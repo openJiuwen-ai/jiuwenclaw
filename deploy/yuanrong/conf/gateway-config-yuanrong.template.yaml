@@ -38,7 +38,10 @@ symphony:
     min_edge_confidence: 0.1
 
   orchestration:
+    # fast is the default one-shot path; beam enables bidirectional search.
     mode: fast
+    # Beam-only candidate count retained after each search round.
+    top_k: 3
     max_depth: 4
     min_edge_confidence: 0.3
 
@@ -481,6 +484,8 @@ gateway:
     function_version_urn: <<FUNCTION_ID>>
     concurrency: <<GATEWAY_CONCURRENCY>>
     invoke_timeout_s: <<GATEWAY_INVOKE_TIMEOUT>>
+    agent_timeout_s: 300
+    agent_namespace: default
 
 heartbeat:
   # 心跳间隔（秒），默认 3600

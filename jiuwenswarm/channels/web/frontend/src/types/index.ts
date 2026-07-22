@@ -2,8 +2,10 @@
  * 类型导出
  */
 
+export * from './goal';
 export * from './message';
 export * from './skillTree';
+export * from './beamSearch';
 export * from './todo';
 export * from './websocket';
 export * from '../features/workspace/projectTypes';

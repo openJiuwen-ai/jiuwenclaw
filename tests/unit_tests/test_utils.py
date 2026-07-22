@@ -50,6 +50,32 @@ class TestPathResolution:
         assert "agent" in str(agent_workspace)
 
     @staticmethod
+    def test_get_default_project_workspace_dir():
+        """Test no-project task workspace lives under agent workspace/projects."""
+        project_workspace = utils.get_default_project_workspace_dir()
+        assert isinstance(project_workspace, Path)
+        assert project_workspace == utils.get_agent_workspace_dir() / "projects"
+
+    @staticmethod
+    def test_get_default_project_session_workspace_dir():
+        """Test no-project task workspace is scoped by session."""
+        session_workspace = utils.get_default_project_session_workspace_dir("abc-123")
+        assert isinstance(session_workspace, Path)
+        assert session_workspace == (
+            utils.get_default_project_workspace_dir()
+            / "abc-123"
+        )
+        assert session_workspace.exists()
+
+    @staticmethod
+    def test_get_default_project_session_workspace_dir_without_session():
+        """Test early initialization does not create a throwaway session folder."""
+        session_workspace = utils.get_default_project_session_workspace_dir()
+        assert isinstance(session_workspace, Path)
+        assert session_workspace == utils.get_default_project_workspace_dir()
+        assert session_workspace.exists()
+
+    @staticmethod
     def test_path_caching():
         """Test that path results are cached."""
         # First call

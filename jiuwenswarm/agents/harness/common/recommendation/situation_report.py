@@ -6,7 +6,6 @@ recommendation history, and pending commitments into a single LLM-ready context.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -47,8 +46,15 @@ class SituationReport:
         return all(not s.compressed_history for s in self.sessions)
 
     def most_recent_active_session(self) -> SessionSummary | None:
-        """Return the session with the latest activity for push delivery."""
-        active = [s for s in self.sessions if s.compressed_history]
+        """Return the session with the latest activity for push delivery.
+
+        Push delivery only needs a session id, not history content — so a
+        just-sent session whose assistant hasn't finished streaming (and thus
+        has no compressed history yet) is still a valid delivery target.
+        History content is a concern of LLM decision material (render_for_llm /
+        is_empty), not of delivery target selection.
+        """
+        active = [s for s in self.sessions if s.last_message_at > 0]
         if not active:
             return None
         return max(active, key=lambda s: s.last_message_at)
@@ -59,14 +65,17 @@ class SituationReport:
         Used when the caller specifies a target channel (e.g. cron passes
         ``target_channel="web"``); we deliver the recommendation to a session
         on that channel. Falls back to the channel-id string comparison.
-        Returns ``None`` if no session on that channel has content.
+        Returns ``None`` if no session on that channel.
+
+        Note: delivery target selection does NOT require compressed history —
+        push only needs a session id. See :meth:`most_recent_active_session`.
         """
         if not channel:
             return self.most_recent_active_session()
         target = channel.strip().lower()
         active = [
             s for s in self.sessions
-            if s.compressed_history and (s.channel_id or "").strip().lower() == target
+            if (s.channel_id or "").strip().lower() == target and s.last_message_at > 0
         ]
         if not active:
             return None
@@ -170,12 +179,16 @@ def _scan_sessions(
         if not history_path.exists():
             continue
 
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-
-        if not isinstance(meta, dict):
+        # 走 get_session_metadata（带内存缓存）而非裸读盘：用户刚发消息时，
+        # AgentServer 进程内 sync_session_request_metadata 已同步刷新 _METADATA_CACHE
+        # 的 last_message_at，但磁盘是异步落盘（_METADATA_QUEUE）。裸读盘会读到旧值，
+        # 导致刚发消息的会话排不到"最活跃"第一、甚至被当作无活动跳过。走缓存即可
+        # 拿到最新值。enable_writeback=False 避免读路径触发推断写盘副作用。
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+        meta = get_session_metadata(session_id, enable_writeback=False)
+        if not isinstance(meta, dict) or not meta:
             continue
 
         # Filter by session mode (agent / code / team ...) — 默认只扫 agent 类会话
@@ -193,9 +206,11 @@ def _scan_sessions(
         if last_ts <= 0:
             continue
 
+        # 历史压缩用于 LLM 决策素材（render_for_llm / is_empty）。推送目标选择不再
+        # 要求它非空——刚发消息、assistant 还没回完时历史为空，但该会话仍应作为
+        # "最活跃会话"推送候选（推送本身只需 session_id）。故不再因 compressed 空
+        # 而 continue。
         compressed = _compress_history_for_profile(session_id, max_rounds=max_rounds)
-        if not compressed:
-            continue
 
         delivery_ctx = meta.get("delivery_context")
         if isinstance(delivery_ctx, dict):

@@ -34,13 +34,20 @@ symphony:
   build:
     workers: 4
     batch_size: 16
+    max_candidates_per_skill_relation: 32
     require_consensus: false
-    min_edge_confidence: 0.1
+    min_edge_confidence: 0.5
+
+  evolution:
+    enabled: false  # true = 消费 Session 轨迹并使用动态 overlay
 
   orchestration:
+    # fast is the default one-shot path; beam enables bidirectional search.
     mode: fast
+    # Beam-only candidate count retained after each search round.
+    top_k: 3
     max_depth: 4
-    min_edge_confidence: 0.3
+    min_edge_confidence: 0.5
 
   skill_retrieval:
     enabled: false
@@ -563,6 +570,10 @@ gateway:
     function_version_urn:
     concurrency: 1
     invoke_timeout_s: 60
+    # POST/DELETE /api/agent 超时（秒）；create 含镜像拉取/容器启动，建议明显大于 invoke_timeout_s
+    agent_timeout_s: 300
+    # create 请求的 namespace，默认 default
+    agent_namespace: default
 
   # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
   agentos:
@@ -574,8 +585,11 @@ gateway:
       - user_id
       - agent_type
     registry:
+      # Agent OS 注册中心地址（空=本地 stub，不发 HTTP）。一体机默认 http://127.0.0.1:8000
       endpoint:
       request_timeout_s: 10
+      # 本机 nodeIP，供 POST /api/nodes/{node}/heartbeat
+      node:
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -1004,35 +1018,6 @@ hooks:
   #         command: "echo 'agent stopping'"
 
 
-team:
-  # 默认：单机 local + inprocess。双机 pyzmq 示例见 tmp/team-leader.yaml、tmp/team-teammate.yaml（与 .tmp/leader_home、.tmp/teammate_home 内 config 同步）。
-  runtime:
-    mode: local
-    role: leader
-
-  team_name: jiuwen_team
-  lifecycle: persistent
-  teammate_mode: build_mode
-  spawn_mode: inprocess
-
-  leader:
-    member_name: team_leader
-    display_name: 团队领导
-    persona: "天才项目管理专家，擅长任务分解和团队协调"
-
-  agents:
-    leader: $agent_leader
-    teammate: $agent_teammate
-
-  workspace:
-    enabled: true
-
-  transport:
-    type: inprocess
-
-  storage:
-    type: sqlite
-
 mcp:
   servers: []
   # 示例：
@@ -1101,6 +1086,17 @@ modes:
       teammate_mode: build_mode
       spawn_mode: inprocess
       enable_swarmflow: false
+
+      # SwarmFlow per-Leader concurrency caps (three-layer governor).
+      # Only effective when enable_swarmflow is true.
+      #   max_workflows:    L1 — max concurrent workflow runs under one leader (>=1).
+      #   agents_per_run:   L2 — per-run agent admission cap (optional; None uses
+      #                          the engine's default agents-per-run resolution).
+      #   max_agents_total: L3 — global agent admission across all runs (>=1).
+      swarmflow_concurrency:
+        max_workflows: 16
+        agents_per_run: null
+        max_agents_total: 64
 
       # Enable the host-managed worktree capability used by team members and
       # SwarmFlow agent calls with options.isolation="worktree".

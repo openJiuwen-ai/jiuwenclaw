@@ -19,8 +19,11 @@ def test_symphony_config_defaults_paths(monkeypatch, tmp_path):
     assert cfg.fingerprint.scan.max_depth is None
     assert cfg.fingerprint.extraction.body_limit is None
     assert cfg.build.batch_size == 12
-    assert cfg.build.min_edge_confidence == 0.7
+    assert cfg.build.max_candidates_per_skill_relation == 32
+    assert cfg.build.min_edge_confidence == 0.5
     assert cfg.orchestration.mode == "fast"
+    assert cfg.orchestration.min_edge_confidence == 0.5
+    assert cfg.evolution.enabled is False
     assert cfg.enabled is False
 
 
@@ -56,6 +59,7 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
             "build": {
                 "workers": "3",
                 "batch_size": "0",
+                "max_candidates_per_skill_relation": "19",
                 "require_consensus": "false",
                 "min_edge_confidence": 2,
             },
@@ -64,6 +68,7 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
                 "max_depth": "7",
                 "min_edge_confidence": -1,
             },
+            "evolution": {"enabled": "false"},
             "enabled": "true",
         }
     )
@@ -80,24 +85,26 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
     assert cfg.fingerprint.normalization.max_vocab_size == 9
     assert cfg.build.workers == 3
     assert cfg.build.batch_size == 1
+    assert cfg.build.max_candidates_per_skill_relation == 19
     assert cfg.build.require_consensus is False
     assert cfg.build.min_edge_confidence == 1.0
     assert cfg.orchestration.mode == "fast"
     assert cfg.orchestration.max_depth == 7
     assert cfg.orchestration.min_edge_confidence == 0.0
+    assert cfg.evolution.enabled is False
     assert cfg.enabled is True
 
 
-@pytest.mark.parametrize("mode", ["fast", "", None])
-def test_symphony_config_accepts_fast_mode_aliases(mode):
+@pytest.mark.parametrize("mode", ["fast", "beam", "", None])
+def test_symphony_config_accepts_supported_orchestration_modes(mode):
     cfg = symphony_config.symphony_config_from_dict(
         {"orchestration": {"mode": mode}}
     )
 
-    assert cfg.orchestration.mode == "fast"
+    assert cfg.orchestration.mode == (mode or "fast")
 
 
-@pytest.mark.parametrize("mode", ["beam", "default", "graph", "unknown", "quick"])
+@pytest.mark.parametrize("mode", ["default", "graph", "unknown", "quick"])
 def test_symphony_config_rejects_non_llm_orchestration_modes(mode):
     with pytest.raises(ValueError, match="Unsupported Symphony orchestration mode"):
         symphony_config.symphony_config_from_dict(

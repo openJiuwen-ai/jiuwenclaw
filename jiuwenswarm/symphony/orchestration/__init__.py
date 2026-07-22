@@ -6,8 +6,6 @@ from jiuwenswarm.symphony.orchestration.artifacts import (
 )
 from jiuwenswarm.symphony.orchestration.planning.models import (
     ArtifactRef,
-    GroundedQuery,
-    InferredInput,
     OrchestrationPlan,
     PlanStep,
 )
@@ -15,8 +13,6 @@ from jiuwenswarm.symphony.orchestration.planning.models import (
 __all__ = [
     "ArtifactRef",
     "ScoreArtifacts",
-    "GroundedQuery",
-    "InferredInput",
     "OrchestrationPlan",
     "PlanStep",
     "load_score_artifacts",

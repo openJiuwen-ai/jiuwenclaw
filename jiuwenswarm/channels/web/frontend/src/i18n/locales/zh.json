@@ -416,6 +416,35 @@
     "pending": "待处理",
     "completed": "已完成"
   },
+  "goal": {
+    "formSubmit": "确定",
+    "formCancel": "取消",
+    "editTitle": "编辑目标",
+    "toolbarTag": "目标",
+    "closeTag": "取消目标",
+    "badge": "设为目标",
+    "status": {
+      "active": "进行中",
+      "paused": "已暂停",
+      "completed": "已完成",
+      "blocked": "已阻塞"
+    },
+    "action": {
+      "editTooltip": "编辑目标",
+      "pauseTooltip": "暂停目标",
+      "resumeTooltip": "恢复目标",
+      "deleteTooltip": "删除目标"
+    },
+    "completedCardTitle": "目标已完成",
+    "completedMessageFallback": "目标已完成。",
+    "editStaleWarning": "目标在编辑期间已经完成，这次修改未保存。如需设置新目标，请重新通过「+」创建。",
+    "detail": {
+      "attempts": "已执行次数",
+      "tokens": "累计 Token",
+      "lastAssessment": "最近评估",
+      "lastStopReason": "最近停止原因"
+    }
+  },
   "sessions": {
     "title": "会话管理",
     "subtitle": "浏览并管理会话与文件",
@@ -774,6 +803,7 @@
       "teamMemberPromptHint": "提示词",
       "teamMemberAgentKey": "Agent Key",
       "symphonyEnabled": "启用技能编排",
+      "symphonyDynamicGraphEnabled": "启用动态图谱",
       "skillRetrievalEnabled": "启用技能检索",
       "skillRetrievalBuildBranchingFactor": "拆分阈值基数",
       "skillRetrievalBuildMaxDepth": "最大树深",
@@ -802,6 +832,7 @@
     },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
+      "symphonyDynamicGraphEnabled": "关闭后仅使用静态图谱，已有运行时数据会保留。",
       "skillRetrievalBuildRootCategories": "直接编辑包含 tree_root_categories 或 root_categories 的 YAML/JSON；页面会展示默认分层供参考。保存后会写入配置内容本身，而不是外部文件路径。"
     },
     "hideValue": "隐藏明文",
@@ -948,6 +979,7 @@
       "freeSearchDdg": "启用 DuckDuckGo（含 DDG via Jina）",
       "freeSearchBing": "启用 Bing",
       "enabled": "启用",
+      "dynamicGraph": "启用动态图谱",
       "kvCacheAffinity": "算力亲和（KV 释放）"
     },
     "permissionsTools": {

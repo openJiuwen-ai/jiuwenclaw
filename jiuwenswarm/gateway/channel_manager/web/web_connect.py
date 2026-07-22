@@ -682,7 +682,9 @@ class WebChannel(BaseWsChannel):
                 "payload": res_payload,
             }
             if not msg.ok:
-                error_text = res_payload.get("error")
+                # Prefer explicit error; fall back to message (e.g. command.goal
+                # unary failures put the human-readable text in payload.message).
+                error_text = res_payload.get("error") or res_payload.get("message")
                 if isinstance(error_text, str) and error_text:
                     frame["error"] = error_text
                 code_text = res_payload.get("code")
@@ -1135,6 +1137,9 @@ class WebChannel(BaseWsChannel):
             await self.register_ws(ws, _rk)
         # else: ws 层心跳 / 拉取请求，不更新路由注册，沿用 ws 已有的 RoutingKey。
 
+        # Preserve client top-level is_stream (e.g. command.goal set/resume).
+        # chat.send / history.get still become stream in _normalize_gateway_message
+        # even when the client omits this field.
         user_message = Message(
             id=req_id,
             type="req",
@@ -1145,6 +1150,7 @@ class WebChannel(BaseWsChannel):
             ok=True,
             req_method=self._parse_req_method(method),
             mode=self._parse_mode(params.get("mode")),
+            is_stream=bool(data.get("is_stream", False)),
             app_id=_app_id,
             agent_ref={"mode": _mode, "id": _agent_id},
             user_id=req_user_id,

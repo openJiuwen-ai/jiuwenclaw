@@ -550,3 +550,53 @@ async def test_agent_stream_slash_followup_continues_into_runner(monkeypatch):
     ]
     assert chunks[0].payload == {"event_type": "chat.delta", "content": "agent delta"}
     assert chunks[-1].is_complete is True
+
+
+@pytest.mark.anyio
+async def test_team_stream_injects_image_tool_context_for_non_vision_model(monkeypatch):
+    """Team mode must preserve the same local-image tool context as agent mode."""
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = SimpleNamespace()  # pylint: disable=protected-access
+    adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _model_name="": True)
+    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: object())
+    monkeypatch.setattr(adapter, "_apply_model_to_react_agent", lambda _model: None)
+    monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
+    monkeypatch.setattr(adapter, "_native_image_input_enabled", lambda *_args: False)
+    monkeypatch.setattr(adapter, "_write_runtime_state", lambda **_kwargs: None)
+
+    async def _capture_team_inputs(_request, inputs, _instance):
+        captured.update(inputs)
+        if False:
+            yield None
+
+    from jiuwenswarm.server.runtime.agent_adapter import team_helpers
+
+    monkeypatch.setattr(team_helpers, "process_team_message_stream", _capture_team_inputs)
+
+    request = AgentRequest(
+        request_id="req-team-image",
+        channel_id="web",
+        session_id="sess-team-image",
+        params={
+            "mode": "team",
+            "query": "解析图片内容",
+            "media_items": [
+                {
+                    "type": "image",
+                    "filename": "persisted.png",
+                    "path": "agent/sessions/sess-team-image/uploads/persisted.png",
+                    "mime_type": "image/png",
+                }
+            ],
+        },
+        is_stream=True,
+    )
+
+    async for _ in adapter.process_message_stream_impl(request, {"query": "解析图片内容"}):
+        pass
+
+    assert "jiuwenswarm_image_tool_context" in captured["query"]
+    assert "agent/sessions/sess-team-image/uploads/persisted.png" in captured["query"]

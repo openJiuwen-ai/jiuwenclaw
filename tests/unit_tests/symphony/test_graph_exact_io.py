@@ -3,7 +3,7 @@ import pytest
 from jiuwenswarm.symphony.fingerprint.models import (
     ArtifactSpec,
     ParameterSpec,
-    SkillFingerprint,
+    Fingerprint,
 )
 from jiuwenswarm.symphony.graph.builders import ScoreLookupBuilder
 from jiuwenswarm.symphony.graph.candidates import CandidateGenerator
@@ -629,7 +629,7 @@ def test_score_lookup_emits_text_term_lookup():
     }
 
 
-def _candidates(*skills: SkillFingerprint):
+def _candidates(*skills: Fingerprint):
     return CandidateGenerator().generate(
         SkillRegistry(skills={skill.id: skill for skill in skills})
     )
@@ -640,8 +640,9 @@ def _skill(
     *,
     inputs: list[ParameterSpec] | None = None,
     outputs: list[ArtifactSpec] | None = None,
-) -> SkillFingerprint:
-    return SkillFingerprint(
+) -> Fingerprint:
+    return Fingerprint(
+        type="skill",
         id=skill_id,
         name=skill_id,
         description="",

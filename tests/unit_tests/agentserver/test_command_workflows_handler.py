@@ -117,7 +117,7 @@ class TestHandleCommandWorkflows:
 
     @pytest.mark.anyio
     async def test_handler_returns_snapshot(self) -> None:
-        """When workflow handler exists, return its snapshot."""
+        """When workflow handler exists, return lightweight list summaries."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -142,13 +142,67 @@ class TestHandleCommandWorkflows:
         wire = json.loads(ws.sent[0])
         payload = self._extract_payload_from_wire(wire)
         assert payload["type"] == "workflow_run_snapshot"
-        assert payload["workflows"] == snapshot_data
+        assert payload["action"] == "list"
+        assert len(payload["workflows"]) == len(snapshot_data)
+        assert payload["workflows"][0]["id"] == "wf_1"
+        assert payload["workflows"][0]["detail_pending"] is True
+        assert "truncated" not in payload["workflows"][0]
         assert payload["session_id"] == "sess-2"
+
+    @pytest.mark.anyio
+    async def test_handler_get_returns_workflow_detail(self) -> None:
+        """action=get returns one workflow with full detail payload."""
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(session_id="sess-get", channel_id="cli")
+        request.params = {"action": "get", "workflow_id": "wf_1"}
+        send_lock = asyncio.Lock()
+
+        snapshot_data = [
+            {
+                "id": "wf_1",
+                "name": "research-flow",
+                "status": "completed",
+                "phases": [
+                    {
+                        "id": "phase-1",
+                        "name": "main",
+                        "status": "completed",
+                        "agents": [
+                            {
+                                "id": "agent-1",
+                                "name": "writer",
+                                "status": "completed",
+                                "prompt": "hello world",
+                                "outcome": "done",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+        fake_handler = _FakeWorkflowHandler(snapshot=snapshot_data)
+        fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
+
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=fake_tm,
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        payload = self._extract_payload_from_wire(json.loads(ws.sent[0]))
+        assert payload["type"] == "workflow_run_detail"
+        assert payload["action"] == "get"
+        workflow = payload["workflow"]
+        assert workflow["id"] == "wf_1"
+        assert workflow["phases"][0]["agents"][0]["prompt"] == "hello world"
 
     @pytest.mark.anyio
     async def test_handler_bounds_large_snapshot_response(self, monkeypatch) -> None:
         """Large workflow snapshots should not exceed the configured wire budget."""
-        from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+        from jiuwenswarm.server import wire_truncate as wire_truncate_module
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -170,7 +224,7 @@ class TestHandleCommandWorkflows:
         fake_handler = _FakeWorkflowHandler(snapshot=snapshot_data)
         fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
 
-        monkeypatch.setattr(agent_ws_server_module, "_WORKFLOW_SNAPSHOT_MAX_BYTES", 8192)
+        monkeypatch.setattr(wire_truncate_module, "_WORKFLOW_SNAPSHOT_MAX_BYTES", 8192)
 
         with patch(
             "jiuwenswarm.agents.harness.team.get_team_manager",
@@ -186,14 +240,14 @@ class TestHandleCommandWorkflows:
         assert payload["type"] == "workflow_run_snapshot"
         assert payload["session_id"] == "sess-large-workflow"
         assert payload["workflows"]
-        assert len(payload["workflows"]) < len(snapshot_data)
-        assert payload["workflows"][0]["description"].endswith("[truncated]")
-        assert payload["truncated"] is True
+        assert len(payload["workflows"]) == len(snapshot_data)
+        assert payload["workflows"][0]["detail_pending"] is True
+        assert payload["truncated"] is False
 
     @pytest.mark.anyio
     async def test_handler_preserves_too_large_first_snapshot_as_placeholder(self, monkeypatch) -> None:
         """A huge first workflow should be represented instead of dropped."""
-        from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+        from jiuwenswarm.server import wire_truncate as wire_truncate_module
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -213,7 +267,7 @@ class TestHandleCommandWorkflows:
         fake_handler = _FakeWorkflowHandler(snapshot=snapshot_data)
         fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
 
-        monkeypatch.setattr(agent_ws_server_module, "_WORKFLOW_SNAPSHOT_MAX_BYTES", 2048)
+        monkeypatch.setattr(wire_truncate_module, "_WORKFLOW_SNAPSHOT_MAX_BYTES", 2048)
 
         with patch(
             "jiuwenswarm.agents.harness.team.get_team_manager",
@@ -226,17 +280,17 @@ class TestHandleCommandWorkflows:
 
         payload = self._extract_payload_from_wire(json.loads(ws.sent[0]))
         assert len(payload["workflows"]) == 1
-        assert payload["workflows"][0]["truncated"] is True
+        assert payload["workflows"][0]["detail_pending"] is True
         assert payload["workflows"][0]["id"].startswith("wf-too-large-")
         assert payload["workflows"][0]["status"] == "running"
-        assert payload["truncated"] is True
+        assert payload["workflows"][0]["name"] == "workflow-too-large"
 
     @pytest.mark.anyio
     async def test_handler_degrades_to_id_placeholder_when_minimal_exceeds_budget(
         self, monkeypatch
     ) -> None:
         """When even the minimal snapshot exceeds budget, fall back to {id, truncated}."""
-        from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+        from jiuwenswarm.server import wire_truncate as wire_truncate_module
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -264,7 +318,7 @@ class TestHandleCommandWorkflows:
         fake_handler = _FakeWorkflowHandler(snapshot=snapshot_data)
         fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
 
-        monkeypatch.setattr(agent_ws_server_module, "_WORKFLOW_SNAPSHOT_MAX_BYTES", 2048)
+        monkeypatch.setattr(wire_truncate_module, "_WORKFLOW_SNAPSHOT_MAX_BYTES", 2048)
 
         with patch(
             "jiuwenswarm.agents.harness.team.get_team_manager",
@@ -272,18 +326,21 @@ class TestHandleCommandWorkflows:
         ):
             await server._handle_command_workflows(ws, request, send_lock)
 
-        encoded_size = len(ws.sent[0].encode("utf-8"))
-        assert encoded_size <= 2048
-
         payload = self._extract_payload_from_wire(json.loads(ws.sent[0]))
+        budget = max(
+            wire_truncate_module._TEAM_HISTORY_MIN_MAX_BYTES,
+            wire_truncate_module._WORKFLOW_SNAPSHOT_MAX_BYTES
+            - wire_truncate_module._WORKFLOW_SNAPSHOT_FRAME_OVERHEAD_BYTES,
+        )
+        payload_size = wire_truncate_module._json_wire_size(payload)
+        assert payload_size <= budget
+
         assert len(payload["workflows"]) == 1
-        assert payload["truncated"] is True
         first = payload["workflows"][0]
-        assert first["truncated"] is True
+        assert first["detail_pending"] is True
         assert first["id"].startswith("wf-min-")
-        # Minimal fields are dropped once degraded to the id-only placeholder.
-        assert "name" not in first
-        assert "status" not in first
+        assert first.get("name")
+        assert first.get("status")
 
     @pytest.mark.anyio
     async def test_handler_exception_returns_empty_snapshot(self) -> None:
@@ -429,9 +486,9 @@ class TestHandleCommandWorkflows:
 
 
 def _find_payload_recursive(data: Any) -> dict[str, Any]:
-    """Recursively search for a dict with 'type' == 'workflow_run_snapshot'."""
+    """Recursively search for a workflow list/detail payload dict."""
     if isinstance(data, dict):
-        if data.get("type") == "workflow_run_snapshot":
+        if data.get("type") in ("workflow_run_snapshot", "workflow_run_detail", "workflow_human_prompt"):
             return data
         for v in data.values():
             result = _find_payload_recursive(v)
@@ -470,3 +527,107 @@ class TestCommandWorkflowsDispatch:
         await server._handle_command_workflows(ws, request, send_lock)
 
         server._handle_command_workflows.assert_called_once_with(ws, request, send_lock)
+
+
+class TestWorkflowHumanPromptWireHelpers:
+    def test_collapse_preserves_full_waiting_human_prompt(self) -> None:
+        from jiuwenswarm.server.wire_truncate import (
+            _build_workflow_detail_payload,
+            _collapse_oversized_workflow_snapshot_item,
+        )
+
+        long_question = "Q-" + ("x" * 5000)
+        workflow = {
+            "id": "wf-human",
+            "name": "party-planner",
+            "status": "running",
+            "phases": [
+                {
+                    "id": "phase-1",
+                    "name": "main",
+                    "status": "running",
+                    "agents": [
+                        {
+                            "id": "agent-wait",
+                            "name": "human_baby",
+                            "status": "waiting_for_human",
+                            "kind": "human",
+                            "correlation_id": "main:human_baby:1",
+                            "human_prompt": long_question,
+                        },
+                        *[
+                            {
+                                "id": f"agent-{idx}",
+                                "name": f"worker-{idx}",
+                                "status": "completed",
+                                "kind": "agent",
+                                "prompt": "p" * 8000,
+                                "outcome": "o" * 8000,
+                            }
+                            for idx in range(12)
+                        ],
+                    ],
+                }
+            ],
+        }
+
+        collapsed = _collapse_oversized_workflow_snapshot_item(workflow)
+        waiting = collapsed["phases"][0]["agents"][0]
+        assert waiting["human_prompt"] == long_question
+        assert "[truncated]" not in waiting["human_prompt"]
+
+        detail = _build_workflow_detail_payload(workflow, session_id="sess-human")
+        detail_waiting = detail["workflow"]["phases"][0]["agents"][0]
+        assert detail_waiting["human_prompt"] == long_question
+
+    @pytest.mark.anyio
+    async def test_get_human_prompt_action_returns_full_text(self) -> None:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(session_id="sess-human", channel_id="web")
+        request.params = {
+            "action": "get_human_prompt",
+            "workflow_id": "wf_human",
+            "agent_id": "agent-wait",
+        }
+        send_lock = asyncio.Lock()
+
+        long_question = "Approve?" + ("!" * 4000)
+        snapshot_data = [
+            {
+                "id": "wf_human",
+                "name": "party-planner",
+                "status": "running",
+                "phases": [
+                    {
+                        "id": "phase-1",
+                        "name": "main",
+                        "status": "running",
+                        "agents": [
+                            {
+                                "id": "agent-wait",
+                                "name": "human_baby",
+                                "status": "waiting_for_human",
+                                "kind": "human",
+                                "human_prompt": long_question,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+        fake_handler = _FakeWorkflowHandler(snapshot=snapshot_data)
+        fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
+
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=fake_tm,
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        assert len(ws.sent) == 1
+        payload = TestHandleCommandWorkflows()._extract_payload_from_wire(json.loads(ws.sent[0]))
+        assert payload["type"] == "workflow_human_prompt"
+        assert payload["human_prompt"] == long_question

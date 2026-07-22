@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import subprocess
+import threading
 import time
 from collections import Counter
 from contextvars import ContextVar, Token
@@ -141,7 +142,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     ResponsePromptRail,
     RuntimePromptRail,
     StructuredAskUserRail,
-    SymphonyOrchestrationPromptRail,
+    SymphonyOrchestrationRail,
 )
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
@@ -290,6 +291,7 @@ from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_agent_workspace_dir,
     get_checkpoint_dir,
+    get_default_project_session_workspace_dir,
     get_env_file,
     get_prompt_attachment_dir,
     get_runtime_state_path,
@@ -328,8 +330,58 @@ def get_runtime_tool_session_id() -> str | None:
 
 logger = logging.getLogger(__name__)
 
-_PERSISTENT_CHECKPOINTER_LOCK = asyncio.Lock()
+_PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
+_PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
+_PERSISTENT_CHECKPOINTER_LOCK_INIT = threading.Lock()
 _PERSISTENT_CHECKPOINTER_READY = False
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+async def _get_persistent_checkpointer_lock() -> asyncio.Lock:
+    """Lazy-init or rebind the process-wide checkpointer lock to the running loop.
+
+    ``asyncio.Lock`` binds to the loop of its first ``acquire()``; any later
+    acquire from a different loop raises ``RuntimeError("... is bound to a
+    different event loop")``. The first call may have happened on a transient
+    loop (test harness, ephemeral worker) that is gone by the time AgentServer's
+    main loop needs the lock. To stay correct under that drift we:
+
+    1. Lazily construct the Lock inside the caller's running loop (guarded by a
+       ``threading.Lock`` so concurrent first-acquires from different threads
+       cannot create two Locks).
+    2. Before returning, verify the Lock is still bound to the current loop. If
+       it is bound to a dead/foreign loop, drop and rebuild it so the caller can
+       re-acquire safely. This rebinding is also done under the threading guard.
+
+    After ``_PERSISTENT_CHECKPOINTER_READY`` flips True no one acquires the lock,
+    so rebinding is a no-op for the steady state.
+    """
+    global _PERSISTENT_CHECKPOINTER_LOCK, _PERSISTENT_CHECKPOINTER_LOCK_LOOP
+    current = _running_loop()
+    if current is None:
+        raise RuntimeError(
+            "_get_persistent_checkpointer_lock must be called from a running event loop"
+        )
+    with _PERSISTENT_CHECKPOINTER_LOCK_INIT:
+        bound = _PERSISTENT_CHECKPOINTER_LOCK_LOOP
+        if _PERSISTENT_CHECKPOINTER_LOCK is None or bound is None or bound is not current:
+            if bound is not None and bound is not current and not bound.is_closed():
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] _PERSISTENT_CHECKPOINTER_LOCK rebound: "
+                    "old_loop=%r new_loop=%r (lock repr=%r)",
+                    bound,
+                    current,
+                    _PERSISTENT_CHECKPOINTER_LOCK,
+                )
+            _PERSISTENT_CHECKPOINTER_LOCK = asyncio.Lock()
+            _PERSISTENT_CHECKPOINTER_LOCK_LOOP = current
+    return _PERSISTENT_CHECKPOINTER_LOCK
 
 _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
     {
@@ -512,7 +564,21 @@ async def ensure_persistent_checkpointer() -> None:
     if _PERSISTENT_CHECKPOINTER_READY:
         return
 
-    async with _PERSISTENT_CHECKPOINTER_LOCK:
+    lock = await _get_persistent_checkpointer_lock()
+    acquired = False
+    try:
+        try:
+            await lock.acquire()
+        except RuntimeError as acquire_exc:
+            logger.exception(
+                "[JiuWenSwarmDeepAdapter] _PERSISTENT_CHECKPOINTER_LOCK acquire failed: %s "
+                "(lock repr=%r, running_loop=%r)",
+                acquire_exc,
+                lock,
+                asyncio.get_event_loop(),
+            )
+            raise
+        acquired = True
         if _PERSISTENT_CHECKPOINTER_READY:
             return
 
@@ -537,6 +603,9 @@ async def ensure_persistent_checkpointer() -> None:
                 exc,
             )
             raise RuntimeError("persistent checkpointer initialization failed") from exc
+    finally:
+        if acquired:
+            lock.release()
 
 
 _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
@@ -711,7 +780,7 @@ class JiuWenSwarmDeepAdapter:
         self._paid_search_tool: WebPaidSearchTool | None = None
         self._symphony_tools: list[Any] = []
         self._symphony_tools_registered: bool = False
-        self._symphony_orchestration_prompt_rail = None
+        self._symphony_orchestration_rail = None
         self._skill_retrieval_tools_registered: bool = False
         self._skill_retrieval_tools: list[Any] = []
         self._skill_retrieval_prompt_rail: SkillRetrievalPromptRail | None = None
@@ -3771,17 +3840,17 @@ class JiuWenSwarmDeepAdapter:
                 except (AttributeError, TypeError):
                     pass
 
-    def _build_symphony_orchestration_prompt_rail(
+    def _build_symphony_orchestration_rail(
         self,
-    ) -> SymphonyOrchestrationPromptRail | None:
+    ) -> SymphonyOrchestrationRail | None:
         """Build dynamic Symphony orchestration prompt guidance."""
         try:
-            return SymphonyOrchestrationPromptRail(
+            return SymphonyOrchestrationRail(
                 config_base=lambda: self._config_base_cache,
             )
         except Exception as exc:
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] SymphonyOrchestrationPromptRail create failed: %s",
+                "[JiuWenSwarmDeepAdapter] SymphonyOrchestrationRail create failed: %s",
                 exc,
             )
             return None
@@ -3865,8 +3934,8 @@ class JiuWenSwarmDeepAdapter:
         rail_infos.insert(
             4 if self._filesystem_rail_enabled_for_profile() else 3,
             _RailBuildInfo(
-                "_symphony_orchestration_prompt_rail",
-                self._build_symphony_orchestration_prompt_rail,
+                "_symphony_orchestration_rail",
+                self._build_symphony_orchestration_rail,
             ),
         )
         if isinstance(mode, str) and mode.startswith("agent"):
@@ -4403,8 +4472,11 @@ class JiuWenSwarmDeepAdapter:
         )
 
         await self._instance.ensure_initialized()
-        self._seed_runtime_cwd(self._project_dir or self._workspace_dir)
-        setattr(self._instance, "_jiuwenswarm_project_dir", self._project_dir or self._workspace_dir)
+        initial_runtime_workspace = self._project_dir or str(
+            get_default_project_session_workspace_dir()
+        )
+        self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
+        setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
         self._sync_a2x_runtime_state()
         self._registered_mcp_server_ids.clear()
@@ -5082,13 +5154,14 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
-        self._seed_runtime_cwd(
-            runtime_config.cwd
+        task_workspace = (
+            runtime_config.workspace
             or runtime_config.project_dir
             or self._project_dir
-            or self._workspace_dir,
-            workspace=runtime_config.workspace,
+            or str(get_default_project_session_workspace_dir(runtime_config.session_id))
         )
+        task_cwd = runtime_config.cwd or task_workspace
+        self._seed_runtime_cwd(task_cwd, workspace=task_workspace)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = (
             str(
@@ -5103,7 +5176,7 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_channel(resolved_channel)
             self._runtime_prompt_rail.set_trusted_dirs(runtime_config.trusted_dirs)
             self._runtime_prompt_rail.set_runtime_paths(
-                cwd=runtime_config.cwd,
+                cwd=task_cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
@@ -5132,9 +5205,9 @@ class JiuWenSwarmDeepAdapter:
             channel=resolved_channel,
             session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
-            or runtime_config.cwd
+            or task_cwd
             or self._project_dir
-            or self._workspace_dir,
+            or str(get_default_project_session_workspace_dir(runtime_config.session_id)),
         )
 
         await self._update_rails_for_mode(runtime_config.mode)
@@ -5969,6 +6042,89 @@ class JiuWenSwarmDeepAdapter:
             channel_id=request.channel_id,
             ok=True,
             payload={"accepted": True, "resolved": resolved},
+            metadata=request.metadata,
+        )
+
+    async def handle_swarmflow_reply(self, request: AgentRequest) -> AgentResponse:
+        """Handle chat.swarmflow_reply — deliver a person's reply to a human turn.
+
+        Builds a HumanAgentMessage addressed to ``swarmflow:<run_id>:<corr>``
+        (run-scoped; falls back to ``swarmflow:<corr>`` when no run_id) and
+        delivers it via ``TeamManager.interact`` — the agent-core thin route
+        resolves the pending human-session future on the run's reply topic.
+        """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            try:
+                return await session_adapter.handle_swarmflow_reply(request)
+            finally:
+                await self._evict_idle_session_adapters()
+
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = params.get("session_id") or request.session_id or ""
+        run_id = params.get("run_id")
+        corr = params.get("correlation_id") or ""
+        answer = params.get("answer") or ""
+        logger.info(
+            "[WF_DBG] chat.swarmflow_reply req channel_id=%s session_id=%s request_id=%s "
+            "run_id=%s correlation_id=%s answer_len=%d",
+            request.channel_id,
+            session_id,
+            request.request_id,
+            run_id,
+            corr,
+            len(answer) if isinstance(answer, str) else 0,
+        )
+        if not session_id or not corr or answer == "":
+            logger.warning(
+                "[WF_DBG] chat.swarmflow_reply res ok=False session_id=%s correlation_id=%s error=missing_params",
+                session_id,
+                corr,
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"ok": False, "error": "missing session_id/correlation_id/answer"},
+                metadata=request.metadata,
+            )
+
+        from jiuwenswarm.agents.harness.team import get_team_manager
+        from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
+        from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
+
+        from openjiuwen.agent_teams.schema.events import format_swarmflow_human_reply_target
+
+        target = format_swarmflow_human_reply_target(corr, run_id)
+        msg = HumanAgentMessage(
+            sender=USER_PSEUDO_MEMBER_NAME,
+            target=target,
+            body=answer,
+        )
+        try:
+            team_manager = get_team_manager(request.channel_id)
+            ok, reason = await team_manager.interact(session_id, msg)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] swarmflow reply delivery failed: "
+                "session_id=%s corr=%s error=%s",
+                session_id, corr, exc,
+            )
+            ok, reason = False, "exception"
+
+        logger.log(
+            logging.WARNING if not ok else logging.INFO,
+            "[WF_DBG] chat.swarmflow_reply res ok=%s session_id=%s correlation_id=%s error=%s",
+            ok,
+            session_id,
+            corr,
+            None if ok else (reason or "failed"),
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=bool(ok),
+            payload={"ok": True} if ok else {"ok": False, "error": reason or "failed"},
             metadata=request.metadata,
         )
 
@@ -7043,6 +7199,16 @@ class JiuWenSwarmDeepAdapter:
 
             resolved_model = self._resolve_model_for_request(request)
             self._apply_model_to_react_agent(resolved_model)
+            inputs = self._prepare_multimodal_image_inputs(request, inputs)
+            enable_read_image_multimodal = self._native_image_input_enabled(
+                self._config_cache,
+                resolved_model,
+            )
+            inputs = self._prepare_react_image_tool_prompt(
+                request,
+                inputs,
+                enable_read_image_multimodal=enable_read_image_multimodal,
+            )
             resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
             if self._runtime_prompt_rail:
@@ -7267,6 +7433,7 @@ class JiuWenSwarmDeepAdapter:
         image_files_token = None
         _run_span: Any = None
         _debug_logger = None
+        _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
         interaction_stream_abort = True
         try:
@@ -7346,6 +7513,9 @@ class JiuWenSwarmDeepAdapter:
                 except Exception:
                     pass
             try:
+                from jiuwenswarm.server.runtime.debug_trace.context import (
+                    set_debug_trace_logger,
+                )
                 from jiuwenswarm.server.runtime.debug_trace.paths import debug_trace_file
                 from jiuwenswarm.server.runtime.debug_trace.stream_logger import (
                     DebugTraceLogger,
@@ -7363,6 +7533,11 @@ class JiuWenSwarmDeepAdapter:
                         otel_trace_id=_otel_trace_id,
                         otel_span_id=_otel_span_id,
                     )
+                    # Publish the logger so subagent dispatch sites (TaskTool in
+                    # the SDK, AgentTool in jiuwenswarm) can capture subagent
+                    # streams into this same dump. asyncio.create_task copies the
+                    # current ContextVar, so background subagents inherit it too.
+                    _debug_trace_token = set_debug_trace_logger(_debug_logger)
             except Exception as _dbg_exc:
                 logger.warning("[JiuWenSwarmDeepAdapter] debug trace init failed: %s", _dbg_exc)
                 _debug_logger = None
@@ -7746,6 +7921,11 @@ class JiuWenSwarmDeepAdapter:
             close_agent_run_span(_run_span)
             if _debug_logger is not None:
                 _debug_logger.flush()
+            if _debug_trace_token is not None:
+                from jiuwenswarm.server.runtime.debug_trace.context import (
+                    reset_debug_trace_logger,
+                )
+                reset_debug_trace_logger(_debug_trace_token)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,

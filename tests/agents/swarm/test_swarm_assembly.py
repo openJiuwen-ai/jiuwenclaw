@@ -1061,7 +1061,7 @@ def test_symphony_orchestration_prompt_provider_is_leader_only() -> None:
     leader_rail = factory({}, SwarmBuildContext(role="leader"))
     teammate_rail = factory({}, SwarmBuildContext(role="teammate"))
 
-    assert type(leader_rail).__name__ == "SymphonyOrchestrationPromptRail"
+    assert type(leader_rail).__name__ == "SymphonyOrchestrationRail"
     assert teammate_rail is None
 
 
@@ -1490,6 +1490,7 @@ def test_code_runtime_prompt_provider_carries_project_dir(tmp_path: Path) -> Non
     ctx = SwarmBuildContext(
         mode="code.team",
         role="leader",
+        session_id="sess-code-team-runtime",
         channel="tui",
         project_dir=str(project_dir),
     )
@@ -1501,6 +1502,8 @@ def test_code_runtime_prompt_provider_carries_project_dir(tmp_path: Path) -> Non
 
     assert getattr(rail, "_project_dir") == str(project_dir)
     assert getattr(rail, "_cwd") == str(project_dir)
+    assert getattr(rail, "_mode") == "code.team"
+    assert getattr(rail, "_session_id") == "sess-code-team-runtime"
 
 
 def test_team_plan_approval_provider_builds_only_for_leader() -> None:

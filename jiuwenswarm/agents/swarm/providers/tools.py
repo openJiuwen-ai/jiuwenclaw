@@ -404,7 +404,8 @@ def _build_symphony_tools(ctx: SwarmBuildContext) -> list[Any]:
     if getattr(ctx, "role", "") != "leader":
         return []
     try:
-        return list(SymphonyToolkit().get_tools(get_config()))
+        config = ctx.config or get_config()
+        return list(SymphonyToolkit().get_tools(config))
     except Exception as exc:
         logger.warning("[swarm.symphony_toolkit] construction failed: %s", exc)
         return []

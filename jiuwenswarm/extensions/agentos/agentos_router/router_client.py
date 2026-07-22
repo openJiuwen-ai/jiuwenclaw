@@ -83,6 +83,8 @@ class AgentOSRouterClient(AgentServerClient):
             setter(handler)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+        # 3rdagent.list / 3rdagent.switch are handled by Gateway ThirdAgent
+        # (TUI local_handler), not via E2A send_request.
         try:
             runtime = await self._resolve_agent(envelope)
         except (ValueError, AgentCreatingTimeout) as exc:
@@ -101,6 +103,94 @@ class AgentOSRouterClient(AgentServerClient):
         runtime.attach_to_envelope(envelope)
         async for chunk in self._yuanrong.send_request_stream(envelope):
             yield chunk
+
+    async def thirdagent_list(
+        self,
+        *,
+        user_id: str,
+        current_agent_type: str = "",
+    ) -> dict[str, Any]:
+        """Handle ``3rdagent.list``: list switchable third-party agent images."""
+        uid = str(user_id or "").strip()
+        if not uid:
+            return {
+                "ok": False,
+                "error": "user_id is required for AgentOS routing",
+                "code": "BAD_REQUEST",
+            }
+        images = await self._registry.list_user_images(uid)
+        agents: list[dict[str, Any]] = []
+        for image in images:
+            agent_type = str(
+                (image.metadata or {}).get("agent_type") or image.image_name or ""
+            ).strip()
+            if not agent_type:
+                continue
+            agents.append(
+                {
+                    "agent_type": agent_type,
+                    "image_name": image.image_name,
+                    "image_uri": image.image_uri,
+                    "metadata": dict(image.metadata or {}),
+                }
+            )
+        current = str(current_agent_type or "").strip() or "jiuwenswarm"
+        return {
+            "ok": True,
+            "payload": {
+                "agents": agents,
+                "current_agent_type": current,
+            },
+        }
+
+    async def thirdagent_switch(
+        self,
+        *,
+        user_id: str,
+        agent_type: str,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        """Handle ``3rdagent.switch``: ensure agent exists without forwarding chat."""
+        uid = str(user_id or "").strip()
+        if not uid:
+            return {
+                "ok": False,
+                "error": "user_id is required for AgentOS routing",
+                "code": "BAD_REQUEST",
+            }
+        try:
+            normalized = AgentRuntime.normalize_agent_type(agent_type)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "code": "UNSUPPORTED_AGENT_TYPE",
+            }
+        try:
+            runtime = await self._agent_manager.get_or_create_agent(
+                uid,
+                normalized,
+                key_values={"session_id": session_id} if session_id else None,
+                creator=self._create_agent,
+                metadata={"session_id": session_id} if session_id else None,
+            )
+        except (ValueError, AgentCreatingTimeout) as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "code": "INTERNAL_ERROR",
+            }
+        info = runtime.info
+        status = info.status.value if hasattr(info.status, "value") else str(info.status)
+        return {
+            "ok": True,
+            "payload": {
+                "agent_id": info.agent_id,
+                "agent_type": info.agent_type,
+                "sandbox_id": info.sandbox_id,
+                "status": status,
+            },
+        }
 
     async def shutdown(self) -> None:
         await self.disconnect()
@@ -128,20 +218,26 @@ class AgentOSRouterClient(AgentServerClient):
             )
 
         image_info = await self._registry.get_image_info(agent_info.agent_type)
+        urn = str(
+            image_info.image_uri
+            or image_info.metadata.get("urn")
+            or self._yuanrong.function_version_urn
+        ).strip()
+        if not urn:
+            raise ValueError(
+                f"function urn is required to create sandbox for agent_type={agent_info.agent_type}"
+            )
         sandbox = await self._yuanrong.create_sandbox(
-            user_id=agent_info.user_id,
-            agent_type=agent_info.agent_type,
-            agent_id=agent_info.agent_id,
-            image_name=image_info.image_name,
-            metadata={
-                "session_id": agent_info.metadata.get("session_id"),
-                "image_info": dict(image_info.metadata),
-            },
+            namespace=self._yuanrong.agent_namespace,
+            name=f"{agent_info.user_id}+{agent_info.agent_type}",
+            urn=urn,
         )
-        agent_info.sandbox_id = sandbox.sandbox_id
+        instance_id = sandbox.sandbox_id
+        agent_info.sandbox_id = instance_id
         agent_info.metadata.update(
             {
-                "image": image_info.image_name,
+                "instance_id": instance_id,
+                "urn": urn,
                 "image_info": dict(image_info.metadata),
                 "sandbox": dict(sandbox.metadata),
             }
@@ -179,11 +275,7 @@ class AgentOSRouterClient(AgentServerClient):
                 "session_id"
             )
         if agent_info.sandbox_id:
-            await self._yuanrong.delete_sandbox(
-                agent_info.sandbox_id,
-                user_id=agent_info.user_id,
-                agent_type=agent_info.agent_type,
-            )
+            await self._yuanrong.delete_sandbox(agent_info.sandbox_id)
         await self._agent_manager.delete_agent(
             agent_info.user_id,
             agent_info.agent_type,

@@ -24,6 +24,7 @@ import {
   exportShareImageNode,
   type ShareImageSnapshot,
 } from './features/shareImageExport';
+import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
 import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
@@ -39,7 +40,7 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
-import { useWebSocket } from './hooks';
+import { useWebSocket, mergePersistedGoalCompletionMessages } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
@@ -48,6 +49,7 @@ import {
   useSessionStore,
   useChatStore,
   useTodoStore,
+  useGoalStore,
   useHarnessStore,
   useWorkspaceStore,
   useCronStore,
@@ -436,6 +438,11 @@ function AppContent() {
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
   const teamMembers = useSessionStore((s) => s.runtimes[sessionId]?.teamMembers ?? []);
   const [chatPanelWidthPct, setChatPanelWidthPct] = useState(33.33);
+  const [codeReviewTarget, setCodeReviewTarget] = useState<CodeReviewTarget | null>(null);
+
+  useEffect(() => {
+    setCodeReviewTarget(null);
+  }, [sessionId]);
 
   const handleToggleDetailPanel = useCallback((expanded: boolean) => {
     if (expanded && mode !== 'team' && teamAreaActiveTab === 'team') {
@@ -444,7 +451,8 @@ function AppContent() {
     setTeamAreaExpanded(expanded);
   }, [mode, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
 
-  const handleOpenCodeReview = useCallback(() => {
+  const handleOpenCodeReview = useCallback((target: CodeReviewTarget) => {
+    setCodeReviewTarget(target);
     setTeamAreaActiveTab('review');
     setTeamAreaExpanded(true);
   }, [setTeamAreaActiveTab, setTeamAreaExpanded]);
@@ -577,6 +585,12 @@ function AppContent() {
     cancel,
     supplement,
     sendUserAnswer,
+    setGoalObjective,
+    pauseGoal,
+    resumeGoal,
+    clearGoal,
+    refreshGoal,
+    drainTaskQueueIfIdle,
   } = useWebSocket({
     activeSessionId: sessionId,
     onConnect: () => console.log('Connected'),
@@ -1300,7 +1314,10 @@ function AppContent() {
       sessionId: sessionId,
       onReady: (messages, totalPages) => {
         historyRestoreFromPanelHintRef.current = false;
-        replaceHistoryMessages(sessionId, messages);
+        // "目标完成"回显消息纯前端合成，从未写进后端 session 历史，history.get 拉回来的
+        // messages 里不会有它——按时间戳把本地持久化的记录补回去，见
+        // hooks/useWebSocket.ts 的 applyIncomingGoal/mergePersistedGoalCompletionMessages。
+        replaceHistoryMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, messages));
         const restoredTotalPages = totalPages ?? 1;
         setHistoryPagerMeta(sessionId, {
           loadedPages: 1,
@@ -1315,7 +1332,7 @@ function AppContent() {
         });
       },
       onEmpty: (emptyTotalPages) => {
-        replaceHistoryMessages(sessionId, []);
+        replaceHistoryMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, []));
         const restoredTotalPages = emptyTotalPages ?? 1;
         setHistoryPagerMeta(sessionId, {
           loadedPages: 1,
@@ -1465,6 +1482,29 @@ function AppContent() {
     startBackgroundHistoryPrefetch,
   ]);
 
+  // 会话切换/页面加载时主动拉一次当前 Goal 状态（协议文档 v2 §11 推荐流程）——不然刷新页面
+  // 后 GoalBar 要等下一次 goal.updated 推送才会重新出现，目标 paused/静默期时甚至会一直缺失
+  // （2026-07-21 真机联调发现，见 backend-requests.md #1 末尾）。新会话（promoted from 'new'）
+  // 同样可能已经有 Goal（欢迎页 armed 流程可以直接创建），不跳过。
+  // get 完如果 status 是 active，按 §11 第4步再补发一次流式 resume——不是"目标被暂停了要恢复"，
+  // 是"重新抢一次输出听筒"：切会话/刷新导致之前监听后端输出的那条连接断了，目标可能还在后台跑，
+  // 这时候没人在听它的实时输出（chat.delta/chat.reasoning 等）。resume 对一个本来就 active 的
+  // 目标发是幂等的（状态不会变），抢到听筒就能继续收到实时输出，抢不到收 runtime.accepted，
+  // 都不算错误。
+  useEffect(() => {
+    if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
+    if (!isRestorableSessionId(sessionId)) return;
+    void (async () => {
+      await refreshGoal(sessionId);
+      // 等 get 落地这段时间里用户可能已经切到别的会话，避免对着旧会话发 resume。
+      if (sessionIdRef.current !== sessionId) return;
+      const goal = useGoalStore.getState().runtimes[sessionId]?.goal;
+      if (goal?.status === 'active') {
+        void resumeGoal(sessionId);
+      }
+    })();
+  }, [isConnected, sessionId, refreshGoal, resumeGoal]);
+
   const requestComposerFocus = useCallback(() => {
     setComposerFocusNonce((nonce) => nonce + 1);
   }, []);
@@ -1582,11 +1622,25 @@ function AppContent() {
         sessionIdRef.current = newSid;
         setSessionId(newSid);
         navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
-        const sent = await sendMessage(content, newSid, mediaItems);
-        newConversationProjectRef.current = null;
-        if (!sent) {
-          useChatStore.getState().setInputValue(newSid, content);
+        const goalArmedOnNew = useGoalStore.getState().runtimes[NEW_CONVERSATION_ID]?.armed ?? false;
+        useGoalStore.getState().setArmed(NEW_CONVERSATION_ID, false);
+        if (goalArmedOnNew) {
+          // 欢迎页 "+" 选了「目标」：这条内容不走普通 chat.send，
+          // 本地落一条 user 消息（供徽章匹配）后改调 command.goal（见 InputArea.tsx 的同款分流逻辑）
+          useChatStore.getState().addMessage(newSid, {
+            id: `user-${Date.now()}`,
+            role: 'user',
+            content,
+            timestamp: new Date().toISOString(),
+          });
+          setGoalObjective(newSid, content);
+        } else {
+          const sent = await sendMessage(content, newSid, mediaItems);
+          if (!sent) {
+            useChatStore.getState().setInputValue(newSid, content);
+          }
         }
+        newConversationProjectRef.current = null;
       } catch (error) {
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         useChatStore.getState().setThinking(NEW_CONVERSATION_ID, false);
@@ -1610,7 +1664,7 @@ function AppContent() {
     } else {
       useChatStore.getState().setInputValue(currentSessionId, content);
     }
-  }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, t]);
+  }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, setGoalObjective, t]);
 
   const handlePersistMedia = useCallback((content: string, mediaItems: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
@@ -1708,7 +1762,7 @@ function AppContent() {
   ]);
 
   const handleRestoreSession = useCallback(
-    async (targetSessionId: string, targetMode?: string, targetSession?: Session) => {
+    async (targetSessionId: string, targetMode?: string, targetSession?: Session, options?: { skipHistoryLoad?: boolean }) => {
       if (!isRestorableSessionId(targetSessionId)) return;
 
       const resolvedMode = targetMode ?? targetSession?.mode ?? mode;
@@ -1742,7 +1796,9 @@ function AppContent() {
       }
       setActiveNav('chat');
       navigate({ kind: 'chat-session', sessionId: targetSessionId });
-      setHistoryBootstrapKey((k) => k + 1);
+      if (!options?.skipHistoryLoad) {
+        setHistoryBootstrapKey((k) => k + 1);
+      }
       requestComposerFocus();
       if (!targetSession) {
         void loadSessionMetadata(targetSessionId);
@@ -1789,6 +1845,7 @@ function AppContent() {
       useChatStore.getState().removeRuntime(deleteTarget.session_id);
       useTodoStore.getState().removeRuntime(deleteTarget.session_id);
       useHarnessStore.getState().removeRuntime(deleteTarget.session_id);
+      useGoalStore.getState().removeRuntime(deleteTarget.session_id);
       const deletingCurrent = sessionIdRef.current === deleteTarget.session_id;
       setDeleteTarget(null);
       await useWorkspaceStore.getState().refreshSessionWorkspace(deletedSession);
@@ -1987,6 +2044,11 @@ function AppContent() {
                       onSavePermission={savePermissionSilent}
                       historyPager={chatHistoryPager}
                       isHistoryRestoring={isRestoringHistorySession}
+                      onSetGoal={setGoalObjective}
+                      onPauseGoal={pauseGoal}
+                      onResumeGoal={resumeGoal}
+                      onClearGoal={clearGoal}
+                      onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
                     />
                   </div>
                 </div>
@@ -2009,10 +2071,12 @@ function AppContent() {
                     teamAreaActiveTab={teamAreaActiveTab}
                     teamAreaActiveDetailTab={teamAreaActiveDetailTab}
                     teamAreaSelectedMemberId={teamAreaSelectedMemberId}
+                    codeReviewTarget={codeReviewTarget}
                     setTeamAreaExpanded={setTeamAreaExpanded}
                     setTeamAreaActiveTab={setTeamAreaActiveTab}
                     setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
                     setTeamAreaSelectedMemberId={setTeamAreaSelectedMemberId}
+                    setCodeReviewTarget={setCodeReviewTarget}
                   />
                 )}
               </div>
@@ -2066,6 +2130,8 @@ function AppContent() {
                     // 构造最小 Session 占位对象，让 upsertSessionMetadata 直接加入会话列表，
                     // 避免 loadSessionMetadata 立即失败导致"对话不存在或已删除"。
                     // 后续 cron 广播到达时会刷新会话列表补全完整元数据。
+                    // 跳过初始历史加载：session 是全新的，空响应的 replaceHistoryMessages
+                    // 会覆盖后续到达的广播消息。
                     void handleRestoreSession(session, undefined, {
                       session_id: session,
                       title: '',
@@ -2076,7 +2142,7 @@ function AppContent() {
                       message_count: 0,
                       created_at: new Date().toISOString(),
                       updated_at: new Date().toISOString(),
-                    });
+                    }, { skipHistoryLoad: true });
                     return;
                   }
                   requestSessionNavigation(session);

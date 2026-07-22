@@ -5,18 +5,33 @@ from __future__ import annotations
 from typing import Iterable, List
 
 from jiuwenswarm.symphony.graph.models import GraphDiagnostic, SkillRegistry
-from jiuwenswarm.symphony.fingerprint.models import SkillFingerprint
+from jiuwenswarm.symphony.fingerprint.models import Fingerprint
 
 
 class SkillRegistryBuilder:
     """Register normalized Skill fingerprints by stable ID."""
 
     @staticmethod
-    def register(fingerprints: Iterable[SkillFingerprint]) -> SkillRegistry:
+    def register(fingerprints: Iterable[Fingerprint]) -> SkillRegistry:
         skills = {}
         diagnostics: List[GraphDiagnostic] = []
 
         for fingerprint in sorted(fingerprints, key=lambda item: item.id):
+            if fingerprint.type != "skill":
+                diagnostics.append(
+                    GraphDiagnostic(
+                        stage="registry",
+                        severity="error",
+                        code="unsupported_fingerprint_type",
+                        message=(
+                            "Skill Graph only accepts fingerprints with "
+                            "type='skill'."
+                        ),
+                        details={"type": fingerprint.type, "id": fingerprint.id},
+                    )
+                )
+                continue
+
             if not fingerprint.id:
                 diagnostics.append(
                     GraphDiagnostic(

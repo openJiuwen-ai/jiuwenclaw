@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,6 +31,12 @@ def _use_chinese_preferred_language(monkeypatch):
         lambda: {"preferred_language": "zh"},
     )
 
+    async def fresh_score(self, params=None, request=None):
+        del self, params, request
+        return {"success": True, "exists": True, "stale": False}
+
+    monkeypatch.setattr(SymphonyExtension, "score_status", fresh_score)
+
 
 class _Registry:
     def __init__(self):
@@ -44,15 +51,19 @@ def test_extension_registers_rpc_handlers():
 
     SymphonyExtension().register(registry)
 
-    assert SYMPHONY_SCORE_STATUS in registry.handlers
-    assert SYMPHONY_BUILD_SCORE in registry.handlers
-    assert SYMPHONY_PAUSE_BUILD in registry.handlers
-    assert SYMPHONY_GRAPH in registry.handlers
-    assert SYMPHONY_PLAN in registry.handlers
+    assert set(registry.handlers) == {
+        SYMPHONY_SCORE_STATUS,
+        SYMPHONY_BUILD_SCORE,
+        SYMPHONY_PAUSE_BUILD,
+        SYMPHONY_GRAPH,
+        SYMPHONY_PLAN,
+    }
 
 
 def test_symphony_skill_metadata():
-    skill_md = Path("jiuwenswarm/extensions/symphony/skills/symphony-assistant/SKILL.md")
+    skill_md = Path(
+        "jiuwenswarm/extensions/symphony/skills/symphony-assistant/SKILL.md"
+    )
     content = skill_md.read_text(encoding="utf-8")
 
     assert "name: symphony-assistant" in content
@@ -75,10 +86,56 @@ def test_extension_requires_query():
     assert "query is required" in result["detail"]
 
 
+def test_plan_refreshes_stale_score_in_extension(monkeypatch, tmp_path):
+    extension = SymphonyExtension()
+    calls = []
+
+    async def stale_status(params=None, request=None):
+        del params, request
+        calls.append("status")
+        return {"success": True, "exists": True, "stale": True}
+
+    async def build_score(params=None, request=None):
+        del params, request
+        calls.append("build")
+        return {"success": True}
+
+    async def plan_from_score(*args, **kwargs):
+        del args, kwargs
+        calls.append("plan")
+        return {"status": "ready", "recommended_plans": []}
+
+    monkeypatch.setattr(extension, "score_status", stale_status)
+    monkeypatch.setattr(extension, "build_score", build_score)
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        plan_from_score,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {"paths": {"score_dir": str(tmp_path / "score")}}
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    result = asyncio.run(extension.plan({"query": "compose"}))
+
+    assert calls == ["status", "build", "plan"]
+    assert result["score_build"] == {"success": True, "rebuilt": True}
+
+
 def test_plan_uses_llm_plan_from_score(monkeypatch, tmp_path):
     configured_score_dir = tmp_path / "configured"
     llm_config = object()
     seen = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.get_config",
+        lambda: {"preferred_language": "zh"},
+    )
     monkeypatch.setattr(
         "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
         lambda: symphony_config_from_dict(
@@ -121,11 +178,137 @@ def test_plan_uses_llm_plan_from_score(monkeypatch, tmp_path):
     assert result["success"] is True
     assert result["mode"] == "fast"
     assert result["direct_display"] is True
-    assert result["display_format"] == "markdown"
+    assert "display_format" not in result
     assert seen["score_dir"] == configured_score_dir.resolve()
     assert seen["query"] == "do work"
     assert seen["llm_config"] is llm_config
     assert "orchestration_config" in seen["kwargs"]
+    assert seen["kwargs"]["language"] == "cn"
+    assert seen["kwargs"]["dynamic_graph_enabled"] is False
+
+
+def test_plan_ignores_internal_language_parameter(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    seen = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {"paths": {"score_dir": str(configured_score_dir)}}
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    async def fake_plan_from_score(*args, **kwargs):
+        del args
+        seen.update(kwargs)
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
+
+    result = asyncio.run(
+        SymphonyExtension().plan({"query": "do work", "language": "en"})
+    )
+
+    assert result["language"] == "cn"
+    assert result["content"].startswith("## Symphony 编排计划")
+    assert seen["language"] == "cn"
+
+
+def test_plan_resolves_language_from_runtime_config(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    seen = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.get_config",
+        lambda: {"preferred_language": "en"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {"paths": {"score_dir": str(configured_score_dir)}}
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    async def fake_plan_from_score(*args, **kwargs):
+        del args
+        seen.update(kwargs)
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
+
+    result = asyncio.run(SymphonyExtension().plan({"query": "do work"}))
+
+    assert result["language"] == "en"
+    assert seen["language"] == "en"
+
+
+def test_plan_passes_enabled_dynamic_graph_switch(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    seen = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {
+                "paths": {"score_dir": str(configured_score_dir)},
+                "evolution": {"enabled": True},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    async def fake_plan_from_score(score_dir, query, received_llm_config, **kwargs):
+        del score_dir, query, received_llm_config
+        seen.update(kwargs)
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
+
+    result = asyncio.run(SymphonyExtension().plan({"query": "do work"}))
+
+    assert result["success"] is True
+    assert seen["dynamic_graph_enabled"] is True
 
 
 def test_plan_uses_requested_fast_mode(monkeypatch, tmp_path):
@@ -160,9 +343,7 @@ def test_plan_uses_requested_fast_mode(monkeypatch, tmp_path):
         fake_plan_from_score,
     )
 
-    result = asyncio.run(
-        SymphonyExtension().plan({"query": "do work", "mode": "fast"})
-    )
+    result = asyncio.run(SymphonyExtension().plan({"query": "do work", "mode": "fast"}))
 
     assert result["success"] is True
     assert result["mode"] == "fast"
@@ -260,7 +441,10 @@ def test_graph_filters_disabled_skills_from_visual_payload(monkeypatch, tmp_path
     monkeypatch.setattr(
         "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
         lambda: symphony_config_from_dict(
-            {"paths": {"score_dir": str(configured_score_dir)}}
+            {
+                "paths": {"score_dir": str(configured_score_dir)},
+                "evolution": {"enabled": True},
+            }
         ),
     )
     monkeypatch.setattr(
@@ -270,6 +454,14 @@ def test_graph_filters_disabled_skills_from_visual_payload(monkeypatch, tmp_path
     monkeypatch.setattr(
         "jiuwenswarm.extensions.symphony.extension.load_execution_disabled_skills",
         lambda: ["Beta Skill"],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_dynamic_overlay",
+        lambda score_dir: {
+            "edges": {
+                "skill-a->skill-c:can_feed": {"runtime_weight": 1.15},
+            }
+        },
     )
 
     result = asyncio.run(SymphonyExtension().graph({}))
@@ -281,7 +473,11 @@ def test_graph_filters_disabled_skills_from_visual_payload(monkeypatch, tmp_path
         "skill:skill-c",
     ]
     assert result["graph"]["edges"] == [
-        {"source": "skill:skill-a", "target": "skill:skill-c"}
+        {
+            "source": "skill:skill-a",
+            "target": "skill:skill-c",
+            "runtime_weight": 1.15,
+        }
     ]
     assert result["score_lookup"] == {
         "by_output": {"draft": ["skill-a"]},
@@ -290,22 +486,106 @@ def test_graph_filters_disabled_skills_from_visual_payload(monkeypatch, tmp_path
     }
 
 
-def test_plan_rejects_requested_beam_mode(monkeypatch, tmp_path):
+def test_plan_uses_requested_beam_mode(monkeypatch, tmp_path):
     configured_score_dir = tmp_path / "configured"
+    seen = {}
     monkeypatch.setattr(
         "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
         lambda: symphony_config_from_dict(
             {"paths": {"score_dir": str(configured_score_dir)}}
         ),
     )
-
-    result = asyncio.run(
-        SymphonyExtension().plan({"query": "do work", "mode": "beam"})
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
     )
 
-    assert result["success"] is False
-    assert result["mode"] == "fast"
-    assert "Unsupported Symphony orchestration mode: beam" in result["detail"]
+    async def fake_plan_from_score(score_dir, query, received_llm_config, **kwargs):
+        del score_dir, query, received_llm_config
+        seen["orchestration_config"] = kwargs["orchestration_config"]
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
+
+    result = asyncio.run(SymphonyExtension().plan({"query": "do work", "mode": "beam"}))
+
+    assert result["success"] is True
+    assert result["mode"] == "beam"
+    assert seen["orchestration_config"].mode == "beam"
+
+
+def test_plan_streams_beam_progress_events(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    events = []
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {
+                "paths": {"score_dir": str(configured_score_dir)},
+                "orchestration": {"mode": "beam"},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    async def fake_plan_from_score(score_dir, query, received_llm_config, **kwargs):
+        del score_dir, query, received_llm_config
+        await kwargs["progress_callback"](
+            {
+                "event": "started",
+                "language": "en",
+                "round_index": 0,
+                "graph": {"nodes": [], "edges": []},
+            }
+        )
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+            "beam_search": {"graph": {"nodes": [], "edges": []}},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
+    request = SimpleNamespace(
+        metadata={
+            "symphony_progress_callback": lambda event: events.append(event),
+        }
+    )
+
+    result = asyncio.run(
+        SymphonyExtension().plan({"query": "do work", "mode": "beam"}, request)
+    )
+
+    assert result["success"] is True
+    assert events == [
+        {
+            "event": "started",
+            "language": "en",
+            "round_index": 0,
+            "graph": {"nodes": [], "edges": []},
+        }
+    ]
 
 
 def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
@@ -363,6 +643,44 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
                     }
                 ]
             },
+            "beam_search": {
+                "language": "cn",
+                "round_index": 1,
+                "graph": {
+                    "nodes": [
+                        {
+                            "id": "skill-1",
+                            "label": "Skill 1",
+                            "status": "final",
+                            "seed": True,
+                        },
+                        {
+                            "id": "skill-2",
+                            "label": "Skill 2",
+                            "status": "final",
+                            "seed": False,
+                        },
+                        {
+                            "id": "skill-3",
+                            "label": "Skill 3",
+                            "status": "rejected",
+                            "seed": False,
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "source": "skill-1",
+                            "target": "skill-2",
+                            "status": "final",
+                        },
+                        {
+                            "source": "skill-1",
+                            "target": "skill-3",
+                            "status": "rejected",
+                        },
+                    ],
+                },
+            },
         }
 
     monkeypatch.setattr(
@@ -374,13 +692,17 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
 
     assert result["success"] is True
     assert "## Recommended Plan" in result["content"]
-    assert result["markdown"] == result["content"]
+    assert "markdown" not in result
     assert result["direct_display"] is True
-    assert result["display_format"] == "markdown"
+    assert "display_format" not in result
     assert "Status:" not in result["content"]
     assert result["result"]["recommended_plans"][0]["status"] == "ready"
     assert "Best match." in result["content"]
     assert result["content"].endswith("是否按照上述编排结果执行？")
+    assert "## Beam search" not in result["content"]
+    assert "classDef rejected" not in result["content"]
+    assert "score `0.91`" not in result["content"]
+    assert "strong can_feed match" not in result["content"]
     assert "Missing inputs:" not in result["content"]
     assert "收件邮箱地址" not in result["content"]
     assert "imap-smtp-email" not in result["content"]
@@ -396,19 +718,13 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
         result["result"]["recommended_plans"][0]["can_feed_edges"][0]["confidence"]
         == 0.91
     )
-    assert 'N1["Skill 1"]' in result["mermaid"]
-    assert "N1 --> N2" in result["mermaid"]
-    assert "-->|" not in result["mermaid"]
-    assert "0.91" not in result["mermaid"]
+    assert 'N1["Skill 1"]' in result["content"]
+    assert "N1 --> N2" in result["content"]
 
 
 def test_plan_presentation_does_not_ask_to_execute_empty_plan():
     presentation = _build_presentation(
-        {
-            "recommended_plans": [
-                {"title": "Empty Plan", "status": "ready", "steps": []}
-            ]
-        }
+        {"recommended_plans": [{"title": "Empty Plan", "status": "ready", "steps": []}]}
     )
 
     assert "是否按照上述编排结果执行？" not in presentation["markdown"]
@@ -435,11 +751,7 @@ def test_plan_presentation_asks_to_execute_in_english():
 
 def test_plan_presentation_does_not_ask_to_execute_no_plan():
     presentation = _build_presentation(
-        {
-            "recommended_plans": [
-                {"title": "No Plan", "status": "no_plan", "steps": []}
-            ]
-        }
+        {"recommended_plans": [{"title": "No Plan", "status": "no_plan", "steps": []}]}
     )
 
     assert "是否按照上述编排结果执行？" not in presentation["markdown"]
@@ -482,7 +794,9 @@ def test_build_score_awaits_service_and_records_build_log(monkeypatch, tmp_path)
     async def fake_build_score(*args, **kwargs):
         seen["args"] = args
         seen["kwargs"] = kwargs
-        kwargs["build_log"]("fingerprint.extract.start", current=1, total=1, path="skill-1")
+        kwargs["build_log"](
+            "fingerprint.extract.start", current=1, total=1, path="skill-1"
+        )
         return _Result()
 
     monkeypatch.setattr(

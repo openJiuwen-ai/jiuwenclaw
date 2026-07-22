@@ -3,6 +3,7 @@
 """YuanrongFrontendAgentClient - openYuanRong Frontend HTTP 客户端.
 
 通过 HTTP POST 调用 openYuanRong Frontend 的函数 invocation 接口。
+另经 POST/DELETE /api/agent 管理常驻 agent 实例（create_sandbox / delete_sandbox）。
 保留无 service_id 设计，使用 session_id 进行并发控制。
 """
 
@@ -11,12 +12,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, TypedDict
 
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.models import E2AEnvelope
@@ -27,15 +27,25 @@ from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk, A
 logger = logging.getLogger(__name__)
 
 
+class AgentMount(TypedDict, total=False):
+    """Bind mount for POST /api/agent ``mounts``."""
+
+    source: str
+    target: str
+    readonly: bool
+
+
 @dataclass
 class SandboxInfo:
-    """YuanRong sandbox lifecycle record (placeholder until real APIs land)."""
+    """YuanRong agent instance lifecycle record returned by /api/agent."""
 
     sandbox_id: str
-    user_id: str
-    agent_type: str
     status: str = "ready"
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class YuanrongAgentApiError(RuntimeError):
+    """Raised when YuanRong /api/agent returns a non-success response."""
 
 
 class YuanrongFrontendAgentClient(AgentServerClient):
@@ -43,7 +53,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
 
     通过 HTTP POST 调用 openYuanRong frontend 的函数 invocation 接口。
     使用 session_id 进行并发控制，不使用 service_id/agent_id。
-    另提供 create_sandbox / delete_sandbox 生命周期占位，供 AgentOS Router 使用。
+    另提供 create_sandbox / delete_sandbox，经 /api/agent 管理常驻 agent 实例。
     """
 
     def __init__(
@@ -53,13 +63,29 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         function_version_urn: str,
         concurrency: int = 1,
         invoke_timeout_s: float = 60.0,
+        agent_timeout_s: float = 300.0,
+        agent_namespace: str = "default",
+        session_ttl_s: int = 900,
     ) -> None:
         self._frontend_endpoint = (frontend_endpoint or "").rstrip("/")
         self._function_version_urn = (function_version_urn or "").strip()
         self._concurrency = max(int(concurrency), 1)
         self._invoke_timeout_s = float(invoke_timeout_s)
+        self._agent_timeout_s = float(agent_timeout_s)
+        self._agent_namespace = str(agent_namespace or "default").strip() or "default"
+        # yuanrong X-Instance-Session.sessionTTL，单位：秒；0 = 立即解绑。
+        # 默认 900s（15 分钟），保证会话对实例的亲和性，避免每次调用重建实例。
+        self._session_ttl_s = max(int(session_ttl_s), 0)
         self._connected = False
         self._server_ready = False
+
+    @property
+    def function_version_urn(self) -> str:
+        return self._function_version_urn
+
+    @property
+    def agent_namespace(self) -> str:
+        return self._agent_namespace
 
     def set_or_update_server_config(
         self,
@@ -96,75 +122,201 @@ class YuanrongFrontendAgentClient(AgentServerClient):
     async def create_sandbox(
         self,
         *,
-        user_id: str,
-        agent_type: str,
-        agent_id: str | None = None,
-        image_name: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        namespace: str,
+        name: str,
+        urn: str,
+        workspace: str | None = None,
+        env_vars: dict[str, str] | None = None,
+        mounts: list[AgentMount] | None = None,
     ) -> SandboxInfo:
-        """Create a sandbox via YuanRong (placeholder).
+        """Create a detached agent instance via POST /api/agent.
 
-        Both ``swarm`` / ``jiuwenswarm`` and ``3rd`` agent types are expected to
-        provision sandboxes through this API. Real Frontend create calls will
-        replace the local stub below.
+        Mirrors Frontend ``CreateRequest``:
+
+        - ``namespace`` / ``name`` / ``urn``: required
+        - ``workspace`` / ``env_vars`` / ``mounts``: optional
         """
         self._ensure_connected()
-        normalized_user_id = str(user_id or "").strip()
-        normalized_agent_type = str(agent_type or "").strip().lower()
-        if not normalized_user_id:
-            raise ValueError("user_id is required to create sandbox")
-        if not normalized_agent_type:
-            raise ValueError("agent_type is required to create sandbox")
+        normalized_namespace = str(namespace or "").strip()
+        normalized_name = str(name or "").strip()
+        normalized_urn = str(urn or "").strip()
+        if not normalized_namespace:
+            raise ValueError("namespace is required to create sandbox")
+        if not normalized_name:
+            raise ValueError("name is required to create sandbox")
+        if not normalized_urn:
+            raise ValueError("urn is required to create sandbox")
 
-        sandbox_id = f"sbx_{uuid.uuid4().hex}"
+        payload: dict[str, Any] = {
+            "namespace": normalized_namespace,
+            "name": normalized_name,
+            "urn": normalized_urn,
+        }
+
+        if workspace is not None:
+            normalized_workspace = str(workspace).strip()
+            if normalized_workspace:
+                payload["workspace"] = normalized_workspace
+
+        if env_vars:
+            payload["env_vars"] = {
+                str(key): str(value) for key, value in dict(env_vars).items()
+            }
+
+        if mounts:
+            payload["mounts"] = list(mounts)
+
+        status, body = await asyncio.to_thread(self._do_agent_create, payload)
+        parsed = self._parse_agent_api_response(body, status)
+        instance_id = str(parsed.get("instance_id") or "").strip()
+        if not instance_id:
+            raise YuanrongAgentApiError(
+                f"create agent missing instance_id: status={status}, body={body!r}"
+            )
+
         info = SandboxInfo(
-            sandbox_id=sandbox_id,
-            user_id=normalized_user_id,
-            agent_type=normalized_agent_type,
+            sandbox_id=instance_id,
             status="ready",
             metadata={
-                **dict(metadata or {}),
-                "agent_id": agent_id,
-                "image_name": image_name,
-                "provisioning": "yuanrong_create_sandbox_stub",
+                "instance_id": instance_id,
+                "namespace": normalized_namespace,
+                "name": normalized_name,
+                "urn": normalized_urn,
+                "workspace": payload.get("workspace"),
+                "env_vars": dict(payload.get("env_vars") or {}),
+                "mounts": list(payload.get("mounts") or []),
+                "provisioning": "yuanrong_agent_api",
             },
         )
         logger.info(
-            "[YuanrongFrontendAgentClient] create_sandbox stub: "
-            "sandbox_id=%s user_id=%s agent_type=%s agent_id=%s",
-            sandbox_id,
-            normalized_user_id,
-            normalized_agent_type,
-            agent_id,
+            "[YuanrongFrontendAgentClient] create_sandbox: "
+            "instance_id=%s name=%s namespace=%s urn=%s",
+            instance_id,
+            normalized_name,
+            normalized_namespace,
+            normalized_urn,
         )
         return info
 
-    async def delete_sandbox(
-        self,
-        sandbox_id: str,
-        *,
-        user_id: str | None = None,
-        agent_type: str | None = None,
-    ) -> None:
-        """Delete a sandbox via YuanRong (placeholder).
-
-        Applies to both ``swarm`` / ``jiuwenswarm`` and ``3rd`` sandboxes.
-        """
+    async def delete_sandbox(self, sandbox_id: str) -> None:
+        """Destroy a detached agent instance via DELETE /api/agent/:instanceId."""
         self._ensure_connected()
         normalized_sandbox_id = str(sandbox_id or "").strip()
         if not normalized_sandbox_id:
             raise ValueError("sandbox_id is required to delete sandbox")
-        logger.info(
-            "[YuanrongFrontendAgentClient] delete_sandbox stub: "
-            "sandbox_id=%s user_id=%s agent_type=%s",
+
+        status, body = await asyncio.to_thread(
+            self._do_agent_delete,
             normalized_sandbox_id,
-            user_id,
-            agent_type,
+        )
+        self._parse_agent_api_response(body, status)
+        logger.info(
+            "[YuanrongFrontendAgentClient] delete_sandbox: instance_id=%s",
+            normalized_sandbox_id,
         )
 
     def _ensure_connected(self) -> None:
         if not self._connected:
             raise RuntimeError("client not connected")
+
+    def _agent_create_url(self) -> str:
+        return f"{self._frontend_endpoint}/api/agent"
+
+    def _agent_delete_url(self, instance_id: str) -> str:
+        encoded = urllib.parse.quote(instance_id, safe="")
+        return f"{self._frontend_endpoint}/api/agent/{encoded}"
+
+    @staticmethod
+    def _parse_agent_api_response(body: str, status: int) -> dict[str, Any]:
+        try:
+            parsed = json.loads(body) if body else {}
+        except Exception as exc:
+            raise YuanrongAgentApiError(
+                f"invalid agent API response: status={status}, body={body!r}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise YuanrongAgentApiError(
+                f"invalid agent API response shape: status={status}, body={body!r}"
+            )
+        code = parsed.get("code")
+        if not (200 <= status < 300) or code not in (200, "200"):
+            message = parsed.get("message") or parsed.get("status") or body
+            raise YuanrongAgentApiError(
+                f"agent API failed: http_status={status}, code={code}, message={message!r}"
+            )
+        return parsed
+
+    def _urlopen_request(
+        self,
+        req: urllib.request.Request,
+        *,
+        timeout: float | None = None,
+        raise_on_timeout: bool = False,
+    ) -> tuple[int, str]:
+        resolved_timeout = (
+            self._invoke_timeout_s if timeout is None else float(timeout)
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=resolved_timeout) as resp:
+                status = int(getattr(resp, "status", 200))
+                text = resp.read().decode("utf-8", errors="replace")
+                return status, text
+        except urllib.error.HTTPError as err:
+            text = err.read().decode("utf-8", errors="replace") if err.fp else str(err)
+            logger.error(
+                "[YuanrongFrontendAgentClient] HTTP error: url=%s code=%d",
+                req.full_url,
+                getattr(err, "code", 500),
+            )
+            return int(getattr(err, "code", 500) or 500), text
+        except Exception as err:
+            logger.error(
+                "[YuanrongFrontendAgentClient] request failed: url=%s error=%s",
+                req.full_url,
+                str(err),
+            )
+            if raise_on_timeout and self._is_timeout_error(err):
+                raise YuanrongAgentApiError(
+                    f"request timeout after {resolved_timeout}s: "
+                    f"url={req.full_url}, error={err}"
+                ) from err
+            return 500, str(err)
+
+    @staticmethod
+    def _is_timeout_error(err: BaseException) -> bool:
+        if isinstance(err, TimeoutError):
+            return True
+        reason = getattr(err, "reason", None)
+        if isinstance(reason, TimeoutError):
+            return True
+        text = str(err).lower()
+        return "timed out" in text or "timeout" in type(err).__name__.lower()
+
+    def _do_agent_create(self, payload: dict[str, Any]) -> tuple[int, str]:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            self._agent_create_url(),
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        return self._urlopen_request(
+            req,
+            timeout=self._agent_timeout_s,
+            raise_on_timeout=True,
+        )
+
+    def _do_agent_delete(self, instance_id: str) -> tuple[int, str]:
+        req = urllib.request.Request(
+            self._agent_delete_url(instance_id),
+            headers={"Content-Type": "application/json"},
+            method="DELETE",
+        )
+        return self._urlopen_request(
+            req,
+            timeout=self._agent_timeout_s,
+            raise_on_timeout=True,
+        )
 
     def _invoke_url(self) -> str:
         urn = urllib.parse.quote(self._function_version_urn, safe="")
@@ -324,7 +476,11 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         headers = {
             "Content-Type": "application/json",
             "X-Instance-Session": json.dumps(
-                {"sessionID": session_id, "concurrency": self._concurrency},
+                {
+                    "sessionID": session_id,
+                    "sessionTTL": self._session_ttl_s,
+                    "concurrency": self._concurrency,
+                },
                 ensure_ascii=False,
             ),
         }
@@ -366,27 +522,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         )
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self._invoke_url(), data=data, headers=headers, method="POST")
-
-        try:
-            with urllib.request.urlopen(req, timeout=self._invoke_timeout_s) as resp:
-                status = int(getattr(resp, "status", 200))
-                text = resp.read().decode("utf-8", errors="replace")
-                return status, text
-        except urllib.error.HTTPError as err:
-            text = err.read().decode("utf-8", errors="replace") if err.fp else str(err)
-            logger.error(
-                "[YuanrontFrontendAgentClient] HTTP error: session_id=%s, code=%d",
-                session_id,
-                getattr(err, "code", 500),
-            )
-            return int(getattr(err, "code", 500) or 500), text
-        except Exception as err:
-            logger.error(
-                "[YuanrontFrontendAgentClient] request failed: session_id=%s, error=%s",
-                session_id,
-                str(err),
-            )
-            return 500, str(err)
+        return self._urlopen_request(req)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         """发送非流式请求.

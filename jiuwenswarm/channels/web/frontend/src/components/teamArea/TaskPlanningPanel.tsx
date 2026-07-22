@@ -25,6 +25,7 @@ import { getTotalTaskVisualProgressPercent } from './taskProgress';
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
   tasks: SessionTeamTask[];
+  progressTasks?: SessionTeamTask[];
   members: TeamMember[];
   totalTasks: number;
   completedTasks: number;
@@ -49,6 +50,7 @@ const compactStatusIcons: Record<TaskColumnKey, string> = {
 export function TaskPlanningPanel({
   variant,
   tasks,
+  progressTasks = tasks,
   members,
   totalTasks,
   completedTasks,
@@ -94,29 +96,16 @@ export function TaskPlanningPanel({
     return () => window.clearInterval(timer);
   }, [variant]);
 
-  const completedProgressPercent = totalTasks > 0
-    ? Math.round((completedTasks / totalTasks) * 100)
+  const completedProgressTasks = progressTasks.filter((task) => task.status === 'completed').length;
+  const completedProgressPercent = progressTasks.length > 0
+    ? Math.round((completedProgressTasks / progressTasks.length) * 100)
     : 0;
   const progressPercent = variant === 'expanded'
-    ? getTotalTaskVisualProgressPercent(tasks, now)
+    ? getTotalTaskVisualProgressPercent(progressTasks, now)
     : completedProgressPercent;
 
   if (variant === 'compact') {
     const allTasks = tasks;
-
-    const tabCounts = {
-      completed: groupedTasks.completed.length,
-      running: groupedTasks.running.length,
-      waiting: groupedTasks.waiting.length,
-      cancelled: groupedTasks.cancelled.length,
-    };
-
-    const tabLabels = {
-      completed: t('team.planning.columns.completed'),
-      running: t('team.planning.columns.running'),
-      waiting: t('team.planning.columns.waiting'),
-      cancelled: t('team.planning.columns.failed'),
-    };
 
     return (
       <div className={`flex flex-[2] flex-col overflow-hidden min-h-0 px-3 pb-3${hideBorder ? '' : ' border-b border-border'}`}>
@@ -153,13 +142,13 @@ export function TaskPlanningPanel({
             </div>
           )}
           <div className="flex justify-between gap-2">
-            {(['completed', 'running', 'waiting', 'cancelled'] as const).map((key) => (
+            {BOARD_COLUMNS.map((column) => (
               <div
-                key={key}
+                key={column.key}
                 className={`flex-1 flex flex-col items-center justify-center py-2 rounded-md`}
               >
-                <span className="text-sm font-normal text-text-strong">{tabCounts[key]}</span>
-                <span className="text-xs mt-1 text-text-muted">{tabLabels[key]}</span>
+                <span className="text-sm font-normal text-text-strong">{groupedTasks[column.key].length}</span>
+                <span className="text-xs mt-1 text-text-muted">{t(column.labelKey)}</span>
               </div>
             ))}
           </div>
@@ -238,9 +227,9 @@ export function TaskPlanningPanel({
   return (
     <div className="flex-1 overflow-hidden bg-card">
       {view === 'list' ? (
-        <div className="flex h-full flex-col px-6 pb-6 pt-8">
+        <div className="flex h-full flex-col px-6 pb-6">
           <div className="flex h-8 items-center gap-3">
-            <h2 className="text-base font-medium leading-6 text-text-strong">{t('team.planning.progressTitle')}</h2>
+            <h2 className="text-sm font-medium leading-5 text-text-strong">{t('team.planning.progressTitle')}</h2>
             {viewSwitcher}
           </div>
           <ExpandedTaskList
@@ -252,8 +241,8 @@ export function TaskPlanningPanel({
         </div>
       ) : (
         <div className="flex h-full flex-col px-6 pb-6">
-          <div className="mb-5 flex items-center gap-3">
-            <h2 className="text-sm font-medium text-text-strong">{t('team.planning.progressTitle')}</h2>
+          <div className="mb-5 flex h-8 items-center gap-3">
+            <h2 className="text-sm font-medium leading-5 text-text-strong">{t('team.planning.progressTitle')}</h2>
             {viewSwitcher}
             <span className="text-sm font-medium text-text-strong">{progressPercent}%</span>
           </div>
@@ -298,25 +287,15 @@ function ExpandedTaskList({
     <>
       <div className="mt-2 flex min-h-7 flex-wrap items-baseline gap-x-8 gap-y-2">
         <div className="flex shrink-0 items-baseline gap-2">
-          <span className="text-base leading-6 text-text-muted">{t('team.planning.metrics.progress')}</span>
-          <span className="text-lg font-semibold leading-7 text-text-strong">{progressPercent}%</span>
+          <span className="text-sm leading-5 text-text-muted">{t('team.planning.metrics.progress')}</span>
+          <span className="text-base font-semibold leading-6 text-text">{progressPercent}%</span>
         </div>
-        <div className="flex shrink-0 items-baseline gap-2">
-          <span className="text-base leading-6 text-text-muted">{t('team.planning.columns.completed')}</span>
-          <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.completed.length}</span>
-        </div>
-        <div className="flex shrink-0 items-baseline gap-2">
-          <span className="text-base leading-6 text-text-muted">{t('team.planning.columns.running')}</span>
-          <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.running.length}</span>
-        </div>
-        <div className="flex shrink-0 items-baseline gap-2">
-          <span className="text-base leading-6 text-text-muted">{t('team.planning.columns.waiting')}</span>
-          <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.waiting.length}</span>
-        </div>
-        <div className="flex shrink-0 items-baseline gap-2">
-          <span className="text-base leading-6 text-text-muted">{t('team.taskStatus.cancelled')}</span>
-          <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.cancelled.length}</span>
-        </div>
+        {BOARD_COLUMNS.map((column) => (
+          <div key={column.key} className="flex shrink-0 items-baseline gap-2">
+            <span className="text-sm leading-5 text-text-muted">{t(column.labelKey)}</span>
+            <span className="text-base font-semibold leading-6 text-text">{groupedTasks[column.key].length}</span>
+          </div>
+        ))}
       </div>
       <div className="h-1 overflow-hidden rounded-full bg-secondary">
         <div
@@ -324,7 +303,7 @@ function ExpandedTaskList({
           style={{ width: `${progressPercent}%` }}
         />
       </div>
-      <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
+      <div className="mt-3 min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
         {tasks.length === 0 ? (
           <div className="py-8 text-center text-sm text-text-muted">{t('team.noTasks')}</div>
         ) : tasks.map((task) => {
@@ -337,7 +316,7 @@ function ExpandedTaskList({
               <span className="mr-4 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-medium leading-4 text-muted">
                 {String(seq).padStart(2, '0')}
               </span>
-              <span className="min-w-0 flex-1 truncate text-base leading-6 text-text" title={title}>{title}</span>
+              <span className="min-w-0 flex-1 truncate text-sm font-normal leading-5 text-text" title={title}>{title}</span>
               <img
                 src={compactStatusIcons[columnKey]}
                 className={`ml-4 h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}

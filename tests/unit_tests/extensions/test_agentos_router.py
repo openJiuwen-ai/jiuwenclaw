@@ -25,6 +25,8 @@ from jiuwenswarm.extensions.yuanrong_frontend_client import SandboxInfo
 class FakeYuanRongClient:
     def __init__(self) -> None:
         self.server_ready = True
+        self.function_version_urn = "urn:test:function:1"
+        self.agent_namespace = "default"
         self.send_calls = 0
         self.create_calls = 0
         self.delete_calls: list[str] = []
@@ -41,32 +43,27 @@ class FakeYuanRongClient:
     async def create_sandbox(
         self,
         *,
-        user_id: str,
-        agent_type: str,
-        agent_id: str | None = None,
-        image_name: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        namespace: str,
+        name: str,
+        urn: str,
+        workspace: str | None = None,
+        env_vars: dict[str, str] | None = None,
+        mounts: list[dict[str, Any]] | None = None,
     ) -> SandboxInfo:
         self.create_calls += 1
         return SandboxInfo(
             sandbox_id=f"sbx-{self.create_calls}",
-            user_id=user_id,
-            agent_type=agent_type,
             metadata={
-                **dict(metadata or {}),
-                "agent_id": agent_id,
-                "image_name": image_name,
+                "namespace": namespace,
+                "name": name,
+                "urn": urn,
+                "workspace": workspace,
+                "env_vars": dict(env_vars or {}),
+                "mounts": list(mounts or []),
             },
         )
 
-    async def delete_sandbox(
-        self,
-        sandbox_id: str,
-        *,
-        user_id: str | None = None,
-        agent_type: str | None = None,
-    ) -> None:
-        del user_id, agent_type
+    async def delete_sandbox(self, sandbox_id: str) -> None:
         self.delete_calls.append(sandbox_id)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
@@ -103,10 +100,25 @@ class FakeRegistryClient:
     def __init__(self) -> None:
         self.registered: list[AgentInfo] = []
         self.image_lookups = 0
+        self.list_user_images_calls: list[str] = []
 
     async def get_image_info(self, image_name: str) -> ImageInfo:
         self.image_lookups += 1
         return ImageInfo(image_name=image_name)
+
+    async def list_user_images(self, user_id: str) -> list[ImageInfo]:
+        self.list_user_images_calls.append(user_id)
+        return [
+            ImageInfo(
+                image_name="claude",
+                image_uri="registry://claude:latest",
+                metadata={"agent_type": "claude", "user_id": user_id},
+            ),
+            ImageInfo(
+                image_name="opencode",
+                metadata={"agent_type": "opencode", "user_id": user_id},
+            ),
+        ]
 
     async def register_agent(self, agent_info: AgentInfo) -> None:
         self.registered.append(agent_info)
@@ -186,6 +198,101 @@ async def test_third_party_type_creates_via_yuanrong() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_switch_creates_without_forwarding_chat() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="claude",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is True
+    assert yuanrong.create_calls == 1
+    assert yuanrong.send_calls == 0
+    assert response["payload"]["agent_type"] == "claude"
+    assert response["payload"]["sandbox_id"] == "sbx-1"
+    agents = await agent_manager.list_user_agents("u1")
+    assert len(agents) == 1
+    assert agents[0].info.agent_type == "claude"
+
+
+@pytest.mark.asyncio
+async def test_agent_list_returns_registry_images_without_creating() -> None:
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(yuanrong, registry, agent_manager)
+
+    response = await client.thirdagent_list(
+        user_id="u1",
+        current_agent_type="jiuwenswarm",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is True
+    assert yuanrong.create_calls == 0
+    assert yuanrong.send_calls == 0
+    assert registry.list_user_images_calls == ["u1"]
+    assert response["payload"]["current_agent_type"] == "jiuwenswarm"
+    assert [item["agent_type"] for item in response["payload"]["agents"]] == [
+        "claude",
+        "opencode",
+    ]
+    assert response["payload"]["agents"][0]["image_uri"] == "registry://claude:latest"
+    assert await agent_manager.list_user_agents("u1") == []
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_reuses_existing_agent() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+
+    first = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="claude",
+        session_id="sess-1",
+    )
+    second = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="claude",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert first["ok"] and second["ok"]
+    assert yuanrong.create_calls == 1
+    assert yuanrong.send_calls == 0
+    assert first["payload"]["agent_id"] == second["payload"]["agent_id"]
+
+
+@pytest.mark.asyncio
+async def test_chat_after_switch_reuses_agent() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+
+    switch_resp = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="claude",
+        session_id="sess-1",
+    )
+    chat_envelope = _envelope(agent_type="claude")
+    chat_resp = await client.send_request(chat_envelope)
+    await client.shutdown()
+
+    assert switch_resp["ok"] and chat_resp.ok
+    assert yuanrong.create_calls == 1
+    assert yuanrong.send_calls == 1
+    assert chat_envelope.channel_context["agent_id"] == switch_resp["payload"]["agent_id"]
+    assert chat_envelope.channel_context["agent_type"] == "claude"
+
+
+@pytest.mark.asyncio
 async def test_delete_agent_releases_yuanrong_sandbox() -> None:
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
@@ -199,6 +306,51 @@ async def test_delete_agent_releases_yuanrong_sandbox() -> None:
 
     assert yuanrong.delete_calls == ["sbx-1"]
     assert await agent_manager.list_user_agents("u1") == []
+
+
+@pytest.mark.asyncio
+async def test_unsupported_third_agent_returns_unsupported() -> None:
+    from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
+
+    third = get_unsupported_third_agent()
+    listed = await third.thirdagent_list(user_id="u1", current_agent_type="jiuwenswarm")
+    switched = await third.thirdagent_switch(
+        user_id="u1", agent_type="claude", session_id="s1"
+    )
+
+    assert listed["ok"] is False
+    assert listed["code"] == "UNSUPPORTED"
+    assert switched["ok"] is False
+    assert switched["code"] == "UNSUPPORTED"
+
+
+@pytest.mark.asyncio
+async def test_agentos_third_agent_list_and_switch() -> None:
+    from jiuwenswarm.extensions.agentos.agentos_router.third_agent import (
+        AgentOSThirdAgent,
+    )
+
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(yuanrong, registry, agent_manager)
+    third = AgentOSThirdAgent(client)
+
+    listed = await third.thirdagent_list(user_id="u1", current_agent_type="jiuwenswarm")
+    switched = await third.thirdagent_switch(
+        user_id="u1", agent_type="claude", session_id="sess-1"
+    )
+    await client.shutdown()
+
+    assert listed["ok"] is True
+    assert [item["agent_type"] for item in listed["payload"]["agents"]] == [
+        "claude",
+        "opencode",
+    ]
+    assert switched["ok"] is True
+    assert switched["payload"]["agent_type"] == "claude"
+    assert yuanrong.create_calls == 1
+    assert yuanrong.send_calls == 0
 
 
 def test_agentos_selected_by_agent_client_type() -> None:
@@ -235,11 +387,17 @@ def test_load_router_config_agent_key_fields() -> None:
             },
             "agentos": {
                 "agent_key_fields": ["user_id", "agent_type", "session_id"],
+                "registry": {
+                    "endpoint": "http://127.0.0.1:8000",
+                    "node": "192.168.0.12",
+                },
             },
         }
     }
     loaded = load_router_config(config)
     assert loaded.agent_key_fields == ("user_id", "agent_type", "session_id")
+    assert loaded.registry.endpoint == "http://127.0.0.1:8000"
+    assert loaded.registry.node == "192.168.0.12"
 
     default_loaded = load_router_config(
         {
@@ -278,9 +436,13 @@ async def test_agentos_extension_is_selected_independently(
 
     class Registry:
         registered = None
+        third_agent = None
 
         def register_agent_server_client(self, extension) -> None:
             self.registered = extension
+
+        def register_third_agent(self, extension) -> None:
+            self.third_agent = extension
 
     registry = Registry()
     assert await plain_extension.register_extensions(registry) == []
@@ -289,4 +451,6 @@ async def test_agentos_extension_is_selected_independently(
     assert len(registered) == 1
     assert isinstance(registered[0], AgentOSRouter)
     assert registry.registered is registered[0]
+    assert registry.third_agent is registered[0]
+    assert registry.third_agent.get_third_agent() is registered[0].get_third_agent()
     await registered[0].shutdown()

@@ -3,6 +3,7 @@
  */
 
 import type { SkillTreePath } from './skillTree';
+import type { BeamSearchProgress } from './beamSearch';
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
@@ -97,6 +98,7 @@ export interface ToolResult {
   summary?: string;  // 结果摘要
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
   skillTree?: SkillTreePath;
+  beamSearch?: BeamSearchProgress;
 }
 
 export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error';

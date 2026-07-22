@@ -11,6 +11,7 @@ import {
   Copy,
   Info,
   Square,
+  Target,
   Volume2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -26,6 +27,8 @@ import { MediaRenderer } from './MediaRenderer';
 import { A2UIMessageContent } from '../../features/a2ui/A2UIMessageContent';
 import { QaSummaryCard } from '../InteractionSlot/QaSummaryCard';
 import { isQaSummaryContent } from '../InteractionSlot/qaSummary';
+import { GoalCompletedCard } from '../GoalBar/GoalCompletedCard';
+import { isGoalCompletedContent } from '../GoalBar/goalCompletedMessage';
 import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
 import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
 import { useSpeechSynthesis } from '../../hooks';
@@ -211,6 +214,8 @@ interface MessageItemProps {
   autoSpeak?: boolean;
   showAvatar?: boolean;
   disableA2UIInteraction?: boolean;
+  /** 当前会话的目标文本；message.content 与其完全匹配时显示"设为目标"徽章（纯前端字符串匹配派生，不依赖后端字段） */
+  goalObjective?: string | null;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -218,6 +223,7 @@ export const MessageItem = memo(function MessageItem({
   autoSpeak = false,
   showAvatar = true,
   disableA2UIInteraction = false,
+  goalObjective,
 }: MessageItemProps) {
   const { t } = useTranslation();
   const {
@@ -370,6 +376,11 @@ export const MessageItem = memo(function MessageItem({
   // 交互问答「问题澄清」回显卡（ask_user 确认后前端合成注入）
   if (isQaSummaryContent(content)) {
     return <QaSummaryCard content={content} />;
+  }
+
+  // 目标完成回显卡（目标实时跳变到 completed 时前端合成注入）
+  if (isGoalCompletedContent(content)) {
+    return <GoalCompletedCard content={content} />;
   }
 
   // 系统消息
@@ -621,7 +632,14 @@ export const MessageItem = memo(function MessageItem({
             )}
           >
             <span>{formatTimestamp(timestamp)}</span>
-            
+
+            {isUser && goalObjective && content === goalObjective && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-accent-subtle px-2 py-0.5 text-xs text-accent">
+                <Target className="w-3 h-3" strokeWidth={2} />
+                {t('goal.badge')}
+              </span>
+            )}
+
             {showCopy && (
               <div className="relative">
                 {copied && (

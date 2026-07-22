@@ -6,6 +6,7 @@
  */
 
 import { create } from 'zustand';
+import { subscribeWithSelector } from 'zustand/middleware';
 import {
   Message,
   ToolCall,
@@ -23,6 +24,10 @@ import {
   TodoItem,
 } from '../types';
 import { useTodoStore } from './todoStore';
+import {
+  mergeToolResultProgress,
+  shouldDropToolResult,
+} from './toolResultLifecycle';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
 const EVOLUTION_STATUS_END_VISIBLE_MS = 3_000;
@@ -192,6 +197,7 @@ interface ChatState {
   setSwitchingMode: (sessionId: string, switching: boolean) => void;
   setNewSession: (sessionId: string, isNew: boolean) => void;
   addToolCall: (sessionId: string, toolCall: ToolCall, options?: { startedAt?: string; requestId?: string }) => void;
+  updateToolProgress: (sessionId: string, toolCallId: string, progress: Partial<ToolResult>) => void;
   addToolResult: (sessionId: string, toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: (sessionId: string) => void;
   updateSubtask: (sessionId: string, payload: SubtaskUpdatePayload) => void;
@@ -215,7 +221,7 @@ interface ChatState {
   ) => void;
 }
 
-export const useChatStore = create<ChatState>((set, get) => ({
+export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get) => ({
   runtimes: {},
   activeSessionId: null,
   globalTaskRunning: false,
@@ -741,9 +747,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const duplicatedOrphan = nextOrphanResults.get(incomingToolCallId);
         if (
           duplicatedOrphan &&
-          duplicatedOrphan.result === toolResult.result &&
-          duplicatedOrphan.success === toolResult.success &&
-          (duplicatedOrphan.summary || '') === (toolResult.summary || '')
+          shouldDropToolResult(
+            resolveExecutionStatus(duplicatedOrphan),
+            duplicatedOrphan,
+            toolResult
+          )
         ) {
           const nextDropped = runtime.toolMetrics.toolResultDedupDropped + 1;
           if (import.meta.env.DEV && (nextDropped === 1 || nextDropped % 10 === 0)) {
@@ -774,43 +782,78 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       }
 
-      if (existingExecution.result) {
-        const duplicated =
-          existingExecution.result.result === toolResult.result &&
-          existingExecution.result.success === toolResult.success &&
-          (existingExecution.result.summary || '') === (toolResult.summary || '');
-        if (duplicated) {
-          const nextDropped = runtime.toolMetrics.toolResultDedupDropped + 1;
-          if (import.meta.env.DEV && (nextDropped === 1 || nextDropped % 10 === 0)) {
-            console.debug('[ws][metrics] toolResultDedupDropped', {
-              count: nextDropped,
-              reason: 'execution duplicate',
-            });
-          }
-          return {
-            runtimes: {
-              ...state.runtimes,
-              [sessionId]: {
-                ...runtime,
-                toolMetrics: {
-                  ...runtime.toolMetrics,
-                  toolResultDedupDropped: nextDropped,
-                },
+      const mergedToolResult = mergeToolResultProgress(
+        existingExecution.result,
+        toolResult
+      );
+      const nextStatus = resolveExecutionStatus(mergedToolResult);
+
+      if (
+        shouldDropToolResult(
+          existingExecution.status,
+          existingExecution.result,
+          mergedToolResult
+        )
+      ) {
+        const nextDropped = runtime.toolMetrics.toolResultDedupDropped + 1;
+        if (import.meta.env.DEV && (nextDropped === 1 || nextDropped % 10 === 0)) {
+          console.debug('[ws][metrics] toolResultDedupDropped', {
+            count: nextDropped,
+            reason: 'execution duplicate',
+          });
+        }
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: {
+              ...runtime,
+              toolMetrics: {
+                ...runtime.toolMetrics,
+                toolResultDedupDropped: nextDropped,
               },
             },
-          };
-        }
+          },
+        };
       }
 
       const nextExecutions = new Map(runtime.toolExecutions);
-      const nextStatus = resolveExecutionStatus(toolResult);
       nextExecutions.set(incomingToolCallId, {
         ...existingExecution,
-        result: toolResult,
+        result: mergedToolResult,
         status: nextStatus,
         updatedAt,
         resultArrivedAfterTimeout:
           existingExecution.status === 'timeout' ? true : existingExecution.resultArrivedAfterTimeout,
+      });
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, toolExecutions: nextExecutions },
+        },
+      };
+    });
+  },
+
+  updateToolProgress: (sessionId, toolCallId, progress) => {
+    if (!toolCallId) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const execution = runtime.toolExecutions.get(toolCallId);
+      if (!execution) return state;
+      const nextExecutions = new Map(runtime.toolExecutions);
+      nextExecutions.set(toolCallId, {
+        ...execution,
+        result: {
+          toolName: execution.toolCall.name,
+          result: '',
+          success: true,
+          toolCallId,
+          ...execution.result,
+          ...progress,
+        },
+        status: 'pending',
+        updatedAt: new Date().toISOString(),
       });
       return {
         runtimes: {
@@ -1221,4 +1264,4 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     });
   },
-}));
+})));

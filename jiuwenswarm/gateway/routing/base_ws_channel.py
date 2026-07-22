@@ -246,11 +246,15 @@ class BaseWsChannel(BaseChannel):
                 try:
                     await asyncio.wait_for(ws.send(frame), timeout=10.0)
                 except asyncio.TimeoutError:
+                    # Drop only this frame. Killing the writer leaves an unbounded
+                    # queue with nobody draining it — later unary res frames
+                    # (e.g. command.workflows list) never reach the TUI and the
+                    # client reports ``request timeout`` despite AgentServer OK.
                     logger.warning(
-                        "[%s] ws.send timed out 10s, dropping writer ws_id=%s",
+                        "[%s] ws.send timed out 10s, dropping frame ws_id=%s",
                         self.channel_id, ws_id,
                     )
-                    return
+                    continue
                 except Exception as e:
                     if bool(getattr(ws, "closed", False)):
                         logger.debug(

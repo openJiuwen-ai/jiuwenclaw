@@ -15,6 +15,12 @@ import {
   ContextCompressionSummary,
   TeamMemberContextCompressionState,
 } from '../types';
+import {
+  createTaskProgressBaseline,
+  mergeTaskProgressBaseline,
+  registerConfirmedTaskCreation,
+  type TaskProgressBaseline,
+} from '../features/teamTaskProgressBaseline';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
@@ -231,6 +237,7 @@ export interface SessionRuntime {
   contextCompressionAfter: number | null;
   teamTaskEvents: TeamTaskEvent[];
   teamTasks: TeamTask[];
+  teamTaskProgressBaseline: TaskProgressBaseline;
   teamMembers: TeamMember[];
   teamLeaderMemberIds: string[];
   teamHumanShareCommands: HumanShareCommand[];
@@ -254,6 +261,7 @@ function createEmptyRuntime(): SessionRuntime {
     contextCompressionAfter: null,
     teamTaskEvents: [],
     teamTasks: [],
+    teamTaskProgressBaseline: createTaskProgressBaseline(),
     teamMembers: [],
     teamLeaderMemberIds: [],
     teamHumanShareCommands: [],
@@ -315,6 +323,8 @@ interface SessionState {
   setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
   setTeamTasks: (sessionId: string, tasks: TeamTask[]) => void;
+  registerConfirmedTeamTaskCreation: (sessionId: string, taskId: string) => void;
+  mergeTeamTaskProgressBaseline: (sessionId: string, baseline: TaskProgressBaseline) => void;
   upsertTeamTask: (sessionId: string, task: TeamTaskUpsert) => void;
   updateTeamTask: (sessionId: string, taskId: string, patch: Partial<TeamTask>) => void;
   setTeamMembers: (sessionId: string, members: TeamMember[]) => void;
@@ -631,7 +641,51 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, teamTasks: tasks },
+          [sessionId]: {
+            ...runtime,
+            teamTasks: tasks,
+            teamTaskProgressBaseline: tasks.length === 0
+              ? createTaskProgressBaseline()
+              : runtime.teamTaskProgressBaseline,
+          },
+        },
+      };
+    });
+  },
+
+  registerConfirmedTeamTaskCreation: (sessionId, taskId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const baseline = registerConfirmedTaskCreation(
+        runtime.teamTasks,
+        runtime.teamTaskProgressBaseline,
+        taskId
+      );
+      if (baseline === runtime.teamTaskProgressBaseline) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTaskProgressBaseline: baseline },
+        },
+      };
+    });
+  },
+
+  mergeTeamTaskProgressBaseline: (sessionId, restoredBaseline) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamTaskProgressBaseline: mergeTaskProgressBaseline(
+              runtime.teamTaskProgressBaseline,
+              restoredBaseline
+            ),
+          },
         },
       };
     });

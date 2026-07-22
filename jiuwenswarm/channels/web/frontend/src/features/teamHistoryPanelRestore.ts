@@ -7,6 +7,11 @@ import type {
   TeamTaskStatus,
 } from '../stores/sessionStore';
 import { normalizeFinalContent } from '../utils/finalContent';
+import {
+  createTaskProgressBaseline,
+  registerConfirmedTaskCreation,
+  type TaskProgressBaseline,
+} from './teamTaskProgressBaseline';
 
 interface TeamMember {
   id: string;
@@ -40,6 +45,7 @@ export interface TeamHistoryPanelState {
   executionEvents: TeamMemberExecutionEvent[];
   messages: Message[];
   humanShareCommands: HumanShareCommand[];
+  taskProgressBaseline: TaskProgressBaseline;
 }
 
 interface TeamHistoryGetResponse {
@@ -329,6 +335,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
   const humanShareCommands = new Map<string, HumanShareCommand>();
   const messages: Message[] = [];
   const shutdownMembers = new Set<string>();
+  let taskProgressBaseline = createTaskProgressBaseline();
   let hasSeenMember = false;
 
   const addMember = (memberId: string, timestamp: number) => {
@@ -747,6 +754,14 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     const content = pickString(event, ['content']);
     const teamId = pickString(event, ['team_id']);
 
+    if (type === 'team.task.created') {
+      taskProgressBaseline = registerConfirmedTaskCreation(
+        Array.from(tasks.values()),
+        taskProgressBaseline,
+        taskId
+      );
+    }
+
     taskEvents.set(taskId, {
       id: `hist-task-${taskId}-${timestamp}`,
       type,
@@ -772,6 +787,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       executionEvents: [],
       messages: [],
       humanShareCommands: [],
+      taskProgressBaseline: createTaskProgressBaseline(),
     };
   }
 
@@ -782,6 +798,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     executionEvents: Array.from(executionEvents.values()),
     messages,
     humanShareCommands: Array.from(humanShareCommands.values()),
+    taskProgressBaseline,
   };
 }
 

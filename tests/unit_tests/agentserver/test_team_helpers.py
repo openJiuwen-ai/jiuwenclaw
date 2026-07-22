@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -2807,21 +2808,26 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
     assert [event["event_type"] for event in broadcasted] == [
         "chat.processing_status",
         "team.runtime_ready",
+        'chat.final',
+        'chat.processing_status',
+        'chat.final',
+        'chat.processing_status',
+        'chat.final',
+        'chat.processing_status',
         "chat.processing_status",
-        'chat.final',
-        'chat.processing_status',
-        'chat.final',
-        'chat.processing_status',
-        'chat.final',
-        'chat.processing_status',
         'team.completed',
     ]
     # Round-start processing_status
     assert broadcasted[0]["is_processing"] is True
     assert broadcasted[0]["is_complete"] is False
     # Round-end processing_status (from team.completed)
-    assert broadcasted[2]["is_processing"] is False
-    assert broadcasted[2]["is_complete"] is True
+    assert broadcasted[-2]["is_processing"] is False
+    assert broadcasted[-2]["is_complete"] is True
+    for index, event in enumerate(broadcasted):
+        if event.get("event_type") == "chat.final":
+            next_event = broadcasted[index + 1]
+            assert next_event["event_type"] == "chat.processing_status"
+            assert next_event["is_processing"] is False
 
 
 @pytest.mark.anyio
@@ -3914,3 +3920,103 @@ def test_workflow_updated_to_team_events_first_sight_terminal_spawns_then_status
     assert member_types == ["team.member.spawned", "team.member.status_changed"]
     task = next(e for e in out if e["event_type"] == "team.task")
     assert task["event"]["type"] == "team.task.cancelled"
+
+
+def test_persist_team_file_monitor_roots_replaces_stale_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_persist_team_file_monitor_roots 应替换旧 root,而非累积合并。"""
+    written: list[dict[str, Any]] = []
+
+    def _fake_read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
+        return {
+            "session_id": session_id,
+            "team_file_monitor_roots": ["/old/stale/workspace"],
+        }
+
+    def _fake_enqueue_write(
+        session_id: str, metadata: dict[str, Any], **kwargs: Any
+    ) -> None:
+        written.append(metadata)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata._read_metadata",
+        _fake_read_metadata,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata._enqueue_write",
+        _fake_enqueue_write,
+    )
+    fake_home = Path("/team/home/unit-team")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.team_helpers.team_home",
+        lambda name: fake_home,
+    )
+
+    team_spec = SimpleNamespace(
+        team_name="unit-team",
+        workspace=SimpleNamespace(root_path="/team/home/unit-team/team-workspace"),
+        agents={
+            "worker": SimpleNamespace(
+                workspace=SimpleNamespace(root_path="/team/home/unit-team/workspaces/worker_workspace"),
+            ),
+        },
+    )
+    team_helpers._persist_team_file_monitor_roots("sess-1", team_spec)
+
+    assert len(written) == 1
+    persisted_roots = written[0]["team_file_monitor_roots"]
+    # 旧 root 应被清除
+    assert "/old/stale/workspace" not in persisted_roots
+    # 新 root 应包含 team-workspace 和 member workspace(路径经 resolve 归一化)
+    home = fake_home.resolve()
+    assert str(home / "team-workspace") in persisted_roots
+    assert str(home / "workspaces") in persisted_roots
+    assert str(home / "workspaces" / "worker_workspace") in persisted_roots
+
+
+def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """当 roots 未变化时不应触发写盘。"""
+    written: list[dict[str, Any]] = []
+    fake_home = Path("/team/home/unit-team")
+
+    expected_roots = [
+        str(fake_home.resolve() / "team-workspace"),
+        str(fake_home.resolve() / "workspaces"),
+        str(fake_home.resolve() / "workspaces" / "worker_workspace"),
+    ]
+
+    def _fake_read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
+        return {
+            "session_id": session_id,
+            "team_file_monitor_roots": list(expected_roots),
+        }
+
+    def _fake_enqueue_write(
+        session_id: str, metadata: dict[str, Any], **kwargs: Any
+    ) -> None:
+        written.append(metadata)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata._read_metadata",
+        _fake_read_metadata,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata._enqueue_write",
+        _fake_enqueue_write,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.team_helpers.team_home",
+        lambda name: fake_home,
+    )
+
+    team_spec = SimpleNamespace(
+        team_name="unit-team",
+        workspace=SimpleNamespace(root_path="/team/home/unit-team/team-workspace"),
+        agents={
+            "worker": SimpleNamespace(
+                workspace=SimpleNamespace(root_path="/team/home/unit-team/workspaces/worker_workspace"),
+            ),
+        },
+    )
+    team_helpers._persist_team_file_monitor_roots("sess-1", team_spec)
+
+    assert len(written) == 0

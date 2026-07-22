@@ -415,6 +415,35 @@
     "pending": "Pending",
     "completed": "Completed"
   },
+  "goal": {
+    "formSubmit": "Confirm",
+    "formCancel": "Cancel",
+    "editTitle": "Edit goal",
+    "toolbarTag": "Goal",
+    "closeTag": "Cancel goal",
+    "badge": "Set as goal",
+    "status": {
+      "active": "Active",
+      "paused": "Paused",
+      "completed": "Completed",
+      "blocked": "Blocked"
+    },
+    "action": {
+      "editTooltip": "Edit goal",
+      "pauseTooltip": "Pause goal",
+      "resumeTooltip": "Resume goal",
+      "deleteTooltip": "Delete goal"
+    },
+    "completedCardTitle": "Goal completed",
+    "completedMessageFallback": "Goal completed.",
+    "editStaleWarning": "The goal was completed while you were editing it, so this change wasn't saved. Use \"+\" to set a new goal if needed.",
+    "detail": {
+      "attempts": "Attempts",
+      "tokens": "Total tokens",
+      "lastAssessment": "Last assessment",
+      "lastStopReason": "Last stop reason"
+    }
+  },
   "sessions": {
     "title": "Session Management",
     "subtitle": "Browse and manage sessions and files",
@@ -774,6 +803,7 @@
       "teamMemberPromptHint": "Prompt Hint",
       "teamMemberAgentKey": "Agent Key",
       "symphonyEnabled": "Enable skill orchestration",
+      "symphonyDynamicGraphEnabled": "Enable dynamic graph",
       "skillRetrievalEnabled": "Enable skill retrieval",
       "skillRetrievalBuildBranchingFactor": "Split threshold base",
       "skillRetrievalBuildMaxDepth": "Max tree depth",
@@ -802,6 +832,7 @@
     },
     "keyHelp": {
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
+      "symphonyDynamicGraphEnabled": "When disabled, planning uses only the static graph. Existing runtime data is retained.",
       "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path."
     },
     "hideValue": "Hide value",
@@ -948,6 +979,7 @@
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
+      "dynamicGraph": "Enable dynamic graph",
       "kvCacheAffinity": "Compute affinity (KV cache release)"
     },
     "permissionsTools": {

@@ -4,7 +4,10 @@ from unittest.mock import patch
 import pytest
 
 from openjiuwen.core.foundation.llm import Model
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    ToolCallInputs,
+)
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
@@ -20,8 +23,8 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
 from jiuwenswarm.agents.harness.common.rails import skill_retrieval_prompt_rail as _skill_retrieval_prompt_mod
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
-from jiuwenswarm.agents.harness.common.rails.symphony_orchestration_prompt_rail import (
-    SymphonyOrchestrationPromptRail,
+from jiuwenswarm.agents.harness.common.rails.symphony import (
+    SymphonyOrchestrationRail,
 )
 
 
@@ -101,17 +104,41 @@ class _FakeRuntimeInstance:
         self.ability_manager = _FakeAbilityManager()
 
 
+def _tool_call_ctx(
+    tool_name: str,
+    args: dict,
+    *,
+    extra: dict | None = None,
+    result: object | None = None,
+):
+    tool_call = SimpleNamespace(
+        id=f"{tool_name}-call",
+        name=tool_name,
+        arguments=dict(args),
+    )
+    return SimpleNamespace(
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name=tool_name,
+            tool_args=dict(args),
+            tool_result={"success": True} if result is None else result,
+        ),
+        extra={} if extra is None else extra,
+        exception=None,
+    )
+
+
 def test_build_agent_identity_prompt_contains_identity_section_only():
     prompt = build_agent_identity_prompt(language="zh")
 
-    assert "# 你的家" in prompt
+    assert "# JiuwenSwarm 内部数据" in prompt
     assert "## Symphony Orchestration" not in prompt
     assert "`symphony_compose_score`" not in prompt
     assert "# 消息说明" not in prompt
 
 
 @pytest.mark.asyncio
-async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
+async def test_symphony_orchestration_rail_respects_config_snapshot():
     enabled_builder = SystemPromptBuilder(language="cn")
     enabled_agent = _FakeAgent(enabled_builder)
     enabled_ctx = AgentCallbackContext(
@@ -122,7 +149,7 @@ async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
         session=_FakeSession(),
         extra={},
     )
-    enabled_rail = SymphonyOrchestrationPromptRail(
+    enabled_rail = SymphonyOrchestrationRail(
         config_base={"symphony": {"enabled": True}},
     )
     enabled_rail.init(enabled_agent)
@@ -138,7 +165,7 @@ async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
         session=_FakeSession(),
         extra={},
     )
-    disabled_rail = SymphonyOrchestrationPromptRail(
+    disabled_rail = SymphonyOrchestrationRail(
         config_base={"symphony": {"enabled": False}},
     )
     disabled_rail.init(disabled_agent)
@@ -153,7 +180,7 @@ async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
 
 
 @pytest.mark.asyncio
-async def test_symphony_orchestration_prompt_rail_injects_when_tool_visible(
+async def test_symphony_orchestration_rail_injects_when_tool_visible(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -171,17 +198,125 @@ async def test_symphony_orchestration_prompt_rail_injects_when_tool_visible(
         extra={},
     )
 
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     rail.init(agent)
     await rail.before_model_call(ctx)
 
     prompt = builder.build()
     assert "## Symphony Orchestration" in prompt
     assert "`symphony_compose_score`" in prompt
+    assert "exact identifiers or names" in prompt
+    assert "Do not omit this field" in prompt
+    assert "skill_branch_explore" not in prompt
 
 
 @pytest.mark.asyncio
-async def test_symphony_orchestration_prompt_rail_clears_when_unavailable(
+async def test_symphony_orchestration_rail_backfills_viewed_skills():
+    rail = SymphonyOrchestrationRail()
+    invocation_extra: dict = {}
+
+    for skill_name in (
+        "creating-financial-models",
+        "xlsx",
+        "creating-financial-models",
+    ):
+        await rail.after_tool_call(
+            _tool_call_ctx(
+                "skill_tool",
+                {"skill_name": skill_name},
+                extra=invocation_extra,
+            )
+        )
+
+    compose_ctx = _tool_call_ctx(
+        "symphony_compose_score",
+        {"query": "build a financial model"},
+        extra=invocation_extra,
+    )
+    await rail.before_tool_call(compose_ctx)
+
+    expected = ["creating-financial-models", "xlsx"]
+    assert compose_ctx.inputs.tool_args["candidate_skill_ids"] == expected
+    assert compose_ctx.inputs.tool_call.arguments["candidate_skill_ids"] == expected
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_rail_preserves_explicit_candidates():
+    rail = SymphonyOrchestrationRail()
+    invocation_extra: dict = {}
+    await rail.after_tool_call(
+        _tool_call_ctx(
+            "skill_tool",
+            {"skill_name": "viewed-skill"},
+            extra=invocation_extra,
+        )
+    )
+    compose_ctx = _tool_call_ctx(
+        "symphony_compose_score",
+        {"query": "task", "candidate_skill_ids": ["explicit-skill"]},
+        extra=invocation_extra,
+    )
+
+    await rail.before_tool_call(compose_ctx)
+
+    assert compose_ctx.inputs.tool_args["candidate_skill_ids"] == [
+        "explicit-skill"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_rail_does_not_reuse_other_invocation():
+    rail = SymphonyOrchestrationRail()
+    await rail.after_tool_call(
+        _tool_call_ctx(
+            "skill_tool",
+            {"skill_name": "previous-skill"},
+            extra={},
+        )
+    )
+    compose_ctx = _tool_call_ctx(
+        "symphony_compose_score",
+        {"query": "new task"},
+        extra={},
+    )
+
+    await rail.before_tool_call(compose_ctx)
+
+    assert "candidate_skill_ids" not in compose_ctx.inputs.tool_args
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_rail_ignores_disclosure_and_failed_views():
+    rail = SymphonyOrchestrationRail()
+    invocation_extra: dict = {}
+    await rail.after_tool_call(
+        _tool_call_ctx(
+            "skill_branch_explore",
+            {"node_ids": ["FinanceBusiness"]},
+            extra=invocation_extra,
+        )
+    )
+    await rail.after_tool_call(
+        _tool_call_ctx(
+            "skill_tool",
+            {"skill_name": "failed-skill"},
+            extra=invocation_extra,
+            result={"success": False},
+        )
+    )
+    compose_ctx = _tool_call_ctx(
+        "symphony_compose_score",
+        {"query": "task"},
+        extra=invocation_extra,
+    )
+
+    await rail.before_tool_call(compose_ctx)
+
+    assert "candidate_skill_ids" not in compose_ctx.inputs.tool_args
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_rail_clears_when_unavailable(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -204,7 +339,7 @@ async def test_symphony_orchestration_prompt_rail_clears_when_unavailable(
         extra={},
     )
 
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     rail.init(agent)
     await rail.before_model_call(ctx)
 
@@ -212,7 +347,7 @@ async def test_symphony_orchestration_prompt_rail_clears_when_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_symphony_orchestration_prompt_rail_clears_when_disabled(
+async def test_symphony_orchestration_rail_clears_when_disabled(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -230,7 +365,7 @@ async def test_symphony_orchestration_prompt_rail_clears_when_disabled(
         extra={},
     )
 
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     rail.init(agent)
     await rail.before_model_call(ctx)
 
@@ -407,15 +542,25 @@ async def test_runtime_git_status_attachment_clears_when_git_context_disappears(
 
 
 @pytest.mark.asyncio
-async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path):
+async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, monkeypatch):
     builder = SystemPromptBuilder(language="en")
     agent = _FakeAgent(builder)
     stale_dir = tmp_path / "missing-worktree"
     project_dir = tmp_path / "project"
     current_dir = project_dir / "current"
     extra_dir = tmp_path / "extra"
+    agent_data_dir = tmp_path / "agent-data"
     current_dir.mkdir(parents=True)
     extra_dir.mkdir()
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
 
     runtime_rail = RuntimePromptRail(language="en", channel="tui")
     runtime_rail.init(agent)
@@ -431,16 +576,90 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path):
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# Current Project Workspace" in prompt
-    assert "Current project directory" in prompt
-    assert "Do not call `pwd`, `ls`" in prompt
+    assert "# Runtime Directory Context" in prompt
+    assert "Current project directory (project root and workspace boundary)" in prompt
+    assert "Current working directory (cwd and Bash default directory)" in prompt
+    assert "Agent internal data directory" in prompt
     assert "# Working Directory Policy" in prompt
+    assert str(project_dir) in prompt
     assert str(current_dir) in prompt
     assert str(stale_dir) not in prompt
     assert str(extra_dir) in prompt
+    assert "System directory" not in prompt
 
     items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     assert [item.id for item in items if item.id.endswith(".trusted_dirs_policy")] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_describes_external_cwd_without_project(tmp_path, monkeypatch):
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeAgent(builder)
+    agent_data_dir = tmp_path / "agent-data"
+    task_dir = tmp_path / "standalone-task"
+    agent_data_dir.mkdir()
+    task_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="en", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=str(task_dir), project_dir=None)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "Current project directory: not set" in prompt
+    assert str(task_dir) in prompt
+    assert "No user project is currently bound" in prompt
+    assert "it is not a project directory" in prompt
+    assert "fallen back to the Agent internal data directory" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_describes_agent_data_cwd_fallback(tmp_path, monkeypatch):
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    agent_data_dir = tmp_path / "agent-data"
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="cn", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=None, project_dir=None)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "当前项目目录：未设置" in prompt
+    assert str(agent_data_dir) in prompt
+    assert "当前工作目录暂时回退到 Agent 内部数据目录" in prompt
+    assert "它仍然是 Agent 内部数据目录，不是用户项目" in prompt
 
 
 @pytest.mark.asyncio

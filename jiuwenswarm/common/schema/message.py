@@ -15,6 +15,7 @@ class ReqMethod(Enum):
     CHAT_RESUME = "chat.resume"
     CHAT_CANCEL = "chat.interrupt"
     CHAT_ANSWER = "chat.user_answer"
+    CHAT_SWARMFLOW_REPLY = "chat.swarmflow_reply"
     HISTORY_GET = "history.get"
     COMMAND_BTW = "command.btw"
     COMMAND_ADD_DIR = "command.add_dir"
@@ -77,6 +78,8 @@ class ReqMethod(Enum):
     AGENTS_ENABLE = "agents.enable"
     AGENTS_DISABLE = "agents.disable"
     AGENTS_TOOLS_LIST = "agents.tools_list"
+    AGENT_SWITCH = "3rdagent.switch"
+    AGENT_LIST = "3rdagent.list"
 
     SKILLS_MARKETPLACE_LIST = "skills.marketplace.list"
     SKILLS_LIST = "skills.list"

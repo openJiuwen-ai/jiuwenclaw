@@ -162,22 +162,36 @@ async def test_successful_discard_restores_files_and_marks_dirty():
     truncate_calls: list[dict] = []
     restore_calls: list[dict] = []
 
-    def fake_truncate(session_id, cutoff_ts, project_dir=None):
+    def fake_truncate(session_id, cutoff_ts, project_dir=None, *, extra_history_roots=None):
         truncate_calls.append({
             "session_id": session_id,
             "cutoff_ts": cutoff_ts,
             "project_dir": project_dir,
+            "extra_history_roots": extra_history_roots,
         })
 
-    def fake_restore(*, session_id, turn_index, project_dir=None):
+    mark_discarded_calls: list[dict] = []
+
+    def fake_mark_discarded(session_id, turn_index, project_dir=None, *, extra_history_roots=None):
+        mark_discarded_calls.append({
+            "session_id": session_id,
+            "turn_index": turn_index,
+            "project_dir": project_dir,
+            "extra_history_roots": extra_history_roots,
+        })
+        return "cs_sess-1_2_test1234"
+
+    def fake_restore(*, session_id, turn_index, project_dir=None, extra_history_roots=None):
         restore_calls.append({
             "session_id": session_id,
             "turn_index": turn_index,
             "project_dir": project_dir,
+            "extra_history_roots": extra_history_roots,
         })
         return fake_restore_result
 
     fake_diff_service = SimpleNamespace(
+        mark_turn_discarded=fake_mark_discarded,
         truncate_file_ops_by_timestamp=fake_truncate,
     )
 
@@ -209,6 +223,10 @@ async def test_successful_discard_restores_files_and_marks_dirty():
             side_effect=fake_restore,
         ),
         patch(
+            "jiuwenswarm.server.runtime.session.git_diff_status.get_session_extra_history_roots",
+            return_value=["/tmp/team-workspace"],
+        ),
+        patch(
             "jiuwenswarm.server.utils.diff_service.get_diff_service",
             return_value=fake_diff_service,
         ),
@@ -224,6 +242,7 @@ async def test_successful_discard_restores_files_and_marks_dirty():
     payload = resp["payload"]
     assert payload["file_ops_truncated"] is True
     assert payload["global_file_ops_truncated"] is False
+    assert payload["change_set_id"] == "cs_sess-1_2_test1234"
 
     # P2 修复:用 get_session_metadata(enable_writeback=False) 保留推断、避免写盘
     assert len(meta_calls) == 1
@@ -231,7 +250,11 @@ async def test_successful_discard_restores_files_and_marks_dirty():
 
     # P1 修复:handler 显式传入 proj.project_dir 到 restore / truncate
     assert restore_calls[0]["project_dir"] == "/tmp/proj-A"
+    assert mark_discarded_calls[0]["project_dir"] == "/tmp/proj-A"
     assert truncate_calls[0]["project_dir"] == "/tmp/proj-A"
+    assert restore_calls[0]["extra_history_roots"] == ["/tmp/team-workspace"]
+    assert mark_discarded_calls[0]["extra_history_roots"] == ["/tmp/team-workspace"]
+    assert truncate_calls[0]["extra_history_roots"] == ["/tmp/team-workspace"]
 
     # watcher 标脏正确项目
     assert registry.mark_dirty_calls == ["proj-A"]

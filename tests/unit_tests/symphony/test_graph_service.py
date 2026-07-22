@@ -8,7 +8,7 @@ from jiuwenswarm.symphony.fingerprint.models import (
     ExtractedSkillSchema,
     ParameterSpec,
     RawSkillManifest,
-    SkillFingerprint,
+    Fingerprint,
     SkillFolder,
 )
 from jiuwenswarm.symphony.fingerprint.normalize import (
@@ -507,7 +507,8 @@ async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypa
     )
     registry = SkillRegistry(
         skills={
-            "source": SkillFingerprint(
+            "source": Fingerprint(
+                type="skill",
                 id="source",
                 name="Source",
                 description="Produces result",
@@ -515,7 +516,8 @@ async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypa
                 inputs=[],
                 outputs=[ArtifactSpec(name="result", type="text")],
             ),
-            "target": SkillFingerprint(
+            "target": Fingerprint(
+                type="skill",
                 id="target",
                 name="Target",
                 description="Consumes input",
@@ -620,6 +622,7 @@ async def test_build_score_passes_separate_symphony_stage_configs(tmp_path):
             "build": {
                 "workers": 8,
                 "batch_size": 9,
+                "max_candidates_per_skill_relation": 17,
                 "require_consensus": False,
                 "min_edge_confidence": 0.33,
             },
@@ -667,6 +670,7 @@ async def test_build_score_passes_separate_symphony_stage_configs(tmp_path):
     assert seen["normalization"].max_vocab_size == 7
     assert seen["build"].workers == 8
     assert seen["build"].batch_size == 9
+    assert seen["build"].max_candidates_per_skill_relation == 17
     assert seen["build"].require_consensus is False
     assert seen["build"].min_edge_confidence == 0.33
 
@@ -901,6 +905,55 @@ async def test_build_score_reuses_unchanged_relation_matches(tmp_path):
     assert second.relation_resolved_count == 0
     assert second.relation_reused_count == first.relation_resolved_count
     assert second_matcher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_relation_cache_preserves_matcher_worker_windows(tmp_path):
+    matcher = _CountingAcceptedMatcher()
+    matcher.batch_size = 2
+    matcher.max_workers = 3
+    cached_matcher = CachedOntologyMatcher(
+        matcher,
+        tmp_path / "relation_matches.json",
+        fingerprints=[],
+    )
+    candidates = [
+        RelationCandidate(
+            source_id=f"source-{index}",
+            target_id=f"target-{index}",
+            relation_hints=["can_feed"],
+            candidate_methods=["test"],
+            priority="medium",
+        )
+        for index in range(8)
+    ]
+
+    first = await cached_matcher.match(SkillRegistry(skills={}), candidates)
+    second = await cached_matcher.match(SkillRegistry(skills={}), candidates)
+
+    assert [len(call) for call in matcher.calls] == [6, 2]
+    assert len(first) == 8
+    assert len(second) == 8
+    assert cached_matcher.stats.reused_count == 8
+    assert cached_matcher.stats.resolved_count == 0
+
+
+@pytest.mark.asyncio
+async def test_graph_manifest_records_candidate_generation_limit():
+    result = await GraphBuilder(
+        matcher=_NoopMatcher(),
+        candidate_generator=CandidateGenerator(
+            max_candidates_per_skill_relation=17,
+            max_port_mappings_per_candidate=9,
+            max_exact_io_pair_fanout=33,
+        ),
+    ).build([])
+
+    assert result.manifest.candidate_generation == {
+        "max_candidates_per_skill_relation": 17,
+        "max_port_mappings_per_candidate": 9,
+        "max_exact_io_pair_fanout": 33,
+    }
 
 
 @pytest.mark.asyncio
@@ -1340,7 +1393,8 @@ async def test_normalized_calendar_memo_input_enables_expected_candidates(tmp_pa
     registry = SkillRegistry(
         skills={
             calendar_result.fingerprint.id: calendar_result.fingerprint,
-            "speech-to-text": SkillFingerprint(
+            "speech-to-text": Fingerprint(
+                type="skill",
                 id="speech-to-text",
                 name="speech-to-text",
                 description="Transcribe audio to text.",
@@ -1348,7 +1402,8 @@ async def test_normalized_calendar_memo_input_enables_expected_candidates(tmp_pa
                 inputs=[ParameterSpec(name="audio", type="audio")],
                 outputs=[ArtifactSpec(name="text", type="text")],
             ),
-            "general-writing": SkillFingerprint(
+            "general-writing": Fingerprint(
+                type="skill",
                 id="general-writing",
                 name="general-writing",
                 description="Write markdown content.",
@@ -1732,7 +1787,8 @@ async def test_fingerprint_extractor_extract_from_root_reports_removed_paths_and
 @pytest.mark.asyncio
 async def test_graph_builder_call_emits_progress_and_supports_no_progress():
     fingerprints = [
-        SkillFingerprint(
+        Fingerprint(
+            type="skill",
             id="skill-1",
             name="Skill 1",
             description="Test skill",

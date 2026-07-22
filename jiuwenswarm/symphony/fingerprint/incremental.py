@@ -12,10 +12,10 @@ from typing import Any, Callable
 
 from jiuwenswarm.symphony.fingerprint.models import (
     ExtractionDiagnostic,
+    Fingerprint,
     NormalizationDecision,
     NormalizationResult,
     SkillFolder,
-    SkillFingerprint,
 )
 from jiuwenswarm.symphony.fingerprint.normalize import (
     IONameVocabulary,
@@ -30,8 +30,8 @@ IndexedSkillFolder = tuple[int, SkillFolder]
 @dataclass(frozen=True)
 class FingerprintReusePlan:
     changed_folders: list[IndexedSkillFolder]
-    fingerprints: list[SkillFingerprint]
-    fingerprints_by_path: dict[str, SkillFingerprint]
+    fingerprints: list[Fingerprint]
+    fingerprints_by_path: dict[str, Fingerprint]
     removed_paths: set[str]
     reused_count: int
 
@@ -53,7 +53,7 @@ class IncrementalFingerprintStore:
         current_hashes: dict[str, str],
         *,
         force: bool,
-        on_reuse: Callable[[int, SkillFolder, SkillFingerprint], None] | None = None,
+        on_reuse: Callable[[int, SkillFolder, Fingerprint], None] | None = None,
     ) -> FingerprintReusePlan:
         old_active_entries = self.old_state.active_entries()
         removed_paths = {
@@ -62,8 +62,8 @@ class IncrementalFingerprintStore:
             if relative_path not in current_hashes
         }
         changed_folders: list[IndexedSkillFolder] = []
-        fingerprints: list[SkillFingerprint] = []
-        fingerprints_by_path: dict[str, SkillFingerprint] = {}
+        fingerprints: list[Fingerprint] = []
+        fingerprints_by_path: dict[str, Fingerprint] = {}
         reused_count = 0
 
         for folder_index, folder in enumerate(folders):
@@ -144,7 +144,7 @@ class FingerprintResultCache:
         if not isinstance(fingerprint_payload, dict):
             return None
         return NormalizationResult(
-            fingerprint=SkillFingerprint.from_dict(fingerprint_payload),
+            fingerprint=Fingerprint.from_dict(fingerprint_payload),
             diagnostics=[
                 _diagnostic_from_dict(item)
                 for item in payload.get("diagnostics", [])
@@ -187,13 +187,13 @@ class FingerprintResultCache:
         return self.root / f"{digest}.json"
 
 
-def load_fingerprints(output_dir: Path) -> list[SkillFingerprint]:
+def load_fingerprints(output_dir: Path) -> list[Fingerprint]:
     path = resolve_score_artifact_dir(output_dir) / "fingerprints.json"
     if not path.exists():
         return []
     payload = json.loads(path.read_text(encoding="utf-8"))
     return [
-        SkillFingerprint.from_dict(item)
+        Fingerprint.from_dict(item)
         for item in payload.get("fingerprints", [])
         if isinstance(item, dict)
     ]

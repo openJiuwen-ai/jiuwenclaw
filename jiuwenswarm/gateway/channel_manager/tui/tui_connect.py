@@ -33,6 +33,7 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     get_model_names,
     update_preferred_language_in_config,
+    update_swarmflow_enabled_in_config,
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -212,6 +213,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "chat.interrupt",
         "chat.resume",
         "chat.user_answer",
+        "chat.swarmflow_reply",
         "history.get",
         "browser.start",
         "skills.marketplace.list",
@@ -397,6 +399,7 @@ class CliHandlersBindParams:
     channel: Any  # GatewayServer instance
     agent_client: Any = None
     message_handler: Any = None
+    third_agent: Any = None
     on_config_saved: Any = None
     path: str = "/tui"
     cron_controller: Any = None
@@ -406,6 +409,7 @@ class CliHandlersBindParams:
 class CliRouteBindParams:
     agent_client: Any = None
     message_handler: Any = None
+    third_agent: Any = None
     on_config_saved: Any = None
     path: str = "/tui"
     channel_id: str = "tui"
@@ -468,6 +472,7 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "permissions_enabled": update_permissions_enabled_in_config,
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
     "preferred_language": update_preferred_language_in_config,
+    "enable_swarmflow": update_swarmflow_enabled_in_config,
     # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
     # 用户名同时设置 git.user_name, fork_owner, gitcode.username（三者合一）
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
@@ -679,12 +684,22 @@ def _load_env_from_file() -> dict[str, str]:
     return result
 
 
+def resolve_3rdagent_switch_session_id(params: dict | None) -> str:
+    """Explicit ``params.session_id`` for 3rdagent.switch (never gateway req_id fallback)."""
+    if not isinstance(params, dict):
+        return ""
+    return str(params.get("session_id") or "").strip()
+
+
 def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel = bind.channel
     agent_client = bind.agent_client
     on_config_saved = bind.on_config_saved
     path = bind.path
     cron_controller_ref = bind.cron_controller
+    from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
+
+    third_agent = bind.third_agent if bind.third_agent is not None else get_unsupported_third_agent()
 
     async def _config_get(ws, req_id, params, session_id):
         payload = {
@@ -719,6 +734,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["auto_recap_enabled"] = (
                 "true" if auto_recap_cfg.get("enabled", True) else "false"
             )
+            # swarmflow toggle lives at modes.team.jiuwen_team.enable_swarmflow
+            _team_cfg = (raw.get("modes") or {}).get("team") or {}
+            _jiuwen_team_cfg = _team_cfg.get("jiuwen_team") or {}
+            _swarmflow_enabled = bool(_jiuwen_team_cfg.get("enable_swarmflow", False))
+            payload["enable_swarmflow"] = "true" if _swarmflow_enabled else "false"
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -2097,6 +2117,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["request_id"] = request_id
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _chat_swarmflow_reply(ws, req_id, params, session_id):
+        # Empty-ack shell — standard 3-layer routing forwards the reply to the
+        # agent adapter, which builds HumanAgentMessage and calls team_manager.
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"accepted": True, "session_id": session_id}
+        )
+
     async def _history_get(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
         if isinstance(params, dict):
@@ -2710,10 +2737,86 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.warning("[models.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
+    async def _3rdagent_list(ws, req_id, params, session_id, user_id=None):
+        params = params if isinstance(params, dict) else {}
+        current = str(
+            getattr(ws, "_gateway_agent_type", None)
+            or params.get("agent_type")
+            or "jiuwenswarm"
+        ).strip() or "jiuwenswarm"
+        uid = str(user_id or getattr(ws, "_gateway_user_id", None) or "").strip()
+        try:
+            result = await third_agent.thirdagent_list(
+                user_id=uid,
+                current_agent_type=current,
+            )
+        except Exception as exc:
+            logger.warning("[3rdagent.list] %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+            )
+            return
+        if not result.get("ok"):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(result.get("error") or "3rdagent.list unsupported"),
+                code=str(result.get("code") or "UNSUPPORTED"),
+            )
+            return
+        await channel.send_response(
+            ws, req_id, ok=True, payload=dict(result.get("payload") or {})
+        )
+
+    async def _3rdagent_switch(ws, req_id, params, session_id, user_id=None):
+        del session_id  # do not use gateway req_id fallback; require explicit params.session_id
+        params = params if isinstance(params, dict) else {}
+        uid = str(user_id or getattr(ws, "_gateway_user_id", None) or "").strip()
+        explicit_session_id = resolve_3rdagent_switch_session_id(params)
+        if not explicit_session_id:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="session_id is required for 3rdagent.switch",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            result = await third_agent.thirdagent_switch(
+                user_id=uid,
+                agent_type=str(params.get("agent_type") or ""),
+                session_id=explicit_session_id,
+                params=params,
+            )
+        except Exception as exc:
+            logger.warning("[3rdagent.switch] %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+            )
+            return
+        if not result.get("ok"):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(result.get("error") or "3rdagent.switch unsupported"),
+                code=str(result.get("code") or "UNSUPPORTED"),
+            )
+            return
+        payload = dict(result.get("payload") or {})
+        switched = str(payload.get("agent_type") or "").strip()
+        if switched:
+            setattr(ws, "_gateway_agent_type", switched)
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
     channel.register_local_handler(path, "config.get", _config_get)
     channel.register_local_handler(path, "config.set", _config_set)
     channel.register_local_handler(path, "config.validate_model", _config_validate_model)
     channel.register_local_handler(path, "models.list", _models_list)
+    channel.register_local_handler(path, "3rdagent.list", _3rdagent_list)
+    channel.register_local_handler(path, "3rdagent.switch", _3rdagent_switch)
     channel.register_local_handler(path, "session.list", _session_list)
     channel.register_local_handler(path, "session.create", _session_create)
     channel.register_local_handler(path, "session.delete", _session_delete)
@@ -2730,6 +2833,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.interrupt", _chat_interrupt)
     channel.register_local_handler(path, "tui.disconnect", _tui_disconnect_request)
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
+    channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
     channel.register_local_handler(path, "command.model", _command_model)
 
@@ -3073,6 +3177,7 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
                 channel=channel,
                 agent_client=bind.agent_client,
                 message_handler=bind.message_handler,
+                third_agent=bind.third_agent,
                 on_config_saved=bind.on_config_saved,
                 path=bind.path,
                 cron_controller=bind.cron_controller,

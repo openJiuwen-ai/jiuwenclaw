@@ -17,9 +17,15 @@ from jiuwenswarm.symphony.llm import LLMConfig
 from jiuwenswarm.symphony.config import load_symphony_config, symphony_config_from_dict
 from jiuwenswarm.symphony.build import build_score as service_build_score
 from jiuwenswarm.symphony.build import score_status
+from jiuwenswarm.symphony.evolution.models import edge_key, skill_id
+from jiuwenswarm.symphony.evolution.service import load_dynamic_overlay
 from jiuwenswarm.symphony.orchestration import load_score_artifacts
 from jiuwenswarm.symphony.orchestration.artifacts import filter_disabled_score_artifacts
 from jiuwenswarm.symphony.orchestration.execution_graph import select_primary_plan
+from jiuwenswarm.symphony.orchestration.language import (
+    default_plan_title,
+    resolve_orchestration_language,
+)
 from jiuwenswarm.symphony.orchestration.service import plan_from_score
 from jiuwenswarm.symphony.score_storage import resolve_score_artifact_dir
 
@@ -97,7 +103,9 @@ class SymphonyExtension(BaseExtension):
         request: Any = None,
     ) -> dict[str, Any]:
         params = params or {}
-        return await self._build_score(params, request, force=_param_bool(params.get("force")))
+        return await self._build_score(
+            params, request, force=_param_bool(params.get("force"))
+        )
 
     async def pause_build(
         self,
@@ -131,7 +139,9 @@ class SymphonyExtension(BaseExtension):
         payload.update(_build_log_payload(score_dir))
         return payload
 
-    async def graph(self, params: dict[str, Any] | None = None, request: Any = None) -> dict[str, Any]:
+    async def graph(
+        self, params: dict[str, Any] | None = None, request: Any = None
+    ) -> dict[str, Any]:
         del params, request
         config = load_symphony_config()
         score_dir = config.paths.score_dir
@@ -158,7 +168,12 @@ class SymphonyExtension(BaseExtension):
                     orchestration_min_edge_confidence
                 ),
                 "skills": artifacts.skills,
-                "graph": artifacts.graph,
+                "graph": _graph_with_runtime_weights(
+                    artifacts.graph,
+                    load_dynamic_overlay(artifacts.score_dir)
+                    if config.evolution.enabled
+                    else None,
+                ),
                 "score_lookup": artifacts.lookup,
             }
             payload.update(_build_log_payload(score_dir))
@@ -166,14 +181,18 @@ class SymphonyExtension(BaseExtension):
 
         return await asyncio.to_thread(load)
 
-    async def plan(self, params: dict[str, Any] | None = None, request: Any = None) -> dict[str, Any]:
-        del request
+    async def plan(
+        self, params: dict[str, Any] | None = None, request: Any = None
+    ) -> dict[str, Any]:
         params = params or {}
         query = str(params.get("query") or "").strip()
         if not query:
             return {"success": False, "detail": "query is required"}
         candidate_skill_ids = _candidate_skill_ids_from_params(
             params.get("candidate_skill_ids")
+        )
+        language = resolve_orchestration_language(
+            get_config().get("preferred_language", "zh")
         )
         config = load_symphony_config()
         score_dir = config.paths.score_dir
@@ -197,19 +216,40 @@ class SymphonyExtension(BaseExtension):
                 mode=requested_orchestration_config.mode,
             )
 
-        try:
-            load_score_artifacts(score_dir)
-        except FileNotFoundError as exc:
-            payload = _missing_artifacts_payload(score_dir, exc)
-            payload.update(_build_log_payload(score_dir))
-            return payload
+        status = await self.score_status(request=request)
+        if not status.get("success"):
+            return {
+                "success": False,
+                "detail": "symphony.score_status failed before planning",
+                "score_status": status,
+            }
+        if _score_needs_build(status):
+            score_build = await self.build_score(request=request)
+            score_build["rebuilt"] = True
+            if not score_build.get("success"):
+                return {
+                    "success": False,
+                    "detail": "symphony.build_score failed before planning",
+                    "score_status": status,
+                    "score_build": score_build,
+                }
+        else:
+            score_build = {
+                "success": True,
+                "rebuilt": False,
+                "reason": "not_required",
+            }
+        progress_callback = _beam_progress_callback(request)
         payload = await plan_from_score(
             score_dir,
             query,
             LLMConfig.from_default_model(),
             orchestration_config=orchestration_config,
+            dynamic_graph_enabled=config.evolution.enabled,
             candidate_skill_ids=candidate_skill_ids,
             disabled_skill_names=load_execution_disabled_skills(),
+            progress_callback=progress_callback,
+            language=language,
         )
         if payload.get("success") is False:
             return {
@@ -217,23 +257,22 @@ class SymphonyExtension(BaseExtension):
                 "score_dir": str(score_dir),
                 "query": query,
                 "mode": orchestration_config.mode,
+                "language": language,
+                "score_status": status,
+                "score_build": score_build,
                 **payload,
             }
-        preferred_language = str(
-            get_config().get("preferred_language") or "zh"
-        ).strip().lower()
-        presentation = _build_presentation(payload, language=preferred_language)
+        presentation = _build_presentation(payload, language=language)
         return {
             "success": True,
             "score_dir": str(score_dir),
             "query": query,
             "mode": orchestration_config.mode,
+            "language": language,
             "content": presentation["markdown"],
-            "markdown": presentation["markdown"],
-            "mermaid": presentation["mermaid"],
             "direct_display": True,
-            "display_format": "markdown",
-            "presentation": presentation,
+            "score_status": status,
+            "score_build": score_build,
             "result": payload,
         }
 
@@ -252,7 +291,11 @@ class SymphonyExtension(BaseExtension):
         current_task = asyncio.current_task()
         async with self._build_guard:
             active_task = self._active_build_task
-            if active_task is not None and active_task is not current_task and not active_task.done():
+            if (
+                active_task is not None
+                and active_task is not current_task
+                and not active_task.done()
+            ):
                 payload = {
                     "success": False,
                     "score_dir": str(score_dir),
@@ -320,13 +363,49 @@ async def register_extensions(registry):
     return [extension]
 
 
-def _missing_artifacts_payload(score_dir: Path, exc: FileNotFoundError) -> dict[str, Any]:
+def _score_needs_build(status: dict[str, Any]) -> bool:
+    if not bool(status.get("exists", False)) or bool(status.get("stale", False)):
+        return True
+    for key in ("added_count", "changed_count", "removed_count"):
+        try:
+            if int(status.get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _missing_artifacts_payload(
+    score_dir: Path, exc: FileNotFoundError
+) -> dict[str, Any]:
     return {
         "success": False,
         "score_dir": str(score_dir),
         "detail": "技能总谱不存在或不完整，请先构建总谱。",
         "error": str(exc),
     }
+
+
+def _graph_with_runtime_weights(
+    graph: dict[str, Any],
+    overlay: dict[str, Any] | None,
+) -> dict[str, Any]:
+    runtime_edges = overlay.get("edges") if isinstance(overlay, dict) else None
+    if not isinstance(runtime_edges, dict) or not runtime_edges:
+        return graph
+    output_edges = []
+    for edge in graph.get("edges", []):
+        item = dict(edge)
+        current_key = edge_key(
+            skill_id(item.get("source")),
+            skill_id(item.get("target")),
+            str(item.get("type") or "can_feed"),
+        )
+        stats = runtime_edges.get(current_key)
+        if isinstance(stats, dict):
+            item["runtime_weight"] = float(stats.get("runtime_weight") or 1.0)
+        output_edges.append(item)
+    return {**graph, "edges": output_edges}
 
 
 def _param_bool(value: Any, default: bool = False) -> bool:
@@ -337,6 +416,39 @@ def _param_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _beam_progress_callback(request: Any):
+    async def callback(event: dict[str, Any]) -> None:
+        await _emit_beam_progress_event(request, event)
+
+    return callback
+
+
+async def _emit_beam_progress_event(request: Any, event: dict[str, Any]) -> None:
+    if request is None:
+        return
+    payload = {
+        "event_type": "symphony.beam_search.update",
+        "beam_search_event": event,
+    }
+    metadata = getattr(request, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata_callback = metadata.get("symphony_progress_callback")
+        if callable(metadata_callback):
+            result = metadata_callback(event)
+            if asyncio.iscoroutine(result):
+                await result
+            return
+
+    for name in ("write_stream", "send_event", "send_stream"):
+        writer = getattr(request, name, None)
+        if not callable(writer):
+            continue
+        result = writer(payload)
+        if asyncio.iscoroutine(result):
+            await result
+        return
 
 
 _BUILD_STAGE_LABELS = {
@@ -492,12 +604,18 @@ def _latest_effective_build_log_entry(entries: list[dict[str, Any]]) -> dict[str
     if not entries:
         return {}
     for entry in reversed(entries):
-        if str(entry.get("stage") or "") in {"update.done", "update.failed", "update.paused"}:
+        if str(entry.get("stage") or "") in {
+            "update.done",
+            "update.failed",
+            "update.paused",
+        }:
             return entry
     return entries[-1]
 
 
-def _build_token_usage_payload(score_dir: Path, entries: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_token_usage_payload(
+    score_dir: Path, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
     status = _build_progress(entries).get("status")
     if status == "running":
         current = _current_token_usage_summary()
@@ -611,10 +729,10 @@ def _compact_details(details: dict[str, Any]) -> str:
 def _build_presentation(
     payload: dict[str, Any],
     *,
-    language: str = "zh",
+    language: str = "cn",
 ) -> dict[str, str]:
     plan = select_primary_plan(payload)
-    title = str(plan.get("title") or "Symphony plan").strip()
+    title = str(plan.get("title") or default_plan_title(language)).strip()
     mermaid = _plan_to_mermaid(plan, payload.get("execution_graph") or {})
     lines = [
         f"## {title}",
@@ -656,12 +774,16 @@ def _plan_to_mermaid(plan: dict[str, Any], graph: dict[str, Any]) -> str:
         if target and target not in node_ids:
             node_ids.append(target)
     if not node_ids:
-        return "flowchart LR\n  none[\"No Symphony plan\"]"
+        return 'flowchart LR\n  none["No Symphony plan"]'
 
-    node_keys = {node_id: f"N{index}" for index, node_id in enumerate(node_ids, start=1)}
+    node_keys = {
+        node_id: f"N{index}" for index, node_id in enumerate(node_ids, start=1)
+    }
     lines = ["flowchart LR"]
     for node_id in node_ids:
-        lines.append(f'  {node_keys[node_id]}["{_mermaid_escape(labels.get(node_id) or node_id)}"]')
+        lines.append(
+            f'  {node_keys[node_id]}["{_mermaid_escape(labels.get(node_id) or node_id)}"]'
+        )
     for edge in edges or []:
         source = str(edge.get("source") or "")
         target = str(edge.get("target") or "")

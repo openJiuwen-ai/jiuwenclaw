@@ -48,7 +48,7 @@ from jiuwenswarm.extensions.hook_event import GatewayHookEvents
 from jiuwenswarm.extensions.hooks_context import GatewayChatHookContext
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.gateway.hooks.handler import GatewayHookHandler
-from jiuwenswarm.gateway.routing.keys import DeliveryTarget, RoutingKey, AgentRef, make_delivery_target
+from jiuwenswarm.gateway.routing.keys import RoutingKey, AgentRef, make_delivery_target
 from jiuwenswarm.gateway.routing.session_sharing import SessionSharingRegistry, SubRole
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,16 @@ _INTERRUPT_RESUME_SOURCES = frozenset({
     "evolution_interrupt",
 })
 _A2UI_OPEN_TAG_MARKER = "<a2ui-json>"
+_DELIVERY_IDENTITY_METADATA_KEYS = frozenset({
+    "app_id",
+    "chat_type",
+    "im_chat_type",
+    "feishu_chat_id",
+    "feishu_open_id",
+    "open_id",
+    "im_sender_user_id",
+    "im_thread_id",
+})
 
 
 def apply_a2ui_text_fallback_to_gateway_payload(
@@ -649,16 +659,18 @@ class MessageHandler(ABC):
 
         - str: 兼容历史行为，封装为 {"content": text, "is_complete": True}
         - dict: 透传给 channel（仅确保 is_complete=True）
+
+        小艺 channel 按 payload.is_complete 判定任务结束（True → WS final=true，
+        关闭「处理中」接收周期）。CLI 控制指令等 notice 均为终态回包，必须默认 True；
+        若确需多帧未完结，调用方显式传入 is_complete=False。
         """
         from jiuwenswarm.common.schema.message import Message, EventType
 
-        # 小艺 channel 按 payload.is_complete 判定任务结束（收到 True 即关闭接收周期）。
-        _default_complete = False if channel_id == "xiaoyi" else True
         if isinstance(text_or_payload, dict):
             payload = dict(text_or_payload)
-            payload.setdefault("is_complete", _default_complete)
+            payload.setdefault("is_complete", True)
         else:
-            payload = {"content": text_or_payload, "is_complete": _default_complete}
+            payload = {"content": text_or_payload, "is_complete": True}
 
         _app_id = user_infos.get("app_id") or user_infos.get("bot_id", "")
         msg = Message(
@@ -2490,6 +2502,9 @@ class MessageHandler(ABC):
         if not req_md and not resp_md:
             return None
         merged: dict[str, Any] = {**req_md, **resp_md}
+        for key in _DELIVERY_IDENTITY_METADATA_KEYS:
+            if key in req_md:
+                merged[key] = req_md[key]
         return merged
 
     @staticmethod
@@ -3289,6 +3304,15 @@ class MessageHandler(ABC):
                                 msg.session_id,
                                 answer_request_id,
                             )
+                    continue
+
+                if msg.req_method == ReqMethod.CHAT_SWARMFLOW_REPLY:
+                    # Forward a swarmflow human reply to the agent adapter
+                    # (non-stream). Unlike CHAT_ANSWER, no evolution-approval
+                    # machinery; unlike CHAT_SEND, no cancel-existing-stream.
+                    agent_msg = await self._prepare_agent_dispatch_message(msg)
+                    env = self.message_to_e2a(agent_msg)
+                    await self._process_non_stream_request(msg, env)
                     continue
 
                 if msg.req_method == ReqMethod.CHAT_CANCEL:

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import inspect
 import json
 import logging
@@ -60,6 +61,22 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 
 class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
+
+
+def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> None:
+    """Submit session-based Symphony learning without delaying the response."""
+
+    try:
+        from jiuwenswarm.symphony.evolution.session_consumer import (
+            schedule_session_evolution_consume,
+        )
+
+        schedule_session_evolution_consume(session_id, request_id)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).debug(
+            "Failed to schedule Symphony session feedback: %s",
+            exc,
+        )
 
 
 def _history_user_content(params: Any, query: Any) -> Any:
@@ -1479,6 +1496,75 @@ class JiuWenSwarm:
             metadata=request.metadata,
         )
 
+    async def _handle_symphony_request_stream(
+        self,
+        request: AgentRequest,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Stream Symphony RPC progress events, then the final RPC payload."""
+        if request.req_method not in _SYMPHONY_METHODS:
+            return
+
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def progress_callback(event: dict[str, Any]) -> None:
+            await queue.put(event)
+
+        metadata = dict(request.metadata or {})
+        metadata["symphony_progress_callback"] = progress_callback
+        stream_request = replace(request, metadata=metadata)
+        task = asyncio.create_task(self._handle_symphony_request(stream_request))
+
+        try:
+            while not task.done() or not queue.empty():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": event.get("type")
+                        or "symphony.beam_search.update",
+                        "beam_search_event": event,
+                    },
+                    is_complete=False,
+                )
+            response = await task
+        except Exception as exc:
+            logger.exception("[JiuWenSwarm] Symphony stream failed: %s", exc)
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"event_type": "chat.error", "error": str(exc)},
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload=None,
+                is_complete=True,
+            )
+            return
+
+        payload = dict(response.payload or {}) if response is not None else {}
+        payload.setdefault(
+            "event_type",
+            f"{request.req_method.value if request.req_method else 'symphony'}.result",
+        )
+        yield AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload=payload,
+            is_complete=False,
+        )
+        yield AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload=None,
+            is_complete=True,
+        )
+
     async def _process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
 
@@ -1672,6 +1758,10 @@ class JiuWenSwarm:
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
             return await adapter.handle_user_answer(request)
 
+        if request.req_method == ReqMethod.CHAT_SWARMFLOW_REPLY:
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+            return await adapter.handle_swarmflow_reply(request)
+
         # Non-stream goal command (GET, PAUSE, CLEAR)
         if request.req_method == ReqMethod.COMMAND_GOAL:
             try:
@@ -1689,22 +1779,44 @@ class JiuWenSwarm:
                 if goal_result is not None:
                     result_type = goal_result.get("result_type")
                     ok = result_type not in {"goal_error", "goal_confirm_required"}
+                    # Only set writes user history (objective as the user turn).
+                    # pause / resume / clear / get stay control-only.
+                    if ok and str(action or "").strip().lower() == "set":
+                        objective = str(params.get("objective") or "").strip()
+                        if objective:
+                            append_history_record(
+                                session_id=session_id,
+                                request_id=request.request_id,
+                                channel_id=request.channel_id,
+                                role="user",
+                                content=objective,
+                                timestamp=time.time(),
+                                channel_metadata=request.metadata,
+                                mode=params.get("mode", "unknown"),
+                            )
+                    # Keep message for callers that read payload.message; also
+                    # mirror into error on failure so Gateway top-level error
+                    # forwarding and older clients stay consistent.
+                    human_text = goal_result.get("output", goal_result.get("error", ""))
+                    payload = {
+                        "action": goal_result.get("action", action),
+                        "message": human_text,
+                        "goal": goal_result.get("goal"),
+                        # Keep this field for the existing TUI command
+                        # surface; it is a copy of the authoritative goal.
+                        "record": goal_result.get("goal"),
+                        "cleared_goal": goal_result.get("cleared_goal"),
+                        "existing_goal": goal_result.get("existing_goal"),
+                        "requested_objective": goal_result.get("requested_objective"),
+                        "code": goal_result.get("error_code"),
+                    }
+                    if not ok and human_text:
+                        payload["error"] = human_text
                     return AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
                         ok=ok,
-                        payload={
-                            "action": goal_result.get("action", action),
-                            "message": goal_result.get("output", goal_result.get("error", "")),
-                            "goal": goal_result.get("goal"),
-                            # Keep this field for the existing TUI command
-                            # surface; it is a copy of the authoritative goal.
-                            "record": goal_result.get("goal"),
-                            "cleared_goal": goal_result.get("cleared_goal"),
-                            "existing_goal": goal_result.get("existing_goal"),
-                            "requested_objective": goal_result.get("requested_objective"),
-                            "code": goal_result.get("error_code"),
-                        },
+                        payload=payload,
                         metadata=request.metadata,
                     )
                 return AgentResponse(
@@ -1854,6 +1966,7 @@ class JiuWenSwarm:
             if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
+        _schedule_symphony_session_feedback(session_id, request.request_id)
         return result
 
     async def process_message_stream(
@@ -1935,7 +2048,12 @@ class JiuWenSwarm:
                     channel_id=request.channel_id,
                     payload={"event_type": "skilldev.error", "error": str(exc)},
                     is_complete=True,
-                )
+            )
+            return
+
+        if request.req_method in _SYMPHONY_METHODS:
+            async for chunk in self._handle_symphony_request_stream(request):
+                yield chunk
             return
 
         # 无状态 RPC（skills / plugins / symphony）不需要 adapter，
@@ -1986,21 +2104,35 @@ class JiuWenSwarm:
 
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
-        # Streaming command.goal set/resume is control traffic, not a user utterance.
-        if (
-            request.req_method != ReqMethod.COMMAND_GOAL
-            and _should_record_user_history(request.params)
-        ):
+        # command.goal: only set records the objective as a user turn; resume/
+        # pause/clear/get remain control traffic.
+        params_for_history = request.params if isinstance(request.params, dict) else {}
+        if request.req_method == ReqMethod.COMMAND_GOAL:
+            goal_action = str(params_for_history.get("action", "") or "").strip().lower()
+            if goal_action == "set":
+                objective = str(params_for_history.get("objective") or "").strip()
+                if objective:
+                    append_history_record(
+                        session_id=session_id,
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        role="user",
+                        content=objective,
+                        timestamp=time.time(),
+                        channel_metadata=request.metadata,
+                        mode=params_for_history.get("mode", "unknown"),
+                    )
+        elif _should_record_user_history(params_for_history):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 role="user",
-                content=_history_user_content(request.params, query),
+                content=_history_user_content(params_for_history, query),
                 timestamp=time.time(),
-                extra=_history_user_extra(request.params),
+                extra=_history_user_extra(params_for_history),
                 channel_metadata=request.metadata,
-                mode=request.params.get("mode", "unknown"),
+                mode=params_for_history.get("mode", "unknown"),
             )
 
         logger.info(
@@ -2519,6 +2651,7 @@ class JiuWenSwarm:
         if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
+        _schedule_symphony_session_feedback(session_id, rid)
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=cid,

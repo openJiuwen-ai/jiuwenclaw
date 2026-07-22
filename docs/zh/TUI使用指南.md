@@ -45,6 +45,25 @@
 | `--token <token>` | 鉴权令牌（若 Gateway 需要） | 空字符串 | `jiuwenswarm-cli --token YOUR_TOKEN` |
 | `-h`, `--help` | 打印帮助并退出 | - | `jiuwenswarm-cli -h` |
 
+### 连接到非标准端口（端口冲突回退后）
+
+当后端启动时端口被占用，`jiuwenswarm-start` 会自动回退到相邻可用端口组（详见 [快速开始 · 端口冲突自动处理](Quickstart.md#端口冲突自动处理)）。回退后新端口会被持久化，TUI / CLI 有两种连接方式：
+
+1. **自动读取**（推荐）：`jiuwenswarm chat` 和 `jiuwenswarm-tui` 会自动从持久化的 `GATEWAY_PORT` 读取回退后的 Gateway 端口，无需任何参数。
+
+   ```bash
+   jiuwenswarm chat        # 自动读 GATEWAY_PORT
+   jiuwenswarm-tui         # 自动读 GATEWAY_PORT
+   ```
+
+2. **显式 `--url`**：若 TUI 未读到持久化端口（例如在另一台机器、或持久化文件被清理），按启动日志里的提示显式指定：
+
+   ```bash
+   jiuwenswarm-tui --url ws://127.0.0.1:20001/tui
+   ```
+
+   启动后端时日志会打印实际的 Gateway 端口和对应的 `--url`，直接复制即可。
+
 ### 启动后界面
 
 - **欢迎区**：ASCII 标题、版本、当前 Provider / Model / Mode；窄终端下为精简布局（`jiuwenswarm/cli/src/ui/welcome.ts`）。

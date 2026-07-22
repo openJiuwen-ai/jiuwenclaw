@@ -126,12 +126,48 @@ def is_valid_instance_name(name: str) -> bool:
     return validate_instance_name(name) is None
 
 
+# Environment variable names that override BASE_PORTS, enabling Docker /
+# container deployments and ad-hoc base-port customization. When unset,
+# behavior is identical to the historical fixed defaults (backward compatible).
+PORT_ENV_OVERRIDES = {
+    "agent_server": "JIUWENSWARM_AGENT_SERVER_PORT",
+    "web": "JIUWENSWARM_WEB_PORT",
+    "gateway": "JIUWENSWARM_GATEWAY_PORT",
+    "frontend": "JIUWENSWARM_FRONTEND_PORT",
+}
+
+
+def _resolved_base_port(port_type: str) -> int:
+    """Return the effective base port for a port type.
+
+    Honors ``JIUWENSWARM_<TYPE>_PORT`` env-var overrides (Phase 2 / Docker),
+    falling back to the static ``BASE_PORTS`` default. Malformed env values are
+    ignored with a debug log so a typo never breaks startup.
+    """
+    env_key = PORT_ENV_OVERRIDES.get(port_type)
+    if env_key:
+        raw = os.getenv(env_key)
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                logger.debug(
+                    "Ignoring invalid %s=%r (not an int), using default",
+                    env_key, raw,
+                )
+    return BASE_PORTS.get(port_type, 10000)
+
+
 def compute_auto_port(port_type: str, index: int) -> int:
     """Compute auto-allocated port for an instance.
 
     Algorithm: base_port + index * 1000
     - index 0 reserved for default instance
     - Named instances start from index 1
+
+    The base_port honors ``JIUWENSWARM_<TYPE>_PORT`` env-var overrides
+    (see ``PORT_ENV_OVERRIDES``); when unset the historical fixed default is
+    used, so existing deployments are unaffected.
 
     Args:
         port_type: Service type (agent_server, web, gateway, frontend)
@@ -140,32 +176,58 @@ def compute_auto_port(port_type: str, index: int) -> int:
     Returns:
         Computed port number
     """
-    base = BASE_PORTS.get(port_type, 10000)
-    return base + index * 1000
+    return _resolved_base_port(port_type) + index * 1000
 
 
 def calculate_instance_ports(index: int) -> Dict[str, int]:
-    """Calculate ports for an instance: base_port + index * 1000."""
-    return {k: v + index * 1000 for k, v in BASE_PORTS.items()}
+    """Calculate ports for an instance: base_port + index * 1000.
+
+    Base ports honor env-var overrides (see ``compute_auto_port``).
+    """
+    return {k: _resolved_base_port(k) + index * 1000 for k in BASE_PORTS}
 
 
 def is_port_available(host: str, port: int) -> bool:
-    """Check if a port is available on the given host.
+    """Check if a port is available for binding on the given host.
+
+    Probes by attempting to ``bind()``+``listen()`` (without SO_REUSEADDR) and
+    immediately closing. This mirrors how the real services (AgentServer /
+    Gateway / Web / Frontend) actually acquire their ports, so it correctly
+    detects:
+
+    - A live service listening on the port (bind fails -> occupied).
+    - A *stuck/zombie* listener that is in LISTENING state but no longer
+      accept()ing connections (connect()-based probes falsely report these as
+      free because the connect times out, but bind() still fails).
+
+    Earlier connect()-based probes mis-detected stuck listeners as available,
+    which made the fallback logic pick an index whose ports were actually
+    held by a dead-but-listening socket, causing the real service to crash
+    with ``OSError [Errno 10048]`` on its own bind.
 
     Args:
         host: Host address to check
         port: Port number to check
 
     Returns:
-        True if port is available, False if occupied
+        True if the port can be bound (available), False if occupied.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Intentionally NOT setting SO_REUSEADDR: on Windows it permits multiple
+    # sockets to bind the same port, which would mask an occupied port and
+    # reproduce the very 10048 crash we are trying to avoid. The real services
+    # do not set it either.
+    try:
+        sock.bind((host, port))
+        sock.listen(1)
+        return True  # Port is available (we could bind it)
+    except OSError:
+        return False  # Port is occupied
+    finally:
         try:
-            sock.connect((host, port))
-            return False  # Port is occupied
+            sock.close()
         except OSError:
-            return True  # Port is available
+            pass
 
 
 def check_port_conflicts(
@@ -263,3 +325,122 @@ def _get_system_executable(name: str) -> str:
     # Fallback to shutil.which for cross-platform resolution
     resolved = shutil.which(name)
     return resolved or name
+
+
+# Port-type to bootstrap .env variable name mapping. Kept here (next to the
+# port allocation logic) so fallback persistence and bootstrap .env creation
+# stay in sync. Must match jiuwenswarm/instance_manager/bootstrap.py.
+PORT_ENV_NAMES = {
+    "agent_server": "AGENT_SERVER_PORT",
+    "web": "WEB_PORT",
+    "gateway": "GATEWAY_PORT",
+    "frontend": "FRONTEND_PORT",
+}
+
+
+def find_available_ports(
+    base_index: int = 0,
+    host: str = "127.0.0.1",
+    scan_range: int = 10,
+    exclude_ports: Optional[Sequence[int]] = None,
+) -> Optional[tuple]:
+    """Scan upward for the first fully-available port group.
+
+    Starting at ``base_index``, walks ``scan_range`` consecutive instance
+    indices. For each index it computes the full 4-port group via
+    ``calculate_instance_ports``; the group is usable only when *every* port
+    is available on ``host`` AND not in ``exclude_ports`` (ports already
+    claimed by other live instances).
+
+    Args:
+        base_index: Instance index to start scanning from (typically the
+            instance's own index).
+        host: Host address to probe.
+        scan_range: Number of consecutive indices to try.
+        exclude_ports: Ports to treat as occupied regardless of probe result
+            (avoids colliding with other configured instances).
+
+    Returns:
+        ``(ports_dict, actual_index)`` for the first usable group, or ``None``
+        if the entire scan range is exhausted.
+    """
+    exclude_set = set(exclude_ports or [])
+
+    # scan_range=0 means "scan nothing" → immediately None. (Previously this
+    # was clamped via max(1, scan_range), which silently scanned one index
+    # even when the caller asked for zero — making the exhausted-range error
+    # message in start_services.py ("scanned indices base..base+range-1")
+    # describe a range that did not match what was actually scanned.)
+    for offset in range(scan_range):
+        index = base_index + offset
+        candidate = calculate_instance_ports(index)
+
+        if all(
+            p not in exclude_set and is_port_available(host, p)
+            for p in candidate.values()
+        ):
+            return candidate, index
+
+    return None
+
+
+def _upsert_env_ports(
+    env_path: Path,
+    ports: Dict[str, int],
+) -> None:
+    """Idempotently write port assignments into a .env file.
+
+    For each port type in ``PORT_ENV_NAMES``: if a ``KEY=...`` line exists it
+    is replaced in place, otherwise the line is appended. All other lines
+    (API keys, model config, etc.) are preserved untouched. Creates the file
+    if missing.
+
+    This is the persistence mechanism for the default instance (whose ports
+    are read from ``~/.jiuwenswarm/config/.env`` via ``app.py``'s
+    ``load_dotenv(get_env_file(), override=True)``). Named instances persist
+    via ``instances.yaml`` + ``create_bootstrap_env`` instead.
+    """
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    target_keys = {env_name: str(ports[pt]) for pt, env_name in PORT_ENV_NAMES.items() if pt in ports}
+
+    lines: List[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    seen: set = set()
+    updated: List[str] = []
+    for line in lines:
+        stripped = line.lstrip()
+        if "=" in stripped and not stripped.startswith("#"):
+            key = stripped.split("=", 1)[0].strip()
+            if key in target_keys:
+                updated.append(f"{key}={target_keys[key]}")
+                seen.add(key)
+                continue
+        updated.append(line)
+
+    # Append any port keys not already present in the file
+    for key, val in target_keys.items():
+        if key not in seen:
+            updated.append(f"{key}={val}")
+
+    env_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+    logger.debug("Upserted port env vars into %s: %s", env_path, list(target_keys))
+
+
+def _format_url_hint(ports: Dict[str, int]) -> str:
+    """Build the TUI/CLI connection hint shown after a port fallback.
+
+    Emits ``jiuwenswarm-tui --url ...`` (explicit, works even if the TUI cannot
+    read the persisted GATEWAY_PORT) and ``jiuwenswarm chat`` (which reads
+    GATEWAY_PORT from the loaded .env automatically). Returns a multi-line
+    string without a trailing newline.
+    """
+    gateway_port = ports.get("gateway", 0)
+    lines = [
+        "[start_services] TUI/CLI connect with:",
+        f"  jiuwenswarm-tui --url ws://127.0.0.1:{gateway_port}/tui",
+        "  jiuwenswarm chat   (auto-reads GATEWAY_PORT)",
+    ]
+    return "\n".join(lines)

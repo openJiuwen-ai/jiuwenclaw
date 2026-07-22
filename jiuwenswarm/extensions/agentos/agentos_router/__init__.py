@@ -14,8 +14,24 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import (
     AgentStatus,
     ImageInfo,
 )
-from jiuwenswarm.extensions.agentos.agentos_router.registry_client import RegistryClient
+from jiuwenswarm.extensions.agentos.agentos_router.registry_client import (
+    HeartbeatResult,
+    ImageFrameworkInfo,
+    InstanceRecord,
+    LaunchSpec,
+    RegistryClient,
+    RegistryConfig,
+    RegistryConflictError,
+    RegistryConnectionError,
+    RegistryError,
+    RegistryHTTPError,
+    RegistryNotFoundError,
+    RegistryValidationError,
+    instance_service_id,
+    resolve_instance_kind,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
+from jiuwenswarm.extensions.agentos.agentos_router.third_agent import AgentOSThirdAgent
 
 __all__ = [
     "AgentCreatingTimeout",
@@ -23,10 +39,24 @@ __all__ = [
     "AgentManager",
     "AgentOSRouter",
     "AgentOSRouterClient",
+    "AgentOSThirdAgent",
     "AgentRuntime",
     "AgentStatus",
+    "HeartbeatResult",
+    "ImageFrameworkInfo",
     "ImageInfo",
+    "InstanceRecord",
+    "LaunchSpec",
     "RegistryClient",
+    "RegistryConfig",
+    "RegistryConflictError",
+    "RegistryConnectionError",
+    "RegistryError",
+    "RegistryHTTPError",
+    "RegistryNotFoundError",
+    "RegistryValidationError",
     "SUPPORTED_AGENT_TYPES",
+    "instance_service_id",
     "normalize_agent_key_fields",
+    "resolve_instance_kind",
 ]

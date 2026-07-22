@@ -572,11 +572,16 @@ class GitDiffWebSocketHandler:
         from jiuwenswarm.agents.harness.common.session_ops_service import (
             restore_session_files,
         )
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            get_session_extra_history_roots,
+        )
+        extra_history_roots = get_session_extra_history_roots(session_id)
         restore_result = await asyncio.to_thread(
             restore_session_files,
             session_id=session_id,
             turn_index=turn_index,
             project_dir=proj.project_dir,
+            extra_history_roots=extra_history_roots,
         )
 
         # 清理本轮的 file_ops 日志,使 git 监控的 last_turn diff 与实际工作区一致。
@@ -589,13 +594,21 @@ class GitDiffWebSocketHandler:
         #   确保扫描到项目目录下的 session-specific file_ops。
         restore_errors = restore_result.get("errors", []) or []
         file_ops_truncated = False
+        discarded_change_set_id: str | None = None
         if cut_timestamp > 0 and not restore_errors:
             from jiuwenswarm.server.utils.diff_service import get_diff_service
             diff_service = get_diff_service()
+            discarded_change_set_id = await asyncio.to_thread(
+                diff_service.mark_turn_discarded,
+                session_id, turn_index,
+                project_dir=proj.project_dir,
+                extra_history_roots=extra_history_roots,
+            )
             await asyncio.to_thread(
                 diff_service.truncate_file_ops_by_timestamp,
                 session_id, cut_timestamp,
                 project_dir=proj.project_dir,
+                extra_history_roots=extra_history_roots,
             )
             file_ops_truncated = True
 
@@ -616,6 +629,7 @@ class GitDiffWebSocketHandler:
             payload={
                 "session_id": session_id,
                 "turn_index": turn_index,
+                "change_set_id": discarded_change_set_id,
                 "restored_files": restore_result.get("restored_files", []),
                 "deleted_files": restore_result.get("deleted_files", []),
                 "errors": restore_errors,

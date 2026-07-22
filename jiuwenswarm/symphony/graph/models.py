@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from jiuwenswarm.symphony.fingerprint.models import SkillFingerprint
+from jiuwenswarm.symphony.fingerprint.models import Fingerprint
 
 
 ALLOWED_RELATION_TYPES = frozenset(
@@ -42,10 +42,10 @@ class GraphDiagnostic:
 class SkillRegistry:
     """Validated Skill registry keyed by Skill ID."""
 
-    skills: Dict[str, SkillFingerprint]
+    skills: Dict[str, Fingerprint]
     diagnostics: List[GraphDiagnostic] = field(default_factory=list)
 
-    def ordered_skills(self) -> List[SkillFingerprint]:
+    def ordered_skills(self) -> List[Fingerprint]:
         return [self.skills[skill_id] for skill_id in sorted(self.skills)]
 
 
@@ -224,6 +224,7 @@ class BuildManifest:
             "enable_backward_search": True,
         }
     )
+    candidate_generation: Dict[str, Any] = field(default_factory=dict)
     llm: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -235,6 +236,7 @@ class BuildManifest:
             "artifacts": self.artifacts,
             "thresholds": self.thresholds,
             "planning_defaults": self.planning_defaults,
+            "candidate_generation": self.candidate_generation,
             "llm": self.llm,
             "created_at": self.created_at,
         }
@@ -245,7 +247,7 @@ class GraphBuildResult:
     """Complete graph build result."""
 
     manifest: BuildManifest
-    skills: List[SkillFingerprint]
+    skills: List[Fingerprint]
     candidates: List[RelationCandidate]
     llm_matches: List[LLMMatch]
     graph: SkillGraph

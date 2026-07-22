@@ -11,17 +11,20 @@ from jiuwenswarm.extensions.agentos.agentos_router.config import (
 )
 from jiuwenswarm.extensions.agentos.agentos_router.registry_client import RegistryClient
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
+from jiuwenswarm.extensions.agentos.agentos_router.third_agent import AgentOSThirdAgent
 from jiuwenswarm.extensions.sdk.agent_server_client import (
     AgentServerClientExtension,
 )
+from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
     YuanrongFrontendAgentClient,
 )
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
+from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
 
 
-class AgentOSRouter(AgentServerClientExtension):
-    """AgentOS southbound Router extension."""
+class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
+    """AgentOS southbound Router extension (AgentServerClient + ThirdAgent)."""
 
     def __init__(self, config: RouterConfig) -> None:
         self._config = config
@@ -30,6 +33,8 @@ class AgentOSRouter(AgentServerClientExtension):
             function_version_urn=config.function_version_urn,
             concurrency=config.concurrency,
             invoke_timeout_s=config.invoke_timeout_s,
+            agent_timeout_s=config.agent_timeout_s,
+            agent_namespace=config.agent_namespace,
         )
         self._registry_client = RegistryClient(config.registry)
         self._agent_manager = AgentManager(
@@ -41,6 +46,7 @@ class AgentOSRouter(AgentServerClientExtension):
             self._registry_client,
             self._agent_manager,
         )
+        self._third_agent = AgentOSThirdAgent(self._router_client)
         self._closed = False
 
     async def initialize(self, config) -> None:
@@ -48,6 +54,9 @@ class AgentOSRouter(AgentServerClientExtension):
 
     def get_client(self) -> AgentServerClient:
         return self._router_client
+
+    def get_third_agent(self) -> ThirdAgent:
+        return self._third_agent
 
     async def shutdown(self) -> None:
         if self._closed:
@@ -62,4 +71,5 @@ async def register_extensions(registry):
         return []
     extension = AgentOSRouter(load_router_config(config))
     registry.register_agent_server_client(extension)
+    registry.register_third_agent(extension)
     return [extension]
