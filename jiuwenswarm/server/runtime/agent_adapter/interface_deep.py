@@ -5538,10 +5538,14 @@ class JiuWenSwarmDeepAdapter:
             return started
         return bool(getattr(self._instance, "_interaction_started", False))
 
-    def _has_active_goal_interaction(self) -> bool:
-        """Whether the shared DeepAgent still owns an active goal interaction."""
-        if self._has_active_goal_round():
-            return True
+    def _goal_record_is_active(self) -> bool:
+        """Whether GoalRecord is ACTIVE (persistent objective still running).
+
+        Unlike ``_has_active_goal_interaction``, this ignores an in-flight goal
+        round.  Used when deciding whether to demote ``chat.final``: after user
+        cancel/pause the record is no longer ACTIVE, so a terminal final must
+        reach the frontend even while the aborted round is still unwinding.
+        """
         if self._instance is None:
             return False
         manager = getattr(self._instance, "goal_manager", None)
@@ -5551,18 +5555,28 @@ class JiuWenSwarmDeepAdapter:
             peek = getattr(manager, "peek", None)
             record = peek() if callable(peek) else manager.get_store().load()
         except Exception:
-            logger.debug("[Goal] failed to inspect active goal status", exc_info=True)
+            logger.debug("[Goal] failed to inspect goal record status", exc_info=True)
             return False
         status = getattr(record, "status", None)
         status_value = getattr(status, "value", status)
         return status_value == "active"
+
+    def _has_active_goal_interaction(self) -> bool:
+        """Whether the shared DeepAgent still owns an active goal interaction."""
+        if self._has_active_goal_round():
+            return True
+        return self._goal_record_is_active()
 
     def _adapt_goal_intermediate_final(self, parsed: dict | None) -> dict | None:
         if not isinstance(parsed, dict):
             return parsed
         if parsed.get("event_type") != "chat.final":
             return parsed
-        if not self._has_active_goal_interaction():
+        # Demote only while the GoalRecord remains ACTIVE.  Do not key off an
+        # in-flight goal round: user cancel pauses the record first, then
+        # aborts the round — finals during unwind must stay terminal so the
+        # frontend can close the dialog.
+        if not self._goal_record_is_active():
             return parsed
         adapted = dict(parsed)
         adapted["event_type"] = "chat.delta"
@@ -5628,6 +5642,44 @@ class JiuWenSwarmDeepAdapter:
         """Steer / follow_up prefer an existing reader when one is present."""
         mode = self._resolve_input_dispatch_mode(params)
         return mode in (InputDispatchMode.STEER, InputDispatchMode.FOLLOW_UP)
+
+    @staticmethod
+    def _is_interrupt_resume_dispatch(params: Any) -> bool:
+        """HITL answers must inject into the existing interaction when possible.
+
+        Permission / confirm / ask-user resumes arrive as ``chat.send`` with
+        ``answers``.  When a Goal (or other) consumer already holds the output
+        lease, ``attach_output`` returns ``None`` — we must still ``send_input``
+        so InteractiveInput reaches DeepAgent; otherwise the tool stays blocked
+        while Goal keeps running.
+        """
+        if not isinstance(params, dict):
+            return False
+        source = str(params.get("source") or "").strip()
+        answers = params.get("answers")
+        request_id = str(params.get("request_id") or "").strip()
+        if (
+            bool(request_id)
+            and isinstance(answers, list)
+            and source in {
+                "ask_user_interrupt",
+                "confirm_interrupt",
+                "permission_interrupt",
+                "evolution_interrupt",
+            }
+        ):
+            return True
+        from jiuwenswarm.gateway.message_handler.evolution_approval import (
+            is_interrupt_evolution_approval_answer_payload,
+        )
+
+        return is_interrupt_evolution_approval_answer_payload(params)
+
+    def _should_inject_into_existing_interaction(self, params: Any) -> bool:
+        """Whether input must be sent even when this request cannot take the lease."""
+        return self._is_ack_only_dispatch(params) or self._is_interrupt_resume_dispatch(
+            params
+        )
 
     @staticmethod
     def _structured_goal_op_from_request(
@@ -5938,8 +5990,31 @@ class JiuWenSwarmDeepAdapter:
         Closing the owning interaction output stream is the primary shutdown
         path for streaming hosts.  This unary handler is the idempotent
         fallback: ``cancel_round`` aborts the current user or goal attempt
-        without clearing GoalRecord.
+        without clearing GoalRecord.  For user cancel, pause an ACTIVE goal
+        first so the GoalBar stops continuing after the round is aborted.
         """
+        paused_goal_payload: dict[str, Any] | None = None
+        if intent == "cancel":
+            try:
+                goal_manager = self._get_goal_manager()
+                if goal_manager is not None:
+                    record = await goal_manager.get()
+                    status = getattr(record, "status", None) if record is not None else None
+                    if status is GoalStatus.ACTIVE:
+                        paused = await goal_manager.pause()
+                        paused_goal_payload = self._goal_record_payload(paused)
+                        logger.info(
+                            "[JiuWenSwarmDeepAdapter] interrupt(cancel): paused ACTIVE goal "
+                            "session=%s",
+                            request.session_id,
+                        )
+            except Exception:
+                logger.exception(
+                    "[JiuWenSwarmDeepAdapter] interrupt(cancel): goal pause failed "
+                    "session=%s",
+                    request.session_id,
+                )
+
         cancelled = False
         try:
             cancelled = await self._instance.cancel_round(
@@ -5967,6 +6042,11 @@ class JiuWenSwarmDeepAdapter:
         }
         if new_input:
             payload["new_input"] = new_input
+        if paused_goal_payload is not None:
+            # Always return the paused snapshot on the interrupt response so
+            # Web/TUI can refresh GoalBar even when no output lease remains
+            # to receive goal.updated.
+            payload["goal"] = paused_goal_payload
 
         # Best-effort todo cancellation for user cancel (does not touch runtime).
         if cancelled and intent == "cancel" and request.session_id:
@@ -6711,6 +6791,36 @@ class JiuWenSwarmDeepAdapter:
         return "Goal set." if goal is not None else "Goal was not set."
 
     @staticmethod
+    def _record_goal_set_history_if_needed(
+        request: AgentRequest,
+        *,
+        action: str | None,
+        result_type: str | None,
+        goal_payload: dict[str, Any] | None,
+    ) -> None:
+        """Write objective as a user history turn only after a successful set."""
+        if str(action or "").strip().lower() != "set":
+            return
+        if result_type in {"goal_error", "goal_confirm_required", None}:
+            return
+        if not isinstance(goal_payload, dict):
+            return
+        objective = str(goal_payload.get("objective") or "").strip()
+        if not objective:
+            return
+        params = request.params if isinstance(request.params, dict) else {}
+        append_history_record(
+            session_id=request.session_id or "default",
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            role="user",
+            content=objective,
+            timestamp=time.time(),
+            channel_metadata=request.metadata,
+            mode=params.get("mode", "unknown"),
+        )
+
+    @staticmethod
     def _interaction_goal_updated_payload(payload: Any) -> dict[str, Any]:
         """Normalize goal updates to the public Web/TUI payload shape."""
         if not isinstance(payload, dict):
@@ -6788,7 +6898,13 @@ class JiuWenSwarmDeepAdapter:
             }
         try:
             if normalized_action == "get":
-                goal = await goal_manager.get()
+                # Read-only status query: use the lock-free ``peek`` snapshot so a
+                # long-running / stuck goal round (which holds the shared
+                # interaction control lock across ``set``/``clear`` -> abort) can
+                # never block a plain ``command.goal get`` up to the unary timeout.
+                # ``await get()`` would serialize on that same control lock.
+                peek = getattr(goal_manager, "peek", None)
+                goal = peek() if callable(peek) else await goal_manager.get()
             elif normalized_action == "set":
                 goal = await goal_manager.set(
                     objective or "",
@@ -6797,17 +6913,84 @@ class JiuWenSwarmDeepAdapter:
                     max_attempts=max_attempts,
                 )
             elif normalized_action == "pause":
+                before = await goal_manager.get()
+                if before is None:
+                    return {
+                        "result_type": "goal_error",
+                        "action": normalized_action,
+                        "error_code": "no_goal",
+                        "error": "No goal in this session; cannot pause.",
+                        "goal": None,
+                    }
+                before_status = before.status
                 goal = await goal_manager.pause()
+                goal_payload = self._goal_record_payload(goal)
+                if before_status is not GoalStatus.ACTIVE:
+                    status_value = getattr(before_status, "value", str(before_status))
+                    return {
+                        "result_type": "goal_error",
+                        "action": normalized_action,
+                        "error_code": "invalid_state",
+                        "error": (
+                            f"Goal is {status_value}; only active goals can be paused."
+                        ),
+                        "goal": goal_payload,
+                    }
+                return {
+                    "result_type": "goal_control",
+                    "action": normalized_action,
+                    "goal": goal_payload,
+                    "output": "Goal paused.",
+                }
             elif normalized_action == "resume":
+                before = await goal_manager.get()
+                if before is None:
+                    return {
+                        "result_type": "goal_error",
+                        "action": normalized_action,
+                        "error_code": "no_goal",
+                        "error": "No goal in this session; cannot resume.",
+                        "goal": None,
+                    }
+                before_status = before.status
+                if before_status is GoalStatus.ACTIVE:
+                    goal_payload = self._goal_record_payload(before)
+                    return {
+                        "result_type": "goal_control",
+                        "action": normalized_action,
+                        "goal": goal_payload,
+                        "output": "Goal already active.",
+                    }
+                if before_status not in (GoalStatus.PAUSED, GoalStatus.BLOCKED):
+                    status_value = getattr(before_status, "value", str(before_status))
+                    return {
+                        "result_type": "goal_error",
+                        "action": normalized_action,
+                        "error_code": "invalid_state",
+                        "error": (
+                            f"Goal is {status_value}; only paused/blocked goals "
+                            "can be resumed."
+                        ),
+                        "goal": self._goal_record_payload(before),
+                    }
                 goal = await goal_manager.resume()
             elif normalized_action == "clear":
                 removed = await goal_manager.clear()
+                if removed is None:
+                    return {
+                        "result_type": "goal_error",
+                        "action": normalized_action,
+                        "error_code": "no_goal",
+                        "error": "No goal in this session; nothing to clear.",
+                        "goal": None,
+                        "cleared_goal": None,
+                    }
                 return {
                     "result_type": "goal_control",
                     "action": normalized_action,
                     "goal": None,
                     "cleared_goal": self._goal_record_payload(removed),
-                    "output": self._format_goal_control_message(normalized_action, None),
+                    "output": "Goal cleared.",
                 }
             else:
                 return {
@@ -7148,8 +7331,8 @@ class JiuWenSwarmDeepAdapter:
                         metadata=request.metadata,
                     )
                 interaction_stream = await self._instance.attach_output()
-            elif self._is_ack_only_dispatch(request.params):
-                # Steal the reader if idle; otherwise inject into the existing stream.
+            elif self._should_inject_into_existing_interaction(request.params):
+                # Idle → become the reader; busy → inject into the existing stream.
                 interaction_stream = await self._instance.attach_output()
                 await self._instance.send_input(
                     SendInputRequest(
@@ -7696,6 +7879,12 @@ class JiuWenSwarmDeepAdapter:
                         },
                         is_complete=False,
                     )
+                self._record_goal_set_history_if_needed(
+                    request,
+                    action=goal_action if isinstance(goal_action, str) else None,
+                    result_type=result_type if isinstance(result_type, str) else None,
+                    goal_payload=goal_snapshot if isinstance(goal_snapshot, dict) else None,
+                )
                 # Only keep the lease when set/resume left an ACTIVE goal to run.
                 if result_type != "goal_stream" or interaction_stream is None:
                     if interaction_stream is not None:
@@ -7717,6 +7906,12 @@ class JiuWenSwarmDeepAdapter:
                         },
                         is_complete=False,
                     )
+                self._record_goal_set_history_if_needed(
+                    request,
+                    action=goal_action if isinstance(goal_action, str) else None,
+                    result_type="goal_stream" if goal_stream_request else "goal_control",
+                    goal_payload=goal_snapshot if isinstance(goal_snapshot, dict) else None,
+                )
                 if attach_goal_request:
                     gm = self._get_goal_manager()
                     peek = getattr(gm, "peek", None) if gm is not None else None
@@ -7733,8 +7928,10 @@ class JiuWenSwarmDeepAdapter:
                         yield chunk
                     interaction_stream_abort = False
                     return
-            elif self._is_ack_only_dispatch(request.params):
+            elif self._should_inject_into_existing_interaction(request.params):
                 # Idle → become the reader; busy → inject and accept.
+                # Interrupt resumes (permission/confirm/ask-user) must send_input
+                # even when Goal already holds the output lease.
                 interaction_stream = await self._instance.attach_output()
                 await self._instance.send_input(
                     SendInputRequest(
@@ -7943,9 +8140,11 @@ class JiuWenSwarmDeepAdapter:
                     )
 
             if accumulated_text:
+                # Same rule as _adapt_goal_intermediate_final: only keep the
+                # host flush as delta while GoalRecord is still ACTIVE.
                 final_event_type = (
                     "chat.delta"
-                    if self._has_active_goal_interaction()
+                    if self._goal_record_is_active()
                     else "chat.final"
                 )
                 yield AgentResponseChunk(
@@ -7981,6 +8180,9 @@ class JiuWenSwarmDeepAdapter:
             # InteractionOutputStream.close() in ``finally`` owns the targeted
             # round abort. Do not issue a second adapter-level abort here:
             # it can race with a newly attached output consumer.
+            # Do not yield chat.final here: CancelledError often means the
+            # consumer is already tearing down, so the frame may never reach
+            # the frontend; user Stop already closes UI via interrupt_result.
             if _debug_logger is not None:
                 _debug_logger.end_run(status="cancelled")
             raise

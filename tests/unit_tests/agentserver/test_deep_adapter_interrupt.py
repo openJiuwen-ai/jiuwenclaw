@@ -81,6 +81,74 @@ async def test_cancel_runs_teardown_when_session_not_in_active_counter(
 
 
 @pytest.mark.asyncio
+async def test_interaction_cancel_pauses_active_goal_before_cancel_round() -> None:
+    """User stop should pause ACTIVE Goal then cancel_round; payload carries goal."""
+    from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
+
+    paused_record = GoalRecord.create(session_id="sess-goal", objective="keep going")
+    paused_record.status = GoalStatus.PAUSED
+    active_record = GoalRecord.create(session_id="sess-goal", objective="keep going")
+    active_record.status = GoalStatus.ACTIVE
+
+    goal_manager = MagicMock()
+    goal_manager.get = AsyncMock(return_value=active_record)
+    goal_manager.pause = AsyncMock(return_value=paused_record)
+
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance.goal_manager = goal_manager
+    instance.cancel_round = AsyncMock(return_value=True)
+
+    adapter = _make_adapter(
+        _active_session_ids={"sess-goal": 1},
+        _stream_event_rail=MagicMock(),
+        _instance=instance,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+
+    response = await adapter.process_interrupt(
+        AgentRequest(
+            request_id="req-stop",
+            channel_id="web",
+            session_id="sess-goal",
+            req_method=ReqMethod.CHAT_CANCEL,
+            params={"intent": "cancel", "mode": "agent"},
+        )
+    )
+
+    goal_manager.pause.assert_awaited_once()
+    instance.cancel_round.assert_awaited_once_with(reason="user_cancel")
+    assert response.payload["event_type"] == "chat.interrupt_result"
+    assert response.payload["goal"]["status"] == "paused"
+    assert response.payload["goal"]["objective"] == "keep going"
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_skips_pause_when_no_goal() -> None:
+    goal_manager = MagicMock()
+    goal_manager.get = AsyncMock(return_value=None)
+    goal_manager.pause = AsyncMock()
+
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance.goal_manager = goal_manager
+    instance.cancel_round = AsyncMock(return_value=True)
+
+    adapter = _make_adapter(
+        _active_session_ids={"sess-x": 1},
+        _stream_event_rail=MagicMock(),
+        _instance=instance,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+
+    response = await adapter.process_interrupt(_build_cancel_request("sess-x"))
+
+    goal_manager.pause.assert_not_awaited()
+    instance.cancel_round.assert_awaited_once()
+    assert "goal" not in response.payload
+
+
+@pytest.mark.asyncio
 async def test_unmark_skips_rail_cleanup_when_stream_consumer_cancelled() -> None:
     rail = MagicMock()
     adapter = _make_adapter(

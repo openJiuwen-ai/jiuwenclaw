@@ -200,6 +200,10 @@ class MessageHandler(ABC):
         self._stream_metadata: dict[str, dict[str, Any] | None] = {}  # request_id -> request metadata
         self._stream_modes: dict[str, str] = {}  # request_id -> mode
         self._stream_emits_processing_status: dict[str, bool] = {}  # request_id -> emits chat.processing_status
+        # request_id -> req_method value（如 chat.send / command.goal / history.get）。
+        # 用于 processing_status=false 守卫：仅 chat.send(emit=True) 与 command.goal
+        # 长流可挡住补发；history.get 等短只读流不得挡住。
+        self._stream_methods: dict[str, str] = {}
         # 非流式 chat.send（如飞书 enable_streaming=False）任务追踪：rid -> mode。
         # 流式任务走 _stream_emits_processing_status；非流式 chat 不产生 processing_status，
         # 但同样是“用户发起的对话任务在跑”，配置保存锁须覆盖，故单列此集合。
@@ -695,6 +699,7 @@ class MessageHandler(ABC):
         self._stream_sessions.pop(rid, None)
         self._stream_metadata.pop(rid, None)
         self._stream_emits_processing_status.pop(rid, None)
+        self._stream_methods.pop(rid, None)
         self._stream_app_ids.pop(rid, None)
         self._stream_modes.pop(rid, None)
 
@@ -2930,6 +2935,37 @@ class MessageHandler(ABC):
 
         return msg.req_method == ReqMethod.CHAT_SEND
 
+    def _session_has_streams_blocking_processing_false(
+        self, session_id: str | None
+    ) -> bool:
+        """同 session 是否还有应挡住 ``is_processing=false`` 补发的流.
+
+        - ``chat.send``（emit=True）：正常对话仍在跑
+        - ``command.goal``（emit=False 长流）：权限同意短流结束时不得误清前端，
+          否则会出现「前端已结束、后端 Goal 还在跑、后续 delta 收不到」
+
+        ``history.get`` 等短只读流不计入，否则 chat 结束时若并发拉历史，会永远
+        等不到 false（这些流自身 emit=False，退出时也不会补发）。
+        """
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        for active_rid, sid in self._stream_sessions.items():
+            if sid != session_id:
+                continue
+            if self._stream_emits_processing_status.get(active_rid, True):
+                return True
+            if self._stream_methods.get(active_rid) == ReqMethod.COMMAND_GOAL.value:
+                return True
+        return False
+
+    @staticmethod
+    def _stream_method_value(msg: "Message") -> str:
+        """Normalize ``msg.req_method`` to its wire value string."""
+        req_method = getattr(msg, "req_method", None)
+        if req_method is None:
+            return ""
+        return str(getattr(req_method, "value", req_method) or "")
+
     async def _trigger_before_chat_request_hook(self, msg: "Message") -> None:
         if not self._should_trigger_before_chat_request_hook(msg):
             return
@@ -3858,14 +3894,17 @@ class MessageHandler(ABC):
             # 若以下分支均不进入 _send_processing_status（其内部会广播），
             # 则前端保存锁可能卡在最后一次广播值，仅靠重连自愈。
             # cancelled 也会补发 is_processing=false（见下方），故不再排除 cancelled。
+            # Block false only while chat.send or command.goal remains — not
+            # arbitrary emit=False streams (e.g. history.get). Otherwise a short
+            # permission-resume chat.send would clear is_processing while Goal
+            # is still running; but history.get must not strand the spinner.
+            session_blocks_processing_false = (
+                self._session_has_streams_blocking_processing_false(session_id)
+            )
             _will_broadcast = (
                 emit_processing_status
                 and not has_processing_status_false
-                and not any(
-                    sid == session_id
-                    and self._stream_emits_processing_status.get(active_rid, True)
-                    for active_rid, sid in self._stream_sessions.items()
-                )
+                and not session_blocks_processing_false
             )
             logger.info(
                 "[task.global_running] stream 退出: rid=%s cancelled=%s emit=%s "
@@ -3885,15 +3924,10 @@ class MessageHandler(ABC):
             # AgentServer 的 interrupt_result 可能要等很久（如命中 agent 首次初始化的同步阻塞窗口，
             # 事件循环读不出 cancel 消息），此时前端会一直转圈。主动补发一次 is_processing=false，
             # 让 TUI 立刻停转圈，不等 AgentServer 回 interrupt_result。
-            # session_has_active_tasks 守卫仍保证：同 session 还有其它活跃流时不误发 false。
+            # 守卫：同 session 还有 chat.send 或 command.goal 时不误发 false
+            # （避免权限同意短流在 Goal 仍跑时清前端；history.get 不挡）。
             if emit_processing_status and not has_processing_status_false:
-                # 检查该 session_id 是否还有活跃任务
-                session_has_active_tasks = any(
-                    sid == session_id
-                    and self._stream_emits_processing_status.get(active_rid, True)
-                    for active_rid, sid in self._stream_sessions.items()
-                )
-                if not session_has_active_tasks:
+                if not session_blocks_processing_false:
                     await self._send_processing_status(
                         rid, session_id, channel_id,
                         is_processing=False, app_id=stream_app_id,
@@ -3945,6 +3979,7 @@ class MessageHandler(ABC):
         """Start a Gateway stream consumer and register stream bookkeeping."""
         emit_processing_status = self._should_emit_processing_status_for_stream(msg)
         self._stream_emits_processing_status[stream_rid] = emit_processing_status
+        self._stream_methods[stream_rid] = self._stream_method_value(msg)
         self._stream_modes[stream_rid] = (
             msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
         )
@@ -4180,6 +4215,7 @@ class MessageHandler(ABC):
         self._stream_sessions.clear()
         self._stream_metadata.clear()
         self._stream_emits_processing_status.clear()
+        self._stream_methods.clear()
         self._stream_modes.clear()
         pending_disconnect_cancels = list(self._disconnect_cancel_tasks.values())
         for task in pending_disconnect_cancels:

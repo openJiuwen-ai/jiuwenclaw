@@ -1806,6 +1806,21 @@ class AgentWebSocketServer:
             )
         )
 
+    @staticmethod
+    def _is_readonly_goal_get_request(request: AgentRequest) -> bool:
+        """``command.goal`` + ``action=get``：只读查询，不得兜底新建 session metadata.
+
+        与 skills.list 同类问题：走 ``_prepare_code_mode_chat_turn`` 会触发
+        ``sync_session_request_metadata`` 在无 metadata 时写出
+        ``metadata.json``。get 仍需要真实 agent（可能从 checkpointer 读已有
+        Goal），故不能整段塞进 ``_is_stateless_method_request``。
+        """
+        if request.req_method != ReqMethod.COMMAND_GOAL:
+            return False
+        params = request.params if isinstance(request.params, dict) else {}
+        action = str(params.get("action") or "get").strip().lower()
+        return action == "get"
+
     async def _get_stateless_agent(self, channel_id: str) -> Any:
         """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
 
@@ -1831,6 +1846,8 @@ class AgentWebSocketServer:
         self,
         request: AgentRequest,
         channel_id: str,
+        *,
+        sync_metadata: bool = True,
     ) -> tuple[str, str | None, Any]:
         """Mode resolution and correct agent instance selection."""
         # [新增] 在 _apply_resolved_mode_to_request 把 canonical mode 写回 params 之前，
@@ -1851,12 +1868,30 @@ class AgentWebSocketServer:
         canonical_mode = (
             request.params.get("mode") if isinstance(request.params, dict) else None
         )
-        project_dir = _sync_chat_request_metadata(
-            request,
-            requested_project_dir,
-            canonical_mode if canonical_mode else mode,
-            explicit_mode_provided=explicit_mode_provided,
-        )
+        if sync_metadata:
+            project_dir = _sync_chat_request_metadata(
+                request,
+                requested_project_dir,
+                canonical_mode if canonical_mode else mode,
+                explicit_mode_provided=explicit_mode_provided,
+            )
+        else:
+            # Read-only path (e.g. command.goal get): never create/update
+            # metadata.json. Prefer request project_dir, else locked disk value.
+            project_dir = requested_project_dir
+            if not (isinstance(project_dir, str) and project_dir.strip()):
+                sid = str(request.session_id or "").strip()
+                if sid:
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+
+                    meta = get_session_metadata(
+                        sid, cache_bust=True, enable_writeback=False
+                    )
+                    locked = meta.get("project_dir") if isinstance(meta, dict) else None
+                    if isinstance(locked, str) and locked.strip():
+                        project_dir = locked.strip()
         if isinstance(project_dir, str) and project_dir.strip():
             project_dir = project_dir.strip()
             request.params["project_dir"] = project_dir
@@ -2022,20 +2057,27 @@ class AgentWebSocketServer:
             )
             return
 
+        readonly_goal_get = self._is_readonly_goal_get_request(request)
         mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-            request, channel_id
+            request,
+            channel_id,
+            sync_metadata=not readonly_goal_get,
         )
 
-        restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
-        if restored_plan:
-            await self._push_plan_mode_exited(request)
+        if not readonly_goal_get:
+            restored_plan = await self._ensure_code_mode_state(
+                request, mode, sub_mode, agent
+            )
+            if restored_plan:
+                await self._push_plan_mode_exited(request)
 
         resp = None
         try:
             resp = await agent.process_message(request)
         finally:
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
-            await self._check_post_process_plan_exit(request, agent)
+            if not readonly_goal_get:
+                await self._check_post_process_plan_exit(request, agent)
 
         # V2: 非流式响应回带请求侧 agent_ref，供 gateway 3 元组路由（设计 §6.3）。
         # is None 守卫：保留 agent 层显式设置的 agent_ref（如 team 模式由事件派生）。
@@ -2063,16 +2105,22 @@ class AgentWebSocketServer:
         # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
         # 不触发 adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
+        readonly_goal_get = self._is_readonly_goal_get_request(request)
         if self._is_stateless_method_request(request):
             agent = await self._get_stateless_agent(channel_id)
         else:
             mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-                request, channel_id
+                request,
+                channel_id,
+                sync_metadata=not readonly_goal_get,
             )
 
-            restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
-            if restored_plan:
-                await self._push_plan_mode_exited(request)
+            if not readonly_goal_get:
+                restored_plan = await self._ensure_code_mode_state(
+                    request, mode, sub_mode, agent
+                )
+                if restored_plan:
+                    await self._push_plan_mode_exited(request)
 
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
@@ -2186,7 +2234,8 @@ class AgentWebSocketServer:
                 if not entries:
                     self._session_stream_tasks.pop(session_id, None)
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
-            await self._check_post_process_plan_exit(request, agent)
+            if not readonly_goal_get:
+                await self._check_post_process_plan_exit(request, agent)
 
         logger.info(
             "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
