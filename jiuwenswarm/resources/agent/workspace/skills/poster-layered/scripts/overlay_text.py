@@ -83,7 +83,8 @@ def overlay(base_path: Path, layout_path: Path, out_path: Path) -> None:
         stroke_width = int(block.get("stroke_width") or 0)
         max_width = int(block.get("max_width") or 0)
         align = str(block.get("align") or "left")
-        line_gap = int(block.get("line_gap") or max(4, size // 6))
+        line_gap_raw = block.get("line_gap")
+        line_gap = int(line_gap_raw) if line_gap_raw is not None else max(4, size // 6)
         font = _resolve_font(block.get("font_path") or default_font, size)
 
         lines = _wrap_text(draw, text, font, max_width)
