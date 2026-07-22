@@ -4849,6 +4849,7 @@ class JiuWenClawDeepAdapter:
                     agent=self._instance,
                     session=freeze_session,
                     status="interrupted",
+                    persist_mode="async",
                 )
                 context_engine = resolve_context_engine(self._instance)
                 if context_engine is not None and freeze_session is not None:

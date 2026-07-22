@@ -50,7 +50,7 @@ class TestQABlockInterruptFreeze(unittest.IsolatedAsyncioTestCase):
             )
         mock_persist.assert_awaited_once()
 
-    async def test_freeze_helper_calls_sync_freeze(self) -> None:
+    async def test_freeze_helper_calls_async_freeze(self) -> None:
         session = MagicMock()
         freeze_rail = getattr(self.adapter, "_qa_block_freeze_rail")
         with patch(
@@ -77,6 +77,7 @@ class TestQABlockInterruptFreeze(unittest.IsolatedAsyncioTestCase):
             agent=getattr(self.adapter, "_instance"),
             session=session,
             status="interrupted",
+            persist_mode="async",
         )
         mock_persist.assert_awaited_once()
 

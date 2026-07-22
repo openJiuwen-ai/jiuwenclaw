@@ -259,6 +259,28 @@ class TestQABlockFreezeRailInteractiveResume(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(registry.current_qa_id)
         context_engine.save_contexts.assert_not_awaited()
+        self.assertEqual(self.freeze_mock.await_args.kwargs["persist_mode"], "sync")
+
+    async def test_interrupt_freeze_forwards_async_persist_mode(self) -> None:
+        context_engine = MagicMock()
+        context_engine.get_context.return_value = MagicMock(context_id=lambda: "ctx-1")
+        context_engine.get_history_qa_buffer.return_value = []
+        context_engine.save_contexts = AsyncMock()
+        session = SimpleNamespace(get_session_id=lambda: "session-1")
+
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "post_agent_execute_for_session", new_callable=AsyncMock):
+            await self.rail.freeze_current_qa_sync(
+                "session-1",
+                agent=SimpleNamespace(),
+                session=session,
+                persist_mode="async",
+            )
+
+        self.assertEqual(self.freeze_mock.await_args.kwargs["persist_mode"], "async")
 
 
 class TestQABlockFreezeRailFirstAskPlainQuery(unittest.IsolatedAsyncioTestCase):
