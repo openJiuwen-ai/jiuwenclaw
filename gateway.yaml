@@ -1,0 +1,7 @@
+extensions:
+  auth:
+    type: "agentos"  # 认证器类型：agentos / passthrough
+    agentos:
+      auth_service_url: "http://iam-agentos:8080"  # 计算认证服务地址
+      gateway_secret_key: "${GATEWAY_SECRET_KEY}"  # API-KEY HMAC密钥（环境变量）
+    # passthrough无需额外配置

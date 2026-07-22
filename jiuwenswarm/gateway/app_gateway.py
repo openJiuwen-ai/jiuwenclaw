@@ -53,6 +53,9 @@ from jiuwenswarm.common.utils import (
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
 
+from jiuwenswarm.extensions.registry import ExtensionRegistry
+from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenticator
+
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
@@ -80,6 +83,20 @@ logger = logging.getLogger("jiuwenswarm.gateway")
 
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
+
+#3rd
+def _init_auth_handler():
+    registry = ExtensionRegistry.get_instance()
+    return registry.get_authenticator()
+
+# 全局认证器实例
+_auth_handler: CredentialAuthenticator | None = None
+
+def get_auth_handler() -> CredentialAuthenticator:
+    global _auth_handler
+    if _auth_handler is None:
+        _auth_handler = _init_auth_handler()
+    return _auth_handler
 
 
 def _build_event_frame(msg) -> dict[str, Any]:
