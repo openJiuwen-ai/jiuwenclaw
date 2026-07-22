@@ -236,7 +236,7 @@ def build_playwright_mcp_config() -> McpServerConfig:
 
 def resolve_model_settings() -> Tuple[str, str, str]:
     provider_mode = _normalize_provider(
-        _first_non_empty_env("MODEL_PROVIDER", "MODEL_CLIENT_PROVIDER")
+        _first_non_empty_env("LLM_MODEL_PROVIDER", "MODEL_PROVIDER", "MODEL_CLIENT_PROVIDER")
     )
     if provider_mode and provider_mode not in {"openai", "openrouter", "siliconflow", "dashscope"}:
         raise ValueError(
@@ -245,7 +245,7 @@ def resolve_model_settings() -> Tuple[str, str, str]:
         )
 
     explicit_api_key = _first_non_empty_env("API_KEY", "MODEL_API_KEY")
-    explicit_api_base = _first_non_empty_env("API_BASE", "MODEL_API_BASE")
+    explicit_api_base = _first_non_empty_env("LLM_API_BASE", "API_BASE", "MODEL_API_BASE")
 
     if provider_mode:
         provider = provider_mode
@@ -282,6 +282,7 @@ def resolve_model_settings() -> Tuple[str, str, str]:
             "OPENAI_API_KEY",
         )
         api_base = _first_non_empty_env(
+            "LLM_API_BASE",
             "API_BASE",
             "MODEL_API_BASE",
             "OPENROUTER_BASE_URL",
@@ -296,6 +297,7 @@ def resolve_model_settings() -> Tuple[str, str, str]:
             "OPENROUTER_API_KEY",
         )
         api_base = _first_non_empty_env(
+            "LLM_API_BASE",
             "API_BASE",
             "MODEL_API_BASE",
             "SILICONFLOW_BASE_URL",
@@ -310,6 +312,7 @@ def resolve_model_settings() -> Tuple[str, str, str]:
             "OPENROUTER_API_KEY",
         )
         api_base = _first_non_empty_env(
+            "LLM_API_BASE",
             "API_BASE",
             "MODEL_API_BASE",
             "DASHSCOPE_BASE_URL",
@@ -323,6 +326,7 @@ def resolve_model_settings() -> Tuple[str, str, str]:
             "OPENROUTER_API_KEY",
         )
         api_base = _first_non_empty_env(
+            "LLM_API_BASE",
             "API_BASE",
             "MODEL_API_BASE",
             "OPENAI_BASE_URL",

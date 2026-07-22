@@ -44,7 +44,7 @@ GUARDRAIL_RETRY_ONCE = True
 
 async def main() -> None:
     provider, api_key, api_base = resolve_model_settings()
-    model_name = (os.getenv("MODEL_NAME") or "anthropic/claude-sonnet-4").strip()
+    model_name = (os.getenv("LLM_MODEL_NAME") or "anthropic/claude-sonnet-4").strip()
     if not api_key:
         raise RuntimeError("Missing API key. Set API_KEY (or OPENROUTER_API_KEY / OPENAI_API_KEY / DASHSCOPE_API_KEY).")
 

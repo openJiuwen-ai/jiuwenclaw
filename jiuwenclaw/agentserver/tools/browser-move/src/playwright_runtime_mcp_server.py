@@ -70,7 +70,7 @@ def _build_runtime() -> "BrowserAgentRuntime":
     if not api_key:
         raise RuntimeError("Missing API key. Set OPENROUTER_API_KEY or OPENAI_API_KEY.")
 
-    model_name = (os.getenv("MODEL_NAME") or "anthropic/claude-sonnet-4.5").strip()
+    model_name = (os.getenv("LLM_MODEL_NAME") or "anthropic/claude-sonnet-4.5").strip()
     guardrails = BrowserRunGuardrails(
         max_steps=GUARDRAIL_MAX_STEPS,
         max_failures=GUARDRAIL_MAX_FAILURES,
