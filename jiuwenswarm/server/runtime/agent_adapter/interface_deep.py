@@ -480,6 +480,16 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         if isinstance(round_level_cfg, dict) and round_level_cfg:
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
 
+        reasoning_loop_cfg = context_engine_cfg.get("reasoning_tool_loop_compact_config", {})
+        if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
+            reasoning_loop_cfg = {
+                **reasoning_loop_cfg,
+                "language": resolve_language(
+                    str(config.get("preferred_language", "zh")).strip().lower()
+                ),
+            }
+            user_processors.append(("ReasoningToolLoopCompactProcessor", reasoning_loop_cfg))
+
         context_rail = ContextProcessorRail(
             processors=user_processors if user_processors else None,
             preset=True,
