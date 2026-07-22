@@ -120,6 +120,8 @@ gen_gateway_file() {
 }
 
 render_gateway_files() {
+    ensure_jiuwenclaw_id_in_custom_env
+
     local pvc_template_file="${CONFIG["CLAW_PVC_TEMPLATE_FILE"]}"
     local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
     local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
