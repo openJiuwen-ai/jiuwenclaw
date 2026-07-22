@@ -459,3 +459,45 @@ def test_empty_old_string_creates_content_when_empty() -> None:
     )
     assert activity["file_states"]["result.json"] == '{"findings": {}}'
     assert activity["edit_limitations"] == []
+
+
+def test_pr_commenter_successful_call_count_dry_run_and_execute() -> None:
+    """successful_comment_calls increments once per successful pr_commenter call.
+
+    A successful dry run (success + --dry-run + [DRY RUN]) and a successful
+    execute (success + no --dry-run) each count one successful call. A failed
+    call (not success) counts none. This locks the shared dry_run_ok/execute_ok
+    condition used by dry_run_success, execute_success and successful_comment_calls.
+    """
+    from jiuwenavatar.server.runtime.review_trace.adapter import _apply_command_activity
+
+    def run(command: str, result_text: str, success: bool) -> dict:
+        activity = {
+            "dev_reviewer_loaded": False, "dev_reviewer_runner_used": False,
+            "collect_done": False, "init_review_done": False, "report_done": False,
+            "resolve_positions_done": False, "validate_comments_done": False,
+            "render_comments_done": False, "dry_run_used": False, "dry_run_success": False,
+            "dry_run_comment_ids_null": False, "execute_used": False, "execute_success": False,
+            "gitcode_comment_called": False, "reported_api_result": False,
+            "commented_finding_ids": set(), "successful_comment_calls": 0,
+            "collect_commands": [], "artifacts": [], "changed_files": [],
+            "review_texts": [], "pr_metadata": {}, "review_result": {},
+            "file_states": {}, "edit_limitations": [], "context_artifact": None, "diff_artifact": None,
+        }
+        _apply_command_activity(activity, command, {"success": success, "data": {"content": result_text}}, result_text)
+        return activity
+
+    dry_ok = run("pr_commenter.py --number 1 --dry-run", "[DRY RUN] posted", True)
+    assert dry_ok["dry_run_success"] is True
+    assert dry_ok["execute_success"] is False
+    assert dry_ok["successful_comment_calls"] == 1
+
+    execute_ok = run("pr_commenter.py --number 1", "comment_id: abc", True)
+    assert execute_ok["dry_run_success"] is False
+    assert execute_ok["execute_success"] is True
+    assert execute_ok["successful_comment_calls"] == 1
+
+    failed = run("pr_commenter.py --number 1 --dry-run", "error", False)
+    assert failed["dry_run_success"] is False
+    assert failed["execute_success"] is False
+    assert failed["successful_comment_calls"] == 0

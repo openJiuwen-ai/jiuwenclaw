@@ -567,14 +567,17 @@ def _apply_command_activity(activity: dict[str, Any], command: str, result: Any,
             activity["execute_used"] = True
         if "comment_id" in result_text or "[DRY RUN]" in result_text:
             activity["reported_api_result"] = True
-        if success and is_dry_run and "[DRY RUN]" in result_text:
+        # One successful pr_commenter call: either a dry run that printed
+        # [DRY RUN], or an execute (no --dry-run). Both must additionally have
+        # succeeded. Collapse the repeated condition so each boolean expr stays
+        # within the clause limit and the three consumers share one definition.
+        dry_run_ok = success and is_dry_run and "[DRY RUN]" in result_text
+        execute_ok = success and not is_dry_run
+        if dry_run_ok:
             activity["dry_run_success"] = True
-        if success and not is_dry_run:
+        if execute_ok:
             activity["execute_success"] = True
-        if success and (
-            (is_dry_run and "[DRY RUN]" in result_text)
-            or not is_dry_run
-        ):
+        if dry_run_ok or execute_ok:
             activity["successful_comment_calls"] += 1
         if '"comment_id": null' in result_text or "'comment_id': None" in result_text:
             activity["dry_run_comment_ids_null"] = True
