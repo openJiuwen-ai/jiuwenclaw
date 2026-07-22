@@ -317,7 +317,8 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
     assert "html_base64" not in json.dumps(provenance)
 
 
-def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
+@pytest.mark.asyncio
+async def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
     final_result = {
         "response_content": "# 报告\n\n正文",
         "infer_messages": [],
@@ -335,7 +336,9 @@ def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
         "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
         side_effect=_convert,
     ):
-        artifacts = dt._write_report_artifacts_stream(final_result, "研究报告.md", "C1")
+        artifacts = await dt._write_report_artifacts_stream(
+            final_result, "研究报告.md", "C1"
+        )
 
     assert artifacts == {
         "md": str(tmp_path / "研究报告.md"),
@@ -345,7 +348,8 @@ def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
     assert (tmp_path / "研究报告.provenance.json").is_file()
 
 
-def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp_path):
+@pytest.mark.asyncio
+async def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp_path):
     final_result = {
         "response_content": "# 报告\n\n正文",
         "infer_messages": [],
@@ -359,7 +363,9 @@ def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp_path)
         "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
         side_effect=RuntimeError("converter unavailable"),
     ):
-        artifacts = dt._write_report_artifacts_stream(final_result, "研究报告.md", "C1")
+        artifacts = await dt._write_report_artifacts_stream(
+            final_result, "研究报告.md", "C1"
+        )
 
     assert artifacts == {"md": str(tmp_path / "研究报告.md")}
     assert (tmp_path / "研究报告.final-result.json").is_file()
