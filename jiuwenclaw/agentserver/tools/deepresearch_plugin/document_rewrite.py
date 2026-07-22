@@ -242,7 +242,9 @@ def _load_final_result_citations(report_path: Path, provenance: dict, root: Path
     return citations
 
 
-def _citation_index(citations: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
+def _citation_index(
+    citations: list[dict],
+) -> tuple[dict[str, dict], dict[str, tuple[dict, ...]]]:
     def field_size(value: str) -> int:
         try:
             return len(value.encode("utf-8"))
@@ -252,7 +254,7 @@ def _citation_index(citations: list[dict]) -> tuple[dict[str, dict], dict[str, d
             ) from exc
 
     by_id: dict[str, dict] = {}
-    by_key: dict[str, dict] = {}
+    by_key_lists: dict[str, list[dict]] = {}
     for item in citations:
         raw_id = item.get("id")
         raw_reference_index = item.get("reference_index")
@@ -287,11 +289,39 @@ def _citation_index(citations: list[dict]) -> tuple[dict[str, dict], dict[str, d
             ):
                 raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is invalid")
         key = f"{reference_index}\0{url}"
-        if source_id in by_id or key in by_key:
+        if source_id in by_id:
             raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is ambiguous")
         by_id[source_id] = item
-        by_key[key] = item
-    return by_id, by_key
+        by_key_lists.setdefault(key, []).append(item)
+    return by_id, {key: tuple(items) for key, items in by_key_lists.items()}
+
+
+def _citation_occurrence_index(
+    markdown: str, citations: list[dict]
+) -> dict[tuple[int, int], dict]:
+    _, by_key = _citation_index(citations)
+    boundary_table = Utf8BoundaryTable(markdown)
+    ranges_by_key: dict[str, list[tuple[int, int]]] = {}
+    for match in CITATION_RE.finditer(markdown):
+        key = f"{match.group('index')}\0{match.group('url')}"
+        ranges_by_key.setdefault(key, []).append(
+            (
+                boundary_table.codepoint_to_byte[match.start()],
+                boundary_table.codepoint_to_byte[match.end()],
+            )
+        )
+
+    result: dict[tuple[int, int], dict] = {}
+    for key, items in by_key.items():
+        ranges = ranges_by_key.get(key, [])
+        if len(items) == 1:
+            for byte_range in ranges:
+                result[byte_range] = items[0]
+            continue
+        if len(ranges) != len(items):
+            raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is ambiguous")
+        result.update(zip(ranges, items))
+    return result
 
 
 def _mapping_conflict(message: str) -> None:
@@ -596,7 +626,7 @@ def prepare_rewrite(
     if normalized_visible != selected_text.replace("\r\n", "\n").replace("\r", "\n"):
         _mapping_conflict("selected text does not match normalized Markdown visibility")
 
-    _, by_key = _citation_index(final_result_citations)
+    citation_occurrences = _citation_occurrence_index(markdown, final_result_citations)
     allowed: dict[str, dict] = {}
     selected_anchors = tuple(
         anchor
@@ -609,7 +639,7 @@ def prepare_rewrite(
             continue
         match = CITATION_RE.fullmatch(anchor.source)
         if match is not None:
-            citation = by_key.get(f"{match.group('index')}\0{match.group('url')}")
+            citation = citation_occurrences.get((anchor.start_byte, anchor.end_byte))
             if citation is not None:
                 allowed[str(citation.get("id"))] = citation
 
@@ -983,7 +1013,7 @@ def _validate_affected_citations(
     citations = _load_final_result_citations(
         context.report_path, provenance, context.workspace_root
     )
-    _, by_key = _citation_index(citations)
+    citation_occurrences = _citation_occurrence_index(original_map.source, citations)
     selected_ids = {unit.unit_id for unit in context.selected_units}
     affected_indexes = [
         index
@@ -1007,11 +1037,16 @@ def _validate_affected_citations(
     if identities(child_map) != expected:
         raise RewriteError("FORMAT_CONFLICT", "citation identity or order changed")
     source_ids = []
-    for reference_index, url in expected:
-        item = by_key.get(f"{reference_index}\0{url}")
-        if item is None:
-            raise RewriteError("FORMAT_CONFLICT", "citation is outside the final-result whitelist")
-        source_ids.append(str(item.get("id")))
+    for index in affected_indexes:
+        for anchor in original_map.units[index].protected:
+            if anchor.kind != "citation":
+                continue
+            item = citation_occurrences.get((anchor.start_byte, anchor.end_byte))
+            if item is None:
+                raise RewriteError(
+                    "FORMAT_CONFLICT", "citation is outside the final-result whitelist"
+                )
+            source_ids.append(str(item.get("id")))
     return source_ids
 
 

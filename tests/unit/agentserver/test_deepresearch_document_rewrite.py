@@ -279,6 +279,36 @@ def test_prepare_normalizes_multiple_citations_without_duplicate_evidence(tmp_pa
     assert len(prepared["citation_evidence"]) == 1
 
 
+def test_prepare_maps_repeated_source_citations_by_document_occurrence(tmp_path):
+    body = "first [[1]](https://example.com/source) second [[1]](https://example.com/source) tail\n"
+    report, provenance = _write_document(tmp_path, body)
+    snapshot_path = report.with_name(provenance["final_result_path"])
+    first = json.loads(snapshot_path.read_text(encoding="utf-8"))[
+        "citation_messages"
+    ]["data"][0]
+    _set_snapshot_citations(
+        report,
+        provenance,
+        [
+            dict(first, id=3, chunk="first occurrence evidence"),
+            dict(first, id=4, chunk="second occurrence evidence"),
+        ],
+    )
+
+    prepared = _prepare(
+        tmp_path,
+        report,
+        body.rstrip("\n"),
+        visible="first [1] second [1] tail",
+    )
+
+    assert prepared["allowed_source_ids"] == ["3", "4"]
+    assert [item["chunk"] for item in prepared["citation_evidence"]] == [
+        "first occurrence evidence",
+        "second occurrence evidence",
+    ]
+
+
 def test_prepare_rejects_selection_containing_only_a_protected_citation(tmp_path):
     body = "left[[1]](https://example.com/source)right\n"
     report, _ = _write_document(tmp_path, body)
