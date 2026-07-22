@@ -451,7 +451,7 @@ def main() -> int:
     try:
         return start_browser(dry_run=args.dry_run, config_file=args.config)
     except Exception as exc:
-        logger.info(f"Failed to start Chrome: {exc}", file=sys.stderr)
+        logger.error("Failed to start Chrome: %s", exc)
         return 1
 
 
