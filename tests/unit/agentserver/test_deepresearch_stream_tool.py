@@ -8,6 +8,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from contextlib import asynccontextmanager
 
 import os
 import sys
@@ -139,6 +140,77 @@ class _LargeStdoutLineProc(_Proc):
     @property
     def stdout(self):
         return self._stdout
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raise_during_use", [False, True])
+async def test_styled_report_llm_context_restores_explicit_tls_value(
+    monkeypatch, raise_during_use
+):
+    monkeypatch.setenv("LLM_SSL_VERIFY", "true")
+    observed = {}
+
+    @asynccontextmanager
+    async def fake_context_factory(llm_config):
+        observed["config"] = llm_config
+        observed["entry"] = os.environ.get("LLM_SSL_VERIFY")
+        try:
+            yield "runtime-llm"
+        finally:
+            observed["exit"] = os.environ.get("LLM_SSL_VERIFY")
+
+    async def use_context():
+        async with dt._scoped_report_style_llm_context(
+            fake_context_factory, {"general": {"model_name": "test"}}
+        ) as llm:
+            assert llm == "runtime-llm"
+            observed["yielded"] = os.environ.get("LLM_SSL_VERIFY")
+            if raise_during_use:
+                raise RuntimeError("stylization failed")
+
+    if raise_during_use:
+        with pytest.raises(RuntimeError, match="stylization failed"):
+            await use_context()
+    else:
+        await use_context()
+
+    assert observed == {
+        "config": {"general": {"model_name": "test"}},
+        "entry": "true",
+        "yielded": "true",
+        "exit": "true",
+    }
+    assert os.environ.get("LLM_SSL_VERIFY") == "true"
+
+
+@pytest.mark.asyncio
+async def test_styled_report_llm_context_uses_bridge_tls_only_for_entry(monkeypatch):
+    monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
+    bridge_inputs = []
+    observed = {}
+
+    def fake_build_bridge_env(source):
+        bridge_inputs.append(source.get("LLM_SSL_VERIFY"))
+        return {"LLM_SSL_VERIFY": "resolved-by-bridge"}
+
+    @asynccontextmanager
+    async def fake_context_factory(_llm_config):
+        observed["entry"] = os.environ.get("LLM_SSL_VERIFY")
+        yield "runtime-llm"
+
+    monkeypatch.setattr(dt, "_build_bridge_env", fake_build_bridge_env)
+
+    async with dt._scoped_report_style_llm_context(
+        fake_context_factory, {"general": {}}
+    ):
+        observed["yielded"] = os.environ.get("LLM_SSL_VERIFY")
+
+    assert bridge_inputs == ["ambient"]
+    assert observed == {
+        "entry": "resolved-by-bridge",
+        "yielded": "ambient",
+    }
+    assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
 
 
 def _patch_env(tool_lines):

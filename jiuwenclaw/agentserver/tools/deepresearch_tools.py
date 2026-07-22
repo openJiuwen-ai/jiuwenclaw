@@ -15,6 +15,7 @@ import sys
 import tempfile
 import uuid
 import zipfile
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from jiuwenclaw.config import get_config
 
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
+_REPORT_STYLE_LLM_INIT_LOCK = asyncio.Lock()
 
 # 使用 contextvars
 _deepresearch_route_ctx: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
@@ -216,6 +218,25 @@ def _build_styled_export_llm_config() -> dict:
     }
 
 
+@asynccontextmanager
+async def _scoped_report_style_llm_context(context_factory, llm_config):
+    """Scope the SDK's env-based TLS setting to runtime LLM initialization."""
+    async with AsyncExitStack() as stack:
+        async with _REPORT_STYLE_LLM_INIT_LOCK:
+            previous_ssl_verify = os.environ.get("LLM_SSL_VERIFY")
+            resolved_ssl_verify = _build_bridge_env(os.environ)["LLM_SSL_VERIFY"]
+            os.environ["LLM_SSL_VERIFY"] = resolved_ssl_verify
+            try:
+                llm = await stack.enter_async_context(context_factory(llm_config))
+            finally:
+                if previous_ssl_verify is None:
+                    os.environ.pop("LLM_SSL_VERIFY", None)
+                else:
+                    os.environ["LLM_SSL_VERIFY"] = previous_ssl_verify
+
+        yield llm
+
+
 def _validate_zip_member(member_name: str) -> str:
     """Normalize and validate a ZIP member path to prevent traversal attacks."""
     from pathlib import PurePosixPath, PureWindowsPath
@@ -324,23 +345,10 @@ async def _write_report_artifacts_stream(
         )
 
         llm_config = _build_styled_export_llm_config()
-        # The SDK's LLMModelFactory reads verify_ssl from the
-        # LLM_SSL_VERIFY env var (default "true"), NOT from the
-        # llm_config dict.  The ``verify_ssl`` key we set in
-        # _build_styled_export_llm_config is silently dropped by
-        # LLMConfig (Pydantic extra='ignore'), so we must also set
-        # the env var — matching what _build_bridge_env does for the
-        # child-subprocess path.  Restore on exit to avoid leaking.
-        _prev_ssl_verify = os.environ.get("LLM_SSL_VERIFY")
-        os.environ["LLM_SSL_VERIFY"] = "false"
-        try:
-            async with report_style_llm_context(llm_config) as llm:
-                result = await stylize_report(final_result, llm)
-        finally:
-            if _prev_ssl_verify is None:
-                os.environ.pop("LLM_SSL_VERIFY", None)
-            else:
-                os.environ["LLM_SSL_VERIFY"] = _prev_ssl_verify
+        async with _scoped_report_style_llm_context(
+            report_style_llm_context, llm_config
+        ) as llm:
+            result = await stylize_report(final_result, llm)
 
         # Extract the base64-encoded ZIP bundle and install to target path.
         with tempfile.TemporaryDirectory(prefix="jiuwenclaw_report_") as temporary_dir:
