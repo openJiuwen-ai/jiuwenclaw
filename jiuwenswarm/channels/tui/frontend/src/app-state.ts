@@ -101,6 +101,7 @@ export interface SessionUsageSummary {
   total_input_tokens: number;
   total_output_tokens: number;
   total_tokens: number;
+  total_cost_usd: number;
   byModel: ModelUsageEntry[];
 }
 
@@ -368,6 +369,8 @@ export class CliPiAppState {
   private statusLineText: string | null = null;
   private statusLineTimer: ReturnType<typeof setInterval> | null = null;
   private usageByModel = new Map<string, ModelUsageEntry>();
+  /** Session-cumulative estimated cost; reset on `updateSession`. See `getUsageSummary`. */
+  private sessionTotalCostUsd = 0;
   private currentQueryUsage: CurrentQueryUsage = {
     input_tokens: 0,
     output_tokens: 0,
@@ -568,10 +571,10 @@ export class CliPiAppState {
     },
     tryAutoRestoreAfterCancel: () => this.tryAutoRestoreAfterCancel(),
     appendUsageSummary: (usage, model) => {
-      this.appendUsageDelta(usage, model);
+      this.appendUsageSummary(usage, model);
     },
     appendUsageMetadata: (usage) => {
-      this.updateCurrentUsageTokens(usage);
+      this.appendUsageMetadata(usage);
     },
     addWorkedForEntry: () => {
       if (this.turnStartedAt === null) return;
@@ -1228,15 +1231,26 @@ export class CliPiAppState {
       total_input_tokens: entries.reduce((s, e) => s + e.input_tokens, 0),
       total_output_tokens: entries.reduce((s, e) => s + e.output_tokens, 0),
       total_tokens: entries.reduce((s, e) => s + e.total_tokens, 0),
+      total_cost_usd: this.sessionTotalCostUsd,
       byModel: entries,
     };
+  }
+
+  /** Apply a `chat.usage_summary`-style usage/cost delta (same path as the event delegate). */
+  appendUsageSummary(usage: Record<string, unknown>, model?: string): void {
+    this.appendUsageDelta(usage, model);
+  }
+
+  /** Apply provider token metadata for the current query (same path as the event delegate). */
+  appendUsageMetadata(usage: Record<string, unknown>): void {
+    this.updateCurrentUsageTokens(usage);
   }
 
   private appendUsageDelta(usage: Record<string, unknown>, model?: string): void {
     const key = model || "unknown";
     const existing = this.usageByModel.get(key);
-    const inputDelta = this.safeTokenCount(usage.input_tokens);
-    const outputDelta = this.safeTokenCount(usage.output_tokens);
+    const inputDelta = this.safeNonNegativeNumber(usage.input_tokens);
+    const outputDelta = this.safeNonNegativeNumber(usage.output_tokens);
     const totalDelta =
       typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens)
         ? Math.max(0, usage.total_tokens)
@@ -1248,11 +1262,18 @@ export class CliPiAppState {
       total_tokens: (existing?.total_tokens ?? 0) + totalDelta,
     };
     this.usageByModel.set(key, entry);
+
+    // 会话累计费用：仅在 usage 事件携带有效（有限、非负）total_cost 时累加；
+    // 缺失或非法值视为零增量，不影响既有 token 累加（对齐 requirements.md SR-003）。
+    const costDelta = this.safeNonNegativeNumber(usage.total_cost);
+    if (costDelta > 0) {
+      this.sessionTotalCostUsd += costDelta;
+    }
   }
 
   private updateCurrentUsageTokens(usage: Record<string, unknown>): void {
-    const inputDelta = this.safeTokenCount(usage.input_tokens);
-    const outputDelta = this.safeTokenCount(usage.output_tokens);
+    const inputDelta = this.safeNonNegativeNumber(usage.input_tokens);
+    const outputDelta = this.safeNonNegativeNumber(usage.output_tokens);
     const totalDelta =
       typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens)
         ? Math.max(0, usage.total_tokens)
@@ -1267,7 +1288,8 @@ export class CliPiAppState {
     };
   }
 
-  private safeTokenCount(value: unknown): number {
+  /** 通用非负有限数字守卫；用于 token 计数与会话累计费用（cost）增量。 */
+  private safeNonNegativeNumber(value: unknown): number {
     return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
   }
 
@@ -1636,6 +1658,7 @@ export class CliPiAppState {
     this.sessionId = newId;
     this.lastVisibleUserRequest = null;
     this.usageByModel.clear();
+    this.sessionTotalCostUsd = 0;
     this.resetCurrentUsageTokens();
     this.workflowRuns = [];
     this.pendingHumanPrompts = new Map();
@@ -3099,6 +3122,12 @@ export class CliPiAppState {
     this.startStatusLinePoll();
   }
 
+  /** 读取 `outputStyle` 配置；缺省或非字符串值回落 "default"（statusline JSON 的 `output_style.name`）。 */
+  private getOutputStyleName(): string {
+    const configured = loadTuiConfig().outputStyle;
+    return typeof configured === "string" && configured.trim() ? configured : "default";
+  }
+
   private buildStatusLineJsonInput(): Record<string, unknown> {
     const snapshot = this.getSnapshot();
     const usage = this.getUsageSummary();
@@ -3131,6 +3160,12 @@ export class CliPiAppState {
         total_input_tokens: usage.total_input_tokens,
         total_output_tokens: usage.total_output_tokens,
         total_tokens: usage.total_tokens,
+      },
+      cost: {
+        total_cost_usd: usage.total_cost_usd,
+      },
+      output_style: {
+        name: this.getOutputStyleName(),
       },
       context_window: {
         context_window_size: snapshot.contextWindowLimit ?? 0,
@@ -3184,7 +3219,7 @@ export class CliPiAppState {
           },
         );
         // Pipe stdin so commands that read stdin directly (jq, python, etc.) work
-        // on Windows the same way they do on POSIX — aligning with Claude Code behavior.
+        // on Windows the same way they do on POSIX.
         child.stdin?.end(jsonInput);
       } else {
         // On POSIX, stdin piping works correctly in sh -c.

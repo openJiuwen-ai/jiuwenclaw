@@ -81,8 +81,9 @@ function showHelp(ctx: CommandContext): void {
     "  JSON is piped via stdin. On Windows, you can also use the file at $JIUWENSWARM_SL_FILE.",
     "",
     "Subcommands:",
-    "  /statusline                 — show current configuration",
-    "  /statusline get             — show current configuration",
+    "  /statusline                 — not configured: launch the setup agent;",
+    "                                already configured: show current configuration",
+    "  /statusline get             — always show current configuration (never launches setup)",
     "  /statusline set <command>   — set the shell command to run",
     "  /statusline padding <n>     — set left & right padding (0 or positive)",
     "  /statusline clear           — remove statusline configuration",
@@ -116,6 +117,7 @@ function showHelp(ctx: CommandContext): void {
     "  streaming_state, last_error, evolution_status,",
     "  active_subtask_count, todo_count, trusted_dirs,",
     "  usage.total_input_tokens, usage.total_output_tokens, usage.total_tokens,",
+    "  cost.total_cost_usd, output_style.name,",
     "  context_window.context_window_size, .used_percentage, .remaining_percentage",
     "",
     "Use /statusline json to see the actual values right now.",
@@ -162,6 +164,29 @@ function agentGenerate(ctx: CommandContext, prompt: string): void {
   }
 }
 
+/**
+ * Default description injected when the user runs bare `/statusline` while no
+ * statusline command is configured yet.
+ * Launches a setup agent instead of just showing "not configured" (Issue #648).
+ * Kept in sync with the backend field reference table in
+ * `_STATUSLINE_SETUP_PROMPT` (server/runtime/agent_adapter/interface.py).
+ */
+const DEFAULT_SETUP_DESCRIPTIONS: Record<"zh" | "en", string> = {
+  zh: "配置一个实用的默认状态栏，显示当前模式、模型、上下文占用百分比和会话费用（cost.total_cost_usd）",
+  en: "show mode, model, context usage percentage, and session cost (cost.total_cost_usd)",
+};
+
+function getDefaultSetupDescription(ctx: CommandContext): string {
+  return ctx.preferredLanguage === "zh"
+    ? DEFAULT_SETUP_DESCRIPTIONS.zh
+    : DEFAULT_SETUP_DESCRIPTIONS.en;
+}
+
+function isStatusLineConfigured(): boolean {
+  const sl = getStatusLineConfig();
+  return !!sl && sl.type === "command" && !!sl.command;
+}
+
 // Known subcommands that are handled locally (not sent to agent)
 const KNOWN_SUBCOMMANDS = ["set", "padding", "clear", "help", "json", "get"];
 
@@ -170,7 +195,7 @@ export function createStatusLineCommand(): SlashCommand {
     name: "statusline",
     altNames: ["sl"],
     description: "Configure custom status line footer",
-    usage: "/statusline <set|padding|clear|help|json> | /statusline <prompt>",
+    usage: "/statusline [get|set|padding|clear|help|json|<prompt>]",
     example: "/statusline set 'echo $mode | $model'  OR  /statusline show my PS1 config",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
@@ -233,8 +258,14 @@ export function createStatusLineCommand(): SlashCommand {
     action: (ctx, args) => {
       const trimmedArgs = args.trim();
       if (!trimmedArgs) {
-        // No args — show current config (per docs: "/statusline" shows current config)
-        showCurrentConfig(ctx);
+        // No args:
+        // - Not configured yet → launch the setup agent, instead of only showing "not configured" (Issue #648).
+        // - Already configured → show current config, same as `/statusline get`.
+        if (!isStatusLineConfigured()) {
+          agentGenerate(ctx, getDefaultSetupDescription(ctx));
+        } else {
+          showCurrentConfig(ctx);
+        }
         return;
       }
 

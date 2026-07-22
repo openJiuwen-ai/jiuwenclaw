@@ -480,8 +480,14 @@ _SKILL_COMMAND_REGEX = re.compile(
 
 # /statusline prompt-type 模式：
 # 用户输入 "/statusline <描述>" → 直接注入 statusline-setup 指令到 prompt
-# 排除已知子命令（set, padding, clear, help, json）——这些由 TUI 前端本地处理，
+# 排除已知子命令（set, padding, clear, help, json, get）——这些由 TUI 前端本地处理，
 # 但如果消息经过 Gateway 传到 AgentServer，后端也需要区分。
+#
+# 未配置无参分流（Issue #648）：TUI 前端在 statusLine 未配置时，对无参 "/statusline"
+# 本地注入一段默认描述（见 statusline.ts 的 DEFAULT_SETUP_DESCRIPTIONS），再以
+# "/statusline <默认描述>" 形式发出；因此仍会命中下方 _STATUSLINE_PROMPT_REGEX 的
+# 「有描述」分支，无需在此新增单独的“空参数”处理路径。已配置或 `/statusline get`
+# 时 TUI 只在本地展示当前配置，不会发出聊天消息，也不会进入这里。
 _STATUSLINE_KNOWN_SUBCOMMANDS = {"set", "padding", "clear", "help", "json", "get"}
 _STATUSLINE_PROMPT_REGEX = re.compile(
     r"^/statusline\s+(?P<description>.+)$"
@@ -552,6 +558,8 @@ The command receives this JSON via stdin every 2 seconds:
 | usage.total_input_tokens | Session total input tokens |
 | usage.total_output_tokens | Session total output tokens |
 | usage.total_tokens | Session total tokens |
+| cost.total_cost_usd | Session-cumulative estimated cost in USD (0 when no cost data yet) |
+| output_style.name | Current output style name (defaults to "default") |
 | context_window.context_window_size | Max context window tokens |
 | context_window.used_percentage | Context used percentage (0-100) |
 | context_window.remaining_percentage | Context remaining percentage (0-100) |
@@ -664,7 +672,11 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
             # 把用户的描述转化为让 Agent 自动配置状态栏的 prompt
             return _STATUSLINE_SETUP_PROMPT, description
 
-    # /statusline 无参数 → 不是 prompt 模式（TUI 应已拦截处理 help）
+    # /statusline 无参数（本函数收到的 query 本身就没有描述文本）→ 不是 prompt 模式。
+    # 注意：TUI 在 statusLine 未配置时会先在本地把无参 "/statusline" 转换为带默认
+    # 描述的 "/statusline <默认描述>" 再发送，所以这条分支只会在极少数直接绕过 TUI、
+    # 直连 Gateway 发送真正空参数的场景下命中；已配置或 `/statusline get` 时 TUI
+    # 只本地展示配置，不会发消息到这里。
     return "", query
 
 
@@ -704,7 +716,7 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
         skills_to_use = []
 
     if isinstance(content, str):
-        # /statusline <prompt> prompt-type 命令（仿 Claude Code，不调用 /skills）
+        # /statusline <prompt> 为 prompt-type 命令（直接注入 setup 指令，不调用 /skills）
         statusline_prompt, statusline_content = _handle_statusline_prompt_command(content)
         if statusline_prompt:
             content = statusline_content
@@ -762,7 +774,7 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
     if trusted_dirs:
         user_message_context["trusted_dirs"] = json.dumps(trusted_dirs, ensure_ascii=False)
 
-    # 仿 Claude Code statusline-setup: 把指令文本直接嵌入 prompt
+    # statusline-setup：把指令文本直接嵌入 prompt
     base_prompt = interaction_prefix + prompt + json.dumps(user_message_context, ensure_ascii=False)
     if statusline_prompt:
         if language == "zh":

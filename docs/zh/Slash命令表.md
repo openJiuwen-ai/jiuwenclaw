@@ -973,13 +973,14 @@ hooks:
 
 ### `/statusline`（TUI 状态栏配置）
 
-配置 TUI 底部状态栏，通过自定义 shell 命令动态显示会话信息（模式、模型、工作目录等），仿照 Claude Code 的 `/statusline` 实现。
+配置 TUI 底部状态栏，通过自定义 shell 命令动态显示会话信息（模式、模型、工作目录等）。
 
 #### 子命令
 
 | 命令 | 说明 |
 |---|---|
-| `/statusline` 或 `/statusline get` | 查看当前状态栏配置 |
+| `/statusline` | 未配置状态栏命令时，自动进入 setup agent 引导配置；已配置时查看当前状态栏配置 |
+| `/statusline get` | 始终查看当前状态栏配置，即使未配置也只展示状态，不会触发 setup agent |
 | `/statusline set <shell-command>` | 设置状态栏命令（命令输出将显示在 TUI 底部） |
 | `/statusline clear` | 清除状态栏配置（底部栏将不再显示） |
 | `/statusline help` | 显示使用指南（含写法模式、实用示例、字段列表） |
@@ -991,6 +992,7 @@ hooks:
 - **Shell 命令**：用户配置的 shell 命令每 2 秒自动执行一次，其 stdout 输出渲染为状态栏文字。
 - **JSON 输入**：每次执行时，系统将当前会话信息以 JSON 格式传入命令，用户可在命令中用 `jq` 等工具解析。POSIX（Linux/macOS）通过 stdin 管道传入；Windows 上因 MSYS2 管道继承限制，系统自动将 JSON 写入临时文件，并将命令中的 `$(cat)` 替换为 `$(cat "文件路径")`，用户无需修改命令格式。
 - **前置依赖**：需要 `jq`（https://stedolan.github.io/jq/）用于解析 JSON；Windows 用户还需将 Git Bash 的 `usr\bin` 目录加入系统 PATH（如 `E:\Git\usr\bin`）。
+- **未配置引导**：未配置状态栏时输入 `/statusline`（无参数），会自动向 Agent 发送一段默认描述，由 setup agent 生成并写入一条实用的默认状态栏命令（含模式、模型、上下文占用与会话费用），无需先执行 `/statusline set`。
 
 #### JSON 输入字段
 
@@ -1023,6 +1025,8 @@ hooks:
 | `usage.total_input_tokens` | 会话总输入 token |
 | `usage.total_output_tokens` | 会话总输出 token |
 | `usage.total_tokens` | 会话总 token |
+| `cost.total_cost_usd` | 会话累计估计费用；尚无计费数据时为 `0` |
+| `output_style.name` | 当前输出风格名称；未配置时为 `"default"`，可通过写入 `~/.jiuwenswarm-tui/config.json` 的 `outputStyle` 字段修改 |
 | `context_window.context_window_size` | 模型最大上下文窗口 token 数（如 200000） |
 | `context_window.used_percentage` | 上下文占用百分比（0-100） |
 | `context_window.remaining_percentage` | 上下文剩余百分比（0-100） |
@@ -1065,13 +1069,16 @@ hooks:
 | 总输入 token | `jq -r '.usage.total_input_tokens // 0'` |
 | 总输出 token | `jq -r '.usage.total_output_tokens // 0'` |
 | 总 token | `jq -r '.usage.total_tokens // 0'` |
+| 会话累计费用 | `jq -r '.cost.total_cost_usd // 0'` |
+| 输出风格名称 | `jq -r '.output_style.name // "default"'` |
 | 上下文窗口大小 | `jq -r '.context_window.context_window_size // 0'` |
 | 上下文占用 % | `jq -r '.context_window.used_percentage // 0'` |
 | 上下文剩余 % | `jq -r '.context_window.remaining_percentage // 0'` |
 
 #### 更多示例
 
-- `/statusline` — 查看当前配置
+- `/statusline` — 未配置时自动进入 setup agent 引导配置；已配置时查看当前配置
+- `/statusline get` — 始终查看当前配置，不会触发 setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — 只显示模型名
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — 显示是否在处理和模型名
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — 显示上下文窗口占用百分比

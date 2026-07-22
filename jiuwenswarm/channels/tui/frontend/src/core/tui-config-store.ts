@@ -22,6 +22,11 @@ export interface TuiConfig {
    */
   trustedDirs?: Record<string, string[]> | string[];
   statusLine?: StatusLineSetting;
+  /**
+   * Output style name surfaced to the statusline JSON as `output_style.name`
+   * Falls back to `"default"` when unset or not a string.
+   */
+  outputStyle?: string;
 }
 
 export function loadTuiConfig(): TuiConfig {

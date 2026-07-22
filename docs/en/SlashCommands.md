@@ -971,13 +971,14 @@ If StatusView is unavailable, the command falls back to inline key-value display
 
 ### `/statusline` (TUI Footer Status Bar)
 
-Configure the TUI footer status bar with a custom shell command that dynamically displays session info (mode, model, cwd, etc.), modeled after Claude Code's `/statusline` implementation.
+Configure the TUI footer status bar with a custom shell command that dynamically displays session info (mode, model, cwd, etc.).
 
 #### Subcommands
 
 | Command | Description |
 |---|---|
-| `/statusline` or `/statusline get` | View current status line configuration |
+| `/statusline` | When no statusline command is configured, automatically enter the setup agent guided flow; when already configured, show the current statusline configuration |
+| `/statusline get` | Always show the current statusline configuration; even when unconfigured, only shows status and never launches the setup agent |
 | `/statusline set <shell-command>` | Set the status line command (its output will appear in the TUI footer) |
 | `/statusline clear` | Remove the status line configuration (footer bar will hide) |
 | `/statusline help` | Show usage guide (writing patterns, practical examples, field list) |
@@ -989,6 +990,7 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 - **Shell command**: The configured shell command is automatically executed every 2 seconds; its stdout output is rendered as the status bar text.
 - **JSON input**: Each execution receives current session info as JSON, which can be parsed with `jq` or other tools. On POSIX (Linux/macOS), JSON is passed via stdin pipe; on Windows, due to MSYS2 pipe inheritance limitations, the system automatically writes JSON to a temp file and replaces `$(cat)` in the command with `$(cat "filepath")` — the user doesn't need to modify their command format.
 - **Prerequisites**: Requires `jq` (https://stedolan.github.io/jq/) for JSON parsing; Windows users also need to add Git Bash's `usr\bin` directory to the system PATH (e.g., `E:\Git\usr\bin`).
+- **Unconfigured setup**: Entering bare `/statusline` (no arguments) when no statusline is configured automatically sends a default description to the agent; the setup agent generates and writes a practical default statusline command (mode, model, context usage, and session cost) without requiring `/statusline set` first.
 
 #### JSON Input Fields
 
@@ -1021,6 +1023,8 @@ The command receives the following JSON data on each execution:
 | `usage.total_input_tokens` | Total input tokens for session |
 | `usage.total_output_tokens` | Total output tokens for session |
 | `usage.total_tokens` | Total tokens for session |
+| `cost.total_cost_usd` | Session-cumulative estimated cost; `0` when no billing data yet |
+| `output_style.name` | Current output style name; `"default"` when unset; configurable via the `outputStyle` field in `~/.jiuwenswarm-tui/config.json` |
 | `context_window.context_window_size` | Model max context window tokens (e.g. 200000) |
 | `context_window.used_percentage` | Context occupancy percentage (0-100) |
 | `context_window.remaining_percentage` | Context remaining percentage (0-100) |
@@ -1063,13 +1067,16 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 | Total input tokens | `jq -r '.usage.total_input_tokens // 0'` |
 | Total output tokens | `jq -r '.usage.total_output_tokens // 0'` |
 | Total tokens | `jq -r '.usage.total_tokens // 0'` |
+| Session cumulative cost | `jq -r '.cost.total_cost_usd // 0'` |
+| Output style name | `jq -r '.output_style.name // "default"'` |
 | Context window size | `jq -r '.context_window.context_window_size // 0'` |
 | Context used % | `jq -r '.context_window.used_percentage // 0'` |
 | Context remaining % | `jq -r '.context_window.remaining_percentage // 0'` |
 
 #### More Examples
 
-- `/statusline` — View current configuration
+- `/statusline` — When unconfigured, enter the setup agent guided flow; when configured, show current configuration
+- `/statusline get` — Always show current configuration; never launches the setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — Show model name only
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — Show processing state and model
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — Show context window occupancy with percentage bar

@@ -10,10 +10,9 @@ Tests cover:
   injection, normal messages unaffected)
 - _STATUSLINE_SETUP_PROMPT: hardcoded prompt content validation
 
-This follows Claude Code's pattern: /statusline is a prompt-type
-command that injects a hardcoded statusline-setup instruction text
-directly into the user prompt — no /skills command or SkillUseRail
-involved.
+/statusline is a prompt-type command that injects a hardcoded
+statusline-setup instruction text directly into the user prompt —
+no /skills command or SkillUseRail involved.
 """
 
 from __future__ import annotations
@@ -282,6 +281,16 @@ class TestStatuslineSetupPrompt:
     def test_contains_auto_update_note():
         assert "2 seconds" in _STATUSLINE_SETUP_PROMPT
 
+    @staticmethod
+    def test_contains_cost_field_reference():
+        """Issue #695: field table must reference the new cost/output_style
+        JSON paths so the setup agent can wire them into generated commands."""
+        assert "cost.total_cost_usd" in _STATUSLINE_SETUP_PROMPT
+
+    @staticmethod
+    def test_contains_output_style_field_reference():
+        assert "output_style.name" in _STATUSLINE_SETUP_PROMPT
+
 
 # ── build_user_prompt (full pipeline) ───────────────────────────
 
@@ -415,7 +424,7 @@ class TestBuildUserPromptStatusline:
 
     @staticmethod
     def test_no_skill_file_dependency():
-        """Injection from hardcoded string, not SKILL.md — aligned with Claude Code."""
+        """Injection from hardcoded string, not SKILL.md."""
         prompt = build_user_prompt(
             "/statusline show model",
             files={},
@@ -428,6 +437,83 @@ class TestBuildUserPromptStatusline:
         assert "SKILL.md" not in prompt
         # Should use the hardcoded prompt text
         assert _STATUSLINE_SETUP_PROMPT in prompt
+
+
+# ── Issue #648 未配置无参默认描述路由 ───────────────────────────
+#
+# TUI 在 statusLine 未配置且用户无参执行 "/statusline" 时，会在本地把它转换
+# 为 "/statusline <默认描述>"（见 statusline.ts 的 DEFAULT_SETUP_DESCRIPTIONS）
+# 再发送。这里用与前端完全一致的默认描述文案，验证后端仍按既有
+# "/statusline <描述>" 规则识别并注入 setup 指令，无需新增 API（test_plan
+# 2.7、4.2）。
+
+
+_DEFAULT_SETUP_DESCRIPTION_ZH = (
+    "配置一个实用的默认状态栏，显示当前模式、模型、"
+    "上下文占用百分比和会话费用（cost.total_cost_usd）"
+)
+_DEFAULT_SETUP_DESCRIPTION_EN = (
+    "show mode, model, context usage percentage, "
+    "and session cost (cost.total_cost_usd)"
+)
+
+
+class TestDefaultSetupDescriptionRouting:
+    """未配置无参 /statusline 的默认描述仍应命中既有 prompt 注入路径。"""
+
+    @staticmethod
+    def test_zh_default_description_injects_setup_prompt():
+        prompt_text, content = _handle_statusline_prompt_command(
+            f"/statusline {_DEFAULT_SETUP_DESCRIPTION_ZH}"
+        )
+        assert prompt_text == _STATUSLINE_SETUP_PROMPT
+        assert content == _DEFAULT_SETUP_DESCRIPTION_ZH
+
+    @staticmethod
+    def test_en_default_description_injects_setup_prompt():
+        prompt_text, content = _handle_statusline_prompt_command(
+            f"/statusline {_DEFAULT_SETUP_DESCRIPTION_EN}"
+        )
+        assert prompt_text == _STATUSLINE_SETUP_PROMPT
+        assert content == _DEFAULT_SETUP_DESCRIPTION_EN
+
+    @staticmethod
+    def test_default_description_first_word_not_a_known_subcommand():
+        """防回归：默认描述首词不得意外撞上已知子命令而被排除注入。"""
+        for description in (
+            _DEFAULT_SETUP_DESCRIPTION_ZH,
+            _DEFAULT_SETUP_DESCRIPTION_EN,
+        ):
+            first_word = description.split()[0]
+            assert first_word not in _STATUSLINE_KNOWN_SUBCOMMANDS
+
+    @staticmethod
+    def test_build_user_prompt_with_zh_default_description():
+        """端到端（test_plan 4.2）：默认描述经 build_user_prompt 完整注入。"""
+        prompt = build_user_prompt(
+            f"/statusline {_DEFAULT_SETUP_DESCRIPTION_ZH}",
+            files={},
+            channel="tui",
+            language="zh",
+        )
+        assert "status line setup agent" in prompt
+        assert "cost.total_cost_usd" in prompt
+        prompt_data = _extract_json_from_prompt(prompt)
+        assert _DEFAULT_SETUP_DESCRIPTION_ZH in prompt_data.get("content", "")
+        assert "/statusline" not in prompt_data.get("content", "")
+
+    @staticmethod
+    def test_build_user_prompt_with_en_default_description():
+        prompt = build_user_prompt(
+            f"/statusline {_DEFAULT_SETUP_DESCRIPTION_EN}",
+            files={},
+            channel="tui",
+            language="en",
+        )
+        assert "status line setup agent" in prompt
+        assert "cost.total_cost_usd" in prompt
+        prompt_data = _extract_json_from_prompt(prompt)
+        assert _DEFAULT_SETUP_DESCRIPTION_EN in prompt_data.get("content", "")
 
 
 # ── Known subcommands constant ──────────────────────────────────
