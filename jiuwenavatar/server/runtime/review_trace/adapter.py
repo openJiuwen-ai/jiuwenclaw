@@ -671,7 +671,6 @@ def _parse_numbered_json(content: str) -> Any:
 
     if not isinstance(content, str) or not content.strip():
         return None
-    import re
 
     cleaned_lines: list[str] = []
     for line in content.split("\n"):
