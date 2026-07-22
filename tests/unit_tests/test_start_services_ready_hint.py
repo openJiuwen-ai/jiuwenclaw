@@ -65,6 +65,19 @@ def test_resolve_runtime_ports_invalid_env_keeps_default(monkeypatch: pytest.Mon
     assert ports["gateway"] == 19001
 
 
+def test_resolve_runtime_ports_out_of_range_env_keeps_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """PR #3936 review: reject ports outside 1–65535 to avoid OverflowError."""
+    monkeypatch.setenv("FRONTEND_PORT", "-1")
+    monkeypatch.setenv("AGENT_SERVER_PORT", "99999")
+    monkeypatch.setenv("WEB_PORT", "0")
+    ports = _resolve_runtime_ports()
+    assert ports["frontend"] == 5173
+    assert ports["agent_server"] == 18092
+    assert ports["web"] == 19000
+
+
 def test_wait_for_services_ready_prints_access_url_for_web_dev(caplog: pytest.LogCaptureFixture):
     frontend = MagicMock()
     frontend.poll.return_value = None
@@ -153,6 +166,43 @@ def test_port_open_tries_ipv6_when_ipv4_fails():
 
     assert ("127.0.0.1", 5173) in calls
     assert ("::1", 5173) in calls
+
+
+def test_port_open_falls_back_when_ipv6_unavailable(caplog: pytest.LogCaptureFixture):
+    """PR #3936 P3: IPv6 socket creation failure must not block IPv4 success."""
+    import socket
+
+    frontend = MagicMock()
+    frontend.poll.return_value = None
+    ports = {"frontend": 5173}
+    processes = {"web-dev": frontend}
+
+    class _Sock:
+        def __init__(self, family, *_a, **_k):
+            if family == socket.AF_INET6:
+                raise OSError("Address family not supported")
+            self.family = family
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def settimeout(self, _t):
+            return None
+
+        def connect(self, addr):
+            host, _port = addr[0], addr[1]
+            if host == "127.0.0.1":
+                return None
+            raise OSError("unexpected")
+
+    with patch("socket.socket", side_effect=lambda *a, **k: _Sock(*a, **k)):
+        with caplog.at_level(logging.INFO):
+            _wait_for_services_ready(ports, processes, overall_timeout=2.0)
+
+    assert "✓ Web UI" in "\n".join(caplog.messages)
 
 
 def test_web_ui_banner_prints_before_backends_ready(caplog: pytest.LogCaptureFixture):

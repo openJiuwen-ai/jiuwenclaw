@@ -343,7 +343,10 @@ def _resolve_runtime_ports() -> dict[str, int]:
         if not raw:
             continue
         try:
-            ports[port_type] = int(raw)
+            port_val = int(raw)
+            if not (1 <= port_val <= 65535):
+                raise ValueError("port out of range")
+            ports[port_type] = port_val
         except ValueError:
             logging.info(
                 "[start_services] ignore invalid %s=%r, keep port %s",
@@ -404,13 +407,17 @@ def _wait_for_services_ready(
     def _port_open(port: int) -> bool:
         """Return True if port accepts TCP on IPv4 or IPv6 localhost."""
         # Vite on Windows often binds ::1 only; backend services bind 127.0.0.1.
+        if not (1 <= int(port) <= 65535):
+            return False
         for host, family in (("127.0.0.1", socket.AF_INET), ("::1", socket.AF_INET6)):
             try:
                 with socket.socket(family, socket.SOCK_STREAM) as sock:
                     sock.settimeout(0.4)
                     sock.connect((host, port))
                     return True
-            except OSError:
+            except (OSError, OverflowError, ValueError):
+                # OverflowError: CPython rejects ports outside 0–65535.
+                # OSError: refused / unreachable / IPv6 unavailable on host.
                 continue
         return False
 
