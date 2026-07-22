@@ -1199,6 +1199,8 @@ class CronSchedulerService:
                 "run_id": state.run_id,
                 "push_at": state.push_at_iso,
                 "wake_at": state.wake_at_iso,
+                "exec_channel_id": state.exec_channel_id,
+                "exec_session_id": state.exec_session_id,
                 "is_placeholder": bool(is_placeholder),
                 "status": state.status,
             },
