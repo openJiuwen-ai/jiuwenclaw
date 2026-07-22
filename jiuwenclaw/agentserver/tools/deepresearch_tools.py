@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import uuid
 import zipfile
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -25,7 +26,7 @@ from jiuwenclaw.config import get_config
 
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
-_REPORT_STYLE_LLM_INIT_LOCK = asyncio.Lock()
+_REPORT_STYLE_LLM_INIT_LOCK = threading.Lock()
 
 # 使用 contextvars
 _deepresearch_route_ctx: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
@@ -222,7 +223,22 @@ def _build_styled_export_llm_config() -> dict:
 async def _scoped_report_style_llm_context(context_factory, llm_config):
     """Scope the SDK's env-based TLS setting to runtime LLM initialization."""
     async with AsyncExitStack() as stack:
-        async with _REPORT_STYLE_LLM_INIT_LOCK:
+        acquire_task = asyncio.create_task(
+            asyncio.to_thread(_REPORT_STYLE_LLM_INIT_LOCK.acquire)
+        )
+        try:
+            await asyncio.shield(acquire_task)
+        except asyncio.CancelledError:
+            while not acquire_task.done():
+                try:
+                    await asyncio.shield(acquire_task)
+                except asyncio.CancelledError:
+                    continue
+            if acquire_task.result():
+                _REPORT_STYLE_LLM_INIT_LOCK.release()
+            raise
+
+        try:
             previous_ssl_verify = os.environ.get("LLM_SSL_VERIFY")
             resolved_ssl_verify = _build_bridge_env(os.environ)["LLM_SSL_VERIFY"]
             os.environ["LLM_SSL_VERIFY"] = resolved_ssl_verify
@@ -233,6 +249,8 @@ async def _scoped_report_style_llm_context(context_factory, llm_config):
                     os.environ.pop("LLM_SSL_VERIFY", None)
                 else:
                     os.environ["LLM_SSL_VERIFY"] = previous_ssl_verify
+        finally:
+            _REPORT_STYLE_LLM_INIT_LOCK.release()
 
         yield llm
 

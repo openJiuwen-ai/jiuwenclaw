@@ -213,6 +213,72 @@ async def test_styled_report_llm_context_uses_bridge_tls_only_for_entry(monkeypa
     assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
 
 
+def test_styled_report_llm_context_lock_works_across_event_loops(monkeypatch):
+    monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
+    monkeypatch.setattr(
+        dt,
+        "_build_bridge_env",
+        lambda _source: {"LLM_SSL_VERIFY": "resolved-by-bridge"},
+    )
+    observed = []
+
+    @asynccontextmanager
+    async def fake_context_factory(_llm_config):
+        observed.append(("entry", os.environ.get("LLM_SSL_VERIFY")))
+        await asyncio.sleep(0.01)
+        yield "runtime-llm"
+
+    async def use_context():
+        async with dt._scoped_report_style_llm_context(
+            fake_context_factory, {"general": {}}
+        ):
+            observed.append(("yielded", os.environ.get("LLM_SSL_VERIFY")))
+
+    async def run_contending_pair():
+        await asyncio.gather(use_context(), use_context())
+
+    previous_loop = asyncio.get_event_loop_policy().get_event_loop()
+    try:
+        asyncio.run(run_contending_pair())
+        assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
+        asyncio.run(run_contending_pair())
+    finally:
+        asyncio.set_event_loop(previous_loop)
+
+    assert observed == [
+        ("entry", "resolved-by-bridge"),
+        ("yielded", "ambient"),
+        ("entry", "resolved-by-bridge"),
+        ("yielded", "ambient"),
+        ("entry", "resolved-by-bridge"),
+        ("yielded", "ambient"),
+        ("entry", "resolved-by-bridge"),
+        ("yielded", "ambient"),
+    ]
+    assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
+
+
+@pytest.mark.asyncio
+async def test_styled_report_llm_context_restores_unset_tls_after_entry_failure(
+    monkeypatch,
+):
+    monkeypatch.delenv("LLM_SSL_VERIFY", raising=False)
+
+    @asynccontextmanager
+    async def failing_context_factory(_llm_config):
+        assert os.environ.get("LLM_SSL_VERIFY") == "false"
+        raise RuntimeError("context entry failed")
+        yield  # pragma: no cover
+
+    with pytest.raises(RuntimeError, match="context entry failed"):
+        async with dt._scoped_report_style_llm_context(
+            failing_context_factory, {"general": {}}
+        ):
+            pass
+
+    assert "LLM_SSL_VERIFY" not in os.environ
+
+
 def _patch_env(tool_lines):
     """统一 patch:Python/script 解析、route(空,触发 _send 早退)、subprocess、transport。"""
     return [
