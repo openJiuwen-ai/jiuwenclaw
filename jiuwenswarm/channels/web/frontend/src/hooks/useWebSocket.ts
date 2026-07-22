@@ -760,6 +760,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const onErrorRef = useRef(onError);
   const onConfigChangedRef = useRef(onConfigChanged);
   const sendMessageRef = useRef<typeof sendMessage>();
+  // 标记本地 sendMessage 刚发起但后端尚未确认 processing_status=true 的 session。
+  // 用于区分"旧任务被打断的 false"和"任务正常结束的 false"——前者应跳过自动排空，
+  // 因为新任务即将由后端启动（会紧跟一条 processing_status=true）。
+  const localSendPendingRef = useRef<Set<string>>(new Set());
   const recentEventRef = useRef<Map<string, number>>(new Map());
   const teamToolCallMemberRef = useRef<Map<string, string>>(new Map());
   const shutdownMemberToolCallRef = useRef<Map<string, string>>(new Map());
@@ -1242,6 +1246,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       useChatStore.getState().setProcessing(sessionId, true);
       useChatStore.getState().setThinking(sessionId, true);
+      // 标记本地发起的发送，用于 processing_status 处理器区分"旧任务被打断"
+      // 和"任务正常结束"——前者跳过自动排空
+      localSendPendingRef.current.add(sessionId);
 
       // 正常调用接口
       const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
@@ -1287,6 +1294,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         return true;
       } catch (error) {
         const webError = error as WebError;
+        localSendPendingRef.current.delete(sessionId);
         setConnectionStats({ lastError: webError.message });
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
@@ -2480,6 +2488,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 加载历史消息时忽略处理状态更新
         if (useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) return;
         const isProcessingNow = Boolean(payload.is_processing);
+        // 后端确认 processing=true 时清除本地发送标记——新任务已由后端接管
+        if (isProcessingNow) {
+          localSendPendingRef.current.delete(sessionId);
+        }
         // 如果 interrupt_result 指示任务已完成，忽略 processing_status=true
         const interruptResult = useChatStore.getState().getRuntime(sessionId)?.interruptResult;
         const resumeAlreadyCompleted = isCompletedResumeResult(interruptResult);
@@ -2506,7 +2518,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const runtime = useChatStore.getState().getRuntime(sessionId);
           const taskQueue = runtime?.taskQueue ?? [];
           const queuePaused = runtime?.queuePaused ?? false;
+          // 如果是本地 sendMessage 触发的打断（如队列"发送"按钮立即发送），
+          // 跳过自动排空——后端即将发送 processing_status=true 启动新任务，
+          // 不应在此刻再发队列首条导致两条消息同时到达后端
+          const skipAutoDrain = localSendPendingRef.current.has(sessionId);
+          if (skipAutoDrain) {
+            localSendPendingRef.current.delete(sessionId);
+          }
           if (
+            !skipAutoDrain &&
             currentMode === 'agent' &&
             !resumeAlreadyCompleted &&
             !queuePaused &&
