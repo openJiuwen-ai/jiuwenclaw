@@ -613,7 +613,18 @@ def _apply_file_write_activity(activity: dict[str, Any], args: Any) -> None:
             states[key] = current if isinstance(current, str) else ""
             return
         if old_string == "" and new_string:
-            # Append-style edit: only valid against empty/None content.
+            # An empty old_string creates a new file against empty/None content.
+            # openjiuwen's edit_file rejects "file exists with empty old_string",
+            # so when current content already exists we must NOT overwrite it —
+            # record the limitation and keep the current state instead.
+            if current:
+                activity.setdefault("edit_limitations", []).append(
+                    {
+                        "file": file_path,
+                        "reason": "empty_old_string_on_nonempty_content",
+                    }
+                )
+                return
             updated = new_string
         elif old_string in current:
             updated = current.replace(old_string, new_string, 1)

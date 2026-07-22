@@ -417,3 +417,45 @@ def test_kindless_tool_step_with_tool_name_is_collected() -> None:
     tool_names = [c["tool_name"] for c in calls]
     assert tool_names == ["bash", "powershell"]
     assert all(c.get("_source") == "top_level_step" for c in calls)
+
+
+def test_empty_old_string_does_not_overwrite_existing_content() -> None:
+    """An edit_file with old_string="" must not overwrite existing content.
+
+    openjiuwen's edit_file rejects "file exists with empty old_string"; the
+    adapter's virtual file state must mirror that: when current content
+    already exists, the edit is recorded as a limitation and the current state
+    is kept. Previously the code unconditionally set updated = new_string,
+    clobbering real content (e.g. an accumulated result.json) and corrupting
+    the downstream review_result reload.
+    """
+    from jiuwenavatar.server.runtime.review_trace.adapter import _apply_file_write_activity
+
+    activity = {"file_states": {"result.json": '{"findings": {"must_fix": [{"id": "MF-1"}]}}'}, "edit_limitations": []}
+    _apply_file_write_activity(
+        activity,
+        {"file_path": "result.json", "old_string": "", "new_string": "clobber"},
+    )
+    # Current content preserved, not overwritten by "clobber".
+    assert activity["file_states"]["result.json"] == '{"findings": {"must_fix": [{"id": "MF-1"}]}}'
+    # Limitation recorded.
+    assert any(
+        lim["reason"] == "empty_old_string_on_nonempty_content" for lim in activity["edit_limitations"]
+    )
+
+
+def test_empty_old_string_creates_content_when_empty() -> None:
+    """An edit_file with old_string="" against empty content creates the file.
+
+    This is the valid half of the empty-old_string path (new file creation),
+    and must keep working after the non-empty guard is added.
+    """
+    from jiuwenavatar.server.runtime.review_trace.adapter import _apply_file_write_activity
+
+    activity = {"file_states": {}, "edit_limitations": []}
+    _apply_file_write_activity(
+        activity,
+        {"file_path": "result.json", "old_string": "", "new_string": '{"findings": {}}'},
+    )
+    assert activity["file_states"]["result.json"] == '{"findings": {}}'
+    assert activity["edit_limitations"] == []
