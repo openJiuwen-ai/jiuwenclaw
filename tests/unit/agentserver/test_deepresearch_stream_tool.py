@@ -697,6 +697,52 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume():
 
 
 @pytest.mark.asyncio
+async def test_outline_titles_are_reused_when_workflow_continues_without_interrupt():
+    outline = json.dumps({
+        "title": "AI Agent 入门",
+        "sections": [
+            {"id": "1", "title": "AI Agent 概念定义与核心区分"},
+            {"id": "2", "title": "AI Agent 技术架构与工作原理"},
+        ],
+    }, ensure_ascii=False)
+    lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({"agent": "outline", "content": outline}),
+        json.dumps({
+            "agent": "plan_reasoning",
+            "section_idx": "2",
+            "event": "message",
+            "content": "章节规划过程",
+        }),
+        json.dumps({"__deepsearch_status__": "error", "conversation_id": "C1",
+                    "error": "stop after section evidence"}),
+    ]
+    push = AsyncMock()
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "R1", "channel_id": "CH1", "session_id": "S1"
+         }), \
+         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+             return_value=push,
+         ):
+        await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
+
+    section_payloads = [
+        call.args[0]["payload"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("stream_source_id") == "deepresearch_section_2"
+    ]
+    assert section_payloads
+    assert all(
+        payload["task_content"] == "AI Agent 技术架构与工作原理"
+        for payload in section_payloads
+    )
+
+
+@pytest.mark.asyncio
 async def test_interrupted_marker_waits_for_runner_to_exit_naturally():
     proc = _RunningProc([
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),

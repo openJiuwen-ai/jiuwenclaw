@@ -928,6 +928,16 @@ async def deepresearch_stream(
                 }
                 break
             # progress chunk
+            if chunk.get("agent") == "outline":
+                outline_content = chunk.get("content")
+                if outline_content:
+                    section_titles = _get_task_manager_cls()._extract_section_titles(
+                        outline_content if isinstance(outline_content, str)
+                        else json.dumps(outline_content, ensure_ascii=False)
+                    )
+                    if section_titles:
+                        state.section_titles.update(section_titles)
+                        state.authoritative_section_indices.update(section_titles)
             for payload in route_chunk(chunk, state):
                 await _send(payload)
     finally:
