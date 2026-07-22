@@ -1144,6 +1144,7 @@ class SkillManager:
                             "summary": item.get("summary", ""),
                             "version": item.get("version", ""),
                             "updated_at": item.get("updatedAt", 0),
+                            "owner_handle": item.get("ownerHandle", ""),
                         }
                     )
 
@@ -1174,6 +1175,7 @@ class SkillManager:
 
         params:
             slug: skill slug (必需)
+            owner_handle: 发布者标识 (可选，slug 有多个发布者时必需)
             version: 版本号 (可选，默认 latest)
             tag: 标签 (可选，如 latest)
             force: 强制覆盖 (可选，默认 False)
@@ -1195,6 +1197,7 @@ class SkillManager:
                 "detail_key": "skills.clawhub.errors.tokenNotConfigured",
             }
 
+        owner_handle = str(params.get("owner_handle") or "").strip()
         version = params.get("version")
         tag = params.get("tag")
         force = bool(params.get("force", False))
@@ -1217,6 +1220,8 @@ class SkillManager:
                 headers["Authorization"] = f"Bearer {token}"
 
             download_params = {"slug": slug}
+            if owner_handle:
+                download_params["ownerHandle"] = owner_handle
             if version:
                 download_params["version"] = version
             if tag:

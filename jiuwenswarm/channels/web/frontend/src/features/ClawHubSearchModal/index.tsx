@@ -40,6 +40,7 @@ type ClawHubSkillItem = {
   summary: string;
   version: string;
   updated_at: number;
+  owner_handle: string;
 };
 
 interface ClawHubSearchModalProps {
@@ -256,7 +257,7 @@ export function ClawHubSearchModal({
         skill?: { name: string };
       }>(
         "skills.clawhub.download",
-        withSession({ slug, force: forceOverwrite })
+        withSession({ slug, owner_handle: item.owner_handle, force: forceOverwrite })
       );
       if (!data.success) {
         const message = data.detail_key
