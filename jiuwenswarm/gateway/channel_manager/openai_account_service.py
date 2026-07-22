@@ -183,7 +183,8 @@ class OpenAIAccountService:
             return None
         return max(self._jobs.items(), key=lambda item: item[1].created_at)
 
-    def _status_payload(self, manager: OpenAIAccountAuthManager) -> dict[str, Any]:
+    @staticmethod
+    def _status_payload(manager: OpenAIAccountAuthManager) -> dict[str, Any]:
         status = manager.status()
         return {
             "authenticated": status.authenticated,

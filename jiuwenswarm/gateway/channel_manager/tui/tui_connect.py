@@ -146,14 +146,13 @@ def _validate_model_client_config(
 ) -> None:
     """Validate stored model settings with agent-core's provider contract."""
     resolved = resolve_env_vars(dict(client_cfg))
-    missing = [
-        display
-        for field, display in (
-            ("model_name", "model_name"),
-            ("client_provider", "model_provider"),
-        )
-        if not str(resolved.get(field) or "").strip()
-    ]
+    missing = []
+    for field, display in (
+        ("model_name", "model_name"),
+        ("client_provider", "model_provider"),
+    ):
+        if not str(resolved.get(field) or "").strip():
+            missing.append(display)
     if missing:
         raise _ModelOpError(
             f"Model '{model_label}' missing required config: {', '.join(missing)}"
