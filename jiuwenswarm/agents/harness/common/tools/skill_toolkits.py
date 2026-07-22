@@ -391,7 +391,9 @@ class SkillToolkit:
                 clawhub_owner = ""
                 if "/" in target:
                     clawhub_owner, _, clawhub_slug = target.partition("/")
-                payload = await self._manager.handle_skills_clawhub_download({"slug": clawhub_slug, "owner_handle": clawhub_owner, "force": False})
+                payload = await self._manager.handle_skills_clawhub_download(
+                    {"slug": clawhub_slug, "owner_handle": clawhub_owner, "force": False}
+                )
         except Exception as exc:  # noqa: BLE001
             logger.exception("install_skill failed")
             return {
