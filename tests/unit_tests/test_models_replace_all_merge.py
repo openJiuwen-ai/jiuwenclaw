@@ -83,12 +83,16 @@ def test_is_env_var_placeholder():
 
 
 def test_first_time_setup_materializes_client_provider_placeholder():
-    """Persist client_provider literally when YAML still uses ${MODEL_PROVIDER}."""
+    """Persist client_provider literally when YAML still uses ${MODEL_PROVIDER}.
+
+    Mirrors the shipped template: model_name is a bare ${MODEL_NAME} (no inline
+    default), so on a first-time setup with MODEL_NAME unset it resolves to "".
+    """
     raw = {
         "model_client_config": {
             "api_base": "${API_BASE}",
             "api_key": "${API_KEY}",
-            "model_name": "${MODEL_NAME:-xiaomi/mimo-v2-omni}",
+            "model_name": "${MODEL_NAME}",
             "client_provider": "${MODEL_PROVIDER}",
             "timeout": 1800,
             "verify_ssl": False,
@@ -100,7 +104,7 @@ def test_first_time_setup_materializes_client_provider_placeholder():
         "model_client_config": {
             "api_base": "https://api.example.com",
             "api_key": "sk-template",
-            "model_name": "xiaomi/mimo-v2-omni",
+            "model_name": "",
             "client_provider": "OpenAI",
             "timeout": 1800,
             "verify_ssl": False,
