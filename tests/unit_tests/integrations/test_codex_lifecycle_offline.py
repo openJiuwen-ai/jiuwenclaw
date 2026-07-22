@@ -258,7 +258,10 @@ time.sleep(60)
     monkeypatch.setattr(
         "jiuwenswarm.integrations.ai4research_subscription.codex_binary."
         "VERSION_VERIFY_TIMEOUT_SECONDS",
-        0.1 if mode == "timeout" else 10.0,
+        # Keep the timeout far below the production 10-second bound, while
+        # allowing the real parent and SIGTERM-ignoring child to reach their
+        # explicit ready barrier under full-suite scheduler load.
+        1.0 if mode == "timeout" else 10.0,
     )
     monkeypatch.setattr(
         "jiuwenswarm.integrations.ai4research_subscription.codex_binary."
