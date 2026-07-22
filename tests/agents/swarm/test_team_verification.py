@@ -513,3 +513,69 @@ def test_workflow_state_records_verification_fields() -> None:
     assert agent.verification_reason == "all criteria met"
     # Serialization surfaces the new fields.
     assert agent.to_dict()["verification_status"] == "passed"
+
+
+def test_verification_update_on_already_terminal_agent_emits_delta() -> None:
+    """A verification-only update to an already-completed agent must not be lost.
+
+    Regression: when the agent is already terminal and no outcome/error needs
+    backfilling, ``_finalize_agent`` used to return ``None`` even though it had
+    mutated the verification fields, silently dropping the delta.
+    """
+    run = WorkflowRunState()
+    run.apply(WorkflowProgress(kind="workflow_started", run_id="r1", workflow_name="wf"))
+    run.apply(
+        WorkflowProgress(
+            kind="agent_started",
+            phase="p1",
+            label="researcher",
+            agent_id="researcher-1",
+        )
+    )
+    # First completion marks the agent terminal with an outcome (no verdict yet).
+    run.apply(
+        WorkflowProgress(
+            kind="agent_completed",
+            phase="p1",
+            label="researcher",
+            agent_id="researcher-1",
+            outcome="done",
+        )
+    )
+    agent = run.phases[0].agents[0]
+    assert agent.status == "completed"
+    assert agent.verification_status is None
+
+    # A later verification-only update (same outcome, nothing to backfill).
+    delta = run.apply(
+        WorkflowProgress(
+            kind="agent_completed",
+            phase="p1",
+            label="researcher",
+            agent_id="researcher-1",
+            outcome="done",
+            verification_status="failed",
+            verification_reason="missing citations",
+        )
+    )
+
+    # The verdict is recorded AND a delta is emitted (not silently dropped).
+    assert agent.verification_status == "failed"
+    assert agent.verification_reason == "missing citations"
+    assert delta is not None
+    # Counters are unaffected by a verification-only update.
+    assert run.phases[0].completed_agent_count == 1
+
+    # A redundant repeat (no real change) should not emit a delta.
+    repeat = run.apply(
+        WorkflowProgress(
+            kind="agent_completed",
+            phase="p1",
+            label="researcher",
+            agent_id="researcher-1",
+            outcome="done",
+            verification_status="failed",
+            verification_reason="missing citations",
+        )
+    )
+    assert repeat is None
