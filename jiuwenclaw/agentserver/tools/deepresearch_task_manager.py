@@ -220,16 +220,21 @@ class DeepResearchTaskManager:
     ) -> tuple[dict, dict]:
         """Build isolated LLM configs for the workflow and report styling."""
 
-        def build_config() -> dict:
+        def build_config(model_type: str) -> dict:
             return {
                 "model_name": config["LLM_MODEL_NAME"],
-                "model_type": config["LLM_MODEL_TYPE"],
+                "model_type": model_type,
                 "base_url": config["LLM_BASE_URL"],
                 "extension": extension,
                 "api_key": bytearray(config["LLM_API_KEY"], encoding="utf-8"),
             }
 
-        return build_config(), build_config()
+        workflow_model_type = config["LLM_MODEL_TYPE"]
+        report_style_model_type = workflow_model_type.strip().lower()
+        if report_style_model_type not in ("openai", "siliconflow"):
+            report_style_model_type = "openai"
+
+        return build_config(workflow_model_type), build_config(report_style_model_type)
 
     @staticmethod
     def _load_config(env: Mapping[str, str] | None = None) -> Dict[str, str]:

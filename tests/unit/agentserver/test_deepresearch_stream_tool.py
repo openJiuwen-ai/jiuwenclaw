@@ -1148,6 +1148,26 @@ def test_build_bridge_env_reuses_run_task_petal_fallback():
     assert env["WEB_SEARCH_URL"] == "https://client-claw.example/v1/ai-tools/web-search"
 
 
+def test_general_llm_configs_normalize_only_styled_report_provider():
+    config = {
+        "LLM_MODEL_NAME": "qwen-plus",
+        "LLM_MODEL_TYPE": "qwen",
+        "LLM_BASE_URL": "https://dashscope.example/compatible-mode/v1",
+        "LLM_API_KEY": "sk-test",
+    }
+    extension = {"extra_body": {"thinking": {"type": "disabled"}}}
+
+    workflow_config, report_style_config = (
+        dt._get_task_manager_cls()._build_general_llm_configs(config, extension)
+    )
+
+    assert workflow_config["model_type"] == "qwen"
+    assert report_style_config["model_type"] == "openai"
+    assert workflow_config is not report_style_config
+    assert workflow_config["api_key"] is not report_style_config["api_key"]
+    assert workflow_config["api_key"] == report_style_config["api_key"] == bytearray(b"sk-test")
+
+
 def test_build_bridge_env_empty_value_not_set():
     # 无 API_KEY → 不设 LLM_API_KEY,让 .env 兜底
     env = dt._build_bridge_env({"MODEL_NAME": "m"})
