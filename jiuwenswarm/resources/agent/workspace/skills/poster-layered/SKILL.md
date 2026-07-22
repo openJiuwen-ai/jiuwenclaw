@@ -89,7 +89,7 @@ python scripts/overlay_text.py \
 
 脚本相对本技能目录；若工作目录不同，用绝对路径调用。依赖：`Pillow`（`pip install pillow`）。系统需有可用中文字体（脚本会尝试常见路径，也可在 `layout.json` 里指定 `font_path`）。
 
-3. `text_rerender += 1`。若超过上限，停止并报告。
+3. `text_rerender += 1`。若 `text_rerender >= max_text_rerender`，停止并报告。
 
 ### Step 3 — OCR 对照放行
 
