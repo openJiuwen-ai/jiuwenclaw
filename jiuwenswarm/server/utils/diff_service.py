@@ -45,6 +45,7 @@ class DiffService:
         session_id: str,
         project_dir: str | None = None,
         repo_context: dict[str, Any] | None = None,
+        extra_history_roots: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """获取 session 的所有 turn diff（完整信息）.
 
@@ -55,7 +56,7 @@ class DiffService:
         Returns:
             turn diff 列表，按时间倒序排列（most recent first）
         """
-        turns = self._compute_turn_diffs(session_id, project_dir)
+        turns = self._compute_turn_diffs(session_id, project_dir, extra_history_roots=extra_history_roots)
         self._enrich_with_change_sets(session_id, turns, repo_context=repo_context)
         return list(reversed(turns))
 
@@ -64,6 +65,7 @@ class DiffService:
         session_id: str,
         project_dir: str | None = None,
         repo_context: dict[str, Any] | None = None,
+        extra_history_roots: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """获取 session 的历史 turn diff 摘要，包含已持久化快照。
 
@@ -71,7 +73,7 @@ class DiffService:
         但仍存在于 change_sets/snapshot 中的历史轮次也返回出来（例如已撤销
         的 turn）。
         """
-        turns = self._compute_turn_diffs(session_id, project_dir)
+        turns = self._compute_turn_diffs(session_id, project_dir, extra_history_roots=extra_history_roots)
         self._enrich_with_change_sets(session_id, turns, repo_context=repo_context)
         by_turn = {int(t.get("turnIndex", 0) or 0): t for t in turns}
         for entry in self._load_change_sets(session_id):
@@ -99,6 +101,7 @@ class DiffService:
         change_set_id: str | None = None,
         project_dir: str | None = None,
         repo_context: dict[str, Any] | None = None,
+        extra_history_roots: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """获取指定轮次的 turn diff。
 
@@ -132,14 +135,24 @@ class DiffService:
             snapshot = self._load_turn_snapshot(session_id, change_set_id)
             if snapshot is not None:
                 return snapshot
-            turns = self.get_turn_diffs(session_id, project_dir, repo_context=repo_context)
+            turns = self.get_turn_diffs(
+                session_id,
+                project_dir,
+                repo_context=repo_context,
+                extra_history_roots=extra_history_roots,
+            )
             for turn in turns:
                 if turn.get("change_set_id") == change_set_id:
                     return turn
             raise DiffHistoryExpiredError(
                 f"diff history expired for change_set_id={change_set_id}"
             )
-        turns = self.get_turn_diffs(session_id, project_dir, repo_context=repo_context)
+        turns = self.get_turn_diffs(
+            session_id,
+            project_dir,
+            repo_context=repo_context,
+            extra_history_roots=extra_history_roots,
+        )
         for turn in turns:
             if int(turn.get("turnIndex", 0) or 0) == turn_index:
                 return turn
@@ -156,14 +169,24 @@ class DiffService:
                     )
         return None
 
-    def _compute_turn_diffs(self, session_id: str, project_dir: str | None = None) -> list[dict[str, Any]]:
+    def _compute_turn_diffs(
+        self,
+        session_id: str,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """计算 turn-based diffs."""
         history = self._read_history(session_id)
 
         if not history:
             return []
 
-        agent_history = self._read_agent_history(session_id, project_dir)
+        agent_history = self._read_agent_history(
+            session_id,
+            project_dir,
+            extra_history_roots=extra_history_roots,
+        )
 
         turns: list[dict[str, Any]] = []
 
@@ -416,13 +439,19 @@ class DiffService:
         }
 
     def mark_turn_discarded(
-        self, session_id: str, turn_index: int, project_dir: str | None = None
+        self,
+        session_id: str,
+        turn_index: int,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
     ) -> str | None:
         """将指定 turn 的 change_set 状态标记为 discarded。"""
         if turn_index <= 0:
             return None
         target = self.get_turn_diff(
             session_id, turn_index=turn_index, project_dir=project_dir,
+            extra_history_roots=extra_history_roots,
         )
         change_set_id = str((target or {}).get("change_set_id") or "")
         if not change_set_id:
@@ -569,24 +598,79 @@ class DiffService:
             logger.debug("Failed to read metadata file %s: %s", metadata_file, e)
         return None
 
+    @staticmethod
     def _is_valid_file_ops_file(
-        self, name: str, session_id: str | None, require_session: bool = False
+        name: str, session_id: str | None, require_session: bool = False
     ) -> bool:
-        """检查文件名是否是有效的 file_ops 文件."""
-        if not name.startswith(f"file_ops_{self._agent_id}_"):
+        """检查文件名是否是有效的 file_ops 文件.
+
+        文件名约定: ``file_ops_{agent_id}_{session_id}.json``,其中 session_id
+        始终是 ``.json`` 前的最后一段。使用 ``_{session_id}.json`` 后缀匹配替代
+        子串匹配,避免短 session_id 误匹配其他 agent 的 file_ops 文件。
+        """
+        if not name.startswith("file_ops_"):
             return False
         if not name.endswith(".json"):
             return False
-        if require_session:
-            return session_id is not None and session_id in name
-        return session_id is None or session_id in name
+        if not session_id:
+            return not require_session
+        return name.endswith(f"_{session_id}.json")
 
-    def _read_agent_history(self, session_id: str | None = None, project_dir: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _agent_history_dirs_for_roots(
+        history_roots: list[str],
+        *,
+        include_child_workspaces: bool = False,
+    ) -> list[Path]:
+        """Return .agent_history dirs for roots and optional immediate workspaces."""
+        result: list[Path] = []
+        seen_history_dirs: set[Path] = set()
+
+        def add_history_dir(hist_dir: Path) -> None:
+            try:
+                key = hist_dir.resolve()
+            except Exception:
+                key = hist_dir
+            if key in seen_history_dirs:
+                return
+            seen_history_dirs.add(key)
+            result.append(hist_dir)
+
+        for history_root in history_roots:
+            root = Path(history_root)
+            add_history_dir(root / ".agent_history")
+            if not include_child_workspaces:
+                continue
+            if not root.is_dir():
+                continue
+            try:
+                children = list(root.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                if child.is_dir():
+                    add_history_dir(child / ".agent_history")
+        return result
+
+    @staticmethod
+    def _is_internal_team_workspace_file(file_path: str) -> bool:
+        """Return whether an edited file is an internal team workspace artifact."""
+        parts = str(file_path or "").replace("\\", "/").lower().split("/")
+        return ".agent_teams" in parts
+
+    def _read_agent_history(
+        self,
+        session_id: str | None = None,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> dict[str, Any]:
         """读取 .agent_history（同时读取全局与 session-specific 文件并合并）.
 
         Args:
             session_id: 若提供，额外扫描匹配该 session 的 file_ops 文件。
             project_dir: 项目目录路径，若提供则也从项目目录读取 .agent_history。
+            extra_history_roots: 额外写入根目录，例如 team/member workspace。
         """
         result: dict[str, Any] = {}
 
@@ -614,6 +698,26 @@ class DiffService:
         if project_dir:
             project_hist_dir = Path(project_dir) / ".agent_history"
             if project_hist_dir.is_dir():
+                for f in project_hist_dir.iterdir():
+                    name = f.name
+                    if self._is_valid_file_ops_file(name, session_id):
+                        paths.append(f)
+                global_file = project_hist_dir / f"file_ops_{self._agent_id}.json"
+                if global_file.exists():
+                    paths.append(global_file)
+        extra_roots: list[str] = []
+        if extra_history_roots:
+            extra_roots.extend(
+                str(root).strip()
+                for root in extra_history_roots
+                if isinstance(root, str) and str(root).strip()
+            )
+
+        for project_hist_dir in self._agent_history_dirs_for_roots(
+            extra_roots,
+            include_child_workspaces=True,
+        ):
+            if project_hist_dir.is_dir():
                 # 读取 session-specific file_ops 文件
                 for f in project_hist_dir.iterdir():
                     name = f.name
@@ -638,6 +742,8 @@ class DiffService:
                 try:
                     data = json.loads(history_file.read_text(encoding="utf-8"))
                     for file_path, entries in data.items():
+                        if self._is_internal_team_workspace_file(file_path):
+                            continue
                         # 规范化路径，避免大小写差异导致的重复
                         normalized_path = normalize_path(file_path)
                         if normalized_path not in result:
@@ -1519,7 +1625,12 @@ class DiffService:
         )
 
     def get_files_to_restore(
-        self, session_id: str, turn_index: int, project_dir: str | None = None
+        self,
+        session_id: str,
+        turn_index: int,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """返回需要恢复的文件及其目标内容.
 
@@ -1554,7 +1665,11 @@ class DiffService:
             return {}
 
         # 2. 读取 file_ops 日志
-        agent_history = self._read_agent_history(session_id, project_dir)
+        agent_history = self._read_agent_history(
+            session_id,
+            project_dir,
+            extra_history_roots=extra_history_roots,
+        )
 
         # 3. 对于每个文件，找到第一条 timestamp >= target_timestamp 的 entry
         #    该 entry 的 old_content 即为目标 turn 开始前的文件状态
@@ -1585,6 +1700,8 @@ class DiffService:
         session_id: str,
         cutoff_ts: float,
         project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
     ) -> None:
         """截断 file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
 
@@ -1621,10 +1738,27 @@ class DiffService:
                 if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
                     file_ops_paths.append(f)
 
-        # 也从项目目录扫描(显式传入优先,否则从 metadata 推断)
+        # 也从项目目录/额外写入根扫描(显式传入优先,否则从 metadata 推断)
         resolved_project_dir = project_dir or self._get_project_dir_from_metadata(session_id)
         if resolved_project_dir:
             project_hist_dir = Path(resolved_project_dir) / ".agent_history"
+            if project_hist_dir.is_dir():
+                for f in project_hist_dir.iterdir():
+                    if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
+                        if f not in file_ops_paths:
+                            file_ops_paths.append(f)
+        extra_roots: list[str] = []
+        if extra_history_roots:
+            extra_roots.extend(
+                str(root).strip()
+                for root in extra_history_roots
+                if isinstance(root, str) and str(root).strip()
+            )
+
+        for project_hist_dir in self._agent_history_dirs_for_roots(
+            extra_roots,
+            include_child_workspaces=True,
+        ):
             if project_hist_dir.is_dir():
                 for f in project_hist_dir.iterdir():
                     if self._is_valid_file_ops_file(f.name, session_id, require_session=True):

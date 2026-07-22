@@ -240,6 +240,81 @@ def _convert_stats(raw_stats: dict[str, Any] | None) -> DiffStats:
     )
 
 
+def get_session_extra_history_roots(session_id: str | None) -> list[str]:
+    """Return team/member/worktree roots recorded for file history monitoring."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    try:
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+
+        # Team roots may be written by a different process; force disk read so
+        # diff/restore sees the latest persisted metadata.
+        metadata = get_session_metadata(sid, cache_bust=True, enable_writeback=False)
+    except Exception:  # noqa: BLE001
+        return []
+    raw_roots = metadata.get("team_file_monitor_roots")
+    roots: list[str] = []
+    seen: set[str] = set()
+
+    def add_root(raw: Any) -> None:
+        if not isinstance(raw, str) or not raw.strip():
+            return
+        root = raw.strip()
+        try:
+            key = str(Path(root).expanduser().resolve())
+        except Exception:
+            key = root
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(root)
+
+    raw_root_values = raw_roots if isinstance(raw_roots, list) else []
+    if isinstance(raw_roots, list):
+        for raw in raw_roots:
+            add_root(raw)
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            try:
+                raw_path = Path(raw.strip()).expanduser()
+                if raw_path.name == "team-workspace":
+                    add_root(str(raw_path.parent / "workspaces"))
+            except Exception:  # noqa: BLE001
+                continue
+
+    team_name = str(metadata.get("team_name") or "").strip()
+    if team_name:
+        for raw in raw_root_values:
+            if not isinstance(raw, str) or team_name not in raw:
+                continue
+            try:
+                path = Path(raw.strip()).expanduser()
+                parts = path.parts
+                # 使用最后一次出现的位置,避免路径中 team_name 多次出现时
+                # 定位到错误的层级(深层路径更可能是实际 team 目录)。
+                idx = -1
+                for i in range(len(parts) - 1, -1, -1):
+                    if parts[i] == team_name:
+                        idx = i
+                        break
+                if idx >= 0:
+                    home = Path(*parts[: idx + 1])
+                    add_root(str(home / "team-workspace"))
+                    add_root(str(home / "workspaces"))
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            from openjiuwen.agent_teams.paths import team_home
+
+            home = team_home(team_name)
+            add_root(str(home / "team-workspace"))
+            add_root(str(home / "workspaces"))
+        except Exception:  # noqa: BLE001
+            pass
+    return roots
+
+
 def _convert_hunks(raw_hunks: list[dict[str, Any]] | None) -> list[DiffHunk]:
     """转换 camelCase hunk 列表 → snake_case DiffHunk 列表。"""
     if not raw_hunks or not isinstance(raw_hunks, list):
@@ -570,6 +645,7 @@ class DiffStatusService:
         last_turn: DiffTurnSummary | None = None
         if session_id:
             diff_service = get_diff_service()
+            extra_history_roots = get_session_extra_history_roots(session_id)
             try:
                 turns = diff_service.get_turn_diffs(
                     session_id,
@@ -579,6 +655,7 @@ class DiffStatusService:
                         "branch": repo_info.branch,
                         "base_head": repo_info.head,
                     },
+                    extra_history_roots=extra_history_roots,
                 )
             except Exception as exc:  # noqa: BLE001
                 # 与 get_git_diff 保持对称:错误向上抛,让 handler 感知并触发
@@ -620,8 +697,12 @@ class DiffStatusService:
         project_dir = getattr(project, "project_dir", "")
         repo_context = _repo_context_from_status(project, reject_transient=True)
         diff_service = get_diff_service()
+        extra_history_roots = get_session_extra_history_roots(session_id)
         turns = diff_service.get_turn_diff_summaries(
-            session_id, project_dir, repo_context=repo_context,
+            session_id,
+            project_dir,
+            repo_context=repo_context,
+            extra_history_roots=extra_history_roots,
         )
         total = len(turns)
         cursor = max(0, int(cursor or 0))
@@ -664,12 +745,14 @@ class DiffStatusService:
         repo_root = repo_context.get("repo_root")
 
         diff_service = get_diff_service()
+        extra_history_roots = get_session_extra_history_roots(session_id)
         turn = diff_service.get_turn_diff(
             session_id,
             turn_index=turn_index,
             change_set_id=change_set_id,
             project_dir=project_dir,
             repo_context=repo_context,
+            extra_history_roots=extra_history_roots,
         )
         if turn is None:
             return None

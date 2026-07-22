@@ -1235,6 +1235,66 @@ def _team_spec_skills_dir(team_spec: Any) -> str:
     return str(team_home(team_name) / "team-workspace" / "skills")
 
 
+def _team_spec_monitor_roots(team_spec: Any) -> list[str]:
+    """Return team/member workspace roots where file-op history may be written."""
+    roots: list[str] = []
+
+    def add_root(value: Any) -> None:
+        raw = str(value or "").strip()
+        if not raw:
+            return
+        try:
+            root = str(Path(raw).expanduser().resolve())
+        except Exception:
+            root = raw
+        if root not in roots:
+            roots.append(root)
+
+    workspace = getattr(team_spec, "workspace", None)
+    root_path = str(getattr(workspace, "root_path", "") or "").strip()
+    team_name = str(getattr(team_spec, "team_name", "") or "").strip()
+    home = team_home(team_name)
+    add_root(root_path or str(home / "team-workspace"))
+    add_root(home / "workspaces")
+
+    agents = getattr(team_spec, "agents", None)
+    if isinstance(agents, dict):
+        for member_name, member_spec in agents.items():
+            member_workspace = getattr(member_spec, "workspace", None)
+            add_root(getattr(member_workspace, "root_path", None))
+            add_root(home / "workspaces" / f"{member_name}_workspace")
+
+    return roots
+
+
+def _persist_team_file_monitor_roots(session_id: str, team_spec: Any) -> None:
+    roots = _team_spec_monitor_roots(team_spec)
+    if not roots:
+        return
+    try:
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            _enqueue_write,
+            _read_metadata,
+        )
+
+        metadata = _read_metadata(session_id, cache_bust=True)
+        if not metadata:
+            return
+        existing = metadata.get("team_file_monitor_roots")
+        # 直接替换而非合并: team_spec 是当前 team 组成的权威来源,
+        # 合并旧 root 会导致已移除成员的 workspace 路径累积无法清理。
+        if roots == existing:
+            return
+        metadata["team_file_monitor_roots"] = roots
+        _enqueue_write(session_id, metadata, preserve_pin_fields=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[TeamHelpers] failed to persist team file monitor roots: session=%s error=%s",
+            session_id,
+            exc,
+        )
+
+
 async def _start_team_stream_round(
     *,
     channel_id: str | None,
@@ -1393,6 +1453,7 @@ async def process_team_message_stream(
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,
         )
+        _persist_team_file_monitor_roots(session_id, team_spec)
     except Exception as exc:
         logger.exception("[TeamHelpers] TeamAgent create failed: %s", exc)
         yield AgentResponseChunk(

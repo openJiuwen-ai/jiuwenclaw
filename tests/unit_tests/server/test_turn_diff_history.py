@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -142,6 +143,130 @@ def test_get_turn_diff_finds_second_turn():
     assert turn["turnIndex"] == 2
     assert "/proj/file_b.py" in turn["files"]
     assert turn["request_id"] == "req-002"
+
+
+def test_get_turn_diffs_reads_extra_history_roots(tmp_path, monkeypatch):
+    """Team 模式的成员 workspace file_ops 也应纳入 last_turn diff。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    workspaces_root = tmp_path / "team-home" / "workspaces"
+    team_root = workspaces_root / "worker_workspace"
+    team_hist = team_root / ".agent_history"
+    team_hist.mkdir(parents=True)
+    target_file = project_root / "team_file.py"
+    internal_file = tmp_path / ".agent_teams" / "unit-team" / "workspaces" / "worker_workspace" / "notes.md"
+    (team_hist / "file_ops_jiuwen_team_unit_worker_sess-1.json").write_text(
+        json.dumps(
+            {
+                str(target_file): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": "old\n",
+                        "new_content": "old\nnew\n",
+                    },
+                ],
+                str(internal_file): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": "",
+                        "new_content": "internal scratch\n",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs(
+            "sess-1",
+            str(project_root),
+            extra_history_roots=[str(workspaces_root)],
+        )
+
+    assert len(turns) == 1
+    expected_path = str(target_file.resolve())
+    internal_path = str(internal_file.resolve())
+    assert expected_path in turns[0]["files"]
+    assert internal_path not in turns[0]["files"]
+    assert turns[0]["files"][expected_path]["linesAdded"] == 1
+
+
+def test_get_turn_diffs_does_not_scan_project_child_history_dirs(tmp_path, monkeypatch):
+    """普通 project_dir 不应扫描一级子目录中的 .agent_history。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    project_hist = project_root / ".agent_history"
+    nested_hist = project_root / "nested" / ".agent_history"
+    project_hist.mkdir(parents=True)
+    nested_hist.mkdir(parents=True)
+    project_file = project_root / "kept.py"
+    nested_file = project_root / "nested" / "leaked.py"
+    (project_hist / "file_ops_agent_sess-1.json").write_text(
+        json.dumps(
+            {
+                str(project_file): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": "old\n",
+                        "new_content": "old\nnew\n",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (nested_hist / "file_ops_agent_sess-1.json").write_text(
+        json.dumps(
+            {
+                str(nested_file): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": "old\n",
+                        "new_content": "old\nnew\n",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs("sess-1", str(project_root))
+
+    assert len(turns) == 1
+    assert str(project_file.resolve()) in turns[0]["files"]
+    assert str(nested_file.resolve()) not in turns[0]["files"]
 
 
 def test_get_turn_diff_by_change_set_id():
@@ -307,6 +432,59 @@ def test_mark_turn_discarded_preserves_snapshot():
     assert "/proj/file_a.py" in turn["files"]
 
 
+def test_truncate_file_ops_reads_extra_history_roots(tmp_path, monkeypatch):
+    """撤销本轮修改时也应截断 team 额外目录中的 session-specific file_ops。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    workspaces_root = tmp_path / "team-home" / "workspaces"
+    team_root = workspaces_root / "worker_workspace"
+    team_hist = team_root / ".agent_history"
+    team_hist.mkdir(parents=True)
+    history_file = team_hist / "file_ops_jiuwen_team_unit_worker_sess-1.json"
+    history_file.write_text(
+        json.dumps(
+            {
+                str(team_root / "team_file.py"): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542840.0),
+                        "old_content": "before\n",
+                        "new_content": "middle\n",
+                    },
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": "middle\n",
+                        "new_content": "after\n",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+
+    service = DiffService()
+    service.truncate_file_ops_by_timestamp(
+        "sess-1",
+        1784542850.0,
+        project_dir="/proj",
+        extra_history_roots=[str(workspaces_root)],
+    )
+
+    data = json.loads(history_file.read_text(encoding="utf-8"))
+    entries = next(iter(data.values()))
+    assert len(entries) == 1
+    assert entries[0]["new_content"] == "middle\n"
+
+
 def test_turn_diff_list_returns_summaries_with_files_without_hunks():
     ph, pa, pl, ps = _patch_diff_service()
     with ph, pa, pl, ps:
@@ -356,6 +534,101 @@ def test_turn_diff_list_includes_change_set_metadata():
     assert result["turns"][0]["user_message_id"] == "req-002:user"
     assert result["turns"][1]["request_id"] == "req-001"
     assert result["turns"][1]["assistant_message_id"] == "req-001:assistant"
+
+
+def test_get_session_extra_history_roots_infers_team_workspaces(tmp_path):
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={
+                "team_name": "unit-team",
+                "team_file_monitor_roots": [
+                    str(tmp_path / ".agent_teams" / "unit-team" / "team-workspace"),
+                ],
+            },
+        ),
+        patch(
+            "openjiuwen.agent_teams.paths.team_home",
+            return_value=tmp_path / "team-home",
+        ),
+    ):
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            get_session_extra_history_roots,
+        )
+
+        roots = get_session_extra_history_roots("sess-1")
+
+    assert str(tmp_path / ".agent_teams" / "unit-team" / "team-workspace") in roots
+    assert str(tmp_path / ".agent_teams" / "unit-team" / "workspaces") in roots
+    assert str(tmp_path / "team-home" / "team-workspace") in roots
+    assert str(tmp_path / "team-home" / "workspaces") in roots
+
+
+def test_is_valid_file_ops_file_uses_suffix_match():
+    """session_id 后缀匹配,避免子串误匹配其他 session 的 file_ops 文件。"""
+    service = DiffService()
+    # 正确匹配: session_id 是 .json 前的最后一段
+    assert service._is_valid_file_ops_file("file_ops_agent_sess-1.json", "sess-1")
+    assert service._is_valid_file_ops_file("file_ops_agent_sess-1.json", "sess-1", require_session=True)
+    # 前缀不同的 session 不应匹配(sess-1 不应匹配 sess-10)
+    assert not service._is_valid_file_ops_file("file_ops_agent_sess-10.json", "sess-1")
+    # session_id 不在末尾段时不应匹配
+    assert not service._is_valid_file_ops_file("file_ops_sess-1_agent.json", "sess-1")
+    # 非 file_ops 前缀
+    assert not service._is_valid_file_ops_file("other_ops_agent_sess-1.json", "sess-1")
+    # 非 .json 后缀
+    assert not service._is_valid_file_ops_file("file_ops_agent_sess-1.txt", "sess-1")
+    # require_session=True 但 session_id=None
+    assert not service._is_valid_file_ops_file("file_ops_agent.json", None, require_session=True)
+    # require_session=False 且 session_id=None: 接受所有 file_ops 文件
+    assert service._is_valid_file_ops_file("file_ops_agent.json", None)
+    assert service._is_valid_file_ops_file("file_ops_agent.json", None, require_session=False)
+
+
+def test_multi_history_root_first_wins_priority(tmp_path, monkeypatch):
+    """project_dir 的 file_ops 应优先于 extra_history_roots(first-wins)。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    extra_root = tmp_path / "extra"
+
+    proj_hist = project_root / ".agent_history"
+    extra_hist = extra_root / ".agent_history"
+    proj_hist.mkdir(parents=True)
+    extra_hist.mkdir(parents=True)
+
+    target_file = str(project_root / "shared.py")
+    # project_dir 记录的 old_content 优先
+    (proj_hist / "file_ops_agent_sess-1.json").write_text(
+        json.dumps({target_file: [{"action": "write", "timestamp": _ts(1784542850.0),
+                                    "old_content": "proj-old\n", "new_content": "proj-new\n"}]}),
+        encoding="utf-8",
+    )
+    # extra_root 记录了不同的 old_content,不应覆盖 project_dir
+    (extra_hist / "file_ops_agent_sess-1.json").write_text(
+        json.dumps({target_file: [{"action": "write", "timestamp": _ts(1784542850.0),
+                                    "old_content": "extra-old\n", "new_content": "extra-new\n"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir", lambda: agent_ws)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir", lambda: user_ws)
+
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs(
+            "sess-1", str(project_root),
+            extra_history_roots=[str(extra_root)],
+        )
+    assert len(turns) == 1
+    entry = turns[0]["files"][target_file]
+    # project_dir 优先, old_content 应为 proj-old
+    assert entry["linesAdded"] == 1
+    assert entry["linesRemoved"] == 1
 
 
 def test_turn_diff_list_respects_limit():

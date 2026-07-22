@@ -536,6 +536,7 @@ def restore_session_files(
     session_id: str,
     turn_index: int,
     project_dir: str | None = None,
+    extra_history_roots: list[str] | None = None,
 ) -> dict[str, Any]:
     """恢复指定 turn 之后所有被修改的文件到目标 turn 开始前的状态.
 
@@ -560,7 +561,10 @@ def restore_session_files(
 
     diff_service = get_diff_service()
     files_to_restore = diff_service.get_files_to_restore(
-        session_id, turn_index, project_dir=project_dir,
+        session_id,
+        turn_index,
+        project_dir=project_dir,
+        extra_history_roots=extra_history_roots,
     )
 
     if not files_to_restore:

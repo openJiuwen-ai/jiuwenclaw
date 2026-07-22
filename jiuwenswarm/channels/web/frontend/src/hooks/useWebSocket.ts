@@ -367,6 +367,24 @@ function buildPersistedMediaFiles(mediaItems: MediaItem[]): Record<string, unkno
   };
 }
 
+function getSessionWorkContext(sessionId: string): Record<string, unknown> {
+  const sessionStore = useSessionStore.getState();
+  const workspaceStore = useWorkspaceStore.getState();
+  const session =
+    sessionStore.currentSession?.session_id === sessionId
+      ? sessionStore.currentSession
+      : sessionStore.sessions.find((item) => item.session_id === sessionId);
+  const selectedProject = workspaceStore.selectedProject;
+  const projectId = session?.project_id || selectedProject?.project_id || '';
+  const projectDir = session?.project_dir || selectedProject?.project_dir || '';
+  const workMode = session?.work_mode || selectedProject?.work_mode || workspaceStore.workMode;
+  return {
+    ...(projectId ? { project_id: projectId } : {}),
+    ...(projectDir ? { project_dir: projectDir } : {}),
+    ...(workMode ? { work_mode: workMode } : {}),
+  };
+}
+
 interface ContextCompressionStatePayload extends Record<string, unknown> {
   status?: string;
   summary?: string;
@@ -984,11 +1002,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       // 正常调用接口
       const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
-      const currentSessionState = useSessionStore.getState();
-      const currentSession = currentSessionState.currentSession?.session_id === sessionId
-        ? currentSessionState.currentSession
-        : currentSessionState.sessions.find((s) => s.session_id === sessionId);
-      const projectDir = currentSession?.project_dir || undefined;
+      const workContext = getSessionWorkContext(sessionId);
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset(sessionId);
       }
@@ -1020,7 +1034,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(outgoingFiles ? { files: outgoingFiles } : {}),
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
-          ...(projectDir ? { project_dir: projectDir } : {}),
+          ...workContext,
           skills: selectedSkills,
         });
         return true;
@@ -1060,10 +1074,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       useChatStore.getState().setThinking(sessionId, true);
 
       const currentSessionState = useSessionStore.getState();
-      const currentSession = currentSessionState.currentSession?.session_id === sessionId
-        ? currentSessionState.currentSession
-        : currentSessionState.sessions.find((s) => s.session_id === sessionId);
-      const projectDir = currentSession?.project_dir || undefined;
+      const workContext = getSessionWorkContext(sessionId);
       const currentMode = currentSessionState.getRuntime(sessionId)?.mode;
       const selectedModel = currentSessionState.getRuntime(sessionId)?.selectedModelName;
       if (currentMode === 'auto_harness') {
@@ -1078,7 +1089,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           content,
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
-          ...(projectDir ? { project_dir: projectDir } : {}),
+          ...workContext,
         });
       } catch (error) {
         const webError = error as WebError;
@@ -1129,6 +1140,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const params: Record<string, unknown> = {
           session_id: sessionId,
           intent,
+          ...getSessionWorkContext(sessionId),
         };
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         if (['pause', 'resume', 'cancel', 'supplement'].includes(intent)) {
@@ -1295,6 +1307,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             session_id: sessionId,
             query: '',
             mode: resolvedResumeMode,
+            ...getSessionWorkContext(sessionId),
             request_id: requestId,
             answers: answers,
             ...sourcePayload,
@@ -1312,6 +1325,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             session_id: sessionId,
             content: '',
             mode: 'auto_harness',
+            ...getSessionWorkContext(sessionId),
             activate_response: {
               interaction_id: interactionId,
               action,
@@ -1323,6 +1337,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           // 否则发送 chat.user_answer（自进化确认）
           await request('chat.user_answer', {
             session_id: sessionId,
+            ...getSessionWorkContext(sessionId),
             request_id: requestId,
             answers,
             ...sourcePayload,
@@ -1347,6 +1362,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           session_id: sessionId,
           content: '',
           mode: 'auto_harness',
+          ...getSessionWorkContext(sessionId),
           activate_response: {
             interaction_id: interactionId,
             action,
