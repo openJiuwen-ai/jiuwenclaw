@@ -247,15 +247,20 @@ def _find_existing_browser_processes(
         try:
             executable = str(process.info.get("exe") or "")
             args = [str(arg) for arg in (process.info.get("cmdline") or [])]
+            if not executable:
+                continue
+            if _normalized_path(executable) != expected_executable:
+                continue
+            if _cmdline_option(args, "--remote-debugging-port") != str(port):
+                continue
+
             actual_user_data_dir = _cmdline_option(args, "--user-data-dir")
-            if (
-                executable
-                and _normalized_path(executable) == expected_executable
-                and _cmdline_option(args, "--remote-debugging-port") == str(port)
-                and actual_user_data_dir
-                and _normalized_path(actual_user_data_dir) == expected_user_data_dir
-            ):
-                matches.append(process)
+            if not actual_user_data_dir:
+                continue
+            if _normalized_path(actual_user_data_dir) != expected_user_data_dir:
+                continue
+
+            matches.append(process)
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             continue
     return matches
