@@ -26,6 +26,10 @@ from openjiuwen_deepsearch.utils.log_utils.log_common import session_id_ctx
 from openjiuwen_deepsearch.utils.log_utils.log_manager import LogManager
 
 from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketGatewayPushTransport
+from jiuwenclaw.agentserver.tools._deepresearch_tls import (
+    TASK_MANAGER_TLS_ENV,
+    iterate_with_scoped_tls_initialization,
+)
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import build_report_bundle
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.styled_html_export import export_styled_html
 from jiuwenclaw.local_env_config import read_default_headers_raw
@@ -1006,9 +1010,6 @@ class DeepResearchTaskManager:
             collect_progress=True: (最终研究报告内容, 进度条目列表)
         """
         try:
-            agent_factory = AgentFactory()
-            agent = agent_factory.create_agent(agent_config)
-
             last_report = None
             chunk_count = 0
 
@@ -1023,12 +1024,20 @@ class DeepResearchTaskManager:
             section_titles: dict[str, str] = {}
             progress_entries: list[str] = []
 
-            async for chunk in agent.run(
+            def create_agent_stream():
+                agent_factory = AgentFactory()
+                agent = agent_factory.create_agent(agent_config)
+                return agent.run(
                     message=query,
                     conversation_id=str(secrets.token_hex(16)),
                     report_template=report_template,
                     interrupt_feedback="",
                     agent_config=agent_config
+                )
+
+            async for chunk in iterate_with_scoped_tls_initialization(
+                create_agent_stream,
+                TASK_MANAGER_TLS_ENV,
             ):
                 chunk_count += 1
                 logger.debug("[DeepResearchTaskManager] Stream chunk #%d from node", chunk_count)
@@ -1382,12 +1391,6 @@ class DeepResearchTaskManager:
             config_valid, config_msg = DeepResearchTaskManager._validate_config(config)
             if not config_valid:
                 raise ValueError(config_msg)
-
-            # 3. 设置 SSL 配置
-            os.environ["LLM_SSL_VERIFY"] = "false"
-            os.environ["LLM_SSL_CERT"] = ""
-            os.environ["TOOL_SSL_VERIFY"] = "false"
-            os.environ["TOOL_SSL_CERT"] = ""
 
             config_extension = {
                 "extra_body": {
@@ -2056,12 +2059,6 @@ class DeepResearchTaskManager:
         config_valid, config_msg = DeepResearchTaskManager._validate_config(config)
         if not config_valid:
             raise ValueError(config_msg)
-
-        # 3. 设置 SSL 配置
-        os.environ["LLM_SSL_VERIFY"] = "false"
-        os.environ["LLM_SSL_CERT"] = ""
-        os.environ["TOOL_SSL_VERIFY"] = "false"
-        os.environ["TOOL_SSL_CERT"] = ""
 
         config_extension = {
             "extra_body": {

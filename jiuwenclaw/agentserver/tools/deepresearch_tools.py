@@ -13,7 +13,6 @@ import os
 import shutil
 import sys
 import tempfile
-import threading
 import uuid
 import zipfile
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -23,10 +22,13 @@ from pathlib import Path
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenclaw.config import get_config
+from jiuwenclaw.agentserver.tools._deepresearch_tls import (
+    DEEPRESEARCH_TLS_ENV_LOCK as _REPORT_STYLE_LLM_INIT_LOCK,
+    scoped_deepresearch_tls_env,
+)
 
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
-_REPORT_STYLE_LLM_INIT_LOCK = threading.Lock()
 
 # 使用 contextvars
 _deepresearch_route_ctx: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
@@ -223,26 +225,12 @@ def _build_styled_export_llm_config() -> dict:
 async def _scoped_report_style_llm_context(context_factory, llm_config):
     """Scope the SDK's env-based TLS setting to runtime LLM initialization."""
     async with AsyncExitStack() as stack:
-        acquired = False
-        try:
-            while not acquired:
-                acquired = _REPORT_STYLE_LLM_INIT_LOCK.acquire(blocking=False)
-                if not acquired:
-                    await asyncio.sleep(0.001)
-
-            previous_ssl_verify = os.environ.get("LLM_SSL_VERIFY")
-            resolved_ssl_verify = _build_bridge_env(os.environ)["LLM_SSL_VERIFY"]
-            os.environ["LLM_SSL_VERIFY"] = resolved_ssl_verify
-            try:
-                llm = await stack.enter_async_context(context_factory(llm_config))
-            finally:
-                if previous_ssl_verify is None:
-                    os.environ.pop("LLM_SSL_VERIFY", None)
-                else:
-                    os.environ["LLM_SSL_VERIFY"] = previous_ssl_verify
-        finally:
-            if acquired:
-                _REPORT_STYLE_LLM_INIT_LOCK.release()
+        async with scoped_deepresearch_tls_env(
+            lambda: {
+                "LLM_SSL_VERIFY": _build_bridge_env(os.environ)["LLM_SSL_VERIFY"]
+            }
+        ):
+            llm = await stack.enter_async_context(context_factory(llm_config))
 
         yield llm
 
