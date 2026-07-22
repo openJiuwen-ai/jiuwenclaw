@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 import yaml
 from dotenv import load_dotenv
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
@@ -460,8 +461,8 @@ def parse_int(value: Any, default: int) -> int:
 def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> ContextEngineConfig:
     """供 ``create_deep_agent(..., context_engine_config=...)`` 使用（与 agent-core 集成测试方法二一致）。
 
-    仅根据 ``react.context_engine_config.enable_kv_cache_release`` 切换亲和开关；
-    其余字段与 ``ReActAgentConfig`` 默认 ``context_engine_config`` 一致。
+    仅承接 ContextEngine 自身配置；KV cache affinity 由独立
+    ``react.kv_cache_affinity_config`` 管理。
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
@@ -469,11 +470,43 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
     return ReActAgentConfig().context_engine_config.model_copy(
         update={
             "enable_reload": bool(cec.get("enable_reload", False)),
-            "enable_kv_cache_release": bool(cec.get("enable_kv_cache_release", False)),
             "enable_openrouter_model_context_window_tokens": bool(
                 cec.get("enable_openrouter_model_context_window_tokens", False)
             ),
         }
+    )
+
+
+def _model_provider(model: Any) -> str:
+    for owner in (model, getattr(model, "_client", None)):
+        model_client_config = getattr(owner, "model_client_config", None)
+        provider = getattr(model_client_config, "client_provider", None)
+        if provider is not None:
+            return str(getattr(provider, "value", provider) or "").strip()
+    return ""
+
+
+def _deep_agent_kv_cache_affinity_config(
+        react_cfg: dict[str, Any] | None,
+        model: Model | None = None,
+) -> KVCacheAffinityConfig:
+    """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
+    react_cfg = react_cfg or {}
+    kv_cfg = react_cfg.get("kv_cache_affinity_config")
+    kv_cfg = kv_cfg if isinstance(kv_cfg, dict) else {}
+    affinity_enabled = bool(kv_cfg.get("enable_kv_cache_affinity", False))
+    if affinity_enabled and model is not None:
+        provider = _model_provider(model)
+        if provider != "AscendAffinity":
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] KV cache affinity failed closed: "
+                "model provider=%s requires=AscendAffinity",
+                provider or "<empty>",
+            )
+            affinity_enabled = False
+    return KVCacheAffinityConfig(
+        enable_kv_cache_release=bool(kv_cfg.get("enable_kv_cache_release", False)),
+        enable_kv_cache_affinity=affinity_enabled,
     )
 
 
@@ -4062,6 +4095,7 @@ class JiuWenSwarmDeepAdapter:
                 language=self._resolve_prompt_language(),
             ),
             context_engine_config=_deep_agent_context_engine_config(config),
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             max_iterations=config.get("max_iterations", 15),
             subagents=configured_subagents,
@@ -4462,6 +4496,7 @@ class JiuWenSwarmDeepAdapter:
         self._instance = create_deep_agent(
             **common_kwargs,
             context_engine_config=_deep_agent_context_engine_config(config),
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),

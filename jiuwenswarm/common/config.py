@@ -17,6 +17,12 @@ from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 import yaml
 import portalocker
 
+from jiuwenswarm.common.kv_cache_affinity_config import (
+    ASCEND_AFFINITY_PROVIDER,
+    get_default_model_provider as resolve_default_model_provider,
+    set_default_model_provider_in_entries,
+    validate_affinity_invariant,
+)
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
 logger = logging.getLogger(__name__)
@@ -106,6 +112,18 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
         mcc = react.get("model_client_config")
         if isinstance(mcc, dict) and "custom_headers" in mcc:
             mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
+        kv_cfg = react.get("kv_cache_affinity_config")
+        if isinstance(kv_cfg, dict) and kv_cfg.get("enable_kv_cache_affinity", False):
+            provider = get_default_model_provider(config)
+            if provider != ASCEND_AFFINITY_PROVIDER:
+                logger.warning(
+                    "KV cache affinity configuration failed closed: default provider=%s requires=%s",
+                    provider or "<empty>",
+                    ASCEND_AFFINITY_PROVIDER,
+                )
+                # Runtime-only normalization: preserve the user's file for
+                # diagnosis, but never activate an inconsistent configuration.
+                kv_cfg["enable_kv_cache_affinity"] = False
     # send_file 工具默认开关：web/feishu/xiaoyi 顶层缺 send_file_allowed 时兜底 True。
     channels = config.get("channels", {})
     for _ch in ("web", "feishu", "xiaoyi"):
@@ -144,6 +162,16 @@ def get_config():
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
     return _read_with_retry(CONFIG_YAML_PATH)
+
+
+def get_default_model_provider(config: dict[str, Any] | None) -> str:
+    return resolve_default_model_provider(config)
+
+
+def validate_persisted_kv_cache_affinity() -> tuple[bool, list[str]]:
+    """Validate the persisted KVC invariant after a config write."""
+    raw = get_config_raw()
+    return validate_affinity_invariant(resolve_env_vars(raw))
 
 
 def set_config(config):
@@ -490,14 +518,30 @@ def update_context_engine_enabled_in_config(value: bool) -> None:
 
 
 def update_kv_cache_affinity_enabled_in_config(value: bool) -> None:
-    """更新 react.context_engine_config.enable_kv_cache_release（算力/KV 亲和释放）并写回。"""
+    """更新 react.kv_cache_affinity_config.enable_kv_cache_affinity 并写回。"""
     data = load_yaml_round_trip(CONFIG_YAML_PATH)
     if "react" not in data:
         data["react"] = {}
     react = data["react"]
-    if "context_engine_config" not in react:
-        react["context_engine_config"] = {}
-    react["context_engine_config"]["enable_kv_cache_release"] = value
+    if "kv_cache_affinity_config" not in react:
+        react["kv_cache_affinity_config"] = {}
+    react["kv_cache_affinity_config"]["enable_kv_cache_affinity"] = value
+    if value:
+        react["kv_cache_affinity_config"]["enable_kv_cache_release"] = False
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_kv_cache_release_enabled_in_config(value: bool) -> None:
+    """更新 react.kv_cache_affinity_config.enable_kv_cache_release 并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "react" not in data:
+        data["react"] = {}
+    react = data["react"]
+    if "kv_cache_affinity_config" not in react:
+        react["kv_cache_affinity_config"] = {}
+    react["kv_cache_affinity_config"]["enable_kv_cache_release"] = value
+    if value:
+        react["kv_cache_affinity_config"]["enable_kv_cache_affinity"] = False
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
@@ -1053,6 +1097,48 @@ def update_default_models_in_config(models_list: list[dict[str, Any]]) -> None:
             del data["models"]["default"]
         return data
     update_config(_mutate)
+
+
+def update_default_model_provider_in_config(provider: str) -> bool:
+    """Update only the default model provider in config.yaml.
+
+    Returns True when a persisted model entry was changed. The default entry is
+    the first entry with ``is_default: true``; if none is marked, the first
+    ``models.defaults`` entry is used. This intentionally does not rewrite
+    non-default models or agent-specific model bindings.
+    """
+    normalized_provider = str(provider or "").strip()
+    if not normalized_provider:
+        return False
+
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    models = data.get("models")
+    if not isinstance(models, dict):
+        return False
+
+    defaults = models.get("defaults")
+    if isinstance(defaults, list) and defaults:
+        changed = set_default_model_provider_in_entries(
+            defaults,
+            normalized_provider,
+        )
+        if changed:
+            dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+        return changed
+
+    default_entry = models.get("default")
+    if isinstance(default_entry, dict):
+        mcc = default_entry.setdefault("model_client_config", {})
+        if not isinstance(mcc, dict):
+            mcc = {}
+            default_entry["model_client_config"] = mcc
+        if mcc.get("client_provider") == normalized_provider:
+            return False
+        mcc["client_provider"] = normalized_provider
+        dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+        return True
+
+    return False
 
 
 def ensure_defaults_list_in_config() -> list[dict[str, Any]]:

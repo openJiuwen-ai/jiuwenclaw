@@ -81,6 +81,12 @@ import {
 import type { DesktopSaveApiResult } from './utils/desktopSave';
 import './App.css';
 
+const TEAM_SESSION_MODES = new Set(['team', 'team.plan', 'code.team']);
+
+function isTeamMode(mode: string): boolean {
+  return TEAM_SESSION_MODES.has(mode);
+}
+
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
 
 type LoadedHistoryPage = {
@@ -351,6 +357,10 @@ function AppContent() {
   const shareExportTokenRef = useRef(0);
   const preserveSelectedProjectOnChatNewRef = useRef(false);
   const newConversationProjectRef = useRef<Pick<Session, 'project_id' | 'project_dir'> | null>(null);
+  const newConversationPreviousSessionRef = useRef<{
+    sessionId: string;
+    mode: AgentMode;
+  } | null>(null);
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
@@ -1512,6 +1522,13 @@ function AppContent() {
   const enterNewConversation = useCallback((targetMode: AgentMode = mode, options: NewConversationOptions = {}) => {
     const currentSessionId = sessionIdRef.current;
     const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
+    newConversationPreviousSessionRef.current =
+      currentSessionId && currentSessionId !== NEW_CONVERSATION_ID
+        ? {
+          sessionId: currentSessionId,
+          mode: currentRuntime?.mode ?? mode,
+        }
+        : null;
     // 新建会话固定使用配置的默认模型，不继承当前会话手动切换过的模型；
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
     const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
@@ -1589,6 +1606,11 @@ function AppContent() {
           title: createConversationTitle(content).slice(0, 100),
           work_mode: workContext.work_mode,
         };
+        const previousSession = newConversationPreviousSessionRef.current;
+        if (previousSession) {
+          createParams.previous_session_id = previousSession.sessionId;
+          createParams.previous_mode = previousSession.mode;
+        }
         if (runtimeSettings.selectedModelName) {
           createParams.model = runtimeSettings.selectedModelName;
         }
@@ -1641,6 +1663,7 @@ function AppContent() {
           }
         }
         newConversationProjectRef.current = null;
+        newConversationPreviousSessionRef.current = null;
       } catch (error) {
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         useChatStore.getState().setThinking(NEW_CONVERSATION_ID, false);
@@ -1767,6 +1790,25 @@ function AppContent() {
 
       const resolvedMode = targetMode ?? targetSession?.mode ?? mode;
       disposeInFlightHistoryHandles(targetSessionId);
+      if (sessionId && sessionId !== targetSessionId) {
+        try {
+          await request('session.switch', {
+            session_id: targetSessionId,
+            previous_session_id: sessionId,
+            previous_mode: mode,
+            mode: resolvedMode,
+          });
+        } catch (error) {
+          if (isTeamMode(resolvedMode)) {
+            console.error('Failed to switch team session:', error);
+            window.alert(t('sessions.errors.switchSession'));
+            return;
+          }
+          console.warn('Session switch lifecycle hook failed; continuing restore:', error);
+        }
+      }
+
+      setHistoryPagerMeta(targetSessionId, null);
       setHistoryLoadingMore(false);
       const existingRuntime = useChatStore.getState().getRuntime(targetSessionId);
       if (!existingRuntime) {
@@ -1812,16 +1854,20 @@ function AppContent() {
       mode,
       navigate,
       loadSessionMetadata,
+      request,
       requestComposerFocus,
       resetHarnessStore,
       setActiveNav,
       setCurrentSession,
       setHistoryLoadingMore,
+      setHistoryPagerMeta,
       setMode,
       setPaused,
       setProcessing,
       setSessionId,
       setThinking,
+      sessionId,
+      t,
       upsertSessionMetadata,
     ]
   );

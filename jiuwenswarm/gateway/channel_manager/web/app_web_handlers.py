@@ -54,7 +54,10 @@ from jiuwenswarm.common.config import (
     update_browser_in_config,
     update_preferred_language_in_config,
     update_context_engine_enabled_in_config,
+    update_default_model_provider_in_config,
     update_kv_cache_affinity_enabled_in_config,
+    validate_persisted_kv_cache_affinity,
+    update_kv_cache_release_enabled_in_config,
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
@@ -64,6 +67,15 @@ from jiuwenswarm.common.config import (
     update_a2ui_in_config,
     update_updater_in_config,
     update_proactive_recommendation_in_config,
+)
+from jiuwenswarm.common.kv_cache_affinity_config import (
+    ASCEND_AFFINITY_PROVIDER,
+    KVC_CONFIG_KEYS,
+    default_model_provider_from_entries,
+    is_affinity_enabled,
+    normalize_affinity_request,
+    parse_bool as parse_kvc_bool,
+    set_default_model_provider_in_entries,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
     get_a2ui_config_payload,
@@ -81,13 +93,10 @@ from jiuwenswarm.common.utils import (
 from jiuwenswarm.common.work_mode import (
     DEFAULT_PROJECT_ID_CODE,
     DEFAULT_PROJECT_ID_WORK,
-    DEFAULT_PROJECT_IDS,
     DEFAULT_TUI_WORK_MODE,
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
     is_default_project_id,
-    normalize_work_mode,
-    resolve_default_project_id,
 )
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
@@ -776,6 +785,7 @@ CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
 _CONFIG_YAML_KEYS = frozenset({
     "context_engine_enabled",
+    "kv_cache_release_enabled",
     "kv_cache_affinity_enabled",
     "permissions_enabled",
     "memory_forbidden_enabled",
@@ -1491,10 +1501,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 if (("api_key" in key.lower() or "token" in key.lower())
                         and ExtensionRegistry.get_instance().get_crypto_provider()):
                     payload[key] = ExtensionRegistry.get_instance().get_crypto_provider().decrypt(val)
-            ctx_cfg = (raw.get("react") or {}).get("context_engine_config") or {}
+            react_cfg = raw.get("react") or {}
+            ctx_cfg = react_cfg.get("context_engine_config") or {}
+            kv_cfg = react_cfg.get("kv_cache_affinity_config") or {}
             payload["context_engine_enabled"] = "true" if ctx_cfg.get("enabled", False) else "false"
+            payload["kv_cache_release_enabled"] = (
+                "true" if kv_cfg.get("enable_kv_cache_release", False) else "false"
+            )
             payload["kv_cache_affinity_enabled"] = (
-                "true" if ctx_cfg.get("enable_kv_cache_release", False) else "false"
+                "true" if kv_cfg.get("enable_kv_cache_affinity", False) else "false"
             )
             perm_cfg = raw.get("permissions") or {}
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
@@ -1532,6 +1547,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 proactive_cfg.get("max_rounds_per_tick", 20))
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
+            payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("skill_create", "false")
@@ -1616,6 +1632,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             raise _ConfigBadRequest(f"{name} 需为 {lo}-{hi} 的正整数，当前：{n}")
         return n
 
+    def _parse_config_bool(value: Any) -> bool:
+        return parse_kvc_bool(value)
+
     def _encrypt_config_params(params: dict[str, Any]) -> dict[str, Any]:
         encrypted = dict(params)
         for key, val in list(encrypted.items()):
@@ -1631,6 +1650,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
         available_model_providers = [provider.value for provider in ProviderType]
+        raw = get_config_raw()
+        preferred_lang = raw.get("preferred_language", "zh")
+
+        try:
+            normalize_affinity_request(params)
+        except ValueError as exc:
+            raise _ConfigBadRequest(str(exc)) from exc
 
         for param_key, env_key in _CONFIG_SET_ENV_MAP.items():
             if param_key not in params:
@@ -1663,10 +1689,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if param_key not in params:
                 continue
             val = params[param_key]
-            parsed = str(val).strip().lower() in ("true", "1", "yes")
+            parsed = _parse_config_bool(val)
             try:
                 if param_key == "context_engine_enabled":
                     update_context_engine_enabled_in_config(parsed)
+                elif param_key == "kv_cache_release_enabled":
+                    update_kv_cache_release_enabled_in_config(parsed)
                 elif param_key == "kv_cache_affinity_enabled":
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
@@ -1700,6 +1728,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 if param_key == "swarmflow_enabled":
                     raise _ConfigInternalError("failed to update enable_swarmflow") from e
 
+        if params.get("model_provider") == ASCEND_AFFINITY_PROVIDER:
+            try:
+                if update_default_model_provider_in_config(
+                    ASCEND_AFFINITY_PROVIDER
+                ):
+                    yaml_updated.append("models.default_provider")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[config.set] 写回默认模型 provider 失败: %s", e)
+
         symphony_updates = _build_symphony_config_update(params)
         if symphony_updates:
             try:
@@ -1726,6 +1763,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.info("[config.set] 已更新 .env: %s", list(env_updates.keys()))
         if yaml_updated:
             logger.info("[config.set] 已更新 config.yaml: %s", yaml_updated)
+
+        kvc_config_changed = any(key in params for key in KVC_CONFIG_KEYS)
+        if kvc_config_changed:
+            valid, failures = validate_persisted_kv_cache_affinity()
+            if not valid:
+                # Do not leave a persisted half-success state active. This is a
+                # narrow fail-closed correction, not a cross-file transaction.
+                update_kv_cache_affinity_enabled_in_config(False)
+                raise _ConfigInternalError(
+                    "KV cache affinity saved but not applied: " + "; ".join(failures)
+                )
 
         return env_updates, yaml_updated
 
@@ -2060,6 +2108,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         try:
             new_models = _build_models_defaults_from_frontend(params.get("models"))
+            default_provider = default_model_provider_from_entries(new_models)
+            if (
+                is_affinity_enabled(get_config_raw())
+                and default_provider != ASCEND_AFFINITY_PROVIDER
+            ):
+                update_kv_cache_affinity_enabled_in_config(False)
             update_default_models_in_config(new_models)
 
             applied_without_restart = await _apply_config_change_set(
@@ -2109,17 +2163,47 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if "team" in params:
                 config_params["team"] = params.get("team")
 
+            affinity_requested = _parse_config_bool(config_params.get("kv_cache_affinity_enabled"))
+            if affinity_requested and new_models is not None:
+                if set_default_model_provider_in_entries(
+                    new_models,
+                    ASCEND_AFFINITY_PROVIDER,
+                ):
+                    yaml_updated.append("models.default_provider")
+
             if config_params:
                 applied_env, applied_yaml = _apply_config_payload(config_params)
                 env_updates.update(applied_env)
                 yaml_updated.extend(applied_yaml)
 
             if new_models is not None:
+                default_provider = default_model_provider_from_entries(new_models)
+                if (
+                    is_affinity_enabled(get_config_raw())
+                    and default_provider != ASCEND_AFFINITY_PROVIDER
+                ):
+                    update_kv_cache_affinity_enabled_in_config(False)
+                    yaml_updated.append("kv_cache_affinity_enabled")
                 update_default_models_in_config(new_models)
                 yaml_updated.append("models.defaults")
                 models_count = len(new_models)
 
-            change_set = _ConfigChangeSet(env_updates, yaml_updated, force=bool(env_updates or yaml_updated))
+            kvc_config_changed = new_models is not None or any(
+                key in config_params for key in KVC_CONFIG_KEYS
+            )
+            if kvc_config_changed:
+                valid, failures = validate_persisted_kv_cache_affinity()
+                if not valid:
+                    update_kv_cache_affinity_enabled_in_config(False)
+                    raise _ConfigInternalError(
+                        "KV cache affinity saved but not applied: " + "; ".join(failures)
+                    )
+
+            change_set = _ConfigChangeSet(
+                env_updates,
+                yaml_updated,
+                force=bool(env_updates or yaml_updated),
+            )
             applied_without_restart = await _apply_config_change_set(change_set)
 
             await channel.send_response(
@@ -2661,6 +2745,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="session is not a directory", code="BAD_REQUEST",
             )
             return
+        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+            evict_session_kv_cache,
+        )
+
+        try:
+            await evict_session_kv_cache(
+                session_id=session_id_to_delete,
+                parent_session_id=session_id_to_delete,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[session.delete] KV cache evict hook failed during local fallback; "
+                "continuing: session_id=%s error=%s",
+                session_id_to_delete,
+                exc,
+            )
         shutil.rmtree(session_dir)
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": session_id_to_delete})
 

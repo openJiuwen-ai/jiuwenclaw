@@ -1070,11 +1070,20 @@ class AgentWebSocketServer:
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
-        if self._server is None:
+        had_server = self._server is not None
+        if had_server:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
+        from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+            cancel_pending_tasks,
+        )
+
+        await cancel_pending_tasks()
+
+        if not had_server:
             return
-        self._server.close()
-        await self._server.wait_closed()
-        self._server = None
         try:
             await self._jiuwenbox_runner.stop()
         except Exception as exc:  # noqa: BLE001
@@ -2277,13 +2286,75 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _handle_session_switch(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """Switch the active team runtime without deleting recoverable session state."""
-        from jiuwenswarm.agents.harness.team import get_team_manager
+    async def _apply_session_switch_lifecycle(
+        self,
+        *,
+        channel_id: str,
+        target_session_id: str,
+        previous_session_id: str,
+        params: dict[str, Any],
+        reason: str,
+    ) -> tuple[bool, str]:
+        """Keep the product runtime owner independent from optional KVC signals."""
+        target_is_team = is_team_params(params)
+        _, _, resolved_mode = resolve_agent_request_mode(
+            params.get("mode", "agent.plan")
+        )
+        context = None
+        dispatch_signals = None
+        try:
+            from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+                dispatch_session_switch_signals,
+                resolve_session_switch_context,
+            )
 
+            context = resolve_session_switch_context(
+                target_session_id=target_session_id,
+                previous_session_id=previous_session_id,
+                params=params,
+            )
+            target_is_team = context.target_is_team
+            resolved_mode = context.resolved_mode
+            dispatch_signals = dispatch_session_switch_signals
+        except Exception as exc:
+            logger.warning(
+                "[AgentWebSocketServer] session switch KVC context unavailable; "
+                "preserving product lifecycle: target_session_id=%s error=%s",
+                target_session_id,
+                exc,
+            )
+
+        previous_is_team = bool(context and context.previous_is_team)
+        team_manager = None
+        if target_is_team or previous_is_team:
+            from jiuwenswarm.agents.harness.team import get_team_manager
+
+            team_manager = get_team_manager(channel_id)
+            await team_manager.prepare_session_switch(
+                target_session_id,
+                previous_session_id=(
+                    previous_session_id if previous_is_team else None
+                ),
+                reason=reason,
+            )
+
+        if context is not None and dispatch_signals is not None:
+            await dispatch_signals(
+                context=context,
+                agent_manager=self._agent_manager,
+                channel_id=channel_id,
+                team_manager=team_manager,
+                target_session_id=target_session_id,
+                previous_session_id=previous_session_id,
+                reason=reason,
+            )
+        return target_is_team, resolved_mode
+
+    async def _handle_session_switch(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Switch product sessions without deleting recoverable session state."""
         params = request.params if isinstance(request.params, dict) else {}
         target = str(params.get("session_id") or request.session_id or "").strip()
-        is_team = is_team_params(params)
+        previous_session_id = str(params.get("previous_session_id") or "").strip()
 
         if not target:
             resp = AgentResponse(
@@ -2293,22 +2364,13 @@ class AgentWebSocketServer:
                 payload={"error": "session_id is required", "code": "BAD_REQUEST"},
                 metadata=request.metadata,
             )
-        elif not is_team:
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={
-                    "error": "session.switch is only supported for team mode",
-                    "code": "UNSUPPORTED_MODE",
-                },
-                metadata=request.metadata,
-            )
         else:
             channel_id = str(request.channel_id or "").strip() or "default"
-            team_manager = get_team_manager(channel_id)
-            await team_manager.prepare_session_switch(
-                target,
+            _, resolved_mode = await self._apply_session_switch_lifecycle(
+                channel_id=channel_id,
+                target_session_id=target,
+                previous_session_id=previous_session_id,
+                params=params,
                 reason="session.switch: ",
             )
             resp = AgentResponse(
@@ -2317,7 +2379,7 @@ class AgentWebSocketServer:
                 ok=True,
                 payload={
                     "session_id": target,
-                    "mode": "team",
+                    "mode": resolved_mode,
                     "switched": True,
                 },
                 metadata=request.metadata,
@@ -2423,9 +2485,14 @@ class AgentWebSocketServer:
                         metadata=request.metadata,
                     )
                 else:
+                    from jiuwenswarm.agents.harness.team import (
+                        kv_cache_hooks as team_kv_cache_hooks,
+                    )
+
                     for team_session_id in team_session_ids:
-                        await stop_team_session_runtime_across_managers(
-                            team_session_id,
+                        await team_kv_cache_hooks.stop_runtime_before_terminal_delete(
+                            stop_team_session_runtime_across_managers,
+                            session_id=team_session_id,
                             reason="team.delete: ",
                         )
 
@@ -2508,6 +2575,16 @@ class AgentWebSocketServer:
                     metadata = get_session_metadata(target)
                     mode = str(metadata.get("mode") or "").strip().lower()
                     channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
+                    if mode != "team":
+                        from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+                            evict_plan_session,
+                        )
+
+                        await evict_plan_session(
+                            session_id=target,
+                            agent_manager=self._agent_manager,
+                            channel_id=channel_id,
+                        )
                     try:
                         if mode == "team":
                             team_manager = get_team_manager(channel_id)
@@ -6243,6 +6320,7 @@ class AgentWebSocketServer:
             params = request.params if isinstance(request.params, dict) else {}
             mode, _, _ = resolve_agent_request_mode(params.get("mode", "agent"))
             explicit_session_id = params.get("session_id")
+            previous_session_id = str(params.get("previous_session_id") or "").strip()
             session_id = await self._agent_manager.create_session(
                 channel_id=channel_id,
                 session_id=str(explicit_session_id).strip() if isinstance(explicit_session_id, str) else None,
@@ -6373,21 +6451,15 @@ class AgentWebSocketServer:
                 work_mode=final_work_mode,
             )
 
-            if mode == "team":
-                from jiuwenswarm.agents.harness.team import get_team_manager
-
-                team_manager = get_team_manager(channel_id)
-                logger.info(
-                    "[AgentServer] session.create preparing team switch: channel_id=%s "
-                    "target_session_id=%s mode=%s",
-                    channel_id,
-                    session_id,
-                    mode,
-                )
-                await team_manager.prepare_session_switch(
-                    session_id,
-                    reason="session.create switch: ",
-                )
+            lifecycle_params = dict(params)
+            lifecycle_params["mode"] = mode
+            await self._apply_session_switch_lifecycle(
+                channel_id=channel_id,
+                target_session_id=session_id,
+                previous_session_id=previous_session_id,
+                params=lifecycle_params,
+                reason="session.create switch: ",
+            )
 
             resp = AgentResponse(
                 request_id=request.request_id,
