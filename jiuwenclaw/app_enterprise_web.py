@@ -15,7 +15,7 @@ import uuid
 from functools import partial
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 from jiuwenclaw.app_web import (
@@ -30,6 +30,12 @@ from jiuwenclaw.security.ws_origin import (
     forbidden_origin_response,
     get_header_value,
     is_allowed_browser_origin,
+)
+from jiuwenclaw.history_store import (
+    ChatHistoryStore,
+    get_session_detail_sync,
+    list_sessions_sync,
+    make_history_callback,
 )
 from jiuwenclaw.utils import get_logs_dir, get_multi_tenant_user_workspace_dir, get_user_workspace_dir
 
@@ -73,6 +79,14 @@ class EnterpriseWebWsServer:
         # request_ext 透传：记住每条浏览器连接握手时的 query（含透传字段），
         # 转发给 Gateway 时随帧带上，由 EnterpriseWebChannel 抽取为 ext。
         self._browser_query: dict[str, dict[str, list[str]]] = {}
+        # 会话历史采集回调：(direction, raw, conn_id)；None 表示不采集。由 _run_ws_server 注入。
+        self.on_frame: Callable[[str, str, str | None], Awaitable[None]] | None = None
+        # 历史存储实例（由 _run_ws_server 注入；HTTP 端用 history_store.list_sessions_sync 读同一 db）。
+        self._history_store: ChatHistoryStore | None = None
+
+    def set_history_store(self, store: ChatHistoryStore) -> None:
+        """注入历史存储实例（供 _run_ws_server 外部调用，避免直接访问受保护成员）。"""
+        self._history_store = store
 
     async def start(self) -> None:
         if self._running:
@@ -225,7 +239,17 @@ class EnterpriseWebWsServer:
         """Route a browser req frame (mirrors /ws message handling)."""
         await self._handle_browser_frame(conn_id, raw)
 
+    async def _fire_on_frame(self, direction: str, raw: str, conn_id: str | None) -> None:
+        """触发历史采集回调（异常隔离，绝不影响中继转发）。"""
+        if self.on_frame is None:
+            return
+        try:
+            await self.on_frame(direction, raw, conn_id)
+        except Exception:
+            logger.warning("[jiuwenclaw-enterprise-web] on_frame 回调异常 dir=%s", direction, exc_info=True)
+
     async def route_uplink_frame(self, raw: str) -> None:
+        await self._fire_on_frame("uplink", raw, None)
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -418,6 +442,7 @@ class EnterpriseWebWsServer:
         self._session_subscribers.setdefault(session_id, set()).add(conn_id)
 
     async def _handle_browser_frame(self, conn_id: str, raw: str) -> None:
+        await self._fire_on_frame("browser", raw, conn_id)
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -522,11 +547,57 @@ def _run_http_server(
     workspace_root: Path,
     logs_root: Path,
     log_level: str,
+    history_db: str = "",
 ) -> None:
     file_logger = _setup_logger(logs_root, log_level)
 
     class _ConfiguredHandler(_SpaStaticHandler):
-        pass
+        history_db: str = ""
+
+        def do_GET(self) -> None:  # noqa: N802
+            if self._handle_history_api():
+                return
+            super().do_GET()
+
+        def _handle_history_api(self) -> bool:
+            """处理 GET /api/sessions 与 /api/sessions/{id}；未命中返回 False。"""
+            if not self.history_db:
+                return False
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if path == "/api/sessions":
+                qs = parse_qs(parsed.query)
+                try:
+                    limit = int((qs.get("limit", ["20"])[0]) or 20)
+                    offset = int((qs.get("offset", ["0"])[0]) or 0)
+                except ValueError:
+                    limit, offset = 20, 0
+                limit = max(1, min(limit, 100))
+                offset = max(0, offset)
+                user = (qs.get("user", [None])[0]) or None
+                body = json.dumps(
+                    {"sessions": list_sessions_sync(self.history_db, limit=limit, offset=offset, user=user)},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self._respond_json(body)
+                return True
+            if path.startswith("/api/sessions/"):
+                session_id = path[len("/api/sessions/"):]
+                user = (parse_qs(parsed.query).get("user", [None])[0]) or None
+                detail = get_session_detail_sync(self.history_db, session_id, user=user)
+                if detail is None:
+                    self._respond_json(json.dumps({"error": "not_found"}).encode("utf-8"), status=404)
+                else:
+                    self._respond_json(json.dumps(detail, ensure_ascii=False).encode("utf-8"))
+                return True
+            return False
+
+        def _respond_json(self, body: bytes, status: int = 200) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
     _ConfiguredHandler.api_target = api_target
     _ConfiguredHandler.ws_target = ws_target
@@ -535,6 +606,7 @@ def _run_http_server(
     _ConfiguredHandler.workspace_root = workspace_root
     _ConfiguredHandler.logs_root = logs_root
     _ConfiguredHandler.logger = file_logger
+    _ConfiguredHandler.history_db = history_db
 
     handler = partial(_ConfiguredHandler, directory=str(dist_dir))
     server = ThreadingHTTPServer((host, port), handler)
@@ -561,6 +633,7 @@ async def _run_ws_server(
     port: int,
     browser_path: str,
     gateway_path: str,
+    history_db: str = "",
 ) -> None:
     ws_server = EnterpriseWebWsServer(
         host=host,
@@ -568,6 +641,11 @@ async def _run_ws_server(
         browser_path=browser_path,
         gateway_path=gateway_path,
     )
+    if history_db:
+        store = ChatHistoryStore(history_db)
+        ws_server.set_history_store(store)
+        ws_server.on_frame = make_history_callback(store)
+        logger.info("[jiuwenclaw-enterprise-web] history db: %s", history_db)
     try:
         await ws_server.start()
     except asyncio.CancelledError:
@@ -638,6 +716,7 @@ def main() -> None:
     project_root = get_user_workspace_dir()
     workspace_root = get_multi_tenant_user_workspace_dir("default", "default") or project_root
     logs_root = get_logs_dir().resolve()
+    history_db = str(workspace_root / "web_history.db")
 
     if not args.relay_only:
         http_thread = threading.Thread(
@@ -653,6 +732,7 @@ def main() -> None:
                 "workspace_root": workspace_root,
                 "logs_root": logs_root,
                 "log_level": args.log_level,
+                "history_db": history_db,
             },
             name="enterprise-web-http",
             daemon=True,
@@ -667,6 +747,7 @@ def main() -> None:
             port=relay_port,
             browser_path=args.relay_browser_path,
             gateway_path=args.relay_gateway_path,
+            history_db=history_db,
         ),
         name="enterprise-web-ws",
     )

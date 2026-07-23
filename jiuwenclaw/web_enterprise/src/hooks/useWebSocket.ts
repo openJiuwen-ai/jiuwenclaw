@@ -81,7 +81,7 @@ interface UseWebSocketReturn {
     params?: Record<string, unknown>,
     options?: WebRequestOptions
   ) => Promise<T>;
-  sendMessage: (content: string, sessionId: string, files?: ChatSendFile[]) => Promise<void>;
+  sendMessage: (content: string, sessionId: string, files?: ChatSendFile[], user?: string) => Promise<void>;
   interrupt: (
     sessionId: string,
     intent: InterruptIntent,
@@ -414,7 +414,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   // 发送聊天消息
   const sendMessage = useCallback(
-    async (content: string, sessionId: string, files?: ChatSendFile[]) => {
+    async (content: string, sessionId: string, files?: ChatSendFile[], user?: string) => {
       const trimmed = content.trim();
       const hasFiles = Boolean(files && files.length > 0);
       if (!trimmed && !hasFiles) return;
@@ -482,6 +482,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               }
             : {}),
           ...extSettingsToRoutingParams(ext),
+          ...(user ? { user } : {}),
         }, { requestId });
       } catch (error) {
         const webError = error as WebError;

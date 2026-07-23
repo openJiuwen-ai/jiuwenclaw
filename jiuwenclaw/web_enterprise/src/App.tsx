@@ -26,6 +26,7 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
+import { fetchSessions as fetchDbSessions, fetchSessionDetail, type HistorySession } from './services/api';
 import { setToolResultDisplayMaxChars } from './utils/formatters';
 import { AgentMode, UserAnswer, ChatSendFile, ModelEntry } from './types';
 import {
@@ -262,6 +263,15 @@ function AppContent() {
     totalPages: number;
   } | null>(null);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const [dbSessions, setDbSessions] = useState<HistorySession[]>([]);
+  const [currentUser, setCurrentUser] = useState<string>(() => {
+    try {
+      return localStorage.getItem('history_user') || 'guest';
+    } catch {
+      return 'guest';
+    }
+  });
+  const [userInput, setUserInput] = useState('');
   const sessionIdRef = useRef(sessionId);
   const historyRestoreHandleRef = useRef<HistoryRestoreHandle | null>(null);
   const historyPageHandleRef = useRef<HistoryRestoreHandle | null>(null);
@@ -269,6 +279,9 @@ function AppContent() {
   const historyRestoreFromPanelHintRef = useRef(false);
   /** 用户已开始实时对话后，禁止后台 history.get 覆盖当前消息 */
   const historyRestoreSuppressedRef = useRef(false);
+  /** 点击会话列表恢复时置 true，驱动 historyRestore effect 拉历史；新建/刷新页面不拉 */
+  const restoreRequestedRef = useRef(false);
+  const restoreSeqRef = useRef(0);
   /** extSettings 路由字段变更后，待 WS 重连完成再 session.create */
   const pendingRoutingSessionResetRef = useRef(false);
 
@@ -557,12 +570,17 @@ function AppContent() {
 
   // 页面加载或切换会话时尝试恢复历史；用户开始实时对话后不再自动恢复
   useEffect(() => {
+    // 改用 DB 恢复（handleRestoreSession → /api/sessions/{id}），不再走 WS historyRestore
+    return;
+
     if (!isConnected || !sessionId || sessionId === 'new') return;
 
     // 仅处理以 sess_ 开头的会话 ID
     if (!sessionId.startsWith('sess_')) return;
 
     if (historyRestoreSuppressedRef.current) return;
+    // 仅"点击会话列表恢复"时拉历史；新建/刷新页面不主动拉（保留原禁用意图）
+    if (!restoreRequestedRef.current) return;
     if (useChatStore.getState().messages.length > 0) {
       historyRestoreSuppressedRef.current = true;
       return;
@@ -575,10 +593,6 @@ function AppContent() {
     setProcessing(false);
     setThinking(false);
     setPaused(false);
-
-    // 不再主动拉取历史会话：任何场景下都直接返回空，不发送 history.get 请求。
-    // 下方 beginHistoryRestore / request(HISTORY_GET_METHOD) 等逻辑保留但不再执行。
-    return;
 
     const historyRequestId = `history-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
     logHistoryRestore('effect.start', { sessionId, historyRequestId, isConnected });
@@ -596,6 +610,7 @@ function AppContent() {
       sessionId: sessionId,
       requestId: historyRequestId,
       onReady: (messages, totalPages) => {
+        restoreRequestedRef.current = false;
         if (historyRestoreSuppressedRef.current) {
           logHistoryRestore('onReady.suppressed', { sessionId });
           return;
@@ -625,6 +640,7 @@ function AppContent() {
         });
       },
       onEmpty: (emptyTotalPages) => {
+        restoreRequestedRef.current = false;
         if (historyRestoreSuppressedRef.current) {
           logHistoryRestore('onEmpty.suppressed', { sessionId });
           return;
@@ -758,7 +774,84 @@ function AppContent() {
   }, [isConnected, sessionId, request, disposeInFlightHistoryHandles]);
 
   // 新建会话：立即生成可用的 session_id，避免停留在 'new' 导致无法发送消息
+  const loadDbSessions = useCallback(async () => {
+    try {
+      setDbSessions(await fetchDbSessions(50, 0, currentUser || undefined));
+    } catch (e) {
+      console.error('loadDbSessions failed', e);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    void loadDbSessions();
+  }, [loadDbSessions]);
+
+  const switchUser = useCallback(
+    (name: string) => {
+      const u = name.trim() || 'guest';
+      try {
+        localStorage.setItem('history_user', u);
+      } catch {
+        // ignore storage error
+      }
+      setCurrentUser(u);
+      setUserInput('');
+      restoreRequestedRef.current = false;
+      disposeInFlightHistoryHandles();
+      setHistoryPagerMeta(null);
+      setHistoryLoadingMore(false);
+      setProcessing(false);
+      setThinking(false);
+      setPaused(false);
+      clearMessages();
+      clearTodos();
+      setSessionId('new');
+    },
+    [disposeInFlightHistoryHandles, clearMessages, clearTodos],
+  );
+
+  const handleNavigate = useCallback((nav: MainNavKey) => {
+    setActiveNav(nav);
+  }, []);
+
+  const handleRestoreSession = useCallback(
+    async (sid: string) => {
+      if (!sid) return;
+      setActiveNav('chat');
+      restoreSeqRef.current += 1;
+      const seq = restoreSeqRef.current;
+      clearMessages();
+      clearTodos();
+      setHistoryPagerMeta(null);
+      setHistoryLoadingMore(false);
+      setProcessing(false);
+      setThinking(false);
+      setPaused(false);
+      try {
+        const detail = await fetchSessionDetail(sid, extUserId || undefined);
+        if (seq !== restoreSeqRef.current) return; // 期间又点了别的会话，丢弃本次旧请求
+        if (detail && detail.messages) {
+          const chatStore = useChatStore.getState();
+          for (const m of detail.messages) {
+            chatStore.addMessage({
+              id: m.request_id || `hist-${sid}-${m.timestamp}`,
+              role: m.role,
+              content: m.content,
+              timestamp: new Date(m.timestamp * 1000).toISOString(),
+            });
+          }
+        }
+      } catch (e) {
+        console.error('handleRestoreSession failed', e);
+      }
+      setSessionId(sid);
+      storeSessionId(sid);
+    },
+    [extUserId, clearMessages, clearTodos],
+  );
+
   const handleNewSession = useCallback(async () => {
+    restoreRequestedRef.current = false;
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);
     setHistoryLoadingMore(false);
@@ -788,6 +881,7 @@ function AppContent() {
         }
       }
       await fetchSessions();
+      void loadDbSessions();
     } catch (error) {
       console.error('Failed to create session:', error);
       return;
@@ -804,6 +898,7 @@ function AppContent() {
     clearTodos,
     disposeInFlightHistoryHandles,
     fetchSessions,
+    loadDbSessions,
     mode,
     request,
     setCurrentSession,
@@ -889,9 +984,10 @@ function AppContent() {
       setHistoryLoadingMore(false);
       const sid = await ensureSessionForSend();
       if (!sid) return;
-      await sendMessage(content, sid, files);
+      await sendMessage(content, sid, files, currentUser);
+      void loadDbSessions();
     })();
-  }, [disposeInFlightHistoryHandles, ensureSessionForSend, sendMessage]);
+  }, [disposeInFlightHistoryHandles, ensureSessionForSend, sendMessage, currentUser, loadDbSessions]);
 
   const handleInterrupt = useCallback((newInput?: string, files?: ChatSendFile[]) => {
     if (!sessionId || sessionId === 'new') return;
@@ -925,11 +1021,6 @@ function AppContent() {
     if (!sessionId.startsWith('sess_') || !historyPagerMeta) return;
     if (historyLoadingMore || historyPagerMeta.loadedPages >= historyPagerMeta.totalPages) return;
 
-    // 不再主动拉取更早分页：任何场景下都直接返回空，不发送 history.get 请求。
-    // 下方 fetchHistoryPage / request(HISTORY_GET_METHOD) 等逻辑保留但不再执行。
-    return;
-
-    // 以下为不可达代码（保留以便后续恢复历史拉取功能）
     const sid = sessionId;
     const nextPage = historyPagerMeta!.loadedPages + 1;
     const fallbackTotal = historyPagerMeta!.totalPages;
@@ -1041,10 +1132,6 @@ function AppContent() {
     sessionId,
   ]);
 
-  const handleNavigate = useCallback((nav: MainNavKey) => {
-    setActiveNav(nav);
-  }, []);
-
   const heartbeatToastPreviewRaw = heartbeatToastMessage.replace(/\s+/g, ' ').trim();
   const heartbeatToastPreview = heartbeatToastPreviewRaw.length > 120
     ? `${heartbeatToastPreviewRaw.slice(0, 120)}...`
@@ -1073,6 +1160,26 @@ function AppContent() {
             </span>
           </div>
 
+          {/* 用户切换（多租户隔离，无密码） */}
+          <div className="pill flex items-center gap-2">
+            <span className="text-sm">👤 {currentUser}</span>
+            <input
+              className="mono text-sm bg-transparent border border-border rounded px-2 py-0.5 w-28"
+              value={userInput}
+              onChange={(e) => setUserInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') switchUser(userInput);
+              }}
+              placeholder={t('history.userPlaceholder')}
+            />
+            <button
+              className="text-sm px-2 py-0.5 rounded border border-border hover:bg-secondary"
+              onClick={() => switchUser(userInput)}
+            >
+              {t('history.switchUser')}
+            </button>
+          </div>
+
           {/* 语言切换 */}
           <LanguageSwitcher />
 
@@ -1083,6 +1190,10 @@ function AppContent() {
 
       {/* Navigation Sidebar */}
       <SessionSidebar
+        sessions={dbSessions}
+        currentSessionId={sessionId}
+        onSelect={handleRestoreSession}
+        onNewSession={handleNewSession}
         activeNav={activeNav}
         onNavigate={handleNavigate}
         appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : '0.1.7'}
