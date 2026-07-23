@@ -64,6 +64,7 @@ harmony = [
     "loguru>=0.7.3",
     "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@develop",
     "pgvector>=0.4.2",
+    "portalocker>=3.2.0",
     "aiosqlite>=0.22.1",
     "croniter>=2.0.0",
     "python-telegram-bot>=20.0",
