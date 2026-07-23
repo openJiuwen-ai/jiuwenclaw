@@ -625,6 +625,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "extensions.toggle",
     "team.snapshot",
     "team.history.get",
+    "team.mq.publish",
     # Agent configuration
     "agents.list",
     "agents.get",
@@ -660,6 +661,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "browser.start",
     "team.snapshot",
     "team.history.get",
+    "team.mq.publish",
     "skills.marketplace.list",
     "skills.list",
     "skills.installed",
