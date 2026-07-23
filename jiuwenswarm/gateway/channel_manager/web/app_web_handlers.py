@@ -116,6 +116,10 @@ from jiuwenswarm.integrations.ai4research_subscription.constants import (
     CODEX_MODEL_ALIAS,
     CODEX_PROVIDER_NAME,
 )
+from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+    CLAUDE_MODEL_ALIAS,
+    CLAUDE_PROVIDER_NAME,
+)
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.INFO)
@@ -1657,16 +1661,29 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     def _apply_config_payload(params: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
         """Apply config.set-style payload to .env/config.yaml without triggering reload."""
-        if str(params.get("model_provider") or "").strip() == CODEX_PROVIDER_NAME:
+        _payload_provider = str(params.get("model_provider") or "").strip()
+        if _payload_provider == CODEX_PROVIDER_NAME:
             params = dict(params)
             params.setdefault("model", CODEX_MODEL_ALIAS)
+            params["api_base"] = ""
+            params["api_key"] = ""
+        elif _payload_provider == CLAUDE_PROVIDER_NAME:
+            # Subscription-only, credential-free: force the fixed alias and drop
+            # any stale api_base/api_key (parallel to Codex).
+            params = dict(params)
+            params.setdefault("model", CLAUDE_MODEL_ALIAS)
             params["api_base"] = ""
             params["api_key"] = ""
         params = _encrypt_config_params(params)
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
         available_model_providers = available_model_provider_names()
-        api_model_providers = [name for name in available_model_providers if name != CODEX_PROVIDER_NAME]
+        # Neither subscription provider is a valid secondary/multimodal slot.
+        api_model_providers = [
+            name
+            for name in available_model_providers
+            if name not in (CODEX_PROVIDER_NAME, CLAUDE_PROVIDER_NAME)
+        ]
 
         try:
             normalize_affinity_request(params)
@@ -2098,6 +2115,108 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     req_id,
                     ok=False,
                     error="Codex model validation returned an invalid response.",
+                    code="LLM_ERROR",
+                )
+                return
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={"ok": True, "model_provider": model_provider},
+            )
+            return
+
+        if model_provider == CLAUDE_PROVIDER_NAME:
+            # The Claude provider is registered only in AgentServer, so build the
+            # validation there (parallel to Codex) rather than locally in the
+            # Gateway, where the provider is unavailable.
+            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenswarm.common.schema.message import ReqMethod
+            from jiuwenswarm.common.security.ws_origin import (
+                is_sensitive_browser_request_allowed,
+            )
+            from jiuwenswarm.gateway.routing.agent_request_timeout import (
+                AGENT_SERVER_TIMEOUT_CODE,
+                AGENT_SERVER_TIMEOUT_ERROR,
+                AgentRequestTimeoutError,
+                send_agent_request_with_timeout,
+            )
+
+            if not is_sensitive_browser_request_allowed(ws):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Claude model validation requires a trusted local browser origin.",
+                    code="FORBIDDEN_ORIGIN",
+                )
+                return
+            ac = _resolve(agent_client)
+            if ac is None or not getattr(ac, "server_ready", False):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="AgentServer is not available for Claude model validation.",
+                    code="AGENT_UNAVAILABLE",
+                )
+                return
+            env = e2a_from_agent_fields(
+                request_id=str(req_id) if req_id else "",
+                channel_id="web",
+                session_id=session_id,
+                req_method=ReqMethod.CLAUDE_VALIDATE_MODEL,
+                params={
+                    "model_provider": CLAUDE_PROVIDER_NAME,
+                    "model": CLAUDE_MODEL_ALIAS,
+                },
+            )
+            try:
+                response = await send_agent_request_with_timeout(
+                    ac,
+                    env,
+                    label=ReqMethod.CLAUDE_VALIDATE_MODEL.value,
+                    timeout_seconds=35.0,
+                )
+            except AgentRequestTimeoutError:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=AGENT_SERVER_TIMEOUT_ERROR,
+                    code=AGENT_SERVER_TIMEOUT_CODE,
+                )
+                return
+            except Exception:
+                logger.exception("[config.validate_model] Claude AgentServer forwarding failed")
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Claude model validation service is unavailable.",
+                    code="AGENT_UNAVAILABLE",
+                )
+                return
+            payload = response.payload if isinstance(response.payload, dict) else {}
+            if not response.ok:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=str(payload.get("error") or "Claude model validation failed."),
+                    code=str(payload.get("code") or "LLM_ERROR"),
+                )
+                return
+            if (
+                payload.get("validated") is not True
+                or payload.get("model_provider") != CLAUDE_PROVIDER_NAME
+                or payload.get("model") != CLAUDE_MODEL_ALIAS
+            ):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Claude model validation returned an invalid response.",
                     code="LLM_ERROR",
                 )
                 return
@@ -5655,6 +5774,76 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("provider.codex.auth.start", _codex_auth_start)
     channel.register_method("provider.codex.auth.cancel", _codex_auth_cancel)
     channel.register_method("provider.codex.auth.logout", _codex_auth_logout)
+
+    async def _claude_status(ws, req_id, params, session_id, user_id=None):
+        """Forward the read-only Claude provider status probe to AgentServer.
+
+        The Claude provider is registered only in AgentServer, so the status
+        probe (CLI/version/subscription check, no login flow) runs there. This is
+        read-only and never manages credentials.
+        """
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.security.ws_origin import (
+            is_sensitive_browser_request_allowed,
+        )
+        from jiuwenswarm.gateway.routing.agent_request_timeout import (
+            AgentRequestTimeoutError,
+            send_agent_request_with_timeout,
+        )
+
+        if not is_sensitive_browser_request_allowed(ws):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="Claude status requires a trusted local browser origin.",
+                code="FORBIDDEN_ORIGIN",
+            )
+            return
+        ac = _resolve(agent_client)
+        if ac is None or not getattr(ac, "server_ready", False):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="AgentServer is not available for Claude status.",
+                code="AGENT_UNAVAILABLE",
+            )
+            return
+        env = e2a_from_agent_fields(
+            request_id=str(req_id) if req_id else "",
+            channel_id="web",
+            session_id=session_id,
+            req_method=_CodexReqMethod.CLAUDE_STATUS,
+            params={},
+            user_id=user_id,
+        )
+        try:
+            response = await send_agent_request_with_timeout(
+                ac, env, label=_CodexReqMethod.CLAUDE_STATUS.value, timeout_seconds=60.0,
+            )
+        except AgentRequestTimeoutError:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="Claude status timed out.",
+                code="AGENT_TIMEOUT",
+            )
+            return
+        except Exception:
+            logger.exception("[provider.claude.status] AgentServer forwarding failed")
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="Claude status service is unavailable.",
+                code="AGENT_UNAVAILABLE",
+            )
+            return
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        if not response.ok:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=str(payload.get("error") or "Claude status failed."),
+                code=str(payload.get("code") or "LLM_ERROR"),
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    channel.register_method("provider.claude.status", _claude_status)
 
     async def _forward_permissions_to_agent(
         ws, req_id, params, session_id, *, req_method, user_id=None,

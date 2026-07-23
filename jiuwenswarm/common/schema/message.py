@@ -45,6 +45,9 @@ class ReqMethod(Enum):
     CODEX_AUTH_LOGOUT = "provider.codex.auth.logout"
     CODEX_VALIDATE_MODEL = "provider.codex.validate_model"
 
+    CLAUDE_VALIDATE_MODEL = "provider.claude.validate_model"
+    CLAUDE_STATUS = "provider.claude.status"
+
     SESSION_LIST = "session.list"
     SESSION_CREATE = "session.create"
     SESSION_SWITCH = "session.switch"

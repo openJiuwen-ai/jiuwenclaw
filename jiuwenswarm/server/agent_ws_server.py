@@ -124,7 +124,9 @@ from jiuwenswarm.integrations.ai4research_subscription.consumer_policy import (
     require_default_codex_consumer,
 )
 from jiuwenswarm.integrations.ai4research_subscription.errors import (
+    ClaudeProviderError,
     CodexProviderError,
+    claude_provider_error_payload,
     provider_error_payload,
 )
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
@@ -1318,6 +1320,12 @@ class AgentWebSocketServer:
                 else:
                     await self._handle_codex_auth(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.CLAUDE_VALIDATE_MODEL:
+                await self._handle_claude_validate_model(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.CLAUDE_STATUS:
+                await self._handle_claude_status(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.SESSION_RENAME:
                 await self._handle_session_rename(ws, request, send_lock)
                 return
@@ -1597,6 +1605,26 @@ class AgentWebSocketServer:
                 channel_id=request.channel_id,
                 ok=False,
                 payload=provider_error_payload(exc),
+            )
+            wire = encode_agent_response_for_wire(
+                error_resp, response_id=request.request_id
+            )
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+        except ClaudeProviderError as exc:
+            # Preserve the typed Claude receipt (e.g. auth_wrong_method,
+            # auth_login_required) through ordinary chat, parallel to Codex,
+            # rather than genericizing it in the Exception handler below.
+            logger.warning(
+                "[AgentWebSocketServer] Claude request failed: request_id=%s code=%s",
+                request.request_id,
+                exc.code,
+            )
+            error_resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload=claude_provider_error_payload(exc),
             )
             wire = encode_agent_response_for_wire(
                 error_resp, response_id=request.request_id
@@ -3289,6 +3317,163 @@ class AgentWebSocketServer:
                 metadata=request.metadata,
             )
 
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_claude_validate_model(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Run one credential-free Claude model probe inside AgentServer.
+
+        The Gateway forwards Claude validation here (parallel to Codex) because
+        the Claude provider is registered only in AgentServer, so building the
+        client locally in the Gateway fails. Unlike Codex there is no call permit:
+        Claude routes as an ordinary keyed provider. The provider is disabled by
+        default (experimental, subscription-login-only), so an operator who has
+        not opted in gets a clear ``provider_disabled`` result here.
+        """
+        from openjiuwen.core.foundation.llm import Model
+        from openjiuwen.core.foundation.llm.schema.config import (
+            ModelClientConfig,
+            ModelRequestConfig,
+        )
+
+        from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+            CLAUDE_MODEL_ALIAS,
+            CLAUDE_PROVIDER_NAME,
+        )
+        from jiuwenswarm.integrations.ai4research_subscription.claude_consumer_policy import (
+            require_claude_enabled,
+        )
+        from jiuwenswarm.integrations.ai4research_subscription.errors import (
+            ClaudeProviderError,
+        )
+
+        params = request.params if isinstance(request.params, dict) else None
+        try:
+            if params is None or set(params) != {"model_provider", "model"}:
+                raise ClaudeProviderError(
+                    "invalid_request",
+                    "Claude model validation accepts only model_provider and model.",
+                )
+            if (
+                params.get("model_provider") != CLAUDE_PROVIDER_NAME
+                or params.get("model") != CLAUDE_MODEL_ALIAS
+            ):
+                raise ClaudeProviderError(
+                    "invalid_request",
+                    "The Claude provider or model alias is invalid.",
+                )
+
+            require_claude_enabled()
+            model_request_config = ModelRequestConfig(
+                model_name=CLAUDE_MODEL_ALIAS,
+                temperature=0,
+            )
+            model_client_config = ModelClientConfig(
+                client_id="config-validate",
+                client_provider=CLAUDE_PROVIDER_NAME,
+                api_key="",
+                api_base="",
+                timeout=25.0,
+                max_retries=0,
+                verify_ssl=False,
+            )
+            llm = Model(
+                model_config=model_request_config,
+                model_client_config=model_client_config,
+            )
+            result = await llm.invoke(
+                [{"role": "user", "content": "Hi"}],
+                max_tokens=1,
+                temperature=0,
+            )
+            content = getattr(result, "content", None)
+            if not isinstance(content, str) or not content.strip():
+                raise ClaudeProviderError(
+                    "invalid_output",
+                    "Claude returned an empty model-validation response.",
+                )
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "validated": True,
+                    "model_provider": CLAUDE_PROVIDER_NAME,
+                    "model": CLAUDE_MODEL_ALIAS,
+                    "response": content.strip(),
+                },
+                metadata=request.metadata,
+            )
+        except ClaudeProviderError as exc:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": exc.safe_message, "code": exc.code},
+                metadata=request.metadata,
+            )
+        except Exception:
+            logger.exception("[AgentWS] Claude model validation failed")
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "error": "Claude could not validate the model configuration.",
+                    "code": "provider_failed",
+                },
+                metadata=request.metadata,
+            )
+
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_claude_status(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Read-only Claude provider status probe (no inference, no login flow).
+
+        Returns one of the safe ``ClaudeProviderStatus`` states so the dashboard/
+        TUI can show whether the Claude provider is usable and, if not, why. The
+        administrator kill switch (``disabled``) is answered here without probing.
+        """
+        from jiuwenswarm.integrations.ai4research_subscription.claude_auth_seam import (
+            ClaudeProviderStatus,
+        )
+        from jiuwenswarm.integrations.ai4research_subscription.claude_consumer_policy import (
+            claude_subscription_enabled,
+        )
+        from jiuwenswarm.integrations.ai4research_subscription.claude_process import (
+            ClaudeProcessRunner,
+        )
+
+        try:
+            if not claude_subscription_enabled():
+                status = ClaudeProviderStatus.DISABLED
+            else:
+                status = await ClaudeProcessRunner().probe_status()
+            payload = {"status": status.value}
+        except Exception:
+            logger.exception("[AgentWS] Claude status probe failed")
+            payload = {"status": ClaudeProviderStatus.AUTH_STATUS_UNVERIFIABLE.value}
+
+        response = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
         wire = encode_agent_response_for_wire(response, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
