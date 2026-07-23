@@ -11,6 +11,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 import os
 import sys
@@ -653,6 +654,44 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
         "citations_preview_path": "/skill/data/C1.citations.preview.json",
     }
     assert "citations_path" not in provenance["citation_artifacts"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_kind", ["file", "symlink"])
+async def test_write_report_artifacts_fallback_omits_occupied_html_without_overwrite(
+    tmp_path, target_kind
+):
+    html_path = tmp_path / "研究报告-v1.html"
+    protected_path = tmp_path / "protected.html"
+    protected_path.write_bytes(b"protected")
+    if target_kind == "file":
+        html_path.write_bytes(b"existing")
+    else:
+        html_path.symlink_to(protected_path)
+    converter_outputs = []
+
+    def _convert(_markdown_path, output_path):
+        converter_outputs.append(Path(output_path))
+        Path(output_path).write_bytes(b"<html>fallback</html>")
+
+    with patch(
+        "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
+        return_value=str(tmp_path),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
+        side_effect=_convert,
+    ):
+        artifacts = await dt._write_report_artifacts_stream(
+            _minimal_report_result(), "研究报告.md", "C1"
+        )
+
+    assert artifacts == {"md": str(tmp_path / "研究报告-v1.md")}
+    assert converter_outputs and converter_outputs[0] != html_path
+    assert protected_path.read_bytes() == b"protected"
+    if target_kind == "file":
+        assert html_path.read_bytes() == b"existing"
+    else:
+        assert html_path.is_symlink()
 
 
 @pytest.mark.asyncio

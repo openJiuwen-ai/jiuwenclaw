@@ -468,7 +468,12 @@ async def _write_report_artifacts_stream(
                 convert_md_to_html,
             )
 
-            convert_md_to_html(str(report_path_md), str(report_path_html))
+            with tempfile.TemporaryDirectory(
+                prefix=".deepresearch-html-", dir=report_path_html.parent
+            ) as staging_name:
+                staging_path = Path(staging_name) / report_path_html.name
+                convert_md_to_html(str(report_path_md), str(staging_path))
+                _atomic_create_bytes(report_path_html, staging_path.read_bytes())
         except Exception as fallback_exc:  # pylint: disable=broad-exception-caught
             logger.warning(
                 "Offline HTML conversion also failed. output=%s error=%s",
