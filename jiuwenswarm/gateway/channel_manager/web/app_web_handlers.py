@@ -2726,6 +2726,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return st
 
         for s in sessions:
+            # 仅统计 web 渠道会话
+            if s.get("channel_id") != "web":
+                continue
             # 置顶会话已从项目分组剥离,不计入任何项目统计
             if s.get("pinned"):
                 continue
@@ -2870,8 +2873,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return _attribute_session_project(meta, visible_by_id) == project_id
 
         sessions = collect_all_sessions_metadata()
-        # 仅非置顶普通会话(cron_id 为空) + 归属匹配；cron 会话由 get_cron_sessions 返回
-        matched = [s for s in sessions if not s.get("pinned") and _belongs(s) and not s.get("cron_id")]
+        # 仅非置顶普通会话(cron_id 为空) + 归属匹配 + web 渠道
+        # cron 会话由 get_cron_sessions 返回
+        matched = [
+            s for s in sessions
+            if not s.get("pinned") and _belongs(s) and not s.get("cron_id") and s.get("channel_id") == "web"
+        ]
 
         def _lum(s: dict[str, Any]) -> float:
             v = s.get("last_user_message_at")
@@ -2944,6 +2951,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         sessions = collect_all_sessions_metadata()
         # 仅非置顶 cron 会话(cron_id 非空) + 归属匹配 + 可选按 cron_id 过滤
+        # 注意: cron 会话的 channel_id 通常为 "__cron__"(默认模式)或 job.targets(team 模式),
+        # 不固定为 "web",因此不过滤 channel_id,否则 cron 面板会变空。
         matched = []
         for s in sessions:
             if s.get("pinned"):
@@ -3248,6 +3257,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         sessions = collect_all_sessions_metadata()
         affected = 0
         for s in sessions:
+            if s.get("channel_id") != "web":
+                continue
             if not s.get("pinned") and _attribute_session_project(s, visible_by_id) == project_id:
                 affected += 1
 
@@ -3328,6 +3339,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         sessions = collect_all_sessions_metadata()
         affected = 0
         for s in sessions:
+            if s.get("channel_id") != "web":
+                continue
             if not s.get("pinned") and _attribute_session_project(s, visible_by_id) == project_id:
                 affected += 1
 
@@ -3383,6 +3396,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         last_message_at = None
         last_user_message_at = None
         for s in sessions:
+            if s.get("channel_id") != "web":
+                continue
             if s.get("pinned") or s.get("cron_id"):
                 continue
             if _attribute_session_project(s, visible_by_id) == project_id:
@@ -3430,7 +3445,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
 
         sessions = collect_all_sessions_metadata()
-        pinned = [s for s in sessions if s.get("pinned")]
+        pinned = [s for s in sessions if s.get("pinned") and s.get("channel_id") == "web"]
         pinned.sort(key=lambda s: int(s.get("pin_order", 0) or 0))
 
         await channel.send_response(ws, req_id, ok=True, payload={
