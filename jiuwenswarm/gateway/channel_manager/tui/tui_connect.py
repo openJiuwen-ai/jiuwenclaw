@@ -2856,6 +2856,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     # ── Memory RPC handlers ────────────────────────────────────────────
     from jiuwenswarm.agents.harness.common.memory_rpc import (
+        MemoryModeNotSupportedError,
         handle_memory_list,
         handle_memory_edit,
         handle_memory_status,
@@ -2885,18 +2886,23 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         try:
             result = await handle_memory_list(workspace, mode, params)
             await channel.send_response(ws, req_id, ok=True, payload=result)
+        except MemoryModeNotSupportedError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED_MODE")
         except Exception as exc:
             logger.warning("[memory.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
     async def _memory_edit(ws, req_id, params, session_id):
         workspace = str(get_agent_workspace_dir())
+        mode = params.get("mode", "plan")
         project_dir = _resolve_project_dir(params)
         if project_dir:
             params = {**params, "project_dir": project_dir}
         try:
-            result = await handle_memory_edit(workspace, params)
+            result = await handle_memory_edit(workspace, mode, params)
             await channel.send_response(ws, req_id, ok=True, payload=result)
+        except MemoryModeNotSupportedError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED_MODE")
         except Exception as exc:
             logger.warning("[memory.edit] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -2910,6 +2916,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         try:
             result = await handle_memory_status(workspace, mode, params)
             await channel.send_response(ws, req_id, ok=True, payload=result)
+        except MemoryModeNotSupportedError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED_MODE")
         except Exception as exc:
             logger.warning("[memory.status] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -2920,18 +2928,23 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         try:
             result = await handle_memory_toggle(workspace, mode, params)
             await channel.send_response(ws, req_id, ok=True, payload=result)
+        except MemoryModeNotSupportedError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED_MODE")
         except Exception as exc:
             logger.warning("[memory.toggle] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
     async def _memory_open(ws, req_id, params, session_id):
         workspace = str(get_agent_workspace_dir())
+        mode = params.get("mode", "plan")
         project_dir = _resolve_project_dir(params)
         if project_dir:
             params = {**params, "project_dir": project_dir}
         try:
-            result = await handle_memory_open(workspace, params)
+            result = await handle_memory_open(workspace, mode, params)
             await channel.send_response(ws, req_id, ok=True, payload=result)
+        except MemoryModeNotSupportedError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED_MODE")
         except Exception as exc:
             logger.warning("[memory.open] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")

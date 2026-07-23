@@ -4,6 +4,7 @@ import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import { getEditorInfo } from "../../utils/editor.js";
+import { isTeamMode } from "../../modes.js";
 import { getDisplayPath, findGitRoot, isAncestorOrSelfDir } from "./memory-path-utils.js";
 
 export interface MemoryFile {
@@ -223,6 +224,19 @@ function modeToShort(mode: string): string {
   return mode.replace("agent.", "");
 }
 
+function rejectUnsupportedMemoryMode(
+  ctx: import("../types.js").CommandContext,
+): boolean {
+  if (!isTeamMode(ctx.mode)) return false;
+  ctx.addItem(
+    addError(
+      ctx.sessionId,
+      "Memory management is not supported in Team mode. Please switch to Agent or Code mode.",
+    ),
+  );
+  return true;
+}
+
 /** 收集并排序可编辑规则文件（合并后端 list + 前端发现，含占位条目）。
  *  供 list / edit 页签复用。 */
 export async function collectOrderedMemoryFiles(
@@ -309,6 +323,7 @@ export async function collectOrderedMemoryFiles(
 
 /** edit 页签：纯文件选择器（无开关/打开文件夹行），选中即用 $EDITOR 打开。 */
 async function editMemorySelector(ctx: import("../types.js").CommandContext): Promise<void> {
+  if (rejectUnsupportedMemoryMode(ctx)) return;
   const mode = modeToShort(ctx.mode);
   try {
     const { files, userMemoryPath, gitRoot, projectDir } = await collectOrderedMemoryFiles(ctx, mode);
@@ -379,6 +394,7 @@ async function showMemoryConsole(
   ctx: import("../types.js").CommandContext,
   initialTab?: MemoryTab,
 ): Promise<void> {
+  if (rejectUnsupportedMemoryMode(ctx)) return;
   if (initialTab === "edit") return editMemorySelector(ctx);
   if (initialTab === "status") return showMemoryStatus(ctx);
   if (initialTab === "toggle") return showToggleList(ctx);
@@ -411,6 +427,7 @@ async function editMemory(
   ctx: import("../types.js").CommandContext,
   args: string,
 ): Promise<void> {
+  if (rejectUnsupportedMemoryMode(ctx)) return;
   const targetPath = args.trim();
 
   if (!targetPath) {
@@ -425,6 +442,7 @@ async function editMemoryByPath(
   ctx: import("../types.js").CommandContext,
   path: string,
 ): Promise<void> {
+  if (rejectUnsupportedMemoryMode(ctx)) return;
   try {
     const trustedDirs = ctx.getTrustedDirs();
     const projectDir = ctx.getCurrentProjectDir();
@@ -499,6 +517,7 @@ async function editMemoryByPath(
 
     const payload = await ctx.request<MemoryEditResult>("memory.edit", {
       path,
+      mode: modeToShort(ctx.mode),
       trusted_dirs: trustedDirs.length > 0 ? trustedDirs : undefined,
       cwd: ctx.getWorkspaceDir(),
     });
@@ -547,6 +566,7 @@ async function editMemoryByPath(
 async function showMemoryStatus(
   ctx: import("../types.js").CommandContext,
 ): Promise<void> {
+  if (rejectUnsupportedMemoryMode(ctx)) return;
   const mode = modeToShort(ctx.mode);
   try {
     const payload = await ctx.request<MemoryStatusResult>("memory.status", {
@@ -726,6 +746,7 @@ async function toggleMemory(
   ctx: import("../types.js").CommandContext,
   args: string,
 ): Promise<void> {
+  if (rejectUnsupportedMemoryMode(ctx)) return;
   const key = args.trim();
 
   if (!key) {
@@ -814,10 +835,12 @@ async function toggleByKey(
 async function openMemoryDir(
   ctx: import("../types.js").CommandContext,
 ): Promise<void> {
+  if (rejectUnsupportedMemoryMode(ctx)) return;
   const mode = modeToShort(ctx.mode);
   const cat = modeCategory(mode);
   try {
     const payload = await ctx.request<MemoryOpenResult>("memory.open", {
+      mode,
       project_dir: ctx.getCurrentProjectDir() || undefined,
     });
 
