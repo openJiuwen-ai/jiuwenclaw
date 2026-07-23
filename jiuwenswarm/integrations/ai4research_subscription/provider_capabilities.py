@@ -9,6 +9,7 @@ from openjiuwen.core.foundation.llm.utils.provider_utils import (
     is_openai_account_provider,
 )
 
+from .claude_constants import CLAUDE_MODEL_ALIAS, CLAUDE_PROVIDER_NAME
 from .constants import CODEX_MODEL_ALIAS, CODEX_PROVIDER_NAME
 
 
@@ -31,6 +32,18 @@ _OPENAI_ACCOUNT_CAPABILITIES = ModelProviderCapabilities(
     requires_api_key=False,
     subscription_auth=True,
 )
+# Claude carries NO credential in Jiuwen config: the CLI resolves credentials
+# natively from the operator's environment - an exported ANTHROPIC_API_KEY, or
+# the operator's own Claude login performed outside this product. The config
+# therefore requires (and must contain) neither an API key nor an API base.
+# subscription_auth=False: no in-product auth controller, and the provider routes
+# through the normal model path (not the Codex subscription-admission wrapper).
+_CLAUDE_CAPABILITIES = ModelProviderCapabilities(
+    requires_api_base=False,
+    requires_api_key=False,
+    fixed_model_name=CLAUDE_MODEL_ALIAS,
+    subscription_auth=False,
+)
 
 
 def provider_name(value: object) -> str:
@@ -41,6 +54,8 @@ def get_model_provider_capabilities(value: object) -> ModelProviderCapabilities:
     normalized = provider_name(value)
     if normalized == CODEX_PROVIDER_NAME:
         return _CODEX_CAPABILITIES
+    if normalized == CLAUDE_PROVIDER_NAME:
+        return _CLAUDE_CAPABILITIES
     if is_openai_account_provider(normalized):
         return _OPENAI_ACCOUNT_CAPABILITIES
     return ModelProviderCapabilities()
@@ -50,6 +65,8 @@ def available_model_provider_names() -> list[str]:
     providers = [item.value for item in ProviderType]
     if CODEX_PROVIDER_NAME not in providers:
         providers.append(CODEX_PROVIDER_NAME)
+    if CLAUDE_PROVIDER_NAME not in providers:
+        providers.append(CLAUDE_PROVIDER_NAME)
     return providers
 
 
