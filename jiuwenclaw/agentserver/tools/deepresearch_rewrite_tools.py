@@ -14,10 +14,12 @@ from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.document_rewrite import (
     RewriteError,
     commit_rewrite,
+    prepare_html_export,
     prepare_rewrite,
 )
 from jiuwenclaw.agentserver.tools.deepresearch_tools import (
     _build_related_artifact_bundle,
+    _generate_report_html,
     _get_route,
 )
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
@@ -103,6 +105,19 @@ _COMMIT_INPUT_SCHEMA = {
         },
     },
     "required": ["context_token", "structured_result"],
+    "additionalProperties": False,
+}
+
+_HTML_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "report_path": {"type": "string"},
+        "revision_id": {
+            "type": "string",
+            "pattern": "^rev_[A-Za-z0-9_-]{1,128}$",
+        },
+    },
+    "required": ["report_path", "revision_id"],
     "additionalProperties": False,
 }
 
@@ -335,6 +350,30 @@ async def _deliver_report(
     return True
 
 
+async def _deliver_html(
+    html_path: Path,
+    route: dict[str, object],
+) -> bool:
+    if not route.get("session_id") or not route.get("channel_id"):
+        return False
+    from jiuwenclaw.agentserver.gateway_push.transport import (  # pylint: disable=import-outside-toplevel
+        WebSocketGatewayPushTransport,
+    )
+
+    transport = WebSocketGatewayPushTransport()
+    await transport.send_push({
+        "request_id": route.get("request_id", ""),
+        "channel_id": route["channel_id"],
+        "session_id": route["session_id"],
+        "payload": {
+            "event_type": "chat.file",
+            "files": [{"path": str(html_path), "name": html_path.name}],
+        },
+        "is_complete": False,
+    })
+    return True
+
+
 @_safe_input_tool(
     name="deepresearch_commit_rewrite",
     description=(
@@ -398,4 +437,110 @@ async def deepresearch_commit_rewrite(
     )
 
 
-__all__ = ["deepresearch_prepare_rewrite", "deepresearch_commit_rewrite"]
+@_safe_input_tool(
+    name="deepresearch_generate_rewrite_html",
+    description=(
+        "Generate and deliver HTML for a committed DeepResearch rewrite. "
+        "Inputs must be passed unchanged from the latest successful "
+        "deepresearch_commit_rewrite result."
+    ),
+    input_params=_HTML_INPUT_SCHEMA,
+    input_error_code="BAD_REQUEST",
+)
+async def deepresearch_generate_rewrite_html(
+    report_path: str,
+    revision_id: str,
+) -> str:
+    route = _get_route()
+    output_dir = get_effective_request_output_dir()
+    if (
+        not output_dir
+        or not route.get("session_id")
+        or not route.get("channel_id")
+    ):
+        return json.dumps({
+            "status": "error",
+            "error_code": "BAD_REQUEST",
+            "error": "rewrite HTML workspace or route is unavailable",
+        })
+
+    try:
+        export = prepare_html_export(
+            workspace_root=output_dir,
+            report_path=report_path,
+            revision_id=revision_id,
+        )
+    except RewriteError as exc:
+        logger.info("deepresearch rewrite HTML export rejected: code=%s", exc.code)
+        if exc.code == "BAD_REQUEST":
+            message = "invalid HTML export request"
+        elif exc.code == "REVISION_CONFLICT":
+            message = "rewrite revision is unavailable"
+        else:
+            return json.dumps({
+                "status": "error",
+                "error_code": "INTERNAL_ERROR",
+                "error": "HTML export preparation failed",
+            })
+        return json.dumps({
+            "status": "error",
+            "error_code": exc.code,
+            "error": message,
+        })
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error(
+            "deepresearch rewrite HTML preparation failed: type=%s",
+            type(exc).__name__,
+        )
+        return json.dumps({
+            "status": "error",
+            "error_code": "INTERNAL_ERROR",
+            "error": "HTML export preparation failed",
+        })
+
+    try:
+        html_path = await _generate_report_html(
+            export["final_result"], Path(export["report_path"])
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error(
+            "deepresearch rewrite HTML generation failed: type=%s",
+            type(exc).__name__,
+        )
+        html_path = None
+    if html_path is None:
+        return json.dumps({
+            "status": "error",
+            "error_code": "HTML_GENERATION_FAILED",
+            "error": (
+                "HTML generation failed; the Markdown rewrite remains available"
+            ),
+        })
+
+    try:
+        delivered = await _deliver_html(html_path, route)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error(
+            "deepresearch rewrite HTML delivery failed: type=%s",
+            type(exc).__name__,
+        )
+        delivered = False
+    if not delivered:
+        return json.dumps({
+            "status": "error",
+            "error_code": "HTML_DELIVERY_FAILED",
+            "error": "HTML delivery failed; the Markdown rewrite remains available",
+        })
+
+    return json.dumps({
+        "status": "completed",
+        "html_delivered": True,
+        "delivery_status": "delivered",
+    })
+
+
+__all__ = [
+    "deepresearch_prepare_rewrite",
+    "deepresearch_commit_rewrite",
+    "deepresearch_generate_rewrite_html",
+]

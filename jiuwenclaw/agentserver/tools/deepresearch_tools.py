@@ -1133,6 +1133,7 @@ def get_deepresearch_tools() -> list:
         return []
     from jiuwenclaw.agentserver.tools.deepresearch_rewrite_tools import (  # pylint: disable=import-outside-toplevel
         deepresearch_commit_rewrite,
+        deepresearch_generate_rewrite_html,
         deepresearch_prepare_rewrite,
     )
 
@@ -1140,6 +1141,7 @@ def get_deepresearch_tools() -> list:
         deepresearch_stream,
         deepresearch_prepare_rewrite,
         deepresearch_commit_rewrite,
+        deepresearch_generate_rewrite_html,
     ]
 
 

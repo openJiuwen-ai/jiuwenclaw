@@ -1650,6 +1650,7 @@ def test_get_deepresearch_tools_exposes_stream_and_rewrite_tools(monkeypatch):
         dt.deepresearch_stream,
         rt.deepresearch_prepare_rewrite,
         rt.deepresearch_commit_rewrite,
+        rt.deepresearch_generate_rewrite_html,
     ]
 
 

@@ -188,6 +188,30 @@ def test_rewrite_tool_schemas_expose_only_protocol_v2_contract():
     assert slot_schema["required"] == ["slot_id", "text"]
     assert slot_schema["additionalProperties"] is False
 
+    html_tool = rt.deepresearch_generate_rewrite_html
+    assert list(inspect.signature(html_tool._func).parameters) == [
+        "report_path",
+        "revision_id",
+    ]
+    html_card = html_tool._card
+    assert html_card.name == "deepresearch_generate_rewrite_html"
+    assert (
+        "latest successful deepresearch_commit_rewrite result"
+        in html_card.description
+    )
+    assert html_card.input_params == {
+        "type": "object",
+        "properties": {
+            "report_path": {"type": "string"},
+            "revision_id": {
+                "type": "string",
+                "pattern": "^rev_[A-Za-z0-9_-]{1,128}$",
+            },
+        },
+        "required": ["report_path", "revision_id"],
+        "additionalProperties": False,
+    }
+
 
 @pytest.mark.asyncio
 async def test_prepare_invoke_keeps_full_lifecycle_for_valid_and_invalid_inputs():
@@ -681,4 +705,302 @@ def test_deepresearch_catalog_includes_stream_and_rewrite_tools(monkeypatch):
         dt.deepresearch_stream,
         rt.deepresearch_prepare_rewrite,
         rt.deepresearch_commit_rewrite,
+        rt.deepresearch_generate_rewrite_html,
     ]
+
+
+@pytest.mark.asyncio
+async def test_generate_rewrite_html_invoke_keeps_lifecycle_and_rejects_invalid_schema():
+    valid_payload = {
+        "report_path": "/workspace/rewrite.md",
+        "revision_id": "rev_child",
+    }
+    invalid_payload = {**valid_payload, "extra": "SECRET-extra"}
+    export = {
+        "report_path": "/workspace/rewrite.md",
+        "final_result": {"response_content": "rewritten"},
+    }
+    html_path = Path("/workspace/rewrite.html")
+    with patch.object(
+        rt, "_get_route", return_value={"session_id": "S1", "channel_id": "CH1"}
+    ), patch.object(
+        rt, "get_effective_request_output_dir", return_value="/workspace"
+    ), patch.object(
+        rt, "prepare_html_export", return_value=export
+    ) as prepare, patch.object(
+        rt, "_generate_report_html", AsyncMock(return_value=html_path)
+    ), patch.object(
+        rt, "_deliver_html", AsyncMock(return_value=True)
+    ):
+        valid_raw, valid_events = await _invoke_with_event_probe(
+            rt.deepresearch_generate_rewrite_html, valid_payload
+        )
+        invalid_raw, invalid_events = await _invoke_with_event_probe(
+            rt.deepresearch_generate_rewrite_html, invalid_payload
+        )
+
+    assert json.loads(valid_raw) == {
+        "status": "completed",
+        "html_delivered": True,
+        "delivery_status": "delivered",
+    }
+    assert json.loads(invalid_raw) == {
+        "status": "error",
+        "error_code": "BAD_REQUEST",
+        "error": "invalid tool input",
+    }
+    assert "SECRET" not in invalid_raw
+    prepare.assert_called_once()
+    assert set(valid_events) == set(_INVOKE_LIFECYCLE_EVENTS)
+    assert invalid_events == [
+        ToolCallEvents.TOOL_INVOKE_INPUT,
+        ToolCallEvents.TOOL_CALL_STARTED,
+        ToolCallEvents.TOOL_PARSE_STARTED,
+        ToolCallEvents.TOOL_CALL_FINISHED,
+        ToolCallEvents.TOOL_INVOKE_OUTPUT,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_rewrite_html_passes_inputs_generates_once_and_delivers_only_html():
+    route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
+    final_result = {"response_content": "rewritten"}
+    export = {
+        "report_path": "/workspace/child.md",
+        "final_result": final_result,
+    }
+    html_path = Path("/workspace/child.html")
+    generator = AsyncMock(return_value=html_path)
+    delivery = AsyncMock(return_value=True)
+    with patch.object(rt, "_get_route", return_value=route), patch.object(
+        rt, "get_effective_request_output_dir", return_value="/workspace"
+    ), patch.object(
+        rt, "prepare_html_export", return_value=export
+    ) as prepare, patch.object(
+        rt, "_generate_report_html", generator
+    ), patch.object(
+        rt, "_deliver_html", delivery
+    ):
+        raw = await rt.deepresearch_generate_rewrite_html._func(
+            report_path="/workspace/child.md",
+            revision_id="rev_child",
+        )
+
+    assert json.loads(raw) == {
+        "status": "completed",
+        "html_delivered": True,
+        "delivery_status": "delivered",
+    }
+    prepare.assert_called_once_with(
+        workspace_root="/workspace",
+        report_path="/workspace/child.md",
+        revision_id="rev_child",
+    )
+    generator.assert_awaited_once_with(final_result, Path("/workspace/child.md"))
+    delivery.assert_awaited_once_with(html_path, route)
+    assert "/workspace" not in raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_dir", "route"),
+    [
+        (None, {"session_id": "S1", "channel_id": "CH1"}),
+        ("/workspace", {"channel_id": "CH1"}),
+        ("/workspace", {"session_id": "S1"}),
+    ],
+)
+async def test_generate_rewrite_html_requires_workspace_and_full_route_before_core(
+    output_dir, route
+):
+    with patch.object(rt, "_get_route", return_value=route), patch.object(
+        rt, "get_effective_request_output_dir", return_value=output_dir
+    ), patch.object(
+        rt, "prepare_html_export", side_effect=AssertionError("core called")
+    ) as prepare:
+        raw = await rt.deepresearch_generate_rewrite_html._func(
+            report_path="/SECRET/child.md",
+            revision_id="rev_child",
+        )
+
+    assert json.loads(raw) == {
+        "status": "error",
+        "error_code": "BAD_REQUEST",
+        "error": "rewrite HTML workspace or route is unavailable",
+    }
+    assert "SECRET" not in raw
+    prepare.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", ["BAD_REQUEST", "REVISION_CONFLICT"])
+async def test_generate_rewrite_html_returns_safe_core_errors(error_code, caplog):
+    with patch.object(
+        rt, "_get_route", return_value={"session_id": "S1", "channel_id": "CH1"}
+    ), patch.object(
+        rt, "get_effective_request_output_dir", return_value="/workspace"
+    ), patch.object(
+        rt,
+        "prepare_html_export",
+        side_effect=rt.RewriteError(error_code, "SECRET /internal/source.md"),
+    ), caplog.at_level(logging.INFO, logger=rt.__name__):
+        raw = await rt.deepresearch_generate_rewrite_html._func(
+            report_path="/SECRET/child.md",
+            revision_id="rev_child",
+        )
+
+    expected_message = {
+        "BAD_REQUEST": "invalid HTML export request",
+        "REVISION_CONFLICT": "rewrite revision is unavailable",
+    }[error_code]
+    assert json.loads(raw) == {
+        "status": "error",
+        "error_code": error_code,
+        "error": expected_message,
+    }
+    assert "SECRET" not in raw
+    assert "/internal" not in raw
+    assert "SECRET" not in caplog.text
+    assert "/internal" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "generation_effect",
+    [None, RuntimeError("SECRET /internal/generated.html")],
+)
+async def test_generate_rewrite_html_generation_failure_does_not_deliver(
+    generation_effect, caplog
+):
+    generator = AsyncMock()
+    if isinstance(generation_effect, Exception):
+        generator.side_effect = generation_effect
+    else:
+        generator.return_value = generation_effect
+    delivery = AsyncMock()
+    with patch.object(
+        rt, "_get_route", return_value={"session_id": "S1", "channel_id": "CH1"}
+    ), patch.object(
+        rt, "get_effective_request_output_dir", return_value="/workspace"
+    ), patch.object(
+        rt,
+        "prepare_html_export",
+        return_value={
+            "report_path": "/workspace/child.md",
+            "final_result": {"response_content": "rewritten"},
+        },
+    ), patch.object(
+        rt, "_generate_report_html", generator
+    ), patch.object(
+        rt, "_deliver_html", delivery
+    ), caplog.at_level(logging.ERROR, logger=rt.__name__):
+        raw = await rt.deepresearch_generate_rewrite_html._func(
+            report_path="/workspace/child.md",
+            revision_id="rev_child",
+        )
+
+    assert json.loads(raw) == {
+        "status": "error",
+        "error_code": "HTML_GENERATION_FAILED",
+        "error": "HTML generation failed; the Markdown rewrite remains available",
+    }
+    assert "SECRET" not in raw
+    assert "/internal" not in raw
+    assert "SECRET" not in caplog.text
+    assert "/internal" not in caplog.text
+    generator.assert_awaited_once()
+    delivery.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "delivery_effect",
+    [False, RuntimeError("SECRET /internal/delivery")],
+)
+async def test_generate_rewrite_html_delivery_failure_is_safe(delivery_effect, caplog):
+    delivery = AsyncMock()
+    if isinstance(delivery_effect, Exception):
+        delivery.side_effect = delivery_effect
+    else:
+        delivery.return_value = delivery_effect
+    with patch.object(
+        rt, "_get_route", return_value={"session_id": "S1", "channel_id": "CH1"}
+    ), patch.object(
+        rt, "get_effective_request_output_dir", return_value="/workspace"
+    ), patch.object(
+        rt,
+        "prepare_html_export",
+        return_value={
+            "report_path": "/workspace/child.md",
+            "final_result": {"response_content": "rewritten"},
+        },
+    ), patch.object(
+        rt, "_generate_report_html", AsyncMock(return_value=Path("/workspace/child.html"))
+    ), patch.object(
+        rt, "_deliver_html", delivery
+    ), caplog.at_level(logging.ERROR, logger=rt.__name__):
+        raw = await rt.deepresearch_generate_rewrite_html._func(
+            report_path="/workspace/child.md",
+            revision_id="rev_child",
+        )
+
+    assert json.loads(raw) == {
+        "status": "error",
+        "error_code": "HTML_DELIVERY_FAILED",
+        "error": "HTML delivery failed; the Markdown rewrite remains available",
+    }
+    assert "SECRET" not in raw
+    assert "/internal" not in raw
+    assert "SECRET" not in caplog.text
+    assert "/internal" not in caplog.text
+    delivery.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_rewrite_html_unexpected_preparation_failure_is_safe(caplog):
+    with patch.object(
+        rt, "_get_route", return_value={"session_id": "S1", "channel_id": "CH1"}
+    ), patch.object(
+        rt, "get_effective_request_output_dir", return_value="/workspace"
+    ), patch.object(
+        rt,
+        "prepare_html_export",
+        side_effect=RuntimeError("SECRET /internal/preparation"),
+    ), caplog.at_level(logging.ERROR, logger=rt.__name__):
+        raw = await rt.deepresearch_generate_rewrite_html._func(
+            report_path="/SECRET/child.md",
+            revision_id="rev_child",
+        )
+
+    assert json.loads(raw) == {
+        "status": "error",
+        "error_code": "INTERNAL_ERROR",
+        "error": "HTML export preparation failed",
+    }
+    assert "SECRET" not in raw
+    assert "/internal" not in raw
+    assert "SECRET" not in caplog.text
+    assert "/internal" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_deliver_html_sends_exactly_one_html_file_without_metadata():
+    push = AsyncMock()
+    route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
+    with patch(
+        "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+        return_value=push,
+    ):
+        delivered = await rt._deliver_html(Path("/workspace/child.html"), route)
+
+    assert delivered is True
+    push.send_push.assert_awaited_once_with({
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "payload": {
+            "event_type": "chat.file",
+            "files": [{"path": "/workspace/child.html", "name": "child.html"}],
+        },
+        "is_complete": False,
+    })
