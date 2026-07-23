@@ -2898,8 +2898,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         project_dir = _resolve_project_dir(params)
         if project_dir:
             params = {**params, "project_dir": project_dir}
+        params = {**params, "mode": mode}
         try:
-            result = await handle_memory_edit(workspace, mode, params)
+            result = await handle_memory_edit(workspace, params)
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except MemoryModeNotSupportedError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED_MODE")
@@ -2940,8 +2941,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         project_dir = _resolve_project_dir(params)
         if project_dir:
             params = {**params, "project_dir": project_dir}
+        params = {**params, "mode": mode}
         try:
-            result = await handle_memory_open(workspace, mode, params)
+            result = await handle_memory_open(workspace, params)
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except MemoryModeNotSupportedError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED_MODE")

@@ -323,7 +323,6 @@ export async function collectOrderedMemoryFiles(
 
 /** edit 页签：纯文件选择器（无开关/打开文件夹行），选中即用 $EDITOR 打开。 */
 async function editMemorySelector(ctx: import("../types.js").CommandContext): Promise<void> {
-  if (rejectUnsupportedMemoryMode(ctx)) return;
   const mode = modeToShort(ctx.mode);
   try {
     const { files, userMemoryPath, gitRoot, projectDir } = await collectOrderedMemoryFiles(ctx, mode);
@@ -442,7 +441,6 @@ async function editMemoryByPath(
   ctx: import("../types.js").CommandContext,
   path: string,
 ): Promise<void> {
-  if (rejectUnsupportedMemoryMode(ctx)) return;
   try {
     const trustedDirs = ctx.getTrustedDirs();
     const projectDir = ctx.getCurrentProjectDir();

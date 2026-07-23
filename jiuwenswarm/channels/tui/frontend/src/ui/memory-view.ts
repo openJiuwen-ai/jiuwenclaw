@@ -6,8 +6,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
-import { addInfo } from "../core/commands/helpers.js";
+import { addError, addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
+import { isTeamMode } from "../core/modes.js";
 import { openFileInEditor as openInExternalEditor, openFolderInExplorer } from "../core/utils/editor.js";
 import { collectOrderedMemoryFiles, type MemoryFile } from "../core/commands/builtins/memory.js";
 import { getDisplayPath } from "../core/commands/builtins/memory-path-utils.js";
@@ -146,6 +147,15 @@ export class MemoryViewController {
     this.lastOpenedPath = null;
     const ctx = this.appState.getCommandContext();
     const fullMode = ctx.mode ?? "code.normal";
+    if (isTeamMode(fullMode)) {
+      this.appState.addItem(
+        addError(
+          this.appState.getSnapshot().sessionId,
+          "Memory management is not supported in Team mode. Please switch to Agent or Code mode.",
+        ),
+      );
+      return;
+    }
     const projectDir = ctx.getCurrentProjectDir() || process.cwd();
     const initialTab: MemoryViewTab = tab ?? "edit";
 
@@ -173,7 +183,7 @@ export class MemoryViewController {
         projectDir,
       })),
       this.appState.request<MVStatus>("memory.status", { detailed: true, mode: this.shortMode(fullMode) }).catch(() => null),
-      this.appState.request<MVOpen>("memory.open", { project_dir: projectDir }).catch(() => null),
+      this.appState.request<MVOpen>("memory.open", { project_dir: projectDir, mode: this.shortMode(fullMode) }).catch(() => null),
     ]);
 
     if (!this.state) return; // 用户可能已关闭

@@ -297,10 +297,9 @@ async def handle_memory_list(
 
 async def handle_memory_edit(
     workspace: str,
-    mode: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    _ensure_memory_mode_supported(mode)
+    _ensure_memory_mode_supported(params.get("mode", ""))
     raw_path = params.get("path", "")
     project_dir = params.get("project_dir")
     is_valid, resolved = _validate_edit_path(raw_path, workspace, project_dir)
@@ -598,10 +597,9 @@ def _update_mode_memory_config(mode: str, field: str, value: bool) -> None:
 
 async def handle_memory_open(
     workspace: str,
-    mode: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    _ensure_memory_mode_supported(mode)
+    _ensure_memory_mode_supported(params.get("mode", ""))
     project_dir = params.get("project_dir")
     result: dict[str, Any] = {
         "memory_dir": os.path.join(workspace, "memory"),
