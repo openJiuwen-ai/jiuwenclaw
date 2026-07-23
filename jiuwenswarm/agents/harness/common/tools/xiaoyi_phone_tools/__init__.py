@@ -13,7 +13,7 @@
 - 相册: search_photo_gallery, upload_photo
 - 文件: search_file, upload_file, send_file_to_user
 - 电话: call_phone
-- 短信/消息: send_message, search_message
+- 短信/消息: send_sms, search_message
 - 闹钟: create_alarm, search_alarms, modify_alarm, delete_alarm
 - 收藏: query_collection, add_collection, delete_collection
 - 保存: save_media_to_gallery, save_file_to_file_manager
@@ -30,7 +30,7 @@ from .contact_tools import search_contact
 from .photo_tools import search_photo_gallery, upload_photo
 from .file_tools import search_file, upload_file
 from .phone_tools import call_phone
-from .message_tools import send_message, search_message
+from .message_tools import send_message, send_sms, search_message
 from .alarm_tools import create_alarm, search_alarms, modify_alarm, delete_alarm
 from .xiaoyi_collection_tool import query_collection, add_collection, delete_collection
 from .save_tools import save_media_to_gallery, save_file_to_file_manager
@@ -53,6 +53,7 @@ __all__ = [
     "search_file",
     "upload_file",
     "call_phone",
+    "send_sms",
     "send_message",
     "search_message",
     "create_alarm",
