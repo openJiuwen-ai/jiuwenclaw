@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import uuid
 import zipfile
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -29,6 +30,9 @@ from jiuwenclaw.agentserver.tools._deepresearch_tls import (
 
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
+_REPORT_PUBLICATION_ATTEMPTS = 8
+_REPORT_OUTPUT_LOCKS: dict[Path, threading.Lock] = {}
+_REPORT_OUTPUT_LOCKS_GUARD = threading.Lock()
 
 # 使用 contextvars
 _deepresearch_route_ctx: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
@@ -130,8 +134,8 @@ def _write_report_markdown(
     citation_artifacts: object = None,
 ) -> str:
     """Build and write the completed report bundle into the request output directory."""
-    from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import (
-        make_safe_filename_component,
+    from jiuwenclaw.agentserver.tools.deepresearch_plugin.artifact_naming import (
+        allocate_initial_paths,
     )
     from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import (
         build_report_bundle,
@@ -145,42 +149,89 @@ def _write_report_markdown(
     if not output_dir:
         raise RuntimeError("current request output_dir is unavailable")
 
-    requested_stem = Path(file_name).stem if file_name else ""
-    fallback_stem = f"deepresearch_{conversation_id or 'report'}"
-    safe_stem = make_safe_filename_component(requested_stem, default=fallback_stem)
-    report_path = Path(output_dir).expanduser().resolve() / f"{safe_stem}.md"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    bundle = build_report_bundle(final_result, report_path.with_suffix(""))
-    markdown_bytes = bundle.markdown_text.encode("utf-8")
-    snapshot_path = report_path.with_suffix(".final-result.json")
-    snapshot_bytes = serialize_final_result_snapshot(bundle.final_result_snapshot)
-    provenance = {
-        "schema_version": 2,
-        "document_id": f"doc_{uuid.uuid4().hex}",
-        "revision_id": f"rev_{uuid.uuid4().hex}",
-        "parent_revision_id": None,
-        "conversation_id": conversation_id,
-        "markdown_path": str(report_path),
-        "content_sha256": hashlib.sha256(markdown_bytes).hexdigest(),
-        "final_result_path": snapshot_path.name,
-        "final_result_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "operation": {"action": "deepresearch_generate"},
-        "citations": bundle.citations,
-        "inference_manifest": bundle.inference_manifest,
-        "chart_manifest": bundle.chart_manifest,
-        "rewrite_history": [],
-    }
-    normalized_artifacts = _normalize_citation_artifacts(citation_artifacts)
-    if normalized_artifacts:
-        provenance["citation_artifacts"] = normalized_artifacts
-    _atomic_write_bytes(snapshot_path, snapshot_bytes)
-    _atomic_write_bytes(
-        report_path.with_suffix(".provenance.json"),
-        json.dumps(provenance, ensure_ascii=False, indent=2).encode("utf-8"),
-    )
-    _atomic_write_bytes(report_path, markdown_bytes)
-    return str(report_path)
+    output_path = Path(output_dir).expanduser().resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+    output_lock = _get_report_output_lock(output_path)
+    with output_lock:
+        for _attempt in range(_REPORT_PUBLICATION_ATTEMPTS):
+            paths = allocate_initial_paths(output_path, file_name)
+            report_base = paths.markdown_path.with_suffix("")
+            bundle_dir_candidates = (
+                report_base.with_name(f"{report_base.name}_infer"),
+                report_base.with_name(f"{report_base.name}_charts"),
+            )
+            preexisting_bundle_dirs = {
+                path for path in bundle_dir_candidates if os.path.lexists(path)
+            }
+            try:
+                bundle = build_report_bundle(final_result, report_base)
+            except BaseException:
+                _remove_created_bundle_directories(
+                    bundle_dir_candidates, preexisting_bundle_dirs
+                )
+                raise
+            created_bundle_dirs = _created_bundle_directories(
+                bundle_dir_candidates, preexisting_bundle_dirs
+            )
+            markdown_bytes = bundle.markdown_text.encode("utf-8")
+            snapshot_bytes = serialize_final_result_snapshot(
+                bundle.final_result_snapshot
+            )
+            provenance = {
+                "schema_version": 2,
+                "document_id": f"doc_{uuid.uuid4().hex}",
+                "revision_id": f"rev_{uuid.uuid4().hex}",
+                "parent_revision_id": None,
+                "conversation_id": conversation_id,
+                "markdown_path": str(paths.markdown_path),
+                "content_sha256": hashlib.sha256(markdown_bytes).hexdigest(),
+                "final_result_path": paths.final_result_path.name,
+                "final_result_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "operation": {"action": "deepresearch_generate"},
+                "version_number": paths.version.version_number,
+                "version_base_stem": paths.version.base_stem,
+                "citations": bundle.citations,
+                "inference_manifest": bundle.inference_manifest,
+                "chart_manifest": bundle.chart_manifest,
+                "rewrite_history": [],
+            }
+            normalized_artifacts = _normalize_citation_artifacts(
+                citation_artifacts
+            )
+            if normalized_artifacts:
+                provenance["citation_artifacts"] = normalized_artifacts
+
+            created_paths: list[tuple[Path, os.stat_result]] = []
+            try:
+                created_paths.append((
+                    paths.final_result_path,
+                    _atomic_create_bytes(paths.final_result_path, snapshot_bytes),
+                ))
+                created_paths.append((
+                    paths.provenance_path,
+                    _atomic_create_bytes(
+                        paths.provenance_path,
+                        json.dumps(
+                            provenance, ensure_ascii=False, indent=2
+                        ).encode("utf-8"),
+                    ),
+                ))
+                created_paths.append((
+                    paths.markdown_path,
+                    _atomic_create_bytes(paths.markdown_path, markdown_bytes),
+                ))
+            except FileExistsError:
+                _remove_created_artifacts(created_paths)
+                _remove_created_directories(created_bundle_dirs)
+                continue
+            except BaseException:
+                _remove_created_artifacts(created_paths)
+                _remove_created_directories(created_bundle_dirs)
+                raise
+            return str(paths.markdown_path)
+
+    raise FileExistsError("report publication attempts exhausted")
 
 
 def _build_styled_export_llm_config() -> dict:
@@ -394,6 +445,82 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             os.unlink(temp_name)
         except FileNotFoundError:
             pass
+
+
+def _get_report_output_lock(output_dir: Path) -> threading.Lock:
+    """Return the process-local publication lock for one resolved output directory."""
+    with _REPORT_OUTPUT_LOCKS_GUARD:
+        return _REPORT_OUTPUT_LOCKS.setdefault(output_dir, threading.Lock())
+
+
+def _atomic_create_bytes(path: Path, payload: bytes) -> os.stat_result:
+    """Publish a complete immutable file without replacing an existing target."""
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+            metadata = os.fstat(stream.fileno())
+        os.link(temp_name, path, follow_symlinks=False)
+        return metadata
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def _remove_created_artifacts(
+    created_paths: list[tuple[Path, os.stat_result]],
+) -> None:
+    """Remove only files whose identity still matches this publication attempt."""
+    for path, created_metadata in reversed(created_paths):
+        try:
+            current_metadata = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if (
+            current_metadata.st_dev == created_metadata.st_dev
+            and current_metadata.st_ino == created_metadata.st_ino
+        ):
+            path.unlink()
+
+
+def _created_bundle_directories(
+    candidates: tuple[Path, ...], preexisting: set[Path]
+) -> list[tuple[Path, os.stat_result]]:
+    created = []
+    for path in candidates:
+        if path in preexisting or path.is_symlink() or not path.is_dir():
+            continue
+        created.append((path, os.lstat(path)))
+    return created
+
+
+def _remove_created_directories(
+    created_directories: list[tuple[Path, os.stat_result]],
+) -> None:
+    for path, created_metadata in reversed(created_directories):
+        try:
+            current_metadata = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if (
+            current_metadata.st_dev == created_metadata.st_dev
+            and current_metadata.st_ino == created_metadata.st_ino
+            and not path.is_symlink()
+            and path.is_dir()
+        ):
+            shutil.rmtree(path)
+
+
+def _remove_created_bundle_directories(
+    candidates: tuple[Path, ...], preexisting: set[Path]
+) -> None:
+    _remove_created_directories(
+        _created_bundle_directories(candidates, preexisting)
+    )
 
 
 def _deepresearch_dependency_available() -> bool:

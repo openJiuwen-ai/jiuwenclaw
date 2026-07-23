@@ -579,23 +579,25 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
     ):
         report_path = dt._write_report_markdown(final_result, "研究报告.md", "C1")
 
-    assert report_path == str(tmp_path / "研究报告.md")
-    report = (tmp_path / "研究报告.md").read_text(encoding="utf-8")
+    assert report_path == str(tmp_path / "研究报告-v1.md")
+    report = (tmp_path / "研究报告-v1.md").read_text(encoding="utf-8")
     assert "checked_citation" not in report
-    assert "[观点](研究报告_infer/inference_7.html)" in report
+    assert "[观点](研究报告-v1_infer/inference_7.html)" in report
     assert "[[1]](https://example.com/source)" in report
-    assert (tmp_path / "研究报告_infer" / "inference_7.html").read_bytes() == b"<html>trace</html>"
-    provenance = json.loads((tmp_path / "研究报告.provenance.json").read_text(encoding="utf-8"))
-    snapshot_path = tmp_path / "研究报告.final-result.json"
+    assert (tmp_path / "研究报告-v1_infer" / "inference_7.html").read_bytes() == b"<html>trace</html>"
+    provenance = json.loads((tmp_path / "研究报告-v1.provenance.json").read_text(encoding="utf-8"))
+    snapshot_path = tmp_path / "研究报告-v1.final-result.json"
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     assert snapshot["response_content"] == final_result["response_content"]
     assert snapshot["citation_messages"] == final_result["citation_messages"]
     assert snapshot["request_metadata"] == {"trace_id": "trace-1"}
     assert "html_base64" not in snapshot["infer_messages"][0]
-    assert snapshot["infer_messages"][0]["artifact_path"] == "研究报告_infer/inference_7.html"
+    assert snapshot["infer_messages"][0]["artifact_path"] == "研究报告-v1_infer/inference_7.html"
     assert "base64" not in snapshot["chart_messages"][0]
-    assert snapshot["chart_messages"][0]["artifact_path"] == "研究报告_charts/chart-1.png"
+    assert snapshot["chart_messages"][0]["artifact_path"] == "研究报告-v1_charts/chart-1.png"
     assert provenance["schema_version"] == 2
+    assert provenance["version_number"] == 1
+    assert provenance["version_base_stem"] == "研究报告"
     assert provenance["document_id"].startswith("doc_")
     assert provenance["revision_id"].startswith("rev_")
     assert provenance["parent_revision_id"] is None
@@ -639,12 +641,12 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
         )
 
     assert artifacts == {
-        "md": str(tmp_path / "研究报告.md"),
-        "html": str(tmp_path / "研究报告.html"),
+        "md": str(tmp_path / "研究报告-v1.md"),
+        "html": str(tmp_path / "研究报告-v1.html"),
     }
-    assert (tmp_path / "研究报告.final-result.json").is_file()
+    assert (tmp_path / "研究报告-v1.final-result.json").is_file()
     provenance = json.loads(
-        (tmp_path / "研究报告.provenance.json").read_text(encoding="utf-8")
+        (tmp_path / "研究报告-v1.provenance.json").read_text(encoding="utf-8")
     )
     assert provenance["citation_artifacts"] == {
         "raw_report_path": "/skill/data/C1.raw_report.md",
@@ -672,9 +674,167 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp
             final_result, "研究报告.md", "C1"
         )
 
-    assert artifacts == {"md": str(tmp_path / "研究报告.md")}
-    assert (tmp_path / "研究报告.final-result.json").is_file()
-    assert (tmp_path / "研究报告.provenance.json").is_file()
+    assert artifacts == {"md": str(tmp_path / "研究报告-v1.md")}
+    assert (tmp_path / "研究报告-v1.final-result.json").is_file()
+    assert (tmp_path / "研究报告-v1.provenance.json").is_file()
+
+
+def _minimal_report_result():
+    return {
+        "response_content": "# 报告\n\n正文",
+        "infer_messages": [],
+        "chart_messages": [],
+    }
+
+
+def _write_report_in(tmp_path, file_name="研究报告.md", final_result=None):
+    with patch(
+        "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
+        return_value=str(tmp_path),
+    ):
+        return dt._write_report_markdown(
+            final_result or _minimal_report_result(), file_name, "C1"
+        )
+
+
+def test_write_report_markdown_allocates_same_title_ordinal(tmp_path):
+    first = _write_report_in(tmp_path)
+    second = _write_report_in(tmp_path)
+
+    assert first == str(tmp_path / "研究报告-v1.md")
+    assert second == str(tmp_path / "研究报告-2-v1.md")
+
+
+@pytest.mark.parametrize("unsafe_name", ["", "../..", "***"])
+def test_write_report_markdown_uses_default_for_empty_or_unsafe_title(
+    tmp_path, unsafe_name
+):
+    report_path = _write_report_in(tmp_path, unsafe_name)
+
+    assert report_path == str(tmp_path / "深度研究报告-v1.md")
+
+
+def test_write_report_markdown_serializes_same_title_allocation_across_threads(
+    tmp_path,
+):
+    with patch(
+        "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
+        return_value=str(tmp_path),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            paths = list(executor.map(
+                lambda _: dt._write_report_markdown(
+                    _minimal_report_result(), "研究报告.md", "C1"
+                ),
+                range(2),
+            ))
+
+    assert set(paths) == {
+        str(tmp_path / "研究报告-v1.md"),
+        str(tmp_path / "研究报告-2-v1.md"),
+    }
+
+
+@pytest.mark.parametrize("target_kind", ["file", "symlink"])
+def test_write_report_markdown_never_overwrites_preexisting_target(
+    tmp_path, target_kind
+):
+    target = tmp_path / "研究报告-v1.md"
+    protected = tmp_path / "protected.md"
+    protected.write_text("protected", encoding="utf-8")
+    if target_kind == "file":
+        target.write_text("existing", encoding="utf-8")
+    else:
+        target.symlink_to(protected)
+
+    report_path = _write_report_in(tmp_path)
+
+    assert report_path == str(tmp_path / "研究报告-2-v1.md")
+    assert protected.read_text(encoding="utf-8") == "protected"
+    if target_kind == "file":
+        assert target.read_text(encoding="utf-8") == "existing"
+    else:
+        assert target.is_symlink()
+
+
+def test_write_report_markdown_publishes_snapshot_then_provenance_then_markdown(
+    tmp_path, monkeypatch
+):
+    publication_order = []
+    atomic_create = dt._atomic_create_bytes
+
+    def recording_create(path, payload):
+        publication_order.append(path.name)
+        return atomic_create(path, payload)
+
+    monkeypatch.setattr(dt, "_atomic_create_bytes", recording_create)
+
+    report_path = _write_report_in(tmp_path)
+
+    assert report_path == str(tmp_path / "研究报告-v1.md")
+    assert publication_order == [
+        "研究报告-v1.final-result.json",
+        "研究报告-v1.provenance.json",
+        "研究报告-v1.md",
+    ]
+
+
+def test_write_report_markdown_reallocates_after_publication_collision(
+    tmp_path, monkeypatch
+):
+    atomic_create = dt._atomic_create_bytes
+    collision_path = tmp_path / "研究报告-v1.provenance.json"
+    collision_injected = False
+
+    def racing_create(path, payload):
+        nonlocal collision_injected
+        if path == collision_path and not collision_injected:
+            collision_injected = True
+            path.write_text("external", encoding="utf-8")
+        return atomic_create(path, payload)
+
+    monkeypatch.setattr(dt, "_atomic_create_bytes", racing_create)
+
+    report_path = _write_report_in(tmp_path)
+
+    assert report_path == str(tmp_path / "研究报告-2-v1.md")
+    assert collision_path.read_text(encoding="utf-8") == "external"
+    assert not (tmp_path / "研究报告-v1.final-result.json").exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+def test_write_report_markdown_cleans_current_partial_files_on_write_failure(
+    tmp_path, monkeypatch
+):
+    preserved = tmp_path / "preserved.txt"
+    preserved.write_text("keep", encoding="utf-8")
+    atomic_create = dt._atomic_create_bytes
+
+    def failing_create(path, payload):
+        if path.name.endswith(".provenance.json"):
+            raise OSError("disk unavailable")
+        return atomic_create(path, payload)
+
+    monkeypatch.setattr(dt, "_atomic_create_bytes", failing_create)
+    final_result = _minimal_report_result()
+    final_result["infer_messages"] = [{
+        "id": "7",
+        "html_base64": base64.b64encode(b"<html>trace</html>").decode("ascii"),
+    }]
+    final_result["chart_messages"] = [{
+        "chart_id": "chart-1",
+        "base64": base64.b64encode(b"png-bytes").decode("ascii"),
+    }]
+
+    with pytest.raises(OSError, match="disk unavailable"):
+        _write_report_in(tmp_path, final_result=final_result)
+
+    assert preserved.read_text(encoding="utf-8") == "keep"
+    assert not (tmp_path / "研究报告-v1.final-result.json").exists()
+    assert not (tmp_path / "研究报告-v1.provenance.json").exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+    assert not (tmp_path / "研究报告-v1_infer").exists()
+    assert not (tmp_path / "研究报告-v1_charts").exists()
 
 
 def test_build_related_artifact_bundle_exposes_only_hidden_preview_companions():
