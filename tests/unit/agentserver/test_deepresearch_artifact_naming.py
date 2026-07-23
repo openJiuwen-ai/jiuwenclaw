@@ -47,6 +47,14 @@ def test_public_dataclasses_are_frozen_slots_and_initial_name_normalizes_termina
         version.base_stem = "other"
 
 
+def test_artifact_paths_is_frozen(tmp_path):
+    api = _api()
+    paths = api.allocate_initial_paths(tmp_path, "report.md")
+
+    with pytest.raises(AttributeError):
+        paths.markdown_path = Path("other.md")
+
+
 @pytest.mark.parametrize(
     ("provenance", "code"),
     [
@@ -86,8 +94,8 @@ def test_explicit_provenance_is_authoritative_over_filename_and_markdown(tmp_pat
     [
         ("# First heading!\n# Later heading\n", "report.md", "First_heading"),
         ("## Not an H1\n", "legacy report-v9.md", "legacy_report"),
-        ("# !!!\n", "report.md", "深度研究报告"),
-        ("\n", "-v9.md", "深度研究报告"),
+        ("# !!!\n", "report.md", "report"),
+        ("# !!!\n", "-v9.md", "深度研究报告"),
     ],
 )
 def test_legacy_resolution_uses_first_h1_then_report_stem_then_default(
@@ -126,23 +134,50 @@ def test_legacy_resolution_derives_logical_version_from_rewrite_history(tmp_path
     assert version == api.ArtifactVersion("Legacy_title", 3)
 
 
-def test_allocate_initial_paths_adds_same_title_suffix_and_checks_all_sidecars(tmp_path):
+def test_allocate_initial_paths_adds_same_title_suffix_for_markdown_and_sidecar_collisions(tmp_path):
     api = _api()
 
     first = api.allocate_initial_paths(tmp_path, "report.md")
-    first.provenance_path.write_text("{}", encoding="utf-8")
+    first.markdown_path.write_text("report", encoding="utf-8")
     second = api.allocate_initial_paths(tmp_path, "report.md")
-    second.final_result_path.write_text("{}", encoding="utf-8")
+    second.provenance_path.write_text("{}", encoding="utf-8")
     third = api.allocate_initial_paths(tmp_path, "report.md")
+    third.final_result_path.write_text("{}", encoding="utf-8")
+    fourth = api.allocate_initial_paths(tmp_path, "report.md")
 
     assert first.markdown_path.name == "report-v1.md"
     assert second.markdown_path.name == "report-2-v1.md"
     assert third.markdown_path.name == "report-3-v1.md"
+    assert fourth.markdown_path.name == "report-4-v1.md"
     assert second.provenance_path.name == "report-2-v1.provenance.json"
     assert second.final_result_path.name == "report-2-v1.final-result.json"
     assert getattr(api.ArtifactPaths, "__slots__", None) == (
         "version", "markdown_path", "provenance_path", "final_result_path"
     )
+
+
+@pytest.mark.parametrize("path_field", ["markdown_path", "provenance_path", "final_result_path"])
+def test_allocate_initial_paths_treats_hidden_atomic_target_as_collision(tmp_path, path_field):
+    api = _api()
+    first = api.allocate_initial_paths(tmp_path, "report.md")
+    target = getattr(first, path_field)
+    (tmp_path / f".{target.name}.tmp").write_text("in progress", encoding="utf-8")
+
+    allocated = api.allocate_initial_paths(tmp_path, "report.md")
+
+    assert allocated.markdown_path.name == "report-2-v1.md"
+
+
+def test_allocate_initial_paths_caps_base_before_appending_same_title_ordinal(tmp_path):
+    api = _api()
+    requested_name = "x" * 120
+    first = api.allocate_initial_paths(tmp_path, requested_name)
+    first.markdown_path.write_text("report", encoding="utf-8")
+
+    allocated = api.allocate_initial_paths(tmp_path, requested_name)
+
+    assert allocated.version.base_stem == f"{'x' * 118}-2"
+    assert len(allocated.version.base_stem) == 120
 
 
 def test_allocate_next_paths_uses_global_same_document_max_across_branches(tmp_path):

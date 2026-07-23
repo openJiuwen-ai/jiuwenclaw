@@ -58,14 +58,17 @@ def _cap_base_stem(value: str) -> str:
     return value[:_MAX_BASE_STEM_LENGTH].rstrip("._-")
 
 
-def _normalize_base_stem(value: str) -> str:
+def _safe_base_stem_or_empty(value: str) -> str:
     if not isinstance(value, str):
         raise _invalid("artifact base stem must be a string")
     normalized = make_safe_filename_component(
-        _strip_terminal_version(value), default=_DEFAULT_BASE_STEM
+        _strip_terminal_version(value), default=""
     )
-    normalized = _cap_base_stem(normalized)
-    return normalized or _DEFAULT_BASE_STEM
+    return _cap_base_stem(normalized)
+
+
+def _normalize_base_stem(value: str) -> str:
+    return _safe_base_stem_or_empty(value) or _DEFAULT_BASE_STEM
 
 
 def _validate_explicit_base_stem(value: object) -> str:
@@ -109,11 +112,15 @@ def _first_h1(markdown: str) -> str | None:
 def _legacy_base_stem(report_path: Path, markdown: str) -> str:
     heading = _first_h1(markdown)
     if heading:
-        return _normalize_base_stem(heading)
+        heading_base_stem = _safe_base_stem_or_empty(heading)
+        if heading_base_stem:
+            return heading_base_stem
 
     fallback_stem = _strip_terminal_version(report_path.stem)
     if fallback_stem:
-        return _normalize_base_stem(fallback_stem)
+        fallback_base_stem = _safe_base_stem_or_empty(fallback_stem)
+        if fallback_base_stem:
+            return fallback_base_stem
     return _DEFAULT_BASE_STEM
 
 
@@ -168,9 +175,16 @@ def _paths(output_dir: Path, version: ArtifactVersion) -> ArtifactPaths:
 
 def _is_available(paths: ArtifactPaths) -> bool:
     return not any(
-        path.exists()
+        path.exists() or any(path.parent.glob(f".{path.name}.*"))
         for path in (paths.markdown_path, paths.provenance_path, paths.final_result_path)
     )
+
+
+def _base_stem_with_ordinal(base_stem: str, ordinal: int) -> str:
+    if ordinal == 1:
+        return base_stem
+    suffix = f"-{ordinal}"
+    return f"{base_stem[:_MAX_BASE_STEM_LENGTH - len(suffix)].rstrip('._-')}{suffix}"
 
 
 def allocate_initial_paths(output_dir: Path, requested_name: str) -> ArtifactPaths:
@@ -181,7 +195,7 @@ def allocate_initial_paths(output_dir: Path, requested_name: str) -> ArtifactPat
     version = initial_version(requested_name)
     suffix = 1
     while True:
-        base_stem = version.base_stem if suffix == 1 else f"{version.base_stem}-{suffix}"
+        base_stem = _base_stem_with_ordinal(version.base_stem, suffix)
         candidate = _paths(output_dir, ArtifactVersion(base_stem, 1))
         if _is_available(candidate):
             return candidate
