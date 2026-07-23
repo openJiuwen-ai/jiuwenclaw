@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,13 @@ from jiuwenswarm.server.runtime.session.project_git import GitError, GitOperatio
 from jiuwenswarm.server.utils.diff_service import get_diff_service
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_team_path_segment(value: str, fallback: str = "_") -> str:
+    """Sanitize a value into one path segment for team workspace paths."""
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    normalized = normalized.strip("._-")
+    return normalized[:96] or fallback
 
 
 @dataclass(slots=True)
@@ -245,6 +253,7 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
     sid = str(session_id or "").strip()
     if not sid:
         return []
+    safe_sid = _safe_team_path_segment(sid)
     try:
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
@@ -302,14 +311,16 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
                     home = Path(*parts[: idx + 1])
                     add_root(str(home / "team-workspace"))
                     add_root(str(home / "workspaces"))
+                    add_root(str(home / "sessions" / safe_sid / "worktrees"))
             except Exception:  # noqa: BLE001
                 continue
         try:
-            from openjiuwen.agent_teams.paths import team_home
+            from openjiuwen.agent_teams.paths import team_home, team_session_worktrees_dir
 
             home = team_home(team_name)
             add_root(str(home / "team-workspace"))
             add_root(str(home / "workspaces"))
+            add_root(str(team_session_worktrees_dir(team_name, sid)))
         except Exception:  # noqa: BLE001
             pass
     return roots

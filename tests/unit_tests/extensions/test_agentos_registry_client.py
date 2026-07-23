@@ -41,7 +41,10 @@ async def test_local_stub_get_image_and_register() -> None:
     client = RegistryClient(RegistryConfig())
     image = await client.get_image_info("opencode")
     assert image.image_name == "opencode"
+    assert image.image_uri == "local/stub/opencode:latest"
     assert image.metadata["source"] == "local_stub"
+    assert image.metadata["runtime_spec"]["rootfs"]["imageurl"] == image.image_uri
+    assert image.metadata["env_vars"] == {}
 
     agent = AgentInfo(user_id="u1", agent_type="opencode", status=AgentStatus.READY)
     agent.metadata["node"] = "192.168.0.12"
@@ -82,19 +85,24 @@ class _FakeRegistryTransport(httpx.AsyncBaseTransport):
         if method == "GET" and path.endswith("/launch-spec"):
             framework = path.split("/")[-2]
             version = params.get("version") or "v0.2.0"
+            imageurl = f"harbor.local/adapted/{framework}:{version}"
             return httpx.Response(
                 200,
                 json={
                     "framework": framework,
                     "framework_version": version,
-                    "rootfs": {
-                        "type": "image",
-                        "imageurl": f"harbor.local/adapted/{framework}:{version}",
+                    "runtime_spec": {
+                        "runtime": "python3.11",
+                        "sandbox_type": "docker",
+                        "rootfs": {
+                            "imageurl": imageurl,
+                            "user": "agentos",
+                            "ports": ["tcp:8080"],
+                        },
+                        "cpu": 1000,
+                        "memory": 2048,
                     },
-                    "cpu": 1000,
-                    "memory": 2048,
-                    "ports": [{"port": 8080, "protocol": "tcp"}],
-                    "env": {"A2X_LLM_KEY": "${A2X_LLM_KEY}"},
+                    "env_vars": {"A2X_LLM_KEY": "${A2X_LLM_KEY}"},
                 },
             )
 
@@ -104,9 +112,31 @@ class _FakeRegistryTransport(httpx.AsyncBaseTransport):
                 json=[
                     {
                         "framework": "opencode",
-                        "default": "v0.2.0",
-                        "versions": [{"framework_version": "v0.2.0"}],
-                    }
+                        "framework_version": "v0.1.0",
+                        "is_default": False,
+                        "imageurl": "harbor.local/adapted/opencode:v0.1.0",
+                        "cpu": 500,
+                        "memory": 1024,
+                        "uploaded_by": "user-01",
+                    },
+                    {
+                        "framework": "opencode",
+                        "framework_version": "v0.2.0",
+                        "is_default": True,
+                        "imageurl": "harbor.local/adapted/opencode:v0.2.0",
+                        "cpu": 1000,
+                        "memory": 2048,
+                        "ports": [{"port": 8080, "protocol": "tcp"}],
+                        "env": {"A2X_LLM_KEY": "${A2X_LLM_KEY}"},
+                        "uploaded_by": "user-01",
+                    },
+                    {
+                        "framework": "claude",
+                        "framework_version": "v1.0.0",
+                        "is_default": True,
+                        "imageurl": "harbor.local/adapted/claude:v1.0.0",
+                        "uploaded_by": "system",
+                    },
                 ],
             )
 
@@ -169,12 +199,16 @@ async def test_http_launch_spec_register_update_heartbeat() -> None:
     spec = await client.get_launch_spec("opencode")
     assert spec.framework == "opencode"
     assert spec.framework_version == "v0.2.0"
-    assert spec.rootfs["imageurl"].endswith("opencode:v0.2.0")
-    assert spec.cpu == 1000
+    assert spec.runtime_spec["rootfs"]["imageurl"].endswith("opencode:v0.2.0")
+    assert spec.runtime_spec["runtime"] == "python3.11"
+    assert spec.runtime_spec["cpu"] == 1000
+    assert spec.env_vars["A2X_LLM_KEY"] == "${A2X_LLM_KEY}"
 
     image = await client.get_image_info("opencode")
     assert image.image_uri == "harbor.local/adapted/opencode:v0.2.0"
     assert image.metadata["framework_version"] == "v0.2.0"
+    assert image.metadata["runtime_spec"]["sandbox_type"] == "docker"
+    assert image.metadata["env_vars"]["A2X_LLM_KEY"] == "${A2X_LLM_KEY}"
 
     sid = instance_service_id("user-01", "opencode")
     record = await client.register_instance(
@@ -208,6 +242,34 @@ async def test_http_launch_spec_register_update_heartbeat() -> None:
     assert "POST" in methods
     assert "PATCH" in methods
     assert "DELETE" in methods
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_http_list_images_flat_entries_prefer_default() -> None:
+    transport = _FakeRegistryTransport()
+    client = RegistryClient(RegistryConfig(endpoint="http://registry.test"))
+    client._http = httpx.AsyncClient(  # noqa: SLF001
+        base_url="http://registry.test/",
+        transport=transport,
+        timeout=5.0,
+    )
+
+    entries = await client.list_images()
+    assert len(entries) == 3
+    assert entries[0].framework == "opencode"
+    assert entries[0].framework_version == "v0.1.0"
+    assert entries[0].is_default is False
+    assert entries[1].is_default is True
+    assert entries[1].imageurl.endswith("opencode:v0.2.0")
+
+    images = await client.list_user_images("user-01")
+    by_name = {item.image_name: item for item in images}
+    assert set(by_name) == {"opencode", "claude"}
+    assert by_name["opencode"].image_uri.endswith("opencode:v0.2.0")
+    assert by_name["opencode"].metadata["is_default"] is True
+    assert by_name["opencode"].metadata["framework_version"] == "v0.2.0"
+    assert by_name["claude"].metadata["user_id"] == "user-01"
     await client.close()
 
 

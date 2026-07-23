@@ -54,7 +54,7 @@ import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
 import { MemoryViewController, type MemoryViewTab } from "./memory-view.js";
 import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
-import { isTeamMode } from "../core/modes.js";
+import { isClientMode, isTeamMode } from "../core/modes.js";
 import {
   countCompletedWorkflowAgents,
   countWaitingForHuman,
@@ -244,7 +244,7 @@ const MODEL_REQUIRED_FIELDS: ModelFormField[] = ["model_name", "api_base", "api_
 const DEFAULT_MODEL_PROVIDER = "OpenAI";
 const CODEX_SUBSCRIPTION_PROVIDER = "AI4ResearchCodex";
 const CODEX_SUBSCRIPTION_MODEL = "codex-subscription";
-const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek", CODEX_SUBSCRIPTION_PROVIDER];
+const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "AscendAffinity", "DeepSeek", CODEX_SUBSCRIPTION_PROVIDER];
 const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
@@ -3768,6 +3768,30 @@ export class AppScreen implements Component, Focusable {
     // 导致误拦截本已通过后端过滤的会话。
 
     this.resumeSessionList = null;
+    const snapshot = this.state.getSnapshot();
+    const previousSessionId = snapshot.sessionId;
+    const targetMode =
+      matchedSession?.mode && isClientMode(matchedSession.mode)
+        ? matchedSession.mode
+        : snapshot.mode;
+    try {
+      await this.state.request("session.switch", {
+        session_id: nextSessionId,
+        previous_session_id: previousSessionId,
+        previous_mode: snapshot.mode,
+        mode: targetMode,
+      });
+    } catch (error) {
+      if (isTeamMode(targetMode)) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.state.addItem(
+          addError(previousSessionId, "Failed to switch team session: " + message),
+        );
+        this.tui.requestRender();
+        return;
+      }
+    }
+    this.state.setMode(targetMode);
     this.state.updateSession(nextSessionId);
     this.state.clearEntries();
     this.state.setAccentColor(accentColor);

@@ -427,13 +427,16 @@
     "formCancel": "Cancel",
     "editTitle": "Edit goal",
     "toolbarTag": "Goal",
+    "toolbarUnavailable": "A goal is already in progress. Finish or clear it first.",
     "closeTag": "Cancel goal",
-    "badge": "Set as goal",
+    "badge": "Goal",
     "status": {
       "active": "Active",
       "paused": "Paused",
       "completed": "Completed",
-      "blocked": "Blocked"
+      "blocked": "Blocked",
+      "disconnected": "Disconnected",
+      "unknown": "Status unknown"
     },
     "action": {
       "editTooltip": "Edit goal",
@@ -493,7 +496,8 @@
       "loadSessions": "Failed to load sessions",
       "loadFiles": "Failed to load session files",
       "deleteSession": "Failed to delete session: {{sessionId}}",
-      "restoreFailed": "Failed to restore session: {{sessionId}}"
+      "restoreFailed": "Failed to restore session: {{sessionId}}",
+      "switchSession": "Failed to switch session. Please try again."
     }
   },
   "sessionSidebar": {
@@ -788,6 +792,8 @@
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
       "swarmflowEnabled": "Enable SwarmFlow",
+      "kvCacheReleaseEnabled": "Legacy path (KV release)",
+      "kvCacheAffinityEnabled": "New path (Ascend affinity)",
       "skillRetrievalBuildRootCategoriesPlaceholder": "Edit the YAML/JSON root taxonomy directly",
       "agentSkillsPlaceholder": "Click to select skills",
       "agentSkillsEmpty": "No installed skills",
@@ -970,6 +976,7 @@
       "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only, Team required" },
       "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
+      "kvCacheAffinity": { "label": "Compute Affinity", "hint": "Control Ascend KV Cache affinity" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
       "swarmflow": { "label": "SwarmFlow", "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode." },
@@ -987,7 +994,8 @@
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
       "dynamicGraph": "Enable dynamic graph",
-      "kvCacheAffinity": "Compute affinity (KV cache release)"
+      "kvCacheRelease": "Legacy path (KV release)",
+      "kvCacheAffinity": "New path (Ascend affinity)"
     },
     "permissionsTools": {
       "title": "Tool Guardrail (permissions.tools)",

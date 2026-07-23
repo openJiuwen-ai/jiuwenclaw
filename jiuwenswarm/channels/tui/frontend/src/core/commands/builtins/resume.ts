@@ -1,12 +1,14 @@
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import type { AccentColorName } from "../../../ui/theme.js";
+import { isClientMode, isTeamMode } from "../../modes.js";
 
 export interface SessionMeta {
   session_id: string;
   title?: string;
   accent_color?: AccentColorName;
   channel_id?: string;
+  mode?: string;
   created_at?: number;
   last_message_at?: number;
   message_count?: number;
@@ -82,6 +84,22 @@ async function doResume(
   const previousSessionId = ctx.sessionId;
   const previousAccent = ctx.accentColor;
   const previousTitle = ctx.sessionTitle;
+  const targetMode = session.mode && isClientMode(session.mode) ? session.mode : ctx.mode;
+  try {
+    await ctx.request("session.switch", {
+      session_id: session.session_id,
+      previous_session_id: previousSessionId,
+      previous_mode: ctx.mode,
+      mode: targetMode,
+    });
+  } catch (error) {
+    if (isTeamMode(targetMode)) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.addItem(addError(ctx.sessionId, `team session switch failed: ${message}`));
+      return;
+    }
+  }
+  ctx.setMode(targetMode);
   ctx.updateSession(session.session_id);
   ctx.clearEntries();
   ctx.setAccentColor(session.accent_color || "default");

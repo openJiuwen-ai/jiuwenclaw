@@ -891,6 +891,7 @@ class GitDiffWatcherRegistry:
             ProjectGitDiffStatus,
             _convert_turn_diff,
             get_diff_status_service,
+            get_session_extra_history_roots,
         )
         from jiuwenswarm.server.utils.diff_service import get_diff_service
         service = get_diff_status_service()
@@ -945,8 +946,15 @@ class GitDiffWatcherRegistry:
             last_turn = None
             if session_id:
                 try:
+                    # 与首次快照路径(DiffStatusService.get_project_diff_status)对齐:
+                    # 传入 extra_history_roots 以收集 team/member workspace 与
+                    # session worktree 下的 file_ops,否则多 member 在 git worktree
+                    # 工作时的改动会被漏读,导致实时轮询推送的 last_turn 数据残缺。
+                    extra_roots = get_session_extra_history_roots(session_id)
                     turns = await asyncio.to_thread(
-                        diff_service.get_turn_diffs, session_id, project_dir,
+                        diff_service.get_turn_diffs,
+                        session_id, project_dir,
+                        extra_history_roots=extra_roots,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(

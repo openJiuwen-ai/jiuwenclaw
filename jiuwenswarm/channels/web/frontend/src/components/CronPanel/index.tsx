@@ -355,13 +355,13 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     if (!confirmState || confirmBusy) return;
     setConfirmBusy(true);
     try {
-      // 不带 target_session_id：两种触发（自然到点 / 立即执行）统一走后端"最活跃会话"
-      // 选取。后端返回的 session_id 是调度占位 id（cron_*），不可用于跳转，故不再
-      // onSelectSession——避免跳到不存在的会话弹出"对话不存在或已删除"。推荐内容
-      // 异步经 chat.final（source=proactive_recommendation）推到最活跃会话气泡。
-      await webRequest<{ accepted: boolean; run_id: string }>('cron.job.run_now', {
+      const result = await webRequest<{ accepted: boolean; run_id: string; session_id?: string }>('cron.job.run_now', {
         id: confirmState.job.id,
       });
+      if (result.session_id) {
+        useCronStore.getState().setLastRunSessionId(confirmState.job.id, result.session_id);
+        onSelectSession(result.session_id);
+      }
       setSuccess(t('cron.success.runNow'));
       // 刷新左侧栏该定时任务下展开的 session 列表（project.get_cron_sessions）
       const { id: cronId, projectId } = confirmState.job;

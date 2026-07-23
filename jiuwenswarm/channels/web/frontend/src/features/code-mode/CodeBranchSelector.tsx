@@ -45,6 +45,11 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
   const unbornHintId = useId();
   const loadProjects = useWorkspaceStore(state => state.loadProjects);
 
+  const closeMenu = useCallback(() => {
+    setOpen(false);
+    setError(null);
+  }, []);
+
   const loadStatus = useCallback(async () => {
     if (!project || project.work_mode !== 'code' || project.is_default) {
       setStatus(null);
@@ -77,10 +82,10 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) closeMenu();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape') closeMenu();
     };
     document.addEventListener('mousedown', close);
     document.addEventListener('keydown', closeOnEscape);
@@ -88,7 +93,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
       document.removeEventListener('mousedown', close);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [open]);
+  }, [closeMenu, open]);
 
   const branches = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -119,7 +124,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
 
   const switchBranch = async (branch: string) => {
     if (!project || branch === currentBranch) {
-      setOpen(false);
+      closeMenu();
       return;
     }
     setOperating(true);
@@ -127,7 +132,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
     try {
       const result = await gitClient.switchBranch(project.project_id, branch);
       setStatus(result.status);
-      setOpen(false);
+      closeMenu();
       await loadProjects();
     } catch (nextError) {
       setError(getErrorMessage(nextError));
@@ -145,7 +150,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
       setStatus(result.status);
       setBranchDraft('');
       setCreateOpen(false);
-      setOpen(false);
+      closeMenu();
       await loadProjects();
     } catch (nextError) {
       setError(getErrorMessage(nextError));
@@ -173,7 +178,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
         <button
           type='button'
           className='code-branch__trigger'
-          onClick={() => setOpen(value => !value)}
+          onClick={() => (open ? closeMenu() : setOpen(true))}
           disabled={disabled || loading || operating || !status}
           aria-haspopup='menu'
           aria-expanded={open}

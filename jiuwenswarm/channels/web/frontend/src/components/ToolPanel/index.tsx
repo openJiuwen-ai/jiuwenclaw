@@ -107,7 +107,12 @@ function ExpandedSingleAgentArea({
 }) {
   const { t } = useTranslation();
   const artifactsCount = useSessionArtifactsCount();
-  const resolvedTab = activeTab === 'artifacts' ? 'artifacts' : activeTab === 'review' && reviewPanel ? 'review' : 'planning';
+  const resolvedTab =
+    activeTab === 'artifacts' && artifactsCount > 0
+      ? 'artifacts'
+      : activeTab === 'review' && reviewPanel
+        ? 'review'
+        : 'planning';
   const tabs = [
     {
       key: 'planning',
@@ -115,12 +120,14 @@ function ExpandedSingleAgentArea({
       count: `${completedTasks}/${totalTasks}`,
       icon: <img src={teamProcessIcon} width={16} height={16} aria-hidden="true" />,
     },
-    {
-      key: 'artifacts',
-      label: t('artifacts.tab'),
-      count: artifactsCount,
-      icon: <FileText size={16} />,
-    },
+    ...(artifactsCount > 0
+      ? [{
+          key: 'artifacts' as const,
+          label: t('artifacts.tab'),
+          count: artifactsCount,
+          icon: <FileText size={16} />,
+        }]
+      : []),
     ...(reviewPanel ? [{ key: 'review' as const, label: t('codeMode.review'), icon: <FileCheck2 size={16} /> }] : []),
   ];
 

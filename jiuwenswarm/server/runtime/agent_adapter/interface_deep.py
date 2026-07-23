@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 import yaml
 from dotenv import load_dotenv
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
@@ -356,6 +357,20 @@ _CRON_TOOL_MODE: ContextVar[str | None] = ContextVar(
     "cron_tool_mode",
     default=None,
 )
+_CRON_TOOL_BOUND: ContextVar[bool] = ContextVar(
+    "cron_tool_bound",
+    default=False,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeCronContextTokens:
+    channel: Token[str]
+    session: Token[str | None]
+    metadata: Token[dict[str, Any] | None]
+    mode: Token[str | None]
+    bound: Token[bool]
+    shell: Token[str | None]
 
 
 def get_runtime_tool_session_id() -> str | None:
@@ -575,6 +590,18 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
         "skill_index_build",
         "skill_branch_explore",
         "skill_branch_peek",
+    }
+)
+_CRON_TOOL_NAMES = frozenset(
+    {
+        "cron",
+        "cron_list_jobs",
+        "cron_get_job",
+        "cron_create_job",
+        "cron_update_job",
+        "cron_delete_job",
+        "cron_toggle_job",
+        "cron_preview_job",
     }
 )
 
@@ -1053,8 +1080,8 @@ def parse_int(value: Any, default: int) -> int:
 def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> ContextEngineConfig:
     """供 ``create_deep_agent(..., context_engine_config=...)`` 使用（与 agent-core 集成测试方法二一致）。
 
-    仅根据 ``react.context_engine_config.enable_kv_cache_release`` 切换亲和开关；
-    其余字段与 ``ReActAgentConfig`` 默认 ``context_engine_config`` 一致。
+    仅承接 ContextEngine 自身配置；KV cache affinity 由独立
+    ``react.kv_cache_affinity_config`` 管理。
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
@@ -1062,11 +1089,43 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
     return ReActAgentConfig().context_engine_config.model_copy(
         update={
             "enable_reload": bool(cec.get("enable_reload", False)),
-            "enable_kv_cache_release": bool(cec.get("enable_kv_cache_release", False)),
             "enable_openrouter_model_context_window_tokens": bool(
                 cec.get("enable_openrouter_model_context_window_tokens", False)
             ),
         }
+    )
+
+
+def _model_provider(model: Any) -> str:
+    for owner in (model, getattr(model, "_client", None)):
+        model_client_config = getattr(owner, "model_client_config", None)
+        provider = getattr(model_client_config, "client_provider", None)
+        if provider is not None:
+            return str(getattr(provider, "value", provider) or "").strip()
+    return ""
+
+
+def _deep_agent_kv_cache_affinity_config(
+        react_cfg: dict[str, Any] | None,
+        model: Model | None = None,
+) -> KVCacheAffinityConfig:
+    """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
+    react_cfg = react_cfg or {}
+    kv_cfg = react_cfg.get("kv_cache_affinity_config")
+    kv_cfg = kv_cfg if isinstance(kv_cfg, dict) else {}
+    affinity_enabled = bool(kv_cfg.get("enable_kv_cache_affinity", False))
+    if affinity_enabled and model is not None:
+        provider = _model_provider(model)
+        if provider != "AscendAffinity":
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] KV cache affinity failed closed: "
+                "model provider=%s requires=AscendAffinity",
+                provider or "<empty>",
+            )
+            affinity_enabled = False
+    return KVCacheAffinityConfig(
+        enable_kv_cache_release=bool(kv_cfg.get("enable_kv_cache_release", False)),
+        enable_kv_cache_affinity=affinity_enabled,
     )
 
 
@@ -1240,22 +1299,43 @@ class _RuntimeCronToolContext:
 
     def __init__(self, tool_scope: str) -> None:
         self._tool_scope = tool_scope
+        self._fallback_channel_id = CronTargetChannel.WEB.value
+        self._fallback_session_id: str | None = None
+        self._fallback_metadata: dict[str, Any] | None = None
+        self._fallback_mode: str | None = None
+
+    def remember_current_binding(self) -> None:
+        self._fallback_channel_id = _CRON_TOOL_CHANNEL_ID.get()
+        self._fallback_session_id = _CRON_TOOL_SESSION_ID.get()
+        metadata = _CRON_TOOL_METADATA.get()
+        self._fallback_metadata = dict(metadata) if isinstance(metadata, dict) else None
+        self._fallback_mode = _CRON_TOOL_MODE.get()
 
     @property
     def channel_id(self) -> str:
-        return _CRON_TOOL_CHANNEL_ID.get()
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_CHANNEL_ID.get()
+        return self._fallback_channel_id
 
     @property
     def session_id(self) -> str | None:
-        return _CRON_TOOL_SESSION_ID.get()
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_SESSION_ID.get()
+        return self._fallback_session_id
 
     @property
     def metadata(self) -> dict[str, Any] | None:
-        return _CRON_TOOL_METADATA.get()
+        if _CRON_TOOL_BOUND.get():
+            metadata = _CRON_TOOL_METADATA.get()
+            if isinstance(metadata, dict):
+                return metadata
+        return self._fallback_metadata
 
     @property
     def mode(self) -> str | None:
-        return _CRON_TOOL_MODE.get()
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_MODE.get()
+        return self._fallback_mode
 
     @property
     def tool_scope(self) -> str:
@@ -5162,6 +5242,7 @@ class JiuWenSwarmDeepAdapter:
                 language=self._resolve_prompt_language(),
             ),
             context_engine_config=_deep_agent_context_engine_config(config),
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             max_iterations=config.get("max_iterations", 15),
             subagents=configured_subagents,
@@ -5562,6 +5643,7 @@ class JiuWenSwarmDeepAdapter:
         self._instance = create_deep_agent(
             **common_kwargs,
             context_engine_config=_deep_agent_context_engine_config(config),
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
@@ -5984,7 +6066,7 @@ class JiuWenSwarmDeepAdapter:
         request_id: str | None,
         mode: str | None,
         project_dir: str | None = None,
-    ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Token[str | None]]:
+    ) -> _RuntimeCronContextTokens:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
         )
@@ -5996,33 +6078,55 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+
+        session_metadata: dict[str, Any] = {}
+        if isinstance(session_id, str) and session_id.strip():
+            try:
+                from jiuwenswarm.server.runtime.session.session_metadata import (
+                    get_session_metadata,
+                )
+
+                loaded_metadata = get_session_metadata(session_id.strip(), cache_bust=True)
+                if isinstance(loaded_metadata, dict):
+                    session_metadata = loaded_metadata
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] failed to load session metadata for cron context: %s",
+                    exc,
+                )
         # 注入 project_dir 供 cron tool 路由解析任务归属项目（设计文档 §5.1）
         if isinstance(project_dir, str) and project_dir.strip():
             normalized_metadata.setdefault("project_dir", project_dir.strip())
-        return (
-            _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
-            _CRON_TOOL_SESSION_ID.set(session_id),
-            _CRON_TOOL_METADATA.set(normalized_metadata),
-            _CRON_TOOL_MODE.set(normalized_mode),
-            set_shell_session_id(session_id),
+        for key in ("project_id", "project_dir", "work_mode"):
+            value = normalized_metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                continue
+            session_value = session_metadata.get(key)
+            if isinstance(session_value, str) and session_value.strip():
+                normalized_metadata[key] = session_value.strip()
+        return _RuntimeCronContextTokens(
+            channel=_CRON_TOOL_CHANNEL_ID.set(normalized_channel),
+            session=_CRON_TOOL_SESSION_ID.set(session_id),
+            metadata=_CRON_TOOL_METADATA.set(normalized_metadata),
+            mode=_CRON_TOOL_MODE.set(normalized_mode),
+            bound=_CRON_TOOL_BOUND.set(True),
+            shell=set_shell_session_id(session_id),
         )
 
     @staticmethod
     def _reset_runtime_cron_context(
-        tokens: tuple[
-            Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Token[str | None]
-        ],
+        tokens: _RuntimeCronContextTokens,
     ) -> None:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             reset_shell_session_id,
         )
 
-        channel_token, session_token, metadata_token, mode_token, shell_token = tokens
-        reset_shell_session_id(shell_token)
-        _CRON_TOOL_MODE.reset(mode_token)
-        _CRON_TOOL_METADATA.reset(metadata_token)
-        _CRON_TOOL_SESSION_ID.reset(session_token)
-        _CRON_TOOL_CHANNEL_ID.reset(channel_token)
+        reset_shell_session_id(tokens.shell)
+        _CRON_TOOL_BOUND.reset(tokens.bound)
+        _CRON_TOOL_MODE.reset(tokens.mode)
+        _CRON_TOOL_METADATA.reset(tokens.metadata)
+        _CRON_TOOL_SESSION_ID.reset(tokens.session)
+        _CRON_TOOL_CHANNEL_ID.reset(tokens.channel)
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """装配 agent 模式 rails。
@@ -6193,6 +6297,9 @@ class JiuWenSwarmDeepAdapter:
                     logger.info(
                         "[JiuWenSwarmDeepAdapter] Registering %d cron tools", len(cron_tools)
                     )
+                    for existing in list(self._instance.ability_manager.list() or []):
+                        if getattr(existing, "name", "") in _CRON_TOOL_NAMES:
+                            self._instance.ability_manager.remove(existing.name)
                     for cron_tool in cron_tools:
                         if not Runner.resource_mgr.get_tool(cron_tool.card.id):
                             Runner.resource_mgr.add_tool(cron_tool)
@@ -8269,6 +8376,7 @@ class JiuWenSwarmDeepAdapter:
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
+        self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
         self._mark_session_active(session_id)
@@ -8754,6 +8862,7 @@ class JiuWenSwarmDeepAdapter:
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
+        self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
         self._mark_session_active(session_id)

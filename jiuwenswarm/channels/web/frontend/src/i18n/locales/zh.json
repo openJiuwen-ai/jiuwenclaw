@@ -428,13 +428,16 @@
     "formCancel": "取消",
     "editTitle": "编辑目标",
     "toolbarTag": "目标",
+    "toolbarUnavailable": "当前已有进行中的目标，请先完成或清除",
     "closeTag": "取消目标",
-    "badge": "设为目标",
+    "badge": "目标",
     "status": {
       "active": "进行中",
       "paused": "已暂停",
       "completed": "已完成",
-      "blocked": "已阻塞"
+      "blocked": "已阻塞",
+      "disconnected": "连接已断开",
+      "unknown": "状态未知"
     },
     "action": {
       "editTooltip": "编辑目标",
@@ -494,7 +497,8 @@
       "loadSessions": "会话列表加载失败",
       "loadFiles": "会话文件列表加载失败",
       "deleteSession": "删除会话失败：{{sessionId}}",
-      "restoreFailed": "恢复会话失败：{{sessionId}}"
+      "restoreFailed": "恢复会话失败：{{sessionId}}",
+      "switchSession": "切换会话失败，请重试。"
     }
   },
   "sessionSidebar": {
@@ -788,6 +792,8 @@
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
       "swarmflowEnabled": "启用 SwarmFlow",
+      "kvCacheReleaseEnabled": "旧链路（KV 释放）",
+      "kvCacheAffinityEnabled": "新链路（Ascend 亲和）",
       "skillRetrievalBuildRootCategoriesPlaceholder": "直接编辑 YAML/JSON 树根分层配置",
       "agentSkillsPlaceholder": "点击选择技能",
       "agentSkillsEmpty": "暂无已安装技能",
@@ -970,6 +976,7 @@
       "agents": { "label": "多Agent配置", "hint": "仅供集群模式使用，且必须添加Team" },
       "team": { "label": "Team配置", "hint": "多智能体团队配置" },
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
+      "kvCacheAffinity": { "label": "算力亲和", "hint": "控制 Ascend KV Cache 亲和能力" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
       "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
       "swarmflow": { "label": "SwarmFlow", "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控" },
@@ -987,7 +994,8 @@
       "freeSearchBing": "启用 Bing",
       "enabled": "启用",
       "dynamicGraph": "启用动态图谱",
-      "kvCacheAffinity": "算力亲和（KV 释放）"
+      "kvCacheRelease": "旧链路（KV 释放）",
+      "kvCacheAffinity": "新链路（Ascend 亲和）"
     },
     "permissionsTools": {
       "title": "工具防护（permissions.tools）",

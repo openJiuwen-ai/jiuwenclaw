@@ -295,6 +295,63 @@ async def test_handle_command_diff_returns_summary_payload(server, fake_ws):
 
 
 @pytest.mark.asyncio
+async def test_handle_command_diff_includes_session_extra_history_roots(
+    server, fake_ws, monkeypatch
+):
+    captured = {}
+
+    class FakeDiffService:
+        def get_turn_diffs(self, session_id, project_dir, **kwargs):
+            captured["turns"] = {
+                "session_id": session_id,
+                "project_dir": project_dir,
+                "kwargs": kwargs,
+            }
+            return []
+
+        def get_git_diff(self, project_dir):
+            captured["git_diff_project_dir"] = project_dir
+            return None
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_diff_service",
+        lambda: FakeDiffService(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.git_diff_status.get_session_extra_history_roots",
+        lambda session_id: [f"/history/{session_id}/worktrees"],
+    )
+    request = AgentRequest(
+        request_id="req-diff-extra-roots",
+        channel_id="tui",
+        session_id="sess-1",
+        req_method=ReqMethod.COMMAND_DIFF,
+        params={"project_dir": "/repo"},
+    )
+
+    await server.handle_command_diff_for_test(fake_ws, request, asyncio.Lock())
+
+    assert captured["turns"] == {
+        "session_id": "sess-1",
+        "project_dir": "/repo",
+        "kwargs": {
+            "extra_history_roots": ["/history/sess-1/worktrees"],
+        },
+    }
+    assert captured["git_diff_project_dir"] == "/repo"
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-diff-extra-roots",
+            "payload": {
+                "type": "list",
+                "turns": [],
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handle_command_simplify_returns_prompt(server, fake_ws):
     """ /simplify 无 target 时返回包含三阶段审查结构的 prompt。"""
     request = AgentRequest(
