@@ -279,6 +279,73 @@ async def test_send_request_fails_pending_request_when_receiver_stops():
 
 
 @pytest.mark.asyncio
+async def test_send_request_logs_redacted_credentials_and_keeps_route_metadata(caplog):
+    target_logger = logging.getLogger("jiuwenswarm.gateway.routing.agent_client")
+    target_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG, logger=target_logger.name)
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    env = e2a_from_agent_fields(
+        request_id="rid-redaction-route",
+        channel_id="web",
+        session_id="sess-redaction-route",
+        params={
+            "query": "safe-route-query",
+            "nested": {
+                "OPENAI_API_KEY_VALUE": "openai-value-secret-canary",
+                "ANTHROPIC_API_KEY_VALUE": "anthropic-value-secret-canary",
+                "GOOGLE_APPLICATION_CREDENTIALS_VALUE": "google-value-secret-canary",
+                "Cookie": "session=cookie-secret-canary",
+                "Set-Cookie": "refresh=set-cookie-secret-canary",
+                "secretary_name": "public-secretary-canary",
+                "github_public_key": "public-key-canary",
+            },
+        },
+        is_stream=False,
+    )
+
+    try:
+        task = asyncio.create_task(client.send_request(env))
+        for _ in range(100):
+            if ws.sent_payloads:
+                break
+            await asyncio.sleep(0.001)
+        assert ws.sent_payloads
+        queue = client.get_message_queue_for_test("rid-redaction-route")
+        await queue.put(
+            encode_agent_response_for_wire(
+                AgentResponse(
+                    request_id="rid-redaction-route",
+                    channel_id="web",
+                    ok=True,
+                    payload={"status": "ok"},
+                ),
+                response_id="rid-redaction-route",
+            )
+        )
+        response = await asyncio.wait_for(task, timeout=0.1)
+    finally:
+        target_logger.removeHandler(caplog.handler)
+
+    assert response.ok is True
+    for canary in (
+        "openai-value-secret-canary",
+        "anthropic-value-secret-canary",
+        "google-value-secret-canary",
+        "cookie-secret-canary",
+        "set-cookie-secret-canary",
+    ):
+        assert canary not in caplog.text
+    assert "rid-redaction-route" in caplog.text
+    assert "channel=web" in caplog.text
+    assert "safe-route-query" in caplog.text
+    assert "public-secretary-canary" in caplog.text
+    assert "public-key-canary" in caplog.text
+    assert "[redacted]" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_send_request_reconnects_before_new_request_after_disconnect():
     client = ReconnectingAgentClientHarness()
     client.set_uri_for_test("ws://agent-server")

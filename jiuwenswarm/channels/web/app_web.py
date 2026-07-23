@@ -172,6 +172,17 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         "upgrade",
     }
     _WS_LOG_MAX_CHARS = 2000
+    _WS_LOG_REDACTED_VALUE = "[redacted]"
+    _WS_LOG_SENSITIVE_KEYS = frozenset({
+        "authurl",
+        "devicecode",
+        "loginid",
+        "operationid",
+        "providerloginid",
+        "usercode",
+        "verificationuri",
+        "verificationurl",
+    })
     _HTTP_PROXY_TIMEOUT = 30
     _WS_CONNECT_TIMEOUT = 10
     _WS_SELECT_TIMEOUT = 60
@@ -288,7 +299,24 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         return f"{text[:cls._WS_LOG_MAX_CHARS]}...<truncated:{len(text) - cls._WS_LOG_MAX_CHARS}>"
 
     @classmethod
+    def _redact_ws_log_value(cls, value: Any) -> Any:
+        """Recursively redact authentication capabilities from WS diagnostics."""
+        if isinstance(value, dict):
+            redacted = {}
+            for key, item in value.items():
+                normalized_key = "".join(char for char in str(key).lower() if char.isalnum())
+                if normalized_key in cls._WS_LOG_SENSITIVE_KEYS:
+                    redacted[key] = cls._WS_LOG_REDACTED_VALUE
+                else:
+                    redacted[key] = cls._redact_ws_log_value(item)
+            return redacted
+        if isinstance(value, list):
+            return [cls._redact_ws_log_value(item) for item in value]
+        return value
+
+    @classmethod
     def _format_ws_part(cls, value: Any) -> str:
+        value = cls._redact_ws_log_value(value)
         if isinstance(value, str):
             return cls._truncate_for_ws_log(value)
         try:

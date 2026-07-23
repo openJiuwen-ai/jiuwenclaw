@@ -39,6 +39,15 @@ class ReqMethod(Enum):
     CONFIG_SET = "config.set"
     CHANNEL_GET = "channel.get"
 
+    CODEX_AUTH_STATUS = "provider.codex.auth.status"
+    CODEX_AUTH_START = "provider.codex.auth.start"
+    CODEX_AUTH_CANCEL = "provider.codex.auth.cancel"
+    CODEX_AUTH_LOGOUT = "provider.codex.auth.logout"
+    CODEX_VALIDATE_MODEL = "provider.codex.validate_model"
+
+    CLAUDE_VALIDATE_MODEL = "provider.claude.validate_model"
+    CLAUDE_STATUS = "provider.claude.status"
+
     SESSION_LIST = "session.list"
     SESSION_CREATE = "session.create"
     SESSION_SWITCH = "session.switch"

@@ -4,13 +4,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
+from jiuwenswarm.server.runtime.agent_adapter.stream_lifecycle import (
+    close_owned_async_iterator,
+)
+from jiuwenswarm.integrations.ai4research_subscription.errors import CodexProviderError
 
 
 def _build_cancel_request(session_id: str = "tui_sess_1") -> AgentRequest:
@@ -189,6 +196,274 @@ def test_reset_runtime_cron_context_resets_shell_session(
     reset_shell_mock.assert_called_once_with(shell_token)
 
 
+@pytest.mark.asyncio
+async def test_cancel_session_gathers_existing_cancellation_without_cancelling_twice() -> None:
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def worker() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            raise
+
+    task = asyncio.create_task(worker())
+    await asyncio.sleep(0)
+    task.cancel()
+    await cleanup_started.wait()
+    assert task.cancelling() == 1
+    adapter = _make_adapter(_session_agent_tasks={"sess": {task}})
+
+    cancel_call = asyncio.create_task(adapter._cancel_session_agent_tasks("sess"))
+    await asyncio.sleep(0)
+    assert not cancel_call.done()
+    assert task.cancelling() == 1
+    allow_cleanup.set()
+
+    assert await cancel_call == 0
+    assert task.cancelled()
+    assert adapter._session_agent_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_timeout_keeps_cleanup_owner_without_second_cancel() -> None:
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def worker() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            raise
+
+    task = asyncio.create_task(worker())
+    await asyncio.sleep(0)
+    adapter = _make_adapter(_session_agent_tasks={"sess": {task}})
+
+    with pytest.raises(CodexProviderError) as captured:
+        await adapter._cancel_session_agent_tasks(
+            "sess",
+            deadline=asyncio.get_running_loop().time() + 0.01,
+        )
+    assert captured.value.code == "cancel_cleanup_timeout"
+    assert task.cancelling() == 1
+    assert adapter._session_agent_tasks["sess"] == {task}
+    await cleanup_started.wait()
+
+    allow_cleanup.set()
+    await asyncio.gather(task, return_exceptions=True)
+    assert await adapter._cancel_session_agent_tasks("sess") == 0
+    assert adapter._session_agent_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_owner_repeated_cancel_shares_completion_until_cleanup() -> None:
+    adapter = _make_adapter(
+        _codex_turn_owners={},
+        _codex_turn_generations={},
+    )
+    owner = interface_deep_module._CodexTurnOwner(
+        interface_deep_module._CodexTurnIdentity(
+            session_id="sess",
+            request_id="original-request",
+            generation=1,
+        ),
+        adapter._remove_codex_turn_owner,
+    )
+    adapter._register_codex_turn_owner(owner)
+    call_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def provider_call() -> None:
+        task = owner.bind_model_call()
+        call_started.set()
+        error = None
+        try:
+            await asyncio.Event().wait()
+        except BaseException as exc:
+            error = exc
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            raise
+        finally:
+            owner.release_model_call(task, error)
+
+    provider_task = asyncio.create_task(provider_call())
+    await call_started.wait()
+
+    first = owner.request_cancel()
+    second = owner.request_cancel()
+    assert first is second
+    await cleanup_started.wait()
+    assert not first.done()
+    assert adapter._codex_turn_owners["sess"] is owner
+
+    allow_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await provider_task
+    owner.finish(asyncio.CancelledError())
+
+    assert (await first).clean is True
+    assert adapter._codex_turn_owners == {}
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_owner_waits_for_model_release_after_outer_cleanup() -> None:
+    adapter = _make_adapter(_codex_turn_owners={})
+    owner = interface_deep_module._CodexTurnOwner(
+        interface_deep_module._CodexTurnIdentity(
+            session_id="sess",
+            request_id="original-request",
+            generation=1,
+        ),
+        adapter._remove_codex_turn_owner,
+    )
+    adapter._register_codex_turn_owner(owner)
+    model_started = asyncio.Event()
+    release_model = asyncio.Event()
+
+    async def model_call() -> None:
+        task = owner.bind_model_call()
+        model_started.set()
+        try:
+            await release_model.wait()
+        finally:
+            owner.release_model_call(task, None)
+
+    model_task = asyncio.create_task(model_call())
+    await model_started.wait()
+    completion = owner.request_cancel()
+    owner.finish(asyncio.CancelledError())
+
+    assert not completion.done()
+    assert adapter._codex_turn_owners["sess"] is owner
+
+    release_model.set()
+    await asyncio.gather(model_task, return_exceptions=True)
+    assert (await completion).clean is True
+    assert adapter._codex_turn_owners == {}
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_owner_blocks_same_session_replacement_until_completion() -> None:
+    adapter = _make_adapter(_codex_turn_owners={})
+
+    def make_owner(generation: int):
+        return interface_deep_module._CodexTurnOwner(
+            interface_deep_module._CodexTurnIdentity(
+                session_id="sess",
+                request_id=f"request-{generation}",
+                generation=generation,
+            ),
+            adapter._remove_codex_turn_owner,
+        )
+
+    first = make_owner(1)
+    second = make_owner(2)
+    adapter._register_codex_turn_owner(first)
+
+    with pytest.raises(CodexProviderError) as captured:
+        adapter._register_codex_turn_owner(second)
+    assert captured.value.code == "provider_busy"
+
+    first.finish()
+    adapter._register_codex_turn_owner(second)
+    assert adapter._codex_turn_owners["sess"] is second
+    second.finish()
+
+
+@pytest.mark.asyncio
+async def test_owned_iterator_close_survives_repeated_external_cancellation() -> None:
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class Iterator:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            close_started.set()
+            await allow_close.wait()
+
+    iterator = Iterator()
+    close_task = asyncio.create_task(close_owned_async_iterator(iterator))
+    await close_started.wait()
+    close_task.cancel()
+    await asyncio.sleep(0)
+    assert not close_task.done()
+    allow_close.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+    assert iterator.close_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_aclose_cancels_and_joins_owned_background_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    class BlockingAdapter:
+        async def process_message_stream_impl(self, request, inputs):
+            del inputs
+            try:
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={"event_type": "chat.delta", "content": "first"},
+                    is_complete=False,
+                )
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_started.set()
+                await allow_cleanup.wait()
+                raise
+            finally:
+                cleanup_finished.set()
+
+    swarm = JiuWenSwarm()
+    adapter = BlockingAdapter()
+    monkeypatch.setattr(swarm, "_ensure_adapter", lambda **_kwargs: adapter)
+    monkeypatch.setattr(
+        swarm,
+        "_build_inputs",
+        lambda _request: ({"query": "test"}, "off", "test"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface.append_history_record",
+        lambda **_kwargs: None,
+    )
+    request = AgentRequest(
+        request_id="req-close",
+        channel_id="tui",
+        session_id="sess-close",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "query": "test",
+            "mode": "auto_harness",
+            "activate_response": {},
+        },
+    )
+    stream = swarm.process_message_stream(request)
+    first = await anext(stream)
+    assert first.payload["content"] == "first"
+
+    close_task = asyncio.create_task(stream.aclose())
+    await cleanup_started.wait()
+    assert not close_task.done()
+    allow_cleanup.set()
+    await close_task
+
+    assert cleanup_finished.is_set()
 def test_bind_runtime_cron_context_fills_locked_session_project_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -7,7 +7,9 @@ from __future__ import annotations
 from typing import Any
 
 from jiuwenswarm.common.e2a.constants import (
+    E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY,
     E2A_RESPONSE_STATUS_SUCCEEDED,
+    E2A_INTERNAL_SOURCE_REQUEST_ID_KEY,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
     E2A_WIRE_SERVER_PUSH_KEY,
 )
@@ -16,6 +18,18 @@ from jiuwenswarm.common.e2a.wire_codec import encode_agent_chunk_for_wire
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 
 _CONVERTER = "jiuwenswarm.server.gateway_push.wire:build_server_push_wire"
+
+
+def _attach_internal_route_context(
+    metadata: dict[str, Any],
+    msg: dict[str, Any],
+) -> None:
+    source_request_id = msg.get("source_request_id")
+    if isinstance(source_request_id, str) and source_request_id.strip():
+        metadata[E2A_INTERNAL_SOURCE_REQUEST_ID_KEY] = source_request_id.strip()
+    receipt = msg.get("actual_model_route_receipt")
+    if isinstance(receipt, dict) and receipt:
+        metadata[E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY] = dict(receipt)
 
 
 def build_server_push_wire(msg: dict[str, Any]) -> dict[str, Any]:
@@ -44,6 +58,7 @@ def build_server_push_wire(msg: dict[str, Any]) -> dict[str, Any]:
             metadata=dict(msg.get("metadata") or {}),
         ).to_dict()
         md = dict(wire.get("metadata") or {})
+        _attach_internal_route_context(md, msg)
         md[E2A_WIRE_SERVER_PUSH_KEY] = True
         wire["metadata"] = md
         return wire
@@ -67,6 +82,7 @@ def build_server_push_wire(msg: dict[str, Any]) -> dict[str, Any]:
                 continue
             md[k] = v
     md[E2A_WIRE_SERVER_PUSH_KEY] = True
+    _attach_internal_route_context(md, msg)
     wire["metadata"] = md
     sid = msg.get("session_id")
     if sid is not None and str(sid).strip():

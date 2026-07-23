@@ -631,21 +631,26 @@ def test_process_message_stream_routes_web_evolution_interrupt_without_user_hist
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
     class FakeSessionManager:
+        inline_task = None
+
         @staticmethod
         def get_session_id(session_id=None):
             return session_id or "default"
 
-        @staticmethod
-        async def submit_task(_session_id, task_factory):
+        @classmethod
+        async def submit_task(cls, _session_id, task_factory):
+            cls.inline_task = asyncio.current_task()
             await task_factory()
 
     class FakeAdapter:
         seen_inputs = None
+        execution_task = None
 
         @staticmethod
         async def process_message_stream_impl(*_args, **_kwargs):
             _request, inputs = _args
             FakeAdapter.seen_inputs = inputs
+            FakeAdapter.execution_task = asyncio.current_task()
             yield AgentResponseChunk(
                 request_id="req-stream-answer",
                 channel_id="web",
@@ -685,7 +690,16 @@ def test_process_message_stream_routes_web_evolution_interrupt_without_user_hist
     )
 
     async def collect_chunks():
-        return [chunk async for chunk in interface_module.JiuWenSwarm().process_message_stream(request)]
+        chunks = [
+            chunk
+            async for chunk in interface_module.JiuWenSwarm().process_message_stream(request)
+        ]
+        # Ordinary chat now starts the RuntimeController producer immediately
+        # instead of scheduling it through the legacy SessionManager queue.
+        assert FakeSessionManager.inline_task is None
+        assert FakeAdapter.execution_task is not asyncio.current_task()
+        assert asyncio.current_task().cancelling() == 0
+        return chunks
 
     chunks = asyncio.run(collect_chunks())
 

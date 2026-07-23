@@ -7,8 +7,26 @@ from types import SimpleNamespace
 import pytest
 
 from jiuwenswarm.common.schema import Message
+from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.common.e2a.constants import (
+    E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY,
+    E2A_INTERNAL_SOURCE_REQUEST_ID_KEY,
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
+    E2A_WIRE_SERVER_PUSH_KEY,
+)
+from jiuwenswarm.common.e2a.gateway_normalize import (
+    E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY,
+    E2A_BOUND_SUBSCRIPTION_ROUTE_KEY,
+    E2A_INTERNAL_CONTEXT_KEY,
+)
+from jiuwenswarm.gateway.message_handler import message_handler as message_handler_module
+from jiuwenswarm.gateway.message_handler.evolution_approval import GatewayRequestRoute
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
+)
 
 
 _APPROVAL_SCHEMA = "openjiuwen.skill_evolution_approval.v1"
@@ -24,33 +42,50 @@ _INTERRUPT_APPROVAL_META = {
 class _FakeAgentClient:
     sent_requests: list[object] = []
     sent_stream_requests: list[object] = []
+    stream_request_captured: asyncio.Event | None = None
+    stream_release: asyncio.Event | None = None
     stream_payloads: list[dict[str, object]] = []
+    stream_metadata: dict[str, object] | None = None
     response_payload: dict[str, object] = {
         "event_type": "chat.interrupt_result",
         "message": "当前没有可取消的团队任务",
         "success": False,
     }
+    response_metadata: dict[str, object] | None = None
 
     @staticmethod
     async def send_request(env: object) -> SimpleNamespace:
         _FakeAgentClient.sent_requests.append(env)
         return SimpleNamespace(
-            request_id="interrupt-1",
+            request_id=getattr(env, "request_id", "") or "interrupt-1",
             channel_id="feishu_enterprise",
             ok=True,
             payload=dict(_FakeAgentClient.response_payload),
-            metadata=None,
+            metadata=(
+                dict(_FakeAgentClient.response_metadata)
+                if _FakeAgentClient.response_metadata is not None
+                else None
+            ),
         )
 
     @staticmethod
     async def send_request_stream(env: object) -> AsyncIterator[object]:
         _FakeAgentClient.sent_stream_requests.append(env)
+        if _FakeAgentClient.stream_request_captured is not None:
+            _FakeAgentClient.stream_request_captured.set()
+        if _FakeAgentClient.stream_release is not None:
+            await _FakeAgentClient.stream_release.wait()
         for index, payload in enumerate(_FakeAgentClient.stream_payloads):
             yield SimpleNamespace(
                 request_id=getattr(env, "request_id", "") or f"stream-{index}",
                 channel_id=getattr(env, "channel", "") or "web",
                 payload=payload,
                 is_complete=False,
+                metadata=(
+                    dict(_FakeAgentClient.stream_metadata)
+                    if _FakeAgentClient.stream_metadata is not None
+                    else None
+                ),
             )
 
 
@@ -61,7 +96,11 @@ class _TestMessageHandler(MessageHandler):
         setattr(cls, "_instance", None)
         _FakeAgentClient.sent_requests = []
         _FakeAgentClient.sent_stream_requests = []
+        _FakeAgentClient.stream_request_captured = asyncio.Event()
+        _FakeAgentClient.stream_release = None
         _FakeAgentClient.stream_payloads = []
+        _FakeAgentClient.stream_metadata = None
+        _FakeAgentClient.response_metadata = None
         return cls(_FakeAgentClient())
 
     def seed_pending_evolution_approval(
@@ -87,6 +126,63 @@ class _TestMessageHandler(MessageHandler):
             str(payload.get("new_input") or ""),
             payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
         )
+
+    def seed_request_model_route(
+        self,
+        request_id: str,
+        *,
+        mode: str,
+        model_key: str,
+        provider: str,
+    ) -> None:
+        self._evolution_approval.register_request_route(
+            request_id,
+            GatewayRequestRoute(
+                mode=mode,
+                model_key=model_key,
+                provider=provider,
+            ),
+            "sess-1",
+        )
+
+    def has_pending_question_route(
+        self,
+        session_id: str,
+        request_id: str,
+    ) -> bool:
+        return self._evolution_approval.has_question_route(session_id, request_id)
+
+    def pending_question_route(
+        self,
+        session_id: str,
+        request_id: str,
+    ) -> object | None:
+        return self._evolution_approval.pending_question_route(session_id, request_id)
+
+    def has_request_model_route(self, request_id: str) -> bool:
+        return self._evolution_approval.has_request_route(request_id)
+
+    def finish_stream_route_tracking(self, request_id: str, session_id: str) -> None:
+        sessions = getattr(self, "_stream_sessions")
+        sessions[request_id] = session_id
+        self._pop_stream_tracking(request_id)
+
+    def retained_request_route_count(self) -> int:
+        return self._evolution_approval.retained_request_route_count()
+
+    def clear_subscription_route_cache(self) -> None:
+        self._subscription_route_config_signature = None
+        self._subscription_route_model_entries = None
+
+    def seed_stream_metadata(
+        self,
+        request_id: str,
+        metadata: dict[str, object],
+    ) -> None:
+        self._stream_metadata[request_id] = metadata
+
+    def clear_session_evolution_states(self, session_id: str) -> None:
+        self._clear_session_evolution_states(session_id)
 
     async def handle_evolution_chunk(
         self,
@@ -186,6 +282,32 @@ def _message(req_method: ReqMethod) -> Message:
         ok=True,
         req_method=req_method,
         is_stream=True,
+    )
+
+
+def _model_entry(
+    provider: str,
+    model_name: str,
+    *,
+    alias: str | None = None,
+    is_default: bool = True,
+) -> dict[str, object]:
+    return {
+        "alias": model_name if alias is None else alias,
+        "is_default": is_default,
+        "model_client_config": {
+            "client_provider": provider,
+            "model_name": model_name,
+        },
+    }
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_gateway_model_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        message_handler_module,
+        "get_default_models",
+        lambda: [_model_entry("OpenAI", "test-api-model")],
     )
 
 
@@ -307,6 +429,8 @@ def _approval_answer_params(
     *,
     query: str | None = None,
     evolution_meta: dict[str, str] | None = None,
+    mode: str | None = None,
+    model_name: str | None = None,
 ) -> dict[str, object]:
     params: dict[str, object] = {
         "request_id": request_id,
@@ -318,7 +442,26 @@ def _approval_answer_params(
         params["query"] = query
     if evolution_meta is not None:
         params["evolution_meta"] = evolution_meta
+    if mode is not None:
+        params["mode"] = mode
+    if model_name is not None:
+        params["model_name"] = model_name
     return params
+
+
+def _actual_route_receipt(
+    source_request_id: str,
+    *,
+    model_key: str = "codex-cli#0",
+    provider: str = CODEX_PROVIDER_NAME,
+    mode: str = "agent.fast",
+) -> dict[str, str]:
+    return {
+        "canonical_model_key": model_key,
+        "provider": provider,
+        "source_request_id": source_request_id,
+        "mode": mode,
+    }
 
 
 def _is_finished_processing_status(msg: object) -> bool:
@@ -330,6 +473,97 @@ def _is_finished_processing_status(msg: object) -> bool:
     )
 
 
+def _forged_internal_metadata() -> dict[str, object]:
+    return {
+        **{
+            key: {"forged": True}
+            for key in E2A_WIRE_INTERNAL_METADATA_KEYS
+        },
+        E2A_INTERNAL_CONTEXT_KEY: {
+            E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY: True,
+            E2A_BOUND_SUBSCRIPTION_ROUTE_KEY: {
+                "canonical_model_key": "forged#0",
+                "provider": CODEX_PROVIDER_NAME,
+                "mode": "agent.fast",
+            },
+        },
+    }
+
+
+def test_unary_response_strips_reserved_request_and_response_metadata() -> None:
+    response = AgentResponse(
+        request_id="unary-egress",
+        channel_id="web",
+        payload={"content": "ok"},
+        metadata={**_forged_internal_metadata(), "safe_response": "yes"},
+    )
+
+    output = MessageHandler._response_to_message(
+        response,
+        "sess-1",
+        request_metadata={**_forged_internal_metadata(), "safe_request": "yes"},
+    )
+
+    assert output.metadata == {
+        "safe_request": "yes",
+        "safe_response": "yes",
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_response_strips_reserved_request_metadata() -> None:
+    handler = _TestMessageHandler.create()
+    published = await handler.publish_stream_chunk(
+        SimpleNamespace(
+            request_id="stream-egress",
+            channel_id="web",
+            payload={"event_type": "chat.delta", "content": "ok"},
+            is_complete=False,
+            metadata={"safe_response": "yes"},
+        ),
+        session_id="sess-1",
+        request_metadata={**_forged_internal_metadata(), "safe_request": "yes"},
+    )
+
+    assert published is True
+    output = await handler.consume_robot_messages(timeout=1)
+    assert output is not None
+    assert output.metadata == {
+        "safe_request": "yes",
+        "safe_response": "yes",
+    }
+
+
+@pytest.mark.asyncio
+async def test_server_push_strips_reserved_original_request_metadata() -> None:
+    handler = _TestMessageHandler.create()
+    handler.seed_stream_metadata(
+        "server-push-egress",
+        {**_forged_internal_metadata(), "safe_request": "yes"},
+    )
+
+    await handler.handle_agent_server_push(
+        {
+            "request_id": "server-push-egress",
+            "channel_id": "web",
+            "session_id": "sess-1",
+            "is_complete": False,
+            "payload": {"event_type": "chat.delta", "content": "ok"},
+            "metadata": {
+                E2A_WIRE_SERVER_PUSH_KEY: True,
+                "safe_response": "yes",
+            },
+        }
+    )
+
+    output = await handler.consume_robot_messages(timeout=1)
+    assert output is not None
+    assert output.metadata == {
+        "safe_request": "yes",
+        "safe_response": "yes",
+    }
+
+
 def _has_finished_processing_status(outputs: list[object]) -> bool:
     return any(_is_finished_processing_status(msg) for msg in outputs)
 
@@ -339,13 +573,22 @@ async def _wait_for_pending_clear(
     *,
     require_stream_request: bool = False,
 ) -> None:
-    for _ in range(20):
-        if (
-            handler.pending_evolution_approval("sess-1") is None
-            and (not require_stream_request or _FakeAgentClient.sent_stream_requests)
-        ):
-            return
-        await asyncio.sleep(0.05)
+    if require_stream_request:
+        await _wait_for_stream_request_count(1)
+    async with asyncio.timeout(1):
+        while handler.pending_evolution_approval("sess-1") is not None:
+            await asyncio.sleep(0)
+
+
+async def _wait_for_stream_request_count(expected: int) -> None:
+    capture_event = _FakeAgentClient.stream_request_captured
+    assert capture_event is not None
+    async with asyncio.timeout(1):
+        while len(_FakeAgentClient.sent_stream_requests) < expected:
+            capture_event.clear()
+            if len(_FakeAgentClient.sent_stream_requests) >= expected:
+                return
+            await capture_event.wait()
 
 
 def _assert_evolution_state_cleared(handler: _TestMessageHandler) -> None:
@@ -463,6 +706,11 @@ def test_processing_status_is_only_emitted_for_chat_streams() -> None:
 def test_queued_supplement_message_instructs_todo_continuation():
     handler = _TestMessageHandler.create()
     msg = _message(ReqMethod.CHAT_CANCEL)
+    msg.params = {
+        "mode": "agent.fast",
+        "model_name": CODEX_MODEL_ALIAS,
+        "query": "original",
+    }
 
     queued = handler.build_queued_chat_send_message(
         msg,
@@ -472,6 +720,8 @@ def test_queued_supplement_message_instructs_todo_continuation():
 
     assert queued.params["supplement_input"] == "删除 todo 列表里的提出改善意见"
     assert queued.params["original_request"] == r"Analyze C:\repo\src\ui\screen-layout.ts"
+    assert queued.params["mode"] == "agent.fast"
+    assert queued.params["model_name"] == CODEX_MODEL_ALIAS
     assert r"C:\repo\src\ui\screen-layout.ts" in queued.params["query"]
     assert "继续执行当前会话 todo 列表中仍未完成" in queued.params["query"]
     assert "不要因为补充请求本身处理完成就询问用户下一步" in queued.params["query"]
@@ -604,6 +854,368 @@ async def test_handle_evolution_chunk_tracks_regular_approval_without_request_pr
     assert handler.pending_evolution_approval("sess-1") == "approval_123"
 
 
+@pytest.mark.parametrize("path", ["stream", "server_push"])
+@pytest.mark.asyncio
+async def test_question_route_binding_uses_exact_origin_for_stream_and_late_push(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    handler.seed_request_model_route(
+        "origin-1",
+        mode="agent.fast",
+        model_key="codex-cli#0",
+        provider=CODEX_PROVIDER_NAME,
+    )
+    payload = _evolution_question_payload("skill_evolve_exact")
+
+    if path == "stream":
+        published = await handler.publish_stream_chunk(
+            SimpleNamespace(
+                request_id="origin-1",
+                channel_id="web",
+                payload=payload,
+                is_complete=False,
+            ),
+            session_id="sess-1",
+        )
+        assert published is True
+    else:
+        handler.finish_stream_route_tracking("origin-1", "sess-1")
+        assert handler.retained_request_route_count() == 1
+        await handler.handle_agent_server_push(
+            {
+                "request_id": "approval-cycle-9",
+                "channel_id": "web",
+                "session_id": "sess-1",
+                "is_complete": False,
+                "payload": payload,
+                "metadata": {
+                    E2A_INTERNAL_SOURCE_REQUEST_ID_KEY: "origin-1",
+                },
+            }
+        )
+
+    route = handler.pending_question_route("sess-1", "skill_evolve_exact")
+    assert route is not None
+    assert route.mode == "agent.fast"
+    assert route.model_key == "codex-cli#0"
+    assert route.provider == CODEX_PROVIDER_NAME
+
+    if path == "server_push":
+        # Binding one question keeps the exact origin alive for a later
+        # deferred question; the correlated terminal event owns cleanup.
+        assert handler.retained_request_route_count() == 1
+        await handler.handle_agent_server_push(
+            {
+                "request_id": "approval-cycle-10",
+                "channel_id": "web",
+                "session_id": "sess-1",
+                "is_complete": False,
+                "payload": _evolution_question_payload("skill_evolve_deferred"),
+                "metadata": {
+                    E2A_INTERNAL_SOURCE_REQUEST_ID_KEY: "origin-1",
+                },
+            }
+        )
+        deferred_route = handler.pending_question_route(
+            "sess-1",
+            "skill_evolve_deferred",
+        )
+        assert deferred_route is not None
+        assert deferred_route.model_key == "codex-cli#0"
+        assert handler.deferred_evolution_approvals("sess-1") == [
+            "skill_evolve_deferred"
+        ]
+        assert handler.retained_request_route_count() == 1
+        await handler.handle_agent_server_push(
+            {
+                "request_id": "approval-cycle-9",
+                "channel_id": "web",
+                "session_id": "sess-1",
+                "is_complete": False,
+                "payload": {
+                    "event_type": "chat.evolution_status",
+                    "status": "end",
+                    "stage": "approval_required",
+                },
+                "metadata": {
+                    E2A_INTERNAL_SOURCE_REQUEST_ID_KEY: "origin-1",
+                },
+            }
+        )
+        assert handler.retained_request_route_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_actual_route_receipt_binds_question_and_is_not_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    published = await handler.publish_stream_chunk(
+        SimpleNamespace(
+            request_id="receipt-stream",
+            channel_id="web",
+            payload=_evolution_question_payload("skill_evolve_receipt_stream"),
+            is_complete=False,
+            metadata={
+                E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY: _actual_route_receipt(
+                    "receipt-stream"
+                ),
+            },
+        ),
+        session_id="sess-1",
+    )
+
+    assert published is True
+    route = handler.pending_question_route(
+        "sess-1",
+        "skill_evolve_receipt_stream",
+    )
+    assert route is not None
+    assert route.model_key == "codex-cli#0"
+    output = await handler.consume_robot_messages(timeout=1)
+    assert output is not None
+    assert E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY not in (output.metadata or {})
+
+
+@pytest.mark.asyncio
+async def test_mismatched_actual_route_receipt_is_suppressed() -> None:
+    handler = _TestMessageHandler.create()
+    published = await handler.publish_stream_chunk(
+        SimpleNamespace(
+            request_id="expected-source",
+            channel_id="web",
+            payload=_evolution_question_payload("skill_evolve_forged_receipt"),
+            is_complete=False,
+            metadata={
+                E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY: _actual_route_receipt(
+                    "different-source"
+                ),
+            },
+        ),
+        session_id="sess-1",
+    )
+
+    assert published is False
+    assert handler.has_pending_question_route(
+        "sess-1",
+        "skill_evolve_forged_receipt",
+    ) is False
+    assert await handler.consume_robot_messages(timeout=0) is None
+
+
+@pytest.mark.asyncio
+async def test_unary_actual_fallback_receipt_overrides_preliminary_codex_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configs = [
+        _model_entry(
+            CODEX_PROVIDER_NAME,
+            "broken-codex",
+            alias="requested",
+        ),
+        _model_entry(
+            "OpenAI",
+            "working-api",
+            alias="working",
+            is_default=False,
+        ),
+    ]
+    monkeypatch.setattr(message_handler_module, "get_default_models", lambda: configs)
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    old_response_payload = dict(_FakeAgentClient.response_payload)
+    _FakeAgentClient.response_payload = _evolution_question_payload(
+        "skill_evolve_actual_fallback"
+    )
+    _FakeAgentClient.response_metadata = {
+        E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY: _actual_route_receipt(
+            "chat-send-1",
+            model_key="working-api#0",
+            provider="OpenAI",
+        )
+    }
+    await handler.start_forwarding()
+    try:
+        await handler.publish_user_messages(
+            _chat_send_message(
+                {
+                    "query": "run",
+                    "mode": "agent.fast",
+                    "model_name": "requested",
+                }
+            )
+        )
+        async with asyncio.timeout(2):
+            while handler.pending_evolution_approval("sess-1") is None:
+                await asyncio.sleep(0)
+        route = handler.pending_question_route(
+            "sess-1",
+            "skill_evolve_actual_fallback",
+        )
+        assert route is not None
+        assert route.model_key == "working-api#0"
+        assert route.provider == "OpenAI"
+        question_output = await handler.consume_robot_messages(timeout=1)
+        assert question_output is not None
+        assert E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY not in (
+            question_output.metadata or {}
+        )
+
+        _FakeAgentClient.response_payload = {"accepted": True, "resolved": True}
+        _FakeAgentClient.response_metadata = None
+        await handler.publish_user_messages(
+            _answer_message(
+                _approval_answer_params(
+                    "skill_evolve_actual_fallback",
+                    ["accept"],
+                    mode="agent.fast",
+                    model_name="requested",
+                )
+            )
+        )
+        async with asyncio.timeout(2):
+            while len(_FakeAgentClient.sent_requests) < 2:
+                await asyncio.sleep(0)
+        answer_env = _FakeAgentClient.sent_requests[1]
+        assert answer_env.params["model_name"] == "working-api#0"
+        assert answer_env.params["mode"] == "agent.fast"
+    finally:
+        _FakeAgentClient.response_payload = old_response_payload
+        _FakeAgentClient.response_metadata = None
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_passive_watcher_actual_receipt_binds_without_preliminary_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    await handler.handle_agent_server_push(
+        {
+            "request_id": "watcher-push",
+            "channel_id": "web",
+            "session_id": "sess-1",
+            "is_complete": False,
+            "payload": _evolution_question_payload("skill_evolve_watcher_receipt"),
+            "metadata": {
+                E2A_INTERNAL_SOURCE_REQUEST_ID_KEY: "watcher-origin",
+                E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY: _actual_route_receipt(
+                    "watcher-origin"
+                ),
+            },
+        }
+    )
+
+    route = handler.pending_question_route(
+        "sess-1",
+        "skill_evolve_watcher_receipt",
+    )
+    assert route is not None
+    assert route.model_key == "codex-cli#0"
+    assert handler.retained_request_route_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_approval_id_from_different_route_is_suppressed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    handler.seed_request_model_route(
+        "origin-codex",
+        mode="agent.fast",
+        model_key="codex-cli#0",
+        provider=CODEX_PROVIDER_NAME,
+    )
+    first = await handler.publish_stream_chunk(
+        SimpleNamespace(
+            request_id="origin-codex",
+            channel_id="web",
+            payload=_evolution_question_payload("skill_evolve_collision"),
+            is_complete=False,
+        ),
+        session_id="sess-1",
+    )
+    handler.seed_request_model_route(
+        "origin-api",
+        mode="agent.fast",
+        model_key="api-model#0",
+        provider="OpenAI",
+    )
+    second = await handler.publish_stream_chunk(
+        SimpleNamespace(
+            request_id="origin-api",
+            channel_id="web",
+            payload=_evolution_question_payload("skill_evolve_collision"),
+            is_complete=False,
+        ),
+        session_id="sess-1",
+    )
+
+    assert first is True
+    assert second is False
+    route = handler.pending_question_route("sess-1", "skill_evolve_collision")
+    assert route is not None
+    assert route.model_key == "codex-cli#0"
+
+
+@pytest.mark.asyncio
+async def test_passive_watcher_route_survives_push_before_stream_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    handler.seed_request_model_route(
+        "origin-active",
+        mode="agent.fast",
+        model_key="codex-cli#0",
+        provider=CODEX_PROVIDER_NAME,
+    )
+
+    await handler.handle_agent_server_push(
+        {
+            "request_id": "push-before-cleanup",
+            "channel_id": "web",
+            "session_id": "sess-1",
+            "is_complete": False,
+            "payload": _evolution_question_payload("skill_evolve_first"),
+            "metadata": {
+                E2A_INTERNAL_SOURCE_REQUEST_ID_KEY: "origin-active",
+            },
+        }
+    )
+    handler.finish_stream_route_tracking("origin-active", "sess-1")
+    assert handler.retained_request_route_count() == 1
+
+    await handler.handle_agent_server_push(
+        {
+            "request_id": "push-after-cleanup",
+            "channel_id": "web",
+            "session_id": "sess-1",
+            "is_complete": False,
+            "payload": _evolution_question_payload("skill_evolve_second"),
+            "metadata": {
+                E2A_INTERNAL_SOURCE_REQUEST_ID_KEY: "origin-active",
+            },
+        }
+    )
+
+    second_route = handler.pending_question_route(
+        "sess-1",
+        "skill_evolve_second",
+    )
+    assert second_route is not None
+    assert second_route.model_key == "codex-cli#0"
+    assert handler.deferred_evolution_approvals("sess-1") == [
+        "skill_evolve_second"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_regular_auto_save_answer_resolved_clears_processing_status(
     monkeypatch: pytest.MonkeyPatch,
@@ -630,11 +1242,42 @@ async def test_regular_auto_save_answer_resolved_clears_processing_status(
 
 
 @pytest.mark.asyncio
-async def test_interrupt_evolution_approval_chat_send_cleans_pending_and_releases_queued_supplement() -> None:
+async def test_codex_fast_approval_releases_queued_supplement_once_with_route_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        message_handler_module,
+        "get_default_models",
+        lambda: [
+            _model_entry(
+                CODEX_PROVIDER_NAME,
+                "codex-cli",
+                alias=CODEX_MODEL_ALIAS,
+            )
+        ],
+    )
     handler = _TestMessageHandler.create()
     old_response_payload = dict(_FakeAgentClient.response_payload)
     _FakeAgentClient.response_payload = {"accepted": True}
-    handler.seed_pending_evolution_approval("sess-1", "call_123")
+    handler.seed_request_model_route(
+        "origin-codex",
+        mode="agent.fast",
+        model_key="codex-cli#0",
+        provider=CODEX_PROVIDER_NAME,
+    )
+    await handler.handle_evolution_chunk(
+        SimpleNamespace(
+            request_id="origin-codex",
+            channel_id="web",
+            payload={
+                **_evolution_question_payload("call_123"),
+                "source": _APPROVAL_SOURCE,
+                "approval_schema": _APPROVAL_SCHEMA,
+                "evolution_meta": _interrupt_approval_meta(),
+            },
+        ),
+        "sess-1",
+    )
     handler.seed_session_evolution_in_progress("sess-1")
     handler.seed_queued_supplement_input("sess-1", {"new_input": "继续补充"})
     await handler.start_forwarding()
@@ -646,20 +1289,526 @@ async def test_interrupt_evolution_approval_chat_send_cleans_pending_and_release
                     ["allow_once"],
                     query="",
                     evolution_meta=_interrupt_approval_meta(),
+                    mode="agent.fast",
+                    model_name=CODEX_MODEL_ALIAS,
                 )
             )
         )
 
-        await _wait_for_pending_clear(handler, require_stream_request=True)
+        await _wait_for_stream_request_count(2)
 
         _assert_evolution_state_cleared(handler)
         assert _FakeAgentClient.sent_requests == []
+        assert len(_FakeAgentClient.sent_stream_requests) == 2
         sent_params = _FakeAgentClient.sent_stream_requests[0].params
         assert sent_params["request_id"] == "call_123"
         assert sent_params["source"] == _APPROVAL_SOURCE
-        queued_params = _FakeAgentClient.sent_stream_requests[-1].params
+        assert sent_params["mode"] == "agent.fast"
+        assert sent_params["model_name"] == "codex-cli#0"
+        queued_params = _FakeAgentClient.sent_stream_requests[1].params
         assert queued_params["supplement_input"] == "继续补充"
         assert queued_params["is_supplement"] is True
+        assert queued_params["mode"] == "agent.fast"
+        assert queued_params["model_name"] == "codex-cli#0"
+    finally:
+        _FakeAgentClient.response_payload = old_response_payload
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_regular_codex_answer_restores_server_route_and_queues_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configs = [
+        _model_entry(
+            CODEX_PROVIDER_NAME,
+            "codex-cli",
+            alias=CODEX_MODEL_ALIAS,
+        ),
+        _model_entry(
+            "OpenAI",
+            "api-model",
+            alias="api-choice",
+            is_default=False,
+        ),
+    ]
+    monkeypatch.setattr(message_handler_module, "get_default_models", lambda: configs)
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    old_response_payload = dict(_FakeAgentClient.response_payload)
+    _FakeAgentClient.stream_payloads = [
+        _evolution_question_payload("skill_evolve_bound")
+    ]
+    _FakeAgentClient.stream_metadata = {
+        E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY: _actual_route_receipt(
+            "chat-send-1"
+        )
+    }
+    await handler.start_forwarding()
+    try:
+        await handler.publish_user_messages(
+            _stream_chat_send_message(
+                {
+                    "query": "start",
+                    "mode": "agent.fast",
+                    "model_name": CODEX_MODEL_ALIAS,
+                }
+            )
+        )
+        async with asyncio.timeout(2):
+            while (
+                handler.pending_evolution_approval("sess-1")
+                != "skill_evolve_bound"
+                or handler.has_request_model_route("chat-send-1")
+            ):
+                await asyncio.sleep(0)
+
+        _FakeAgentClient.sent_stream_requests = []
+        _FakeAgentClient.stream_payloads = []
+        _FakeAgentClient.response_payload = {"accepted": True, "resolved": True}
+        handler.seed_session_evolution_in_progress("sess-1")
+        handler.seed_queued_supplement_input(
+            "sess-1",
+            {"new_input": "continue once"},
+        )
+        await handler.publish_user_messages(
+            _answer_message(
+                _approval_answer_params(
+                    "skill_evolve_bound",
+                    ["accept"],
+                    # Client selectors are deliberately wrong; the bound
+                    # server snapshot must overwrite both.
+                    mode="agent.plan",
+                    model_name="api-choice",
+                )
+            )
+        )
+
+        async with asyncio.timeout(2):
+            while (
+                len(_FakeAgentClient.sent_requests) < 1
+                or len(_FakeAgentClient.sent_stream_requests) < 1
+            ):
+                await asyncio.sleep(0)
+
+        assert len(_FakeAgentClient.sent_requests) == 1
+        assert len(_FakeAgentClient.sent_stream_requests) == 1
+        answer_env = _FakeAgentClient.sent_requests[0]
+        assert answer_env.method == ReqMethod.CHAT_ANSWER.value
+        assert answer_env.params["mode"] == "agent.fast"
+        assert answer_env.params["model_name"] == "codex-cli#0"
+        assert answer_env.channel_context[E2A_INTERNAL_CONTEXT_KEY][
+            E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY
+        ] is True
+        assert answer_env.channel_context[E2A_INTERNAL_CONTEXT_KEY][
+            E2A_BOUND_SUBSCRIPTION_ROUTE_KEY
+        ] == {
+            "canonical_model_key": "codex-cli#0",
+            "provider": CODEX_PROVIDER_NAME,
+            "mode": "agent.fast",
+        }
+        assert E2A_INTERNAL_CONTEXT_KEY not in answer_env.params
+        queued_env = _FakeAgentClient.sent_stream_requests[0]
+        assert queued_env.params["supplement_input"] == "continue once"
+        assert queued_env.params["mode"] == "agent.fast"
+        assert queued_env.params["model_name"] == "codex-cli#0"
+        assert handler.has_pending_question_route(
+            "sess-1",
+            "skill_evolve_bound",
+        ) is False
+    finally:
+        _FakeAgentClient.response_payload = old_response_payload
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_answer_keeps_original_api_route_after_default_changes_to_codex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configs = [
+        _model_entry("OpenAI", "api-model", alias="api-choice"),
+        _model_entry(
+            CODEX_PROVIDER_NAME,
+            "codex-cli",
+            alias=CODEX_MODEL_ALIAS,
+            is_default=False,
+        ),
+    ]
+    monkeypatch.setattr(message_handler_module, "get_default_models", lambda: configs)
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    handler.seed_request_model_route(
+        "origin-api",
+        mode="agent.fast",
+        model_key="api-model#0",
+        provider="OpenAI",
+    )
+    await handler.handle_evolution_chunk(
+        SimpleNamespace(
+            request_id="origin-api",
+            channel_id="web",
+            payload=_evolution_question_payload("skill_evolve_api"),
+        ),
+        "sess-1",
+    )
+    configs[:] = [
+        _model_entry(
+            CODEX_PROVIDER_NAME,
+            "codex-cli",
+            alias=CODEX_MODEL_ALIAS,
+        ),
+        _model_entry(
+            "OpenAI",
+            "api-model",
+            alias="api-choice",
+            is_default=False,
+        ),
+    ]
+    handler.clear_subscription_route_cache()
+    old_response_payload = dict(_FakeAgentClient.response_payload)
+    _FakeAgentClient.response_payload = {"accepted": True, "resolved": True}
+    await handler.start_forwarding()
+    try:
+        await handler.publish_user_messages(
+            _answer_message(_approval_answer_params("skill_evolve_api", ["accept"]))
+        )
+        async with asyncio.timeout(2):
+            while not _FakeAgentClient.sent_requests:
+                await asyncio.sleep(0)
+        assert _FakeAgentClient.sent_requests[0].params["mode"] == "agent.fast"
+        assert _FakeAgentClient.sent_requests[0].params["model_name"] == "api-model#0"
+    finally:
+        _FakeAgentClient.response_payload = old_response_payload
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_provider_rebind_for_same_canonical_key_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        message_handler_module,
+        "get_default_models",
+        lambda: [_model_entry("OpenAI", "shared-model", alias="shared")],
+    )
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    handler.seed_request_model_route(
+        "origin-codex",
+        mode="agent.fast",
+        model_key="shared-model#0",
+        provider=CODEX_PROVIDER_NAME,
+    )
+    await handler.handle_evolution_chunk(
+        SimpleNamespace(
+            request_id="origin-codex",
+            channel_id="web",
+            payload=_evolution_question_payload("skill_evolve_rebind"),
+        ),
+        "sess-1",
+    )
+    await handler.start_forwarding()
+    try:
+        await handler.publish_user_messages(
+            _answer_message(
+                _approval_answer_params("skill_evolve_rebind", ["accept"])
+            )
+        )
+        error = await handler.consume_robot_messages(timeout=2)
+        assert error is not None
+        assert error.ok is False
+        assert error.payload["code"] == "route_unavailable"
+        assert _FakeAgentClient.sent_requests == []
+        assert handler.has_pending_question_route(
+            "sess-1",
+            "skill_evolve_rebind",
+        ) is True
+    finally:
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_unbound_stale_codex_answer_is_denied_without_clearing_current_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        message_handler_module,
+        "get_default_models",
+        lambda: [
+            _model_entry(
+                CODEX_PROVIDER_NAME,
+                "codex-cli",
+                alias=CODEX_MODEL_ALIAS,
+            )
+        ],
+    )
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    handler.seed_request_model_route(
+        "origin-codex",
+        mode="agent.fast",
+        model_key="codex-cli#0",
+        provider=CODEX_PROVIDER_NAME,
+    )
+    await handler.handle_evolution_chunk(
+        SimpleNamespace(
+            request_id="origin-codex",
+            channel_id="web",
+            payload=_evolution_question_payload("skill_evolve_current"),
+        ),
+        "sess-1",
+    )
+    await handler.start_forwarding()
+    try:
+        await handler.publish_user_messages(
+            _answer_message(
+                _approval_answer_params(
+                    "skill_evolve_stale",
+                    ["accept"],
+                    mode="agent.fast",
+                    model_name=CODEX_MODEL_ALIAS,
+                )
+            )
+        )
+        error = await handler.consume_robot_messages(timeout=2)
+        assert error is not None
+        assert error.ok is False
+        assert error.payload["code"] == "consumer_unclassified"
+        assert _FakeAgentClient.sent_requests == []
+        assert handler.pending_evolution_approval("sess-1") == "skill_evolve_current"
+        assert handler.has_pending_question_route(
+            "sess-1",
+            "skill_evolve_current",
+        ) is True
+    finally:
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_current_interrupt_codex_chat_send_requires_exact_route_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        message_handler_module,
+        "get_default_models",
+        lambda: [
+            _model_entry(
+                CODEX_PROVIDER_NAME,
+                "codex-cli",
+                alias=CODEX_MODEL_ALIAS,
+            )
+        ],
+    )
+    handler = _TestMessageHandler.create()
+    handler.seed_pending_evolution_approval("sess-1", "call_unbound_current")
+    await handler.start_forwarding()
+    try:
+        await handler.publish_user_messages(
+            _chat_send_message(
+                _approval_answer_params(
+                    "call_unbound_current",
+                    ["allow_once"],
+                    evolution_meta=_interrupt_approval_meta(),
+                    mode="agent.fast",
+                    model_name=CODEX_MODEL_ALIAS,
+                )
+            )
+        )
+        error = await handler.consume_robot_messages(timeout=2)
+        assert error is not None
+        assert error.ok is False
+        assert error.payload["code"] == "approval_unbound"
+        assert _FakeAgentClient.sent_requests == []
+        assert _FakeAgentClient.sent_stream_requests == []
+        assert handler.pending_evolution_approval("sess-1") == (
+            "call_unbound_current"
+        )
+    finally:
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_bound_answers_dispatch_one_approval_and_one_supplement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        message_handler_module,
+        "get_default_models",
+        lambda: [
+            _model_entry(
+                CODEX_PROVIDER_NAME,
+                "codex-cli",
+                alias=CODEX_MODEL_ALIAS,
+            )
+        ],
+    )
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    handler.seed_request_model_route(
+        "origin-codex",
+        mode="agent.fast",
+        model_key="codex-cli#0",
+        provider=CODEX_PROVIDER_NAME,
+    )
+    await handler.handle_evolution_chunk(
+        SimpleNamespace(
+            request_id="origin-codex",
+            channel_id="web",
+            payload=_evolution_question_payload(
+                "call_duplicate",
+                include_approval_context=True,
+            ),
+        ),
+        "sess-1",
+    )
+    assert handler.pending_evolution_approval("sess-1") == "call_duplicate"
+    assert handler.has_pending_question_route("sess-1", "call_duplicate") is True
+    handler.seed_session_evolution_in_progress("sess-1")
+    handler.seed_queued_supplement_input(
+        "sess-1",
+        {"new_input": "only once"},
+    )
+    _FakeAgentClient.stream_release = asyncio.Event()
+    answer_params = _approval_answer_params(
+        "call_duplicate",
+        ["allow_once"],
+        evolution_meta=_interrupt_approval_meta(),
+    )
+    first = _answer_message(dict(answer_params))
+    first.id = "answer-first"
+    second = _answer_message(dict(answer_params))
+    second.id = "answer-second"
+    await handler.start_forwarding()
+    try:
+        await handler.publish_user_messages(first)
+        await handler.publish_user_messages(second)
+        await _wait_for_stream_request_count(1)
+
+        duplicate_error = None
+        async with asyncio.timeout(2):
+            while duplicate_error is None:
+                output = await handler.consume_robot_messages(timeout=0.5)
+                if (
+                    output is not None
+                    and isinstance(output.payload, dict)
+                    and output.payload.get("code") == "approval_in_progress"
+                ):
+                    duplicate_error = output
+        assert duplicate_error.ok is False
+        assert len(_FakeAgentClient.sent_stream_requests) == 1
+
+        _FakeAgentClient.stream_release.set()
+        await _wait_for_stream_request_count(2)
+        async with asyncio.timeout(2):
+            while handler.pending_evolution_approval("sess-1") is not None:
+                await asyncio.sleep(0)
+
+        assert len(_FakeAgentClient.sent_stream_requests) == 2
+        assert _FakeAgentClient.sent_stream_requests[0].params["request_id"] == (
+            "call_duplicate"
+        )
+        assert _FakeAgentClient.sent_stream_requests[1].params[
+            "supplement_input"
+        ] == "only once"
+    finally:
+        if _FakeAgentClient.stream_release is not None:
+            _FakeAgentClient.stream_release.set()
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_bound_answer_route_is_inherited_by_follow_on_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        message_handler_module,
+        "get_default_models",
+        lambda: [
+            _model_entry(
+                CODEX_PROVIDER_NAME,
+                "codex-cli",
+                alias=CODEX_MODEL_ALIAS,
+            )
+        ],
+    )
+    _set_evolution_auto_save(monkeypatch, False)
+    handler = _TestMessageHandler.create()
+    handler.seed_request_model_route(
+        "origin-codex",
+        mode="agent.fast",
+        model_key="codex-cli#0",
+        provider=CODEX_PROVIDER_NAME,
+    )
+    await handler.handle_evolution_chunk(
+        SimpleNamespace(
+            request_id="origin-codex",
+            channel_id="web",
+            payload={
+                **_evolution_question_payload("call_first"),
+                "source": _APPROVAL_SOURCE,
+                "approval_schema": _APPROVAL_SCHEMA,
+                "evolution_meta": _interrupt_approval_meta(),
+            },
+        ),
+        "sess-1",
+    )
+    _FakeAgentClient.stream_payloads = [
+        _evolution_question_payload(
+            "skill_evolve_follow_on",
+            include_approval_context=True,
+        )
+    ]
+    _FakeAgentClient.stream_metadata = {
+        E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY: _actual_route_receipt(
+            "chat-send-1"
+        )
+    }
+    old_response_payload = dict(_FakeAgentClient.response_payload)
+    await handler.start_forwarding()
+    try:
+        await handler.publish_user_messages(
+            _chat_send_message(
+                _approval_answer_params(
+                    "call_first",
+                    ["allow_once"],
+                    evolution_meta=_interrupt_approval_meta(),
+                )
+            )
+        )
+        async with asyncio.timeout(2):
+            while (
+                handler.pending_evolution_approval("sess-1")
+                != "skill_evolve_follow_on"
+            ):
+                await asyncio.sleep(0)
+        assert handler.has_pending_question_route(
+            "sess-1",
+            "skill_evolve_follow_on",
+        ) is True
+
+        _FakeAgentClient.stream_payloads = []
+        _FakeAgentClient.response_payload = {"accepted": True, "resolved": True}
+        await handler.publish_user_messages(
+            _answer_message(
+                _approval_answer_params("skill_evolve_follow_on", ["accept"])
+            )
+        )
+        async with asyncio.timeout(2):
+            while not _FakeAgentClient.sent_requests:
+                await asyncio.sleep(0)
+        follow_on_env = _FakeAgentClient.sent_requests[0]
+        assert follow_on_env.params["mode"] == "agent.fast"
+        assert follow_on_env.params["model_name"] == "codex-cli#0"
+        assert follow_on_env.channel_context[E2A_INTERNAL_CONTEXT_KEY][
+            E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY
+        ] is True
+        assert follow_on_env.channel_context[E2A_INTERNAL_CONTEXT_KEY][
+            E2A_BOUND_SUBSCRIPTION_ROUTE_KEY
+        ] == {
+            "canonical_model_key": "codex-cli#0",
+            "provider": CODEX_PROVIDER_NAME,
+            "mode": "agent.fast",
+        }
     finally:
         _FakeAgentClient.response_payload = old_response_payload
         await handler.stop_forwarding()
@@ -787,7 +1936,7 @@ async def test_interrupt_evolution_approval_user_answer_is_dispatched_as_chat_se
             )
         )
 
-        await _wait_for_pending_clear(handler, require_stream_request=True)
+        await _wait_for_stream_request_count(2)
 
         assert handler.pending_evolution_approval("sess-1") is None
         assert _FakeAgentClient.sent_requests == []
@@ -796,7 +1945,8 @@ async def test_interrupt_evolution_approval_user_answer_is_dispatched_as_chat_se
         assert sent.is_stream is True
         assert sent.params["request_id"] == "call_123"
         assert sent.params["answers"] == [{"selected_options": ["allow_once"]}]
-        queued_params = _FakeAgentClient.sent_stream_requests[-1].params
+        assert len(_FakeAgentClient.sent_stream_requests) == 2
+        queued_params = _FakeAgentClient.sent_stream_requests[1].params
         assert queued_params["supplement_input"] == "继续补充"
     finally:
         _FakeAgentClient.response_payload = old_response_payload
@@ -822,11 +1972,12 @@ async def test_stream_interrupt_evolution_approval_chat_send_cleans_pending() ->
             )
         )
 
-        await _wait_for_pending_clear(handler, require_stream_request=True)
+        await _wait_for_stream_request_count(2)
 
         _assert_evolution_state_cleared(handler)
         assert _FakeAgentClient.sent_stream_requests[0].params["request_id"] == "call_123"
-        assert _FakeAgentClient.sent_stream_requests[-1].params["supplement_input"] == "继续补充"
+        assert len(_FakeAgentClient.sent_stream_requests) == 2
+        assert _FakeAgentClient.sent_stream_requests[1].params["supplement_input"] == "继续补充"
     finally:
         await handler.stop_forwarding()
 

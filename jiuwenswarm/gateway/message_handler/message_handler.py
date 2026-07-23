@@ -19,10 +19,16 @@ from typing import TYPE_CHECKING, Any, Dict, Literal
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
+    E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY,
     E2A_INTERNAL_CANCEL_SOURCE_KEY,
+    E2A_INTERNAL_SOURCE_REQUEST_ID_KEY,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
 )
-from jiuwenswarm.common.config import get_evolution_auto_save_enabled
+from jiuwenswarm.common.config import get_default_models, get_evolution_auto_save_enabled
+from jiuwenswarm.common.model_route import (
+    build_model_route_index,
+    parse_actual_model_route_receipt,
+)
 from jiuwenswarm.gateway.routing.session_map import SessionMap
 from jiuwenswarm.gateway.routing.agent_request_timeout import (
     send_agent_request_with_timeout,
@@ -33,11 +39,18 @@ from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
     parse_channel_control_text,
 )
 from jiuwenswarm.gateway.message_handler.evolution_approval import (
+    ApprovalDispatchLease,
     EvolutionApprovalCoordinator,
+    GatewayRequestRoute,
     ensure_regular_evolution_approval_metadata,
     is_evolution_approval_payload,
     is_evolution_approval_request_id,
     is_interrupt_evolution_approval_answer_payload,
+)
+from jiuwenswarm.common.e2a.gateway_normalize import (
+    E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY,
+    E2A_BOUND_SUBSCRIPTION_ROUTE_KEY,
+    E2A_INTERNAL_CONTEXT_KEY,
 )
 from jiuwenswarm.gateway.message_handler.prompts.review_prompt import build_review_prompt
 from jiuwenswarm.gateway.message_handler.prompts.security_review_prompt import (
@@ -50,6 +63,7 @@ from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.gateway.hooks.handler import GatewayHookHandler
 from jiuwenswarm.gateway.routing.keys import RoutingKey, AgentRef, make_delivery_target
 from jiuwenswarm.gateway.routing.session_sharing import SessionSharingRegistry, SubRole
+from jiuwenswarm.common.utils import get_config_file
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +107,129 @@ _DELIVERY_IDENTITY_METADATA_KEYS = frozenset({
     "im_sender_user_id",
     "im_thread_id",
 })
+
+
+def _configured_model_route(
+    requested_model: str,
+    model_entries: list[dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    """Resolve the canonical model key and provider without constructing a client.
+
+    This mirrors the selectable keys built by ``JiuWenSwarmDeepAdapter``: explicit
+    ``model_name#index`` keys, the per-name default, and the first unique alias.
+    Unknown selections retain Jiuwen's current fallback-to-default behavior.
+    """
+
+    entries = get_default_models() if model_entries is None else model_entries
+    candidate = build_model_route_index(entries).resolve(requested_model)
+    if candidate is None:
+        return "", ""
+    return candidate.canonical_model_key, candidate.provider
+
+
+def _configured_provider_for_gateway_request(
+    msg: "Message",
+    model_entries: list[dict[str, Any]] | None = None,
+) -> str:
+    """Resolve the request's configured provider without constructing a model client."""
+
+    params = msg.params if isinstance(msg.params, dict) else {}
+    return _configured_model_route(
+        str(params.get("model_name") or ""),
+        model_entries,
+    )[1]
+
+
+def _request_contains_multimodal_input(params: Any) -> bool:
+    """Recognize image/media payloads structurally without opening referenced files."""
+
+    if not isinstance(params, dict):
+        return False
+    media_items = params.get("media_items")
+    if isinstance(media_items, list) and media_items:
+        return True
+    files = params.get("files")
+    if isinstance(files, dict):
+        uploaded_images = files.get("uploaded_images")
+        if isinstance(uploaded_images, list) and uploaded_images:
+            return True
+    attachments = params.get("attachments")
+    if isinstance(attachments, list):
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            media_type = str(attachment.get("type") or "").strip().lower()
+            mime_type = str(
+                attachment.get("mime_type") or attachment.get("mimeType") or ""
+            ).strip().lower()
+            if media_type in {"image", "image_url", "input_image"} or mime_type.startswith("image/"):
+                return True
+    for key in ("query", "content"):
+        content = params.get(key)
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "").strip().lower()
+            if part_type in {"image", "image_url", "input_image"}:
+                return True
+            if "image" in part or "image_url" in part:
+                return True
+    return False
+
+
+def _request_contains_non_text_prompt(params: Any) -> bool:
+    """Reject prompt fields that cannot be passed through as plain text."""
+
+    if not isinstance(params, dict):
+        return True
+    return any(
+        key in params and not isinstance(params[key], str)
+        for key in ("query", "content")
+    )
+
+
+def _preflight_subscription_gateway_request(
+    msg: "Message",
+    model_entries: list[dict[str, Any]] | None = None,
+    *,
+    subscription_continuation_bound: bool = False,
+) -> None:
+    """Reject unsupported Codex requests before hooks, file reads, or cancellation."""
+
+    from jiuwenswarm.integrations.ai4research_subscription.consumer_policy import (
+        classify_agent_request,
+        is_codex_provider,
+        require_codex_consumer,
+    )
+    from jiuwenswarm.integrations.ai4research_subscription.errors import CodexProviderError
+
+    if not is_codex_provider(
+        _configured_provider_for_gateway_request(msg, model_entries)
+    ):
+        return
+    classification_request: object = msg
+    if subscription_continuation_bound:
+        classification_request = SimpleNamespace(
+            req_method=msg.req_method,
+            channel_id=msg.channel_id,
+            params=msg.params,
+            metadata=msg.metadata,
+            subscription_continuation_bound=True,
+        )
+    require_codex_consumer(classify_agent_request(classification_request))
+    params = msg.params
+    if _request_contains_multimodal_input(params):
+        raise CodexProviderError(
+            "unsupported_modality",
+            "Codex subscription supports text-only requests in v1.",
+        )
+    if _request_contains_non_text_prompt(params):
+        raise CodexProviderError(
+            "invalid_request",
+            "Codex subscription query and content fields must be strings in v1.",
+        )
 
 
 def apply_a2ui_text_fallback_to_gateway_payload(
@@ -209,6 +346,8 @@ class MessageHandler(ABC):
         self._stream_app_ids: dict[str, str] = {}  # request_id -> app_id, 多应用流式精确路由
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
         self._evolution_approval = EvolutionApprovalCoordinator()
+        self._subscription_route_config_signature: tuple[int, int] | None = None
+        self._subscription_route_model_entries: list[dict[str, Any]] | None = None
         self._session_last_user_query: dict[str, str] = {}
         # session_id -> 最近一次人类发起请求的 (channel_id, member_name)。
         # team 模式下 file msg 不携带发起者身份（rid 固定为建会话那轮），send_file 定向
@@ -255,6 +394,174 @@ class MessageHandler(ABC):
     def get_session_sharing_registry(self) -> SessionSharingRegistry:
         """返回 SessionSharingRegistry 实例，供 V2 共享会话路由使用."""
         return self._session_sharing
+
+    def _subscription_model_entries(self) -> list[dict[str, Any]]:
+        """Cache pure routing metadata until the instance config file changes."""
+
+        try:
+            stat = get_config_file().stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = None
+        if (
+            signature is not None
+            and signature == self._subscription_route_config_signature
+            and self._subscription_route_model_entries is not None
+        ):
+            return self._subscription_route_model_entries
+        entries = []
+        for entry in get_default_models():
+            if not isinstance(entry, dict):
+                continue
+            model_client_config = entry.get("model_client_config")
+            if not isinstance(model_client_config, dict):
+                continue
+            entries.append(
+                {
+                    "alias": entry.get("alias"),
+                    "is_default": entry.get("is_default") is True,
+                    "model_client_config": {
+                        "client_provider": model_client_config.get("client_provider"),
+                        "model_name": model_client_config.get("model_name"),
+                    },
+                }
+            )
+        if signature is not None:
+            self._subscription_route_config_signature = signature
+            self._subscription_route_model_entries = entries
+        return entries
+
+    def _register_actual_route_receipt(
+        self,
+        metadata: Any,
+        session_id: str | None,
+        *,
+        expected_source_request_id: str,
+        retain: bool = False,
+    ) -> bool:
+        if not isinstance(metadata, dict):
+            return True
+        receipt_present = E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY in metadata
+        receipt = parse_actual_model_route_receipt(
+            metadata,
+            expected_source_request_id=expected_source_request_id,
+        )
+        if receipt is None:
+            if receipt_present:
+                logger.warning(
+                    "[MessageHandler] malformed actual model route receipt ignored: "
+                    "request_id=%s session_id=%s",
+                    expected_source_request_id,
+                    session_id,
+                )
+                return False
+            return True
+        return self._evolution_approval.register_request_route(
+            receipt.source_request_id,
+            GatewayRequestRoute(
+                mode=receipt.mode,
+                model_key=receipt.canonical_model_key,
+                provider=receipt.provider,
+            ),
+            session_id,
+            retain=retain,
+        )
+
+    @staticmethod
+    def _external_agent_metadata(metadata: Any) -> dict[str, Any] | None:
+        if not isinstance(metadata, dict):
+            return None
+        filtered = {
+            key: value
+            for key, value in metadata.items()
+            if key not in E2A_WIRE_INTERNAL_METADATA_KEYS
+        }
+        return filtered or None
+
+    def _restore_pending_question_route(
+        self,
+        msg: "Message",
+        model_entries: list[dict[str, Any]],
+    ) -> GatewayRequestRoute | None:
+        """Restore an exact pending question route and return its trusted route.
+
+        No session-wide fallback is permitted. The canonical model key and
+        provider must still resolve identically in the current instance config;
+        otherwise the answer fails closed and the binding remains retryable.
+        """
+
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.integrations.ai4research_subscription.errors import (
+            CodexProviderError,
+        )
+
+        is_regular_answer = msg.req_method == ReqMethod.CHAT_ANSWER
+        is_interrupt_answer = self._is_interrupt_evolution_approval_chat_send(msg)
+        if not (is_regular_answer or is_interrupt_answer):
+            return None
+        params = msg.params if isinstance(msg.params, dict) else {}
+        saved_route = self._evolution_approval.answer_route(
+            msg.session_id,
+            params.get("request_id"),
+        )
+        if saved_route is None:
+            return None
+
+        current_model_key, current_provider = _configured_model_route(
+            saved_route.model_key,
+            model_entries,
+        )
+        if (
+            current_model_key != saved_route.model_key
+            or current_provider != saved_route.provider
+        ):
+            raise CodexProviderError(
+                "route_unavailable",
+                "The model route used by this pending request is no longer available.",
+            )
+
+        restored_params = dict(params)
+        restored_params["mode"] = saved_route.mode
+        restored_params["model_name"] = saved_route.model_key
+        if is_regular_answer:
+            restored_params = self._ensure_regular_evolution_approval_metadata(
+                restored_params
+            )
+        msg.params = restored_params
+        return saved_route
+
+    def _claim_pending_question_dispatch(
+        self,
+        msg: "Message",
+    ) -> ApprovalDispatchLease:
+        params = msg.params if isinstance(msg.params, dict) else {}
+        incoming_lease = getattr(
+            msg,
+            "_gateway_subscription_continuation_lease",
+            None,
+        )
+        lease = self._evolution_approval.claim_dispatch(
+            msg.session_id,
+            params.get("request_id"),
+            incoming_lease,
+        )
+        setattr(msg, "_gateway_subscription_continuation_lease", lease)
+        return lease
+
+    @staticmethod
+    def _stamp_bound_subscription_continuation(
+        env: "E2AEnvelope",
+        route: GatewayRequestRoute,
+    ) -> None:
+        internal = env.channel_context.get(E2A_INTERNAL_CONTEXT_KEY)
+        internal = dict(internal) if isinstance(internal, dict) else {}
+        internal[E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY] = True
+        internal[E2A_BOUND_SUBSCRIPTION_ROUTE_KEY] = {
+            "canonical_model_key": route.model_key,
+            "provider": route.provider,
+            "mode": route.mode,
+        }
+        env.channel_context[E2A_INTERNAL_CONTEXT_KEY] = internal
 
     def trigger_session_start_hook(self, session_id: str, source: str = "startup") -> None:
         """供 Channel 层调用，触发 SessionStart hook."""
@@ -690,6 +997,7 @@ class MessageHandler(ABC):
 
     def _pop_stream_tracking(self, rid: str) -> None:
         """Remove all per-request stream tracking entries for *rid*."""
+        self._evolution_approval.finish_request_route(rid, retain=True)
         self._stream_tasks.pop(rid, None)
         self._stream_channels.pop(rid, None)
         self._stream_sessions.pop(rid, None)
@@ -2497,8 +2805,18 @@ class MessageHandler(ABC):
         send_push / 工具链返回的响应常不带 metadata，通道（如钉钉 batchSend）需要
         请求侧的 dingtalk_sender_id、conversation_type 等；响应中有同名字段时优先响应。
         """
-        req_md = request_metadata or {}
-        resp_md = response_metadata or {}
+        req_md = {
+            key: value
+            for key, value in (request_metadata or {}).items()
+            if key not in E2A_WIRE_INTERNAL_METADATA_KEYS
+            and key != E2A_INTERNAL_CONTEXT_KEY
+        }
+        resp_md = {
+            key: value
+            for key, value in (response_metadata or {}).items()
+            if key not in E2A_WIRE_INTERNAL_METADATA_KEYS
+            and key != E2A_INTERNAL_CONTEXT_KEY
+        }
         if not req_md and not resp_md:
             return None
         merged: dict[str, Any] = {**req_md, **resp_md}
@@ -2517,7 +2835,10 @@ class MessageHandler(ABC):
     ) -> "Message":
         from jiuwenswarm.common.schema.message import Message, EventType
 
-        metadata = MessageHandler._merge_agent_metadata(request_metadata, resp.metadata)
+        metadata = MessageHandler._merge_agent_metadata(
+            request_metadata,
+            MessageHandler._external_agent_metadata(resp.metadata),
+        )
 
         # ── V2: 合并 resp 的 agent_ref ──
         resp_agent_ref = getattr(resp, "agent_ref", None)
@@ -2600,13 +2921,28 @@ class MessageHandler(ABC):
         # 获取 AgentServer 返回的 metadata
         wmd = wire.get("metadata")
         if isinstance(wmd, dict):
+            source_request_id = wmd.get(E2A_INTERNAL_SOURCE_REQUEST_ID_KEY)
+            source_request_id = (
+                source_request_id.strip()
+                if isinstance(source_request_id, str)
+                else ""
+            )
             resp_md = {
                 k: v
                 for k, v in wmd.items()
                 if k not in E2A_WIRE_INTERNAL_METADATA_KEYS
             }
         else:
+            source_request_id = ""
             resp_md = None
+
+        if source_request_id and not self._register_actual_route_receipt(
+            wmd,
+            session_id,
+            expected_source_request_id=source_request_id,
+            retain=True,
+        ):
+            return
 
         # 合并 metadata：请求 metadata 在前，响应 metadata 在后（响应优先）
         bus_metadata = MessageHandler._merge_agent_metadata(request_metadata, resp_md)
@@ -2630,7 +2966,12 @@ class MessageHandler(ABC):
             return
 
         # Track evolution state on the server_push path as well.
-        if not await self._handle_evolution_chunk(chunk, session_id, bus_metadata):
+        if not await self._handle_evolution_chunk(
+            chunk,
+            session_id,
+            bus_metadata,
+            source_request_id=source_request_id,
+        ):
             return
 
         # 多应用：push 重建 Message 时补 app_id，否则 _resolve_app_id 兜底 "default"，
@@ -2741,10 +3082,10 @@ class MessageHandler(ABC):
         enable_memory = bool(metadata.get("enable_memory", True)) if metadata else True
 
         # ── V2: 合并 chunk.metadata（含 fan_out_targets）+ chunk.agent_ref ──
-        chunk_md = getattr(chunk, "metadata", None) or {}
-        merged_metadata: dict[str, Any] | None = None
-        if metadata or chunk_md:
-            merged_metadata = {**(metadata or {}), **chunk_md}
+        merged_metadata = MessageHandler._merge_agent_metadata(
+            metadata,
+            getattr(chunk, "metadata", None),
+        )
 
         chunk_agent_ref = getattr(chunk, "agent_ref", None)
 
@@ -2809,6 +3150,12 @@ class MessageHandler(ABC):
 
         Returns False when the chunk is a terminal stream sentinel.
         """
+        if not self._register_actual_route_receipt(
+            getattr(chunk, "metadata", None),
+            session_id,
+            expected_source_request_id=str(chunk.request_id or ""),
+        ):
+            return False
         if self._is_terminal_stream_chunk(chunk):
             return False
         if not await self._handle_evolution_chunk(chunk, session_id, request_metadata):
@@ -2994,9 +3341,19 @@ class MessageHandler(ABC):
             msg.session_id,
             (msg.params or {}).get("request_id") if isinstance(msg.params, dict) else None,
         ):
-            self._user_messages.put_nowait(
-                replace(msg, req_method=ReqMethod.CHAT_SEND, is_stream=True)
+            converted = replace(msg, req_method=ReqMethod.CHAT_SEND, is_stream=True)
+            lease = getattr(
+                msg,
+                "_gateway_subscription_continuation_lease",
+                None,
             )
+            if lease is not None:
+                setattr(
+                    converted,
+                    "_gateway_subscription_continuation_lease",
+                    lease,
+                )
+            self._user_messages.put_nowait(converted)
             return
         logger.info(
             "[MessageHandler] stale interrupt evolution approval answer ignored: "
@@ -3096,6 +3453,8 @@ class MessageHandler(ABC):
         chunk,
         session_id: str | None,
         request_metadata: dict[str, Any] | None = None,
+        *,
+        source_request_id: str | None = None,
     ) -> bool:
         """处理 chunk 中的演进状态和审批事件，更新 Gateway 状态机。
 
@@ -3118,6 +3477,7 @@ class MessageHandler(ABC):
             session_id,
             request_metadata,
             auto_save_enabled=auto_save_enabled,
+            source_request_id=source_request_id,
         )
         if decision.user_message is not None:
             self._user_messages.put_nowait(decision.user_message)
@@ -3171,6 +3531,11 @@ class MessageHandler(ABC):
             "session_id": msg.session_id,
             "is_supplement": True,
         }
+        source_params = msg.params if isinstance(msg.params, dict) else {}
+        for route_key in ("mode", "model_name"):
+            route_value = source_params.get(route_key)
+            if isinstance(route_value, str) and route_value.strip():
+                params[route_key] = route_value
         if attachments:
             params["attachments"] = attachments
         return Message(
@@ -3199,18 +3564,34 @@ class MessageHandler(ABC):
         """执行单次非流式 Agent 请求并将结果写入 robot_messages（供串行或后台任务复用）。"""
         try:
             resp = await self._send_non_stream_agent_request(env)
-            out = self._response_to_message(
+            if not self._register_actual_route_receipt(
+                getattr(resp, "metadata", None),
+                msg.session_id,
+                expected_source_request_id=str(resp.request_id or ""),
+            ):
+                return None
+            # Unary chat responses can carry the same ask-user event shape as
+            # stream chunks. Run the shared coordinator while the origin route
+            # is active so pending/auto-save/deferred state and route binding
+            # advance atomically before the origin is released in ``finally``.
+            should_publish = await self._handle_evolution_chunk(
                 resp,
-                session_id=msg.session_id,
-                request_metadata=msg.metadata,
-                app_id=msg.app_id or "",
+                msg.session_id,
+                msg.metadata,
             )
-            await self.publish_robot_messages(out)
-            logger.info(
-                "[MessageHandler] Agent 响应已写入 robot_messages: request_id=%s channel_id=%s",
-                resp.request_id,
-                resp.channel_id,
-            )
+            if should_publish:
+                out = self._response_to_message(
+                    resp,
+                    session_id=msg.session_id,
+                    request_metadata=msg.metadata,
+                    app_id=msg.app_id or "",
+                )
+                await self.publish_robot_messages(out)
+                logger.info(
+                    "[MessageHandler] Agent 响应已写入 robot_messages: request_id=%s channel_id=%s",
+                    resp.request_id,
+                    resp.channel_id,
+                )
             if (
                 self._is_interrupt_evolution_approval_chat_send(msg, method=env.method)
                 and self._approval_response_resolved(resp)
@@ -3232,6 +3613,8 @@ class MessageHandler(ABC):
                 msg.channel_id,
             )
             return None
+        finally:
+            self._evolution_approval.discard_request_route(env.request_id)
 
     # ---------- 入队 -> AgentServer -> 出队 转发循环 ----------
 
@@ -3258,6 +3641,78 @@ class MessageHandler(ABC):
 
                 # 将当前 Channel 的控制状态应用到消息上
                 self._apply_channel_state(msg)
+
+                subscription_continuation_bound = False
+                bound_continuation_route: GatewayRequestRoute | None = None
+                bound_dispatch_lease: ApprovalDispatchLease | None = None
+                model_entries = self._subscription_model_entries()
+
+                # Codex v1 admission must be side-effect free and precede all
+                # hooks, attachment expansion/file reads, stream cancellation,
+                # and AgentServer dispatch.  AgentServer/adapter/model-client
+                # checks remain authoritative defense-in-depth.
+                if msg.req_method in {
+                    ReqMethod.CHAT_SEND,
+                    ReqMethod.CHAT_RESUME,
+                    ReqMethod.CHAT_ANSWER,
+                }:
+                    try:
+                        bound_continuation_route = (
+                            self._restore_pending_question_route(msg, model_entries)
+                        )
+                        subscription_continuation_bound = (
+                            bound_continuation_route is not None
+                        )
+                        from jiuwenswarm.integrations.ai4research_subscription.consumer_policy import (
+                            is_codex_provider,
+                        )
+
+                        if (
+                            self._is_interrupt_evolution_approval_chat_send(msg)
+                            and not subscription_continuation_bound
+                            and is_codex_provider(
+                                _configured_provider_for_gateway_request(
+                                    msg,
+                                    model_entries,
+                                )
+                            )
+                        ):
+                            from jiuwenswarm.integrations.ai4research_subscription.errors import (
+                                CodexProviderError,
+                            )
+
+                            raise CodexProviderError(
+                                "approval_unbound",
+                                "The interrupt approval answer is not bound to its exact request route.",
+                            )
+                        if subscription_continuation_bound:
+                            bound_dispatch_lease = (
+                                self._claim_pending_question_dispatch(msg)
+                            )
+                        _preflight_subscription_gateway_request(
+                            msg,
+                            model_entries,
+                            subscription_continuation_bound=(
+                                subscription_continuation_bound
+                            ),
+                        )
+                    except Exception as exc:
+                        from jiuwenswarm.integrations.ai4research_subscription.errors import (
+                            CodexProviderError,
+                        )
+
+                        if not isinstance(exc, CodexProviderError):
+                            raise
+                        if bound_dispatch_lease is not None:
+                            self._evolution_approval.release_dispatch(
+                                msg.session_id,
+                                (msg.params or {}).get("request_id"),
+                                bound_dispatch_lease,
+                            )
+                        await self.publish_robot_messages(
+                            self._build_error_out_message(msg, exc)
+                        )
+                        continue
 
                 # V2: _apply_channel_state has resolved msg.session_id to the real team
                 # session_id and injected params.mode; register GodView now so it lands
@@ -3287,6 +3742,11 @@ class MessageHandler(ABC):
                             continue
                     agent_msg = await self._prepare_agent_dispatch_message(msg)
                     env = self.message_to_e2a(agent_msg)
+                    if subscription_continuation_bound:
+                        self._stamp_bound_subscription_continuation(
+                            env,
+                            bound_continuation_route,
+                        )
                     resp = await self._process_non_stream_request(msg, env)
                     answer_payload = msg.params if isinstance(msg.params, dict) else {}
                     answer_request_id = answer_payload.get("request_id")
@@ -3297,6 +3757,12 @@ class MessageHandler(ABC):
                                 str(answer_request_id or ""),
                             )
                         else:
+                            if bound_dispatch_lease is not None:
+                                self._evolution_approval.release_dispatch(
+                                    msg.session_id,
+                                    answer_request_id,
+                                    bound_dispatch_lease,
+                                )
                             logger.info(
                                 "[MessageHandler] evolution approval answered but not resolved: "
                                 "id=%s session_id=%s request_id=%s",
@@ -3669,6 +4135,11 @@ class MessageHandler(ABC):
                 agent_msg = await self._prepare_agent_dispatch_message(msg)
                 await self._trigger_before_chat_request_hook(agent_msg)
                 env = self.message_to_e2a(agent_msg)
+                if subscription_continuation_bound:
+                    self._stamp_bound_subscription_continuation(
+                        env,
+                        bound_continuation_route,
+                    )
                 stream_rid = env.request_id or msg.id
                 try:
                     if env.is_stream:
@@ -3676,7 +4147,12 @@ class MessageHandler(ABC):
                         # （例如 TUI 发送新消息时，旧 session 仍在后台空跑）
                         if self._should_cancel_existing_stream_before_chat_send(msg):
                             await self._cancel_stream_tasks_for_channel(msg)
-                        await self._start_stream_task(msg, env, stream_rid)
+                        await self._start_stream_task(
+                            msg,
+                            env,
+                            stream_rid,
+                            approval_dispatch_lease=bound_dispatch_lease,
+                        )
                         # 不 await，让流式任务在后台运行，_forward_loop 继续处理下一个消息
                     elif self._non_stream_rpc_may_run_parallel(env):
                         # 非流式且非聊天：后台执行，避免慢 RPC（如 SkillNet）阻塞队列中的其它请求
@@ -3718,6 +4194,14 @@ class MessageHandler(ABC):
                         and stream_rid not in self._stream_tasks
                     ):
                         await self._pop_stream_tracking_and_broadcast([stream_rid])
+                    else:
+                        self._evolution_approval.discard_request_route(stream_rid)
+                    if bound_dispatch_lease is not None:
+                        self._evolution_approval.release_dispatch(
+                            msg.session_id,
+                            (msg.params or {}).get("request_id"),
+                            bound_dispatch_lease,
+                        )
                     err_msg = self._build_error_out_message(msg, e)
                     await self.publish_robot_messages(err_msg)
                     logger.info(
@@ -3734,6 +4218,7 @@ class MessageHandler(ABC):
         request_metadata: dict[str, Any] | None,
         *,
         emit_processing_status: bool = True,
+        approval_dispatch_lease: ApprovalDispatchLease | None = None,
     ) -> None:
         """处理流式请求，逐个 chunk 写入 robot_messages.
 
@@ -3744,6 +4229,7 @@ class MessageHandler(ABC):
         channel_id = env.channel or ""
         stream_app_id = self._stream_app_ids.get(rid, "")  # 提前捕获，_pop_stream_tracking 后会清除
         cancelled = False
+        failed = False
         has_processing_status_false = False
         _proc_count = 0
         logger.info(
@@ -3805,6 +4291,7 @@ class MessageHandler(ABC):
                 rid, _proc_count,
             )
         except RuntimeError as exc:
+            failed = True
             if "AgentServer WebSocket connection closed" not in str(exc):
                 raise
             await self._publish_stream_connection_error(
@@ -3815,6 +4302,7 @@ class MessageHandler(ABC):
                 str(exc),
             )
         except Exception as exc:
+            failed = True
             logger.exception(
                 "[MessageHandler] Stream 异常: request_id=%s total_chunks=%s error=%s",
                 rid, _proc_count, exc,
@@ -3824,10 +4312,10 @@ class MessageHandler(ABC):
             )
             raise  # 重新抛出，让调用者知道任务被取消
         finally:
-            if (
-                not cancelled
-                and self._is_interrupt_evolution_approval_answer_payload(env.params)
-            ):
+            is_interrupt_approval_answer = (
+                self._is_interrupt_evolution_approval_answer_payload(env.params)
+            )
+            if not cancelled and not failed and is_interrupt_approval_answer:
                 from jiuwenswarm.common.schema.message import Message, ReqMethod
 
                 await self._complete_evolution_approval_if_current(
@@ -3846,6 +4334,12 @@ class MessageHandler(ABC):
                     str((env.params or {}).get("request_id") or ""),
                 )
                 has_processing_status_false = True
+            elif is_interrupt_approval_answer:
+                self._evolution_approval.release_dispatch(
+                    session_id,
+                    (env.params or {}).get("request_id"),
+                    approval_dispatch_lease,
+                )
             # 清理状态：pop tracking 后必须广播 task.global_running 最新快照。
             # 若只裸 pop（不广播），非 chat.send 流（history.get / chat.error 等
             # emit=False 路径）退出时会让 has_active_streams() 计数悬空，前端保存锁
@@ -3941,6 +4435,8 @@ class MessageHandler(ABC):
         msg: "Message",
         env: "E2AEnvelope",
         stream_rid: str,
+        *,
+        approval_dispatch_lease: ApprovalDispatchLease | None = None,
     ) -> None:
         """Start a Gateway stream consumer and register stream bookkeeping."""
         emit_processing_status = self._should_emit_processing_status_for_stream(msg)
@@ -3962,6 +4458,7 @@ class MessageHandler(ABC):
                 msg.session_id,
                 msg.metadata,
                 emit_processing_status=emit_processing_status,
+                approval_dispatch_lease=approval_dispatch_lease,
             )
         )
         self._stream_tasks[stream_rid] = task
@@ -4181,6 +4678,7 @@ class MessageHandler(ABC):
         self._stream_metadata.clear()
         self._stream_emits_processing_status.clear()
         self._stream_modes.clear()
+        self._evolution_approval.clear_all()
         pending_disconnect_cancels = list(self._disconnect_cancel_tasks.values())
         for task in pending_disconnect_cancels:
             if not task.done():

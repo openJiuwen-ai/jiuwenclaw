@@ -124,6 +124,7 @@ type WindowWithPyWebview = Window & {
         dataUrl: string,
         filename: string,
       ) => DesktopSaveApiResult;
+      open_external_url?: (url: string) => Promise<boolean> | boolean;
     };
   };
 };
@@ -929,6 +930,49 @@ function AppContent() {
     },
     [request],
   );
+
+  type CodexAuthStatus = {
+    provider: string;
+    enabled: boolean;
+    available?: boolean;
+    connected: boolean;
+    state: string;
+    operation_id?: string;
+    verification_url?: string;
+    user_code?: string;
+    expires_in_seconds?: number;
+    error_code?: string;
+    last_error_code?: string;
+  };
+
+  const getCodexAuthStatus = useCallback(
+    () => request<CodexAuthStatus>('provider.codex.auth.status', {}),
+    [request],
+  );
+  const startCodexAuth = useCallback(
+    () => request<CodexAuthStatus>('provider.codex.auth.start', {}, { timeoutMs: 45000 }),
+    [request],
+  );
+  const cancelCodexAuth = useCallback(
+    (operationId: string) => request<CodexAuthStatus>('provider.codex.auth.cancel', { operation_id: operationId }),
+    [request],
+  );
+  const logoutCodexAuth = useCallback(
+    () => request<CodexAuthStatus>('provider.codex.auth.logout', {}),
+    [request],
+  );
+  const getClaudeStatus = useCallback(
+    () => request<{ status: string }>('provider.claude.status', {}, { timeoutMs: 60000 }),
+    [request],
+  );
+  const openCodexAuthUrl = useCallback(async (url: string) => {
+    const desktopApi = (window as WindowWithPyWebview).pywebview?.api;
+    if (desktopApi?.open_external_url) {
+      return Boolean(await desktopApi.open_external_url(url));
+    }
+    const popup = window.open(url, '_blank', 'noopener,noreferrer');
+    return popup !== null;
+  }, []);
 
   const handleModelsReplaceAll = useCallback(async (models: ModelEntry[]) => {
     await request('models.replace_all', { models });
@@ -2215,6 +2259,12 @@ function AppContent() {
               onModelsReplaceAll={handleModelsReplaceAll}
               onModelValidate={validateModelConfig}
               onModelsRefresh={handleModelsRefresh}
+              onCodexAuthStatus={getCodexAuthStatus}
+              onCodexAuthStart={startCodexAuth}
+              onCodexAuthCancel={cancelCodexAuth}
+              onCodexAuthLogout={logoutCodexAuth}
+              onClaudeStatus={getClaudeStatus}
+              onOpenCodexAuthUrl={openCodexAuthUrl}
               onAgentsTeamsSave={handleAgentsTeamsSave}
               onHasChangesChange={handleHasChangesChange}
             />

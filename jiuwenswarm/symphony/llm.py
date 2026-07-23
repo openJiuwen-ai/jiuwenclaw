@@ -67,12 +67,31 @@ class LLMConfig:
         ).strip()
         if not model:
             raise RuntimeError("JiuwenSwarm default model is missing model_name.")
-        if not str(client_config.get("api_base") or "").strip():
+        from jiuwenswarm.integrations.ai4research_subscription.provider_capabilities import (
+            get_model_provider_capabilities,
+            validate_provider_model_name,
+        )
+
+        provider = str(client_config.get("client_provider") or "").strip()
+        capabilities = get_model_provider_capabilities(provider)
+        api_base = str(client_config.get("api_base") or "").strip()
+        api_key = str(client_config.get("api_key") or "").strip()
+        if capabilities.requires_api_base and not api_base:
             raise RuntimeError("JiuwenSwarm default model is missing api_base.")
-        if not str(client_config.get("api_key") or "").strip():
+        if capabilities.requires_api_key and not api_key:
             raise RuntimeError("JiuwenSwarm default model is missing api_key.")
-        if not str(client_config.get("client_provider") or "").strip():
+        if not provider:
             raise RuntimeError("JiuwenSwarm default model is missing client_provider.")
+        if (not capabilities.requires_api_base and api_base) or (
+            not capabilities.requires_api_key and api_key
+        ):
+            raise RuntimeError(
+                f"JiuwenSwarm default model credentials must be empty for {provider}."
+            )
+        if not validate_provider_model_name(provider, model):
+            raise RuntimeError(
+                f"JiuwenSwarm default model name is invalid for {provider}."
+            )
         request_config["model"] = model
         return cls(
             model=model,
@@ -215,6 +234,15 @@ def get_llm_token_usage_summary() -> Dict[str, Any]:
 def create_llm_client(config: LLMConfig) -> "JiuwenSwarmChatClient":
     if config is None:
         raise ValueError("create_llm_client requires LLMConfig.")
+    from jiuwenswarm.integrations.ai4research_subscription.consumer_policy import (
+        CodexConsumer,
+        is_codex_provider,
+        require_codex_consumer,
+    )
+
+    client_config = config.model_client_config or {}
+    if is_codex_provider(client_config.get("client_provider")):
+        require_codex_consumer(CodexConsumer.SYMPHONY)
     return JiuwenSwarmChatClient(config)
 
 

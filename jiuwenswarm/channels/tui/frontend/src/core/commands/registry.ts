@@ -4,6 +4,7 @@ import { createBranchCommand } from "./builtins/branch.js";
 import { createBtwCommand } from "./builtins/btw.js";
 import { createClearCommand } from "./builtins/clear.js";
 import { createColorCommand } from "./builtins/color.js";
+import { createCodexCommand } from "./builtins/codex.js";
 import { createCompactCommand } from "./builtins/compact.js";
 import { createConfigCommand } from "./builtins/config.js";
 import { createContextCommand } from "./builtins/context.js";
@@ -73,6 +74,7 @@ export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): Sla
     createClearCommand(),
     createInitCommand(),
     createColorCommand(),
+    createCodexCommand(),
     createCompactCommand(),
     createConfigCommand(),
     createContextCommand(),

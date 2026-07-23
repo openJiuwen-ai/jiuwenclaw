@@ -8,6 +8,12 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
 
 import pytest
 
+from jiuwenswarm.common.e2a.constants import E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
+)
+from jiuwenswarm.integrations.ai4research_subscription.errors import CodexProviderError
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.server.runtime.agent_adapter.interface import build_user_prompt
@@ -61,7 +67,21 @@ class _FailingAsyncA2XRegistryClient:
         raise RuntimeError("a2x unavailable")
 
 
-def _make_config(role: str, *, dataset: str = "", endpoint: str = "") -> dict:
+def _make_config(
+    role: str,
+    *,
+    dataset: str = "",
+    endpoint: str = "",
+    model_name: str = "",
+    provider: str = "OpenAI",
+) -> dict:
+    model_client_config = {
+        "client_provider": provider,
+        "api_key": "system-test-key",
+        "api_base": "http://fake-a2x.local/v1",
+    }
+    if model_name:
+        model_client_config["model_name"] = model_name
     return {
         "preferred_language": "zh",
         "team": {
@@ -88,10 +108,7 @@ def _make_config(role: str, *, dataset: str = "", endpoint: str = "") -> dict:
         "permissions": {"enabled": True},
         "models": {
             "default": {
-                "model_client_config": {
-                    "api_key": "system-test-key",
-                    "api_base": "http://fake-a2x.local/v1",
-                }
+                "model_client_config": model_client_config,
             }
         },
     }
@@ -119,27 +136,53 @@ def _make_request(session_id: str = "web_a2x_system_test") -> tuple[AgentRequest
     return request, inputs
 
 
-def _make_fake_model() -> MagicMock:
+def _make_fake_model(model_name: str, provider: str) -> MagicMock:
     """Create a fake Model with a valid ModelClientConfig for testing."""
     fake_mcc = ModelClientConfig(
         client_provider="OpenAI",
         api_key="system-test-key",
         api_base="http://fake-a2x.local/v1",
     )
+    fake_mcc.client_provider = provider
+    if provider == CODEX_PROVIDER_NAME:
+        fake_mcc.api_key = ""
+        fake_mcc.api_base = ""
     fake_model = MagicMock()
     fake_model.model_client_config = fake_mcc
-    fake_model.model_config = MagicMock()
+    fake_model.model_config = SimpleNamespace(model_name=model_name)
     return fake_model
 
 
 def _mock_create_model(self, config: dict) -> MagicMock:
-    """Mock _create_model that also sets self._model like the real method does."""
-    fake_model = _make_fake_model()
+    """Mirror the production model identity/cache registration."""
+    default_model_config = config.get("models", {}).get("default", {})
+    react_config = config.get("react", {})
+    model_client_config = (
+        default_model_config.get("model_client_config")
+        or react_config.get("model_client_config")
+        or {}
+    )
+    model_name = (
+        model_client_config.get("model_name")
+        or react_config.get("model_name")
+        or "gpt-4"
+    )
+    provider = model_client_config.get("client_provider") or "OpenAI"
+    fake_model = _make_fake_model(model_name, provider)
+    self._model_cache[model_name] = fake_model
+    self._model_canonical_key_by_object_id[id(fake_model)] = model_name
+    self._default_model_name = model_name
     self._model = fake_model
+    self._model_client_config = fake_model.model_client_config
+    self._model_request_config = fake_model.model_config
     return fake_model
 
 
-async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
+async def _create_adapter_and_run_chat(
+    config_base: dict,
+    *,
+    expected_error_code: str | None = None,
+) -> SimpleNamespace:
     """Create adapter, run one chat turn via interaction attach/send_input path.
 
     Returns the fake DeepAgent so callers can assert on ``send_input``.
@@ -157,6 +200,10 @@ async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
 
     created_agent = SimpleNamespace(
         card=SimpleNamespace(id="jiuwenswarm", name="main_agent"),
+        react_agent=SimpleNamespace(
+            set_llm=MagicMock(),
+            config=SimpleNamespace(),
+        ),
         ensure_initialized=AsyncMock(),
         start=AsyncMock(),
         attach_output=AsyncMock(return_value=_FakeInteractionStream()),
@@ -182,11 +229,20 @@ async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
     ):
         adapter = JiuWenSwarmDeepAdapter()
         await adapter.create_instance()
-        response = await adapter.process_message_impl(request, inputs)
+        if expected_error_code is None:
+            response = await adapter.process_message_impl(request, inputs)
+        else:
+            with pytest.raises(CodexProviderError) as captured:
+                await adapter.process_message_impl(request, inputs)
 
-    assert response.ok is True
-    assert response.payload.get("content") == "PONG"
-    created_agent.send_input.assert_awaited()
+    if expected_error_code is None:
+        assert response.ok is True
+        assert response.payload.get("content") == "PONG"
+        created_agent.send_input.assert_awaited()
+    else:
+        assert captured.value.code == expected_error_code
+        assert E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY not in request.metadata
+        created_agent.send_input.assert_not_awaited()
     return created_agent
 
 
@@ -242,3 +298,25 @@ async def test_a2x_init_failure_does_not_block_runtime(
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
 
     await _create_adapter_and_run_chat(_make_config("teammate"))
+
+
+@pytest.mark.asyncio
+async def test_a2x_codex_plan_rejected_before_interaction_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_module = ModuleType("jiuwenswarm.agents.harness.team.a2x.client")
+    fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
+    monkeypatch.setitem(
+        sys.modules,
+        "jiuwenswarm.agents.harness.team.a2x.client",
+        fake_module,
+    )
+
+    await _create_adapter_and_run_chat(
+        _make_config(
+            "teamleader",
+            model_name=CODEX_MODEL_ALIAS,
+            provider=CODEX_PROVIDER_NAME,
+        ),
+        expected_error_code="unsupported_consumer",
+    )

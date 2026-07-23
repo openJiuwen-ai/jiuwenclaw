@@ -14,6 +14,25 @@ import {
   syncAgentsWithModelChanges,
   type ModelIdentity,
 } from "./openaiAccountModelState";
+import {
+  shouldObserveCodexAuth,
+  shouldRetainCodexAuthHandoff,
+} from "./codexAuthHandoff";
+import {
+  CODEX_SUBSCRIPTION_PROVIDER,
+  CLAUDE_SUBSCRIPTION_PROVIDER,
+  OPENAI_ACCOUNT_PROVIDER,
+  buildCodexSubscriptionModelDefaults,
+  buildClaudeSubscriptionModelDefaults,
+  isCodexSubscriptionProvider,
+  isClaudeSubscriptionProvider,
+  isOpenAIAccountProvider,
+  modelRequiresApiBase,
+  modelRequiresApiKey,
+  transitionModelProvider,
+  type ApiProviderSnapshot,
+} from "./modelProviderState";
+import { ModelProviderStateStorage } from "./modelProviderStateStorage";
 import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
 import { ModelProviderIcon } from '../ModelProviderIcon';
 
@@ -197,6 +216,12 @@ interface ConfigPanelProps {
   onModelsReplaceAll?: (models: ModelEntry[]) => Promise<void>;
   onModelValidate?: (fields: { api_base: string; api_key: string; model: string; model_provider: string; reasoning_level?: string }) => Promise<void>;
   onModelsRefresh?: () => Promise<void>;
+  onCodexAuthStatus?: () => Promise<CodexAuthStatus>;
+  onCodexAuthStart?: () => Promise<CodexAuthStatus>;
+  onCodexAuthCancel?: (operationId: string) => Promise<CodexAuthStatus>;
+  onCodexAuthLogout?: () => Promise<CodexAuthStatus>;
+  onClaudeStatus?: () => Promise<{ status: string }>;
+  onOpenCodexAuthUrl?: (url: string) => Promise<boolean>;
   /** 多Agent和Teams操作回调 */
   onAgentsTeamsSave?: (payload: {
     agents: Record<string, {
@@ -216,6 +241,20 @@ interface ConfigPanelProps {
   }, showRestartModal?: boolean) => Promise<void>;
   /** Reports unsaved drafts so cross-window config updates cannot silently overwrite them. */
   onHasChangesChange?: (hasChanges: boolean) => void;
+}
+
+interface CodexAuthStatus {
+  provider: string;
+  enabled: boolean;
+  available?: boolean;
+  connected: boolean;
+  state: string;
+  operation_id?: string;
+  verification_url?: string;
+  user_code?: string;
+  expires_in_seconds?: number;
+  error_code?: string;
+  last_error_code?: string;
 }
 
 interface AgentsTeamsPayload {
@@ -1043,7 +1082,6 @@ function GroupSection({
   );
 }
 
-const OPENAI_ACCOUNT_PROVIDER = "OpenAIAccount";
 const ASCEND_AFFINITY_PROVIDER = "AscendAffinity";
 const OPENAI_ACCOUNT_DEFAULT_API_BASE = "https://chatgpt.com/backend-api/codex";
 const OPENAI_ACCOUNT_LOGIN_POLL_COOLDOWN_MS = 15_000;
@@ -1063,12 +1101,10 @@ const MODEL_PROVIDER_OPTIONS = [
   "InferenceAffinity",
   ASCEND_AFFINITY_PROVIDER,
   "DeepSeek",
+  CODEX_SUBSCRIPTION_PROVIDER,
+  CLAUDE_SUBSCRIPTION_PROVIDER,
 ] as const;
 const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
-
-function isOpenAIAccountProvider(provider?: string): boolean {
-  return (provider || "").trim().toLowerCase() === OPENAI_ACCOUNT_PROVIDER.toLowerCase();
-}
 
 function buildOpenAIAccountModelDefaults(
   model: Partial<ModelEntry>,
@@ -1807,15 +1843,48 @@ function MultiModelSection({
   });
   const [localError, setLocalError] = useState<string | null>(null);
   const [validateToast, setValidateToast] = useState<{ show: boolean; success: boolean; message: string }>({ show: false, success: true, message: "" });
+  const newModelApiProviderSnapshotRef = useRef<ApiProviderSnapshot | null>(null);
+  const providerStateStorageRef = useRef<ModelProviderStateStorage | null>(null);
+  if (providerStateStorageRef.current === null) {
+    providerStateStorageRef.current = new ModelProviderStateStorage(models);
+  }
+  const providerStateStorage = providerStateStorageRef.current;
   const modelsRef = useRef(models);
   modelsRef.current = models;
 
-  const emitModelsChange = useCallback((nextModels: ModelEntry[]) => {
+  type ModelRowsIdentityChange =
+    | { type: "tracked" }
+    | { type: "same-order" }
+    | { type: "append" }
+    | { type: "move"; fromIndex: number; toIndex: number };
+
+  const emitModelsChange = useCallback((
+    nextModels: ModelEntry[],
+    identityChange: ModelRowsIdentityChange = { type: "same-order" },
+  ) => {
+    const currentModels = modelsRef.current;
+    if (identityChange.type === "same-order") {
+      providerStateStorage.preserveSameOrder(currentModels, nextModels);
+    } else if (identityChange.type === "append") {
+      providerStateStorage.appendRow(currentModels, nextModels);
+    } else if (identityChange.type === "move") {
+      providerStateStorage.moveRow(
+        currentModels,
+        nextModels,
+        identityChange.fromIndex,
+        identityChange.toIndex,
+      );
+    }
     modelsRef.current = nextModels;
     onModelsChange(nextModels);
-  }, [onModelsChange]);
+  }, [onModelsChange, providerStateStorage]);
+
+  useEffect(() => {
+    providerStateStorage.synchronize(models);
+  }, [models, providerStateStorage]);
 
   const resetNewModelDraft = () => {
+    newModelApiProviderSnapshotRef.current = null;
     setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
     setLocalError(null);
   };
@@ -1835,15 +1904,26 @@ function MultiModelSection({
   const handleNewModelChange = (field: keyof ModelEntry, value: string) => {
     setLocalError(null);
     onClearExternalError?.();
-    setNewModel((prev) => {
-      if (field === "model_provider" && isOpenAIAccountProvider(value)) {
+    if (field !== "model_provider") {
+      setNewModel((prev) => ({ ...prev, [field]: value }));
+      return;
+    }
+    setNewModel((currentModel) => {
+      if (isOpenAIAccountProvider(value)) {
+        newModelApiProviderSnapshotRef.current = null;
         return {
-          ...prev,
-          ...buildOpenAIAccountModelDefaults(prev),
+          ...currentModel,
+          ...buildOpenAIAccountModelDefaults(currentModel),
           model_name: "",
         };
       }
-      return { ...prev, [field]: value };
+      const transition = transitionModelProvider(
+        currentModel,
+        value,
+        newModelApiProviderSnapshotRef.current,
+      );
+      newModelApiProviderSnapshotRef.current = transition.snapshot;
+      return transition.model;
     });
   };
 
@@ -1916,13 +1996,15 @@ function MultiModelSection({
 
     // api_base URL 格式校验（仅在保存时校验，实时校验会导致用户输入过程中不断报错）
 
-    const copy = [...models];
+    let copy = [...models];
     if (field === "model_provider" && isOpenAIAccountProvider(value)) {
-      copy[idx] = {
+      copy = providerStateStorage.replaceRow(models, idx, {
         ...copy[idx],
         ...buildOpenAIAccountModelDefaults(copy[idx]),
         model_name: "",
-      };
+      }, { clearSnapshot: true });
+    } else if (field === "model_provider") {
+      copy = providerStateStorage.transitionProvider(models, idx, value);
     } else {
       copy[idx] = { ...copy[idx], [field]: value };
     }
@@ -1940,7 +2022,7 @@ function MultiModelSection({
         copy[idx] = { ...copy[idx], is_default: false };
       }
     }
-    emitModelsChange(copy);
+    emitModelsChange(copy, field === "model_provider" ? { type: "tracked" } : { type: "same-order" });
   };
 
   const patchModel = async (
@@ -1989,7 +2071,7 @@ function MultiModelSection({
       }
     }
     copy.unshift(target);
-    emitModelsChange(copy);
+    emitModelsChange(copy, { type: "move", fromIndex: idx, toIndex: 0 });
     setExpandedIdx((prev) => {
       if (prev === null) return null;
       if (prev === idx) return 0;
@@ -2027,7 +2109,8 @@ function MultiModelSection({
     }
     // 不变量：主对话默认（首位）必须是组内默认。当切换发生在主对话默认所在组时，
     // 新的组内默认条目同步成为主对话默认（移到首位）。
-    if (isPrimaryGroup && newDefaultIdx > 0) {
+    const movedDefaultIndex = isPrimaryGroup && newDefaultIdx > 0 ? newDefaultIdx : null;
+    if (movedDefaultIndex !== null) {
       const [newPrimary] = copy.splice(newDefaultIdx, 1);
       copy.unshift(newPrimary);
       setExpandedIdx((prev) => {
@@ -2037,13 +2120,20 @@ function MultiModelSection({
         return prev;
       });
     }
-    emitModelsChange(copy);
+    emitModelsChange(
+      copy,
+      movedDefaultIndex === null
+        ? { type: "same-order" }
+        : { type: "move", fromIndex: movedDefaultIndex, toIndex: 0 },
+    );
   };
 
   const handleAddNew = () => {
     const name = newModel.model_name.trim();
     if (!name) return;
     const isNewOpenAIAccount = isOpenAIAccountProvider(newModel.model_provider);
+    const isNewCodexSubscription = isCodexSubscriptionProvider(newModel.model_provider);
+    const isNewClaudeSubscription = isClaudeSubscriptionProvider(newModel.model_provider);
 
     // 字段长度校验
     if (name.length > MAX_MODEL_NAME_LENGTH) {
@@ -2063,7 +2153,7 @@ function MultiModelSection({
       return;
     }
 
-    if (!isNewOpenAIAccount && !newModel.api_key.trim()) {
+    if (modelRequiresApiKey(newModel.model_provider) && !newModel.api_key.trim()) {
       setLocalError(t("config.modelList.apiKeyRequired"));
       return;
     }
@@ -2088,16 +2178,20 @@ function MultiModelSection({
     const entry: ModelEntry = {
       ...newModel,
       ...(isNewOpenAIAccount ? buildOpenAIAccountModelDefaults(newModel) : {}),
+      ...(isNewCodexSubscription ? buildCodexSubscriptionModelDefaults() : {}),
+      ...(isNewClaudeSubscription ? buildClaudeSubscriptionModelDefaults() : {}),
       model_name: name,
       is_default: !sameNameExists,
     };
-    emitModelsChange([...models, entry]);
+    emitModelsChange([...models, entry], { type: "append" });
     setExpandedIdx(models.length); // 自动展开新增的条目
     setAddingNew(false);
-    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
+    resetNewModelDraft();
   };
 
   const newModelIsOpenAIAccount = isOpenAIAccountProvider(newModel.model_provider);
+  const newModelIsCodexSubscription = isCodexSubscriptionProvider(newModel.model_provider);
+  const newModelIsClaudeSubscription = isClaudeSubscriptionProvider(newModel.model_provider);
 
   return (
     <>
@@ -2130,6 +2224,8 @@ function MultiModelSection({
           const isDefault = model.is_default !== false;
           const isPrimaryDefault = idx === 0;
           const modelIsOpenAIAccount = isOpenAIAccountProvider(model.model_provider);
+          const modelIsCodexSubscription = isCodexSubscriptionProvider(model.model_provider);
+          const modelIsClaudeSubscription = isClaudeSubscriptionProvider(model.model_provider);
           // 同名模型计数，用于区分显示
           const sameNameIndices = models.reduce<number[]>((acc, m, i) => {
             if (m.model_name === model.model_name) acc.push(i);
@@ -2206,7 +2302,11 @@ function MultiModelSection({
                   {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
                     <div key={field} className="flex items-center gap-2 text-xs">
                       <label className="w-28 text-text-muted shrink-0">
-                        {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && modelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
+                        {field}{(
+                          ["model_name", "model_provider"].includes(field) ||
+                          (field === "api_base" && modelRequiresApiBase(model.model_provider)) ||
+                          (field === "api_key" && modelRequiresApiKey(model.model_provider))
+                        ) && <span className="text-danger ml-0.5">*</span>}
                       </label>
                       {field === "model_provider" ? (
                         <select
@@ -2231,11 +2331,19 @@ function MultiModelSection({
                           type={field === "api_key" ? "password" : "text"}
                           value={field === "model_name" && modelIsOpenAIAccount ? "" : models[idx]?.[field] ?? ""}
                           onChange={(e) => updateModel(idx, field, e.target.value)}
-                          disabled={(field === "api_key" || field === "api_base" || field === "model_name") && modelIsOpenAIAccount}
+                          disabled={
+                            (["api_key", "api_base", "model_name"].includes(field) && modelIsOpenAIAccount) ||
+                            (["api_key", "api_base", "model_name"].includes(field) && modelIsCodexSubscription) ||
+                            (["api_key", "api_base", "model_name"].includes(field) && modelIsClaudeSubscription)
+                          }
                           className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
                           placeholder={
                             field === "model_name" && modelIsOpenAIAccount
                               ? t("config.openaiAccount.modelNameUseDropdown")
+                              : modelIsCodexSubscription && ["api_base", "api_key"].includes(field)
+                                ? "Not used for subscription authentication"
+                              : modelIsClaudeSubscription && ["api_base", "api_key"].includes(field)
+                                ? "Resolved from your Claude login on the server"
                               : field === "api_base" && modelIsOpenAIAccount
                                 ? t("config.openaiAccount.apiBaseManaged")
                               : field === "api_key" ? (
@@ -2284,7 +2392,11 @@ function MultiModelSection({
             {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0">
-                  {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && newModelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
+                  {field}{(
+                    ["model_name", "model_provider"].includes(field) ||
+                    (field === "api_base" && modelRequiresApiBase(newModel.model_provider)) ||
+                    (field === "api_key" && modelRequiresApiKey(newModel.model_provider))
+                  ) && <span className="text-danger ml-0.5">*</span>}
                 </label>
                 {field === "model_provider" ? (
                   <select
@@ -2309,13 +2421,21 @@ function MultiModelSection({
                     type={field === "api_key" ? "password" : "text"}
                     value={field === "model_name" && newModelIsOpenAIAccount ? "" : newModel[field] ?? ""}
                     onChange={(e) => handleNewModelChange(field, e.target.value)}
-                    disabled={(field === "api_key" || field === "api_base" || field === "model_name") && newModelIsOpenAIAccount}
+                    disabled={
+                      (["api_key", "api_base", "model_name"].includes(field) && newModelIsOpenAIAccount) ||
+                      (["api_key", "api_base", "model_name"].includes(field) && newModelIsCodexSubscription) ||
+                      (["api_key", "api_base", "model_name"].includes(field) && newModelIsClaudeSubscription)
+                    }
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
                     placeholder={
                       field === "model_name"
                         ? newModelIsOpenAIAccount
                           ? t("config.openaiAccount.modelNameUseDropdown")
                           : "e.g. gpt-4o"
+                        : newModelIsCodexSubscription && ["api_base", "api_key"].includes(field)
+                          ? "Not used for subscription authentication"
+                        : newModelIsClaudeSubscription && ["api_base", "api_key"].includes(field)
+                          ? "Resolved from your Claude login on the server"
                         : field === "api_base" && newModelIsOpenAIAccount
                           ? t("config.openaiAccount.apiBaseManaged")
                         : field === "api_key" ? (
@@ -2345,7 +2465,12 @@ function MultiModelSection({
               <button
                 type="button"
                 onClick={handleAddNew}
-                disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || (!newModelIsOpenAIAccount && !newModel.api_key.trim()) || !newModel.model_provider.trim()}
+                disabled={
+                  !newModel.model_name.trim() ||
+                  (modelRequiresApiBase(newModel.model_provider) && !newModel.api_base.trim()) ||
+                  (modelRequiresApiKey(newModel.model_provider) && !newModel.api_key.trim()) ||
+                  !newModel.model_provider.trim()
+                }
                 className="btn primary !px-3 !py-1 text-xs"
               >
                 {t("common.confirm")}
@@ -3421,6 +3546,12 @@ export function ConfigPanel({
   onModelsReplaceAll,
   onModelValidate,
   onModelsRefresh,
+  onCodexAuthStatus,
+  onCodexAuthStart,
+  onCodexAuthCancel,
+  onCodexAuthLogout,
+  onClaudeStatus,
+  onOpenCodexAuthUrl,
   onAgentsTeamsSave,
   onHasChangesChange,
 }: ConfigPanelProps) {
@@ -3462,6 +3593,132 @@ export function ConfigPanel({
   const [deleteTeamConfirm, setDeleteTeamConfirm] = useState<{ idx: number; teamName: string } | null>(null);
   const [deleteTeamMemberConfirm, setDeleteTeamMemberConfirm] = useState<{ teamIdx: number; memberIdx: number; memberName: string } | null>(null);
   const [installedSkills, setInstalledSkills] = useState<{ name: string; installed?: boolean }[]>([]);
+  const [codexAuth, setCodexAuth] = useState<CodexAuthStatus | null>(null);
+  const [codexAuthHandoff, setCodexAuthHandoff] = useState<CodexAuthStatus | null>(null);
+  const [codexAuthBusy, setCodexAuthBusy] = useState(false);
+  const [claudeStatus, setClaudeStatus] = useState<string | null>(null);
+  const [claudeStatusBusy, setClaudeStatusBusy] = useState(false);
+  const [codexAuthError, setCodexAuthError] = useState<string | null>(null);
+  const hasCodexDraft = useMemo(
+    () => draftModels.some((model) => isCodexSubscriptionProvider(model.model_provider)),
+    [draftModels],
+  );
+  const observeCodexAuth = shouldObserveCodexAuth(
+    hasCodexDraft,
+    codexAuth,
+    codexAuthHandoff,
+  );
+
+  const refreshCodexAuth = useCallback(async () => {
+    if (!onCodexAuthStatus || !isConnected) return;
+    try {
+      const status = await onCodexAuthStatus();
+      setCodexAuth(status);
+      setCodexAuthHandoff((handoff) =>
+        shouldRetainCodexAuthHandoff(handoff, status) ? handoff : null,
+      );
+      if (status.connected) setCodexAuthError(null);
+    } catch (authError) {
+      setCodexAuthHandoff(null);
+      setCodexAuthError(
+        authError instanceof Error
+          ? authError.message
+          : "Could not read Codex connection status.",
+      );
+    }
+  }, [isConnected, onCodexAuthStatus]);
+
+  useEffect(() => {
+    if (hasCodexDraft) void refreshCodexAuth();
+  }, [hasCodexDraft, refreshCodexAuth]);
+
+  useEffect(() => {
+    if (!codexAuth || !["waiting_for_user", "reconciling", "canceling"].includes(codexAuth.state)) return;
+    const timer = window.setInterval(() => void refreshCodexAuth(), 2000);
+    return () => window.clearInterval(timer);
+  }, [codexAuth, refreshCodexAuth]);
+
+  useEffect(() => {
+    if (observeCodexAuth) return;
+    setCodexAuth(null);
+    setCodexAuthHandoff(null);
+    setCodexAuthError(null);
+  }, [observeCodexAuth]);
+
+  const hasClaudeDraft = useMemo(
+    () => draftModels.some((model) => isClaudeSubscriptionProvider(model.model_provider)),
+    [draftModels],
+  );
+
+  const refreshClaudeStatus = useCallback(async () => {
+    if (!onClaudeStatus || !isConnected) return;
+    setClaudeStatusBusy(true);
+    try {
+      const result = await onClaudeStatus();
+      setClaudeStatus(result?.status ?? "auth_status_unverifiable");
+    } catch {
+      setClaudeStatus("auth_status_unverifiable");
+    } finally {
+      setClaudeStatusBusy(false);
+    }
+  }, [isConnected, onClaudeStatus]);
+
+  useEffect(() => {
+    if (hasClaudeDraft) void refreshClaudeStatus();
+    else setClaudeStatus(null);
+  }, [hasClaudeDraft, refreshClaudeStatus]);
+
+  const startCodexAuth = async () => {
+    if (!onCodexAuthStart) return;
+    setCodexAuthBusy(true);
+    setCodexAuthError(null);
+    try {
+      const status = await onCodexAuthStart();
+      setCodexAuth(status);
+      if (status.verification_url && status.user_code && status.operation_id) {
+        setCodexAuthHandoff(status);
+        try {
+          await navigator.clipboard.writeText(status.user_code);
+        } catch {
+          // Clipboard access is optional; the code remains visible and selectable.
+        }
+        if (onOpenCodexAuthUrl) await onOpenCodexAuthUrl(status.verification_url);
+      }
+    } catch (authError) {
+      setCodexAuthError(authError instanceof Error ? authError.message : "Could not start Codex login.");
+    } finally {
+      setCodexAuthBusy(false);
+    }
+  };
+
+  const cancelCodexAuth = async () => {
+    const operationId = codexAuthHandoff?.operation_id ?? codexAuth?.operation_id;
+    if (!onCodexAuthCancel || !operationId) return;
+    setCodexAuthBusy(true);
+    setCodexAuthError(null);
+    try {
+      setCodexAuth(await onCodexAuthCancel(operationId));
+      setCodexAuthHandoff(null);
+    } catch (authError) {
+      setCodexAuthError(authError instanceof Error ? authError.message : "Could not cancel Codex login.");
+    } finally {
+      setCodexAuthBusy(false);
+    }
+  };
+
+  const logoutCodexAuth = async () => {
+    if (!onCodexAuthLogout) return;
+    setCodexAuthBusy(true);
+    setCodexAuthError(null);
+    try {
+      setCodexAuth(await onCodexAuthLogout());
+      setCodexAuthHandoff(null);
+    } catch (authError) {
+      setCodexAuthError(authError instanceof Error ? authError.message : "Could not disconnect Codex.");
+    } finally {
+      setCodexAuthBusy(false);
+    }
+  };
 
   const markAgentsTeamsEdited = () => {
     setAgentsTeamsEdited(true);
@@ -3903,7 +4160,10 @@ export function ConfigPanel({
   }, [hasChanges, onHasChangesChange]);
   const missingRequiredModelFields = useMemo(
     () => REQUIRED_MODEL_FIELDS.filter((key) => {
-      if (key === "api_key" && isOpenAIAccountProvider(draftValues.model_provider)) {
+      if (key === "api_key" && !modelRequiresApiKey(draftValues.model_provider)) {
+        return false;
+      }
+      if (key === "api_base" && !modelRequiresApiBase(draftValues.model_provider)) {
         return false;
       }
       return !(draftValues[key] ?? "").trim();
@@ -3919,7 +4179,7 @@ export function ConfigPanel({
     [draftAgents],
   );
   const hasMissingModelApiKey = useMemo(
-    () => draftModels.some((m) => !isOpenAIAccountProvider(m.model_provider) && !m.api_key.trim()),
+    () => draftModels.some((m) => modelRequiresApiKey(m.model_provider) && !m.api_key.trim()),
     [draftModels],
   );
   const hasMissingModelName = useMemo(
@@ -3927,7 +4187,7 @@ export function ConfigPanel({
     [draftModels],
   );
   const hasMissingModelApiBase = useMemo(
-    () => draftModels.some((m) => !m.api_base.trim()),
+    () => draftModels.some((m) => modelRequiresApiBase(m.model_provider) && !m.api_base.trim()),
     [draftModels],
   );
 
@@ -3935,8 +4195,8 @@ export function ConfigPanel({
     for (const agent of draftAgents) {
       if (!agent.name.trim()) return t('config.validation.agentNameRequired');
       if (!agent.model.provider.trim()) return t('config.validation.agentModelProviderRequired');
-      if (!agent.model.api_base.trim()) return t('config.validation.agentModelApiBaseRequired');
-      if (!isOpenAIAccountProvider(agent.model.provider) && !agent.model.api_key.trim()) return t('config.validation.agentModelApiKeyRequired');
+      if (modelRequiresApiBase(agent.model.provider) && !agent.model.api_base.trim()) return t('config.validation.agentModelApiBaseRequired');
+      if (modelRequiresApiKey(agent.model.provider) && !agent.model.api_key.trim()) return t('config.validation.agentModelApiKeyRequired');
       if (!agent.model.model.trim()) return t('config.validation.agentModelNameRequired');
     }
     if (draftAgents.length > 0 && draftTeams.length === 0) {
@@ -4375,6 +4635,138 @@ export function ConfigPanel({
                   {!modelError && hasMissingModelName ? (
                     <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.modelNameRequired')}
+                    </div>
+                  ) : null}
+                  {observeCodexAuth ? (
+                    <div className="rounded-xl border border-border bg-card/70 p-4 shadow-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-text-strong">
+                            Codex subscription connection
+                          </div>
+                          <div className="mt-1 text-xs text-text-muted">
+                            Uses an isolated ChatGPT login for this Jiuwen instance. Jiuwen never receives your password or token.
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs ${codexAuth?.connected ? "text-ok" : codexAuth?.enabled === false || codexAuth?.state === "unavailable" ? "text-danger" : "text-text-muted"}`}>
+                            {codexAuth?.enabled === false
+                              ? "Disabled for this Jiuwen instance"
+                              : codexAuth?.connected
+                                ? "Connected"
+                                : codexAuth?.state === "waiting_for_user"
+                                  ? "Waiting for approval"
+                                  : codexAuth?.state === "reconciling"
+                                    ? "Finishing connection"
+                                    : codexAuth?.state === "busy"
+                                      ? "Provider busy"
+                                      : codexAuth?.state === "unavailable"
+                                        ? "Unavailable"
+                                        : "Not connected"}
+                          </span>
+                          {codexAuth?.connected ? (
+                            <button type="button" className="btn !px-3 !py-1 text-xs" disabled={codexAuthBusy} onClick={() => void logoutCodexAuth()}>
+                              Disconnect
+                            </button>
+                          ) : codexAuth?.state === "waiting_for_user" || codexAuth?.state === "reconciling" ? (
+                            <button type="button" className="btn !px-3 !py-1 text-xs" disabled={codexAuthBusy} onClick={() => void cancelCodexAuth()}>
+                              Cancel
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn primary !px-3 !py-1 text-xs"
+                              disabled={codexAuthBusy || codexAuth?.enabled === false || codexAuth?.available === false || !isConnected}
+                              onClick={() => void startCodexAuth()}
+                            >
+                              Connect Codex
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {codexAuthHandoff?.verification_url && codexAuthHandoff.user_code ? (
+                        <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-3 text-xs">
+                          <div className="font-medium text-text-strong">Complete sign-in in the browser</div>
+                          <div className="mt-1 text-text-muted">
+                            The device code was copied when permitted. If the page asks for it, enter:
+                          </div>
+                          <code className="mt-2 inline-block select-all rounded bg-bg px-3 py-2 text-sm font-semibold tracking-wider text-text">
+                            {codexAuthHandoff.user_code}
+                          </code>
+                          <a className="ml-3 text-accent underline" href={codexAuthHandoff.verification_url} target="_blank" rel="noreferrer">
+                            Open sign-in page
+                          </a>
+                        </div>
+                      ) : null}
+                      {codexAuthError ? <div className="mt-2 text-xs text-danger">{codexAuthError}</div> : null}
+                    </div>
+                  ) : null}
+                  {hasClaudeDraft ? (
+                    <div className="rounded-xl border border-border bg-card/70 p-4 shadow-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-text-strong">
+                            Claude subscription
+                          </div>
+                          <div className="mt-1 text-xs text-text-muted">
+                            Uses your own Claude CLI login on the server. Jiuwen never receives your password or token, and never signs you in or out.
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-xs ${
+                              claudeStatus === "subscription_ready"
+                                ? "text-ok"
+                                : claudeStatus === "login_required"
+                                  ? "text-accent"
+                                  : claudeStatus === "wrong_auth_method" ||
+                                      claudeStatus === "missing_cli" ||
+                                      claudeStatus === "wrong_version"
+                                    ? "text-danger"
+                                    : "text-text-muted"
+                            }`}
+                          >
+                            {claudeStatusBusy
+                              ? "Checking…"
+                              : claudeStatus === "subscription_ready"
+                                ? "Subscription ready"
+                                : claudeStatus === "login_required"
+                                  ? "Login required"
+                                  : claudeStatus === "wrong_auth_method"
+                                    ? "Not a Claude subscription"
+                                    : claudeStatus === "missing_cli"
+                                      ? "Claude CLI not installed"
+                                      : claudeStatus === "wrong_version"
+                                        ? "Unsupported CLI version"
+                                        : claudeStatus === "disabled"
+                                          ? "Disabled for this Jiuwen instance"
+                                          : "Status unavailable"}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn !px-3 !py-1 text-xs"
+                            disabled={claudeStatusBusy || !isConnected}
+                            onClick={() => void refreshClaudeStatus()}
+                          >
+                            Refresh
+                          </button>
+                        </div>
+                      </div>
+                      {claudeStatus === "login_required" ? (
+                        <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-3 text-xs text-text-muted">
+                          Sign in to Claude on the server using the official Claude CLI login command, then choose Refresh. Jiuwen never performs the login for you.
+                        </div>
+                      ) : null}
+                      {claudeStatus === "wrong_auth_method" ? (
+                        <div className="mt-3 rounded-lg border border-[var(--color-border-danger)] bg-danger-subtle p-3 text-xs text-danger">
+                          This provider requires a Claude.ai subscription login. An API key or a cloud provider (Bedrock, Vertex, or Foundry) is not accepted.
+                        </div>
+                      ) : null}
+                      {claudeStatus === "missing_cli" || claudeStatus === "wrong_version" ? (
+                        <div className="mt-3 rounded-lg border border-[var(--color-border-danger)] bg-danger-subtle p-3 text-xs text-danger">
+                          Install the supported Claude CLI version on the server, then choose Refresh.
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                   <div

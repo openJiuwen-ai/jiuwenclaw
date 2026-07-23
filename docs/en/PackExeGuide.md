@@ -5,7 +5,7 @@ This guide explains how to build a desktop app with **uv**, **PyInstaller**, and
 ## Prerequisites
 
 - **uv**: Python package manager used by the project
-- **Node.js**: **Build-time only** for the web UI; the shipped app does not require Node at runtime
+- **Node.js**: used for the web UI build and bundled by the Windows build script for browser-tool runtime support
 - **Windows**: `onedir` output for Inno Setup installers
 - **macOS**: `.app` bundle and `.dmg`
 
@@ -32,7 +32,17 @@ From the repo root:
 
 Or double-click `scripts\build-exe.bat`.
 
-The script installs deps, builds the frontend, and runs PyInstaller.
+The script installs dependencies, builds the frontend, runs PyInstaller, bundles
+the Node runtime, and compiles the existing Inno Setup installer.
+
+For the Codex subscription-provider pre-release UAT, run the manually dispatched
+`.github/workflows/pre-release-windows-uat.yml` workflow. It extends this same
+desktop installer; it does not create a separate Python/wheel installation path.
+The workflow adds the exact supported native Codex CLI to the bundled runtime,
+recompiles the installer, silently installs it into a clean temporary directory,
+starts the installed backend and frontend entrypoints, serves the packaged
+dashboard, and verifies the desktop proxy -> Gateway -> AgentServer -> Codex
+account-status path without performing login or inference.
 
 ### Option B: manual
 
@@ -119,7 +129,8 @@ Produces `dist/JiuwenSwarm.app` and `dist/JiuwenSwarm-<version>.dmg`.
 
 - **Python**: Bundled by PyInstaller; end users do not install Python.
 - **pywebview**: Loads local `http://127.0.0.1:5173`.
-- **Node**: Only for building the React app; runtime uses static files.
+- **Node**: Bundled on Windows by default for browser-tool runtime support; users do not install Node separately.
+- **Codex UAT build**: The pre-release workflow bundles the pinned native Codex CLI; ordinary `build-exe.ps1` builds do not add Codex by themselves.
 - **Workspace**: Same as pip install — `~/.jiuwenswarm`.
 - **Inno**: Ship the full `dist/jiuwenswarm/` tree, not a single exe only.
 - **DMG**: Script may include an **Applications** shortcut for drag install.

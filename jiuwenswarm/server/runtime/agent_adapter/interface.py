@@ -28,6 +28,9 @@ from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     create_adapter,
     resolve_sdk_choice,
 )
+from jiuwenswarm.server.runtime.agent_adapter.stream_lifecycle import (
+    close_owned_async_iterator,
+)
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_auto_memory_enabled, is_memory_enabled
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
@@ -39,6 +42,7 @@ from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.e2a.constants import E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
@@ -77,6 +81,19 @@ def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> Non
             "Failed to schedule Symphony session feedback: %s",
             exc,
         )
+
+
+def _attach_actual_route_receipt_to_chunk(
+    request: AgentRequest,
+    chunk: AgentResponseChunk,
+) -> AgentResponseChunk:
+    receipt = (request.metadata or {}).get(E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY)
+    if isinstance(receipt, dict):
+        chunk.metadata = {
+            **(chunk.metadata or {}),
+            E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY: dict(receipt),
+        }
+    return chunk
 
 
 def _history_user_content(params: Any, query: Any) -> Any:
@@ -407,6 +424,17 @@ def _trigger_auto_memory_extraction(
         logger.info("[auto_memory] Extraction task launched successfully for mode=%s", mode)
     except Exception as e:
         logger.error("[auto_memory] Failed to launch extraction task: %s", e, exc_info=True)
+
+
+def _preflight_subscription_request(adapter: Any, request: AgentRequest) -> None:
+    preflight = getattr(adapter, "preflight_subscription_request", None)
+    if callable(preflight):
+        preflight(request)
+
+
+def _request_uses_codex(adapter: Any, request: AgentRequest) -> bool:
+    check = getattr(adapter, "request_uses_codex", None)
+    return bool(check(request)) if callable(check) else False
 
 
 logger = logging.getLogger(__name__)
@@ -1757,6 +1785,7 @@ class JiuWenSwarm:
 
         if request.req_method == ReqMethod.CHAT_ANSWER:
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+            _preflight_subscription_request(adapter, request)
             return await adapter.handle_user_answer(request)
 
         if request.req_method == ReqMethod.CHAT_SWARMFLOW_REPLY:
@@ -1861,6 +1890,7 @@ class JiuWenSwarm:
             return symphony_response
 
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        _preflight_subscription_request(adapter, request)
 
         heartbeat_response = await adapter.handle_heartbeat(request)
         if heartbeat_response is not None:
@@ -1921,10 +1951,12 @@ class JiuWenSwarm:
         if result.ok and result.payload.get("content"):
             content = result.payload["content"]
             content_str = content if isinstance(content, str) else str(content)
-            repair_call = getattr(adapter, "repair_model_response", None)
-            retry_without_a2ui_call = self._make_retry_without_a2ui_call(
-                adapter=adapter,
-                request=request,
+            codex_request = _request_uses_codex(adapter, request)
+            repair_call = None if codex_request else getattr(adapter, "repair_model_response", None)
+            retry_without_a2ui_call = (
+                None
+                if codex_request
+                else self._make_retry_without_a2ui_call(adapter=adapter, request=request)
             )
             content_str = await finalize_assistant_response_if_a2ui(
                 content_str,
@@ -1964,7 +1996,11 @@ class JiuWenSwarm:
             # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
             mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
             config = get_config()
-            if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
+            if (
+                not _request_uses_codex(adapter, request)
+                and is_auto_memory_enabled(mode, config)
+                and is_memory_enabled(mode, config)
+            ):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
         _schedule_symphony_session_feedback(session_id, request.request_id)
@@ -2088,6 +2124,7 @@ class JiuWenSwarm:
                 return
 
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        _preflight_subscription_request(adapter, request)
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
@@ -2217,6 +2254,8 @@ class JiuWenSwarm:
         durable_pending_final_chunks: list[str] = []
         durable_pending_reasoning_chunks: list[str] = []
         durable_final_content = ""
+        stream_task: asyncio.Task[Any] | None = None
+        stream_consumer_abandoned = False
 
         def _consume_durable_reasoning_content() -> str:
             nonlocal durable_pending_reasoning_chunks
@@ -2259,8 +2298,18 @@ class JiuWenSwarm:
         async def run_stream_task():
             logger.info("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
             _put_count = 0
+            adapter_stream = None
+            stream_error: BaseException | None = None
             try:
-                async for chunk in adapter.process_message_stream_impl(request, inputs):
+                if stream_consumer_abandoned:
+                    return
+                adapter_stream = adapter.process_message_stream_impl(request, inputs)
+                async for chunk in adapter_stream:
+                    if isinstance(chunk, AgentResponseChunk):
+                        chunk = _attach_actual_route_receipt_to_chunk(
+                            request,
+                            chunk,
+                        )
                     _put_count += 1
                     if _put_count <= 3:
                         _pl = getattr(chunk, "payload", None) or {}
@@ -2270,18 +2319,26 @@ class JiuWenSwarm:
                             _put_count, rid, _et,
                         )
                     await stream_queue.put(("chunk", chunk))
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
-                await stream_queue.put(("error", asyncio.CancelledError()))
+                stream_error = exc
             except Exception as exc:
                 logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
-                await stream_queue.put(("error", exc))
+                stream_error = exc
             finally:
-                logger.info(
-                    "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
-                    rid, _put_count,
-                )
-                stream_done.set()
+                try:
+                    if adapter_stream is not None:
+                        await close_owned_async_iterator(adapter_stream)
+                except BaseException as exc:
+                    stream_error = exc
+                finally:
+                    if stream_error is not None:
+                        await stream_queue.put(("error", stream_error))
+                    logger.info(
+                        "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
+                        rid, _put_count,
+                    )
+                    stream_done.set()
 
         # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
         # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成
@@ -2572,29 +2629,37 @@ class JiuWenSwarm:
             logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
             raise
         finally:
-            # The adapter producer owns RuntimeOutputStream.  Cancelling and
-            # awaiting it releases the runtime output lease and aborts the
-            # in-flight round when the outer WebSocket consumer disappears.
-            if not stream_task.done():
-                stream_task.cancel()
-            try:
-                await stream_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                # run_stream_task normally converts producer failures into a
-                # queue item.  Do not let a cleanup failure mask cancellation.
-                logger.debug(
-                    "[JiuWenSwarm] stream producer cleanup failed: request_id=%s",
-                    rid,
-                    exc_info=True,
-                )
+            # Closing an async generator injects GeneratorExit at its last yield;
+            # it does not automatically cancel this separately scheduled task.
+            # Cancel and join the exact RuntimeController producer task before
+            # aclose() returns. A task that has not started yet observes the
+            # abandoned flag and exits before entering the adapter.
+            stream_consumer_abandoned = True
+            owned_task = stream_task
+            current = asyncio.current_task()
+            if (
+                owned_task is not None
+                and owned_task is not current
+                and not owned_task.done()
+            ):
+                if owned_task.cancelling() == 0:
+                    owned_task.cancel()
+                while not owned_task.done():
+                    try:
+                        await asyncio.shield(owned_task)
+                    except asyncio.CancelledError:
+                        if current is not None:
+                            while current.cancelling():
+                                current.uncancel()
+                await asyncio.gather(owned_task, return_exceptions=True)
 
         assistant_message = final_answer_content or "".join(final_answer_chunks)
-        repair_call = getattr(adapter, "repair_model_response", None)
-        retry_without_a2ui_call = self._make_retry_without_a2ui_call(
-            adapter=adapter,
-            request=request,
+        codex_request = _request_uses_codex(adapter, request)
+        repair_call = None if codex_request else getattr(adapter, "repair_model_response", None)
+        retry_without_a2ui_call = (
+            None
+            if codex_request
+            else self._make_retry_without_a2ui_call(adapter=adapter, request=request)
         )
         
         finalized_assistant_message = await finalize_assistant_response_if_a2ui(
@@ -2649,7 +2714,11 @@ class JiuWenSwarm:
         # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
         mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
         config = get_config()
-        if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
+        if (
+            not _request_uses_codex(adapter, request)
+            and is_auto_memory_enabled(mode, config)
+            and is_memory_enabled(mode, config)
+        ):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
         _schedule_symphony_session_feedback(session_id, rid)

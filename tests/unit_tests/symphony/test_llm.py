@@ -10,6 +10,10 @@ from jiuwenswarm.symphony.llm import (
     reset_llm_token_usage,
     _record_usage_from_response,
 )
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
+)
 
 
 class _FakeInvokeModel:
@@ -118,6 +122,34 @@ def test_llm_config_prefers_resolved_default_model(monkeypatch):
 
     assert config.model == "model-b"
     assert config.base_url == "https://b.example.test/v1"
+
+
+def test_llm_config_accepts_codex_subscription_without_api_credentials():
+    config = LLMConfig.from_model_entry({
+        "model_client_config": {
+            "api_key": "",
+            "api_base": "",
+            "model_name": CODEX_MODEL_ALIAS,
+            "client_provider": CODEX_PROVIDER_NAME,
+        },
+        "model_config_obj": {},
+    })
+
+    assert config.model == CODEX_MODEL_ALIAS
+    assert config.base_url == ""
+    assert config.model_client_config["client_provider"] == CODEX_PROVIDER_NAME
+
+
+def test_llm_config_keeps_api_provider_credentials_required():
+    with pytest.raises(RuntimeError, match="missing api_base"):
+        LLMConfig.from_model_entry({
+            "model_client_config": {
+                "api_key": "",
+                "api_base": "",
+                "model_name": "gpt-4.1",
+                "client_provider": "OpenAI",
+            },
+        })
 
 
 def test_llm_config_does_not_fallback_to_environment_model(monkeypatch):

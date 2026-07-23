@@ -98,11 +98,23 @@ E2A_WIRE_SERVER_PUSH_KEY = "_jiuwenswarm_server_push"
 # Gateway 内部断连 cancel 来源；不得由 channel/user metadata 透传生成。
 E2A_INTERNAL_CANCEL_SOURCE_KEY = "_jiuwenswarm_cancel_source"
 E2A_CANCEL_SOURCE_CLIENT_DISCONNECT = "client_disconnect"
+# AgentServer-owned correlation for asynchronous evolution pushes. This is
+# injected after user metadata filtering and consumed only by the Gateway.
+E2A_INTERNAL_SOURCE_REQUEST_ID_KEY = "_jiuwenswarm_source_request_id"
+# AgentServer-owned receipt for the exact model route resolved after model
+# construction/fallback. Channel-supplied values are stripped at ingress.
+E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY = "_jiuwenswarm_actual_model_route"
+# Gateway-owned expectation for an approval continuation's exact model route.
+# AgentServer validates it before any provider invocation.
+E2A_INTERNAL_EXPECTED_MODEL_ROUTE_KEY = "_jiuwenswarm_expected_model_route"
 
 # 仅用于编解码 / 队列语义，不得随业务 channel metadata 下发给 Message.metadata
 E2A_WIRE_INTERNAL_METADATA_KEYS: frozenset[str] = frozenset(
     {
         E2A_INTERNAL_CANCEL_SOURCE_KEY,
+        E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY,
+        E2A_INTERNAL_EXPECTED_MODEL_ROUTE_KEY,
+        E2A_INTERNAL_SOURCE_REQUEST_ID_KEY,
         E2A_WIRE_SERVER_PUSH_KEY,
         E2A_WIRE_LEGACY_AGENT_CHUNK_KEY,
         E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY,

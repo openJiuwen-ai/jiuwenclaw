@@ -79,6 +79,10 @@ class AgentRequest:
     metadata: dict[str, Any] | None = None
     enable_memory: bool | None = None
     permission_context: PermissionContext | None = None
+    # Gateway-owned E2A transport signal. Channel payloads/metadata must never
+    # populate this field; it is set only after an exact pending-approval route
+    # binding has been validated by the Gateway.
+    subscription_continuation_bound: bool = False
     # V2: AgentRef(mode, id)，全链路透传供响应侧回带（设计 §6.3/§5.2）。
     agent_ref: Any = None
 

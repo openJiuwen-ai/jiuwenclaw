@@ -38,6 +38,7 @@ from jiuwenswarm.common.config import (
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.work_mode import DEFAULT_PROJECT_ID_CODE
+from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -47,6 +48,19 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
     AgentRequestTimeoutError,
     resolve_agent_request_timeout_seconds,
     send_agent_request_with_timeout,
+)
+from jiuwenswarm.integrations.ai4research_subscription.provider_capabilities import (
+    available_model_provider_names,
+    missing_model_fields,
+    validate_provider_model_name,
+)
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
+)
+from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+    CLAUDE_MODEL_ALIAS,
+    CLAUDE_PROVIDER_NAME,
 )
 
 logger = logging.getLogger(__name__)
@@ -490,7 +504,8 @@ _PREFERRED_LANGUAGE_OPTIONS = ("zh", "en")
 
 def _build_config_schema() -> list[dict]:
     """构建配置项 Schema，供前端渲染交互界面。与 config.yaml 结构对齐。"""
-    available_providers = [p.value for p in ProviderType]
+    api_providers = [p.value for p in ProviderType]
+    available_providers = available_model_provider_names()
     # 显式使用 ProviderType.OpenAI 作为默认供应商，避免依赖枚举声明顺序
     default_provider = (
         ProviderType.OpenAI.value
@@ -512,7 +527,7 @@ def _build_config_schema() -> list[dict]:
         {"key": "vision_model", "label": "视觉模型", "group": "Vision", "type": "string",
          "source": "env", "default": empty},
         {"key": "vision_provider", "label": "视觉供应商", "group": "Vision", "type": "select",
-         "options": available_providers, "source": "env", "default": default_provider},
+         "options": api_providers, "source": "env", "default": default_provider},
         {"key": "vision_api_base", "label": "视觉API地址", "group": "Vision", "type": "string",
          "source": "env", "default": empty},
         {"key": "vision_api_key", "label": "视觉API Key", "group": "Vision", "type": "password",
@@ -521,7 +536,7 @@ def _build_config_schema() -> list[dict]:
         {"key": "video_model", "label": "视频模型", "group": "Video", "type": "string",
          "source": "env", "default": empty},
         {"key": "video_provider", "label": "视频供应商", "group": "Video", "type": "select",
-         "options": available_providers, "source": "env", "default": default_provider},
+         "options": api_providers, "source": "env", "default": default_provider},
         {"key": "video_api_base", "label": "视频API地址", "group": "Video", "type": "string",
          "source": "env", "default": empty},
         {"key": "video_api_key", "label": "视频API Key", "group": "Video", "type": "password",
@@ -530,7 +545,7 @@ def _build_config_schema() -> list[dict]:
         {"key": "audio_model", "label": "音频模型", "group": "Audio", "type": "string",
          "source": "env", "default": empty},
         {"key": "audio_provider", "label": "音频供应商", "group": "Audio", "type": "select",
-         "options": available_providers, "source": "env", "default": default_provider},
+         "options": api_providers, "source": "env", "default": default_provider},
         {"key": "audio_api_base", "label": "音频API地址", "group": "Audio", "type": "string",
          "source": "env", "default": empty},
         {"key": "audio_api_key", "label": "音频API Key", "group": "Audio", "type": "password",
@@ -600,7 +615,7 @@ def _normalize_provider_value(value: str) -> str:
     if not normalized:
         return normalized
 
-    available_model_providers = [provider.value for provider in ProviderType]
+    available_model_providers = available_model_provider_names()
     lookup = {provider.lower(): provider for provider in available_model_providers}
     return lookup.get(normalized.lower(), normalized)
 
@@ -757,9 +772,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         "api_base": _mcc.get("api_base"),
                         "api_key": _mcc.get("api_key"),
                     }
+                    _subscription_model = _mcc.get("client_provider") in (
+                        CODEX_PROVIDER_NAME,
+                        CLAUDE_PROVIDER_NAME,
+                    )
                     for _k, _v in _model_overrides.items():
-                        if _v:
-                            payload[_k] = str(_v)
+                        if _v or _subscription_model:
+                            payload[_k] = str(_v or "")
             except Exception as e:
                 logger.warning("[config.get] Failed to resolve default model config: %s", e)
 
@@ -828,6 +847,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
             )
             return
+        _cfg_provider = _normalize_provider_value(str(params.get("model_provider") or ""))
+        if _cfg_provider == CODEX_PROVIDER_NAME:
+            params.setdefault("model", CODEX_MODEL_ALIAS)
+            params["api_base"] = ""
+            params["api_key"] = ""
+        elif _cfg_provider == CLAUDE_PROVIDER_NAME:
+            # Subscription-only, credential-free: force the fixed alias and drop
+            # any stale api_base/api_key (parallel to Codex).
+            params.setdefault("model", CLAUDE_MODEL_ALIAS)
+            params["api_base"] = ""
+            params["api_key"] = ""
         for key, val in params.items():
             from jiuwenswarm.extensions import ExtensionRegistry
 
@@ -837,7 +867,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
-        available_model_providers = [provider.value for provider in ProviderType]
+        available_model_providers = available_model_provider_names()
+        api_model_providers = [provider.value for provider in ProviderType]
 
         for param_key, env_key in _CLI_CONFIG_SET_ENV_MAP.items():
             if param_key not in params:
@@ -849,7 +880,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if (
                 param_key.endswith("_provider")
                 and val
-                and val not in available_model_providers
+                and val not in (
+                    available_model_providers if param_key == "model_provider" else api_model_providers
+                )
             ):
                 await channel.send_response(
                     ws,
@@ -1122,17 +1155,23 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         model_provider = _normalize_provider_value(str(params.get("model_provider") or ""))
         verify_ssl = bool(params.get("verify_ssl", False))
 
-        if not all([api_base, api_key, model, model_provider]):
+        missing = missing_model_fields(
+            model_name=model,
+            model_provider=model_provider,
+            api_base=api_base,
+            api_key=api_key,
+        )
+        if missing:
             await channel.send_response(
                 ws,
                 req_id,
                 ok=False,
-                error="api_base, api_key, model, and model_provider are required",
+                error=f"Required fields missing: {', '.join(missing)}",
                 code="BAD_REQUEST",
             )
             return
 
-        available_model_providers = [provider.value for provider in ProviderType]
+        available_model_providers = available_model_provider_names()
         if model_provider not in available_model_providers:
             await channel.send_response(
                 ws,
@@ -1142,10 +1181,240 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        if not validate_provider_model_name(model_provider, model):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=f"model is invalid for {model_provider}",
+                code="BAD_REQUEST",
+            )
+            return
+        if model_provider == CODEX_PROVIDER_NAME and (api_base or api_key):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=f"api_base and api_key must be empty for {model_provider}",
+                code="BAD_REQUEST",
+            )
+            return
+
+        if model_provider == CLAUDE_PROVIDER_NAME and (api_base or api_key):
+            # Subscription-only: credentials come from the operator's own Claude
+            # login, never from config. Reject supplied key/base (matches web).
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=f"api_base and api_key must be empty for {model_provider}",
+                code="BAD_REQUEST",
+            )
+            return
 
         if api_base.endswith("/chat/completions"):
             api_base = api_base.rsplit("/chat/completions", 1)[0]
         api_base = api_base.rstrip("/")
+
+        if model_provider == CODEX_PROVIDER_NAME:
+            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenswarm.common.security.ws_origin import is_loopback_websocket_peer
+
+            if not is_loopback_websocket_peer(ws):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Codex subscription controls require a local TUI client.",
+                    code="local_provider_required",
+                )
+                return
+            real_client = _resolve_agent_client(agent_client)
+            if real_client is None:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="AgentServer is not available for Codex model validation.",
+                    code="AGENT_UNAVAILABLE",
+                )
+                return
+            envelope = e2a_from_agent_fields(
+                request_id=str(req_id) if req_id else "",
+                channel_id="tui",
+                session_id=session_id,
+                req_method=ReqMethod.CODEX_VALIDATE_MODEL,
+                params={
+                    "model_provider": CODEX_PROVIDER_NAME,
+                    "model": CODEX_MODEL_ALIAS,
+                },
+                is_stream=False,
+                timestamp=time.time(),
+            )
+            try:
+                response = await send_agent_request_with_timeout(
+                    real_client,
+                    envelope,
+                    label=ReqMethod.CODEX_VALIDATE_MODEL.value,
+                    timeout_seconds=35.0,
+                )
+            except AgentRequestTimeoutError as exc:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=str(exc),
+                    code=exc.code,
+                )
+                return
+            except Exception:
+                logger.exception("[cli config.validate_model] Codex AgentServer forwarding failed")
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Codex model validation service is unavailable.",
+                    code="AGENT_UNAVAILABLE",
+                )
+                return
+            payload = response.payload if isinstance(response.payload, dict) else {}
+            if not response.ok:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=str(payload.get("error") or "Codex model validation failed."),
+                    code=str(payload.get("code") or "LLM_ERROR"),
+                )
+                return
+            content = payload.get("response")
+            if (
+                payload.get("validated") is not True
+                or payload.get("model_provider") != CODEX_PROVIDER_NAME
+                or payload.get("model") != CODEX_MODEL_ALIAS
+                or not isinstance(content, str)
+                or not content.strip()
+            ):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Codex model validation returned an invalid response.",
+                    code="LLM_ERROR",
+                )
+                return
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "provider": model_provider,
+                    "model": model,
+                    "response": content.strip(),
+                },
+            )
+            return
+
+        if model_provider == CLAUDE_PROVIDER_NAME:
+            # Claude is registered only in AgentServer; forward validation there
+            # (parallel to Codex) instead of building the client locally.
+            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenswarm.common.security.ws_origin import is_loopback_websocket_peer
+
+            if not is_loopback_websocket_peer(ws):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Claude subscription controls require a local TUI client.",
+                    code="local_provider_required",
+                )
+                return
+            real_client = _resolve_agent_client(agent_client)
+            if real_client is None:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="AgentServer is not available for Claude model validation.",
+                    code="AGENT_UNAVAILABLE",
+                )
+                return
+            envelope = e2a_from_agent_fields(
+                request_id=str(req_id) if req_id else "",
+                channel_id="tui",
+                session_id=session_id,
+                req_method=ReqMethod.CLAUDE_VALIDATE_MODEL,
+                params={
+                    "model_provider": CLAUDE_PROVIDER_NAME,
+                    "model": CLAUDE_MODEL_ALIAS,
+                },
+                is_stream=False,
+                timestamp=time.time(),
+            )
+            try:
+                response = await send_agent_request_with_timeout(
+                    real_client,
+                    envelope,
+                    label=ReqMethod.CLAUDE_VALIDATE_MODEL.value,
+                    timeout_seconds=35.0,
+                )
+            except AgentRequestTimeoutError as exc:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=str(exc),
+                    code=exc.code,
+                )
+                return
+            except Exception:
+                logger.exception("[cli config.validate_model] Claude AgentServer forwarding failed")
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Claude model validation service is unavailable.",
+                    code="AGENT_UNAVAILABLE",
+                )
+                return
+            payload = response.payload if isinstance(response.payload, dict) else {}
+            if not response.ok:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=str(payload.get("error") or "Claude model validation failed."),
+                    code=str(payload.get("code") or "LLM_ERROR"),
+                )
+                return
+            content = payload.get("response")
+            if (
+                payload.get("validated") is not True
+                or payload.get("model_provider") != CLAUDE_PROVIDER_NAME
+                or payload.get("model") != CLAUDE_MODEL_ALIAS
+                or not isinstance(content, str)
+                or not content.strip()
+            ):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Claude model validation returned an invalid response.",
+                    code="LLM_ERROR",
+                )
+                return
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "provider": model_provider,
+                    "model": model,
+                    "response": content.strip(),
+                },
+            )
+            return
 
         model_config_obj = {"temperature": 0}
         if "reasoning_level" in params:
@@ -2234,6 +2503,136 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 payload["page_idx"] = params.get("page_idx")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _forward_codex_auth(ws, req_id, params, session_id, *, req_method, user_id=None):
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.security.ws_origin import is_loopback_websocket_peer
+
+        if not is_loopback_websocket_peer(ws):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="Codex subscription controls require a local TUI client.",
+                code="local_provider_required",
+            )
+            return
+
+        real_client = _resolve_agent_client(agent_client)
+        if real_client is None:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="AgentServer is not available for Codex authentication.",
+                code="AGENT_UNAVAILABLE",
+            )
+            return
+        envelope = e2a_from_agent_fields(
+            request_id=str(req_id) if req_id else "",
+            channel_id="tui",
+            session_id=session_id,
+            req_method=req_method,
+            params=dict(params) if isinstance(params, dict) else {},
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=user_id,
+        )
+        try:
+            response = await _send_tui_agent_request(
+                real_client, envelope, label=req_method.value,
+            )
+        except Exception:
+            logger.exception("[provider.codex.auth] TUI forwarding failed")
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="Codex authentication service is unavailable.",
+                code="AGENT_UNAVAILABLE",
+            )
+            return
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        if not response.ok:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=str(payload.get("error") or "Codex authentication failed."),
+                code=str(payload.get("code") or "AUTH_FAILED"),
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _codex_auth_status(ws, req_id, params, session_id, user_id=None):
+        await _forward_codex_auth(
+            ws, req_id, params, session_id,
+            req_method=ReqMethod.CODEX_AUTH_STATUS, user_id=user_id,
+        )
+
+    async def _codex_auth_start(ws, req_id, params, session_id, user_id=None):
+        await _forward_codex_auth(
+            ws, req_id, params, session_id,
+            req_method=ReqMethod.CODEX_AUTH_START, user_id=user_id,
+        )
+
+    async def _codex_auth_cancel(ws, req_id, params, session_id, user_id=None):
+        await _forward_codex_auth(
+            ws, req_id, params, session_id,
+            req_method=ReqMethod.CODEX_AUTH_CANCEL, user_id=user_id,
+        )
+
+    async def _codex_auth_logout(ws, req_id, params, session_id, user_id=None):
+        await _forward_codex_auth(
+            ws, req_id, params, session_id,
+            req_method=ReqMethod.CODEX_AUTH_LOGOUT, user_id=user_id,
+        )
+
+    async def _claude_status(ws, req_id, params, session_id, user_id=None):
+        """Forward the read-only Claude provider status probe to AgentServer."""
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.security.ws_origin import is_loopback_websocket_peer
+
+        if not is_loopback_websocket_peer(ws):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="Claude status requires a local TUI client.",
+                code="local_provider_required",
+            )
+            return
+        real_client = _resolve_agent_client(agent_client)
+        if real_client is None:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="AgentServer is not available for Claude status.",
+                code="AGENT_UNAVAILABLE",
+            )
+            return
+        envelope = e2a_from_agent_fields(
+            request_id=str(req_id) if req_id else "",
+            channel_id="tui",
+            session_id=session_id,
+            req_method=ReqMethod.CLAUDE_STATUS,
+            params={},
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=user_id,
+        )
+        try:
+            response = await _send_tui_agent_request(
+                real_client, envelope, label=ReqMethod.CLAUDE_STATUS.value,
+            )
+        except Exception:
+            logger.exception("[provider.claude.status] TUI forwarding failed")
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="Claude status service is unavailable.",
+                code="AGENT_UNAVAILABLE",
+            )
+            return
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        if not response.ok:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=str(payload.get("error") or "Claude status failed."),
+                code=str(payload.get("code") or "LLM_ERROR"),
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
     async def _command_model(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -2350,6 +2749,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             # target 作为 model_name 的回退：若未通过 model= 参数指定，则以 target 为准
             if not client_cfg.get("model_name"):
                 client_cfg["model_name"] = target
+            if client_cfg.get("client_provider") == CODEX_PROVIDER_NAME:
+                client_cfg["model_name"] = CODEX_MODEL_ALIAS
+                client_cfg["api_base"] = ""
+                client_cfg["api_key"] = ""
+            elif client_cfg.get("client_provider") == CLAUDE_PROVIDER_NAME:
+                client_cfg["model_name"] = CLAUDE_MODEL_ALIAS
+                client_cfg["api_base"] = ""
+                client_cfg["api_key"] = ""
             effective_name = client_cfg["model_name"]
 
             # alias 为顶层字段，从 client_cfg 提取；提前算最终值，
@@ -2396,15 +2803,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                             raise _ModelOpError(
                                 f"Model '{effective_name}' with the same api_base and api_key already exists"
                             )
-                    _missing = []
-                    for field, display in {
-                        "api_key": "api_key",
-                        "api_base": "api_base",
-                        "model_name": "model_name",
-                        "client_provider": "model_provider",
-                    }.items():
-                        if not resolve_env_vars(str(client_cfg.get(field, ""))):
-                            _missing.append(display)
+                    _provider = resolve_env_vars(str(client_cfg.get("client_provider", "")))
+                    _model_name = resolve_env_vars(str(client_cfg.get("model_name", "")))
+                    _missing = missing_model_fields(
+                        model_name=_model_name,
+                        model_provider=_provider,
+                        api_base=resolve_env_vars(str(client_cfg.get("api_base", ""))),
+                        api_key=resolve_env_vars(str(client_cfg.get("api_key", ""))),
+                    )
                     if _missing:
                         raise _ModelOpError(
                             f"Failed to add model '{effective_name}'. "
@@ -2412,6 +2818,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                             f"Usage: /model add <name> "
                             f"api_base=xxx api_key=xxx "
                             f"model=<name> model_provider=<provider>"
+                        )
+                    if not validate_provider_model_name(_provider, _model_name):
+                        raise _ModelOpError(
+                            f"Model '{_model_name}' is invalid for provider '{_provider}'"
                         )
                     if effective_alias:
                         for _e in _raw_defs:
@@ -2502,6 +2912,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                             continue
                         else:
                             _client_cfg[mapped_k] = v
+                    if _client_cfg.get("client_provider") == CODEX_PROVIDER_NAME:
+                        _client_cfg["model_name"] = CODEX_MODEL_ALIAS
+                        _client_cfg["api_base"] = ""
+                        _client_cfg["api_key"] = ""
+                    elif _client_cfg.get("client_provider") == CLAUDE_PROVIDER_NAME:
+                        _client_cfg["model_name"] = CLAUDE_MODEL_ALIAS
+                        _client_cfg["api_base"] = ""
+                        _client_cfg["api_key"] = ""
                     _reasoning_level = str(_model_cfg_obj.get("reasoning_level", "")).strip()
                     if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
                         raise _ModelOpError("reasoning_level must be one of: off, low, medium, high")
@@ -2509,15 +2927,20 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         _client_cfg["verify_ssl"] = False
                     if "timeout" not in _client_cfg:
                         _client_cfg["timeout"] = 1800
-                    _missing_fields = []
-                    for _req_field, _display in [
-                        ("api_key", "api_key"), ("api_base", "api_base"),
-                        ("model_name", "model_name"), ("client_provider", "model_provider"),
-                    ]:
-                        if not resolve_env_vars(str(_client_cfg.get(_req_field, ""))):
-                            _missing_fields.append(_display)
+                    _provider = resolve_env_vars(str(_client_cfg.get("client_provider", "")))
+                    _model_name = resolve_env_vars(str(_client_cfg.get("model_name", "")))
+                    _missing_fields = missing_model_fields(
+                        model_name=_model_name,
+                        model_provider=_provider,
+                        api_base=resolve_env_vars(str(_client_cfg.get("api_base", ""))),
+                        api_key=resolve_env_vars(str(_client_cfg.get("api_key", ""))),
+                    )
                     if _missing_fields:
                         raise _ModelOpError(f"Model missing required config: {', '.join(_missing_fields)}")
+                    if not validate_provider_model_name(_provider, _model_name):
+                        raise _ModelOpError(
+                            f"Model '{_model_name}' is invalid for provider '{_provider}'"
+                        )
                     _effective_alias = resolve_env_vars(str(_entry.get("alias", ""))) if _entry.get("alias") else ""
                     if _effective_alias:
                         for _other_idx, _other in enumerate(_raw_defs):
@@ -2723,15 +3146,18 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 if _target_entry is None:
                     raise _ModelOpError(f"Model '{target}' config not found")
                 _target_mcc = _target_entry.get("model_client_config") or {}
-                _missing_fields = []
-                for _req_field, _display in [
-                    ("api_key", "api_key"), ("api_base", "api_base"),
-                    ("model_name", "model_name"), ("client_provider", "client_provider"),
-                ]:
-                    if not resolve_env_vars(str(_target_mcc.get(_req_field, ""))):
-                        _missing_fields.append(_display)
+                _target_provider = resolve_env_vars(str(_target_mcc.get("client_provider", "")))
+                _target_model_name = resolve_env_vars(str(_target_mcc.get("model_name", "")))
+                _missing_fields = missing_model_fields(
+                    model_name=_target_model_name,
+                    model_provider=_target_provider,
+                    api_base=resolve_env_vars(str(_target_mcc.get("api_base", ""))),
+                    api_key=resolve_env_vars(str(_target_mcc.get("api_key", ""))),
+                )
                 if _missing_fields:
                     raise _ModelOpError(f"Model '{target}' missing required config: {', '.join(_missing_fields)}")
+                if not validate_provider_model_name(_target_provider, _target_model_name):
+                    raise _ModelOpError(f"Model '{target}' is invalid for provider '{_target_provider}'")
                 _target_model_name_resolved = resolve_env_vars(str(_target_mcc.get("model_name", "")))
                 _target_entry["is_default"] = True
                 for _i, _e in enumerate(_raw_defaults):
@@ -2937,6 +3363,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
     channel.register_local_handler(path, "command.model", _command_model)
+    channel.register_local_handler(path, "provider.codex.auth.status", _codex_auth_status)
+    channel.register_local_handler(path, "provider.codex.auth.start", _codex_auth_start)
+    channel.register_local_handler(path, "provider.codex.auth.cancel", _codex_auth_cancel)
+    channel.register_local_handler(path, "provider.codex.auth.logout", _codex_auth_logout)
+    channel.register_local_handler(path, "provider.claude.status", _claude_status)
 
     # ── Hooks RPC handlers ─────────────────────────────────────────────
     async def _hooks_list(ws, req_id, params, session_id):
