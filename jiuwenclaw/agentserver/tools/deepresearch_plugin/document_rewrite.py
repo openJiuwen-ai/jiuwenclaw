@@ -18,6 +18,11 @@ from urllib.parse import quote
 
 from markdown_it import MarkdownIt
 
+from jiuwenclaw.agentserver.tools.deepresearch_plugin.artifact_naming import (
+    ArtifactNamingError,
+    ArtifactPaths,
+    allocate_next_paths,
+)
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.markdown_rewrite_map import (
     MarkdownRewriteMap,
     ProtectedAnchor,
@@ -50,8 +55,10 @@ FINAL_RESULT_MAX_BYTES = 64 * 1024 * 1024
 CITATION_COUNT_MAX = 10_000
 CITATION_FIELD_MAX_BYTES = 1024 * 1024
 MAX_HIGHLIGHT_RANGES = 4096
+MAX_PUBLICATION_ATTEMPTS = 16
 _BOUNDARY_PUNCTUATION = "，。！？；：,.!?;:"
 _INLINE_PARSER = MarkdownIt("commonmark")
+_VERSIONING_ERROR_MESSAGE = "report artifact versioning failed"
 
 
 class RewriteError(ValueError):
@@ -1115,6 +1122,144 @@ def _allows_empty_wrapper_deletion(
     )
 
 
+def _versioning_error() -> RewriteError:
+    return RewriteError("INVALID_PROVENANCE", _VERSIONING_ERROR_MESSAGE)
+
+
+def _restore_quarantined_path(quarantine: Path, target: Path) -> None:
+    try:
+        os.link(quarantine, target, follow_symlinks=False)
+    except OSError:
+        return
+    try:
+        os.unlink(quarantine)
+    except OSError:
+        pass
+
+
+def _cleanup_owned_publication(path: Path, descriptor: int) -> None:
+    """Quarantine a published path before proving it is still our inode."""
+    quarantine = path.with_name(f".{path.name}.cleanup-{uuid.uuid4().hex}")
+    try:
+        os.rename(path, quarantine)
+    except OSError:
+        return
+    try:
+        owned = os.fstat(descriptor)
+        moved = os.lstat(quarantine)
+    except OSError:
+        _restore_quarantined_path(quarantine, path)
+        return
+    if (owned.st_dev, owned.st_ino) != (moved.st_dev, moved.st_ino):
+        _restore_quarantined_path(quarantine, path)
+        return
+    try:
+        os.unlink(quarantine)
+    except OSError:
+        pass
+
+
+def _publish_create(path: Path, payload: bytes) -> int:
+    """Create and fsync one immutable path, returning an ownership descriptor."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError("safe no-follow publication is unavailable")
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+        0o600,
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written < 1:
+                raise OSError("artifact publication made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+    except BaseException:
+        _cleanup_owned_publication(path, descriptor)
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _allocate_paths(
+    parent_path: Path, parent_provenance: dict, parent_markdown: str
+) -> ArtifactPaths:
+    try:
+        return allocate_next_paths(
+            parent_path, parent_provenance, parent_markdown
+        )
+    except (
+        ArtifactNamingError,
+        OSError,
+        json.JSONDecodeError,
+        UnicodeError,
+    ) as exc:
+        raise _versioning_error() from exc
+
+
+def _publish_child(
+    *,
+    parent_path: Path,
+    parent_provenance: dict,
+    parent_markdown: str,
+    child_markdown: bytes,
+    child_provenance: dict,
+) -> tuple[Path, Path, dict]:
+    for _ in range(MAX_PUBLICATION_ATTEMPTS):
+        paths = _allocate_paths(parent_path, parent_provenance, parent_markdown)
+        published_provenance = dict(child_provenance)
+        published_provenance.update(
+            {
+                "markdown_path": str(paths.markdown_path),
+                "version_number": paths.version.version_number,
+                "version_base_stem": paths.version.base_stem,
+            }
+        )
+        try:
+            provenance_payload = json.dumps(
+                published_provenance, ensure_ascii=False, indent=2
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise _versioning_error() from exc
+
+        try:
+            provenance_descriptor = _publish_create(
+                paths.provenance_path, provenance_payload
+            )
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise _versioning_error() from exc
+        try:
+            try:
+                markdown_descriptor = _publish_create(
+                    paths.markdown_path, child_markdown
+                )
+            except FileExistsError:
+                _cleanup_owned_publication(
+                    paths.provenance_path, provenance_descriptor
+                )
+                continue
+            except OSError as exc:
+                _cleanup_owned_publication(
+                    paths.provenance_path, provenance_descriptor
+                )
+                raise _versioning_error() from exc
+            else:
+                os.close(markdown_descriptor)
+                return (
+                    paths.markdown_path,
+                    paths.provenance_path,
+                    published_provenance,
+                )
+        finally:
+            os.close(provenance_descriptor)
+    raise _versioning_error()
+
+
 def _atomic_write(path: Path, payload: bytes) -> None:
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -1293,10 +1438,8 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
         )
         result_bytes = "\n".join(slot_texts.values()).encode("utf-8")
         revision_id = f"rev_{uuid.uuid4().hex}"
-        child_path = context.report_path.with_name(
-            f"{context.report_path.stem}-rev-{revision_id[4:]}.md"
-        )
-        child_hash = _sha256(child_markdown.encode("utf-8"))
+        child_bytes = child_markdown.encode("utf-8")
+        child_hash = _sha256(child_bytes)
         child_provenance = dict(provenance)
         history = list(provenance.get("rewrite_history") or [])
         history.append({
@@ -1321,7 +1464,6 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
             "rewrite_protocol_version": 2,
             "revision_id": revision_id,
             "parent_revision_id": context.parent_revision_id,
-            "markdown_path": str(child_path),
             "content_sha256": child_hash,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "operation": {"action": context.action},
@@ -1332,11 +1474,12 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
                 "ranges": highlights,
             },
         })
-        _atomic_write(child_path, child_markdown.encode("utf-8"))
-        provenance_path = child_path.with_suffix(".provenance.json")
-        _atomic_write(
-            provenance_path,
-            json.dumps(child_provenance, ensure_ascii=False, indent=2).encode("utf-8"),
+        child_path, provenance_path, child_provenance = _publish_child(
+            parent_path=context.report_path,
+            parent_provenance=provenance,
+            parent_markdown=current_markdown,
+            child_markdown=child_bytes,
+            child_provenance=child_provenance,
         )
     return {
         "document_id": document_id,

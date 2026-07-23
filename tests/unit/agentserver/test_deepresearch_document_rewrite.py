@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import re
@@ -15,7 +16,7 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.document_rewrite import (
 
 
 def _write_document(root: Path, body: str) -> tuple[Path, dict]:
-    report = root / "report.md"
+    report = root / "report-v1.md"
     report.write_text(body, encoding="utf-8")
     authoritative_citation = {
         "id": 3,
@@ -54,11 +55,42 @@ def _write_document(root: Path, body: str) -> tuple[Path, dict]:
         "inference_manifest": [],
         "chart_manifest": [],
         "rewrite_history": [],
+        "version_number": 1,
+        "version_base_stem": "report",
     }
     report.with_suffix(".provenance.json").write_text(
         json.dumps(provenance, ensure_ascii=False), encoding="utf-8"
     )
     return report, provenance
+
+
+def _write_legacy_document(
+    root: Path,
+    body: str,
+    *,
+    filename: str = "old.md",
+    rewrite_history: list[dict] | None = None,
+    h1: str | None = None,
+) -> tuple[Path, dict]:
+    markdown = f"# {h1}\n\n{body}" if h1 is not None else body
+    report, provenance = _write_document(root, markdown)
+    legacy_report = root / filename
+    report.replace(legacy_report)
+    report.with_suffix(".final-result.json").replace(
+        legacy_report.with_suffix(".final-result.json")
+    )
+    report.with_suffix(".provenance.json").unlink()
+    provenance.pop("version_number")
+    provenance.pop("version_base_stem")
+    provenance["markdown_path"] = str(legacy_report)
+    provenance["final_result_path"] = legacy_report.with_suffix(
+        ".final-result.json"
+    ).name
+    provenance["rewrite_history"] = list(rewrite_history or [])
+    legacy_report.with_suffix(".provenance.json").write_text(
+        json.dumps(provenance, ensure_ascii=False), encoding="utf-8"
+    )
+    return legacy_report, provenance
 
 
 def _set_snapshot_citations(report: Path, provenance: dict, citations: list[dict]) -> None:
@@ -1555,6 +1587,7 @@ def test_commit_bounds_rewrite_highlight_ranges_without_truncation(
 def test_rewritten_child_can_be_rewritten_again_with_original_lineage(tmp_path):
     body = "first claim [[1]](https://example.com/source) tail\n\nsecond paragraph\n"
     report, provenance = _write_document(tmp_path, body)
+    provenance["citations"] = [{"id": "3", "path": "citations.json"}]
     provenance["inference_manifest"] = [{"path": "infer/1", "sha256": "a" * 64}]
     provenance["chart_manifest"] = [{"path": "chart/1", "sha256": "b" * 64}]
     report.with_suffix(".provenance.json").write_text(
@@ -1578,6 +1611,7 @@ def test_rewritten_child_can_be_rewritten_again_with_original_lineage(tmp_path):
         ),
     )
     first_child = Path(first_result["report_path"])
+    assert first_child.name == "report-v2.md"
     first_child_markdown = first_child.read_bytes()
     first_child_sidecar = Path(first_result["provenance_path"])
     first_child_provenance_bytes = first_child_sidecar.read_bytes()
@@ -1598,6 +1632,7 @@ def test_rewritten_child_can_be_rewritten_again_with_original_lineage(tmp_path):
         ),
     )
 
+    assert Path(second_result["report_path"]).name == "report-v3.md"
     second_provenance = json.loads(
         Path(second_result["provenance_path"]).read_text(encoding="utf-8")
     )
@@ -1608,10 +1643,13 @@ def test_rewritten_child_can_be_rewritten_again_with_original_lineage(tmp_path):
     for key in (
         "final_result_path",
         "final_result_sha256",
+        "citations",
         "inference_manifest",
         "chart_manifest",
     ):
         assert second_provenance[key] == provenance[key]
+    assert second_provenance["version_number"] == 3
+    assert second_provenance["version_base_stem"] == "report"
     assert len(second_provenance["rewrite_history"]) == 2
     assert (
         second_provenance["rewrite_highlights"]["revision_id"]
@@ -1969,8 +2007,8 @@ def test_context_is_compact_under_large_citation_cache_saturation(
             assert context.parent_revision_id == "rev_parent"
 
 
-def test_commit_child_path_uses_full_revision_uuid(tmp_path):
-    report, _ = _write_document(tmp_path, "original\n")
+def test_commit_versions_first_child_and_keeps_uuid_revision_lineage(tmp_path):
+    report, provenance = _write_document(tmp_path, "original\n")
     prepared = _prepare(tmp_path, report, "original")
 
     result = commit_rewrite(
@@ -1979,4 +2017,339 @@ def test_commit_child_path_uses_full_revision_uuid(tmp_path):
         structured_result=_structured_payload(prepared),
     )
 
-    assert re.search(r"-rev-[0-9a-f]{32}\.md$", result["report_path"])
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert Path(result["report_path"]).name == "report-v2.md"
+    assert re.fullmatch(r"rev_[0-9a-f]{32}", result["revision_id"])
+    assert child_provenance["revision_id"] == result["revision_id"]
+    assert child_provenance["version_number"] == 2
+    assert child_provenance["version_base_stem"] == "report"
+    assert child_provenance["parent_revision_id"] == provenance["revision_id"]
+
+
+def test_commit_allocates_versions_globally_across_branches(tmp_path):
+    report, root_provenance = _write_document(tmp_path, "original\n")
+    root_markdown = report.read_bytes()
+    root_sidecar = report.with_suffix(".provenance.json").read_bytes()
+
+    prepared_v2 = _prepare(tmp_path, report, "original")
+    result_v2 = commit_rewrite(
+        context_token=prepared_v2["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared_v2),
+    )
+    provenance_v2 = json.loads(
+        Path(result_v2["provenance_path"]).read_text(encoding="utf-8")
+    )
+
+    prepared_v3 = _prepare(tmp_path, report, "original")
+    result_v3 = commit_rewrite(
+        context_token=prepared_v3["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared_v3),
+    )
+    provenance_v3 = json.loads(
+        Path(result_v3["provenance_path"]).read_text(encoding="utf-8")
+    )
+
+    prepared_v4 = _prepare(tmp_path, Path(result_v2["report_path"]), "original")
+    result_v4 = commit_rewrite(
+        context_token=prepared_v4["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared_v4),
+    )
+    provenance_v4 = json.loads(
+        Path(result_v4["provenance_path"]).read_text(encoding="utf-8")
+    )
+
+    assert Path(result_v2["report_path"]).name == "report-v2.md"
+    assert Path(result_v3["report_path"]).name == "report-v3.md"
+    assert Path(result_v4["report_path"]).name == "report-v4.md"
+    assert provenance_v2["parent_revision_id"] == root_provenance["revision_id"]
+    assert provenance_v3["parent_revision_id"] == root_provenance["revision_id"]
+    assert provenance_v4["parent_revision_id"] == provenance_v2["revision_id"]
+    assert [provenance_v2["version_number"], provenance_v3["version_number"],
+            provenance_v4["version_number"]] == [2, 3, 4]
+    assert report.read_bytes() == root_markdown
+    assert report.with_suffix(".provenance.json").read_bytes() == root_sidecar
+
+
+@pytest.mark.parametrize(
+    ("occupied_suffix", "occupied_payload"),
+    [
+        (".md", b"preexisting markdown"),
+        (".provenance.json", b"{}"),
+    ],
+)
+def test_commit_advances_past_target_collision_without_overwrite(
+    tmp_path, occupied_suffix, occupied_payload
+):
+    report, _ = _write_document(tmp_path, "original\n")
+    occupied = tmp_path / f"report-v2{occupied_suffix}"
+    occupied.write_bytes(occupied_payload)
+    prepared = _prepare(tmp_path, report, "original")
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared),
+    )
+
+    assert Path(result["report_path"]).name == "report-v3.md"
+    assert occupied.read_bytes() == occupied_payload
+
+
+def test_commit_legacy_h1_uses_title_as_version_root(tmp_path):
+    report, _ = _write_legacy_document(
+        tmp_path, "legacy text\n", filename="old-name.md", h1="title"
+    )
+    prepared = _prepare(tmp_path, report, "legacy text")
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared),
+    )
+
+    assert Path(result["report_path"]).name == "title-v2.md"
+
+
+def test_commit_legacy_version_derives_from_rewrite_history(tmp_path):
+    history = [{"revision_id": "one"}, {"revision_id": "two"}]
+    report, _ = _write_legacy_document(
+        tmp_path,
+        "legacy text\n",
+        filename="old-name.md",
+        rewrite_history=history,
+        h1="title",
+    )
+    prepared = _prepare(tmp_path, report, "legacy text")
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared),
+    )
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+
+    assert Path(result["report_path"]).name == "title-v4.md"
+    assert child_provenance["version_number"] == len(history) + 2
+
+
+def test_commit_legacy_without_h1_uses_old_stem(tmp_path):
+    report, _ = _write_legacy_document(
+        tmp_path, "legacy text\n", filename="old-name.md"
+    )
+    prepared = _prepare(tmp_path, report, "legacy text")
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared),
+    )
+
+    assert Path(result["report_path"]).name == "old-name-v2.md"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda provenance: provenance.pop("version_number"),
+        lambda provenance: provenance.__setitem__("version_number", True),
+        lambda provenance: provenance.__setitem__("version_base_stem", "unsafe/name"),
+    ],
+)
+def test_commit_rejects_partial_or_invalid_explicit_version_metadata(
+    tmp_path, mutate
+):
+    report, provenance = _write_document(tmp_path, "original\n")
+    mutate(provenance)
+    report.with_suffix(".provenance.json").write_text(
+        json.dumps(provenance, ensure_ascii=False), encoding="utf-8"
+    )
+    prepared = _prepare(tmp_path, report, "original")
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared),
+        )
+
+    assert caught.value.code == "INVALID_PROVENANCE"
+    assert str(caught.value) == "report artifact versioning failed"
+
+
+def test_commit_rejects_invalid_same_document_sibling(tmp_path):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+    (tmp_path / "broken-v9.provenance.json").write_text(
+        json.dumps(
+            {
+                "document_id": "doc_test",
+                "version_number": True,
+                "version_base_stem": "report",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared),
+        )
+
+    assert caught.value.code == "INVALID_PROVENANCE"
+    assert str(caught.value) == "report artifact versioning failed"
+
+
+def test_commit_ignores_unrelated_document_sibling_version(tmp_path):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+    (tmp_path / "unrelated-v99.provenance.json").write_text(
+        json.dumps(
+            {
+                "document_id": "doc_other",
+                "version_number": True,
+                "version_base_stem": "unsafe/name",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared),
+    )
+
+    assert Path(result["report_path"]).name == "report-v2.md"
+
+
+@pytest.mark.parametrize(
+    "allocation_error",
+    [
+        OSError("raw filesystem detail"),
+        json.JSONDecodeError("raw json detail", "x", 0),
+    ],
+)
+def test_commit_maps_allocation_failures_to_stable_provenance_error(
+    tmp_path, monkeypatch, allocation_error
+):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+
+    def fail_allocation(*_args, **_kwargs):
+        raise allocation_error
+
+    monkeypatch.setattr(rewrite_module, "allocate_next_paths", fail_allocation)
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared),
+        )
+
+    assert caught.value.code == "INVALID_PROVENANCE"
+    assert str(caught.value) == "report artifact versioning failed"
+    assert "raw" not in str(caught.value)
+
+
+def test_commit_publishes_provenance_before_markdown(tmp_path, monkeypatch):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+    real_publish = rewrite_module._publish_create
+    published = []
+
+    def record_publish(path, payload):
+        published.append(path)
+        return real_publish(path, payload)
+
+    monkeypatch.setattr(rewrite_module, "_publish_create", record_publish)
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared),
+    )
+
+    assert published == [
+        Path(result["provenance_path"]),
+        Path(result["report_path"]),
+    ]
+
+
+def test_commit_retries_markdown_publication_collision_without_overwrite(
+    tmp_path, monkeypatch
+):
+    report, _ = _write_document(tmp_path, "original\n")
+    parent_markdown = report.read_bytes()
+    parent_provenance = report.with_suffix(".provenance.json").read_bytes()
+    prepared = _prepare(tmp_path, report, "original")
+    real_publish = rewrite_module._publish_create
+    raced = False
+
+    def collide_once(path, payload):
+        nonlocal raced
+        if path.name == "report-v2.md" and not raced:
+            raced = True
+            path.write_bytes(b"concurrent markdown")
+        return real_publish(path, payload)
+
+    monkeypatch.setattr(rewrite_module, "_publish_create", collide_once)
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared),
+    )
+
+    assert Path(result["report_path"]).name == "report-v3.md"
+    assert (tmp_path / "report-v2.md").read_bytes() == b"concurrent markdown"
+    assert not (tmp_path / "report-v2.provenance.json").exists()
+    assert report.read_bytes() == parent_markdown
+    assert report.with_suffix(".provenance.json").read_bytes() == parent_provenance
+
+
+def test_commit_publication_failure_preserves_concurrent_content_and_parent(
+    tmp_path, monkeypatch
+):
+    report, _ = _write_document(tmp_path, "original\n")
+    parent_markdown = report.read_bytes()
+    parent_provenance = report.with_suffix(".provenance.json").read_bytes()
+    prepared = _prepare(tmp_path, report, "original")
+    real_publish = rewrite_module._publish_create
+
+    def fail_markdown_after_provenance(path, payload):
+        if path.name == "report-v2.md":
+            provenance_path = path.with_suffix(".provenance.json")
+            provenance_path.unlink()
+            provenance_path.write_bytes(b"concurrent provenance")
+            raise OSError(errno.EIO, "raw publication detail")
+        return real_publish(path, payload)
+
+    monkeypatch.setattr(
+        rewrite_module, "_publish_create", fail_markdown_after_provenance
+    )
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared),
+        )
+
+    assert caught.value.code == "INVALID_PROVENANCE"
+    assert str(caught.value) == "report artifact versioning failed"
+    assert not (tmp_path / "report-v2.md").exists()
+    assert (tmp_path / "report-v2.provenance.json").read_bytes() == (
+        b"concurrent provenance"
+    )
+    assert report.read_bytes() == parent_markdown
+    assert report.with_suffix(".provenance.json").read_bytes() == parent_provenance
