@@ -483,6 +483,30 @@ def test_swarm_skill_retrieval_tools_use_global_skill_manager(
     assert calls == [None]
 
 
+def test_swarm_skill_retrieval_uses_context_team_skills_when_team_links_are_unavailable(
+    tmp_path: Path,
+) -> None:
+    """HarmonyOS copied team mounts remain visible without symlink metadata."""
+    member_skills = tmp_path / "member-workspace" / "skills"
+    team_skills = tmp_path / "team-workspace" / "skills"
+    skill_dir = team_skills / "demo-skill"
+    member_skills.mkdir(parents=True)
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo", encoding="utf-8")
+
+    workspace = SimpleNamespace(
+        get_node_path=lambda _node: member_skills,
+        list_team_links=lambda: [],
+    )
+    ctx = SwarmBuildContext(
+        mode="team",
+        workspace=workspace,
+        team_skills_dir=str(team_skills),
+    )
+
+    assert tools.visible_skill_names_for_list_skill(ctx) == {"demo-skill"}
+
+
 def test_swarm_skill_retrieval_prompt_uses_global_skill_manager(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
