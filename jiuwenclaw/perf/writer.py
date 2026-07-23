@@ -9,7 +9,11 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.utils import get_agent_sessions_dir
+from jiuwenclaw.utils import (
+    get_agent_sessions_dir,
+    normalize_tenant_scope_id,
+    resolve_tenant_sessions_dir,
+)
 from jiuwenclaw.perf.guard import run_perf_safe
 
 logger = logging.getLogger(__name__)
@@ -20,8 +24,33 @@ _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 
 
-def request_summaries_file(session_id: str, sessions_root: str | None = None) -> Path:
-    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+def _resolve_sessions_root(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    sessions_root: str | None = None,
+) -> Path:
+    if sessions_root:
+        return Path(sessions_root)
+    if service_id is not None or agent_id is not None:
+        sid = normalize_tenant_scope_id(service_id)
+        aid = normalize_tenant_scope_id(agent_id)
+        return resolve_tenant_sessions_dir(sid, aid)
+    return get_agent_sessions_dir()
+
+
+def request_summaries_file(
+    session_id: str,
+    sessions_root: str | None = None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    root = _resolve_sessions_root(
+        service_id=service_id,
+        agent_id=agent_id,
+        sessions_root=sessions_root,
+    )
     session_dir = root / (session_id or "default")
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir / "request_summaries.jsonl"
@@ -83,10 +112,17 @@ def append_request_summary(
     summary: dict[str, Any],
     *,
     sessions_root: str | None = None,
+    service_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """Append one request summary line to request_summaries.jsonl."""
     sid = (session_id or "default").strip() or "default"
-    path = request_summaries_file(sid, sessions_root)
+    path = request_summaries_file(
+        sid,
+        sessions_root,
+        service_id=service_id,
+        agent_id=agent_id,
+    )
     _ensure_worker_started()
     try:
         _WRITE_QUEUE.put_nowait((path, summary))

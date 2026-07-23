@@ -216,10 +216,6 @@ def test_engine_checks_unconfigured_tools_via_file_guard(monkeypatch):
 def test_engine_relaxes_guard_ask_when_action_aligned_paths_cleared(monkeypatch, tmp_path):
     """管线 A 仅 DENY 时：workspace 内读路径由管线 B 放行 → 直接 ALLOW（无 tier ASK，故无 relax 后缀）。"""
     _config_dir_with_builtin(_tmp_dir("relax-fg-aligned"), monkeypatch, [])
-    monkeypatch.setattr(
-        "jiuwenclaw.utils.get_agent_workspace_dir",
-        lambda: str(tmp_path),
-    )
     cfg = {
         "enabled": True,
         "tools": {},
@@ -229,6 +225,7 @@ def test_engine_relaxes_guard_ask_when_action_aligned_paths_cleared(monkeypatch,
         },
     }
     engine = PermissionEngine(config=cfg)
+    engine._file_guard._workspace_root = tmp_path
     p = tmp_path / "a.txt"
     p.write_text("ok", encoding="utf-8")
     perm, mr, _, _ = engine.evaluate_global_policy_with_details(

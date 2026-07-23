@@ -7,12 +7,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import os
 import re
 from html import unescape
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 from jiuwenclaw.agentserver.tools.web_search.http_client import http_request
+from jiuwenclaw.local_env_config import read_env_if_set
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +25,10 @@ _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
 
 
 def _env_flag(name: str, *, default: bool = True) -> bool:
-    raw = os.environ.get(name, "").strip().lower()
-    if not raw:
+    raw = read_env_if_set(name)
+    if raw is None or not str(raw).strip():
         return default
-    return raw not in {"false", "0", "no", "off"}
+    return str(raw).strip().lower() not in {"false", "0", "no", "off"}
 
 
 def _free_search_engines() -> list[tuple[str, object]]:

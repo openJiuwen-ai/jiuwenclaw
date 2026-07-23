@@ -157,6 +157,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
         self._deep_agent: Optional[Any] = None
         self._fork_agent_executor: Optional["ForkAgentExecutor"] = None
         self._skill_turbo_adapter: Optional[Any] = None
+        self._checkpointer: Optional[Any] = None
         self._pause_event = asyncio.Event()
         self._pause_event.set()
         self._abort_requested = False
@@ -173,6 +174,10 @@ class JiuClawStreamEventRail(DeepAgentRail):
     def set_skill_turbo_adapter(self, adapter: Optional[Any]) -> None:
         """Bind the adapter instance for skill_turbo tool."""
         self._skill_turbo_adapter = adapter
+
+    def set_checkpointer(self, checkpointer: Optional[Any]) -> None:
+        """Bind tenant-scoped checkpointer for early checkpoint saves."""
+        self._checkpointer = checkpointer
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -279,7 +284,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
         try:
             await context_engine.save_contexts(actual_session)
             inner = getattr(actual_session, "_inner", actual_session)
-            await CheckpointerFactory.get_checkpointer().post_agent_execute(inner)
+            cp = self._checkpointer if self._checkpointer is not None else CheckpointerFactory.get_checkpointer()
+            await cp.post_agent_execute(inner)
             ctx.extra[_EARLY_CHECKPOINT_EXTRA_KEY] = True
             sid = ""
             gs = getattr(actual_session, "get_session_id", None)

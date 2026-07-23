@@ -13,6 +13,12 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar
 
+from jiuwenclaw.local_env_config import (
+    apply_env_overrides_to_active,
+    effective_tip,
+    get_local_config,
+    set_os_environ,
+)
 from jiuwenclaw.agentserver.session_history import (
     enrich_history_messages_session_id,
     read_history_records_for_frontend,
@@ -24,7 +30,7 @@ from jiuwenclaw.utils import (
     FileTransferStartParams,
     get_agent_sessions_dir,
     get_config_file,
-    get_multi_tenant_user_workspace_dir,
+    resolve_tenant_sessions_dir,
 )
 from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
 from jiuwenclaw.e2a.constants import (
@@ -48,6 +54,7 @@ from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseCh
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
 from jiuwenclaw.extensions.types import WsHandlerContext
 from jiuwenclaw.agentserver.extensions import get_rail_manager
+from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
 from jiuwenclaw.agentserver.permissions.patterns import persist_cli_trusted_directory
 from jiuwenclaw.schema.hooks_context import (
     AgentServerChatHookContext,
@@ -110,6 +117,12 @@ def _mask_query_for_log(data: dict[str, Any]) -> dict[str, Any]:
     return {**data, "params": masked_params}
 
 
+def _sessions_dir_for_request(request: AgentRequest) -> Path:
+    """Resolve tenant sessions root from request agent_id/service_id."""
+    agent_id, service_id = TenantAgentPool.extract_ids(request)
+    return resolve_tenant_sessions_dir(service_id, agent_id)
+
+
 def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
     """将 Gateway 发送的 JSON 载荷解析为 AgentRequest."""
     from jiuwenclaw.schema.message import ReqMethod
@@ -127,6 +140,8 @@ def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
         is_stream=data.get("is_stream", False),
         timestamp=data.get("timestamp", 0.0),
         metadata=data.get("metadata"),
+        agent_id=data.get("agent_id"),
+        service_id=data.get("service_id"),
     )
 
 
@@ -648,6 +663,14 @@ class AgentWebSocketServer:
                            extra={'user_visible': 'progress'})
                 await self._handle_agent_reload_config(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.SYNC_AGENTS_CONFIGS:
+                logger.info(
+                    "[AgentWebSocketServer] 处理 sync_agents_configs: request_id=%s",
+                    request.request_id,
+                    extra={'user_visible': 'progress'},
+                )
+                await self._handle_sync_agents_configs(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.EXTENSIONS_LIST:
                 logger.info(f"[AgentWebSocketServer] 处理 extensions.list: request_id={request.request_id}",
                            extra={'user_visible': 'progress'})
@@ -937,8 +960,7 @@ class AgentWebSocketServer:
         from jiuwenclaw.agentserver.session_metadata import get_session_metadata
 
         # extract_ids 现在总是返回有效值（默认或指定的 tenant ID）
-        agent_id, service_id = TenantAgentPool.extract_ids(request)
-        sessions_dir = get_multi_tenant_user_workspace_dir(service_id, agent_id) / "agent" / "sessions"
+        sessions_dir = _sessions_dir_for_request(request)
         sessions = []
 
         try:
@@ -946,7 +968,7 @@ class AgentWebSocketServer:
                 for entry in sorted(sessions_dir.iterdir(), key=lambda e: e.stat().st_mtime, reverse=True):
                     if not entry.is_dir():
                         continue
-                    meta = get_session_metadata(entry.name)
+                    meta = get_session_metadata(entry.name, sessions_root=sessions_dir)
                     if not meta:
                         meta = {
                             "session_id": entry.name,
@@ -980,6 +1002,7 @@ class AgentWebSocketServer:
             request.params,
             sid,
             init_channel_id=ch,
+            sessions_root=_sessions_dir_for_request(request),
         )
         if ok:
             resp = AgentResponse(
@@ -1019,7 +1042,11 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
-        data = self.get_conversation_history(session_id=session_id, page_idx=page_idx)
+        data = self.get_conversation_history(
+            session_id=session_id,
+            page_idx=page_idx,
+            sessions_root=_sessions_dir_for_request(request),
+        )
         if data is None:
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -1042,7 +1069,11 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
-        data = self.get_conversation_history(session_id=session_id, page_idx=page_idx)
+        data = self.get_conversation_history(
+            session_id=session_id,
+            page_idx=page_idx,
+            sessions_root=_sessions_dir_for_request(request),
+        )
         if data is None:
             err_chunk = AgentResponseChunk(
                 request_id=request.request_id,
@@ -1163,14 +1194,15 @@ class AgentWebSocketServer:
     async def _handle_command_ls(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from datetime import datetime
         from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
-        from jiuwenclaw.utils import get_agent_sessions_dir
         logger.info("[AgentWebSocketServer] command.ls %s", request.params)
         try:
             params = request.params or {}
             relative_path = str(params.get("path", ".")).strip()
 
             session_id = request.session_id or "default"
-            workspace_dir = Path(get_resolved_project_dir(session_id, get_agent_sessions_dir()))
+            workspace_dir = Path(
+                get_resolved_project_dir(session_id, _sessions_dir_for_request(request))
+            )
             logger.info("[AgentWebSocketServer] command.ls workspace_dir: %s", workspace_dir)
             target_path = (workspace_dir / relative_path).resolve()
             logger.info("[AgentWebSocketServer] command.ls target_path: %s", target_path)
@@ -1231,7 +1263,6 @@ class AgentWebSocketServer:
 
     async def _handle_command_view(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
-        from jiuwenclaw.utils import get_agent_sessions_dir
         logger.info("[AgentWebSocketServer] command.view %s", request.params)
         try:
             params = request.params or {}
@@ -1252,7 +1283,9 @@ class AgentWebSocketServer:
                 return
 
             session_id = request.session_id or "default"
-            workspace_dir = Path(get_resolved_project_dir(session_id, get_agent_sessions_dir()))
+            workspace_dir = Path(
+                get_resolved_project_dir(session_id, _sessions_dir_for_request(request))
+            )
             target_path = (workspace_dir / relative_path).resolve()
 
             try:
@@ -1367,8 +1400,13 @@ class AgentWebSocketServer:
 
         try:
             session_id = request.session_id or "default"
+            agent_id, service_id = TenantAgentPool.extract_ids(request)
             diff_service = get_diff_service()
-            turns = diff_service.get_turn_diffs(session_id)
+            turns = diff_service.get_turn_diffs(
+                session_id,
+                service_id=service_id,
+                agent_id=agent_id,
+            )
 
             logger.info(
                 "[AgentWebSocketServer] command.diff response: session_id=%s turns=%s",
@@ -1399,6 +1437,17 @@ class AgentWebSocketServer:
 
     async def _handle_command_model(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
+            if request.channel_id == "officeclaw":
+                guard = TenantAgentPool.require_officeclaw_agent(request)
+                if guard is not None:
+                    resp = guard
+                    wire = encode_agent_response_for_wire(
+                        resp, response_id=request.request_id
+                    )
+                    async with send_lock:
+                        await ws.send(json.dumps(wire, ensure_ascii=False))
+                    return
+
             params = request.params or {}
             action = params.get("action")
 
@@ -1429,9 +1478,19 @@ class AgentWebSocketServer:
                         payload={"error": "No env_updates provided"},
                     )
                 else:
+                    agent_id, service_id = TenantAgentPool.extract_ids(request)
+                    apply_env_overrides_to_active(
+                        env_updates,
+                        service_id=service_id,
+                        agent_id=agent_id,
+                    )
                     for k, v in env_updates.items():
-                        os.environ[k] = v
-                    logger.info("[command.model] os.environ 已更新, MODEL_NAME=%s", os.getenv("MODEL_NAME", "unknown"))
+                        set_os_environ(
+                            k, v, service_id=service_id, agent_id=agent_id
+                        )
+                    tip = effective_tip(service_id, agent_id)
+                    model_name = str(tip.get("MODEL_NAME") or "unknown")
+                    logger.info("[command.model] tip 已更新, MODEL_NAME=%s", model_name)
 
                     try:
                         from jiuwenclaw.agentserver.memory.config import clear_config_cache
@@ -1441,30 +1500,44 @@ class AgentWebSocketServer:
                         logger.debug("[command.model] clear_config_cache skipped: %s", e)
 
                     try:
-                        await self._agent_manager.reload_agents_config(None, env_updates)
+                        await self._agent_manager.reload_tenant_config(
+                            agent_id,
+                            service_id,
+                            None,
+                            env_updates,
+                        )
                         logger.info("[command.model] agent config 已重载")
                     except Exception as e:
-                        logger.debug("[command.model] reload_agents_config skipped: %s", e)
+                        logger.debug("[command.model] reload_tenant_config skipped: %s", e)
 
+                    current = str(
+                        effective_tip(service_id, agent_id).get("MODEL_NAME") or "unknown"
+                    )
                     resp = AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
                         ok=True,
                         payload={
-                            "current": os.getenv("MODEL_NAME", "unknown"),
+                            "current": current,
                             "requested": target,
                             "type": "switched",
                             "applied": True,
                         },
                     )
-                    logger.info("[command.model] 切换完成: current=%s", os.getenv("MODEL_NAME", "unknown"))
+                    logger.info("[command.model] 切换完成: current=%s", current)
 
             else:
+                agent_id, service_id = TenantAgentPool.extract_ids(request)
+                current = str(
+                    effective_tip(service_id, agent_id).get("MODEL_NAME")
+                    or get_local_config("MODEL_NAME", "unknown")
+                    or "unknown"
+                )
                 resp = AgentResponse(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
                     ok=True,
-                    payload={"current": os.getenv("MODEL_NAME", "unknown"), "available": ["default-model"]},
+                    payload={"current": current, "available": ["default-model"]},
                 )
 
         except Exception as e:  # noqa: BLE001
@@ -1560,9 +1633,15 @@ class AgentWebSocketServer:
 
     async def _handle_browser_runtime_restart(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
-            from openjiuwen.harness.tools.browser_move import restart_local_browser_runtime_server
+            from jiuwenclaw.agentserver.tools.browser_tools import (
+                restart_local_browser_runtime_server,
+            )
 
-            result = restart_local_browser_runtime_server()
+            agent_id, service_id = TenantAgentPool.extract_ids(request)
+            result = restart_local_browser_runtime_server(
+                service_id=service_id,
+                agent_id=agent_id,
+            )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -1636,12 +1715,37 @@ class AgentWebSocketServer:
                 log_agent_config_hot_reload,
                 summarize_reload_payload,
             )
+            if request.channel_id == "officeclaw":
+                guard = TenantAgentPool.require_officeclaw_agent(request)
+                if guard is not None:
+                    resp = guard
+                    wire = encode_agent_response_for_wire(
+                        resp, response_id=request.request_id
+                    )
+                    async with send_lock:
+                        await ws.send(json.dumps(wire, ensure_ascii=False))
+                    return
 
-            aggregate = await self._agent_manager.reload_agents_config(
-                config=config_payload,
-                env=env_overrides,
-                reload_trace_id=reload_trace_id,
-            )
+            raw_agent = getattr(request, "agent_id", None)
+            agent_id, service_id = TenantAgentPool.extract_ids(request)
+
+            if (
+                request.channel_id == "officeclaw"
+                or (raw_agent is not None and str(raw_agent).strip())
+            ):
+                aggregate = await self._agent_manager.reload_tenant_config(
+                    agent_id,
+                    service_id,
+                    config=config_payload,
+                    env=env_overrides,
+                    reload_trace_id=reload_trace_id,
+                )
+            else:
+                aggregate = await self._agent_manager.reload_agents_config(
+                    config=config_payload,
+                    env=env_overrides,
+                    reload_trace_id=reload_trace_id,
+                )
             payload = aggregate.to_payload()
             log_agent_config_hot_reload(
                 logger,
@@ -1681,10 +1785,63 @@ class AgentWebSocketServer:
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
+    async def _handle_sync_agents_configs(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        from jiuwenclaw.schema.message import EventType
+
+        params = request.params if isinstance(request.params, dict) else {}
+        try:
+            payload = await self._agent_manager.sync_agents_configs(params)
+            agents = payload.get("agents") if isinstance(payload, dict) else []
+            all_ok = (
+                isinstance(agents, list)
+                and all(isinstance(item, dict) and item.get("ok") for item in agents)
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=all_ok,
+                payload={
+                    "event_type": EventType.SYNC_AGENTS_CONFIGS_RESULT.value,
+                    **payload,
+                },
+            )
+        except ValueError as exc:
+            logger.warning(
+                "[AgentWebSocketServer] sync_agents_configs rejected: %s", exc
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "event_type": EventType.SYNC_AGENTS_CONFIGS_RESULT.value,
+                    "error": str(exc),
+                },
+            )
+        except Exception as exc:
+            logger.exception(
+                "[AgentWebSocketServer] sync_agents_configs failed: %s", exc
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "event_type": EventType.SYNC_AGENTS_CONFIGS_RESULT.value,
+                    "error": str(exc),
+                },
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
     async def _handle_extensions_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """获取所有 Rail 扩展列表."""
         try:
-            manager = get_rail_manager()
+            manager = get_rail_manager(RuntimeScopeKey.from_request(request))
             extensions = manager.list_extensions()
 
             resp = AgentResponse(
@@ -1719,7 +1876,7 @@ class AgentWebSocketServer:
             if not source_path.exists() or not source_path.is_dir():
                 raise ValueError(f"文件夹不存在或不是目录: {folder_path}")
 
-            manager = get_rail_manager()
+            manager = get_rail_manager(RuntimeScopeKey.from_request(request))
             extension = manager.import_extension(folder_path)
 
             resp = AgentResponse(
@@ -1750,7 +1907,7 @@ class AgentWebSocketServer:
             if not name:
                 raise ValueError("缺少 name 参数")
 
-            manager = get_rail_manager()
+            manager = get_rail_manager(RuntimeScopeKey.from_request(request))
             manager.delete_extension(name)
 
             resp = AgentResponse(
@@ -1784,7 +1941,7 @@ class AgentWebSocketServer:
             if enabled is None:
                 raise ValueError("缺少 enabled 参数")
 
-            manager = get_rail_manager()
+            manager = get_rail_manager(RuntimeScopeKey.from_request(request))
 
             # 1. 确保 agent 实例已设置（用于热更新）
             agent = self._agent_manager.get_agent_nowait()
@@ -1904,6 +2061,16 @@ class AgentWebSocketServer:
                     chunk_size=params.get("chunk_size", 65536),
                     mime_type=params.get("mime_type", ""),
                     session_id=request.session_id or "",
+                    service_id=str(
+                        params.get("service_id")
+                        or getattr(request, "service_id", None)
+                        or ""
+                    ),
+                    agent_id=str(
+                        params.get("agent_id")
+                        or getattr(request, "agent_id", None)
+                        or ""
+                    ),
                 )
                 result = await ft_manager.handle_transfer_start(ft_params)
             elif event_type == FILE_TRANSFER_CHUNK:
@@ -1952,14 +2119,20 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
             
     @staticmethod
-    def get_conversation_history(session_id: str, page_idx: int) -> dict[str, Any] | None:
+    def get_conversation_history(
+        session_id: str,
+        page_idx: int,
+        *,
+        sessions_root: str | Path | None = None,
+    ) -> dict[str, Any] | None:
         # 按照 session_id 和分页消息获取历史记录
         if not isinstance(session_id, str) or not session_id.strip():
             return None
         if not isinstance(page_idx, int) or page_idx <= 0:
             return None
 
-        history_path: Path = get_agent_sessions_dir() / session_id.strip() / "history.json"
+        root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+        history_path: Path = root / session_id.strip() / "history.json"
         if not history_path.exists():
             return None
         try:
@@ -2129,7 +2302,7 @@ class AgentWebSocketServer:
                         payload={"error": "invalid session_id", "code": "BAD_REQUEST"},
                     )
                 else:
-                    workspace_session_dir = get_agent_sessions_dir()
+                    workspace_session_dir = _sessions_dir_for_request(request)
                     session_dir = resolve_session_dir_under_root(workspace_session_dir, safe_sid)
                     if session_dir is None:
                         resp = AgentResponse(

@@ -56,7 +56,12 @@ from jiuwenclaw.utils import (
     get_multi_tenant_user_workspace_dir,
 )
 from jiuwenclaw.version import __version__
-from jiuwenclaw.local_env_config import decrypt, encrypt
+from jiuwenclaw.local_env_config import (
+    decrypt,
+    encrypt,
+    mirror_bare_business_env_to_default_ns,
+    set_os_environ,
+)
 
 apply_openai_model_client_patch()
 
@@ -69,6 +74,8 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = get_root_dir()
 _ENV_FILE = get_env_file()
 load_dotenv(dotenv_path=_ENV_FILE)
+# Idempotent with app_gateway / app_agentserver; ensures get_default_models sees ns tip.
+mirror_bare_business_env_to_default_ns()
 
 
 def _resolve_env_var_str(value: str) -> str:
@@ -297,6 +304,7 @@ class WebHandlersBindParams:
     on_config_saved: Any = None
     heartbeat_service: Any = None
     cron_controller: Any = None
+    cron_registry: Any = None
     updater_service: WindowsUpdaterService | None = None
 
 
@@ -316,6 +324,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     on_config_saved = bind.on_config_saved
     heartbeat_service = bind.heartbeat_service
     cron_controller = bind.cron_controller
+    cron_registry = bind.cron_registry or bind.cron_controller
     updater_service = bind.updater_service
 
     from jiuwenclaw.schema.message import Message, EventType
@@ -557,6 +566,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         for env_key, value in env_updates.items():
             os.environ[env_key] = encrypt(env_key, value)
+            set_os_environ(env_key, value)
         applied_without_restart = True
 
         if env_updates:
@@ -1877,11 +1887,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     # ----- cron jobs -----
 
-    def _get_cron():
-        return _resolve(cron_controller)
+    def _get_cron_registry():
+        return _resolve(cron_registry)
+
+    def _cron_tenant_scope(params: Any) -> tuple[str, str]:
+        from jiuwenclaw.utils import resolve_cron_tenant_scope
+
+        p = params if isinstance(params, dict) else {}
+        return resolve_cron_tenant_scope(params=p, log_prefix="[WebCron]")
+
+    async def _cron_context(params: Any):
+        reg = _get_cron_registry()
+        if reg is None:
+            return None, None, None, None
+        sid, aid = _cron_tenant_scope(params)
+        if hasattr(reg, "get_controller"):
+            cc = await reg.get_controller(sid, aid)
+            return reg, cc, sid, aid
+        return reg, reg, sid, aid
 
     async def _cron_job_list(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1889,7 +1915,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload={"jobs": jobs})
 
     async def _cron_job_get(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1907,7 +1933,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload={"job": job})
 
     async def _cron_job_create(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1915,13 +1941,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         try:
-            job = await cc.create_job(params)
+            if hasattr(reg, "web_create_job"):
+                job = await reg.web_create_job(params, sid, aid)
+            else:
+                job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except Exception as e:  # noqa: BLE001
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
     async def _cron_job_update(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1937,7 +1966,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
             return
         try:
-            job = await cc.update_job(job_id, patch)
+            if hasattr(reg, "web_update_job"):
+                job = await reg.web_update_job(job_id, patch, sid, aid)
+            else:
+                job = await cc.update_job(job_id, patch)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
@@ -1945,7 +1977,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
     async def _cron_job_delete(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1956,14 +1988,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        deleted = await cc.delete_job(job_id)
+        if hasattr(reg, "web_delete_job"):
+            deleted = await reg.web_delete_job(job_id, sid, aid)
+        else:
+            deleted = await cc.delete_job(job_id)
         if not deleted:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
         await channel.send_response(ws, req_id, ok=True, payload={"deleted": True})
 
     async def _cron_job_toggle(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1979,13 +2014,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="enabled is required", code="BAD_REQUEST")
             return
         try:
-            job = await cc.toggle_job(job_id, bool(enabled))
+            if hasattr(reg, "web_toggle_job"):
+                job = await reg.web_toggle_job(job_id, bool(enabled), sid, aid)
+            else:
+                job = await cc.toggle_job(job_id, bool(enabled))
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
 
     async def _cron_job_preview(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -2006,7 +2044,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
     async def _cron_job_run_now(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return

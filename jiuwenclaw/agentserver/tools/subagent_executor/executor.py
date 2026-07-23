@@ -32,10 +32,15 @@ from jiuwenclaw.agentserver.tools.subagent_models import (
 )
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_subagent_base_prompt
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawContextEngineeringRail
+from jiuwenclaw.agentserver.deep_agent.rails.recent_tool_results_rail import (
+    RecentToolResultsRail,
+)
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
-    get_agent_workspace_dir,
     logger,
+    resolve_tenant_agent_root_dir,
+    resolve_tenant_agent_workspace_dir,
+    resolve_tenant_env_ns_from_agent,
 )
 from jiuwenclaw.config import get_config
 
@@ -433,8 +438,7 @@ class ForkAgentExecutor:
             agent_id=agent_id or "",
         )
 
-    @staticmethod
-    def _resolve_subagent_workspace_dir() -> tuple[str, str]:
+    def _resolve_subagent_workspace_dir(self) -> tuple[str, str]:
         """Resolve context root for fork/spawn subagent.
 
         Context storage (session_memory, offload) goes to agent root,
@@ -443,15 +447,19 @@ class ForkAgentExecutor:
 
         File operations still use cwd (effective_project_dir) inherited from parent.
         """
-        root = str(get_agent_workspace_dir())
+        tenant_ids = resolve_tenant_env_ns_from_agent(self._parent_agent)
+        if tenant_ids is not None:
+            root = str(resolve_tenant_agent_root_dir(*tenant_ids))
+            return (root, f"tenant({tenant_ids[0]},{tenant_ids[1]})")
+        root = str(resolve_tenant_agent_root_dir())
         root_path = Path(root)
         if root_path.exists() and root_path.is_dir():
-            return (root, "get_agent_workspace_dir()")
+            return (root, "resolve_tenant_agent_root_dir()")
         logger.warning(
             "[Subagent] Agent root path does not exist or not a directory: '%s'",
             root
         )
-        return (root, "get_agent_workspace_dir()")
+        return (root, "resolve_tenant_agent_root_dir()")
 
     @staticmethod
     def _resolve_subagent_working_dir() -> str:
@@ -463,7 +471,7 @@ class ForkAgentExecutor:
         req_ws = get_effective_request_workspace_dir()
         if isinstance(req_ws, str) and req_ws.strip():
             return req_ws.strip()
-        return str(get_agent_workspace_dir())
+        return str(resolve_tenant_agent_workspace_dir())
 
     def _resolve_subagent_max_iterations(self) -> int:
         """Use parent DeepAgent's max_iterations; then react.max_iterations; then default.
@@ -1016,14 +1024,9 @@ Approach each task methodically and deliver high-quality results.
                 parent_session=parent_session,
                 workspace=workspace_obj,  # Pass workspace for artifact path detection
             ),
-            self._build_thinking_inject_rail(
-                task.thinking,
-                model or self._model,
-                role_id=getattr(task, "role_id", "") or "",
-                agent_id=getattr(task, "task_id", "") or "",
-            ),
-            # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
-            # include_tools=False：read_file/code/bash 已由 FileSystemRail 注册；
+            RecentToolResultsRail(parent_session=parent_session),
+            # active-skill body 的 lift/pin 由 rail.after_tool_call 触发;
+            # include_tools=False：read_file/code/bash 已由 FileSystemRail 注册;
             # include_skill_body_tools=True：子代理自行注册 skill_tool/skill_complete，
             # 不依赖父 agent 的 SkillUseRail 是否已初始化。
             # 子类版本跳过 before_model_call 的"# 技能"列表渲染（父 prompt 已指明）。

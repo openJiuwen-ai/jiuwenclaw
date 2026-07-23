@@ -91,6 +91,17 @@ from openjiuwen.core.runner.callback import AbortError as _SkillTurboAbortError
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.signal import SignalDetector
 try:
+    from openjiuwen.agent_evolving.skill_self_evolution import resolve_skill_evolution_action
+except ImportError:
+    def resolve_skill_evolution_action(  # type: ignore[misc]
+        skill_name: str,
+        *,
+        default_auto_save: bool = True,
+        **_kwargs: Any,
+    ) -> str:
+        """Fallback when agent-core lacks skill_self_evolution."""
+        return "auto" if default_auto_save else "suggest"
+try:
     from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
     from openjiuwen.harness.rails.evolution.commands import build_rebuild_command_prompt
 except ImportError:
@@ -127,6 +138,7 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     AskUserQuestionRegistry,
     ask_user_question_request_scope,
 )
+from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
 from jiuwenclaw.agentserver.llm_io_trace import (
     begin_llm_trace_event,
     end_llm_trace_event,
@@ -202,6 +214,9 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     SkillProtocolPromptRail,
     TaskExecutionRail,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.recent_tool_results_rail import (
+    RecentToolResultsRail,
+)
 from jiuwenclaw.agentserver.deep_agent.rails.context_engineering_rail_ext import (
     normalize_identify_override,
     normalize_soul_override,
@@ -241,14 +256,21 @@ from jiuwenclaw.agentserver.reload_result import (
     embed_config_fingerprint,
     env_touches_memory,
     env_touches_shared_skills_dirs,
+    env_touches_task_memory,
     memory_cache_fingerprint,
 )
 from jiuwenclaw.local_env_config import (
+    bind_agent_env_ns,
     bind_task_env_overlay,
     build_effective_env_overlay,
-    get_staged_env,
+    effective_tip,
+    get_local_config,
+    get_task_env_overlay,
+    promote_staged_env,
     read_env,
+    reset_agent_env_ns,
     reset_task_env_overlay,
+    set_os_environ,
 )
 from jiuwenclaw.agentserver.memory.external_memory_config import (
     get_memory_engine,
@@ -257,8 +279,14 @@ from jiuwenclaw.agentserver.memory.external_memory_config import (
 )
 from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
                                                   is_proactive_memory)
-from jiuwenclaw.agentserver.memory.manager import clear_memory_manager_cache
-from jiuwenclaw.agentserver.tools.task_tools import clear_task_memory_service
+from jiuwenclaw.agentserver.memory.manager import (
+    invalidate_memory_manager_cache,
+    invalidate_memory_wiki_manager_cache,
+)
+from jiuwenclaw.agentserver.tools.task_tools import (
+    clear_task_memory_service,
+    task_memory_config_fingerprint,
+)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import (
@@ -268,8 +296,10 @@ from jiuwenclaw.agentserver.skill_manager import (
     resolve_string_or_list_config,
 )
 from jiuwenclaw.agentserver.tools.memory_tools import (
+    bind_memory_agent_id,
     init_memory_manager_async,
     get_decorated_tools,
+    reset_memory_agent_id,
 )
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -1230,13 +1260,20 @@ class JiuWenClawDeepAdapter:
         workspace_dir: str | None = None,
         agent_id: str | None = None,
         service_id: str | None = None,
+        *,
+        env_agent_id: str | None = None,
+        env_service_id: str | None = None,
     ) -> None:
         _apply_llm_io_trace_patch()
         self._instance: DeepAgent | None = None
-        self._workspace_dir: str = workspace_dir or str(get_agent_root_dir())
+        self._workspace_dir: str = workspace_dir or str(get_agent_workspace_dir())
         self._agent_name: str = "main_agent"
         self._agent_id = agent_id
         self._service_id = service_id
+        self._env_agent_id = env_agent_id if env_agent_id is not None else agent_id
+        self._env_service_id = (
+            env_service_id if env_service_id is not None else service_id
+        )
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False
         self._video_tool_registered: bool = False
@@ -1245,6 +1282,7 @@ class JiuWenClawDeepAdapter:
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
         self._config_cache: dict[str, Any] = {}
+        self._latest_config_base: dict[str, Any] | None = None
         self._filesystem_rail: FileSystemRail | None = None
         self._skill_rail: JiuWenSkillUseRail | None = None
         self._qualified_memory_tool_ids: list[str] = []
@@ -1273,6 +1311,7 @@ class JiuWenClawDeepAdapter:
         self._pending_follow_ups: set[asyncio.Task] = set()
         self._subagent_rail: SubagentRail | None = None
         self._disabled_tools_rail: DisabledToolsRail | None = None
+        self._checkpointer: Any | None = None
         self._progressive_tool_rail: JiuWenProgressiveToolRail | None = None
         self._qa_block_freeze_rail: JiuClawQABlockFreezeRail | None = None
         self._qa_block_assembly_rail: JiuClawQABlockAssemblyRail | None = None
@@ -1311,18 +1350,24 @@ class JiuWenClawDeepAdapter:
         self._pending_evolution_summary_by_session: dict[str, str] = {}
         # Skills that auto_save evolution just persisted; drained for auto rebuild.
         self._pending_auto_rebuild_skills: list[str] = []
+        # Fire-and-forget: wait for rail evolution then rebuild / stash footnote.
+        self._pending_evolution_followup_tasks: set[asyncio.Task[Any]] = set()
         self._pending_reload: tuple[
             dict[str, Any] | None, dict[str, Any] | None, bool
         ] | None = None
         self._reload_lock = asyncio.Lock()
         self._embed_fingerprint: tuple[Any, ...] | None = None
         self._memory_cache_fingerprint: str | None = None
+        self._task_memory_fingerprint: Any | None = None
         self._registered_skill_dirs: list[str] = []
         self._memory_engine_snapshot: str | None = None
         self._context_engine_config_fp: str | None = None
         self._working_checker: Callable[[], bool] | None = None
         self._last_runtime_mode: str = "agent.plan"
         self._chat_env_overlay_token: Token | None = None
+        self._chat_env_ns_token: Token | None = None
+        self._chat_memory_agent_id_token: Token | None = None
+        self._chat_browser_runtime_pin: Any | None = None
         set_skill_credential_provider(
             lambda: (
                 self._skill_credential_injection_rail.get_skill_envs()
@@ -1616,16 +1661,16 @@ class JiuWenClawDeepAdapter:
         browser_agent_cfg = subagents_cfg.get("browser_agent") if isinstance(subagents_cfg, dict) else {}
         browser_enabled = self._browser_runtime_enabled()
         if browser_enabled:
-            if not str(os.getenv("BROWSER_DRIVER") or "").strip():
-                os.environ["BROWSER_DRIVER"] = "managed"
+            if not str(get_local_config("BROWSER_DRIVER", "") or "").strip():
+                set_os_environ("BROWSER_DRIVER", "managed")
                 logger.info(
                     "[JiuWenClawDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
                     "defaulting to managed mode"
                 )
-            if not str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip():
+            if not str(get_local_config("BROWSER_MANAGED_BINARY", "") or "").strip():
                 chrome_path = self._resolve_managed_browser_binary_from_config()
                 if chrome_path:
-                    os.environ["BROWSER_MANAGED_BINARY"] = chrome_path
+                    set_os_environ("BROWSER_MANAGED_BINARY", chrome_path)
                     logger.info(
                         "[JiuWenClawDeepAdapter] using browser.chrome_path for managed browser: %s",
                         chrome_path,
@@ -1654,7 +1699,13 @@ class JiuWenClawDeepAdapter:
             config_base: dict[str, Any],
     ) -> VisionModelConfig | None:
         """Build DeepAgent vision config from service config/env mapping."""
-        if not dedicated_multimodal_model_configured(config_base, "vision"):
+        sid, aid = self._env_ns_ids()
+        if not dedicated_multimodal_model_configured(
+            config_base,
+            "vision",
+            service_id=sid,
+            agent_id=aid,
+        ):
             logger.info(
                 "[JiuWenClawDeepAdapter] vision tools skipped: models.vision has no dedicated "
                 "api_key in config.yaml"
@@ -1679,7 +1730,7 @@ class JiuWenClawDeepAdapter:
             api_key=api_key,
             base_url=base_url,
             model=model_name,
-            max_retries=_parse_int(os.getenv("VISION_MAX_RETRIES"), 3),
+            max_retries=_parse_int(read_env("VISION_MAX_RETRIES", "3"), 3),
         )
 
     def _build_audio_model_config(
@@ -1687,7 +1738,13 @@ class JiuWenClawDeepAdapter:
             config_base: dict[str, Any],
     ) -> AudioModelConfig | None:
         """Build DeepAgent audio config from service config/env mapping."""
-        if not dedicated_multimodal_model_configured(config_base, "audio"):
+        sid, aid = self._env_ns_ids()
+        if not dedicated_multimodal_model_configured(
+            config_base,
+            "audio",
+            service_id=sid,
+            agent_id=aid,
+        ):
             logger.info(
                 "[JiuWenClawDeepAdapter] skip full audio LLM config: models.audio has no "
                 "dedicated api_key in config.yaml"
@@ -1715,16 +1772,16 @@ class JiuWenClawDeepAdapter:
         config_kwargs: dict[str, Any] = {
             "api_key": api_key,
             "base_url": base_url,
-            "max_retries": _parse_int(os.getenv("AUDIO_MAX_RETRIES"), 3),
-            "http_timeout": _parse_int(os.getenv("AUDIO_HTTP_TIMEOUT"), 20),
+            "max_retries": _parse_int(read_env("AUDIO_MAX_RETRIES", "3"), 3),
+            "http_timeout": _parse_int(read_env("AUDIO_HTTP_TIMEOUT", "20"), 20),
             "max_audio_bytes": _parse_int(
-                os.getenv("AUDIO_MAX_AUDIO_BYTES"),
+                read_env("AUDIO_MAX_AUDIO_BYTES", str(25 * 1024 * 1024)),
                 25 * 1024 * 1024,
             ),
         }
-        acr_access_key = str(os.getenv("ACR_ACCESS_KEY", "")).strip()
-        acr_access_secret = str(os.getenv("ACR_ACCESS_SECRET", "")).strip()
-        acr_base_url = str(os.getenv("ACR_BASE_URL", "")).strip()
+        acr_access_key = str(read_env("ACR_ACCESS_KEY", "")).strip()
+        acr_access_secret = str(read_env("ACR_ACCESS_SECRET", "")).strip()
+        acr_base_url = str(read_env("ACR_BASE_URL", "")).strip()
         if acr_access_key:
             config_kwargs["acr_access_key"] = acr_access_key
         if acr_access_secret:
@@ -1744,7 +1801,13 @@ class JiuWenClawDeepAdapter:
             config_base: dict[str, Any],
     ) -> bool:
         """Build DeepAgent video config from service config/env mapping."""
-        if not dedicated_multimodal_model_configured(config_base, "video"):
+        sid, aid = self._env_ns_ids()
+        if not dedicated_multimodal_model_configured(
+            config_base,
+            "video",
+            service_id=sid,
+            agent_id=aid,
+        ):
             logger.info(
                 "[JiuWenClawDeepAdapter] skip video_understanding: models.video has no "
                 "dedicated api_key in config.yaml"
@@ -1758,10 +1821,15 @@ class JiuWenClawDeepAdapter:
             return False
         return True
 
-    @staticmethod
-    def _build_image_gen_enabled(config_base: dict[str, Any]) -> bool:
+    def _build_image_gen_enabled(self, config_base: dict[str, Any]) -> bool:
         """Whether text_to_image should be registered for this runtime."""
-        if not dedicated_multimodal_model_configured(config_base, "image_gen"):
+        sid, aid = self._env_ns_ids()
+        if not dedicated_multimodal_model_configured(
+            config_base,
+            "image_gen",
+            service_id=sid,
+            agent_id=aid,
+        ):
             logger.info(
                 "[JiuWenClawDeepAdapter] skip text_to_image: models.image_gen has no "
                 "dedicated api_key in config.yaml"
@@ -1786,7 +1854,13 @@ class JiuWenClawDeepAdapter:
         ``audio_metadata``（ACRCloud，仍依赖 ``ACR_*`` 环境变量在运行时识别曲库）。
         """
         config_base = get_config()
-        if not dedicated_multimodal_model_configured(config_base, "audio"):
+        sid, aid = self._env_ns_ids()
+        if not dedicated_multimodal_model_configured(
+            config_base,
+            "audio",
+            service_id=sid,
+            agent_id=aid,
+        ):
             logger.info(
                 "[JiuWenClawDeepAdapter] skip all audio tools (incl. audio_metadata): "
                 "models.audio 未配置独立 api_key"
@@ -1816,12 +1890,22 @@ class JiuWenClawDeepAdapter:
             config_base: dict[str, Any],
     ) -> None:
         """Refresh cached multimodal configs and live tool instances."""
+        sid, aid = self._env_ns_ids()
         for group in MULTIMODAL_ENV_GROUP_KEYS:
-            if dedicated_multimodal_model_configured(config_base, group):
+            if dedicated_multimodal_model_configured(
+                config_base,
+                group,
+                service_id=sid,
+                agent_id=aid,
+            ):
                 continue
             if multimodal_env_anchor_present(group):
                 continue
-            clear_multimodal_env_groups([group])
+            clear_multimodal_env_groups(
+                [group],
+                service_id=sid,
+                agent_id=aid,
+            )
 
         self._vision_model_config = self._build_vision_model_config(config_base)
         self._audio_model_config = self._build_audio_model_config(config_base)
@@ -2081,11 +2165,36 @@ class JiuWenClawDeepAdapter:
             agent_card_id=agent_card_id,
         )
 
-    @staticmethod
-    async def set_checkpoint():
+    def _tenant_disk_ids(self) -> tuple[str, str]:
+        """Return ``(service_id, agent_id)`` for on-disk tenant paths.
+
+        Prefer request-side ``env_*`` ids so ``AGENT_RUNTIME`` rewrite of
+        ``self._agent_id`` (e.g. ``office_default``) does not divert checkpoint
+        / prompt paths away from ``agent_office``.
+        """
+        from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+
+        service_id = TenantAgentPool.normalize_tenant_id(
+            self._env_service_id if self._env_service_id is not None else self._service_id
+        )
+        agent_id = TenantAgentPool.normalize_tenant_id(
+            self._env_agent_id if self._env_agent_id is not None else self._agent_id
+        )
+        return service_id, agent_id
+
+    async def set_checkpoint(self):
         try:
+            from jiuwenclaw.utils import get_multi_tenant_user_workspace_dir
+
             PersistenceCheckpointerProvider()
-            checkpoint_path = get_checkpoint_dir()
+            service_id, agent_id = self._tenant_disk_ids()
+            workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+            if workspace is None:
+                raise ValueError(
+                    f"invalid tenant for checkpoint: service_id={service_id!r}, agent_id={agent_id!r}"
+                )
+            checkpoint_path = workspace / ".checkpoint"
+            checkpoint_path.mkdir(parents=True, exist_ok=True)
             conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
 
             db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
@@ -2102,7 +2211,7 @@ class JiuWenClawDeepAdapter:
             checkpointer = await CheckpointerFactory.create(
                 CheckpointerConfig(type="persistence", conf=conf)
             )
-            CheckpointerFactory.set_default_checkpointer(checkpointer)
+            self._checkpointer = checkpointer
         except Exception as e:
             logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e,
                          extra={'user_visible': 'critical'})
@@ -2127,7 +2236,7 @@ class JiuWenClawDeepAdapter:
     def _build_model_from_entry(mcc: dict, mco: dict) -> Model:
         """根据单个模型条目的 model_client_config / model_config_obj 构建 Model 实例。"""
         mcc = JiuWenClawDeepAdapter._normalize_model_client_config_dict(mcc)
-        name = mcc.get("model_name", "")
+        name = str(mcc.get("model_name") or "").strip()
 
         # 如果 api_key 为空，尝试从环境变量获取或使用默认占位值
         if not mcc.get("api_key"):
@@ -2136,13 +2245,49 @@ class JiuWenClawDeepAdapter:
                 mcc["api_key"] = env_api_key
                 logger.info(
                     "[_build_model_from_entry] 从环境变量 API_KEY 获取到 api_key: model_name=%s",
-                    name
+                    name,
                 )
             else:
                 mcc["api_key"] = "placeholder-api-key"
                 logger.warning(
                     "[_build_model_from_entry] api_key 为空且环境变量未设置，使用占位值: model_name=%s",
-                    name
+                    name,
+                )
+
+        # 与 api_key 对称：yaml ${VAR} 在 sealed overlay 下可能解析为空
+        if not str(mcc.get("client_provider") or "").strip():
+            env_provider = read_env("MODEL_PROVIDER").strip()
+            if env_provider:
+                mcc["client_provider"] = env_provider
+                logger.info(
+                    "[_build_model_from_entry] 从环境变量 MODEL_PROVIDER 获取到 client_provider: %s model_name=%s",
+                    env_provider,
+                    name,
+                )
+            else:
+                mcc["client_provider"] = "OpenAI"
+                logger.warning(
+                    "[_build_model_from_entry] client_provider 为空且 MODEL_PROVIDER 未设置，回退 OpenAI: model_name=%s",
+                    name,
+                )
+
+        if not str(mcc.get("api_base") or "").strip():
+            env_api_base = read_env("API_BASE").strip()
+            if env_api_base:
+                mcc["api_base"] = env_api_base
+                logger.info(
+                    "[_build_model_from_entry] 从环境变量 API_BASE 获取到 api_base: model_name=%s",
+                    name,
+                )
+
+        if not name:
+            env_model_name = read_env("MODEL_NAME").strip()
+            if env_model_name:
+                mcc["model_name"] = env_model_name
+                name = env_model_name
+                logger.info(
+                    "[_build_model_from_entry] 从环境变量 MODEL_NAME 获取到 model_name: %s",
+                    name,
                 )
 
         m_config = ModelRequestConfig(
@@ -2370,9 +2515,14 @@ class JiuWenClawDeepAdapter:
     def _create_sys_operation(self) -> SysOperation | None:
         """Create a sys operation with workspace as working directory."""
         try:
+            from jiuwenclaw.utils import get_multi_tenant_user_workspace_dir
+
             endpoint = get_sandbox_endpoint()
             runtime = get_sandbox_runtime()
-            work_dir = self._workspace_dir or str(get_agent_root_dir())
+            service_id, agent_id = self._tenant_disk_ids()
+            tenant_ws = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+            agent_root = (tenant_ws / "agent") if tenant_ws is not None else get_agent_root_dir()
+            work_dir = self._workspace_dir or str(agent_root)
             sandbox_url = endpoint.get("url") or ""
             sandbox_type = endpoint.get("type") or ""
             sandbox_enabled = bool(runtime.get("enabled"))
@@ -2390,7 +2540,7 @@ class JiuWenClawDeepAdapter:
                     sandbox_url,
                     sandbox_type,
                     self._agent_id,
-                    shared_dir=get_agent_root_dir(),
+                    shared_dir=agent_root,
                     files_runtime=runtime.get("files"),
                     excluded_commands=runtime.get("excluded_commands"),
                     idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
@@ -2548,10 +2698,10 @@ class JiuWenClawDeepAdapter:
             skill_rail = None
         return skill_rail
 
-    @staticmethod
-    def _resolve_evolution_trajectory_dir() -> Path:
-        """Resolve directory for FileTrajectoryStore (always use default)."""
-        return get_agent_evolution_trajectories_dir()
+    def _resolve_evolution_trajectory_dir(self) -> Path:
+        """Resolve directory for FileTrajectoryStore from this adapter's tenant ids."""
+        sid, aid = self._tenant_disk_ids()
+        return get_agent_evolution_trajectories_dir(sid, aid)
 
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> JiuClawSkillEvolutionRail | None:
         """Build JiuClawSkillEvolutionRail with BOOTSTRAP.md builtin skill exclusion."""
@@ -2938,14 +3088,16 @@ class JiuWenClawDeepAdapter:
                 "acp" if self._is_acp_tool_profile(self._instance_overrides)
                 else self._resolve_prompt_channel()
             )
+            disk_service_id, disk_agent_id = self._tenant_disk_ids()
             rail = RuntimePromptRail(
                 language=self._resolve_runtime_language(),
                 channel=default_channel,
                 agent_name=self._agent_name,
                 model_name=self._resolve_model_name(),
                 workspace_dir=self._workspace_dir,
-                agent_id=self._agent_id,
-                service_id=self._service_id,
+                # Disk layout follows env/catalog ids, not AGENT_RUNTIME cache_key.
+                agent_id=disk_agent_id,
+                service_id=disk_service_id,
             )
             rail.set_registered_skill_dirs(self._registered_skill_dirs_for_rail())
             logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success",
@@ -2963,12 +3115,20 @@ class JiuWenClawDeepAdapter:
           - YAML list:      ``disabled_tools: ["bash", "fork_agent"]``
           - Env var string: ``disabled_tools: ${DISABLED_TOOLS:-}``
             (set DISABLED_TOOLS=bash,fork_agent in .env)
+
+        Uses ``touch_shared_resource_mgr=False`` so disable only affects this agent's
+        ``ability_manager``; shared ``Runner.resource_mgr`` stays intact for other
+        in-process agents/sessions (单进程多智能体).
         """
         try:
             disabled_list = resolve_string_or_list_config(config.get("disabled_tools"))
-            rail = DisabledToolsRail(disabled_tools=disabled_list)
+            rail = DisabledToolsRail(
+                disabled_tools=disabled_list,
+                touch_shared_resource_mgr=False,
+            )
             logger.info(
-                "[JiuWenClawDeepAdapter] DisabledToolsRail create success, disabled_tools: %s",
+                "[JiuWenClawDeepAdapter] DisabledToolsRail create success, disabled_tools: %s "
+                "(ability-only, shared resource_mgr untouched)",
                 disabled_list,
                 extra={'user_visible': 'progress'}
             )
@@ -3107,6 +3267,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_progressive_tool_rail", self._build_progressive_tool_rail, {"config": config}),
             # DisabledToolsRail - highest priority (100), runs last to filter disabled tools
             _RailBuildInfo("_disabled_tools_rail", self._build_disabled_tools_rail, {"config": config}),
+            _RailBuildInfo("_recent_tool_results_rail", self._build_recent_tool_results_rail),
         ]
         # ContextEngineeringRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
 
@@ -3178,6 +3339,10 @@ class JiuWenClawDeepAdapter:
         else:
             logger.info("[JiuWenClawDeepAdapter] TaskExecutionRail attached to adapter")
         return rails_list
+
+    @staticmethod
+    def _build_recent_tool_results_rail() -> RecentToolResultsRail:
+        return RecentToolResultsRail()
 
     def _make_deep_agent_config(
             self,
@@ -3569,9 +3734,12 @@ class JiuWenClawDeepAdapter:
         if not should_register_cron_tools():
             logger.info("[JiuWenClawDeepAdapter] skip cron tool build: disabled by env")
             return []
+        service_id, tenant_agent_id = self._tenant_disk_ids()
         return self._cron_runtime.build_tools(
             context=self._runtime_cron_tool_context,
             agent_id=JIUWENCLAW_RESOURCE_AGENT_ID,
+            service_id=service_id,
+            tenant_agent_id=tenant_agent_id,
         )
 
     async def _proc_context_compaction(self) -> None:
@@ -3643,6 +3811,25 @@ class JiuWenClawDeepAdapter:
         mode: str = "agent.plan",
         session_id: str | None = None,
     ) -> None:
+        """Initialize an agent while its request-side environment namespace is bound."""
+        sid, aid = self._env_ns_ids()
+        ns_token = bind_agent_env_ns(sid, aid)
+        try:
+            await self._create_instance_in_env_ns(
+                config,
+                mode=mode,
+                session_id=session_id,
+            )
+        finally:
+            reset_agent_env_ns(ns_token)
+
+    async def _create_instance_in_env_ns(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "agent.plan",
+        session_id: str | None = None,
+    ) -> None:
         """初始化 DeepAgent 实例.
 
         Args:
@@ -3660,7 +3847,10 @@ class JiuWenClawDeepAdapter:
 
         self._instance_overrides = dict(config) if isinstance(config, dict) else {}
         loop = asyncio.get_running_loop()
+        # Align with reload: drop stale resolved ${VAR} cache before reading under seal.
+        clear_global_config_cache()
         config_base = await loop.run_in_executor(None, get_config)
+        self._latest_config_base = config_base if isinstance(config_base, dict) else None
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
@@ -3707,7 +3897,12 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] hook trigger failed: %s", exc)
 
-        model = self._create_model(config_base)
+        # First create must patch model from sealed overlay / tip (same as reload path).
+        sid, aid = self._env_ns_ids()
+        create_env = get_task_env_overlay()
+        if create_env is None:
+            create_env = effective_tip(sid, aid)
+        model = self._create_model(config_base, create_env or None)
 
         await loop.run_in_executor(
             None,
@@ -3739,13 +3934,15 @@ class JiuWenClawDeepAdapter:
         await loop.run_in_executor(None, self._init_subagent_tools)
         await loop.run_in_executor(None, self._init_skill_turbo_tool)
 
-        cfg = get_config()
+        cfg = self._latest_config_base if isinstance(self._latest_config_base, dict) else get_config()
+        sid, aid = self._tenant_disk_ids()
         self._embed_fingerprint = self._embed_config_fingerprint(cfg)
         self._memory_cache_fingerprint = memory_cache_fingerprint(cfg)
+        self._task_memory_fingerprint = task_memory_config_fingerprint(cfg)
         self._memory_engine_snapshot = get_memory_engine(cfg)
         self._context_engine_config_fp = self._context_engine_config_fingerprint(cfg)
         self._external_memory_fingerprint = (
-            external_memory_fingerprint(cfg)
+            external_memory_fingerprint(cfg, service_id=sid, agent_id=aid)
             if is_external_memory_enabled(cfg)
             else None
         )
@@ -3819,6 +4016,8 @@ class JiuWenClawDeepAdapter:
             # 注入 adapter 到 StreamEventRail
             if self._stream_event_rail is not None:
                 self._stream_event_rail.set_skill_turbo_adapter(self)
+                if self._checkpointer is not None:
+                    self._stream_event_rail.set_checkpointer(self._checkpointer)
 
             logger.info("[JiuWenClawDeepAdapter] skill_turbo tool initialized")
         except Exception as exc:
@@ -3847,7 +4046,7 @@ class JiuWenClawDeepAdapter:
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
         try:
-            manager = get_rail_manager()
+            manager = get_rail_manager(RuntimeScopeKey.from_adapter(self))
 
             # 设置 agent 实例到 rail_manager，用于热更新
             manager.set_agent_instance(self._instance)
@@ -3867,6 +4066,12 @@ class JiuWenClawDeepAdapter:
                         )
         except Exception as e:
             logger.error("[JiuWenClawDeepAdapter] 加载用户 Rail 扩展时发生错误: %s", e)
+
+    def _env_ns_ids(self) -> tuple[str, str]:
+        """Request-side (service_id, agent_id) for tip/ns bags."""
+        sid = getattr(self, "_env_service_id", None) or getattr(self, "_service_id", None) or "default"
+        aid = getattr(self, "_env_agent_id", None) or getattr(self, "_agent_id", None) or "default"
+        return str(sid), str(aid)
 
     async def _maybe_apply_pending_reload(self) -> ReloadResult | None:
         if self._pending_reload is None or self._adapter_is_working():
@@ -3889,9 +4094,22 @@ class JiuWenClawDeepAdapter:
                 raise
             if result.applied:
                 self._pending_reload = None
-                from jiuwenclaw.local_env_config import promote_staged_env
+                sid, aid = self._env_ns_ids()
+                promote_staged_env(service_id=sid, agent_id=aid)
+                try:
+                    from jiuwenclaw.agentserver.tools.browser_tools import (
+                        notify_browser_runtime_after_reload,
+                    )
 
-                promote_staged_env()
+                    notify_browser_runtime_after_reload(
+                        idle=True,
+                        service_id=sid,
+                        agent_id=aid,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[JiuWenClawDeepAdapter] browser runtime notify after pending reload failed"
+                    )
             return result
 
     async def apply_pending_reload_if_idle(self) -> ReloadResult | None:
@@ -3907,8 +4125,6 @@ class JiuWenClawDeepAdapter:
             if pending is None:
                 return None
             config_base, env_overrides, invalidate_memory = pending
-            from jiuwenclaw.local_env_config import promote_staged_env
-
             try:
                 result = await self.reload_agent_config(
                     config_base,
@@ -3922,7 +4138,22 @@ class JiuWenClawDeepAdapter:
                 raise
             if result.applied:
                 self._pending_reload = None
-                promote_staged_env()
+                sid, aid = self._env_ns_ids()
+                promote_staged_env(service_id=sid, agent_id=aid)
+                try:
+                    from jiuwenclaw.agentserver.tools.browser_tools import (
+                        notify_browser_runtime_after_reload,
+                    )
+
+                    notify_browser_runtime_after_reload(
+                        idle=True,
+                        service_id=sid,
+                        agent_id=aid,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[JiuWenClawDeepAdapter] browser runtime notify after idle pending reload failed"
+                    )
             return result
 
     async def _on_chat_request_start(self) -> tuple[Token | None, Token | None, Token | None]:
@@ -3934,11 +4165,35 @@ class JiuWenClawDeepAdapter:
             skill_dirs_token = bind_session_registered_skill_dirs(
                 self._registered_skill_dirs
             )
-        overlay = build_effective_env_overlay(get_staged_env())
-        env_token = bind_task_env_overlay(overlay) if overlay else None
+        sid, aid = self._env_ns_ids()
+        ns_token = bind_agent_env_ns(sid, aid)
+        mem_aid_token = bind_memory_agent_id(aid)
+        # Formula B full tip; always bind (incl. {}) — seal S1
+        overlay = build_effective_env_overlay(service_id=sid, agent_id=aid)
+        env_token = bind_task_env_overlay(overlay)
         fp_token: Token | None = None
         if self._memory_cache_fingerprint:
             fp_token = bind_memory_cache_fingerprint(self._memory_cache_fingerprint)
+        # Pack ns_token into env_token path via attribute? Return 4-tuple would break callers.
+        # Store ns token on instance for end().
+        self._chat_env_ns_token = ns_token
+        self._chat_memory_agent_id_token = mem_aid_token
+        # Pin browser runtime generation after tip/ns bind so this request keeps
+        # the credential generation captured at start across mid-request reloads.
+        try:
+            from jiuwenclaw.agentserver.tools.browser_tools import (
+                pin_browser_runtime_generation,
+            )
+
+            self._chat_browser_runtime_pin = pin_browser_runtime_generation(
+                service_id=sid,
+                agent_id=aid,
+            )
+        except Exception:
+            self._chat_browser_runtime_pin = None
+            logger.exception(
+                "[JiuWenClawDeepAdapter] pin browser runtime generation failed"
+            )
         return env_token, fp_token, skill_dirs_token
 
     async def _on_chat_request_end(
@@ -3949,6 +4204,27 @@ class JiuWenClawDeepAdapter:
     ) -> None:
         if overlay_token is not None:
             reset_task_env_overlay(overlay_token)
+        ns_token = getattr(self, "_chat_env_ns_token", None)
+        if ns_token is not None:
+            reset_agent_env_ns(ns_token)
+            self._chat_env_ns_token = None
+        mem_aid_token = getattr(self, "_chat_memory_agent_id_token", None)
+        if mem_aid_token is not None:
+            reset_memory_agent_id(mem_aid_token)
+            self._chat_memory_agent_id_token = None
+        pin = getattr(self, "_chat_browser_runtime_pin", None)
+        if pin is not None:
+            try:
+                from jiuwenclaw.agentserver.tools.browser_tools import (
+                    reset_browser_runtime_generation,
+                )
+
+                reset_browser_runtime_generation(pin)
+            except Exception:
+                logger.exception(
+                    "[JiuWenClawDeepAdapter] reset browser runtime generation failed"
+                )
+            self._chat_browser_runtime_pin = None
         if fp_token is not None:
             reset_memory_cache_fingerprint(fp_token)
         if skill_dirs_token is not None:
@@ -3982,7 +4258,10 @@ class JiuWenClawDeepAdapter:
         else:
             invalidate_memory_cache = _invalidate_memory_cache
 
-        if not _force_apply:
+        if _force_apply:
+            # Authoritative apply (sync / pending drain): drop stale Gateway pending.
+            self._pending_reload = None
+        else:
             pending = (config_base, env_overrides, invalidate_memory_cache)
             if self._adapter_is_working():
                 self._pending_reload = pending
@@ -3994,16 +4273,20 @@ class JiuWenClawDeepAdapter:
                     return ReloadResult(deferred=True)
                 self._pending_reload = None
 
-        overlay = build_effective_env_overlay(env_overrides)
-        overlay_token = bind_task_env_overlay(overlay) if overlay else None
+        sid, aid = self._env_ns_ids()
+        ns_token = bind_agent_env_ns(sid, aid)
+        overlay = build_effective_env_overlay(
+            env_overrides,
+            service_id=sid,
+            agent_id=aid,
+        )
+        overlay_token = bind_task_env_overlay(overlay)
         try:
             if env_overrides is not None and not isinstance(env_overrides, dict):
                 raise TypeError("env_overrides must be a dict when provided")
 
             clear_config_cache()
             clear_global_config_cache()
-            await clear_memory_manager_cache()
-            clear_task_memory_service()
 
             if config_base is None:
                 config_base = get_config()
@@ -4016,6 +4299,8 @@ class JiuWenClawDeepAdapter:
                 merged = deep_merge_dicts(full_config, resolve_env_vars(config_base))
                 config_base = merged
 
+            self._latest_config_base = config_base if isinstance(config_base, dict) else None
+
             # 把 config_base['sandbox'] 的 url/type/enabled 翻译为 env overlay key,
             # 让 _create_sys_operation 经 get_sandbox_endpoint/get_sandbox_runtime 读到。
             sandbox_yaml = (
@@ -4024,13 +4309,55 @@ class JiuWenClawDeepAdapter:
             )
             sandbox_overlay = _sandbox_yaml_to_env_overlay(sandbox_yaml)
             if sandbox_overlay:
-                if overlay_token is not None:
-                    reset_task_env_overlay(overlay_token)
-                overlay = build_effective_env_overlay(env_overrides, sandbox_overlay)
-                overlay_token = bind_task_env_overlay(overlay) if overlay else None
-
+                reset_task_env_overlay(overlay_token)
+                overlay = build_effective_env_overlay(
+                    env_overrides,
+                    sandbox_overlay,
+                    service_id=sid,
+                    agent_id=aid,
+                )
+                overlay_token = bind_task_env_overlay(overlay)
             new_embed_fp = self._embed_config_fingerprint(config_base)
             new_memory_fp = memory_cache_fingerprint(config_base)
+            new_task_fp = task_memory_config_fingerprint(config_base)
+
+            # Memory INDEX_CACHE is process-global, keyed by agent_id+workspace+fp.
+            # Use request-side env_agent_id so init / invalidate / acquire share one key.
+            need_invalidate_memory = bool(invalidate_memory_cache) or (
+                self._embed_fingerprint is not None
+                and new_embed_fp != self._embed_fingerprint
+            ) or (
+                self._memory_cache_fingerprint is not None
+                and new_memory_fp != self._memory_cache_fingerprint
+            )
+            if need_invalidate_memory:
+                _, memory_agent_id = self._env_ns_ids()
+                workspace_dir = str(getattr(self, "_workspace_dir", None) or ".")
+                await invalidate_memory_manager_cache(memory_agent_id, workspace_dir)
+                await invalidate_memory_wiki_manager_cache(memory_agent_id, workspace_dir)
+                logger.info(
+                    "[JiuWenClawDeepAdapter] Scoped memory cache invalidated "
+                    "agent_id=%s workspace_dir=%s memory_fp=%s",
+                    memory_agent_id,
+                    workspace_dir,
+                    new_memory_fp,
+                )
+
+            # TaskMemoryService pool is keyed by (service_id, agent_id, fingerprint).
+            # Invalidate only this tenant, and only when task-memory config/env changes.
+            need_invalidate_task_memory = bool(env_touches_task_memory(env_overrides)) or (
+                self._task_memory_fingerprint is not None
+                and new_task_fp != self._task_memory_fingerprint
+            )
+            if need_invalidate_task_memory:
+                task_sid, task_aid = self._env_ns_ids()
+                clear_task_memory_service(service_id=task_sid, agent_id=task_aid)
+                logger.info(
+                    "[JiuWenClawDeepAdapter] Scoped task memory cache invalidated "
+                    "service_id=%s agent_id=%s",
+                    task_sid,
+                    task_aid,
+                )
 
             # 同步扩展配置到 ExtensionRegistry
             # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
@@ -4125,26 +4452,24 @@ class JiuWenClawDeepAdapter:
                 self._memory_rail = None
 
             await self._handle_memory_rail_by_config(reload_mode)
-            await self._handle_external_memory_rail_by_config()
+            await self._handle_external_memory_rail_by_config(config_base)
             self._apply_registered_skill_dirs_to_runtime_rails()
             self._memory_engine_snapshot = get_memory_engine(config_base)
 
-            if invalidate_memory_cache or (
-                self._embed_fingerprint is not None
-                and new_embed_fp != self._embed_fingerprint
-            ):
+            if need_invalidate_memory:
                 logger.info(
                     "[JiuWenClawDeepAdapter] Memory cache fingerprint updated: %s",
                     new_memory_fp,
                 )
             self._memory_cache_fingerprint = new_memory_fp
             self._embed_fingerprint = new_embed_fp
+            self._task_memory_fingerprint = new_task_fp
 
             logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
             return ReloadResult(applied=True)
         finally:
-            if overlay_token is not None:
-                reset_task_env_overlay(overlay_token)
+            reset_task_env_overlay(overlay_token)
+            reset_agent_env_ns(ns_token)
 
     def _bind_runtime_cron_context(
             self,
@@ -4164,11 +4489,16 @@ class JiuWenClawDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        sid, aid = self._tenant_disk_ids()
+        normalized_metadata.setdefault("service_id", sid)
+        normalized_metadata.setdefault("agent_id", aid)
         # 设置 DeepResearch 路由上下文
         dr_token = push_deepresearch_route(
             request_id=request_id or "",
             channel_id=normalized_channel,
             session_id=session_id or "",
+            service_id=str(sid),
+            agent_id=str(aid),
         )
         return (
             _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
@@ -4854,7 +5184,7 @@ class JiuWenClawDeepAdapter:
                 if context_engine is not None and freeze_session is not None:
                     actual_session = getattr(freeze_session, "_parent", freeze_session) or freeze_session
                     await context_engine.save_contexts(actual_session)
-                    await post_agent_execute_for_session(freeze_session)
+                    await post_agent_execute_for_session(freeze_session, self._checkpointer)
             except Exception as exc:
                 logger.warning(
                     "[JiuWenClawDeepAdapter] qa_block %s freeze failed session_id=%s: %s",
@@ -4939,7 +5269,9 @@ class JiuWenClawDeepAdapter:
             await self._cancel_session_toolkits(request.session_id, "interrupt(supplement): ")
             # 4. 终止 fork_agent / spawn_subagent 派生出的活跃子 Agent
             await self._abort_active_subagents(f"interrupt({intent}) request_id={request.request_id}")
-            AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
+            AskUserQuestionRegistry.get_instance().cancel_for_session(
+                RuntimeScopeKey.from_adapter(self, session_id=str(request.session_id or ""))
+            )
             await self._clear_session_persisted_interrupt_state(
                 request.session_id,
                 reason="interrupt(supplement)",
@@ -4978,7 +5310,9 @@ class JiuWenClawDeepAdapter:
             )
             # 4. 终止 fork_agent / spawn_subagent 派生出的活跃子 Agent
             await self._abort_active_subagents(f"interrupt({intent}) request_id={request.request_id}")
-            AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
+            AskUserQuestionRegistry.get_instance().cancel_for_session(
+                RuntimeScopeKey.from_adapter(self, session_id=str(request.session_id or ""))
+            )
             await self._clear_session_persisted_interrupt_state(
                 request.session_id,
                 reason="interrupt(cancel)",
@@ -5099,7 +5433,7 @@ class JiuWenClawDeepAdapter:
             clear_interrupt_recovery_injected(session)
             if clear_todo_resume_snapshot_pending:
                 set_todo_resume_snapshot_pending(session, pending=False)
-            await post_agent_execute_for_session(session)
+            await post_agent_execute_for_session(session, self._checkpointer)
             # 同时清理 SkillTurbo 自己的 resume 上下文，避免下次 plain chat 时
             # 误命中"resume 路径"。
             try:
@@ -5137,7 +5471,9 @@ class JiuWenClawDeepAdapter:
                 )
         for sid in list(self._session_toolkit_requests.keys()):
             await self._cancel_session_toolkits(sid, "gateway_disconnect: ")
-            AskUserQuestionRegistry.get_instance().cancel_for_session(sid)
+            AskUserQuestionRegistry.get_instance().cancel_for_session(
+                RuntimeScopeKey.from_adapter(self, session_id=str(sid or ""))
+            )
         await self._abort_active_subagents("gateway_disconnect")
 
     def _track_session_toolkit(
@@ -5267,7 +5603,11 @@ class JiuWenClawDeepAdapter:
                 request_id, answers, session_id=request.session_id or "",
             )
         elif source == "ask_tool":
-            resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
+            resolved = AskUserQuestionRegistry.get_instance().resolve(
+                RuntimeScopeKey.from_adapter(self, session_id=str(request.session_id or "")),
+                request_id,
+                answers,
+            )
         else:
             # Backward compatibility: keep request_id-prefix routing for old channels/frontends.
             if request_id.startswith("skill_evolve_"):
@@ -5277,7 +5617,11 @@ class JiuWenClawDeepAdapter:
                     request_id, answers, session_id=request.session_id or "",
                 )
             elif isinstance(request_id, str) and request_id.startswith(ASK_REQUEST_PREFIX):
-                resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
+                resolved = AskUserQuestionRegistry.get_instance().resolve(
+                    RuntimeScopeKey.from_adapter(self, session_id=str(request.session_id or "")),
+                    request_id,
+                    answers,
+                )
 
         return AgentResponse(
             request_id=request.request_id,
@@ -6599,7 +6943,8 @@ class JiuWenClawDeepAdapter:
             return {
                 "output": (
                     "`/evolve_rebuild` 已移除。\n"
-                    "开启 `evolution.auto_save` 后，在线自动演进落盘经验时会自动生成新版本。"
+                    "在 `.office-claw/capabilities.json` 中将 Skill 的 `selfEvolution` 设为 "
+                    "`auto` 后，在线演进落盘经验时会自动融合为新版本。"
                 ),
                 "result_type": "answer",
             }
@@ -6655,7 +7000,7 @@ class JiuWenClawDeepAdapter:
             repair_task_plan_after_pause(state)
             self._instance.save_state(session, state)
             write_plan_pause_to_session(session, paused=True, snapshot=snapshot)
-            await post_agent_execute_for_session(session)
+            await post_agent_execute_for_session(session, self._checkpointer)
 
             logger.info(
                 "[JiuWenClawDeepAdapter] plan pause persisted session=%s",
@@ -6721,11 +7066,11 @@ class JiuWenClawDeepAdapter:
 
             # 写入 session state（内存，同一 session 内可用）
             write_interrupt_artifacts_summary_to_session(session, summary)
-            await post_agent_execute_for_session(session)
+            await post_agent_execute_for_session(session, self._checkpointer)
 
             # 同时写入磁盘文件（进程重启后兜底）
             try:
-                workspace_dir = get_agent_workspace_dir()
+                workspace_dir = Path(self._workspace_dir)
                 write_interrupt_artifacts_to_file(workspace_dir, session_id, summary)
             except Exception as file_exc:
                 logger.warning(
@@ -6782,7 +7127,7 @@ class JiuWenClawDeepAdapter:
             # 读不到时，尝试从磁盘文件读（进程重启兜底）
             if not summary:
                 try:
-                    workspace_dir = get_agent_workspace_dir()
+                    workspace_dir = Path(self._workspace_dir)
                     summary = read_interrupt_artifacts_from_file(workspace_dir, session_id)
                 except Exception as file_exc:
                     logger.debug(
@@ -6813,7 +7158,7 @@ class JiuWenClawDeepAdapter:
             )
             await clear_node_artifacts(skill_turbo_session)
             try:
-                workspace_dir = get_agent_workspace_dir()
+                workspace_dir = Path(self._workspace_dir)
                 clear_interrupt_artifacts_file(workspace_dir, session_id)
             except Exception as file_exc:
                 logger.debug(
@@ -6821,7 +7166,7 @@ class JiuWenClawDeepAdapter:
                     session_id, file_exc,
                 )
             mark_interrupt_recovery_injected(session)
-            await post_agent_execute_for_session(session)
+            await post_agent_execute_for_session(session, self._checkpointer)
 
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt artifacts summary injected session=%s",
@@ -6931,7 +7276,7 @@ class JiuWenClawDeepAdapter:
             merge_supplementary_into_request_params(params, decision)
             clear_plan_pause_on_session(session)
             mark_interrupt_recovery_injected(session)
-            await post_agent_execute_for_session(session)
+            await post_agent_execute_for_session(session, self._checkpointer)
 
             logger.info(
                 "[JiuWenClawDeepAdapter] plan pause decision prompt injected session=%s",
@@ -7140,6 +7485,9 @@ class JiuWenClawDeepAdapter:
                     session_id=request.session_id or "default",
                     stream_request_id=request.request_id or "",
                     channel_id=request.channel_id or "",
+                    scope=RuntimeScopeKey.from_adapter(
+                        self, session_id=request.session_id or "default"
+                    ),
                 ):
                     async for chunk in skill_turbo.resume_stream(
                         plan_code=resume_ctx["plan_code"],
@@ -7395,12 +7743,15 @@ class JiuWenClawDeepAdapter:
                 request_id=request.request_id or "",
                 metadata=request.metadata,
             )
+        disk_service_id, disk_agent_id = self._tenant_disk_ids()
         set_perf_summary_context(
             self._request_summary_rail,
             channel_id=request.channel_id or "",
             session_id=request.session_id or "",
             request_id=request.request_id or "",
             mode=mode,
+            service_id=disk_service_id,
+            agent_id=disk_agent_id,
         )
 
         perf_summary_status = "ok"
@@ -7531,7 +7882,13 @@ class JiuWenClawDeepAdapter:
         if mode == "team":
             from jiuwenclaw.agentserver.deep_agent.team_helpers import process_team_message_stream
 
-            async for chunk in process_team_message_stream(request, inputs, self._instance):
+            team_scope = RuntimeScopeKey.from_adapter(self, session_id=session_id)
+            async for chunk in process_team_message_stream(
+                request,
+                inputs,
+                self._instance,
+                runtime_scope=team_scope,
+            ):
                 yield chunk
             reset_request_id(token_request_id)
             _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
@@ -7619,12 +7976,15 @@ class JiuWenClawDeepAdapter:
                 request_id=request.request_id or "",
                 metadata=request.metadata,
             )
+        disk_service_id, disk_agent_id = self._tenant_disk_ids()
         set_perf_summary_context(
             self._request_summary_rail,
             channel_id=request.channel_id or "",
             session_id=request.session_id or "",
             request_id=request.request_id or "",
             mode=mode,
+            service_id=disk_service_id,
+            agent_id=disk_agent_id,
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
@@ -7639,6 +7999,7 @@ class JiuWenClawDeepAdapter:
                 session_id=session_id,
                 stream_request_id=rid or "",
                 channel_id=cid or "",
+                scope=RuntimeScopeKey.from_adapter(self, session_id=session_id),
             ):
                 logger.info(
                     f"[JiuWenClawDeepAdapter] Agent执行开始: request_id={request.request_id} mode={mode}",
@@ -7934,18 +8295,9 @@ class JiuWenClawDeepAdapter:
                             suppress_stream_after_hitl = True
                             continue
 
-            evolution_summary_text = self._collect_evolution_run_summary_text(rid)
-
-            evolution_merged_into_final = False
-            if evolution_summary_text and accumulated_text and not hitl_pending_stream:
-                accumulated_text += evolution_summary_text
-                evolution_merged_into_final = True
-                logger.info(
-                    "[JiuWenClawDeepAdapter] merged evolution footnote into chat.final: request_id=%s",
-                    rid,
-                    extra={"user_visible": "progress"},
-                )
-
+            # Evolution runs as SkillEvolutionRail background task from after_invoke.
+            # Do not await it on this stream — schedule a detached follow-up for
+            # summary stash + auto rebuild so the user turn can complete immediately.
             if not accumulated_text and not hitl_pending_stream and not has_streamed_content:
                 accumulated_text = "处理完成，但未生成回复内容。请尝试重新发送消息。"
                 logger.warning(
@@ -7978,8 +8330,8 @@ class JiuWenClawDeepAdapter:
                     is_complete=False,
                 )
 
-            # after_invoke 在流关闭后触发，其中缓存的审批事件无法通过
-            # session.write_stream 传递，需手动注入到 stream 输出
+            # Drain only approval events already ready (usually empty while evolution
+            # is still running). Late summary / rebuild happen in a background task.
             if self._skill_evolution_rail is not None:
                 for evt in self._skill_evolution_rail.drain_pending_approval_events():
                     payload = evt.payload or {}
@@ -8023,48 +8375,19 @@ class JiuWenClawDeepAdapter:
                             is_complete=False,
                         )
 
-                if evolution_summary_text and not evolution_merged_into_final:
-                    if hitl_pending_stream:
-                        self._stash_pending_evolution_summary(
-                            session_id,
-                            evolution_summary_text,
-                            rid,
-                        )
-                    else:
-                        logger.info(
-                            "[JiuWenClawDeepAdapter] emitting evolution UI footnote via chat.delta: "
-                            "request_id=%s chars=%d preview=%r",
-                            rid,
-                            len(evolution_summary_text),
-                            evolution_summary_text[:200],
-                            extra={"user_visible": "progress"},
-                        )
-                        yield AgentResponseChunk(
-                            request_id=rid,
-                            channel_id=cid,
-                            payload={"event_type": "chat.delta", "content": evolution_summary_text},
-                            is_complete=False,
-                        )
-                elif not evolution_summary_text:
-                    logger.info(
-                        "[JiuWenClawDeepAdapter] no evolution UI footnote to emit: request_id=%s",
-                        rid,
-                        extra={"user_visible": "progress"},
-                    )
+                # Always schedule followup so evolution summary is stashed for the
+                # next turn (including HITL pause). Auto rebuild runs only when the
+                # turn fully completed (not HITL-pending).
+                self._schedule_background_evolution_followup(
+                    request_id=rid,
+                    session_id=session_id,
+                    hitl_pending=hitl_pending_stream,
+                )
 
                 logger.info(
                     f"[JiuWenClawDeepAdapter] Agent执行成功: request_id={request.request_id}",
                     extra={'user_visible': 'critical'}
                 )
-
-                async for rebuild_chunk in self._iter_auto_rebuild_followups(
-                    base_inputs=inputs,
-                    stream_request_id=rid,
-                    channel_id=cid,
-                    session_id=session_id,
-                    hitl_pending=hitl_pending_stream,
-                ):
-                    yield rebuild_chunk
 
             # Finalize is owned by generate_evolution_merge_version (RPC / auto-rebuild).
             # /evolve_rebuild no longer yields run_rebuild_followup slash results.
@@ -8177,8 +8500,205 @@ class JiuWenClawDeepAdapter:
                 is_complete=True,
             )
 
+    def _schedule_background_evolution_followup(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        hitl_pending: bool = False,
+    ) -> None:
+        """Fire-and-forget: wait for rail evolution, then stash footnote + auto rebuild.
+
+        Must not be awaited from the chat stream — keeps the user turn non-blocking.
+        When ``hitl_pending`` is True, still collect/stash the evolution summary but
+        skip auto rebuild (same policy as the former in-stream path).
+        """
+        rail = self._skill_evolution_rail
+        if rail is None:
+            return
+        if not bool(getattr(rail, "has_pending_evolution", False)):
+            # Evolution may have already finished between after_invoke and here;
+            # still try to drain summary / rebuild once in the background.
+            logger.info(
+                "[JiuWenClawDeepAdapter] schedule evolution followup with no pending task yet: "
+                "request_id=%s hitl_pending=%s",
+                request_id,
+                hitl_pending,
+                extra={"user_visible": "progress"},
+            )
+
+        task = asyncio.create_task(
+            self._background_evolution_followup(
+                request_id=request_id,
+                session_id=session_id,
+                hitl_pending=hitl_pending,
+            ),
+            name=f"evolution_followup_{request_id}",
+        )
+        self._pending_evolution_followup_tasks.add(task)
+
+        def _on_done(done: asyncio.Task[Any]) -> None:
+            self._pending_evolution_followup_tasks.discard(done)
+            if done.cancelled():
+                logger.info(
+                    "[JiuWenClawDeepAdapter] evolution followup cancelled: request_id=%s",
+                    request_id,
+                    extra={"user_visible": "progress"},
+                )
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] evolution followup failed: request_id=%s error=%s",
+                    request_id,
+                    exc,
+                    exc_info=exc,
+                    extra={"user_visible": "progress"},
+                )
+            else:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] evolution followup completed: request_id=%s",
+                    request_id,
+                    extra={"user_visible": "progress"},
+                )
+
+        task.add_done_callback(_on_done)
+        logger.info(
+            "[JiuWenClawDeepAdapter] scheduled background evolution followup: "
+            "request_id=%s hitl_pending=%s pending_followups=%d",
+            request_id,
+            hitl_pending,
+            len(self._pending_evolution_followup_tasks),
+            extra={"user_visible": "progress"},
+        )
+
+    async def _background_evolution_followup(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        hitl_pending: bool = False,
+        timeout: float | None = 300.0,
+    ) -> None:
+        """Detached worker: join rail evolution, stash UI summary, run auto rebuild."""
+        await self._await_pending_skill_evolution(request_id, timeout=timeout)
+        summary_text = self._collect_evolution_run_summary_text(request_id)
+        if summary_text:
+            self._stash_pending_evolution_summary(session_id, summary_text, request_id)
+            logger.info(
+                "[JiuWenClawDeepAdapter] stashed evolution footnote for next turn: "
+                "request_id=%s session_id=%s chars=%d",
+                request_id,
+                session_id,
+                len(summary_text),
+                extra={"user_visible": "progress"},
+            )
+
+        # Late approval events (e.g. skill_creator_follow_up) after evolution —
+        # cannot yield on the closed stream; log for ops visibility.
+        rail = self._skill_evolution_rail
+        if rail is not None:
+            late_events = rail.drain_pending_approval_events()
+            if late_events:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] dropping %d late evolution approval event(s) "
+                    "after stream closed: request_id=%s types=%s",
+                    len(late_events),
+                    request_id,
+                    [getattr(evt, "type", None) for evt in late_events],
+                    extra={"user_visible": "progress"},
+                )
+
+        if hitl_pending:
+            # Mirror _iter_auto_rebuild_followups: do not rebuild while waiting on HITL.
+            self._pending_auto_rebuild_skills = []
+            logger.info(
+                "[JiuWenClawDeepAdapter] skip auto rebuild while HITL pending: request_id=%s",
+                request_id,
+                extra={"user_visible": "progress"},
+            )
+            return
+
+        await self._run_auto_rebuild_skills_detached(request_id=request_id)
+
+    async def _await_pending_skill_evolution(
+        self,
+        request_id: str,
+        *,
+        timeout: float | None = 300.0,
+    ) -> None:
+        """Wait for SkillEvolutionRail background evolution (background followup only)."""
+        rail = self._skill_evolution_rail
+        if rail is None:
+            return
+        wait = getattr(rail, "wait_for_pending_evolution", None)
+        if not callable(wait):
+            logger.info(
+                "[JiuWenClawDeepAdapter] skip evolution wait: request_id=%s "
+                "reason=wait_for_pending_evolution_missing",
+                request_id,
+                extra={"user_visible": "progress"},
+            )
+            return
+        # Brief poll: after_invoke may schedule the task a tick after chat.final.
+        if not bool(getattr(rail, "has_pending_evolution", False)):
+            await asyncio.sleep(0)
+        if not bool(getattr(rail, "has_pending_evolution", False)):
+            logger.info(
+                "[JiuWenClawDeepAdapter] skip evolution wait: request_id=%s reason=no_pending_task",
+                request_id,
+                extra={"user_visible": "progress"},
+            )
+            return
+        logger.info(
+            "[JiuWenClawDeepAdapter] background followup waiting for skill evolution: "
+            "request_id=%s timeout=%s",
+            request_id,
+            timeout,
+            extra={"user_visible": "progress"},
+        )
+        try:
+            await wait(timeout=timeout)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] evolution wait failed: request_id=%s error=%s",
+                request_id,
+                exc,
+                exc_info=True,
+                extra={"user_visible": "progress"},
+            )
+            return
+        still_pending = bool(getattr(rail, "has_pending_evolution", False))
+        logger.info(
+            "[JiuWenClawDeepAdapter] background followup evolution wait done: "
+            "request_id=%s still_pending=%s",
+            request_id,
+            still_pending,
+            extra={"user_visible": "progress"},
+        )
+
+    def _should_auto_merge_evolved_skill(self, skill_name: str) -> bool:
+        """Return True when per-skill selfEvolution resolves to ``auto``.
+
+        Unlisted skills use ``default_auto_save=False`` → ``suggest`` (no auto merge).
+        """
+        name = (skill_name or "").strip()
+        if not name:
+            return False
+        action = resolve_skill_evolution_action(
+            name,
+            default_auto_save=False,
+            skills_dirs=self._registered_skill_dirs_for_rail(),
+        )
+        return action == "auto"
+
     def _collect_evolution_run_summary_text(self, request_id: str) -> str:
-        """Drain and format evolution summary for UI footnote; log skip/drain outcomes."""
+        """Drain and format evolution summary; also fills ``_pending_auto_rebuild_skills``.
+
+        Intended for the detached evolution followup after rail evolution finishes.
+        Only skills whose ``resolve_skill_evolution_action`` is ``auto`` are queued
+        for version merge; ``off`` / ``suggest`` are skipped.
+        """
         self._pending_auto_rebuild_skills = []
         if self._skill_evolution_rail is None:
             logger.info(
@@ -8190,16 +8710,17 @@ class JiuWenClawDeepAdapter:
         try:
             evolution_summary = self._skill_evolution_rail.take_run_summary()
             evolution_summary_text = self._format_evolution_summary_markdown(evolution_summary)
-            if (
-                isinstance(evolution_summary, dict)
-                and getattr(self._skill_evolution_rail, "auto_save", False)
-            ):
+            if isinstance(evolution_summary, dict):
                 names: list[str] = []
                 for item in self._iter_evolution_summary_items(evolution_summary.get("skills")):
                     if not isinstance(item, dict):
                         continue
                     skill_name = str(item.get("skill_name") or "").strip()
-                    if skill_name and skill_name not in names:
+                    if (
+                        skill_name
+                        and skill_name not in names
+                        and self._should_auto_merge_evolved_skill(skill_name)
+                    ):
                         names.append(skill_name)
                 self._pending_auto_rebuild_skills = names
         except Exception as exc:
@@ -8228,6 +8749,72 @@ class JiuWenClawDeepAdapter:
         self._pending_auto_rebuild_skills = []
         return skills
 
+    async def _run_auto_rebuild_skills_detached(
+        self,
+        *,
+        request_id: str,
+    ) -> None:
+        """Rebuild skills off the chat stream (no chunk yields)."""
+        if self._skill_evolution_rail is None:
+            self._pending_auto_rebuild_skills = []
+            return
+
+        skill_names = self._take_pending_auto_rebuild_skills()
+        if not skill_names:
+            return
+
+        for skill_name in skill_names:
+            if not self._should_auto_merge_evolved_skill(skill_name):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] background auto rebuild skipped: "
+                    "request_id=%s skill=%s reason=selfEvolution_not_auto",
+                    request_id,
+                    skill_name,
+                    extra={"user_visible": "progress"},
+                )
+                continue
+            logger.info(
+                "[JiuWenClawDeepAdapter] background auto rebuild start: "
+                "request_id=%s skill=%s",
+                request_id,
+                skill_name,
+                extra={"user_visible": "progress"},
+            )
+            try:
+                result = await self.generate_evolution_merge_version(
+                    skill_name=skill_name,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] background auto rebuild failed: "
+                    "request_id=%s skill=%s error=%s",
+                    request_id,
+                    skill_name,
+                    exc,
+                    exc_info=True,
+                    extra={"user_visible": "progress"},
+                )
+                continue
+
+            if result.get("ok"):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] background auto rebuild ok: "
+                    "request_id=%s skill=%s new_version=%s",
+                    request_id,
+                    skill_name,
+                    result.get("new_version"),
+                    extra={"user_visible": "progress"},
+                )
+            else:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] background auto rebuild skipped/failed: "
+                    "request_id=%s skill=%s reason=%s",
+                    request_id,
+                    skill_name,
+                    result.get("error") or "unknown",
+                    extra={"user_visible": "progress"},
+                )
+
     async def _iter_auto_rebuild_followups(
         self,
         *,
@@ -8237,7 +8824,11 @@ class JiuWenClawDeepAdapter:
         session_id: str,
         hitl_pending: bool,
     ) -> AsyncIterator[AgentResponseChunk]:
-        """Serially rebuild skills that online auto_save evolution just persisted."""
+        """Serially rebuild skills with stream progress (tests / legacy callers).
+
+        Online chat path uses ``_run_auto_rebuild_skills_detached`` instead so the
+        user turn is not blocked.
+        """
         if hitl_pending:
             self._pending_auto_rebuild_skills = []
             logger.info(
@@ -8247,8 +8838,7 @@ class JiuWenClawDeepAdapter:
             )
             return
 
-        rail = self._skill_evolution_rail
-        if rail is None or not getattr(rail, "auto_save", False):
+        if self._skill_evolution_rail is None:
             self._pending_auto_rebuild_skills = []
             return
 
@@ -8257,6 +8847,13 @@ class JiuWenClawDeepAdapter:
             return
 
         for skill_name in skill_names:
+            if not self._should_auto_merge_evolved_skill(skill_name):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] skip auto rebuild: skill=%s reason=selfEvolution_not_auto",
+                    skill_name,
+                    extra={"user_visible": "progress"},
+                )
+                continue
             yield AgentResponseChunk(
                 request_id=stream_request_id,
                 channel_id=channel_id,
@@ -9032,9 +9629,10 @@ class JiuWenClawDeepAdapter:
     async def _init_builtin_memory_manager(self, mode: str,
         config: dict) -> None:
         """初始化 MemoryIndexManager/WikiManager + 注册工具 + 注入 memory prompt section。"""
+        _, memory_agent_id = self._env_ns_ids()
         await init_memory_manager_async(
-            workspace_dir=str(get_agent_workspace_dir()),
-            agent_id="default",
+            workspace_dir=str(self._workspace_dir),
+            agent_id=memory_agent_id,
             memory_mode=mode,
             embed_fingerprint=self._memory_cache_fingerprint,
         )
@@ -9062,13 +9660,19 @@ class JiuWenClawDeepAdapter:
                 register_qualified_tool(self._instance, session_tool, agent_card_id)
                 self._qualified_memory_tool_ids.append(session_tool.card.id)
 
-    def _build_external_memory_rail(self):
+    def _build_external_memory_rail(self, config: dict[str, Any] | None = None):
         from jiuwenclaw.agentserver.memory.external_memory_builder import (
             build_external_memory_rail,
         )
+        cfg = config if isinstance(config, dict) else self._latest_config_base
+        if not isinstance(cfg, dict):
+            cfg = get_config()
+        sid, aid = self._tenant_disk_ids()
         return build_external_memory_rail(
-            config=get_config(),
+            config=cfg,
             workspace_dir=self._workspace_dir,
+            service_id=sid,
+            agent_id=aid,
         )
 
     async def _unregister_external_memory_rail(self) -> None:
@@ -9095,7 +9699,10 @@ class JiuWenClawDeepAdapter:
         self._external_memory_rail = None
         self._external_memory_rail_registered = False
 
-    async def _handle_external_memory_rail_by_config(self):
+    async def _handle_external_memory_rail_by_config(
+        self,
+        config: dict[str, Any] | None = None,
+    ):
         """Register / unregister / rebuild ExternalMemoryRail based on config.
 
         External memory is mode-independent — configured once and active for
@@ -9105,11 +9712,17 @@ class JiuWenClawDeepAdapter:
         When the external-memory fingerprint is unchanged, the existing rail
         is kept (prefetch cache and sync circuit breaker state preserved).
         When the fingerprint changes, the rail is unregistered and rebuilt.
-        """
-        config = get_config()
-        new_fp = external_memory_fingerprint(config)
 
-        if is_external_memory_enabled(config):
+        Prefers the reload/sync ``config`` (or ``_latest_config_base``) over a
+        bare ``get_config()`` so per-tenant tip + config_base drive store paths.
+        """
+        cfg = config if isinstance(config, dict) else self._latest_config_base
+        if not isinstance(cfg, dict):
+            cfg = get_config()
+        sid, aid = self._tenant_disk_ids()
+        new_fp = external_memory_fingerprint(cfg, service_id=sid, agent_id=aid)
+
+        if is_external_memory_enabled(cfg):
             if (
                 self._external_memory_rail_registered
                 and self._external_memory_fingerprint == new_fp
@@ -9119,7 +9732,7 @@ class JiuWenClawDeepAdapter:
             if self._external_memory_rail_registered:
                 await self._unregister_external_memory_rail()
 
-            self._external_memory_rail = self._build_external_memory_rail()
+            self._external_memory_rail = self._build_external_memory_rail(cfg)
             if self._external_memory_rail is None:
                 self._external_memory_fingerprint = None
                 return
@@ -9128,8 +9741,10 @@ class JiuWenClawDeepAdapter:
                 self._external_memory_rail_registered = True
                 self._external_memory_fingerprint = new_fp
                 logger.info(
-                    "[JiuWenClawDeepAdapter] ExternalMemoryRail registered (fp=%s)",
+                    "[JiuWenClawDeepAdapter] ExternalMemoryRail registered (fp=%s sid=%s aid=%s)",
                     new_fp[:8],
+                    sid,
+                    aid,
                 )
             except Exception as exc:
                 logger.error(

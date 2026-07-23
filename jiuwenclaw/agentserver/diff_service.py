@@ -11,10 +11,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.utils import get_agent_sessions_dir, get_agent_workspace_dir, get_user_workspace_dir
+from jiuwenclaw.utils import (
+    get_agent_sessions_dir,
+    get_multi_tenant_user_workspace_dir,
+    normalize_tenant_scope_id,
+    resolve_tenant_sessions_dir,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_sessions_root(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    sessions_root: str | Path | None = None,
+) -> Path:
+    """Resolve sessions root from optional override or explicit tenant ids."""
+    if sessions_root is not None:
+        return Path(sessions_root)
+    if service_id is not None or agent_id is not None:
+        return resolve_tenant_sessions_dir(service_id, agent_id)
+    return get_agent_sessions_dir()
 
 
 class DiffService:
@@ -23,22 +42,51 @@ class DiffService:
     def __init__(self) -> None:
         self._agent_id = "jiuwenclaw"
 
-    def get_turn_diffs(self, session_id: str) -> list[dict[str, Any]]:
+    def get_turn_diffs(
+        self,
+        session_id: str,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+        sessions_root: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
         """获取 session 的所有 turn diff（完整信息）.
 
         Args:
             session_id: 会话 ID
+            service_id / agent_id: 租户身份；用于解析 sessions / workspace
+            sessions_root: 可选覆盖 sessions 根目录；不从 path 反推身份
 
         Returns:
             turn diff 列表，按时间倒序排列（most recent first）
         """
-        turns = self._compute_turn_diffs(session_id)
+        turns = self._compute_turn_diffs(
+            session_id,
+            service_id=service_id,
+            agent_id=agent_id,
+            sessions_root=sessions_root,
+        )
         return list(reversed(turns))
 
-    def _compute_turn_diffs(self, session_id: str) -> list[dict[str, Any]]:
+    def _compute_turn_diffs(
+        self,
+        session_id: str,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+        sessions_root: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
         """计算 turn-based diffs."""
-        history = self._read_history(session_id)
-        agent_history = self._read_agent_history()
+        history = self._read_history(
+            session_id,
+            service_id=service_id,
+            agent_id=agent_id,
+            sessions_root=sessions_root,
+        )
+        agent_history = self._read_agent_history(
+            service_id=service_id,
+            agent_id=agent_id,
+        )
 
         if not history:
             return []
@@ -148,9 +196,34 @@ class DiffService:
         return None
 
     @staticmethod
-    def _read_history(session_id: str) -> list[dict[str, Any]]:
+    def _resolve_sessions_root(
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+        sessions_root: str | Path | None = None,
+    ) -> Path:
+        """Resolve sessions root from optional override or explicit tenant ids."""
+        return _resolve_sessions_root(
+            service_id=service_id,
+            agent_id=agent_id,
+            sessions_root=sessions_root,
+        )
+
+    @staticmethod
+    def _read_history(
+        session_id: str,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+        sessions_root: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
         """读取 session history."""
-        history_file = get_agent_sessions_dir() / session_id / "history.json"
+        root = _resolve_sessions_root(
+            service_id=service_id,
+            agent_id=agent_id,
+            sessions_root=sessions_root,
+        )
+        history_file = root / session_id / "history.json"
         if not history_file.exists():
             return []
         try:
@@ -158,25 +231,39 @@ class DiffService:
         except Exception:
             return []
 
-    def _read_agent_history(self) -> dict[str, Any]:
-        """读取 .agent_history（同时读取两个可能的位置并合并）."""
+    def _read_agent_history(
+        self,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """读取 .agent_history（按 sid/aid 定位；缺省 default/default 租户树）。"""
         result: dict[str, Any] = {}
 
-        paths = [
-            get_agent_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
-            get_user_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
-        ]
+        sid = normalize_tenant_scope_id(service_id)
+        aid = normalize_tenant_scope_id(agent_id)
+        workspace = get_multi_tenant_user_workspace_dir(sid, aid)
+        if workspace is None:
+            workspace = get_multi_tenant_user_workspace_dir("default", "default")
+        if workspace is None:
+            return result
 
-        for history_file in paths:
-            if history_file.exists():
-                try:
-                    data = json.loads(history_file.read_text(encoding="utf-8"))
-                    for file_path, entries in data.items():
-                        if file_path not in result:
-                            result[file_path] = []
-                        result[file_path].extend(entries)
-                except Exception as e:
-                    logger.warning(f"Failed to read agent history file {history_file}: {e}")
+        history_file = (
+            workspace
+            / "agent"
+            / "jiuwenclaw_workspace"
+            / ".agent_history"
+            / f"file_ops_{self._agent_id}.json"
+        )
+        if history_file.exists():
+            try:
+                data = json.loads(history_file.read_text(encoding="utf-8"))
+                for file_path, entries in data.items():
+                    if file_path not in result:
+                        result[file_path] = []
+                    result[file_path].extend(entries)
+            except Exception as e:
+                logger.warning(f"Failed to read agent history file {history_file}: {e}")
 
         return result
 

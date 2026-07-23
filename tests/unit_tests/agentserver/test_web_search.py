@@ -202,3 +202,56 @@ def test_web_search_invalid_search_mode_falls_back_to_default(monkeypatch):
     )
     assert result == "ok"
     assert calls == ["default"]
+
+
+def test_web_search_env_reads_tip_not_bare_keys(monkeypatch):
+    """Track B: free/paid availability must follow tip/ns, not bare os.environ."""
+    import os
+
+    from jiuwenclaw.agentserver.tools.web_search.free import _env_flag, _free_search_engines
+    from jiuwenclaw.agentserver.tools.web_search.log_util import paid_provider_skip_reason
+    from jiuwenclaw.agentserver.tools.web_search.providers import paid_provider_available
+    from jiuwenclaw.local_env_config import (
+        apply_env_overrides_to_active,
+        bind_agent_env_ns,
+        reset_agent_env_ns,
+        reset_local_env_state_for_tests,
+    )
+
+    saved = dict(os.environ)
+    reset_local_env_state_for_tests()
+    try:
+        os.environ["FREE_SEARCH_DDG_ENABLED"] = "1"
+        os.environ["SERPER_API_KEY"] = "bare-serper"
+        apply_env_overrides_to_active(
+            {
+                "FREE_SEARCH_DDG_ENABLED": "0",
+                "FREE_SEARCH_BING_ENABLED": "0",
+            },
+            service_id="default",
+            agent_id="office",
+        )
+        token = bind_agent_env_ns("default", "office")
+        try:
+            assert _env_flag("FREE_SEARCH_DDG_ENABLED") is False
+            assert _free_search_engines() == []
+            assert paid_provider_available("serper") is False
+            assert paid_provider_skip_reason("serper") == "missing_SERPER_API_KEY"
+        finally:
+            reset_agent_env_ns(token)
+
+        apply_env_overrides_to_active(
+            {"SERPER_API_KEY": "office-serper"},
+            service_id="default",
+            agent_id="office",
+        )
+        token = bind_agent_env_ns("default", "office")
+        try:
+            assert paid_provider_available("serper") is True
+            assert paid_provider_skip_reason("serper") == "available"
+        finally:
+            reset_agent_env_ns(token)
+    finally:
+        reset_local_env_state_for_tests()
+        os.environ.clear()
+        os.environ.update(saved)

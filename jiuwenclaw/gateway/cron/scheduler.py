@@ -9,10 +9,8 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.gateway.cron.models import CronJob, CronRunState
 from jiuwenclaw.gateway.cron.store import CronJobStore
-from jiuwenclaw.gateway.message_handler import MessageHandler
 from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenclaw.schema.message import EventType, Message, ReqMethod
 
@@ -77,14 +75,18 @@ class CronSchedulerService:
         self,
         *,
         store: CronJobStore,
-        agent_client: AgentServerClient,
-        message_handler: MessageHandler,
+        agent_client: Any,
+        message_handler: Any,
         now_fn: Callable[[], float] = _now_utc_ts,
+        service_id: str = "default",
+        agent_id: str = "default",
     ) -> None:
         self._store = store
         self._agent_client = agent_client
         self._message_handler = message_handler
         self._now_fn = now_fn
+        self._service_id = str(service_id or "default").strip() or "default"
+        self._agent_id = str(agent_id or "default").strip() or "default"
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -129,8 +131,13 @@ class CronSchedulerService:
         if self._running:
             return
         self._running = True
-        await self.reload()
-        self._task = asyncio.create_task(self._loop(), name="cron-scheduler")
+        try:
+            await self.reload()
+            self._task = asyncio.create_task(self._loop(), name="cron-scheduler")
+        except Exception:
+            self._running = False
+            self._task = None
+            raise
         logger.info("[Cron] scheduler started")
 
     async def stop(self) -> None:
@@ -352,6 +359,8 @@ class CronSchedulerService:
                         "content": job.description,
                         "query": job.description,
                         "mode": job.mode or "agent",
+                        "service_id": self._service_id,
+                        "agent_id": self._agent_id,
                         "cron": {
                             "job_id": job.id,
                             "job_name": job.name,
@@ -362,7 +371,11 @@ class CronSchedulerService:
                     },
                     is_stream=False,
                     timestamp=self._now_fn(),
-                    metadata={"cron": {"job_id": job.id, "run_id": run_id}},
+                    metadata={
+                        "cron": {"job_id": job.id, "run_id": run_id},
+                        "service_id": self._service_id,
+                        "agent_id": self._agent_id,
+                    },
                 )
                 resp = await self._agent_client.send_request(envelope)
                 text = _extract_text_from_agent_payload(resp.payload)
@@ -660,4 +673,12 @@ class CronSchedulerService:
             metadata=metadata,
             group_digital_avatar=_group_digital_avatar,
         )
-        await self._message_handler.publish_robot_messages(msg)
+        mh = self._message_handler
+        if mh is None:
+            logger.debug(
+                "[Cron] skip push_to_targets: no message_handler job=%s channel=%s",
+                job.id,
+                channel_id,
+            )
+            return
+        await mh.publish_robot_messages(msg)

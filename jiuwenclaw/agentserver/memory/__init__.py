@@ -34,10 +34,10 @@ from .config import (
     WikiMemorySettings,
     create_memory_settings,
     create_wiki_memory_settings,
+    default_workspace_dir,
     is_memory_enabled,
     get_memory_mode,
     get_embed_config,
-    DEFAULT_WORKSPACE_DIR,
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
 from .external_memory_config import (
@@ -107,7 +107,7 @@ __all__ = [
     "is_memory_enabled",
     "get_memory_mode",
     "get_embed_config",
-    "DEFAULT_WORKSPACE_DIR",
+    "default_workspace_dir",
     "estimate_tokens",
     "get_external_memory_config",
     "is_external_memory_enabled",

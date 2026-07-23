@@ -13,7 +13,11 @@ from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import get_agent_workspace_dir
 from jiuwenclaw.utils import logger
 
-DEFAULT_WORKSPACE_DIR = str(get_agent_workspace_dir())
+
+def default_workspace_dir() -> str:
+    """Lazy default workspace dir (respects tenant ContextVar when bound)."""
+    return str(get_agent_workspace_dir())
+
 
 _config_cache: Optional[Dict[str, Any]] = None
 
@@ -116,7 +120,7 @@ class MemorySettings:
 
 
 def create_memory_settings(
-    workspace_dir: str = DEFAULT_WORKSPACE_DIR,
+    workspace_dir: str | None = None,
     **overrides
 ) -> MemorySettings:
     """Create MemorySettings instance.
@@ -128,6 +132,7 @@ def create_memory_settings(
     Returns:
         MemorySettings instance
     """
+    resolved_workspace = workspace_dir if workspace_dir else default_workspace_dir()
     config = _load_config()
     embed_config = get_embed_config()
     memory_config = config.get("memory", {})

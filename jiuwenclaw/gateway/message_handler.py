@@ -158,6 +158,7 @@ class MessageHandler(ABC):
         self._channel_states: Dict[str, ChannelControlState] = {}
         self._session_map = SessionMap()
         self._cron_controller = None
+        self._cron_registry = None
 
         # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
@@ -1648,7 +1649,11 @@ class MessageHandler(ABC):
         )
 
     def set_cron_controller(self, controller: Any) -> None:
+        """Deprecated: use :meth:`set_cron_registry`."""
         self._cron_controller = controller
+
+    def set_cron_registry(self, registry: Any) -> None:
+        self._cron_registry = registry
 
     async def _handle_cron_push_payload(
         self,
@@ -1659,34 +1664,54 @@ class MessageHandler(ABC):
         session_id: str | None,
         metadata: dict[str, Any] | None,
     ) -> None:
-        cc = self._cron_controller
-        if cc is None:
+        registry = self._cron_registry or self._cron_controller
+        if registry is None:
             return
         action = str(payload.get("action") or "").strip()
         params = payload.get("data") or {}
         if not isinstance(params, dict):
             params = {}
         try:
-            if action == "list":
-                data = await cc.list_jobs()
+            if hasattr(registry, "handle_push_action"):
+                service_id, agent_id = registry.resolve_scope(
+                    metadata=metadata,
+                    payload=payload,
+                    params=params,
+                )
+                request_mode = self._stream_modes.get(request_id)
+                data = await registry.handle_push_action(
+                    action=action,
+                    params=params,
+                    service_id=service_id,
+                    agent_id=agent_id,
+                    request_mode=request_mode,
+                    mirror_to_agent=False,
+                )
+            elif action == "list":
+                data = await registry.list_jobs()
             elif action == "get":
-                data = await cc.get_job(str(params.get("job_id") or ""))
+                data = await registry.get_job(str(params.get("job_id") or ""))
             elif action == "create":
-                # 从原始请求中获取 mode，覆盖 LLM 工具调用的默认值
                 request_mode = self._stream_modes.get(request_id)
                 if request_mode:
                     params["mode"] = request_mode
-                data = await cc.create_job(params)
+                data = await registry.create_job(params)
             elif action == "update":
-                data = await cc.update_job(str(params.get("job_id") or ""), dict(params.get("patch") or {}))
+                data = await registry.update_job(
+                    str(params.get("job_id") or ""), dict(params.get("patch") or {})
+                )
             elif action == "delete":
-                data = {"deleted": await cc.delete_job(str(params.get("job_id") or ""))}
+                data = {"deleted": await registry.delete_job(str(params.get("job_id") or ""))}
             elif action == "toggle":
-                data = await cc.toggle_job(str(params.get("job_id") or ""), bool(params.get("enabled")))
+                data = await registry.toggle_job(
+                    str(params.get("job_id") or ""), bool(params.get("enabled"))
+                )
             elif action == "preview":
-                data = await cc.preview_job(str(params.get("job_id") or ""), int(params.get("count", 5)))
+                data = await registry.preview_job(
+                    str(params.get("job_id") or ""), int(params.get("count", 5))
+                )
             elif action == "run_now":
-                data = {"run_id": await cc.run_now(str(params.get("job_id") or ""))}
+                data = {"run_id": await registry.run_now(str(params.get("job_id") or ""))}
             else:
                 data = {"error": f"unknown cron action: {action}"}
         except Exception as exc:  # noqa: BLE001
@@ -2566,6 +2591,7 @@ class MessageHandler(ABC):
 
         try:
             if event_type == FILE_DOWNLOAD_START:
+                meta = request_metadata or {}
                 dl_params = FileTransferStartParams(
                     transfer_id=payload.get("transfer_id", ""),
                     filename=payload.get("filename", "unnamed"),
@@ -2574,8 +2600,14 @@ class MessageHandler(ABC):
                     total_chunks=payload.get("total_chunks", 0),
                     chunk_size=payload.get("chunk_size", 65536),
                     mime_type=payload.get("mime_type", ""),
-                    session_id=session_id or "",
+                    session_id=session_id or str(payload.get("session_id") or ""),
                     channel_id=channel_id,
+                    service_id=str(
+                        payload.get("service_id") or meta.get("service_id") or ""
+                    ),
+                    agent_id=str(
+                        payload.get("agent_id") or meta.get("agent_id") or ""
+                    ),
                 )
                 result = await ft_handler.handle_download_start(dl_params)
                 logger.info(

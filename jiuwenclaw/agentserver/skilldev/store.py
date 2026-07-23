@@ -29,8 +29,8 @@ class StateStore:
     def __init__(self, base_dir: Path) -> None:
         """
         Args:
-            base_dir: SkillDev 工作区根目录，约定为 get_workspace_dir() / "skilldev"
-                      即 ~/.jiuwenclaw/agent/workspace/skilldev/
+            base_dir: SkillDev 工作区根目录，约定为 ``{tenant_workspace}/skilldev``
+                      例如 ``~/.jiuwenclaw/service_{sid}/agent_{aid}/agent/jiuwenclaw_workspace/skilldev/``
         """
         self._base_dir = base_dir
 

@@ -115,6 +115,8 @@ class RequestSummaryRail(DeepAgentRail):
         request_id: str = "",
         mode: str = "agent.plan",
         trace_id: str | None = None,
+        service_id: str | None = None,
+        agent_id: str | None = None,
     ) -> None:
         if not get_perf_summary_config().enabled:
             return
@@ -127,6 +129,8 @@ class RequestSummaryRail(DeepAgentRail):
                 channel_id=channel_id,
                 mode=mode,
                 trace_id=trace_id,
+                service_id=service_id,
+                agent_id=agent_id,
             ),
         )
 

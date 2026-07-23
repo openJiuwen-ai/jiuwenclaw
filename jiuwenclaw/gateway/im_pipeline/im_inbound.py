@@ -86,7 +86,7 @@ class IMPlatformAdapter(Protocol):
         ...
 
     def load_recent_messages(
-        self, thread_id: str, limit: int = 500
+        self, thread_id: str, limit: int = 500, *, service_id: str | None = None, agent_id: str | None = None
     ) -> list[IMHistoryMessage]:
         ...
 
@@ -229,6 +229,8 @@ class IMConversationProcessor:
             timestamp_ms=self._resolve_timestamp_ms(msg.timestamp, metadata),
             principal_name=principal_name,
             adapter=adapter,
+            service_id=(msg.params or {}).get("service_id") if isinstance(msg.params, dict) else None,
+            agent_id=(msg.params or {}).get("agent_id") if isinstance(msg.params, dict) else None,
         )
         rewritten_content = await self._rewrite_query(prompt, principal_name, adapter)
         if not rewritten_content:
@@ -328,10 +330,17 @@ class IMConversationProcessor:
         timestamp_ms: int,
         principal_name: str,
         adapter: IMPlatformAdapter,
+        service_id: str | None = None,
+        agent_id: str | None = None,
     ) -> str:
         prompt_parts: list[str] = []
         prompt_parts.append("=== 群聊历史消息 ===")
-        history = adapter.load_recent_messages(thread_id, limit=500)
+        history = adapter.load_recent_messages(
+            thread_id,
+            limit=500,
+            service_id=service_id,
+            agent_id=agent_id,
+        )
         if history:
             prompt_parts.append(f"最近 {len(history)} 条消息：\n")
             for msg in history:

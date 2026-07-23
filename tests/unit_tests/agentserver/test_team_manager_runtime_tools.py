@@ -25,8 +25,8 @@ class _FakeResourceManager:
 
 class _FakeCronRuntimeBridge:
     @staticmethod
-    def build_tools(*, context, agent_id):
-        _ = (context, agent_id)
+    def build_tools(*, context, agent_id, service_id=None, tenant_agent_id=None):
+        _ = (context, agent_id, service_id, tenant_agent_id)
         return [
             LocalFunction(
                 card=ToolCard(

@@ -33,10 +33,13 @@ class DisabledToolsRail(DeepAgentRail):
         react:
           disabled_tools: ["bash", "write_file", "mcp_exec_command"]
 
-    When ``touch_shared_resource_mgr`` is False, only the current agent's
+    When ``touch_shared_resource_mgr`` is False (default), only the current agent's
     ``ability_manager`` is updated; ``Runner.resource_mgr`` is unchanged so
-    parallel lightweight agents (e.g. agent.fast sub-ReActAgent) do not evict
-    shared tool registrations.
+    other in-process agents (and parallel lightweight agents such as agent.fast)
+    do not lose shared tool registrations.
+
+    Set ``touch_shared_resource_mgr=True`` only when a single-agent process must
+    also evict tools from the global resource pool.
     """
 
     priority: int = 1  # 低优先级，确保最后执行
@@ -45,15 +48,15 @@ class DisabledToolsRail(DeepAgentRail):
         self,
         disabled_tools: List[str] | None = None,
         *,
-        touch_shared_resource_mgr: bool = True,
+        touch_shared_resource_mgr: bool = False,
     ) -> None:
         """Initialize DisabledToolsRail.
 
         Args:
             disabled_tools: List of tool names to disable. Can be None or empty.
-            touch_shared_resource_mgr: When True (default), remove tools from both
-                ability_manager and Runner.resource_mgr. When False, detach only
-                from ability_manager for this agent.
+            touch_shared_resource_mgr: When False (default), detach only from this
+                agent's ability_manager. When True, also remove tools from
+                Runner.resource_mgr (not safe for multi-agent in one process).
         """
         super().__init__()
         self._disabled_tools: Set[str] = set(disabled_tools or [])

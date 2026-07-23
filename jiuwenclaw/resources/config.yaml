@@ -171,11 +171,11 @@ memory:
     # 依赖顶层 embed 段提供 embedding 配置（不单独配置 api_key）
     openjiuwen:
       kv_type: shelve                                    # shelve | in_memory | sqlite
-      kv_path: ${MEMORY_KV_PATH:-}                       # 默认 ~/.jiuwenclaw/memory/ltm/kv
+      kv_path: ${MEMORY_KV_PATH:-}                       # 空则落租户 workspace/memory/ltm/kv；非空原样用（上游保证隔离）
       vector_type: chroma                                # chroma
-      vector_persist_dir: ${MEMORY_VECTOR_DIR:-}         # 默认 ~/.jiuwenclaw/memory/ltm/chroma
+      vector_persist_dir: ${MEMORY_VECTOR_DIR:-}         # 空则 .../memory/ltm/chroma；非空原样用
       db_type: sqlite
-      db_path: ${MEMORY_DB_PATH:-}                       # 默认 ~/.jiuwenclaw/memory/ltm/ltm.db
+      db_path: ${MEMORY_DB_PATH:-}                       # 空则 .../memory/ltm/ltm.db；非空原样用
 
 # models.*.model_client_config 超时说明：
 #   timeout — 非流式 invoke；流式未配置 stream_timeout 时也使用此值（整包响应上限）
