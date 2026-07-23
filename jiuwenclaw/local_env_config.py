@@ -80,6 +80,8 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
         "JINA_API_KEY",
         "PERPLEXITY_API_KEY",
         "SERPER_API_KEY",
+        "PETAL_SEARCH_URL",
+        "PETAL_SEARCH_HEADERS",
         "default_headers",
         "DEFAULT_HEADERS",
         "VISION_API_KEY",
