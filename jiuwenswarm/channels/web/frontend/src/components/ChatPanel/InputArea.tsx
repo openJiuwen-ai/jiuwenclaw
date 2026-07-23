@@ -267,6 +267,13 @@ export function InputArea({
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectDirError || workDialogOpen) return;
+    const timeoutId = window.setTimeout(() => setProjectDirError(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [projectDirError, workDialogOpen]);
+
   const [composerSuggestion, setComposerSuggestion] = useState<ComposerSuggestionState | null>(null);
   const [composerSuggestionIndex, setComposerSuggestionIndex] = useState(0);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
@@ -1949,7 +1956,11 @@ export function InputArea({
             <CodeBranchSelector project={displayedProject} disabled={isProcessing} compact />
           ) : null}
           {projectDirError && !workDialogOpen ? (
-            <div className="chat-work-select__error" role="alert">{projectDirError}</div>
+            <div className="app-toast-wrapper app-toast-wrapper--top-center">
+              <div className="app-session-toast" role="status" aria-live="polite">
+                {projectDirError}
+              </div>
+            </div>
           ) : null}
         </div>
       ) : null}
