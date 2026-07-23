@@ -893,7 +893,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setConnectionStats,
     updateSession,
     setContextCompressionStats,
-    setHeartbeatStatus,
     setTeamMemberContextCompressionStatus,
     clearTeamMemberContextCompressionStatus,
     clearAllTeamMemberContextCompressionStatus,
@@ -2627,16 +2626,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           handleContextCompressionState(sessionId, payload);
         }
       ),
-      webClient.on('heartbeat.relay', ({ payload }) => {
-        const heartbeatText =
-          typeof payload.heartbeat === 'string' ? payload.heartbeat : '';
-        // 只要成功收到 relay 即表示已成功发到前端，始终为 ok，不存在 alert
-        setHeartbeatStatus(
-          'ok',
-          heartbeatText || null,
-          new Date().toISOString()
-        );
-      }),
       webClient.on('session.updated', ({ payload }) => {
         const sessionId =
           typeof payload.session_id === 'string' ? payload.session_id : '';
@@ -3440,7 +3429,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     handleTtsPlayback,
     revealPendingContextUsage,
     setContextCompressionStats,
-    setHeartbeatStatus,
     clearThinkingForVisibleOutput,
     findActiveTeamLeaderMessage,
     updateSession,
@@ -3499,14 +3487,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setConnected(false);
       // 不再重置上下文压缩信息，保持本地存储的状态
       // setContextCompressionStats(null);
-      setHeartbeatStatus('unknown', null, null);
       setConnectionStats({ state: 'closed', inflight: 0 });
     };
   }, [
     setContextCompressionStats,
     setConnectionStats,
     setConnected,
-    setHeartbeatStatus,
   ]);
 
   useEffect(() => {

@@ -28,7 +28,6 @@
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
-    "heartbeat": "Heartbeat",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
     "channels": "Channels",
@@ -506,52 +505,6 @@
     "version": "Version",
     "language": "Language",
     "moreSettings": "More Settings"
-  },
-  "heartbeat": {
-    "title": "Heartbeat Management",
-    "subtitle": "Maintain heartbeat settings and instruction files",
-    "configTitle": "Heartbeat Settings",
-    "configSubtitle": "Configure heartbeat interval, target channel, and active hours",
-    "loadingConfig": "Loading heartbeat settings...",
-    "saved": "Heartbeat settings saved",
-    "badges": {
-      "ok": "Recent heartbeat is healthy",
-      "alert": "Recent heartbeat is alerting",
-      "unknown": "No heartbeat result yet"
-    },
-    "everyLabel": "Interval (seconds)",
-    "targetLabel": "Target channel (channel_id)",
-    "enableActiveHours": "Enable active hours",
-    "startTime": "Start time",
-    "endTime": "End time",
-    "recentMessages": "Recent 20 heartbeat messages",
-    "noHistory": "No heartbeat history",
-    "statusOk": "OK",
-    "statusUnknown": "UNKNOWN",
-    "latestTime": "Latest heartbeat time",
-    "latestContent": "Latest heartbeat content",
-    "none": "None",
-    "channels": {
-      "web": "Web (web)",
-      "feishu": "Lark (feishu)",
-      "wechat": "WeChat (wechat)",
-      "xiaoyi": "Xiaoyi (xiaoyi)",
-      "dingtalk": "DingTalk (dingtalk)"
-    },
-    "errors": {
-      "loadConfig": "Failed to load heartbeat settings",
-      "saveConfig": "Failed to save heartbeat settings",
-      "invalidEvery": "Heartbeat interval must be greater than 0",
-      "invalidActiveHours": "active_hours must use HH:MM format (for example 08:00)",
-      "invalidRange": "End time must be later than start time",
-      "feishuNoTarget": "Feishu bot has not had any conversation yet. Heartbeat cannot be sent. Please chat with the bot in Feishu first."
-    }
-  },
-  "heartbeatModal": {
-    "closeAria": "Close heartbeat details dialog",
-    "title": "Heartbeat message",
-    "subtitle": "Message details",
-    "empty": "No detailed content"
   },
   "offloadFiles": {
     "title": "Offload Files",
@@ -2045,9 +1998,6 @@
     "configErrorHint": "Please start the backend first (e.g.",
     "configErrorDefault": ", default port 19000). If backend is remote, set",
     "configErrorEnv": "in",
-    "heartbeatTitle": "Heartbeat message",
-    "heartbeatClose": "Close",
-    "heartbeatViewFull": "Click to view full message",
     "securityAlertTitle": "Security Alert",
     "noContent": "No details",
     "restarting": "Restarting service",

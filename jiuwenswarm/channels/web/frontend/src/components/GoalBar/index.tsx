@@ -57,7 +57,7 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   const pendingAction = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.pendingAction ?? null);
   const queryStatus = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.queryStatus ?? 'ok');
   // 前后端连接是否正常，复用 webClient 原生 WS 状态机的镜像（不是心跳消息判断，见真实环境
-  // 联调方案）——跟专门播报 agent 心跳的 HeartbeatPanel/connection.heartbeat 是两回事。
+  // 联调方案）——跟专门播报 agent 心跳的 connection.heartbeat 是两回事。
   const isConnected = useSessionStore((s) => s.isConnected);
   // 后端不下发 created_at（backend-requests.md #2），优先用真实值，没有时退回本地兜底时间
   const localCreatedAt = useGoalStore((s) => (goal ? s.localCreatedAt[goal.goal_id] : undefined));

@@ -28,7 +28,6 @@
     "agent": "智能体",
     "teams": "团队",
     "sessions": "会话",
-    "heartbeat": "心跳",
     "cron": "定时任务",
     "skills": "技能",
     "channels": "频道",
@@ -507,52 +506,6 @@
     "version": "版本",
     "language": "语言",
     "moreSettings": "更多设置"
-  },
-  "heartbeat": {
-    "title": "心跳管理",
-    "subtitle": "维护心跳参数与指令文件",
-    "configTitle": "心跳参数配置",
-    "configSubtitle": "配置心跳间隔、目标频道与生效时间",
-    "loadingConfig": "正在加载心跳配置...",
-    "saved": "心跳参数已保存",
-    "badges": {
-      "ok": "最近心跳正常",
-      "alert": "最近心跳告警",
-      "unknown": "尚无心跳结果"
-    },
-    "everyLabel": "间隔时间 (秒)",
-    "targetLabel": "目标频道 (channel_id)",
-    "enableActiveHours": "启用生效时间",
-    "startTime": "开始时间",
-    "endTime": "结束时间",
-    "recentMessages": "最近 20 条心跳消息",
-    "noHistory": "暂无历史心跳消息",
-    "statusOk": "OK",
-    "statusUnknown": "UNKNOWN",
-    "latestTime": "最近心跳时间",
-    "latestContent": "最近心跳内容",
-    "none": "暂无",
-    "channels": {
-      "web": "网页 (web)",
-      "feishu": "飞书 (feishu)",
-      "wechat": "微信 (wechat)",
-      "xiaoyi": "小艺 (xiaoyi)",
-      "dingtalk": "钉钉 (dingtalk)"
-    },
-    "errors": {
-      "loadConfig": "加载心跳配置失败",
-      "saveConfig": "保存心跳配置失败",
-      "invalidEvery": "心跳间隔必须是大于 0 的正数",
-      "invalidActiveHours": "active_hours 需使用 HH:MM 格式（例如 08:00）",
-      "invalidRange": "结束时间必须大于开始时间",
-      "feishuNoTarget": "飞书机器人尚未与用户对话，无法推送心跳。请先在飞书中与机器人对话一次。"
-    }
-  },
-  "heartbeatModal": {
-    "closeAria": "关闭心跳详情弹窗",
-    "title": "心跳消息",
-    "subtitle": "消息内容详情",
-    "empty": "无详细内容"
   },
   "offloadFiles": {
     "title": "离线文件",
@@ -2046,9 +1999,6 @@
     "configErrorHint": "请先启动 E2E 后端（如",
     "configErrorDefault": "，默认监听 19000）。若后端不在本机或端口不同，可在",
     "configErrorEnv": "设置",
-    "heartbeatTitle": "心跳消息",
-    "heartbeatClose": "关闭",
-    "heartbeatViewFull": "点击查看完整心跳消息",
     "securityAlertTitle": "安全警告",
     "noContent": "无详细内容",
     "restarting": "正在重启服务",
