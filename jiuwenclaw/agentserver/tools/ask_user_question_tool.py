@@ -236,7 +236,11 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
 
     registry = AskUserQuestionRegistry.get_instance()
     try:
-        answers = await registry.wait_for_answer(ask_id, timeout=timeout_sec)
+        # HITL wait must not consume StreamingToolExecutor.wait_all budget.
+        from jiuwenclaw.jiuwen_core_patch import streaming_tool_wait_timeout_paused
+
+        async with streaming_tool_wait_timeout_paused():
+            answers = await registry.wait_for_answer(ask_id, timeout=timeout_sec)
     except asyncio.TimeoutError:
         return {
             "status": "timeout",
