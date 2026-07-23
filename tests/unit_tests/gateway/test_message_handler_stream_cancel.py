@@ -498,7 +498,8 @@ async def test_disconnect_cancel_can_be_delayed_until_grace_expires() -> None:
     await asyncio.sleep(0)
     assert _FakeAgentClient.sent_requests == []
 
-    await asyncio.sleep(0.03)
+    pending = list(getattr(handler, "_disconnect_cancel_tasks").values())
+    await asyncio.gather(*pending)
     assert len(_FakeAgentClient.sent_requests) == 1
 
 

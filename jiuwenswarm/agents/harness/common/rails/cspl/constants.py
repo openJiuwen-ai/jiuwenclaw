@@ -43,6 +43,7 @@ OUTPUT_SCAN_TOOLS = frozenset({
     "powershell",
     "mcp_exec_command",
     "send_message",
+    "send_sms",
     "message",
     "send_file_to_user",
     "pdf",
@@ -58,6 +59,7 @@ SHELL_TOOLS = frozenset({
 
 MESSAGE_TOOLS = frozenset({
     "send_message",
+    "send_sms",
     "message",
     "send_file_to_user",
 })

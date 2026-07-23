@@ -271,15 +271,22 @@ class XiaoyiChannel(BaseChannel):
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}  # Heartbeat tasks for each channel
         self._connect_tasks: dict[str, asyncio.Task] = {}  # Connection tasks for each channel
         self._session_task_map: dict[str, str] = {}
+        # Team responses are produced by the first request's long-lived
+        # stream. Keep the current platform task for each stable session so
+        # those responses reach the user's latest A2A request.
+        self._latest_platform_tasks: dict[str, str] = {}
         self._session_heartbeat_tasks: dict[str, asyncio.Task] = {}  # Response heartbeat tasks for each session
         self._stream_text_buffers: dict[str, str] = {}
         self._task_last_activity: dict[str, float] = {}
         self._on_message_cb: Callable[[Message], Any] | None = None
         # Task timeout management
         self._session_active: set[str] = set()  # Active sessions (concurrent request detection)
-        self._task_timeout_tasks: dict[str, asyncio.Task] = {}  # 1-hour task timeout tasks
-        self._session_timeout_tasks: dict[str, asyncio.Task] = {}  # 60-second periodic timeout tasks
+        self._active_tasks: set[tuple[str, str]] = set()
+        self._task_timeout_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._session_timeout_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._sessions_waiting_for_push: dict[str, str] = {}  # {session: task} waiting for push
+        self._team_sessions: set[str] = set()  # Team rounds stay active across member outputs
+        self._team_tasks: set[tuple[str, str]] = set()
         # Session cleanup management
         self._sessions_marked_for_cleanup: dict[str, dict[str, Any]] = {}  # Session cleanup state
         # File upload service configuration
@@ -291,7 +298,7 @@ class XiaoyiChannel(BaseChannel):
         # Save additional configuration fields
         self.api_id = config.api_id
         self.push_id = config.push_id
-        self._accumulated_texts: dict[str, str] = {}  # Accumulated text per session for push notification
+        self._accumulated_texts: dict[tuple[str, str], str] = {}
         # Data-event 处理器：intent_name -> list of handlers
         self._data_event_handlers: dict[str, List[Callable[[DataEvent], Any]]] = {}
         # InvokeJarvisGUIAgentResponse 原始事件回调列表
@@ -371,15 +378,13 @@ class XiaoyiChannel(BaseChannel):
                 self._session_heartbeat_tasks[session_id].cancel()
                 self._session_heartbeat_tasks[session_id] = None
         # Cancel all task timeout tasks
-        for session_id in list(self._task_timeout_tasks.keys()):
-            if self._task_timeout_tasks[session_id]:
-                self._task_timeout_tasks[session_id].cancel()
-                self._task_timeout_tasks[session_id] = None
+        for task in self._task_timeout_tasks.values():
+            if task:
+                task.cancel()
         # Cancel all session timeout tasks
-        for session_id in list(self._session_timeout_tasks.keys()):
-            if self._session_timeout_tasks[session_id]:
-                self._session_timeout_tasks[session_id].cancel()
-                self._session_timeout_tasks[session_id] = None
+        for task in self._session_timeout_tasks.values():
+            if task:
+                task.cancel()
         # Close all websocket connections
         for url_key, ws in list(self._ws_connections.items()):
             if ws:
@@ -395,7 +400,11 @@ class XiaoyiChannel(BaseChannel):
         self._session_timeout_tasks.clear()
         self._ws_connections.clear()
         self._session_active.clear()
+        self._active_tasks.clear()
+        self._latest_platform_tasks.clear()
         self._sessions_waiting_for_push.clear()
+        self._team_sessions.clear()
+        self._team_tasks.clear()
         self._sessions_marked_for_cleanup.clear()
         self._accumulated_texts.clear()
         logger.info("XiaoyiChannel 已停止")
@@ -438,7 +447,101 @@ class XiaoyiChannel(BaseChannel):
             self.config.enable_streaming,
         )
         logger.info(f"XiaoyiChannel 发送消息: {msg}")
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        event_name = str(
+            getattr(msg.event_type, "value", None) or payload.get("event_type") or ""
+        ).strip()
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        mode = str(metadata.get("mode") or "").strip().lower()
         session_id, task_id = self._extract_platform_receive_info(msg)
+        is_team_event = (
+            event_name.startswith("team.")
+            or mode in {"team", "team.plan", "code.team"}
+        )
+        if is_team_event:
+            task_id = self._latest_platform_tasks.get(session_id, task_id)
+        team_task_key = (session_id, task_id)
+
+        # Team control/state events are not user-visible.  They identify a
+        # long-lived round whose chat.final frames are member outputs rather
+        # than the terminal frame for the whole A2A task.
+        if is_team_event and session_id:
+            self._team_sessions.add(session_id)
+            self._team_tasks.add(team_task_key)
+        is_team_session = team_task_key in self._team_tasks
+
+        if event_name == "team.runtime_ready":
+            return
+
+        # Match Feishu's low-noise policy: member/task lifecycle events remain
+        # internal, while team.message is delivered as readable text.
+        if event_name in {"team.member", "team.task"}:
+            return
+
+        # A completed Xiaoyi task cannot accept more artifacts. Team runtimes
+        # can keep producing member events after the leader has ended the
+        # current round, so drop those events until the next inbound platform
+        # task becomes active. The runtime-level completion event is still
+        # consumed below so its Team markers can be cleared.
+        if (
+            is_team_session
+            and event_name != "team.completed"
+            and not self._is_session_active(session_id, task_id)
+        ):
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_TEAM_EVENT_SKIPPED "
+                "message_id=%s session_id=%s task_id=%s event_type=%s "
+                "reason=platform_task_already_completed",
+                msg.id,
+                session_id,
+                task_id,
+                event_name,
+            )
+            return
+
+        if event_name == "team.message":
+            event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+            from_member = str(event.get("from_member") or "团队成员").strip()
+            to_member = str(event.get("to_member") or "").strip()
+            message_type = str(event.get("type") or "").strip()
+            content = str(event.get("content") or "").strip()
+            if not content:
+                logger.warning("XiaoyiChannel Team 消息缺少 content，跳过发送")
+                return
+            receiver = to_member if message_type == "team.message.p2p" and to_member else "全体"
+            team_text = f"【团队消息｜{from_member} → {receiver}】\n{content}"
+            self._accumulated_texts[team_task_key] = team_text
+            for url_key in list(self._ws_connections.keys()):
+                await self._send_text_response(
+                    session_id,
+                    task_id,
+                    team_text,
+                    url_key,
+                    append=False,
+                    last_chunk=True,
+                    is_final=False,
+                )
+            return
+
+        if event_name == "team.completed":
+            if self._is_session_active(session_id, task_id):
+                for url_key in list(self._ws_connections.keys()):
+                    await self._send_status_update_with_state(
+                        task_id,
+                        session_id,
+                        "团队任务已完成~",
+                        "completed",
+                        url_key,
+                    )
+                await self._finalize_session(session_id, task_id)
+            self._latest_platform_tasks.pop(session_id, None)
+            self._session_task_map.pop(task_id, None)
+            self._clear_task_timeout(session_id)
+            self._clear_session_timeout(session_id)
+            self._sessions_waiting_for_push.pop(session_id, None)
+            self._clear_team_session(session_id)
+            return
+
         # Handle chat.file event
         if self.config.mode == "xiaoyi_claw" and msg.event_type == EventType.CHAT_FILE:
             files = msg.payload.get("files", {}) if isinstance(msg.payload, dict) else {}
@@ -468,12 +571,30 @@ class XiaoyiChannel(BaseChannel):
             return
 
         if should_send_as_status_update(msg.event_type):
+            if is_team_session and msg.event_type in {
+                EventType.CHAT_TOOL_CALL,
+                EventType.CHAT_TOOL_RESULT,
+            }:
+                return
             is_processing = (
                 msg.payload.get("is_processing", True)
                 if isinstance(msg.payload, dict)
                 else True
             )
-            if not is_processing and not self._is_session_active(session_id):
+            if (
+                is_team_session
+                and msg.event_type == EventType.CHAT_PROCESSING_STATUS
+                and is_processing is False
+            ):
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_TEAM_STATUS_DEFERRED "
+                    "message_id=%s session_id=%s task_id=%s",
+                    msg.id,
+                    session_id,
+                    task_id,
+                )
+                return
+            if not is_processing and not self._is_session_active(session_id, task_id):
                 logger.info(
                     "[GUI_AGENT_DIAG] phase=XIAOYI_STATUS_SKIPPED "
                     "message_id=%s session_id=%s event_type=%s "
@@ -484,18 +605,24 @@ class XiaoyiChannel(BaseChannel):
                     msg.payload,
                 )
                 return
-            status_text = get_status_text_for_event(msg.event_type, msg.payload)
+            status_text = (
+                "团队任务已完成~"
+                if is_team_session and not is_processing
+                else get_status_text_for_event(msg.event_type, msg.payload)
+            )
             status_state = get_status_state_for_event(msg.event_type, msg.payload)
             for url_key in list(self._ws_connections.keys()):
                 await self._send_status_update_with_state(
                     task_id, session_id, status_text, status_state, url_key
                 )
             if status_state in {"completed", "failed", "canceled"} and session_id:
-                await self._stop_session_heartbeat(session_id)
-                self._clear_task_timeout(session_id)
-                self._clear_session_timeout(session_id)
-                self._mark_session_completed(session_id)
-                self._accumulated_texts.pop(session_id, None)
+                await self._finalize_session(
+                    session_id,
+                    task_id,
+                    preserve_team_session=(
+                        is_team_session and status_state == "completed"
+                    ),
+                )
             return
 
         # 问卷降级保底：端侧无选项点选卡片能力，把 chat.ask_user_question 降级为纯文本，
@@ -560,6 +687,9 @@ class XiaoyiChannel(BaseChannel):
         cron_job_name = ""
         if isinstance(msg.payload, dict):
             content = msg.payload.get("content", "\n")
+            if msg.event_type == EventType.CHAT_ERROR:
+                error_text = str(msg.payload.get("error") or "处理出错").strip()
+                content = f"⚠️ {error_text}"
             if isinstance(content, dict):
                 content = content.get("output", str(content))
             content = str(content)
@@ -576,28 +706,35 @@ class XiaoyiChannel(BaseChannel):
         if not self.config.enable_streaming:
             append = False
             last_chunk = True
-            final = True
+            final = not (
+                is_team_session
+                and msg.event_type in {EventType.CHAT_FINAL, EventType.CHAT_ERROR}
+            )
+            if not final:
+                member_name = str(msg.payload.get("member_name") or "").strip()
+                if member_name:
+                    content = f"【{member_name}】\n{content}"
         else:
             # 流式模式：按事件类型计算增量与是否结束
-            is_delta = msg.event_type == EventType.CHAT_DELTA
             is_chat_final = msg.event_type == EventType.CHAT_FINAL
             is_final = bool(msg.payload.get("is_complete", False))
 
-            # 获取之前发送的文本
-            previous_text = self._accumulated_texts.get(session_id, "")
-
             # 累积当前文本
-            self._accumulated_texts[session_id] = content
-
-            # 计算增量文本
-            if is_delta:
-                incremental_text = content[len(previous_text):]
-            else:
-                incremental_text = content
+            self._accumulated_texts[team_task_key] = content
 
             # chat.final 携带完整正文，直接作为独立终帧发送，避免客户端
             # 等待后续空 status 帧提交正文。
-            if is_chat_final:
+            if is_team_session and msg.event_type in {
+                EventType.CHAT_FINAL,
+                EventType.CHAT_ERROR,
+            }:
+                member_name = str(msg.payload.get("member_name") or "").strip()
+                if member_name:
+                    content = f"【{member_name}】\n{content}"
+                append = False
+                last_chunk = True
+                final = False
+            elif is_chat_final:
                 append = False
                 last_chunk = True
                 final = True
@@ -627,8 +764,8 @@ class XiaoyiChannel(BaseChannel):
         )
 
         # Get accumulated text for this session (for push notification)
-        accumulated_text = self._accumulated_texts.get(session_id, "")
-        self._accumulated_texts[session_id] = content
+        accumulated_text = self._accumulated_texts.get(team_task_key, "")
+        self._accumulated_texts[team_task_key] = content
 
         # Send to all active connections
         for url_key, ws in self._ws_connections.items():
@@ -647,19 +784,7 @@ class XiaoyiChannel(BaseChannel):
                     logger.warning(f"XiaoyiChannel 发送消息失败 ({url_key}): {e}")
 
         if final and session_id:
-            await self._stop_session_heartbeat(session_id)
-            # Clean up tasks and mark session as completed
-            self._clear_task_timeout(session_id)
-            self._clear_session_timeout(session_id)
-            self._mark_session_completed(session_id)
-            # Check if session was waiting for push and send notification
-            if self._is_session_waiting_for_push(session_id, task_id) and accumulated_text:
-                summary = accumulated_text[:30] + "..." if len(accumulated_text) > 30 else accumulated_text
-                await self._send_push_notification(summary, "后台任务已完成：" + summary)
-                self._clear_session_waiting_for_push(session_id, task_id)
-
-            # Clear accumulated text
-            self._accumulated_texts.pop(session_id, None)
+            await self._finalize_session(session_id, task_id, accumulated_text)
 
     def get_metadata(self) -> ChannelMetadata:
         return ChannelMetadata(
@@ -950,8 +1075,9 @@ class XiaoyiChannel(BaseChannel):
             )
             return
 
-        # 根级直连 A2A（jsonrpc 2.0）须含 params.sessionId，否则整帧丢弃
-        if message.get("jsonrpc") == "2.0":
+        # Direct message streams require a stable params.sessionId. Other
+        # JSON-RPC methods (for example tasks/cancel) have their own schema.
+        if message.get("jsonrpc") == "2.0" and method == "message/stream":
             params_root = message.get("params")
             if not isinstance(params_root, dict):
                 params_root = {}
@@ -1012,8 +1138,21 @@ class XiaoyiChannel(BaseChannel):
         user_message = message.get("params", {}).get("message", {})
         parts = user_message.get("parts", [])
 
+        # A Team runtime spans multiple platform tasks. Retire only the
+        # previous delivery task; keep the session-level Team runtime alive.
+        previous_task_id = self._latest_platform_tasks.get(session_id)
+        if (
+            session_id in self._team_sessions
+            and previous_task_id
+            and previous_task_id != task_id
+        ):
+            await self._retire_superseded_team_task(session_id, previous_task_id)
+
         # Mark session as active
-        self._mark_session_active(session_id)
+        self._mark_session_active(session_id, task_id)
+        self._remember_active_platform_task(session_id, task_id)
+        if session_id in self._team_sessions:
+            self._team_tasks.add((session_id, task_id))
         self._session_task_map[task_id] = session_id
 
         # ==================== PROCESS PARTS (TEXT & FILES) ====================
@@ -1164,6 +1303,8 @@ class XiaoyiChannel(BaseChannel):
             """1-hour task timeout handler."""
             try:
                 await asyncio.sleep(task_timeout_ms / 1000)
+                if (session_id, task_id) not in self._active_tasks:
+                    return
                 logger.info(f"[TASK TIMEOUT] 1-hour timeout triggered for session {session_id}")
                 # Send default message with is_final=true
                 for url_key in list(self._ws_connections.keys()):
@@ -1173,14 +1314,18 @@ class XiaoyiChannel(BaseChannel):
             except asyncio.CancelledError:
                 pass
 
-        self._task_timeout_tasks[session_id] = asyncio.create_task(task_timeout_handler())
+        task_key = (session_id, task_id)
+        self._clear_task_timeout(session_id, task_id)
+        self._task_timeout_tasks[task_key] = asyncio.create_task(task_timeout_handler())
 
         # Start 60-second periodic timeout for status updates
         async def periodic_timeout_handler():
             """60-second periodic timeout for status updates."""
             try:
-                while session_id in self._session_active:
+                while (session_id, task_id) in self._active_tasks:
                     await asyncio.sleep(60)
+                    if (session_id, task_id) not in self._active_tasks:
+                        break
                     # Skip if already waiting for push (1-hour timeout triggered)
                     if self._is_session_waiting_for_push(session_id, task_id):
                         break
@@ -1189,7 +1334,8 @@ class XiaoyiChannel(BaseChannel):
             except asyncio.CancelledError:
                 pass
 
-        self._session_timeout_tasks[session_id] = asyncio.create_task(periodic_timeout_handler())
+        self._clear_session_timeout(session_id, task_id)
+        self._session_timeout_tasks[task_key] = asyncio.create_task(periodic_timeout_handler())
         # =================================================================
 
         handled = False
@@ -1306,17 +1452,68 @@ class XiaoyiChannel(BaseChannel):
         )
         await self._send_agent_response(session_id, task_id, response, url_key)
 
-    def _is_session_active(self, session_id: str) -> bool:
+    def _is_session_active(self, session_id: str, task_id: str | None = None) -> bool:
         """检查会话是否有活跃任务."""
+        if task_id:
+            session_tasks = {key for key in self._active_tasks if key[0] == session_id}
+            if session_tasks:
+                return (session_id, task_id) in session_tasks
         return session_id in self._session_active
 
-    def _mark_session_active(self, session_id: str) -> None:
+    def _remember_active_platform_task(self, session_id: str, task_id: str) -> None:
+        """Remember the latest inbound A2A task for a stable Xiaoyi session."""
+        if session_id and task_id:
+            self._latest_platform_tasks[session_id] = task_id
+
+    async def _retire_superseded_team_task(
+        self, session_id: str, task_id: str
+    ) -> None:
+        """Finish one delivery task while retaining its Agent Team session."""
+        if self._is_session_active(session_id, task_id):
+            for url_key in list(self._ws_connections.keys()):
+                await self._send_status_update_with_state(
+                    task_id,
+                    session_id,
+                    "已切换到下一条指令，团队继续处理中~",
+                    "completed",
+                    url_key,
+                )
+        self._clear_session_waiting_for_push(session_id, task_id)
+        await self._finalize_session(
+            session_id,
+            task_id,
+            preserve_team_session=True,
+        )
+        self._session_task_map.pop(task_id, None)
+
+    def _mark_session_active(self, session_id: str, task_id: str | None = None) -> None:
         """标记会话为活跃状态."""
         self._session_active.add(session_id)
+        if task_id:
+            self._active_tasks.add((session_id, task_id))
 
-    def _mark_session_completed(self, session_id: str) -> None:
+    def _mark_session_completed(self, session_id: str, task_id: str | None = None) -> None:
         """标记会话已完成."""
+        if task_id:
+            self._active_tasks.discard((session_id, task_id))
+            if any(key[0] == session_id for key in self._active_tasks):
+                return
+        else:
+            self._active_tasks = {
+                key for key in self._active_tasks if key[0] != session_id
+            }
         self._session_active.discard(session_id)
+
+    def _clear_team_task(self, session_id: str, task_id: str) -> None:
+        """Clear one Team A2A round without clearing later tasks."""
+        self._team_tasks.discard((session_id, task_id))
+        if not any(key[0] == session_id for key in self._team_tasks):
+            self._team_sessions.discard(session_id)
+
+    def _clear_team_session(self, session_id: str) -> None:
+        """Clear all Team task markers for a platform session."""
+        self._team_tasks = {key for key in self._team_tasks if key[0] != session_id}
+        self._team_sessions.discard(session_id)
 
     def _is_session_waiting_for_push(self, session_id: str, task_id: str) -> bool:
         """检查会话是否正在等待推送."""
@@ -1330,6 +1527,40 @@ class XiaoyiChannel(BaseChannel):
         """清除会话的推送等待状态."""
         if self._sessions_waiting_for_push.get(session_id) == task_id:
             self._sessions_waiting_for_push.pop(session_id, None)
+
+    async def _finalize_session(
+        self,
+        session_id: str,
+        task_id: str,
+        accumulated_text: str | None = None,
+        *,
+        preserve_team_session: bool = False,
+    ) -> None:
+        """Finish one A2A task and emit a deferred push exactly once."""
+        self._clear_task_timeout(session_id, task_id)
+        self._clear_session_timeout(session_id, task_id)
+        self._mark_session_completed(session_id, task_id)
+        if not self._is_session_active(session_id):
+            await self._stop_session_heartbeat(session_id)
+            self._clear_task_timeout(session_id)
+            self._clear_session_timeout(session_id)
+
+        text = accumulated_text
+        task_key = (session_id, task_id)
+        if text is None:
+            text = self._accumulated_texts.get(task_key, "")
+        if self._is_session_waiting_for_push(session_id, task_id):
+            if not text:
+                text = "团队任务已完成" if session_id in self._team_sessions else "任务已完成"
+            summary = text[:30] + "..." if len(text) > 30 else text
+            await self._send_push_notification(summary, "后台任务已完成：" + summary)
+            self._clear_session_waiting_for_push(session_id, task_id)
+
+        self._accumulated_texts.pop(task_key, None)
+        if preserve_team_session:
+            self._team_tasks.discard((session_id, task_id))
+        else:
+            self._clear_team_task(session_id, task_id)
 
     def _is_session_pending_cleanup(self, session_id: str) -> bool:
         """检查会话是否待清理."""
@@ -1346,6 +1577,17 @@ class XiaoyiChannel(BaseChannel):
         """强制清理会话."""
         self._sessions_marked_for_cleanup.pop(session_id, None)
         self._session_task_map.pop(session_id, None)
+        self._mark_session_completed(session_id)
+        self._latest_platform_tasks.pop(session_id, None)
+        self._clear_team_session(session_id)
+        self._clear_task_timeout(session_id)
+        self._clear_session_timeout(session_id)
+        self._sessions_waiting_for_push.pop(session_id, None)
+        self._accumulated_texts = {
+            key: value
+            for key, value in self._accumulated_texts.items()
+            if key[0] != session_id
+        }
 
     async def _handle_clear_context(self, message: dict[str, Any]) -> None:
         """处理清空上下文请求."""
@@ -1372,12 +1614,12 @@ class XiaoyiChannel(BaseChannel):
 
     async def _handle_tasks_cancel(self, message: dict[str, Any]) -> None:
         """处理取消任务请求."""
-        session_id = message.get("sessionId", "")
-        task_id = message.get("params", {}).get("id") or message.get("taskId", "")
+        params = message.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        session_id = params.get("sessionId") or message.get("sessionId", "")
+        task_id = params.get("id") or message.get("taskId", "")
         logger.info(f"XiaoyiChannel 取消任务: {session_id} {task_id}")
-        if session_id:
-            await self._stop_session_heartbeat(session_id)
-
         response = {
             "jsonrpc": "2.0",
             "id": message.get("id", ""),
@@ -1388,10 +1630,18 @@ class XiaoyiChannel(BaseChannel):
             await self._send_agent_response(session_id, task_id, response, url_key)
 
         # 清理超时任务和推送状态
-        self._clear_task_timeout(session_id)
-        self._clear_session_timeout(session_id)
         self._clear_session_waiting_for_push(session_id, task_id)
-        self._mark_session_completed(session_id)
+        self._clear_task_timeout(session_id, task_id)
+        self._clear_session_timeout(session_id, task_id)
+        self._mark_session_completed(session_id, task_id)
+        if not self._is_session_active(session_id):
+            if session_id:
+                await self._stop_session_heartbeat(session_id)
+            self._clear_task_timeout(session_id)
+            self._clear_session_timeout(session_id)
+        # Cancelling one platform task must not stop a long-running Team
+        # runtime. A later user turn will replace the latest task mapping.
+        self._team_tasks.discard((session_id, task_id))
 
     async def _send_text_response(
             self,
@@ -1629,21 +1879,29 @@ class XiaoyiChannel(BaseChannel):
         if not sent:
             raise RuntimeError("发送文件消息失败，WebSocket 未连接")
 
-    def _clear_task_timeout(self, session_id: str) -> None:
+    def _clear_task_timeout(self, session_id: str, task_id: str | None = None) -> None:
         """清除任务超时任务."""
-        if session_id in self._task_timeout_tasks:
-            task = self._task_timeout_tasks[session_id]
+        keys = [
+            key
+            for key in self._task_timeout_tasks
+            if key[0] == session_id and (task_id is None or key[1] == task_id)
+        ]
+        for key in keys:
+            task = self._task_timeout_tasks.pop(key, None)
             if task and not task.done():
                 task.cancel()
-            self._task_timeout_tasks.pop(session_id, None)
 
-    def _clear_session_timeout(self, session_id: str) -> None:
+    def _clear_session_timeout(self, session_id: str, task_id: str | None = None) -> None:
         """清除会话超时任务."""
-        if session_id in self._session_timeout_tasks:
-            task = self._session_timeout_tasks[session_id]
+        keys = [
+            key
+            for key in self._session_timeout_tasks
+            if key[0] == session_id and (task_id is None or key[1] == task_id)
+        ]
+        for key in keys:
+            task = self._session_timeout_tasks.pop(key, None)
             if task and not task.done():
                 task.cancel()
-            self._session_timeout_tasks.pop(session_id, None)
 
     async def _send_push_notification(self, text: str, push_text: str) -> bool:
         """发送推送通知."""

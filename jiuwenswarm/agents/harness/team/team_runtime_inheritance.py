@@ -118,7 +118,7 @@ TOOL_WHITELIST = frozenset({
     "search_file",
     "upload_file",
     "call_phone",
-    "send_message",
+    "send_sms",
     "search_message",
     "create_alarm",
     "search_alarms",
