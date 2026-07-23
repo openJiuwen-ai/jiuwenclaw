@@ -117,10 +117,13 @@ from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.memory.config import (
     clear_config_cache,
     clear_embed_config_db_cache,
+    clear_memory_config_db_cache,
     get_embed_config,
     get_memory_mode,
     is_memory_enabled,
     is_proactive_memory,
+    merge_memory_config_into_config,
+    reload_memory_config_from_gateway_db,
     set_embed_config_db_cache,
 )
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
@@ -866,6 +869,7 @@ class JiuWenClawDeepAdapter:
         self._skill_compliance_rail: SkillComplianceRail | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
+        self._last_runtime_mode: str = "agent.plan"
         self._external_memory_rail: Any = None
         self._external_memory_rail_registered: bool = False
         self._lsp_rail: LspRail | None = None
@@ -2654,6 +2658,7 @@ class JiuWenClawDeepAdapter:
         bootstrap_request = self._instance_overrides.pop("request", None)
         if bootstrap_request is not None:
             await self._load_enterprise_config(bootstrap_request)
+        config_base = merge_memory_config_into_config(config_base)
         config_base = self._merge_enterprise_models_into_config(config_base)
         self._refresh_multimodal_configs(config_base)
         self._startup_config_base = config_base
@@ -2855,7 +2860,17 @@ class JiuWenClawDeepAdapter:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
         clear_embed_config_db_cache()
+        clear_memory_config_db_cache()
         clear_memory_manager_cache()
+
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            try:
+                await reload_memory_config_from_gateway_db()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] reload_memory_config_from_gateway_db failed: %s",
+                    exc,
+                )
 
         if env_overrides is not None:
             if not isinstance(env_overrides, dict):
@@ -2869,6 +2884,8 @@ class JiuWenClawDeepAdapter:
             raise TypeError("config_base must be a dict when provided")
         else:
             config_base = resolve_env_vars(config_base)
+
+        config_base = merge_memory_config_into_config(config_base)
 
         # 同步扩展配置到 ExtensionRegistry
          # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
@@ -2914,6 +2931,18 @@ class JiuWenClawDeepAdapter:
             rails=rails_list,
         )
         self._instance.configure(deep_cfg)
+
+        try:
+            current_mode = str(getattr(self, "_last_runtime_mode", "") or "agent.plan")
+            await self._handle_memory_rail_by_config(
+                "plan" if current_mode == "agent.plan" else "fast"
+            )
+            await self._handle_external_memory_rail_by_config()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenClawDeepAdapter] memory rail refresh after reload failed: %s",
+                exc,
+            )
 
         logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
 
@@ -2977,6 +3006,7 @@ class JiuWenClawDeepAdapter:
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """按 mode 注册或卸载 rails。"""
+        self._last_runtime_mode = mode
         if mode == "agent.plan":
             await self._update_plan_mode_rails()
         else:

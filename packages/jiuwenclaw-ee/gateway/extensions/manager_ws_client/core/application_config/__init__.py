@@ -7,6 +7,7 @@ from .logging_config import apply_logging_config
 from .task_memory_config import apply_task_memory_config
 
 from .permissions_config import apply_permissions_config
+from .memory_config import apply_memory_config
 
 __all__ = (
     "apply_channel_config",
@@ -14,4 +15,5 @@ __all__ = (
     "apply_logging_config",
     "apply_task_memory_config",
     "apply_permissions_config",
+    "apply_memory_config",
 )
