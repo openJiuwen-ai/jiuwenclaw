@@ -296,6 +296,54 @@ def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
         temporary_html_path.unlink(missing_ok=True)
 
 
+async def _generate_report_html(
+    final_result: dict,
+    report_path_md: Path,
+) -> Path | None:
+    """Generate styled report HTML, falling back to offline conversion."""
+    report_path_html = report_path_md.with_suffix(".html")
+    try:
+        from openjiuwen_deepsearch.algorithm.report_style.service import (
+            stylize_report,
+        )
+        from openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime import (
+            report_style_llm_context,
+        )
+
+        llm_config = _build_styled_export_llm_config()
+        async with _scoped_report_style_llm_context(
+            report_style_llm_context, llm_config
+        ) as llm:
+            result = await stylize_report(final_result, llm)
+
+        with tempfile.TemporaryDirectory(prefix="jiuwenclaw_report_") as temporary_dir:
+            bundle_root = _extract_styled_bundle(
+                result.convert_content, Path(temporary_dir)
+            )
+            _install_styled_bundle(bundle_root, report_path_html)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "SDK styled HTML export failed, falling back to offline conversion. error=%s",
+            exc,
+        )
+        try:
+            from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import (
+                convert_md_to_html,
+            )
+
+            convert_md_to_html(str(report_path_md), str(report_path_html))
+        except Exception as fallback_exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "Offline HTML conversion also failed. output=%s error=%s",
+                report_path_html,
+                fallback_exc,
+            )
+            report_path_html.unlink(missing_ok=True)
+            return None
+
+    return report_path_html
+
+
 async def _write_report_artifacts_stream(
     final_result: dict,
     file_name: str,
@@ -332,49 +380,8 @@ async def _write_report_artifacts_stream(
     )
     artifacts: dict[str, str] = {"md": str(report_path_md)}
 
-    # --- Styled HTML (primary, best-effort via SDK direct call) ---
-    report_path_html = report_path_md.with_suffix(".html")
-    try:
-        from openjiuwen_deepsearch.algorithm.report_style.service import (
-            stylize_report,
-        )
-        from openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime import (
-            report_style_llm_context,
-        )
-
-        llm_config = _build_styled_export_llm_config()
-        async with _scoped_report_style_llm_context(
-            report_style_llm_context, llm_config
-        ) as llm:
-            result = await stylize_report(final_result, llm)
-
-        # Extract the base64-encoded ZIP bundle and install to target path.
-        with tempfile.TemporaryDirectory(prefix="jiuwenclaw_report_") as temporary_dir:
-            bundle_root = _extract_styled_bundle(
-                result.convert_content, Path(temporary_dir)
-            )
-            _install_styled_bundle(bundle_root, report_path_html)
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        logger.warning(
-            "SDK styled HTML export failed, falling back to offline conversion. error=%s",
-            exc,
-        )
-        # --- Offline HTML fallback ---
-        try:
-            from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import (
-                convert_md_to_html,
-            )
-
-            convert_md_to_html(str(report_path_md), str(report_path_html))
-        except Exception as fallback_exc:  # pylint: disable=broad-exception-caught
-            logger.warning(
-                "Offline HTML conversion also failed. output=%s error=%s",
-                report_path_html,
-                fallback_exc,
-            )
-        else:
-            artifacts["html"] = str(report_path_html)
-    else:
+    report_path_html = await _generate_report_html(final_result, report_path_md)
+    if report_path_html is not None:
         artifacts["html"] = str(report_path_html)
 
     return artifacts

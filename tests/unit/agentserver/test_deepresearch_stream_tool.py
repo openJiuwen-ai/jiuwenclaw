@@ -7,10 +7,13 @@
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import threading
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
+from types import SimpleNamespace
 
 import os
 import sys
@@ -538,6 +541,94 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots():
         and payload.get("is_processing") is True
         for payload in payloads
     )
+
+
+def _styled_report_archive(html: str) -> str:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("report_bundle/report.html", html)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@asynccontextmanager
+async def _async_context(value):
+    yield value
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_installs_styled_report(tmp_path):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    styled_result = SimpleNamespace(
+        convert_content=_styled_report_archive("<html>styled report</html>")
+    )
+    llm = object()
+
+    with patch.object(
+        dt,
+        "_scoped_report_style_llm_context",
+        return_value=_async_context(llm),
+    ), patch(
+        "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
+        new=AsyncMock(return_value=styled_result),
+    ) as stylize:
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Report"}, report_path_md
+        )
+
+    assert html_path == tmp_path / "report.html"
+    assert html_path.read_text(encoding="utf-8") == "<html>styled report</html>"
+    stylize.assert_awaited_once_with({"response_content": "# Report"}, llm)
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_falls_back_to_offline_conversion(tmp_path):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+
+    def _convert(_markdown_path, html_path):
+        with open(html_path, "w", encoding="utf-8") as stream:
+            stream.write("<html>offline report</html>")
+
+    with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        side_effect=RuntimeError("styled export unavailable"),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
+        side_effect=_convert,
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Report"}, report_path_md
+        )
+
+    assert html_path == tmp_path / "report.html"
+    assert html_path.read_text(encoding="utf-8") == "<html>offline report</html>"
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_removes_partial_output_when_both_paths_fail(
+    tmp_path,
+):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    report_path_html = tmp_path / "report.html"
+    report_path_html.write_text("<html>partial</html>", encoding="utf-8")
+
+    with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        side_effect=RuntimeError("styled export unavailable"),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
+        side_effect=RuntimeError("offline conversion unavailable"),
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Report"}, report_path_md
+        )
+
+    assert html_path is None
+    assert not report_path_html.exists()
 
 
 def test_write_report_markdown_builds_inference_bundle_and_strips_internal_markers(tmp_path):
