@@ -1597,6 +1597,7 @@ async def _consume_stream_with_query(
     hide_dm: bool = bool(_envs.get("hide_dm", False))
     received_chunks = 0
     emitted_ask_user_request_ids: set[str] = set()
+    lg: TeamStreamLogger | None = None
     try:
         logger.info(
             "[TeamHelpers] stream started: channel_id=%s session_id=%s round_id=%s",
@@ -1621,7 +1622,6 @@ async def _consume_stream_with_query(
         stream_trace_enabled = bool(
             _envs.get(_STREAM_TRACE_ENV_KEY) or os.environ.get(_STREAM_TRACE_ENV_KEY)
         )
-        lg: TeamStreamLogger | None = None
         if stream_trace_enabled:
             traces_dir = get_agent_teams_home() / "traces"
             traces_dir.mkdir(parents=True, exist_ok=True)
@@ -1755,6 +1755,9 @@ async def _consume_stream_with_query(
                             },
                         )
                     continue
+                if parsed.get("event_type") == "chat.final":
+                    _broadcast_event(channel_id, session_id, parsed)
+                    continue
                 _broadcast_event(channel_id, session_id, parsed)
 
         # If stream ended without any chunks, broadcast an error event
@@ -1805,6 +1808,11 @@ async def _consume_stream_with_query(
             },
         )
     finally:
+        # Runner normally flushes the diagnostic stream logger, but keep an
+        # idempotent owner-side fallback for startup errors, test runners and
+        # alternate Runner implementations that exit before their cleanup.
+        if lg is not None:
+            lg.flush()
         # Broadcast team.completed so cron round watchers (both the agent
         # adapter's _wait_for_cron_team_round_events and the cron scheduler's
         # own round_state) can finalise even when the team stream ended

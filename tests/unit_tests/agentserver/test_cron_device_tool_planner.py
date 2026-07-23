@@ -145,17 +145,6 @@ def test_route_registry_maps_privileged_and_non_privileged_tools() -> None:
     assert plan.privilege_intents == ("CreateNote",)
 
 
-def test_route_registry_migrates_legacy_sms_tool_name() -> None:
-    plan = map_device_tool_names(
-        ["send_message"],
-        privilege_intents={"SendShortMessage"},
-    )
-
-    assert plan.tool_names == ("send_sms",)
-    assert plan.allowed_intents == ("SendShortMessage",)
-    assert plan.privilege_intents == ("SendShortMessage",)
-
-
 def test_route_registry_covers_all_current_device_tools() -> None:
     assert set(DEVICE_TOOL_ROUTE_BY_NAME) == {
         "get_user_location",

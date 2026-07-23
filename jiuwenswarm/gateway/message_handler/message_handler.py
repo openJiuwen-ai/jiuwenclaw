@@ -111,6 +111,15 @@ class ChannelMode(str, Enum):
     CODE_TEAM = "code.team"
     TEAM = "team"
 
+    @classmethod
+    def is_team_mode(cls, mode: str) -> bool:
+        """Return whether a mode uses the persistent Team stream."""
+        return str(mode or "").strip().lower() in {
+            cls.TEAM.value,
+            cls.CODE_TEAM.value,
+            "team.plan",
+        }
+
 
 @dataclass
 class ChannelControlState:
@@ -322,7 +331,7 @@ class MessageHandler(ABC):
     def _is_team_chat_send(msg: "Message") -> bool:
         if not isinstance(msg.params, dict):
             return False
-        return str(msg.params.get("mode") or "").strip().lower() == "team"
+        return ChannelMode.is_team_mode(str(msg.params.get("mode") or ""))
 
     @classmethod
     def _is_interrupt_resume_chat_send(cls, msg: "Message") -> bool:
@@ -1657,8 +1666,13 @@ class MessageHandler(ABC):
         # 将 mode 写入 params，后续 E2A / Agent 侧从 params["mode"] 读取
         if msg.params is None:
             msg.params = {}
+        mode_value = state.mode.value
         if isinstance(msg.params, dict):
-            msg.params.setdefault("mode", state.mode.value)
+            msg.params.setdefault("mode", mode_value)
+        if msg.metadata is None:
+            msg.metadata = {}
+        if isinstance(msg.metadata, dict):
+            msg.metadata.setdefault("mode", mode_value)
 
     # ---------- user_messages ----------
 
@@ -3305,6 +3319,16 @@ class MessageHandler(ABC):
                         chunk.request_id,
                     )
                     continue
+                payload = chunk.payload or {}
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("event_type") == "chat.processing_status_deferred"
+                ):
+                    # Internal placeholder from a Team follow-up short stream.
+                    # Consume it before Channel publication while suppressing
+                    # the Gateway's fallback processing_status=false event.
+                    has_processing_status_false = True
+                    continue
                 published = await self.publish_stream_chunk(
                     chunk,
                     session_id=session_id,
@@ -3312,22 +3336,11 @@ class MessageHandler(ABC):
                 )
                 if not published:
                     continue
-                payload = chunk.payload or {}
                 if isinstance(payload, dict):
                     event_type = payload.get("event_type")
                     if event_type == "chat.processing_status":
                         if payload.get("is_processing") is False:
                             has_processing_status_false = True
-                    elif event_type == "chat.processing_status_deferred":
-                        # Internal placeholder from the cluster-mode
-                        # follow-up short stream: the real round-complete
-                        # signal will be broadcast by the background team
-                        # stream on team.completed. This marker only
-                        # prevents the Gateway from auto-emitting
-                        # is_processing=False when this short stream
-                        # ends, and is NOT forwarded to the frontend.
-                        has_processing_status_false = True
-                        continue
 
                 logger.debug(
                     "[MessageHandler] Stream chunk 已写入 robot_messages: request_id=%s event_type=%s",

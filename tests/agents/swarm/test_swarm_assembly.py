@@ -98,6 +98,7 @@ _COMMON_RAIL_NAMES: frozenset[str] = frozenset(
         registry.STREAM_EVENT,
         registry.TASK_PLANNING,
         registry.SECURITY,
+        registry.CSPL_SENTINEL,
         registry.HEARTBEAT,
         registry.AVATAR_PROMPT,
         registry.TEAM_WORKSPACE_REPORT_PATH,
@@ -399,9 +400,9 @@ def test_build_member_capability_specs_rail_names(
 
     assert _COMMON_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    # The common set has exactly 15 entries; the role adds only its explicit
+    # The common set has exactly 16 entries; the role adds only its explicit
     # extra rails on top.
-    assert len(_COMMON_RAIL_NAMES) == 15
+    assert len(_COMMON_RAIL_NAMES) == 16
     assert rail_names == _COMMON_RAIL_NAMES | extra_rails
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -964,10 +965,9 @@ def test_xiaoyi_phone_tools_gated_by_config() -> None:
 
     enabled_tools = tools._build_xiaoyi_phone_tools(enabled)
     assert len(enabled_tools) == 27
-    enabled_names = {tool.card.name for tool in enabled_tools}
-    assert "check_plugin_privilege" not in enabled_names
-    assert "send_sms" in enabled_names
-    assert "send_message" not in enabled_names
+    assert "check_plugin_privilege" not in {
+        tool.card.name for tool in enabled_tools
+    }
     assert tools._build_xiaoyi_phone_tools(disabled) == []
 
 

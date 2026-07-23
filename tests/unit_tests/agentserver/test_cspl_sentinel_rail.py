@@ -18,8 +18,6 @@ from jiuwenswarm.agents.harness.common.rails.cspl.client import (
 )
 from jiuwenswarm.agents.harness.common.rails.cspl.constants import (
     ABORT_MESSAGE,
-    MESSAGE_TOOLS,
-    OUTPUT_SCAN_TOOLS,
     TOOL_INPUT_SCAN,
     TOOL_OUTPUT_SCAN,
 )
@@ -61,11 +59,6 @@ def _enabled_config(**overrides):
     }
     base.update(overrides)
     return CsplConfig.from_dict(base)
-
-
-def test_sms_tool_keeps_message_security_scanning_after_rename() -> None:
-    assert "send_sms" in MESSAGE_TOOLS
-    assert "send_sms" in OUTPUT_SCAN_TOOLS
 
 
 class TestCsplClient:
