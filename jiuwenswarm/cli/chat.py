@@ -44,6 +44,7 @@ from jiuwenswarm.cli.gateway_client import GatewayClient
 from jiuwenswarm.cli.events import (
     event_kind,
     is_content_final,
+    is_error_event,
     is_terminal_event,
 )
 from jiuwenswarm.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
@@ -309,6 +310,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--show-tools", action="store_true",
         help="Include compact tool call/result status (stderr).",
+    )
+    p.add_argument(
+        "--report",
+        help="Atomically write a machine-readable run summary to this path.",
     )
     p.add_argument(
         "--timeout", type=float,
@@ -615,6 +620,10 @@ async def _run_interactive_loop(
             payload = data.get("payload", {})
             kind = event_kind(event_type)
 
+            if is_error_event(event_type, payload):
+                renderer.handle_error(payload)
+                return 1
+
             # Any event arriving during the team idle-watch window means
             # the team is still active (member tool calls, reasoning, etc.).
             # Reset the idle timer so we don't prematurely prompt the user.
@@ -631,13 +640,6 @@ async def _run_interactive_loop(
             elif kind == "tool_result":
                 renderer.handle_tool_result(payload)
             elif kind == "final":
-                # team.error is broadcast through the chat.final envelope
-                # (gateway default for unknown EventType). Route it to the
-                # error handler so the message is shown instead of silently
-                # exiting on an empty content field.
-                if payload.get("event_type") == "team.error":
-                    renderer.handle_error(payload)
-                    return 1
                 # Unknown/control event types are transported in a chat.final
                 # envelope. They must not consume HumanRenderer's one final
                 # slot or arm the team idle timer.
@@ -651,9 +653,6 @@ async def _run_interactive_loop(
                 if team_mode:
                     team_final_seen = True
                     team_final_time = time.monotonic()
-            elif kind == "error":
-                renderer.handle_error(payload)
-                return 1
             elif kind == "processing_status":
                 if payload.get("is_processing", False):
                     renderer.ensure_loading()
@@ -759,9 +758,6 @@ async def _run_interactive_loop(
                 # processing_status(is_processing=False) or team.error ends
                 # the stream.
                 if team_mode and event_type == "chat.final":
-                    if payload.get("event_type") == "team.error":
-                        renderer.clear_loading()
-                        return 1
                     # leader reply or team control event — keep listening
                     continue
                 # In team mode, a completed round (processing_status
@@ -876,13 +872,9 @@ async def _run_jsonl_loop(
         event_type = data.get("event", "")
         payload = data.get("payload", {})
         renderer.handle_event(event_type, payload)
-        if event_type == "chat.error":
+        if is_error_event(event_type, payload):
             return 1
         if is_terminal_event(event_type, payload):
-            # team.error is wrapped in chat.final by the gateway; treat it
-            # as an error exit so callers can detect the failure.
-            if payload.get("event_type") == "team.error":
-                return 1
             # In team mode, chat.final (leader reply) is not terminal —
             # the team keeps working. Keep listening for
             # processing_status(is_processing=False).
@@ -898,38 +890,28 @@ async def _run_json_loop(
 ) -> int:
     team_mode = request.get("params", {}).get("mode", "") in ("team", "team.plan", "code.team")
     await client.send_request(request)
-    has_error = False
     while True:
         data = await client.recv()
         if data.get("type") != "event":
             continue
         event_type = data.get("event", "")
         payload = data.get("payload", {})
-        if event_type == "chat.final":
-            # team.error is wrapped in chat.final by the gateway; route it
-            # through the error path so has_error is set and the JSON output
-            # reports ok=false.
-            if payload.get("event_type") == "team.error":
-                renderer.handle_error(payload)
-                has_error = True
-            else:
-                renderer.handle_event(event_type, payload)
-        elif event_type == "chat.error":
+        if is_error_event(event_type, payload):
             renderer.handle_error(payload)
-            has_error = True
+            renderer.output()
+            return 1
+        if event_type == "chat.final":
+            renderer.handle_event(event_type, payload)
         elif event_type == "chat.delta":
             pass
         else:
             renderer.handle_event(event_type, payload)
         if is_terminal_event(event_type, payload):
             if team_mode and event_type == "chat.final":
-                if payload.get("event_type") == "team.error":
-                    renderer.output()
-                    return 1
                 # leader reply — team keeps working, keep listening
                 continue
             renderer.output()
-            return 1 if has_error else 0
+            return 0
 
 
 async def _run_chat(
@@ -988,7 +970,63 @@ def _print_connection_hint(url: str, args: argparse.Namespace) -> None:
         logger.error("Start services with: jiuwenswarm-start app")
 
 
+def _write_run_report(
+    path: str,
+    args: argparse.Namespace,
+    exit_code: int,
+    *,
+    started_at: datetime.datetime,
+    started_monotonic: float,
+) -> None:
+    finished_at = datetime.datetime.now(datetime.UTC)
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    report = {
+        "schema_version": 1,
+        "ok": exit_code == 0,
+        "exit_code": exit_code,
+        "mode": args.mode,
+        "session_id": args.session,
+        "output_mode": "jsonl" if args.jsonl else "json" if args.json else "human",
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_ms": round((time.monotonic() - started_monotonic) * 1000),
+    }
+    try:
+        temporary.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def run_chat(args: argparse.Namespace) -> int:
+    report_path = getattr(args, "report", None)
+    if not report_path:
+        return _run_chat_command(args)
+
+    started_at = datetime.datetime.now(datetime.UTC)
+    started_monotonic = time.monotonic()
+    args.session = args.session or _generate_session_id()
+    exit_code = _run_chat_command(args)
+    try:
+        _write_run_report(
+            report_path,
+            args,
+            exit_code,
+            started_at=started_at,
+            started_monotonic=started_monotonic,
+        )
+    except OSError as exc:
+        logger.error("cannot write run report %s: %s", report_path, exc)
+        return exit_code or 1
+    return exit_code
+
+
+def _run_chat_command(args: argparse.Namespace) -> int:
     error = _validate_args(args)
     if error is not None:
         return error

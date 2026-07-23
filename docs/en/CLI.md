@@ -274,6 +274,7 @@ jiuwenswarm chat "Hello, introduce yourself"
 | `--jsonl` | — | Print each Gateway event frame as JSON Lines |
 | `--show-reasoning` | — | Include reasoning output (to stderr) |
 | `--show-tools` | — | Include compact tool call/result status (to stderr) |
+| `--report <path>` | — | Atomically write a JSON run summary without changing stdout |
 | `--timeout <seconds>` | — | Total response timeout in seconds |
 
 ### Modes (`--mode`)
@@ -360,6 +361,16 @@ jiuwenswarm chat --json "analyze README"
 # JSONL output (pipe-friendly)
 jiuwenswarm chat --jsonl "analyze README" | jq
 ```
+
+For CI and scheduled jobs, `--report` records the invocation outcome even when
+human, JSON, or JSONL output is redirected elsewhere:
+
+```bash
+jiuwenswarm chat --report artifacts/run.json "deploy the service"
+```
+
+The report contains the exit code, mode, session ID, output mode, timestamps,
+and duration. Prompts and model output are intentionally excluded.
 
 ### Interrupts
 

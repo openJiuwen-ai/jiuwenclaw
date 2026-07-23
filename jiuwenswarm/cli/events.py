@@ -13,13 +13,21 @@ def is_content_final(payload: dict[str, Any]) -> bool:
     return not inner or inner == "chat.final"
 
 
+def is_error_event(event_type: str, payload: dict[str, Any]) -> bool:
+    """Return whether a terminal chat event carries an error."""
+    return event_type == "chat.error" or (
+        event_type == "chat.final"
+        and (
+            payload.get("event_type") == "team.error"
+            or payload.get("error") not in (None, "")
+        )
+    )
+
+
 def is_terminal_event(event_type: str, payload: dict[str, Any]) -> bool:
-    if event_type == "chat.error":
+    if is_error_event(event_type, payload):
         return True
     if event_type == "chat.final":
-        inner = payload.get("event_type", "")
-        if inner == "team.error":
-            return True
         # Gateway uses chat.final as a compatibility envelope for event types
         # without an EventType mapping (team.runtime_ready, chat.llm_usage,
         # keepalive, etc.). Those control events do not end the response.

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+import jiuwenswarm.cli.chat as chat_module
 from jiuwenswarm.cli.chat import (
     MODE_ALIASES,
     VALID_MODES,
@@ -28,6 +29,7 @@ from jiuwenswarm.cli.chat import (
     _validate_args,
     build_parser,
     resolve_mode,
+    run_chat,
 )
 from jiuwenswarm.cli.events import (
     event_kind,
@@ -319,6 +321,28 @@ class TestParser:
         assert ns.show_reasoning is True
         assert ns.show_tools is True
         assert ns.timeout == 60
+
+
+def test_run_report_records_failed_invocation_without_prompt(monkeypatch, tmp_path):
+    report_path = tmp_path / "reports" / "run.json"
+    args = build_parser().parse_args([
+        "--mode", "code.team",
+        "--report", str(report_path),
+        "private prompt",
+    ])
+    monkeypatch.setattr(chat_module, "_run_chat_command", lambda _args: 3)
+
+    assert run_chat(args) == 3
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["schema_version"] == 1
+    assert report["ok"] is False
+    assert report["exit_code"] == 3
+    assert report["mode"] == "code.team"
+    assert report["session_id"].startswith("cli-")
+    assert report["output_mode"] == "human"
+    assert report["duration_ms"] >= 0
+    assert "prompt" not in report
+    assert not list(report_path.parent.glob("*.tmp"))
 
 
 class TestEvents:
@@ -783,6 +807,40 @@ class TestInteractiveLoop:
                        "trusted_dirs": ["/tmp"]},
         }
         code = await _run_interactive_loop(client, renderer, request)
+        assert code == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("runner", "renderer_type"),
+        [
+            (chat_module._run_interactive_loop, HumanRenderer),
+            (chat_module._run_json_loop, JsonRenderer),
+            (chat_module._run_jsonl_loop, JsonlRenderer),
+        ],
+    )
+    async def test_final_error_returns_1_in_every_output_mode(
+        self, runner, renderer_type
+    ):
+        messages = [
+            {
+                "type": "event",
+                "event": "chat.final",
+                "payload": {"error": "model request failed"},
+            },
+        ]
+        client = await self._make_connected_client(messages)
+        request = {
+            "type": "req", "id": "r1", "method": "chat.send",
+            "is_stream": True,
+            "params": {"session_id": "s1", "content": "hi", "query": "hi",
+                       "mode": "code.team", "cwd": "/tmp", "project_dir": "/tmp",
+                       "trusted_dirs": ["/tmp"]},
+        }
+
+        code = await asyncio.wait_for(
+            runner(client, renderer_type(), request), timeout=1
+        )
+
         assert code == 1
 
     @pytest.mark.asyncio
