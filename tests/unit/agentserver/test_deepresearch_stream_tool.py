@@ -2843,9 +2843,9 @@ def test_child_env_disables_hitl_and_overrides_stale_parent(monkeypatch):
 
 
 def _make_fake_skill(parent: str) -> str:
-    """在 parent/deepsearch-research/scripts/run_deepsearch.py 建假 skill,返回 skill dir。"""
+    """在 parent/deepresearch/scripts/run_deepsearch.py 建假 skill,返回 skill dir。"""
     import os
-    skill_dir = os.path.join(parent, "deepsearch-research")
+    skill_dir = os.path.join(parent, "deepresearch")
     os.makedirs(os.path.join(skill_dir, "scripts"), exist_ok=True)
     with open(os.path.join(skill_dir, "scripts", "run_deepsearch.py"), "w", encoding="utf-8") as f:
         f.write("# fake")
@@ -2901,12 +2901,12 @@ def test_resolve_skill_root_preserves_windows_drive_letter(tmp_path, monkeypatch
     )
     monkeypatch.chdir(tmp_path)
 
-    assert dt._resolve_skill_root() == os.path.join(windows_parent, "deepsearch-research")
+    assert dt._resolve_skill_root() == os.path.join(windows_parent, "deepresearch")
     assert os.path.samefile(dt._resolve_skill_root(), skill_dir)
 
 
 def test_resolve_skill_root_falls_back_to_cwd(tmp_path, monkeypatch):
-    # 无 env → cwd/office-claw-skills/deepsearch-research
+    # 无 env → cwd/office-claw-skills/deepresearch
     monkeypatch.delenv("JIUWENCLAW_SHARED_SKILLS_DIRS", raising=False)
     skill_dir = _make_fake_skill(str(tmp_path / "office-claw-skills"))
     monkeypatch.chdir(tmp_path)

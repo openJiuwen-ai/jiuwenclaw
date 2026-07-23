@@ -1104,7 +1104,7 @@ async def deepresearch_get_result(task_id: str) -> str:
 @tool(
     name="deepresearch_run_task",
     description=(
-        "旧版兼容入口。deepsearch-research skill 不应调用本工具,必须使用 deepresearch_stream。"
+        "旧版兼容入口。deepresearch skill 不应调用本工具,必须使用 deepresearch_stream。"
         "执行深度研究任务，并阻塞等待生成独立的长文研究报告。"
         "适用场景：独立的深度研究报告生成、全面市场调研、行业分析报告、政策解读报告。"
         "与异步版本的区别：不提交到后台任务池，直接在当前协程执行，阻塞等待完成后返回结果。"
@@ -1239,7 +1239,7 @@ async def _iter_ndjson_lines(stream, read_size: int = 64 * 1024):
 @tool(
     name="deepresearch_stream",
     description=(
-        "deepsearch-research skill 的首选且唯一入口。流式执行 DeepResearch 深度研究,"
+        "deepresearch skill 的首选且唯一入口。流式执行 DeepResearch 深度研究,"
         "进度经 chat 通道(chat.reasoning/task.start/task.complete/"
         "processing_status)实时推送到前端。执行到人机交互节点时返回 interrupted outcome,"
         "由 agent 调 ask_user_question 处理后,再以 action=resume 调本工具恢复。"
@@ -1291,7 +1291,7 @@ async def deepresearch_stream(
 
     route = _get_route()
     interactive_ask, _, _, _ = get_ask_request_context()
-    # Force HITL on: deepsearch-research SKILL.md requires feedback_handler
+    # Force HITL on: deepresearch SKILL.md requires feedback_handler
     # interruption for research direction clarification.  The upstream
     # ContextVar defaults to False when the frontend omits interactiveAsk,
     # which causes DEEPSEARCH_HITL="false" and the SDK skips the
@@ -1576,7 +1576,7 @@ async def deepresearch_stream(
 
 
 def _resolve_skill_root() -> str:
-    """定位 deepsearch-research skill 目录。
+    """定位 deepresearch skill 目录。
 
     优先 JIUWENCLAW_SHARED_SKILLS_DIRS(sidecar 的 cwd 不一定是仓根——sidecar 常跑在
     vendor/jiuwenclaw 下,os.getcwd() 会落空);使用当前平台的路径分隔符。
@@ -1588,9 +1588,9 @@ def _resolve_skill_root() -> str:
         for d in dirs_env.split(os.pathsep):
             d = d.strip()
             if d:
-                candidates.append(os.path.join(d, "deepsearch-research"))
+                candidates.append(os.path.join(d, "deepresearch"))
     # fallback:cwd 相对(仅仓根 cwd 命中)
-    candidates.append(os.path.join(os.getcwd(), "office-claw-skills", "deepsearch-research"))
+    candidates.append(os.path.join(os.getcwd(), "office-claw-skills", "deepresearch"))
     for c in candidates:
         if os.path.exists(os.path.join(c, "scripts", "run_deepsearch.py")):
             return c
