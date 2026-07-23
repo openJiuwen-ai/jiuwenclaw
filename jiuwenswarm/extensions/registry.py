@@ -1,5 +1,6 @@
 from typing import Any, Callable
-import os, yaml
+import os
+import yaml
 
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
@@ -15,6 +16,7 @@ from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
 from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenticator
 from jiuwenswarm.gateway.auth.passthrough_authenticator import PassthroughAuthenticator
 from jiuwenswarm.extensions.auth.agentos_authenticator import AgentOSAuthenticator
+
 
 class ExtensionRegistry:
     _instance: "ExtensionRegistry | None" = None
