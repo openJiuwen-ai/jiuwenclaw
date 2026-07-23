@@ -690,6 +690,8 @@ def sync_session_request_metadata(
         「agent 最后输出时间」，只读 RPC 无 agent 输出，不应刷新；否则点击技能按钮等
         只读查询会把历史会话的 ``last_message_at``/排序时间刷新成「现在」，导致旧会话
         被置顶。
+      - 不存在会话：真实 chat 轮次可兜底创建 metadata；只读/后台 RPC
+        （``is_chat_turn=False``）直接返回，不创建只含 ``metadata.json`` 的未命名会话。
       - mode：**显式覆盖式**——仅当请求方显式携带 mode（explicit_mode_provided=True）
         时才覆盖磁盘值；未显式携带（如只读 RPC 用默认推断值）则保持磁盘原值，不腐蚀
         已锁定的会话 mode（如 team 会话被只读 RPC 默认推断成 agent）。调用方应传入
@@ -702,7 +704,8 @@ def sync_session_request_metadata(
         explicit_mode_provided: 请求是否「显式」携带了 mode；False 时 mode 字段不写盘
         explicit_model_provided: 请求是否「显式」携带了 model；False 时 model 字段不写盘
         is_chat_turn: 本次请求是否为真实 chat 轮次（CHAT_SEND/CHAT_RESUME/CHAT_ANSWER）；
-            False 时 ``last_message_at`` 不刷新。默认 True（向后兼容存量调用方）。
+            False 时 ``last_message_at`` 不刷新，且不会兜底创建不存在的会话。
+            默认 True（向后兼容存量调用方）。
 
     Returns:
         本会话**生效**的 project_dir：磁盘已锁定则返回锁定值，否则返回请求候选值
@@ -722,6 +725,11 @@ def sync_session_request_metadata(
     effective_project_dir: str | None = None
 
     if not metadata:
+        if not is_chat_turn:
+            # 只读/后台 RPC 可能携带尚未真正创建的临时 session_id。查询不得把它
+            # 物化成只含 metadata.json 的目录，否则 session.list 会展示未命名会话。
+            return project_dir or None
+
         # 会话元数据不存在：兜底新建（外部渠道隐式创建 session 的场景）
         now = _current_timestamp()
         # work_mode：未传时按 channel_id 推断默认值

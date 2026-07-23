@@ -1254,6 +1254,26 @@ class TestSyncSessionRequestMetadata:
         assert meta["last_user_message_at"] > 0
 
     @staticmethod
+    def test_sync_readonly_does_not_create_when_missing(sessions_dir):
+        """只读 RPC 携带临时 session_id 时不得创建未命名会话目录。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            sync_session_request_metadata,
+        )
+
+        effective = sync_session_request_metadata(
+            session_id="ghost_readonly",
+            channel_id="web",
+            project_dir="E:\\candidate",
+            is_chat_turn=False,
+        )
+        _drain_queue()
+
+        assert effective == "E:\\candidate"
+        assert get_session_metadata("ghost_readonly") == {}
+        assert not (sessions_dir / "ghost_readonly").exists()
+
+    @staticmethod
     def test_sync_preserves_disk_pinned_over_stale_cache(sessions_dir):
         """跨进程缓存覆盖回归：AgentServer 缓存里残留 pinned=False,
         但磁盘已被 Gateway 置顶为 pinned=True。sync 必须强制读盘,
@@ -1511,15 +1531,17 @@ class TestSyncChatRequestMetadata:
 
     @staticmethod
     def test_creates_metadata_when_missing(sessions_dir, clean_model_env):
-        """不先 init，直接 _sync → 经 sync 兜底新建分支创建"""
+        """不先 init，真实 chat 请求经 sync 兜底新建分支创建。"""
         from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             get_session_metadata,
         )
+        from jiuwenswarm.common.schema.message import ReqMethod
 
         req = _make_agent_request(
             params={"model_name": "glm-5", "mode": "code", "project_dir": "E:\\newproj"},
             session_id="s_new",
+            req_method=ReqMethod.CHAT_SEND,
         )
         effective = _sync_chat_request_metadata(
             req, "E:\\newproj", "code", explicit_mode_provided=True
@@ -1611,10 +1633,8 @@ class TestSyncChatRequestMetadata:
 
         复现场景：前端拿一个未持久化的临时 session_id 去查 skills.list，
         结果在 agent/sessions 下出现一个只含 metadata.json 的空会话目录。
-        根因：sync 兜底新建分支无条件 mkdir。修复后：is_chat_turn=False 时
-        仍走兜底新建（保留 channel_id 等字段语义），但时间字段不刷新。
-        本用例聚焦「只读 RPC 不该走到 sync」——由 _is_stateless_method_request 短路保证，
-        此处补一层存储层兜底契约：即便只读 RPC 误走到 sync，时间字段也不得被改。
+        根因：sync 兜底新建分支无条件 mkdir。修复后，sync 对不存在会话的只读 RPC
+        直接返回；真实 chat 请求仍可按需创建会话元数据。
         """
         from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
@@ -1631,14 +1651,9 @@ class TestSyncChatRequestMetadata:
         _sync_chat_request_metadata(req, None, "agent")
         _drain_queue()
 
-        # 兜底新建会建目录（这是 sync 的既定行为，本修复不动该分支），
-        # 但只读 RPC 不应刷新时间到「现在」——last_user_message_at 应等于 created_at，
-        # 而非 chat 时刻。这里只断言只读语义：mode/model 不被默认推断值腐蚀。
-        meta = get_session_metadata("ghost_readonly")
-        assert meta["mode"] == "unknown", \
-            "只读 RPC 未显式携带 mode → 不得用默认推断值腐蚀磁盘 mode"
-        assert meta["model"] == "", \
-            "只读 RPC 未显式携带 model → 不得用进程默认值腐蚀磁盘 model"
+        assert get_session_metadata("ghost_readonly") == {}
+        assert not (sessions_dir / "ghost_readonly").exists(), \
+            "只读 RPC 不得创建只含 metadata.json 的未命名会话目录"
 
 
 # ===========================================================================
