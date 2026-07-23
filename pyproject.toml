@@ -87,6 +87,7 @@ harmony = [
     "pyyaml>=6.0",
     "httpx[socks]>=0.27",
     "json-repair>=0.30.0",
+    "gitcode-api>=1.2.20",
 ]
 a2a = ["a2a-sdk[http-server]==1.0.0"]
 desktop = ["pywebview>=5.4"]
