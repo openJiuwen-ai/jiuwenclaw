@@ -272,6 +272,7 @@
     "stop": "Stop",
     "modelSelector": {
       "tooltip": "Switch the model used for chat",
+      "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"

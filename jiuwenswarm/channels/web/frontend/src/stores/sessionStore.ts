@@ -284,6 +284,7 @@ interface SessionState {
   // Runtime 管理方法
   ensureRuntime: (sessionId: string) => SessionRuntime;
   getRuntime: (sessionId: string | null) => SessionRuntime | undefined;
+  getEffectiveModelName: (sessionId: string | null) => string | null;
   removeRuntime: (sessionId: string) => void;
 
   // A 类 actions（不加 sessionId）
@@ -374,6 +375,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   getRuntime: (sessionId) => {
     if (!sessionId) return undefined;
     return get().runtimes[sessionId];
+  },
+
+  getEffectiveModelName: (sessionId) => {
+    if (!sessionId) return null;
+    const state = get();
+    const runtime = state.runtimes[sessionId];
+    if (!runtime) return null;
+    return runtime.mode === 'team'
+      ? state.defaultModelName
+      : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {

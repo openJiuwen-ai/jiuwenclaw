@@ -1547,7 +1547,7 @@ function AppContent() {
       const newRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
       const runtimeSettings = {
         mode: newRuntime?.mode ?? mode,
-        selectedModelName: newRuntime?.selectedModelName ?? null,
+        selectedModelName: useSessionStore.getState().getEffectiveModelName(NEW_CONVERSATION_ID),
         projectDir: newRuntime?.projectDirectory ?? null,
       };
       const baseWorkContext = getWorkContextForSession(NEW_CONVERSATION_ID);

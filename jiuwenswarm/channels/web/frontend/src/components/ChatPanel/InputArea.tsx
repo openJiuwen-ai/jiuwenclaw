@@ -1824,7 +1824,10 @@ export function InputArea({
             </button>
           )} */}
 
-          <ModelSelector disabled={hasHistory || isProcessing} />
+          <ModelSelector
+            disabled={isTeamMode || hasHistory || isProcessing}
+            lockedToDefault={isTeamMode}
+          />
 
           <button
             type="button"
@@ -2100,10 +2103,17 @@ function ComposerSuggestionMenu({
   );
 }
 
-function ModelSelector({ disabled = false }: { disabled?: boolean }) {
+function ModelSelector({
+  disabled = false,
+  lockedToDefault = false,
+}: {
+  disabled?: boolean;
+  lockedToDefault?: boolean;
+}) {
   const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectedModelName = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.selectedModelName ?? null);
+  const defaultModelName = useSessionStore((s) => s.defaultModelName);
   const setSelectedModelName = useSessionStore((s) => s.setSelectedModelName);
   const { t } = useTranslation();
 
@@ -2127,8 +2137,9 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
 
   if (chatAvailableModels.length === 0) return null;
 
+  const displayedModelName = lockedToDefault ? defaultModelName : selectedModelName;
   const selectedModel =
-    chatAvailableModels.find((m) => (m.alias || m.model_name) === selectedModelName) ??
+    chatAvailableModels.find((m) => (m.alias || m.model_name) === displayedModelName) ??
     chatAvailableModels[0];
 
   const handleSelect = (modelKey: string) => {
@@ -2149,7 +2160,7 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
       <button
         type="button"
         className="chat-mode-select__trigger"
-        title={t('chat.modelSelector.tooltip')}
+        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
         onClick={() => {
           if (disabled) return;
           if (!isOpen && menuRef.current) {
@@ -2160,6 +2171,7 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
           setIsOpen((v) => !v);
         }}
         style={disabled ? { cursor: 'default' } : undefined}
+        aria-disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={isOpen}
         data-testid="chat-model-selector"

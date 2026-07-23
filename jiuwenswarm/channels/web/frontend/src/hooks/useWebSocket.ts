@@ -1402,7 +1402,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       localSendPendingRef.current.add(sessionId);
 
       // 正常调用接口
-      const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
+      const selectedModel = useSessionStore.getState().getEffectiveModelName(sessionId);
       const workContext = getSessionWorkContext(sessionId);
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset(sessionId);
@@ -1482,7 +1482,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const currentSessionState = useSessionStore.getState();
       const workContext = getSessionWorkContext(sessionId);
       const currentMode = currentSessionState.getRuntime(sessionId)?.mode;
-      const selectedModel = currentSessionState.getRuntime(sessionId)?.selectedModelName;
+      const selectedModel = currentSessionState.getEffectiveModelName(sessionId);
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset(sessionId);
       }
@@ -1578,7 +1578,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         if (intent === 'supplement') {
           params.new_input = newInput ?? '';
-          const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
+          const selectedModel = useSessionStore.getState().getEffectiveModelName(sessionId);
           if (selectedModel) params.model_name = selectedModel;
         }
         await request('chat.interrupt', params);
