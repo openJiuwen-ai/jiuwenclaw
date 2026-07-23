@@ -91,6 +91,17 @@ from openjiuwen.core.runner.callback import AbortError as _SkillTurboAbortError
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.signal import SignalDetector
 try:
+    from openjiuwen.agent_evolving.skill_self_evolution import resolve_skill_evolution_action
+except ImportError:
+    def resolve_skill_evolution_action(  # type: ignore[misc]
+        skill_name: str,
+        *,
+        default_auto_save: bool = True,
+        **_kwargs: Any,
+    ) -> str:
+        """Fallback when agent-core lacks skill_self_evolution."""
+        return "auto" if default_auto_save else "suggest"
+try:
     from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
     from openjiuwen.harness.rails.evolution.commands import build_rebuild_command_prompt
 except ImportError:
@@ -6932,7 +6943,8 @@ class JiuWenClawDeepAdapter:
             return {
                 "output": (
                     "`/evolve_rebuild` 已移除。\n"
-                    "开启 `evolution.auto_save` 后，在线自动演进落盘经验时会自动生成新版本。"
+                    "在 `.office-claw/capabilities.json` 中将 Skill 的 `selfEvolution` 设为 "
+                    "`auto` 后，在线演进落盘经验时会自动融合为新版本。"
                 ),
                 "result_type": "answer",
             }
@@ -8665,10 +8677,27 @@ class JiuWenClawDeepAdapter:
             extra={"user_visible": "progress"},
         )
 
+    def _should_auto_merge_evolved_skill(self, skill_name: str) -> bool:
+        """Return True when per-skill selfEvolution resolves to ``auto``.
+
+        Unlisted skills use ``default_auto_save=False`` → ``suggest`` (no auto merge).
+        """
+        name = (skill_name or "").strip()
+        if not name:
+            return False
+        action = resolve_skill_evolution_action(
+            name,
+            default_auto_save=False,
+            skills_dirs=self._registered_skill_dirs_for_rail(),
+        )
+        return action == "auto"
+
     def _collect_evolution_run_summary_text(self, request_id: str) -> str:
         """Drain and format evolution summary; also fills ``_pending_auto_rebuild_skills``.
 
         Intended for the detached evolution followup after rail evolution finishes.
+        Only skills whose ``resolve_skill_evolution_action`` is ``auto`` are queued
+        for version merge; ``off`` / ``suggest`` are skipped.
         """
         self._pending_auto_rebuild_skills = []
         if self._skill_evolution_rail is None:
@@ -8681,16 +8710,17 @@ class JiuWenClawDeepAdapter:
         try:
             evolution_summary = self._skill_evolution_rail.take_run_summary()
             evolution_summary_text = self._format_evolution_summary_markdown(evolution_summary)
-            if (
-                isinstance(evolution_summary, dict)
-                and getattr(self._skill_evolution_rail, "auto_save", False)
-            ):
+            if isinstance(evolution_summary, dict):
                 names: list[str] = []
                 for item in self._iter_evolution_summary_items(evolution_summary.get("skills")):
                     if not isinstance(item, dict):
                         continue
                     skill_name = str(item.get("skill_name") or "").strip()
-                    if skill_name and skill_name not in names:
+                    if (
+                        skill_name
+                        and skill_name not in names
+                        and self._should_auto_merge_evolved_skill(skill_name)
+                    ):
                         names.append(skill_name)
                 self._pending_auto_rebuild_skills = names
         except Exception as exc:
@@ -8725,8 +8755,7 @@ class JiuWenClawDeepAdapter:
         request_id: str,
     ) -> None:
         """Rebuild skills off the chat stream (no chunk yields)."""
-        rail = self._skill_evolution_rail
-        if rail is None or not getattr(rail, "auto_save", False):
+        if self._skill_evolution_rail is None:
             self._pending_auto_rebuild_skills = []
             return
 
@@ -8735,6 +8764,15 @@ class JiuWenClawDeepAdapter:
             return
 
         for skill_name in skill_names:
+            if not self._should_auto_merge_evolved_skill(skill_name):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] background auto rebuild skipped: "
+                    "request_id=%s skill=%s reason=selfEvolution_not_auto",
+                    request_id,
+                    skill_name,
+                    extra={"user_visible": "progress"},
+                )
+                continue
             logger.info(
                 "[JiuWenClawDeepAdapter] background auto rebuild start: "
                 "request_id=%s skill=%s",
@@ -8800,8 +8838,7 @@ class JiuWenClawDeepAdapter:
             )
             return
 
-        rail = self._skill_evolution_rail
-        if rail is None or not getattr(rail, "auto_save", False):
+        if self._skill_evolution_rail is None:
             self._pending_auto_rebuild_skills = []
             return
 
@@ -8810,6 +8847,13 @@ class JiuWenClawDeepAdapter:
             return
 
         for skill_name in skill_names:
+            if not self._should_auto_merge_evolved_skill(skill_name):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] skip auto rebuild: skill=%s reason=selfEvolution_not_auto",
+                    skill_name,
+                    extra={"user_visible": "progress"},
+                )
+                continue
             yield AgentResponseChunk(
                 request_id=stream_request_id,
                 channel_id=channel_id,
