@@ -274,6 +274,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     view_push_result,
     xiaoyi_gui_agent,
     image_reading,
+    huawei_id_tool,
 )
 from jiuwenswarm.common.config import (
     get_config,
@@ -5183,6 +5184,7 @@ class JiuWenSwarmDeepAdapter:
                 view_push_result,
                 image_reading,
                 xiaoyi_gui_agent,
+                huawei_id_tool,
             ]
             try:
                 for xt in _xiaoyi_tools:

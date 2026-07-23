@@ -34,6 +34,20 @@ class XiaoyiDeviceCommandHandler:
                     "CHANNEL_NOT_FOUND",
                     "XiaoyiChannel is not active",
                 )
+            elif request.intent_name == "GetLoginToken":
+                # huawei_id_tool 跨进程桥特判：不走普通 phone tool command（commands wire），
+                # 改走 send_login_token_artifact（artifact wire，1:1 复刻
+                # xy_channel login-token-tool.ts 第 53-90 行），端侧小艺 App 收到
+                # {kind:"getLoginToken"} part 后弹授权 UI。agentserver 侧工具
+                # login_token_tool.py 通过 execute_device_command("GetLoginToken", ...)
+                # 把请求投到本 handler，由 gateway 进程代为下发（channel 实例只在此进程）。
+                result = await _dispatch_login_token_artifact(channel, request)
+                response = DeviceCommandResponse(
+                    rpc_id=request.rpc_id,
+                    operation_id=request.operation_id,
+                    ok=True,
+                    result=result,
+                )
             else:
                 if request.context.channel_id == "__cron__":
                     logger.info(
@@ -96,6 +110,52 @@ class XiaoyiDeviceCommandHandler:
             response.operation_id,
             response.ok,
         )
+
+
+async def _dispatch_login_token_artifact(
+    channel: Any,
+    request: DeviceCommandRequest,
+) -> dict[str, Any]:
+    """huawei_id_tool 跨进程桥：调 channel.send_login_token_artifact 下发 artifact.
+
+    从 command 取 client_id / skill_name（login_token_tool.py 构造），从 context
+    解析 session_id / task_id / message_id（与 XiaoyiChannel.execute_phone_tool_command
+    的解析顺序一致），message_id 优先用 xiaoyi_rpc_id（端侧用它关联授权回调，对应
+    TS 第 75 行 jsonRpcResponse.id = messageId）。
+
+    Returns:
+        {"sent": bool} ——是否至少成功发送到一个活跃 WS 连接。
+    """
+    command = request.command or {}
+    client_id = str(command.get("client_id") or "").strip()
+    skill_name = str(command.get("skill_name") or "").strip()
+    if not client_id or not skill_name:
+        raise RuntimeError(
+            "GetLoginToken command missing client_id / skill_name"
+        )
+
+    context = request.context
+    session_id = (
+        context.xiaoyi_root_session_id
+        or context.xiaoyi_params_session_id
+        or context.jiuwen_session_id
+        or ""
+    )
+    if not session_id:
+        raise RuntimeError("Xiaoyi session_id is missing for GetLoginToken")
+    task_id = context.xiaoyi_task_id or session_id
+    message_id = context.xiaoyi_rpc_id or f"cmd_{request.operation_id}"
+
+    sent = await channel.send_login_token_artifact(
+        session_id=session_id,
+        task_id=task_id,
+        message_id=message_id,
+        client_id=client_id,
+        skill_name=skill_name,
+    )
+    if not sent:
+        raise RuntimeError("下发授权请求失败：Xiaoyi WebSocket 未连接")
+    return {"sent": True}
 
 
 def parse_device_command_request(data: dict[str, Any]) -> DeviceCommandRequest:
