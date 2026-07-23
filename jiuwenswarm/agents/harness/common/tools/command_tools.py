@@ -207,9 +207,6 @@ _POSIX_COMMANDS = frozenset({
 })
 _QUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?P<quote>['\"])(?P<path>[A-Za-z]:\\[^'\"]+)(?P=quote)")
 _UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s|&;]+)")
-_POSIX_CMD_FLAGS_SILENT_ON_CMD = {
-    "mkdir": frozenset({"-p"}),
-}
 
 
 def _translate_mkdir_p_to_powershell(segment: str) -> str | None:
