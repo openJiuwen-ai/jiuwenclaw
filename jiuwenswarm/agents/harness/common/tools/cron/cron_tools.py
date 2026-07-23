@@ -44,6 +44,8 @@ class CronToolRoute:
     chat_type: str | None = None  # "group" 表示群聊, "p2p" 或 None 表示私聊
     app_id: str = ""
     project_dir: str = ""  # 当前 agent 工作目录，用于 cron 任务归属项目解析
+    project_id: str = ""  # 当前会话锁定项目 ID；优先于 project_dir，避免同路径双模式误判
+    work_mode: str = ""  # 当前会话锁定工作模式，用于 project_dir 归属消歧
 
 
 class CronTools:
@@ -321,6 +323,9 @@ class CronTools:
             project_dir_val = str(self._route().project_dir or "").strip()
 
         # work_mode 解析(严格校验,与 CronController.create_job 保持一致)
+        route_work_mode = str(r.work_mode or "").strip()
+        if "work_mode" not in normalized and route_work_mode:
+            normalized["work_mode"] = route_work_mode
         channel_id_val = self._resolve_channel_id() or "web"
         work_mode, mode_err = self._resolve_work_mode_from_params(
             normalized, channel_id=channel_id_val,
@@ -334,6 +339,8 @@ class CronTools:
         from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_binding
 
         raw_project_id = str(normalized.get("project_id") or "").strip()
+        if not raw_project_id:
+            raw_project_id = str(r.project_id or "").strip()
         binding = resolve_cron_project_binding(raw_project_id, project_dir_val, work_mode)
         if binding.error is not None:
             if binding.hidden:

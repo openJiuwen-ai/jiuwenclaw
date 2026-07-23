@@ -11,8 +11,17 @@ export interface SidebarCronJob {
   cron_expr: string;
   project_id: string;
   session_id?: string;
+  // 推送频道 ID,字符串或逗号分隔的多个(对齐后端 CronJob.to_dict().targets);空串按后端默认 web
+  targets?: string;
   created_at: number | string | null;
   updated_at: number | string | null;
+}
+
+/** 判断 cron job 的 targets 是否含 "web"(空串按后端 normalize 默认 web 处理) */
+export function isWebChannelJob(targets?: string): boolean {
+  const s = (targets ?? '').trim();
+  if (!s) return true;
+  return s.split(',').some((p) => p.trim().toLowerCase() === 'web');
 }
 
 interface CronState {
@@ -41,7 +50,9 @@ export const useCronStore = create<CronState>((set, get) => ({
     set({ isLoading: true });
     try {
       const payload = await webRequest<{ jobs: SidebarCronJob[] }>('cron.job.list');
-      set({ jobs: payload.jobs || [], isLoading: false });
+      // 侧边栏是 Web 端工作区,只展示 targets 含 "web" 的定时任务
+      const webJobs = (payload.jobs || []).filter((j) => isWebChannelJob(j.targets));
+      set({ jobs: webJobs, isLoading: false });
     } catch {
       set({ jobs: [], isLoading: false });
     }

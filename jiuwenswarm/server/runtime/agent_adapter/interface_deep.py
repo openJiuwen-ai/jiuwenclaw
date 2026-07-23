@@ -322,6 +322,20 @@ _CRON_TOOL_MODE: ContextVar[str | None] = ContextVar(
     "cron_tool_mode",
     default=None,
 )
+_CRON_TOOL_BOUND: ContextVar[bool] = ContextVar(
+    "cron_tool_bound",
+    default=False,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeCronContextTokens:
+    channel: Token[str]
+    session: Token[str | None]
+    metadata: Token[dict[str, Any] | None]
+    mode: Token[str | None]
+    bound: Token[bool]
+    shell: Token[str | None]
 
 
 def get_runtime_tool_session_id() -> str | None:
@@ -397,6 +411,18 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
         "skill_index_build",
         "skill_branch_explore",
         "skill_branch_peek",
+    }
+)
+_CRON_TOOL_NAMES = frozenset(
+    {
+        "cron",
+        "cron_list_jobs",
+        "cron_get_job",
+        "cron_create_job",
+        "cron_update_job",
+        "cron_delete_job",
+        "cron_toggle_job",
+        "cron_preview_job",
     }
 )
 
@@ -647,22 +673,43 @@ class _RuntimeCronToolContext:
 
     def __init__(self, tool_scope: str) -> None:
         self._tool_scope = tool_scope
+        self._fallback_channel_id = CronTargetChannel.WEB.value
+        self._fallback_session_id: str | None = None
+        self._fallback_metadata: dict[str, Any] | None = None
+        self._fallback_mode: str | None = None
+
+    def remember_current_binding(self) -> None:
+        self._fallback_channel_id = _CRON_TOOL_CHANNEL_ID.get()
+        self._fallback_session_id = _CRON_TOOL_SESSION_ID.get()
+        metadata = _CRON_TOOL_METADATA.get()
+        self._fallback_metadata = dict(metadata) if isinstance(metadata, dict) else None
+        self._fallback_mode = _CRON_TOOL_MODE.get()
 
     @property
     def channel_id(self) -> str:
-        return _CRON_TOOL_CHANNEL_ID.get()
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_CHANNEL_ID.get()
+        return self._fallback_channel_id
 
     @property
     def session_id(self) -> str | None:
-        return _CRON_TOOL_SESSION_ID.get()
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_SESSION_ID.get()
+        return self._fallback_session_id
 
     @property
     def metadata(self) -> dict[str, Any] | None:
-        return _CRON_TOOL_METADATA.get()
+        if _CRON_TOOL_BOUND.get():
+            metadata = _CRON_TOOL_METADATA.get()
+            if isinstance(metadata, dict):
+                return metadata
+        return self._fallback_metadata
 
     @property
     def mode(self) -> str | None:
-        return _CRON_TOOL_MODE.get()
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_MODE.get()
+        return self._fallback_mode
 
     @property
     def tool_scope(self) -> str:
@@ -4475,6 +4522,7 @@ class JiuWenSwarmDeepAdapter:
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
+        self._ensure_project_gitignore_agent_history(initial_runtime_workspace)
         self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
         setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
@@ -4491,6 +4539,86 @@ class JiuWenSwarmDeepAdapter:
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
+
+    @staticmethod
+    def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:
+        """Ensure JiuwenSwarm's file operation logs stay out of project git diffs."""
+        if not project_dir:
+            return
+        try:
+            repo_probe = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
+        if repo_probe.returncode != 0:
+            return
+
+        repo_root_text = repo_probe.stdout.strip()
+        if not repo_root_text:
+            return
+        gitignore_path = Path(repo_root_text) / ".gitignore"
+        try:
+            existing_bytes = gitignore_path.read_bytes() if gitignore_path.exists() else b""
+        except OSError as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] read .gitignore for agent history rule failed: %s",
+                exc,
+            )
+            return
+
+        if JiuWenSwarmDeepAdapter._gitignore_covers_agent_history(existing_bytes):
+            return
+
+        existing = existing_bytes.decode("utf-8", errors="replace")
+        prefix = "" if not existing else ("\n" if existing.endswith(("\n", "\r")) else "\n\n")
+        addition = (
+            f"{prefix}# JiuwenSwarm runtime file operation logs\n.agent_history/\n"
+        ).encode("utf-8")
+        try:
+            gitignore_path.write_bytes(existing_bytes + addition)
+        except OSError as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ensure .agent_history gitignore failed: %s",
+                exc,
+            )
+
+    @staticmethod
+    def _gitignore_covers_agent_history(content: bytes) -> bool:
+        """Return True if .gitignore content already ignores .agent_history/.
+
+        Recognizes equivalent forms such as ``.agent_history``,
+        ``.agent_history/``, ``.agent_history/*``, ``.agent_history/**``,
+        ``.agent_history/**/*``, ``**/.agent_history`` and combinations
+        thereof, so that the rule is idempotent across pre-existing project
+        configurations.
+        """
+        text = content.decode("utf-8", errors="replace")
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Skip negation rules; they re-include paths rather than ignore
+            # the directory.
+            if line.startswith("!"):
+                continue
+            # Strip leading glob prefix like `**/`.
+            if line.startswith("**/"):
+                line = line[3:]
+            # Split into segments. The rule covers `.agent_history` if the
+            # first segment matches and any following segments are wildcards
+            # that target the directory contents.
+            segments = [seg for seg in line.split("/") if seg]
+            if not segments or segments[0] != ".agent_history":
+                continue
+            if all(seg in ("*", "**") for seg in segments[1:]):
+                return True
+        return False
 
     async def _sync_prompt_attachments_for_request(self, session_id: str) -> None:
         """Hot-load prompt attachment files for the current request.
@@ -4785,7 +4913,7 @@ class JiuWenSwarmDeepAdapter:
         request_id: str | None,
         mode: str | None,
         project_dir: str | None = None,
-    ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Token[str | None]]:
+    ) -> _RuntimeCronContextTokens:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
         )
@@ -4797,33 +4925,55 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+
+        session_metadata: dict[str, Any] = {}
+        if isinstance(session_id, str) and session_id.strip():
+            try:
+                from jiuwenswarm.server.runtime.session.session_metadata import (
+                    get_session_metadata,
+                )
+
+                loaded_metadata = get_session_metadata(session_id.strip(), cache_bust=True)
+                if isinstance(loaded_metadata, dict):
+                    session_metadata = loaded_metadata
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] failed to load session metadata for cron context: %s",
+                    exc,
+                )
         # 注入 project_dir 供 cron tool 路由解析任务归属项目（设计文档 §5.1）
         if isinstance(project_dir, str) and project_dir.strip():
             normalized_metadata.setdefault("project_dir", project_dir.strip())
-        return (
-            _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
-            _CRON_TOOL_SESSION_ID.set(session_id),
-            _CRON_TOOL_METADATA.set(normalized_metadata),
-            _CRON_TOOL_MODE.set(normalized_mode),
-            set_shell_session_id(session_id),
+        for key in ("project_id", "project_dir", "work_mode"):
+            value = normalized_metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                continue
+            session_value = session_metadata.get(key)
+            if isinstance(session_value, str) and session_value.strip():
+                normalized_metadata[key] = session_value.strip()
+        return _RuntimeCronContextTokens(
+            channel=_CRON_TOOL_CHANNEL_ID.set(normalized_channel),
+            session=_CRON_TOOL_SESSION_ID.set(session_id),
+            metadata=_CRON_TOOL_METADATA.set(normalized_metadata),
+            mode=_CRON_TOOL_MODE.set(normalized_mode),
+            bound=_CRON_TOOL_BOUND.set(True),
+            shell=set_shell_session_id(session_id),
         )
 
     @staticmethod
     def _reset_runtime_cron_context(
-        tokens: tuple[
-            Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Token[str | None]
-        ],
+        tokens: _RuntimeCronContextTokens,
     ) -> None:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             reset_shell_session_id,
         )
 
-        channel_token, session_token, metadata_token, mode_token, shell_token = tokens
-        reset_shell_session_id(shell_token)
-        _CRON_TOOL_MODE.reset(mode_token)
-        _CRON_TOOL_METADATA.reset(metadata_token)
-        _CRON_TOOL_SESSION_ID.reset(session_token)
-        _CRON_TOOL_CHANNEL_ID.reset(channel_token)
+        reset_shell_session_id(tokens.shell)
+        _CRON_TOOL_BOUND.reset(tokens.bound)
+        _CRON_TOOL_MODE.reset(tokens.mode)
+        _CRON_TOOL_METADATA.reset(tokens.metadata)
+        _CRON_TOOL_SESSION_ID.reset(tokens.session)
+        _CRON_TOOL_CHANNEL_ID.reset(tokens.channel)
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """装配 agent 模式 rails。
@@ -4994,6 +5144,9 @@ class JiuWenSwarmDeepAdapter:
                     logger.info(
                         "[JiuWenSwarmDeepAdapter] Registering %d cron tools", len(cron_tools)
                     )
+                    for existing in list(self._instance.ability_manager.list() or []):
+                        if getattr(existing, "name", "") in _CRON_TOOL_NAMES:
+                            self._instance.ability_manager.remove(existing.name)
                     for cron_tool in cron_tools:
                         if not Runner.resource_mgr.get_tool(cron_tool.card.id):
                             Runner.resource_mgr.add_tool(cron_tool)
@@ -6992,6 +7145,7 @@ class JiuWenSwarmDeepAdapter:
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
+        self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
@@ -7422,6 +7576,7 @@ class JiuWenSwarmDeepAdapter:
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
+        self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型

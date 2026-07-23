@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { ChevronDown, Search, TrendingUp, Newspaper, Briefcase } from 'lucide-react';
 import { webRequest, webClient } from '../../services/webClient';
 import { useSessionStore } from '../../stores/sessionStore';
-import { useCronStore } from '../../stores';
+import { useCronStore, isWebChannelJob } from '../../stores';
 import { projectRegistryClient } from '../../features/workspace/projectRegistryClient';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
 import type { Session } from '../../types';
@@ -163,7 +163,9 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     setError(null);
     try {
       const payload = await webRequest<{ jobs: CronJobDTO[] }>('cron.job.list');
-      setJobs((payload.jobs || []).map((j) => cronJobToUI(j, projectList)));
+      // Web 端工作区只展示 targets 含 "web" 的定时任务(targets 为空按后端 normalize 默认 web)
+      const webJobs = (payload.jobs || []).filter((j) => isWebChannelJob(j.targets));
+      setJobs(webJobs.map((j) => cronJobToUI(j, projectList)));
     } catch (loadError) {
       const message = loadError instanceof Error ? loadError.message : t('cron.errors.loadJobs');
       setError(message);

@@ -11,6 +11,7 @@ import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
 import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
+import { OnlineSkillSearchPanel } from "../../features/OnlineSkillSearchPanel";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
@@ -23,27 +24,6 @@ const SKILLS_FETCH_TIMEOUT_NORMAL_MS = 30_000;
 const SKILL_RETRIEVAL_RUNNING_POLL_MS = 10_000;
 const SKILL_RETRIEVAL_IDLE_POLL_MS = 5 * 60_000;
 const GRAPH_READING_MIN_VISIBLE_MS = 500;
-
-/** 在线技能源存储 key */
-const ONLINE_SOURCE_STORAGE_KEY = "jiuwen:online_source";
-
-// SkillPanel 可见性开关 — 设为 true 显示，false 隐藏。
-const SKILL_PANEL_FLAGS = {
-  showImportLocal: true, // "导入本地技能" 按钮
-};
-
-/** 获取保存的在线源 */
-function getSavedOnlineSource(): "skillnet" | "clawhub" {
-  try {
-    const saved = localStorage.getItem(ONLINE_SOURCE_STORAGE_KEY);
-    if (saved === "skillnet" || saved === "clawhub") {
-      return saved;
-    }
-  } catch {
-    /* ignore */
-  }
-  return "skillnet";
-}
 
 type SkillItem = {
   name: string;
@@ -590,7 +570,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
-  const [onlineSource, setOnlineSource] = useState<"skillnet" | "clawhub">(getSavedOnlineSource);
   const [searchTrigger, setSearchTrigger] = useState(0);
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [plugins, setPlugins] = useState<InstalledPluginItem[]>([]);
@@ -1977,9 +1956,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       ? t("skills.searchPlaceholder")
                       : marketplaceSubTab === "swarmskills"
                       ? t("skills.swarmskills.searchPlaceholder")
-                      : onlineSource === "skillnet"
-                      ? t("skills.skillNet.searchPlaceholder")
-                      : t("skills.clawhub.searchPlaceholder")
+                      : t("skills.onlineSearch.searchPlaceholder")
                   }
                   className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
                 />
@@ -2102,35 +2079,14 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 </div>
               )}
 
-              {marketplaceSubTab === "online" && onlineSource === "skillnet" && (
-                <div className="h-full" key={`skillnet-${searchTrigger}`}>
-                  <SkillNetSearchModal
-                    open={true}
-                    embedded={true}
+              {marketplaceSubTab === "online" && (
+                <div className="h-full" key={`online-${searchTrigger}`}>
+                  <OnlineSkillSearchPanel
                     sessionId={sessionId}
                     externalSearchQuery={debouncedSearch}
                     installedSkillNames={installedSkillNames}
                     installedSkillOrigins={installedSkillOrigins}
                     viewMode={viewMode}
-                    onClose={() => {}}
-                    onInstalled={(_skillName: string) => {
-                      void fetchSkills();
-                    }}
-                  />
-                </div>
-              )}
-
-              {marketplaceSubTab === "online" && onlineSource === "clawhub" && (
-                <div className="h-full" key={`clawhub-${searchTrigger}`}>
-                  <ClawHubSearchModal
-                    open={true}
-                    embedded={true}
-                    sessionId={sessionId}
-                    externalSearchQuery={debouncedSearch}
-                    installedSkillNames={installedSkillNames}
-                    installedSkillOrigins={installedSkillOrigins}
-                    viewMode={viewMode}
-                    onClose={() => {}}
                     onInstalled={(_skillName: string) => {
                       void fetchSkills();
                     }}
@@ -2396,15 +2352,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         open={sourceModalOpen}
         sessionId={sessionId}
         onClose={() => setSourceModalOpen(false)}
-        currentSource={onlineSource}
-        onSourceChange={(source) => {
-          setOnlineSource(source);
-          try {
-            localStorage.setItem(ONLINE_SOURCE_STORAGE_KEY, source);
-          } catch {
-            /* ignore */
-          }
-        }}
         onNavigateToConfig={() => {
           setSourceModalOpen(false);
           onNavigateToConfig?.();

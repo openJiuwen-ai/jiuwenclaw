@@ -204,7 +204,7 @@ models:
     - model_client_config:
         api_base: ${API_BASE}
         api_key: ${API_KEY}
-        model_name: ${MODEL_NAME:-xiaomi/mimo-v2-omni}
+        model_name: ${MODEL_NAME}
         client_provider: ${MODEL_PROVIDER}
         timeout: 1800
         verify_ssl: false
@@ -216,7 +216,7 @@ models:
       model_client_config:
         api_base: ${VIDEO_API_BASE}
         api_key: ${VIDEO_API_KEY}
-        model_name: ${VIDEO_MODEL_NAME:-xiaomi/mimo-v2-omni}
+        model_name: ${VIDEO_MODEL_NAME}
         client_provider: ${VIDEO_PROVIDER}
         timeout: 1800
         verify_ssl: false
@@ -226,7 +226,7 @@ models:
       model_client_config:
         api_base: ${AUDIO_API_BASE}
         api_key: ${AUDIO_API_KEY}
-        model_name: ${AUDIO_MODEL_NAME:-openai/gpt-4o-audio-preview}
+        model_name: ${AUDIO_MODEL_NAME}
         client_provider: ${AUDIO_PROVIDER}
         verify_ssl: false
         timeout: 1800
@@ -236,7 +236,7 @@ models:
       model_client_config:
         api_base: ${VISION_API_BASE}
         api_key: ${VISION_API_KEY}
-        model_name: ${VISION_MODEL_NAME:-bytedance-seed/seed-2.0-mini}
+        model_name: ${VISION_MODEL_NAME}
         client_provider: ${VISION_PROVIDER}
         verify_ssl: false
         timeout: 1800
@@ -244,10 +244,10 @@ models:
         temperature: 0.95
   image_gen:
       model_client_config:
-        api_base: ${IMAGE_GEN_API_BASE:-https://dashscope.aliyuncs.com/api/v1}
+        api_base: ${IMAGE_GEN_API_BASE}
         api_key: ${IMAGE_GEN_API_KEY}
-        model_name: ${IMAGE_GEN_MODEL_NAME:-qwen-image-max}
-        client_provider: ${IMAGE_GEN_PROVIDER:-DashScope}
+        model_name: ${IMAGE_GEN_MODEL_NAME}
+        client_provider: ${IMAGE_GEN_PROVIDER}
         verify_ssl: false
         timeout: 1800
       model_config_obj:
@@ -430,7 +430,7 @@ react:
   agent_name: main_agent
   enable_task_loop: true
   max_iterations: 100
-  model_name: ${MODEL_NAME:-deepseek-chat}
+  model_name: ${MODEL_NAME}
   skill_mode: all
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
@@ -590,6 +590,13 @@ gateway:
       request_timeout_s: 10
       # 本机 nodeIP，供 POST /api/nodes/{node}/heartbeat
       node:
+    # SSH 南向接入 YuanRong 实例（配合 channels.ssh 北向使用）：
+    # ssh -p <port> 'yr:instance:<instance_id>:user=agentos'@<frontend-host>
+    # 主机取自 agent_client.frontend_endpoint；<instance_id> 为 create agent 返回的实例 id。
+    ssh:
+      port: 2222
+      user_template: "yr:instance:{instance}:user=agentos"
+      connect_timeout_s: 30
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -763,6 +770,18 @@ channels:
     my_user_id: ""
     bot_name: ""
     enable_memory: false
+  ssh:
+    # SSH channel -> MessageHandler（北向）；南向经 gateway.agent_client
+    # （type=agentos_router 时由 AgentOS Router 创建 YuanRong 实例并
+    # 以 yr:instance:<instance_id>:user=agentos 中继到 frontend）。
+    # 启用前请安装可选依赖: pip install "jiuwenswarm[ssh]" 或 uv sync --extra ssh
+    # 客户端: ssh -p <listen_port> user@<gateway-host>
+    # 南向连接参数见 gateway.agentos.ssh；agent_type 跟随用户当前值（3rdagent.switch）。
+    enabled: false
+    listen_host: "0.0.0.0"
+    listen_port: 2222
+    host_key_path: ~/.jiuwenswarm/config/ssh_host_key
+    relay_timeout_sec: 3600
 
 # ========== 细粒度权限管控（tiered_policy）==========
 #

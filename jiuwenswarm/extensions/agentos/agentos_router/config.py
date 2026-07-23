@@ -10,6 +10,10 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     normalize_agent_key_fields,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.registry_client import RegistryConfig
+from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
+    YuanrongSshSettings,
+    load_yuanrong_ssh_settings,
+)
 
 
 @dataclass(frozen=True)
@@ -23,6 +27,7 @@ class RouterConfig:
     agent_timeout_s: float = 300.0
     creating_timeout_seconds: float = 60.0
     agent_key_fields: tuple[str, ...] = DEFAULT_AGENT_KEY_FIELDS
+    ssh: YuanrongSshSettings = YuanrongSshSettings()
 
 
 def agentos_router_selected(config: dict[str, Any]) -> bool:
@@ -80,4 +85,5 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         agent_key_fields=normalize_agent_key_fields(
             agentos.get("agent_key_fields")
         ),
+        ssh=load_yuanrong_ssh_settings(agentos.get("ssh")),
     )

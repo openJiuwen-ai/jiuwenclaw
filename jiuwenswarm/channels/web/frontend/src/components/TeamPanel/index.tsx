@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FileViewer } from '../AgentPanel/FileViewer';
 import { webRequest } from '../../services/webClient';
@@ -23,6 +24,29 @@ interface DirectoryItem {
 
 interface ListFilesResponse {
   files?: unknown[];
+}
+
+interface TeamDeleteResponse {
+  session_ids: string[];
+}
+
+interface TeamPanelProps {
+  onSessionsDeleted?: (sessionIds: string[]) => void | Promise<void>;
+}
+
+const DIRECTORY_MIN_WIDTH = 180;
+const FILE_PREVIEW_MIN_WIDTH = 320;
+const RESIZE_DIVIDER_WIDTH = 4;
+
+function getMaxDirectoryWidth(containerWidth: number): number {
+  return Math.max(
+    DIRECTORY_MIN_WIDTH,
+    containerWidth - FILE_PREVIEW_MIN_WIDTH - RESIZE_DIVIDER_WIDTH,
+  );
+}
+
+function clampDirectoryWidth(width: number, containerWidth: number): number {
+  return Math.min(getMaxDirectoryWidth(containerWidth), Math.max(DIRECTORY_MIN_WIDTH, width));
 }
 
 function normalizePath(path: string): string {
@@ -92,7 +116,7 @@ function toTeamInfos(raw: unknown[]): TeamInfo[] {
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
 }
 
-export function TeamPanel() {
+export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
   const { t } = useTranslation();
   const [teams, setTeams] = useState<TeamInfo[]>([]);
   const [selectedTeamName, setSelectedTeamName] = useState('');
@@ -104,6 +128,11 @@ export function TeamPanel() {
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
   const [selectedFile, setSelectedFile] = useState<DirectoryItem | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [directoryWidth, setDirectoryWidth] = useState<number | null>(null);
+  const [splitPaneWidth, setSplitPaneWidth] = useState(0);
+  const splitPaneRef = useRef<HTMLDivElement>(null);
+  const directoryPaneRef = useRef<HTMLDivElement>(null);
+  const resizeDragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
 
   const deletingTeam = Boolean(deletingTeamName);
   const selectedRoot = selectedTeamName ? `.agent_teams/${selectedTeamName}` : '';
@@ -197,6 +226,50 @@ export function TeamPanel() {
     void loadTeamFiles(selectedTeamName);
   }, [loadTeamFiles, selectedTeamName]);
 
+  useEffect(() => {
+    const splitPane = splitPaneRef.current;
+    if (!splitPane) return;
+
+    const updateWidth = () => {
+      const nextWidth = splitPane.getBoundingClientRect().width;
+      setSplitPaneWidth(nextWidth);
+      setDirectoryWidth((currentWidth) => (
+        currentWidth === null ? null : clampDirectoryWidth(currentWidth, nextWidth)
+      ));
+    };
+
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(splitPane);
+    return () => observer.disconnect();
+  }, []);
+
+  const handleResizePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !directoryPaneRef.current) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: directoryPaneRef.current.getBoundingClientRect().width,
+    };
+  };
+
+  const handleResizePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = resizeDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !splitPaneRef.current) return;
+    const containerWidth = splitPaneRef.current.getBoundingClientRect().width;
+    setDirectoryWidth(clampDirectoryWidth(drag.startWidth + event.clientX - drag.startX, containerWidth));
+  };
+
+  const finishResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (resizeDragRef.current?.pointerId !== event.pointerId) return;
+    resizeDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
   const handleRefresh = () => {
     void loadTeams();
     if (selectedTeamName) {
@@ -211,18 +284,29 @@ export function TeamPanel() {
 
     setDeletingTeamName(teamName);
     try {
-      await webRequest('team.delete', {
-        team_name: teamName,
-        mode: 'team',
-      });
+      let response: TeamDeleteResponse;
+      try {
+        response = await webRequest<TeamDeleteResponse>('team.delete', {
+          team_name: teamName,
+          mode: 'team',
+        });
+      } catch (deleteError) {
+        console.error('Failed to delete team:', deleteError);
+        setError(t('teams.errors.deleteTeam', { team: teamName }));
+        return;
+      }
+
       if (selectedTeamName === teamName) {
         setSelectedFile(null);
         setDirChildren(new Map());
       }
       await loadTeams();
-    } catch (deleteError) {
-      console.error('Failed to delete team:', deleteError);
-      setError(t('teams.errors.deleteTeam', { team: teamName }));
+
+      try {
+        await onSessionsDeleted?.(response.session_ids);
+      } catch (syncError) {
+        console.error('Failed to synchronize deleted team sessions:', syncError);
+      }
     } finally {
       setDeletingTeamName('');
     }
@@ -324,6 +408,8 @@ export function TeamPanel() {
     });
   };
 
+  const resolvedDirectoryWidth = directoryWidth ?? clampDirectoryWidth(splitPaneWidth * 0.25, splitPaneWidth);
+
   return (
     <div className="flex-1 min-h-0">
       <div className="card w-full h-full flex flex-col">
@@ -402,8 +488,15 @@ export function TeamPanel() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm grid grid-cols-[minmax(0,1fr)_minmax(0,3fr)] min-h-0">
-            <div className="border-r border-border flex flex-col min-h-0">
+          <div
+            ref={splitPaneRef}
+            className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex min-h-0"
+          >
+            <div
+              ref={directoryPaneRef}
+              className="shrink-0 flex flex-col min-h-0 overflow-hidden"
+              style={{ width: resolvedDirectoryWidth }}
+            >
               <div className="px-4 py-3 bg-secondary/30 border-b border-border">
                 <div className="min-w-0">
                   <h3 className="text-sm font-medium text-text">{t('teams.directory')}</h3>
@@ -449,7 +542,18 @@ export function TeamPanel() {
               </div>
             </div>
 
-            <div className="flex-1 min-h-0">
+            <div
+              className="resize-divider touch-none select-none"
+              onPointerDown={handleResizePointerDown}
+              onPointerMove={handleResizePointerMove}
+              onPointerUp={finishResize}
+              onPointerCancel={finishResize}
+              onLostPointerCapture={() => {
+                resizeDragRef.current = null;
+              }}
+            />
+
+            <div className="flex-1 min-w-0 min-h-0">
               {selectedFile ? (
                 <FileViewer filePath={selectedFile.path} fileName={selectedFile.name} />
               ) : (

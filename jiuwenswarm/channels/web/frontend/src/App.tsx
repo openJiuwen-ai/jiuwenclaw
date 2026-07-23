@@ -230,11 +230,6 @@ function downloadDataUrl(dataUrl: string, filename: string): void {
   document.body.removeChild(link);
 }
 
-// 判断 session_id 是否为可恢复/可展示的会话（web 渠道 sess_ 与 cron 触发的 cron_ 前缀均需支持）
-function isRestorableSessionId(sessionId: string): boolean {
-  return sessionId.startsWith('sess_') || sessionId.startsWith('cron_');
-}
-
 async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
   const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
   if (pywebviewApi?.save_data_url) {
@@ -499,7 +494,7 @@ function AppContent() {
   const messages = useChatStore((s) => s.runtimes[sessionId]?.messages ?? []);
   const isLoadingHistory = useChatStore((s) => s.runtimes[sessionId]?.isLoadingHistory ?? false);
   const replaceHistoryMessages = useChatStore((s) => s.replaceHistoryMessages);
-  const isRestoringHistorySession = isRestorableSessionId(sessionId) && isLoadingHistory && !historyPagerMeta && messages.length === 0;
+  const isRestoringHistorySession = isLoadingHistory && !historyPagerMeta && messages.length === 0;
   const isRestoringTeamHistory = mode === 'team' && isRestoringHistorySession;
 
   useEffect(() => {
@@ -799,7 +794,6 @@ function AppContent() {
   }, []);
 
   const loadSessionMetadata = useCallback(async (targetSessionId: string): Promise<Session | null> => {
-    if (!isRestorableSessionId(targetSessionId)) return null;
     try {
       const session = await request<Session>('session.get_metadata', {
         session_id: targetSessionId,
@@ -1271,9 +1265,6 @@ function AppContent() {
   useEffect(() => {
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
     
-    // 仅处理以 sess_ 开头的会话 ID
-    if (!isRestorableSessionId(sessionId)) return;
-
     if (promotedFromNewSessionIdsRef.current.has(sessionId)) {
       setHistoryPagerMeta(sessionId, null);
       setHistoryLoadingMore(false);
@@ -1493,7 +1484,6 @@ function AppContent() {
   // 都不算错误。
   useEffect(() => {
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
-    if (!isRestorableSessionId(sessionId)) return;
     void (async () => {
       await refreshGoal(sessionId);
       // 等 get 落地这段时间里用户可能已经切到别的会话，避免对着旧会话发 resume。
@@ -1717,7 +1707,7 @@ function AppContent() {
   }, [sendUserAnswer]);
 
   const handleLoadMoreHistory = useCallback(async () => {
-    if (!isRestorableSessionId(sessionId) || !historyPagerMeta) return;
+    if (!historyPagerMeta) return;
     if (historyLoadingSessionsRef.current.has(sessionId) || historyPagerMeta.loadedPages >= historyPagerMeta.totalPages) return;
 
     const sid = sessionId;
@@ -1763,8 +1753,6 @@ function AppContent() {
 
   const handleRestoreSession = useCallback(
     async (targetSessionId: string, targetMode?: string, targetSession?: Session, options?: { skipHistoryLoad?: boolean }) => {
-      if (!isRestorableSessionId(targetSessionId)) return;
-
       const resolvedMode = targetMode ?? targetSession?.mode ?? mode;
       disposeInFlightHistoryHandles(targetSessionId);
       setHistoryLoadingMore(false);
@@ -1830,6 +1818,38 @@ function AppContent() {
     if (target === 'new') { enterNewConversation(mode, options); return; }
     void handleRestoreSession(target.session_id, target.mode, target);
   }, [enterNewConversation, handleRestoreSession, mode]);
+
+  const handleTeamSessionsDeleted = useCallback(async (sessionIds: string[]) => {
+    const deletedSessionIds = new Set(sessionIds);
+    const sessionState = useSessionStore.getState();
+
+    for (const deletedSessionId of deletedSessionIds) {
+      forgetCreatedConversation(deletedSessionId);
+      sessionState.removeSession(deletedSessionId);
+      sessionState.removeRuntime(deletedSessionId);
+      useChatStore.getState().removeRuntime(deletedSessionId);
+      useTodoStore.getState().removeRuntime(deletedSessionId);
+      useHarnessStore.getState().removeRuntime(deletedSessionId);
+      useGoalStore.getState().removeRuntime(deletedSessionId);
+    }
+
+    if (routeSessionId && deletedSessionIds.has(routeSessionId)) {
+      setMissingSessionId(routeSessionId);
+    }
+
+    const workspaceState = useWorkspaceStore.getState();
+    const loadedProjectIds = Object.keys(workspaceState.projectSessions);
+    await workspaceState.loadProjects();
+    await Promise.all(loadedProjectIds.map((projectId) => workspaceState.loadProjectSessions(projectId)));
+
+    const cronStore = useCronStore.getState();
+    for (const [jobId, sessions] of Object.entries(cronStore.cronSessions)) {
+      if (sessions.some((session) => deletedSessionIds.has(session.session_id))) {
+        const job = cronStore.jobs.find((item) => item.id === jobId);
+        void cronStore.loadCronSessions(job?.project_id || 'default', jobId);
+      }
+    }
+  }, [routeSessionId]);
 
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
@@ -2090,7 +2110,7 @@ function AppContent() {
         )}
         {activeNav === 'teams' && (
           <div className="app-section">
-            <TeamPanel />
+            <TeamPanel onSessionsDeleted={handleTeamSessionsDeleted} />
           </div>
         )}
         {activeNav === 'sessions' && (

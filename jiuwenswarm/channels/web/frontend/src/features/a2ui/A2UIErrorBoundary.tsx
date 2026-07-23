@@ -5,7 +5,7 @@ import { a2uiError } from './formDefaults';
 
 interface A2UIErrorBoundaryProps {
   children: ReactNode;
-  fallback?: ReactNode;
+  fallback: ReactNode;
   onError?: (error: Error, errorInfo: ErrorInfo) => void;
   resetKey?: string;
 }
@@ -45,20 +45,7 @@ export class A2UIErrorBoundary extends Component<
 
   render() {
     if (this.state.hasError) {
-      if (this.props.fallback) {
-        return this.props.fallback;
-      }
-
-      return (
-        <div className="a2ui-error-boundary p-4 border border-danger/30 rounded-lg bg-danger/5">
-          <p className="text-danger text-sm font-medium mb-1">
-            界面内容暂时无法显示
-          </p>
-          <p className="text-text-muted text-xs">
-            请稍后重试或重新生成结果
-          </p>
-        </div>
-      );
+      return this.props.fallback;
     }
 
     return this.props.children;
