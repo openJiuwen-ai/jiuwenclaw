@@ -1515,13 +1515,27 @@ async def test_process_team_message_stream_retries_followup_while_native_starts(
                 "reason: NativeHarness not started.",
             )
 
-    async def _fake_retry(team_manager: object, session_id: str, query: str):
+    async def _fake_retry(
+        team_manager: object,
+        session_id: str,
+        query: str,
+        *,
+        initial_reason: str | None = None,
+    ):
         assert team_manager is not None
+        assert initial_reason == (
+            "deliver_to_leader_failed:[123023] deepagent runtime error, "
+            "reason: NativeHarness not started."
+        )
         _FakeManager.interact_calls.append((session_id, f"retry:{query}"))
-        return True, None
+        return team_helpers._FollowupInteractBoundaryResult(
+            success=True,
+            reason=None,
+            first_request_ready=False,
+        )
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_retry_followup_interact_until_ready", _fake_retry)
+    monkeypatch.setattr(team_helpers, "_deliver_followup_interact_across_boundary", _fake_retry)
 
     request = SimpleNamespace(
         session_id="sess-team-followup-starting",
@@ -1589,20 +1603,25 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
         def register_stream_task(session_id: str, task: object) -> None:
             captured["registered"] = session_id
 
-    async def _fake_wait_first_request(team_manager: object, session_id: str, **kwargs) -> bool:
-        assert team_manager is not None
-        assert session_id == "sess-team-followup-stopped"
-        _FakeManager.stream_active = False
-        return True
-
-    async def _fake_retry(team_manager: object, session_id: str, query: str):
+    async def _fake_retry(
+        team_manager: object,
+        session_id: str,
+        query: str,
+        *,
+        initial_reason: str | None = None,
+    ):
         assert team_manager is not None
         assert session_id == "sess-team-followup-stopped"
         assert query
-        return (
-            False,
+        assert initial_reason == (
             "deliver_to_leader_failed:[123023] deepagent runtime error, "
-            "reason: NativeHarness already stopped.",
+            "reason: NativeHarness already stopped."
+        )
+        _FakeManager.stream_active = False
+        return team_helpers._FollowupInteractBoundaryResult(
+            success=False,
+            reason=initial_reason,
+            first_request_ready=True,
         )
 
     async def _fake_consume_stream_with_query(
@@ -1618,12 +1637,7 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
         captured["consumed"] = (session_id, query, round_id)
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_retry_followup_interact_until_ready", _fake_retry)
-    monkeypatch.setattr(
-        team_helpers,
-        "_wait_for_team_first_request_condition",
-        _fake_wait_first_request,
-    )
+    monkeypatch.setattr(team_helpers, "_deliver_followup_interact_across_boundary", _fake_retry)
     monkeypatch.setattr(team_helpers, "increment_session_round_count", lambda session_id: 7)
     monkeypatch.setattr(team_helpers, "_consume_stream_with_query", _fake_consume_stream_with_query)
 
@@ -1691,17 +1705,23 @@ async def test_process_team_message_stream_fallback_reuses_first_request_directi
         def register_stream_task(session_id: str, task: object) -> None:
             captured["registered"] = session_id
 
-    async def _fake_retry(team_manager: object, session_id: str, query: str):
+    async def _fake_retry(
+        team_manager: object,
+        session_id: str,
+        query: str,
+        *,
+        initial_reason: str | None = None,
+    ):
         assert team_manager is not None
         assert session_id == "sess-team-followup-directives"
         assert query == "/hide_dm /debug weather"
-        return False, "gate_closed"
-
-    async def _fake_wait_first_request(team_manager: object, session_id: str, **kwargs) -> bool:
-        assert team_manager is not None
-        assert session_id == "sess-team-followup-directives"
+        assert initial_reason == "gate_closed"
         _FakeManager.stream_active = False
-        return True
+        return team_helpers._FollowupInteractBoundaryResult(
+            success=False,
+            reason=initial_reason,
+            first_request_ready=True,
+        )
 
     async def _fake_consume_stream_with_query(
         channel_id: str | None,
@@ -1716,12 +1736,7 @@ async def test_process_team_message_stream_fallback_reuses_first_request_directi
         captured["consumed"] = (session_id, query, round_id, envs)
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_retry_followup_interact_until_ready", _fake_retry)
-    monkeypatch.setattr(
-        team_helpers,
-        "_wait_for_team_first_request_condition",
-        _fake_wait_first_request,
-    )
+    monkeypatch.setattr(team_helpers, "_deliver_followup_interact_across_boundary", _fake_retry)
     monkeypatch.setattr(team_helpers, "increment_session_round_count", lambda session_id: 9)
     monkeypatch.setattr(team_helpers, "_consume_stream_with_query", _fake_consume_stream_with_query)
 
@@ -1776,24 +1791,25 @@ async def test_process_team_message_stream_silences_gate_closed_when_shutdown_ra
         async def prepare_runtime_activation(session_id: str, team_name: str):
             raise AssertionError("timed-out shutdown race should not start a new stream")
 
-    async def _fake_wait_first_request(team_manager: object, session_id: str, **kwargs) -> bool:
-        assert team_manager is not None
-        assert session_id == "sess-team-followup-timeout"
-        return False
-
-    async def _fake_retry(team_manager: object, session_id: str, query: str):
+    async def _fake_retry(
+        team_manager: object,
+        session_id: str,
+        query: str,
+        *,
+        initial_reason: str | None = None,
+    ):
         assert team_manager is not None
         assert session_id == "sess-team-followup-timeout"
         assert query
-        return False, "gate_closed"
+        assert initial_reason == "gate_closed"
+        return team_helpers._FollowupInteractBoundaryResult(
+            success=False,
+            reason=initial_reason,
+            first_request_ready=False,
+        )
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_retry_followup_interact_until_ready", _fake_retry)
-    monkeypatch.setattr(
-        team_helpers,
-        "_wait_for_team_first_request_condition",
-        _fake_wait_first_request,
-    )
+    monkeypatch.setattr(team_helpers, "_deliver_followup_interact_across_boundary", _fake_retry)
 
     request = SimpleNamespace(
         session_id="sess-team-followup-timeout",

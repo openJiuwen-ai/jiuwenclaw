@@ -101,8 +101,7 @@ from jiuwenswarm.server.runtime.debug_trace.directives import (
     DEBUG_PREFIX as _DEBUG_PREFIX,
     strip_slash_directive as _strip_directive,
 )
-_FOLLOWUP_INTERACT_RETRY_TIMEOUT_SEC = 1.0
-_FOLLOWUP_INTERACT_RACE_WAIT_TIMEOUT_SEC = 3.0
+_FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC = 10.0
 _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC = 0.05
 
 
@@ -245,46 +244,46 @@ def _is_followup_delivery_boundary_reason(reason: str | None) -> bool:
     return normalized.startswith("deliver_to_leader_failed:")
 
 
-async def _retry_followup_interact_until_ready(
+@dataclass(slots=True)
+class _FollowupInteractBoundaryResult:
+    """Result of delivering a follow-up across a runtime boundary."""
+
+    success: bool
+    reason: str | None
+    first_request_ready: bool
+
+
+async def _deliver_followup_interact_across_boundary(
     team_manager: Any,
     session_id: str,
     query: Any,
     *,
-    timeout_sec: float = _FOLLOWUP_INTERACT_RETRY_TIMEOUT_SEC,
+    initial_reason: str | None = None,
+    timeout_sec: float = _FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC,
     poll_interval_sec: float = _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC,
-) -> tuple[bool, str | None]:
-    """Retry follow-up interact while the runtime boundary may still settle."""
+) -> _FollowupInteractBoundaryResult:
+    """Deliver a follow-up until interact succeeds or the session becomes first-run ready."""
     deadline = time.monotonic() + max(0.0, timeout_sec)
     sleep_sec = max(0.01, poll_interval_sec)
-    last_reason: str | None = None
+    last_reason = initial_reason
     while time.monotonic() < deadline:
-        await asyncio.sleep(sleep_sec)
-        success, reason = await team_manager.interact(session_id, query)
-        if success:
-            return True, None
-        last_reason = reason
-        if not _is_followup_delivery_boundary_reason(reason):
-            return False, reason
-    return False, last_reason
-
-
-async def _wait_for_team_first_request_condition(
-    team_manager: Any,
-    session_id: str,
-    *,
-    timeout_sec: float = _FOLLOWUP_INTERACT_RACE_WAIT_TIMEOUT_SEC,
-    poll_interval_sec: float = _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC,
-) -> bool:
-    """Wait until the canonical first-request condition becomes true."""
-    if not await _team_session_has_runtime(team_manager, session_id):
-        return True
-    deadline = time.monotonic() + max(0.0, timeout_sec)
-    sleep_sec = max(0.01, poll_interval_sec)
-    while time.monotonic() < deadline:
+        if not await _team_session_has_runtime(team_manager, session_id):
+            return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
         await asyncio.sleep(sleep_sec)
         if not await _team_session_has_runtime(team_manager, session_id):
-            return True
-    return not await _team_session_has_runtime(team_manager, session_id)
+            return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
+        success, reason = await team_manager.interact(session_id, query)
+        if success:
+            return _FollowupInteractBoundaryResult(success=True, reason=None, first_request_ready=False)
+        last_reason = reason
+        if not _is_followup_delivery_boundary_reason(reason):
+            return _FollowupInteractBoundaryResult(success=False, reason=reason, first_request_ready=False)
+    first_request_ready = not await _team_session_has_runtime(team_manager, session_id)
+    return _FollowupInteractBoundaryResult(
+        success=False,
+        reason=last_reason,
+        first_request_ready=first_request_ready,
+    )
 
 
 def _build_team_event_chunk_meta(event: Any) -> tuple[dict | None, dict]:
@@ -1563,44 +1562,44 @@ async def process_team_message_stream(
                         reason,
                         _safe_query_preview(query),
                     )
+                    first_request_ready = False
                     if _is_followup_delivery_boundary_reason(reason):
-                        success, reason = await _retry_followup_interact_until_ready(
+                        boundary_result = await _deliver_followup_interact_across_boundary(
                             team_manager,
                             session_id,
                             query,
+                            initial_reason=reason,
                         )
-                    if not success and _is_followup_delivery_boundary_reason(reason):
-                        first_request_ready = await _wait_for_team_first_request_condition(
-                            team_manager,
-                            session_id,
+                        success = boundary_result.success
+                        reason = boundary_result.reason
+                        first_request_ready = boundary_result.first_request_ready
+                    if not success and first_request_ready:
+                        preparation = await _prepare_first_team_request(
+                            team_manager=team_manager,
+                            session_id=session_id,
+                            channel_id=channel_id,
+                            request_id=rid,
+                            query=query,
                         )
-                        if first_request_ready:
-                            preparation = await _prepare_first_team_request(
-                                team_manager=team_manager,
-                                session_id=session_id,
-                                channel_id=channel_id,
-                                request_id=rid,
-                                query=query,
+                        if preparation.error_chunks is not None:
+                            for chunk in preparation.error_chunks:
+                                yield chunk
+                            return
+                        is_first_request = not preparation.recovered_runtime
+                        if is_first_request:
+                            first_request_source = "follow-up fallback"
+                            query = preparation.query
+                            hide_dm = preparation.hide_dm
+                            debug = preparation.debug
+                            logger.info(
+                                "[TeamHelpers] follow-up interact reclassified by first-request condition: "
+                                "channel_id=%s session_id=%s reason=%s",
+                                _resolve_channel_id(channel_id),
+                                session_id,
+                                reason,
                             )
-                            if preparation.error_chunks is not None:
-                                for chunk in preparation.error_chunks:
-                                    yield chunk
-                                return
-                            is_first_request = not preparation.recovered_runtime
-                            if is_first_request:
-                                first_request_source = "follow-up fallback"
-                                query = preparation.query
-                                hide_dm = preparation.hide_dm
-                                debug = preparation.debug
-                                logger.info(
-                                    "[TeamHelpers] follow-up interact reclassified by first-request condition: "
-                                    "channel_id=%s session_id=%s reason=%s",
-                                    _resolve_channel_id(channel_id),
-                                    session_id,
-                                    reason,
-                                )
-                        else:
-                            reason = reason or "gate_closed"
+                    elif not success and _is_followup_delivery_boundary_reason(reason):
+                        reason = reason or "gate_closed"
                     if not success and not is_first_request:
                         final_reason = reason or ""
                         # gate_closed 是 shutdown race（leader stream 正在收尾），静默结束流
