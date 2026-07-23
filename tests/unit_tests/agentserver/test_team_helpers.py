@@ -3966,6 +3966,12 @@ def test_persist_team_file_monitor_roots_replaces_stale_roots(monkeypatch: pytes
         "jiuwenswarm.server.runtime.agent_adapter.team_helpers.team_home",
         lambda name: fake_home,
     )
+    # independent_member_workspace 内部调用 openjiuwen 的 get_openjiuwen_home(),
+    # 无法被 team_home patch 覆盖,这里显式 patch 以保持测试路径稳定。
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.team_helpers.independent_member_workspace",
+        lambda name: fake_home / f"{name}_workspace",
+    )
 
     team_spec = SimpleNamespace(
         team_name="unit-team",
@@ -3986,7 +3992,11 @@ def test_persist_team_file_monitor_roots_replaces_stale_roots(monkeypatch: pytes
     home = fake_home.resolve()
     assert str(home / "team-workspace") in persisted_roots
     assert str(home / "workspaces") in persisted_roots
+    # session_id 经 _safe_segment sanitize(此处 "sess-1" 无特殊字符,保持原样)
+    assert str(home / "sessions" / "sess-1" / "worktrees") in persisted_roots
     assert str(home / "workspaces" / "worker_workspace") in persisted_roots
+    # 漏洞4修复: independent_member_workspace 路径也应被收集
+    assert str(home / "worker_workspace") in persisted_roots
 
 
 def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3997,7 +4007,10 @@ def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest
     expected_roots = [
         str(fake_home.resolve() / "team-workspace"),
         str(fake_home.resolve() / "workspaces"),
+        str(fake_home.resolve() / "sessions" / "sess-1" / "worktrees"),
         str(fake_home.resolve() / "workspaces" / "worker_workspace"),
+        # 漏洞4修复: independent_member_workspace 路径
+        str(fake_home.resolve() / "worker_workspace"),
     ]
 
     def _fake_read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
@@ -4022,6 +4035,10 @@ def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.team_helpers.team_home",
         lambda name: fake_home,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.team_helpers.independent_member_workspace",
+        lambda name: fake_home / f"{name}_workspace",
     )
 
     team_spec = SimpleNamespace(

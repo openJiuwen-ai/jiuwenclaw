@@ -7,13 +7,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
-from openjiuwen.agent_teams.paths import get_agent_teams_home, team_home
+from openjiuwen.agent_teams.paths import (
+    get_agent_teams_home,
+    independent_member_workspace,
+    team_home,
+)
 from openjiuwen.agent_teams.runtime import RunActionKind
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.monitor import TeamStreamLogger
@@ -103,6 +108,13 @@ from jiuwenswarm.server.runtime.debug_trace.directives import (
 )
 _FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC = 10.0
 _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC = 0.05
+
+
+def _safe_team_path_segment(value: str, fallback: str = "_") -> str:
+    """Sanitize a value into one path segment for team workspace paths."""
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    normalized = normalized.strip("._-")
+    return normalized[:96] or fallback
 
 
 def _team_hide_teammate_enabled() -> bool:
@@ -1234,7 +1246,7 @@ def _team_spec_skills_dir(team_spec: Any) -> str:
     return str(team_home(team_name) / "team-workspace" / "skills")
 
 
-def _team_spec_monitor_roots(team_spec: Any) -> list[str]:
+def _team_spec_monitor_roots(team_spec: Any, session_id: str | None = None) -> list[str]:
     """Return team/member workspace roots where file-op history may be written."""
     roots: list[str] = []
 
@@ -1255,6 +1267,13 @@ def _team_spec_monitor_roots(team_spec: Any) -> list[str]:
     home = team_home(team_name)
     add_root(root_path or str(home / "team-workspace"))
     add_root(home / "workspaces")
+    if session_id and team_name:
+        # 与读取侧 get_session_extra_history_roots / team_session_worktrees_dir 对齐:
+        # 对 session_id 做 sanitize,避免含特殊字符时持久化"幽灵路径"
+        # (raw sid 未经 sanitize,与实际 worktree 目录不一致)。
+        # 此处用已 import 的 team_home(可被测试 patch)而非 team_session_worktrees_dir
+        # (后者内部调用 openjiuwen 自身的 team_home,无法被 monkeypatch)。
+        add_root(home / "sessions" / _safe_team_path_segment(session_id) / "worktrees")
 
     agents = getattr(team_spec, "agents", None)
     if isinstance(agents, dict):
@@ -1262,12 +1281,24 @@ def _team_spec_monitor_roots(team_spec: Any) -> list[str]:
             member_workspace = getattr(member_spec, "workspace", None)
             add_root(getattr(member_workspace, "root_path", None))
             add_root(home / "workspaces" / f"{member_name}_workspace")
+            # 兜底: member 可能使用 independent_member_workspace(位于 team_home 之外,
+            # get_openjiuwen_home()/{member}_workspace),仅靠上面的 home/workspaces
+            # 无法覆盖,需显式补上,否则该 member 的 file_ops 不会被收集。
+            try:
+                add_root(str(independent_member_workspace(str(member_name))))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[TeamHelpers] failed to resolve independent member workspace: "
+                    "member=%s error=%s",
+                    member_name,
+                    exc,
+                )
 
     return roots
 
 
 def _persist_team_file_monitor_roots(session_id: str, team_spec: Any) -> None:
-    roots = _team_spec_monitor_roots(team_spec)
+    roots = _team_spec_monitor_roots(team_spec, session_id=session_id)
     if not roots:
         return
     try:
@@ -1278,6 +1309,14 @@ def _persist_team_file_monitor_roots(session_id: str, team_spec: Any) -> None:
 
         metadata = _read_metadata(session_id, cache_bust=True)
         if not metadata:
+            # metadata.json 尚未初始化: 此时无法持久化 team_file_monitor_roots。
+            # 读取侧 get_session_extra_history_roots 会基于 team_name 兜底推断标准
+            # 布局路径,功能不丢失,但记录 warning 便于排查 metadata 初始化时序问题。
+            logger.warning(
+                "[TeamHelpers] cannot persist team_file_monitor_roots: "
+                "metadata not initialized, session=%s",
+                session_id,
+            )
             return
         existing = metadata.get("team_file_monitor_roots")
         # 直接替换而非合并: team_spec 是当前 team 组成的权威来源,
@@ -1287,7 +1326,10 @@ def _persist_team_file_monitor_roots(session_id: str, team_spec: Any) -> None:
         metadata["team_file_monitor_roots"] = roots
         _enqueue_write(session_id, metadata, preserve_pin_fields=True)
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
+        # 写盘失败会影响 last_turn 文件追踪(读取侧只能靠 team_name 兜底推断,
+        # 无法覆盖 independent_member_workspace 等非标准布局),升级为 warning
+        # 以便在日志中及时发现。
+        logger.warning(
             "[TeamHelpers] failed to persist team file monitor roots: session=%s error=%s",
             session_id,
             exc,

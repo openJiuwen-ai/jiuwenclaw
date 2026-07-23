@@ -3767,14 +3767,21 @@ class AgentWebSocketServer:
             await send_wire_payload(ws, wire)
 
     async def _handle_command_diff(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.server.runtime.session.git_diff_status import get_session_extra_history_roots
         from jiuwenswarm.server.utils.diff_service import get_diff_service
 
         try:
             session_id = request.session_id or "default"
             project_dir = resolve_request_project_dir(request)
+            extra_history_roots = get_session_extra_history_roots(session_id)
             diff_service = get_diff_service()
             turns, git_diff = await asyncio.gather(
-                asyncio.to_thread(diff_service.get_turn_diffs, session_id, project_dir),
+                asyncio.to_thread(
+                    diff_service.get_turn_diffs,
+                    session_id,
+                    project_dir,
+                    extra_history_roots=extra_history_roots,
+                ),
                 asyncio.to_thread(diff_service.get_git_diff, project_dir),
             )
 
