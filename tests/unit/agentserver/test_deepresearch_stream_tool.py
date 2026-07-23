@@ -1355,6 +1355,82 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_write_report_artifacts_keeps_html_when_fallback_markdown_read_fails(
+    tmp_path, caplog
+):
+    final_result = {"response_content": "# Report"}
+    report_path = tmp_path / "report.md"
+    html_path = tmp_path / "report.html"
+    generator = AsyncMock(return_value=html_path)
+    caplog.set_level(logging.WARNING, logger=dt.__name__)
+    dt.logger.addHandler(caplog.handler)
+    try:
+        with patch.object(
+            dt,
+            "_write_report_markdown",
+            return_value=str(report_path),
+        ), patch.object(
+            dt.Path,
+            "read_text",
+            side_effect=OSError("SECRET /internal/report.md"),
+        ), patch.object(
+            dt,
+            "_generate_report_html",
+            generator,
+        ):
+            artifacts = await dt._write_report_artifacts_stream(
+                final_result, "report.md", "C1"
+            )
+    finally:
+        dt.logger.removeHandler(caplog.handler)
+
+    assert artifacts == {"md": str(report_path), "html": str(html_path)}
+    generator.assert_awaited_once_with(final_result, report_path, None)
+    assert "OSError" in caplog.text
+    assert "SECRET" not in caplog.text
+    assert "/internal" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_write_report_artifacts_keeps_markdown_when_read_and_styled_fail(
+    tmp_path, caplog
+):
+    final_result = {"response_content": "# Report"}
+    report_path = tmp_path / "report.md"
+    generator = AsyncMock(return_value=None)
+    read_error = UnicodeDecodeError(
+        "utf-8", b"SECRET", 0, 1, "SECRET /internal/report.md"
+    )
+    caplog.set_level(logging.WARNING, logger=dt.__name__)
+    dt.logger.addHandler(caplog.handler)
+    try:
+        with patch.object(
+            dt,
+            "_write_report_markdown",
+            return_value=str(report_path),
+        ), patch.object(
+            dt.Path,
+            "read_text",
+            side_effect=read_error,
+        ), patch.object(
+            dt,
+            "_generate_report_html",
+            generator,
+        ):
+            artifacts = await dt._write_report_artifacts_stream(
+                final_result, "report.md", "C1"
+            )
+    finally:
+        dt.logger.removeHandler(caplog.handler)
+
+    assert artifacts == {"md": str(report_path)}
+    generator.assert_awaited_once_with(final_result, report_path, None)
+    assert "UnicodeDecodeError" in caplog.text
+    assert "SECRET" not in caplog.text
+    assert "/internal" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_write_report_artifacts_fallback_html_matches_delivered_markdown(tmp_path):
     final_result = {
         "response_content": (

@@ -347,7 +347,7 @@ def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
 async def _generate_report_html(
     final_result: dict,
     report_path_md: Path,
-    fallback_markdown: str,
+    fallback_markdown: str | None,
 ) -> Path | None:
     """Generate styled report HTML, falling back to offline conversion."""
     report_path_html = report_path_md.with_suffix(".html")
@@ -452,7 +452,16 @@ async def _write_report_artifacts_stream(
     )
     artifacts: dict[str, str] = {"md": str(report_path_md)}
 
-    fallback_markdown = report_path_md.read_text(encoding="utf-8")
+    try:
+        fallback_markdown: str | None = report_path_md.read_text(
+            encoding="utf-8"
+        )
+    except (OSError, UnicodeError) as exc:
+        logger.warning(
+            "HTML fallback Markdown read failed. type=%s",
+            type(exc).__name__,
+        )
+        fallback_markdown = None
     report_path_html = await _generate_report_html(
         final_result, report_path_md, fallback_markdown
     )
