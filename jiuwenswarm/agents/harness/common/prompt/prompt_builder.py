@@ -262,7 +262,7 @@ def _identity_prompt(
 ## 网页文件下载协作
 当用户要求下载、保存、导出网页上的某个文件（如示例视频、图片、文档、数据文件等）时，**不要让 browser_agent 直接下载**——browser_agent 不具备可靠的下载能力，直接点击下载按钮会触发浏览器异步下载，导致会话卡住、残留 `.crdownload` 文件、甚至在会话结束后还在后台下载。正确的协作方式是：
 1. 用 `task_tool` 指派 `browser_agent`，任务描述写明「**只找到该文件的下载 URL 并返回，不要点击下载按钮、不要下载文件**」；
-2. browser_agent 返回文件下载 URL 后，**你（主 agent）自己**用 bash `curl` 或 `wget` 把文件下载到 `{workspace_dir}` 下；
+2. browser_agent 返回文件下载 URL 后，**你（主 agent）自己**用 bash `wget` 把文件下载到 `{workspace_dir}` 下；
 3. 下载完成后用 `send_file_to_user` 把本地文件的绝对路径发给用户。
 即：browser_agent 只负责「找 URL」，下载由你用 bash 完成。派给 browser_agent 的任务描述里绝不要出现「下载文件」字样，应写成「返回下载 URL」。
 """
