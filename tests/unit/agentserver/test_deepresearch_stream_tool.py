@@ -600,12 +600,8 @@ async def test_generate_report_html_installs_styled_report(tmp_path):
         )
 
     assert html_path == tmp_path / "report.html"
-    generated_infer_dirs = list(tmp_path.glob("report_infer_*"))
-    generated_chart_dirs = list(tmp_path.glob("report_charts_*"))
-    assert len(generated_infer_dirs) == 1
-    assert len(generated_chart_dirs) == 1
-    generated_infer_dir = generated_infer_dirs[0]
-    generated_chart_dir = generated_chart_dirs[0]
+    generated_infer_dir = tmp_path / "report_html_infer"
+    generated_chart_dir = tmp_path / "report_html_charts"
     assert html_path.read_text(encoding="utf-8") == (
         f'<html><a href="{generated_infer_dir.name}/new.html">styled</a>'
         f'<img src="{generated_chart_dir.name}/new.png"></html>'
@@ -624,7 +620,7 @@ async def test_generate_report_html_installs_styled_report(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_generate_report_html_with_assets_does_not_require_dir_fd(tmp_path):
+async def test_generate_report_html_does_not_depend_on_supports_dir_fd(tmp_path):
     report_path_md = tmp_path / "report.md"
     report_path_md.write_text("# Report", encoding="utf-8")
     fixed_infer_dir = tmp_path / "report_infer"
@@ -692,8 +688,8 @@ async def test_generate_report_html_with_assets_does_not_require_dir_fd(tmp_path
     assert html_path == tmp_path / "report.html"
     html = html_path.read_text(encoding="utf-8")
     assert "styled" in html
-    generated_infer_dir = next(tmp_path.glob("report_infer_*"))
-    generated_chart_dir = next(tmp_path.glob("report_charts_*"))
+    generated_infer_dir = tmp_path / "report_html_infer"
+    generated_chart_dir = tmp_path / "report_html_charts"
     assert f'href="{generated_infer_dir.name}/new.html"' in html
     assert f'src="{generated_chart_dir.name}/new.png"' in html
     assert (generated_infer_dir / "new.html").is_file()
@@ -819,8 +815,8 @@ async def test_generate_report_html_does_not_follow_legacy_fixed_temp_symlink(tm
 @pytest.mark.parametrize(
     ("asset_root_name", "asset_name"),
     [
-        ("report_infer", "infer/new.html"),
-        ("report_charts", "charts/new.png"),
+        ("report_html_infer", "infer/new.html"),
+        ("report_html_charts", "charts/new.png"),
     ],
 )
 async def test_generate_report_html_does_not_follow_asset_root_symlink(
@@ -837,7 +833,7 @@ async def test_generate_report_html_does_not_follow_asset_root_symlink(
         convert_content=_styled_report_archive(
             (
                 '<html><a href="infer/new.html">styled report</a></html>'
-                if asset_root_name == "report_infer"
+                if asset_root_name == "report_html_infer"
                 else '<html><img src="charts/new.png">styled report</html>'
             ),
             {asset_name: b"untrusted asset"},
@@ -860,10 +856,8 @@ async def test_generate_report_html_does_not_follow_asset_root_symlink(
 
     assert html_path == tmp_path / "report.html"
     html = html_path.read_text(encoding="utf-8")
-    assert "styled report" in html
-    generated_dir = next(tmp_path.glob(f"{asset_root_name}_*"))
-    assert f'{generated_dir.name}/new.' in html
-    assert (generated_dir / Path(asset_name).name).read_bytes() == b"untrusted asset"
+    assert "Verified report" in html
+    assert (tmp_path / asset_root_name).is_symlink()
     assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
     assert sorted(path.name for path in outside_dir.iterdir()) == ["sentinel"]
 
@@ -872,8 +866,8 @@ async def test_generate_report_html_does_not_follow_asset_root_symlink(
 @pytest.mark.parametrize(
     ("asset_root_name", "asset_name"),
     [
-        ("report_infer", "infer/new.html"),
-        ("report_charts", "charts/new.png"),
+        ("report_html_infer", "infer/new.html"),
+        ("report_html_charts", "charts/new.png"),
     ],
 )
 async def test_generate_report_html_ignores_fixed_asset_root_swapped_to_symlink(
@@ -895,7 +889,7 @@ async def test_generate_report_html_ignores_fixed_asset_root_swapped_to_symlink(
         convert_content=_styled_report_archive(
             (
                 '<html><a href="infer/new.html">styled report</a></html>'
-                if asset_root_name == "report_infer"
+                if asset_root_name == "report_html_infer"
                 else '<html><img src="charts/new.png">styled report</html>'
             ),
             {asset_name: b"untrusted asset"},
@@ -918,98 +912,16 @@ async def test_generate_report_html_ignores_fixed_asset_root_swapped_to_symlink(
 
     assert html_path == tmp_path / "report.html"
     html = html_path.read_text(encoding="utf-8")
-    assert "styled report" in html
-    generated_dir = next(tmp_path.glob(f"{asset_root_name}_*"))
-    assert f"{generated_dir.name}/new." in html
-    assert (generated_dir / Path(asset_name).name).read_bytes() == b"untrusted asset"
+    assert "Verified report" in html
+    assert asset_root.is_symlink()
     assert (held_root / "existing").read_text(encoding="utf-8") == "existing asset"
     assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
     assert sorted(path.name for path in outside_dir.iterdir()) == ["sentinel"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("asset_root_name", "asset_name"),
-    [
-        ("report_infer", "infer/new.html"),
-        ("report_charts", "charts/new.png"),
-    ],
-)
-async def test_generate_report_html_atomically_replaces_final_asset_symlink(
-    tmp_path, asset_root_name, asset_name
-):
-    report_path_md = tmp_path / "report.md"
-    report_path_md.write_text("# Report", encoding="utf-8")
-    outside_dir = tmp_path / f"outside_{asset_root_name}"
-    outside_dir.mkdir()
-    sentinel = outside_dir / "sentinel"
-    sentinel.write_text("outside sentinel", encoding="utf-8")
-    styled_result = SimpleNamespace(
-        convert_content=_styled_report_archive(
-            (
-                '<html><a href="infer/new.html">styled report</a></html>'
-                if asset_root_name == "report_infer"
-                else '<html><img src="charts/new.png">styled report</html>'
-            ),
-            {asset_name: b"published asset"},
-        )
-    )
-    real_replace = dt.os.replace
-    injected_symlink = False
-
-    def _precreate_final_symlink(source, destination, *args, **kwargs):
-        nonlocal injected_symlink
-        source_path = Path(source)
-        destination_path = Path(destination)
-        if (
-            not injected_symlink
-            and source_path.is_dir()
-            and destination_path.parent == tmp_path
-            and destination_path.name.startswith(f"{asset_root_name}_")
-        ):
-            destination_path.symlink_to(outside_dir, target_is_directory=True)
-            injected_symlink = True
-        return real_replace(source, destination, *args, **kwargs)
-
-    with patch.object(
-        dt,
-        "_scoped_report_style_llm_context",
-        return_value=_async_context(object()),
-    ), patch(
-        "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
-        new=AsyncMock(return_value=styled_result),
-    ), patch.object(
-        dt.os,
-        "replace",
-        side_effect=_precreate_final_symlink,
-    ):
-        html_path = await dt._generate_report_html(
-            {"response_content": "# Verified report"},
-            report_path_md,
-            "# Verified report",
-        )
-
-    assert injected_symlink
-    assert html_path == tmp_path / "report.html"
-    generated_dir = next(tmp_path.glob(f"{asset_root_name}_*"))
-    html = html_path.read_text(encoding="utf-8")
-    if "styled report" in html:
-        assert generated_dir.is_dir()
-        assert not generated_dir.is_symlink()
-        assert (
-            generated_dir / Path(asset_name).name
-        ).read_bytes() == b"published asset"
-        assert f"{generated_dir.name}/new." in html
-    else:
-        assert "Verified report" in html
-        assert generated_dir.is_symlink()
-    assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
-    assert sorted(path.name for path in outside_dir.iterdir()) == ["sentinel"]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["asset_copy", "html_install"])
-async def test_generate_report_html_retains_published_assets_when_install_fails(
+async def test_generate_report_html_rolls_back_owned_assets_when_install_fails(
     tmp_path, failure_stage
 ):
     report_path_md = tmp_path / "report.md"
@@ -1030,25 +942,22 @@ async def test_generate_report_html_retains_published_assets_when_install_fails(
             },
         )
     )
-    real_atomic_write = dt._atomic_write_bytes
+    real_atomic_create = dt._atomic_create_bytes
+    real_atomic_create_at = dt._atomic_create_bytes_at
 
-    def _fail_styled_install(path, payload):
-        if (
-            failure_stage == "asset_copy"
-            and payload == b"new chart"
-            and any(
-                part.startswith(("report_charts_", ".report_charts_"))
-                for part in path.parts
-            )
-        ):
+    def _fail_asset_copy(directory_fd, name, payload):
+        if failure_stage == "asset_copy" and payload == b"new chart":
             raise OSError("styled asset copy failed")
+        return real_atomic_create_at(directory_fd, name, payload)
+
+    def _fail_html_install(path, payload):
         if (
             failure_stage == "html_install"
             and path == tmp_path / "report.html"
             and b"styled report" in payload
         ):
             raise OSError("styled HTML install failed")
-        return real_atomic_write(path, payload)
+        return real_atomic_create(path, payload)
 
     with patch.object(
         dt,
@@ -1059,8 +968,12 @@ async def test_generate_report_html_retains_published_assets_when_install_fails(
         new=AsyncMock(return_value=styled_result),
     ), patch.object(
         dt,
-        "_atomic_write_bytes",
-        side_effect=_fail_styled_install,
+        "_atomic_create_bytes_at",
+        side_effect=_fail_asset_copy,
+    ), patch.object(
+        dt,
+        "_atomic_create_bytes",
+        side_effect=_fail_html_install,
     ):
         html_path = await dt._generate_report_html(
             {"response_content": "# Verified report"},
@@ -1070,15 +983,14 @@ async def test_generate_report_html_retains_published_assets_when_install_fails(
 
     assert html_path == tmp_path / "report.html"
     assert "Verified report" in html_path.read_text(encoding="utf-8")
-    assert len(list(tmp_path.glob("report_infer_*"))) == 1
-    expected_chart_dirs = 0 if failure_stage == "asset_copy" else 1
-    assert len(list(tmp_path.glob("report_charts_*"))) == expected_chart_dirs
+    assert not (tmp_path / "report_html_infer").exists()
+    assert not (tmp_path / "report_html_charts").exists()
     assert sorted(path.name for path in fixed_infer_dir.iterdir()) == ["existing"]
     assert sorted(path.name for path in fixed_chart_dir.iterdir()) == ["existing"]
 
 
 @pytest.mark.asyncio
-async def test_generate_report_html_does_not_remove_replaced_published_asset_dir(
+async def test_generate_report_html_preserves_replaced_published_asset_dir(
     tmp_path,
 ):
     report_path_md = tmp_path / "report.md"
@@ -1089,14 +1001,14 @@ async def test_generate_report_html_does_not_remove_replaced_published_asset_dir
             {"infer/new.html": b"published asset"},
         )
     )
-    real_atomic_write = dt._atomic_write_bytes
+    real_atomic_create = dt._atomic_create_bytes
     held_published = tmp_path / "held_published_assets"
     replacement_dir = None
 
     def _replace_final_then_fail_html(path, payload):
         nonlocal replacement_dir
         if path == tmp_path / "report.html" and b"styled report" in payload:
-            published_dir = next(tmp_path.glob("report_infer_*"))
+            published_dir = tmp_path / "report_html_infer"
             published_dir.rename(held_published)
             published_dir.mkdir()
             (published_dir / "replacement-sentinel").write_text(
@@ -1104,7 +1016,7 @@ async def test_generate_report_html_does_not_remove_replaced_published_asset_dir
             )
             replacement_dir = published_dir
             raise OSError("styled HTML install failed")
-        return real_atomic_write(path, payload)
+        return real_atomic_create(path, payload)
 
     with patch.object(
         dt,
@@ -1115,7 +1027,7 @@ async def test_generate_report_html_does_not_remove_replaced_published_asset_dir
         new=AsyncMock(return_value=styled_result),
     ), patch.object(
         dt,
-        "_atomic_write_bytes",
+        "_atomic_create_bytes",
         side_effect=_replace_final_then_fail_html,
     ):
         html_path = await dt._generate_report_html(
@@ -1130,7 +1042,7 @@ async def test_generate_report_html_does_not_remove_replaced_published_asset_dir
     assert (replacement_dir / "replacement-sentinel").read_text(
         encoding="utf-8"
     ) == "replacement sentinel"
-    assert (held_published / "new.html").read_bytes() == b"published asset"
+    assert list(held_published.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -1187,7 +1099,7 @@ async def test_generate_report_html_propagates_cancellation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_generate_report_html_removes_partial_output_when_both_paths_fail(
+async def test_generate_report_html_preserves_existing_output_when_both_paths_fail(
     tmp_path,
 ):
     report_path_md = tmp_path / "report.md"
@@ -1208,37 +1120,7 @@ async def test_generate_report_html_removes_partial_output_when_both_paths_fail(
         )
 
     assert html_path is None
-    assert not report_path_html.exists()
-
-
-@pytest.mark.asyncio
-async def test_generate_report_html_ignores_partial_output_cleanup_failure(
-    tmp_path,
-):
-    report_path_md = tmp_path / "report.md"
-    report_path_md.write_text("# Report", encoding="utf-8")
-
-    with patch.object(dt.logger, "warning") as warning, patch.object(
-        dt,
-        "_build_styled_export_llm_config",
-        side_effect=RuntimeError("styled export unavailable"),
-    ), patch(
-        "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
-        side_effect=RuntimeError("offline conversion unavailable"),
-    ), patch.object(
-        dt.Path,
-        "unlink",
-        side_effect=PermissionError("read-only output"),
-    ):
-        html_path = await dt._generate_report_html(
-            {"response_content": "# Report"}, report_path_md, "# Report"
-        )
-
-    assert html_path is None
-    assert any(
-        args[0] == "Failed to remove partial HTML output. type=%s"
-        for args, _kwargs in warning.call_args_list
-    )
+    assert report_path_html.read_text(encoding="utf-8") == "<html>partial</html>"
 
 
 def test_write_report_markdown_builds_inference_bundle_and_strips_internal_markers(tmp_path):
@@ -1280,23 +1162,25 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
     ):
         report_path = dt._write_report_markdown(final_result, "研究报告.md", "C1")
 
-    assert report_path == str(tmp_path / "研究报告.md")
-    report = (tmp_path / "研究报告.md").read_text(encoding="utf-8")
+    assert report_path == str(tmp_path / "研究报告-v1.md")
+    report = (tmp_path / "研究报告-v1.md").read_text(encoding="utf-8")
     assert "checked_citation" not in report
-    assert "[观点](研究报告_infer/inference_7.html)" in report
+    assert "[观点](研究报告-v1_infer/inference_7.html)" in report
     assert "[[1]](https://example.com/source)" in report
-    assert (tmp_path / "研究报告_infer" / "inference_7.html").read_bytes() == b"<html>trace</html>"
-    provenance = json.loads((tmp_path / "研究报告.provenance.json").read_text(encoding="utf-8"))
-    snapshot_path = tmp_path / "研究报告.final-result.json"
+    assert (tmp_path / "研究报告-v1_infer" / "inference_7.html").read_bytes() == b"<html>trace</html>"
+    provenance = json.loads((tmp_path / "研究报告-v1.provenance.json").read_text(encoding="utf-8"))
+    snapshot_path = tmp_path / "研究报告-v1.final-result.json"
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     assert snapshot["response_content"] == final_result["response_content"]
     assert snapshot["citation_messages"] == final_result["citation_messages"]
     assert snapshot["request_metadata"] == {"trace_id": "trace-1"}
     assert "html_base64" not in snapshot["infer_messages"][0]
-    assert snapshot["infer_messages"][0]["artifact_path"] == "研究报告_infer/inference_7.html"
+    assert snapshot["infer_messages"][0]["artifact_path"] == "研究报告-v1_infer/inference_7.html"
     assert "base64" not in snapshot["chart_messages"][0]
-    assert snapshot["chart_messages"][0]["artifact_path"] == "研究报告_charts/chart-1.png"
+    assert snapshot["chart_messages"][0]["artifact_path"] == "研究报告-v1_charts/chart-1.png"
     assert provenance["schema_version"] == 2
+    assert provenance["version_number"] == 1
+    assert provenance["version_base_stem"] == "研究报告"
     assert provenance["document_id"].startswith("doc_")
     assert provenance["revision_id"].startswith("rev_")
     assert provenance["parent_revision_id"] is None
@@ -1340,12 +1224,12 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
         )
 
     assert artifacts == {
-        "md": str(tmp_path / "研究报告.md"),
-        "html": str(tmp_path / "研究报告.html"),
+        "md": str(tmp_path / "研究报告-v1.md"),
+        "html": str(tmp_path / "研究报告-v1.html"),
     }
-    assert (tmp_path / "研究报告.final-result.json").is_file()
+    assert (tmp_path / "研究报告-v1.final-result.json").is_file()
     provenance = json.loads(
-        (tmp_path / "研究报告.provenance.json").read_text(encoding="utf-8")
+        (tmp_path / "研究报告-v1.provenance.json").read_text(encoding="utf-8")
     )
     assert provenance["citation_artifacts"] == {
         "raw_report_path": "/skill/data/C1.raw_report.md",
@@ -1467,13 +1351,55 @@ async def test_write_report_artifacts_fallback_html_matches_delivered_markdown(t
     assert "checked_citation" not in markdown
     assert "#inference:7" not in markdown
     assert "#insertChart:chart-1" not in markdown
-    assert "[观点](研究报告_infer/inference_7.html)" in markdown
-    assert "![趋势图](研究报告_charts/chart-1.png)" in markdown
+    assert "[观点](研究报告-v1_infer/inference_7.html)" in markdown
+    assert "![趋势图](研究报告-v1_charts/chart-1.png)" in markdown
     assert "checked_citation" not in html
     assert "#inference:7" not in html
     assert "#insertChart:chart-1" not in html
-    assert 'href="研究报告_infer/inference_7.html"' in html
-    assert 'src="研究报告_charts/chart-1.png"' in html
+    assert 'href="研究报告-v1_infer/inference_7.html"' in html
+    assert 'src="研究报告-v1_charts/chart-1.png"' in html
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_kind", ["file", "symlink"])
+async def test_write_report_artifacts_fallback_omits_occupied_html_without_overwrite(
+    tmp_path, target_kind
+):
+    html_path = tmp_path / "研究报告-v1.html"
+    protected_path = tmp_path / "protected.html"
+    protected_path.write_bytes(b"protected")
+    if target_kind == "file":
+        html_path.write_bytes(b"existing")
+    else:
+        html_path.symlink_to(protected_path)
+    converter_outputs = []
+
+    def _convert(_markdown_path, output_path):
+        converter_outputs.append(Path(output_path))
+        Path(output_path).write_bytes(b"<html>fallback</html>")
+
+    with patch(
+        "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
+        return_value=str(tmp_path),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
+        side_effect=_convert,
+    ), patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        side_effect=RuntimeError("styled unavailable"),
+    ):
+        artifacts = await dt._write_report_artifacts_stream(
+            _minimal_report_result(), "研究报告.md", "C1"
+        )
+
+    assert artifacts == {"md": str(tmp_path / "研究报告-v1.md")}
+    assert converter_outputs and converter_outputs[0] != html_path
+    assert protected_path.read_bytes() == b"protected"
+    if target_kind == "file":
+        assert html_path.read_bytes() == b"existing"
+    else:
+        assert html_path.is_symlink()
 
 
 @pytest.mark.asyncio
@@ -1495,9 +1421,598 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp
             final_result, "研究报告.md", "C1"
         )
 
-    assert artifacts == {"md": str(tmp_path / "研究报告.md")}
-    assert (tmp_path / "研究报告.final-result.json").is_file()
-    assert (tmp_path / "研究报告.provenance.json").is_file()
+    assert artifacts == {"md": str(tmp_path / "研究报告-v1.md")}
+    assert (tmp_path / "研究报告-v1.final-result.json").is_file()
+    assert (tmp_path / "研究报告-v1.provenance.json").is_file()
+
+
+def _minimal_report_result():
+    return {
+        "response_content": "# 报告\n\n正文",
+        "infer_messages": [],
+        "chart_messages": [],
+    }
+
+
+def _report_result_with_assets():
+    final_result = _minimal_report_result()
+    final_result["infer_messages"] = [{
+        "id": "7",
+        "html_base64": base64.b64encode(b"<html>trace</html>").decode("ascii"),
+    }]
+    final_result["chart_messages"] = [{
+        "chart_id": "chart-1",
+        "base64": base64.b64encode(b"png-bytes").decode("ascii"),
+    }]
+    return final_result
+
+
+def _write_report_in(tmp_path, file_name="研究报告.md", final_result=None):
+    with patch(
+        "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
+        return_value=str(tmp_path),
+    ):
+        return dt._write_report_markdown(
+            final_result or _minimal_report_result(), file_name, "C1"
+        )
+
+
+def test_write_report_markdown_allocates_same_title_ordinal(tmp_path):
+    first = _write_report_in(tmp_path)
+    second = _write_report_in(tmp_path)
+
+    assert first == str(tmp_path / "研究报告-v1.md")
+    assert second == str(tmp_path / "研究报告-2-v1.md")
+
+
+@pytest.mark.parametrize("unsafe_name", ["", "../..", "***"])
+def test_write_report_markdown_uses_default_for_empty_or_unsafe_title(
+    tmp_path, unsafe_name
+):
+    report_path = _write_report_in(tmp_path, unsafe_name)
+
+    assert report_path == str(tmp_path / "深度研究报告-v1.md")
+
+
+def test_write_report_markdown_serializes_same_title_allocation_across_threads(
+    tmp_path,
+):
+    with patch(
+        "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
+        return_value=str(tmp_path),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            paths = list(executor.map(
+                lambda _: dt._write_report_markdown(
+                    _minimal_report_result(), "研究报告.md", "C1"
+                ),
+                range(2),
+            ))
+
+    assert set(paths) == {
+        str(tmp_path / "研究报告-v1.md"),
+        str(tmp_path / "研究报告-2-v1.md"),
+    }
+    assert dt._REPORT_OUTPUT_LOCKS == {}
+
+
+def test_report_output_lock_registry_releases_sequential_unique_outputs(tmp_path):
+    for index in range(20):
+        output_path = (tmp_path / f"output-{index}").resolve()
+        with dt._report_output_lock(output_path):
+            assert output_path in dt._REPORT_OUTPUT_LOCKS
+
+    assert dt._REPORT_OUTPUT_LOCKS == {}
+
+
+def test_report_output_lock_serializes_waiters_and_releases_registry(tmp_path):
+    output_path = tmp_path.resolve()
+    release_first = threading.Event()
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    order = []
+
+    def worker(label):
+        with dt._report_output_lock(output_path):
+            order.append(f"{label}:enter")
+            if label == "first":
+                first_entered.set()
+                assert release_first.wait(timeout=2)
+            else:
+                second_entered.set()
+            order.append(f"{label}:exit")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(worker, "first")
+        assert first_entered.wait(timeout=2)
+        second = executor.submit(worker, "second")
+        assert not second_entered.wait(timeout=0.05)
+        release_first.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+
+    assert order == [
+        "first:enter",
+        "first:exit",
+        "second:enter",
+        "second:exit",
+    ]
+    assert dt._REPORT_OUTPUT_LOCKS == {}
+
+
+@pytest.mark.parametrize("target_kind", ["file", "symlink"])
+def test_write_report_markdown_never_overwrites_preexisting_target(
+    tmp_path, target_kind
+):
+    target = tmp_path / "研究报告-v1.md"
+    protected = tmp_path / "protected.md"
+    protected.write_text("protected", encoding="utf-8")
+    if target_kind == "file":
+        target.write_text("existing", encoding="utf-8")
+    else:
+        target.symlink_to(protected)
+
+    report_path = _write_report_in(tmp_path)
+
+    assert report_path == str(tmp_path / "研究报告-2-v1.md")
+    assert protected.read_text(encoding="utf-8") == "protected"
+    if target_kind == "file":
+        assert target.read_text(encoding="utf-8") == "existing"
+    else:
+        assert target.is_symlink()
+
+
+@pytest.mark.parametrize(
+    ("asset_suffix", "asset_name", "expected_bytes"),
+    [
+        ("_infer", "inference_7.html", b"<html>trace</html>"),
+        ("_charts", "chart-1.png", b"png-bytes"),
+    ],
+)
+def test_write_report_markdown_reallocates_without_overwriting_preexisting_asset(
+    tmp_path, asset_suffix, asset_name, expected_bytes
+):
+    protected_dir = tmp_path / f"研究报告-v1{asset_suffix}"
+    protected_dir.mkdir()
+    protected_file = protected_dir / asset_name
+    protected_file.write_bytes(b"protected")
+
+    report_path = _write_report_in(
+        tmp_path, final_result=_report_result_with_assets()
+    )
+
+    assert report_path == str(tmp_path / "研究报告-2-v1.md")
+    assert protected_file.read_bytes() == b"protected"
+    assert (
+        tmp_path / f"研究报告-2-v1{asset_suffix}" / asset_name
+    ).read_bytes() == expected_bytes
+    assert not (tmp_path / "研究报告-v1.final-result.json").exists()
+    assert not (tmp_path / "研究报告-v1.provenance.json").exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+@pytest.mark.parametrize(
+    ("asset_suffix", "asset_name"),
+    [
+        ("_infer", "inference_7.html"),
+        ("_charts", "chart-1.png"),
+    ],
+)
+def test_write_report_markdown_does_not_follow_symlinked_asset_directory(
+    tmp_path, asset_suffix, asset_name
+):
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / asset_name
+    external_file.write_bytes(b"external")
+    (tmp_path / f"研究报告-v1{asset_suffix}").symlink_to(
+        external_dir, target_is_directory=True
+    )
+
+    report_path = _write_report_in(
+        tmp_path, final_result=_report_result_with_assets()
+    )
+
+    assert report_path == str(tmp_path / "研究报告-2-v1.md")
+    assert external_file.read_bytes() == b"external"
+    assert (tmp_path / f"研究报告-v1{asset_suffix}").is_symlink()
+    assert not (tmp_path / "研究报告-v1.final-result.json").exists()
+    assert not (tmp_path / "研究报告-v1.provenance.json").exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+def test_write_report_markdown_rejects_asset_directory_namespace_swap(
+    tmp_path, monkeypatch
+):
+    asset_dir = tmp_path / "研究报告-v1_infer"
+    displaced_dir = tmp_path / "displaced-owned-infer"
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / "inference_7.html"
+    external_file.write_bytes(b"external")
+    directory_opened = threading.Event()
+    namespace_swapped = threading.Event()
+    real_open = dt.os.open
+
+    def synchronizing_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if (
+            os.path.basename(os.fspath(path)) == asset_dir.name
+            and flags & os.O_DIRECTORY
+            and not directory_opened.is_set()
+        ):
+            directory_opened.set()
+            assert namespace_swapped.wait(timeout=2)
+        return descriptor
+
+    monkeypatch.setattr(dt.os, "open", synchronizing_open)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            _write_report_in,
+            tmp_path,
+            "研究报告.md",
+            _report_result_with_assets(),
+        )
+        assert directory_opened.wait(timeout=2)
+        os.rename(asset_dir, displaced_dir)
+        asset_dir.symlink_to(external_dir, target_is_directory=True)
+        namespace_swapped.set()
+        with pytest.raises(RuntimeError, match="namespace"):
+            future.result(timeout=2)
+
+    assert external_file.read_bytes() == b"external"
+    assert asset_dir.is_symlink()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+def test_write_report_markdown_cleans_asset_directory_when_open_fails(
+    tmp_path, monkeypatch
+):
+    asset_dir = tmp_path / "研究报告-v1_infer"
+    real_open = dt.os.open
+
+    def failing_open(path, flags, *args, **kwargs):
+        if (
+            os.path.basename(os.fspath(path)) == asset_dir.name
+            and flags & os.O_DIRECTORY
+        ):
+            raise OSError("asset directory open failed")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(dt.os, "open", failing_open)
+    with pytest.raises(OSError, match="asset directory open failed"):
+        _write_report_in(
+            tmp_path, final_result=_report_result_with_assets()
+        )
+
+    assert not asset_dir.exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+def test_write_report_markdown_quarantines_owned_directory_after_fstat_failure(
+    tmp_path, monkeypatch
+):
+    asset_dir = tmp_path / "研究报告-v1_infer"
+    asset_descriptor = None
+    entry_quarantined = threading.Event()
+    replacement_created = threading.Event()
+    real_open = dt.os.open
+    real_fstat = dt.os.fstat
+    real_rename = dt.os.rename
+
+    def recording_open(path, flags, *args, **kwargs):
+        nonlocal asset_descriptor
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if (
+            os.path.basename(os.fspath(path)) == asset_dir.name
+            and flags & os.O_DIRECTORY
+        ):
+            asset_descriptor = descriptor
+        return descriptor
+
+    def failing_fstat(descriptor):
+        nonlocal asset_descriptor
+        if descriptor == asset_descriptor:
+            asset_descriptor = None
+            raise OSError("asset directory fstat failed")
+        return real_fstat(descriptor)
+
+    def synchronizing_rename(source, destination, *args, **kwargs):
+        result = real_rename(source, destination, *args, **kwargs)
+        if os.path.basename(os.fspath(source)) == asset_dir.name:
+            entry_quarantined.set()
+            assert replacement_created.wait(timeout=2)
+        return result
+
+    def replace_public_entry():
+        if not entry_quarantined.wait(timeout=2):
+            return
+        asset_dir.mkdir()
+        (asset_dir / "writer.bin").write_bytes(b"replacement")
+        replacement_created.set()
+
+    monkeypatch.setattr(dt.os, "open", recording_open)
+    monkeypatch.setattr(dt.os, "fstat", failing_fstat)
+    monkeypatch.setattr(dt.os, "rename", synchronizing_rename)
+    replacement = threading.Thread(target=replace_public_entry)
+    replacement.start()
+    with pytest.raises(OSError, match="asset directory fstat failed"):
+        _write_report_in(
+            tmp_path, final_result=_report_result_with_assets()
+        )
+    replacement.join(timeout=2)
+
+    assert entry_quarantined.is_set()
+    assert not replacement.is_alive()
+    assert (asset_dir / "writer.bin").read_bytes() == b"replacement"
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+def test_write_report_markdown_publishes_snapshot_then_provenance_then_markdown(
+    tmp_path, monkeypatch
+):
+    publication_order = []
+    atomic_create = dt._atomic_create_bytes
+
+    def recording_create(path, payload):
+        publication_order.append(path.name)
+        return atomic_create(path, payload)
+
+    monkeypatch.setattr(dt, "_atomic_create_bytes", recording_create)
+
+    report_path = _write_report_in(tmp_path)
+
+    assert report_path == str(tmp_path / "研究报告-v1.md")
+    assert publication_order == [
+        "研究报告-v1.final-result.json",
+        "研究报告-v1.provenance.json",
+        "研究报告-v1.md",
+    ]
+
+
+def test_write_report_markdown_reallocates_after_publication_collision(
+    tmp_path, monkeypatch
+):
+    atomic_create = dt._atomic_create_bytes
+    collision_path = tmp_path / "研究报告-v1.provenance.json"
+    collision_injected = False
+
+    def racing_create(path, payload):
+        nonlocal collision_injected
+        if path == collision_path and not collision_injected:
+            collision_injected = True
+            path.write_text("external", encoding="utf-8")
+        return atomic_create(path, payload)
+
+    monkeypatch.setattr(dt, "_atomic_create_bytes", racing_create)
+
+    report_path = _write_report_in(tmp_path)
+
+    assert report_path == str(tmp_path / "研究报告-2-v1.md")
+    assert collision_path.read_text(encoding="utf-8") == "external"
+    assert not (tmp_path / "研究报告-v1.final-result.json").exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+def test_write_report_markdown_cleans_current_partial_files_on_write_failure(
+    tmp_path, monkeypatch
+):
+    preserved = tmp_path / "preserved.txt"
+    preserved.write_text("keep", encoding="utf-8")
+    atomic_create = dt._atomic_create_bytes
+
+    def failing_create(path, payload):
+        if path.name.endswith(".provenance.json"):
+            raise OSError("disk unavailable")
+        return atomic_create(path, payload)
+
+    monkeypatch.setattr(dt, "_atomic_create_bytes", failing_create)
+    with pytest.raises(OSError, match="disk unavailable"):
+        _write_report_in(
+            tmp_path, final_result=_report_result_with_assets()
+        )
+
+    assert preserved.read_text(encoding="utf-8") == "keep"
+    assert not (tmp_path / "研究报告-v1.final-result.json").exists()
+    assert not (tmp_path / "研究报告-v1.provenance.json").exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+    assert not (tmp_path / "研究报告-v1_infer").exists()
+    assert not (tmp_path / "研究报告-v1_charts").exists()
+
+
+def test_write_report_markdown_cleans_staging_when_snapshot_serialization_fails(
+    tmp_path,
+):
+    with patch(
+        "jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle.serialize_final_result_snapshot",
+        side_effect=RuntimeError("snapshot serialization failed"),
+    ):
+        with pytest.raises(RuntimeError, match="snapshot serialization failed"):
+            _write_report_in(
+                tmp_path, final_result=_report_result_with_assets()
+            )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_remove_created_artifacts_preserves_replacement_created_during_cleanup(
+    tmp_path, monkeypatch
+):
+    owned_path = tmp_path / "owned.bin"
+    owned_path.write_bytes(b"owned")
+    owned_metadata = os.lstat(owned_path)
+    entry_quarantined = threading.Event()
+    replacement_created = threading.Event()
+    real_rename = dt.os.rename
+
+    def synchronizing_rename(source, destination, *args, **kwargs):
+        result = real_rename(source, destination, *args, **kwargs)
+        if os.path.basename(os.fspath(source)) == owned_path.name:
+            entry_quarantined.set()
+            assert replacement_created.wait(timeout=2)
+        return result
+
+    def replace_public_entry():
+        assert entry_quarantined.wait(timeout=2)
+        owned_path.write_bytes(b"replacement")
+        replacement_created.set()
+
+    monkeypatch.setattr(dt.os, "rename", synchronizing_rename)
+    replacement = threading.Thread(target=replace_public_entry)
+    replacement.start()
+    dt._remove_created_artifacts([(owned_path, owned_metadata)])
+    replacement.join(timeout=2)
+
+    assert not replacement.is_alive()
+    assert owned_path.read_bytes() == b"replacement"
+
+
+def test_remove_created_artifacts_restores_replacement_directory(tmp_path):
+    public_dir = tmp_path / "assets"
+    displaced_owned_dir = tmp_path / "displaced-owned-assets"
+    public_dir.mkdir()
+    owned_metadata = os.lstat(public_dir)
+    os.rename(public_dir, displaced_owned_dir)
+    public_dir.mkdir()
+    replacement_file = public_dir / "writer.bin"
+    replacement_file.write_bytes(b"replacement")
+
+    dt._remove_created_artifacts([(public_dir, owned_metadata)])
+
+    assert replacement_file.read_bytes() == b"replacement"
+    assert displaced_owned_dir.is_dir()
+
+
+def _styled_bundle(tmp_path):
+    bundle_root = tmp_path / "styled-bundle"
+    (bundle_root / "infer").mkdir(parents=True)
+    (bundle_root / "charts").mkdir()
+    (bundle_root / "infer" / "inference_7.html").write_bytes(b"styled-infer")
+    (bundle_root / "charts" / "chart-1.png").write_bytes(b"styled-chart")
+    (bundle_root / "report.html").write_text(
+        '<link href="infer/inference_7.html">'
+        '<img src="charts/chart-1.png">',
+        encoding="utf-8",
+    )
+    return bundle_root
+
+
+def test_install_styled_bundle_uses_dedicated_assets_without_mutating_provenance(
+    tmp_path,
+):
+    html_path = tmp_path / "研究报告-v1.html"
+    original_infer = tmp_path / "研究报告-v1_infer"
+    original_charts = tmp_path / "研究报告-v1_charts"
+    original_infer.mkdir()
+    original_charts.mkdir()
+    infer_file = original_infer / "inference_7.html"
+    chart_file = original_charts / "chart-1.png"
+    infer_file.write_bytes(b"provenance-infer")
+    chart_file.write_bytes(b"provenance-chart")
+    before_hashes = {
+        infer_file: hashlib.sha256(infer_file.read_bytes()).hexdigest(),
+        chart_file: hashlib.sha256(chart_file.read_bytes()).hexdigest(),
+    }
+    provenance_path = tmp_path / "研究报告-v1.provenance.json"
+    provenance_path.write_text(json.dumps({
+        "inference_manifest": [{"sha256": before_hashes[infer_file]}],
+        "chart_manifest": [{"sha256": before_hashes[chart_file]}],
+    }), encoding="utf-8")
+    provenance_bytes = provenance_path.read_bytes()
+
+    dt._install_styled_bundle(_styled_bundle(tmp_path), html_path)
+
+    assert {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in before_hashes
+    } == before_hashes
+    assert provenance_path.read_bytes() == provenance_bytes
+    manifests = json.loads(provenance_path.read_text(encoding="utf-8"))
+    assert manifests["inference_manifest"][0]["sha256"] == before_hashes[infer_file]
+    assert manifests["chart_manifest"][0]["sha256"] == before_hashes[chart_file]
+    assert (
+        tmp_path / "研究报告-v1_html_infer" / "inference_7.html"
+    ).read_bytes() == b"styled-infer"
+    assert (
+        tmp_path / "研究报告-v1_html_charts" / "chart-1.png"
+    ).read_bytes() == b"styled-chart"
+    html = html_path.read_text(encoding="utf-8")
+    assert 'href="研究报告-v1_html_infer/' in html
+    assert 'src="研究报告-v1_html_charts/' in html
+
+
+def test_install_styled_bundle_rolls_back_owned_assets_after_collision(tmp_path):
+    html_path = tmp_path / "研究报告-v1.html"
+    protected_chart_dir = tmp_path / "研究报告-v1_html_charts"
+    protected_chart_dir.mkdir()
+    protected_file = protected_chart_dir / "chart-1.png"
+    protected_file.write_bytes(b"protected")
+
+    with pytest.raises(FileExistsError):
+        dt._install_styled_bundle(_styled_bundle(tmp_path), html_path)
+
+    assert protected_file.read_bytes() == b"protected"
+    assert not (tmp_path / "研究报告-v1_html_infer").exists()
+    assert not html_path.exists()
+
+
+def test_install_styled_bundle_does_not_follow_symlinked_asset_target(tmp_path):
+    html_path = tmp_path / "研究报告-v1.html"
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / "inference_7.html"
+    external_file.write_bytes(b"external")
+    (tmp_path / "研究报告-v1_html_infer").symlink_to(
+        external_dir, target_is_directory=True
+    )
+
+    with pytest.raises(FileExistsError):
+        dt._install_styled_bundle(_styled_bundle(tmp_path), html_path)
+
+    assert external_file.read_bytes() == b"external"
+    assert not html_path.exists()
+
+
+def test_install_styled_bundle_rejects_asset_directory_namespace_swap(
+    tmp_path, monkeypatch
+):
+    html_path = tmp_path / "研究报告-v1.html"
+    asset_dir = tmp_path / "研究报告-v1_html_infer"
+    displaced_dir = tmp_path / "displaced-styled-infer"
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / "inference_7.html"
+    external_file.write_bytes(b"external")
+    directory_opened = threading.Event()
+    namespace_swapped = threading.Event()
+    real_open = dt.os.open
+
+    def synchronizing_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if (
+            os.path.basename(os.fspath(path)) == asset_dir.name
+            and flags & os.O_DIRECTORY
+            and not directory_opened.is_set()
+        ):
+            directory_opened.set()
+            assert namespace_swapped.wait(timeout=2)
+        return descriptor
+
+    monkeypatch.setattr(dt.os, "open", synchronizing_open)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            dt._install_styled_bundle, _styled_bundle(tmp_path), html_path
+        )
+        assert directory_opened.wait(timeout=2)
+        os.rename(asset_dir, displaced_dir)
+        asset_dir.symlink_to(external_dir, target_is_directory=True)
+        namespace_swapped.set()
+        with pytest.raises(RuntimeError, match="namespace"):
+            future.result(timeout=2)
+
+    assert external_file.read_bytes() == b"external"
+    assert asset_dir.is_symlink()
+    assert not html_path.exists()
 
 
 def test_build_related_artifact_bundle_exposes_only_hidden_preview_companions():
