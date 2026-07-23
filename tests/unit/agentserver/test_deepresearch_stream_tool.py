@@ -1540,6 +1540,36 @@ def test_report_output_lock_serializes_waiters_and_releases_registry(tmp_path):
     assert dt._REPORT_OUTPUT_LOCKS == {}
 
 
+def test_windows_publication_backend_does_not_require_posix_constants(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "report.md"
+    monkeypatch.setattr(dt, "_uses_windows_path_publication", lambda: True)
+
+    def reject_link(*_args, **_kwargs):
+        raise AssertionError("Windows publication must not call os.link")
+
+    monkeypatch.setattr(dt.os, "link", reject_link)
+    metadata = dt._atomic_create_bytes(target, b"complete")
+
+    assert target.read_bytes() == b"complete"
+    assert dt._same_identity(metadata, os.lstat(target))
+
+
+def test_windows_file_publication_never_overwrites_existing_target(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "report.md"
+    target.write_bytes(b"protected")
+    monkeypatch.setattr(dt, "_uses_windows_path_publication", lambda: True)
+
+    with pytest.raises(FileExistsError):
+        dt._atomic_create_bytes(target, b"replacement")
+
+    assert target.read_bytes() == b"protected"
+    assert not list(tmp_path.glob(".report.md.*"))
+
+
 @pytest.mark.parametrize("target_kind", ["file", "symlink"])
 def test_write_report_markdown_never_overwrites_preexisting_target(
     tmp_path, target_kind

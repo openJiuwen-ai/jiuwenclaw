@@ -551,7 +551,46 @@ def _report_output_lock(output_dir: Path):
                 del _REPORT_OUTPUT_LOCKS[output_dir]
 
 
-def _atomic_create_bytes(path: Path, payload: bytes) -> os.stat_result:
+def _uses_windows_path_publication() -> bool:
+    """Return whether publication must avoid POSIX descriptor APIs."""
+    return os.name == "nt"
+
+
+def _rename_windows_no_replace(source: Path, destination: Path) -> None:
+    """Rename on Windows, where os.rename refuses to replace a destination."""
+    try:
+        os.lstat(destination)
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError(f"publication target already exists: {destination}")
+    os.rename(source, destination)
+
+
+def _atomic_create_bytes_windows(
+    path: Path, payload: bytes
+) -> os.stat_result:
+    """Publish a complete file using Windows-compatible path operations."""
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+            metadata = os.fstat(stream.fileno())
+        _rename_windows_no_replace(temp_path, path)
+        return metadata
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _atomic_create_bytes_posix(
+    path: Path, payload: bytes
+) -> os.stat_result:
     """Publish a complete immutable file without replacing an existing target."""
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -567,6 +606,13 @@ def _atomic_create_bytes(path: Path, payload: bytes) -> os.stat_result:
             os.unlink(temp_name)
         except FileNotFoundError:
             pass
+
+
+def _atomic_create_bytes(path: Path, payload: bytes) -> os.stat_result:
+    """Publish a complete immutable file without replacing an existing target."""
+    if _uses_windows_path_publication():
+        return _atomic_create_bytes_windows(path, payload)
+    return _atomic_create_bytes_posix(path, payload)
 
 
 def _atomic_create_bytes_at(
