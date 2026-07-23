@@ -1109,8 +1109,10 @@ class SkillTurboExecutor:
             except Exception:
                 logger.debug("[SkillTurboExecutor] invalid effective_project_dir for artifact detection: %s", value)
         try:
-            from jiuwenclaw.utils import get_agent_workspace_dir
-            return get_agent_workspace_dir()
+            from jiuwenclaw.utils import resolve_tenant_agent_workspace_dir
+            return resolve_tenant_agent_workspace_dir()
+        except TypeError:
+            return None
         except Exception as e:
             logger.warning("[SkillTurboExecutor] 获取agent工作空间目录失败，将返回None: %s", e)
             return None

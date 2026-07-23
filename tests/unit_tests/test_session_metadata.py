@@ -611,3 +611,66 @@ class TestTitleStability:
 
         data = _read_json(sessions_dir / "sess_noclear" / "metadata.json")
         assert data["title"] == "已有标题", "空字符串不应清除已有标题"
+
+
+# ===========================================================================
+# remove_team_mode_session_dirs_at_startup (multi-tenant)
+# ===========================================================================
+class TestRemoveTeamModeSessionsAtStartup:
+    @staticmethod
+    def test_cleans_team_sessions_across_tenant_dirs(tmp_path, monkeypatch):
+        from jiuwenclaw.agentserver import session_metadata as sm
+
+        workspace = tmp_path / "data"
+        office_sessions = (
+            workspace / "service_default" / "agent_office" / "agent" / "sessions"
+        )
+        assistant_sessions = (
+            workspace / "service_default" / "agent_assistant" / "agent" / "sessions"
+        )
+        default_sessions = (
+            workspace / "service_default" / "agent_default" / "agent" / "sessions"
+        )
+        for root in (office_sessions, assistant_sessions, default_sessions):
+            root.mkdir(parents=True)
+
+        def _write_meta(root: Path, sid: str, mode: str) -> Path:
+            d = root / sid
+            d.mkdir()
+            (d / "metadata.json").write_text(
+                json.dumps({"session_id": sid, "mode": mode, "title": sid}),
+                encoding="utf-8",
+            )
+            return d
+
+        team_office = _write_meta(office_sessions, "team_office", "team")
+        keep_office = _write_meta(office_sessions, "normal_office", "agent.plan")
+        team_asst = _write_meta(assistant_sessions, "team_asst", "team")
+        team_default = _write_meta(default_sessions, "team_default", "team")
+
+        monkeypatch.setattr(sm, "get_user_workspace_dir", lambda: workspace)
+        monkeypatch.setattr(sm, "get_agent_sessions_dir", lambda: default_sessions)
+
+        sm.remove_team_mode_session_dirs_at_startup()
+
+        assert not team_office.exists()
+        assert not team_asst.exists()
+        assert not team_default.exists()
+        assert keep_office.exists()
+
+    @staticmethod
+    def test_iter_tenant_sessions_dirs_dedupes(tmp_path, monkeypatch):
+        from jiuwenclaw.agentserver import session_metadata as sm
+
+        workspace = tmp_path / "data"
+        default_sessions = (
+            workspace / "service_default" / "agent_default" / "agent" / "sessions"
+        )
+        default_sessions.mkdir(parents=True)
+        monkeypatch.setattr(sm, "get_user_workspace_dir", lambda: workspace)
+        monkeypatch.setattr(sm, "get_agent_sessions_dir", lambda: default_sessions)
+
+        dirs = sm.iter_tenant_sessions_dirs(workspace)
+        assert len(dirs) == 1
+        assert dirs[0] == default_sessions
+

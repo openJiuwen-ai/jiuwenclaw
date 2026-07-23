@@ -21,6 +21,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
+from jiuwenclaw.local_env_config import reset_local_env_state_for_tests
+
 import jiuwenclaw.utils as _utils
 
 _REAL_GET_CONFIG_FILE = _utils.get_config_file
@@ -52,6 +56,7 @@ def _is_external_memory_patched_module(node_path) -> bool:
 
 
 def pytest_runtest_setup(item) -> None:
+    reset_local_env_state_for_tests()
     path = getattr(item, "path", None) or getattr(item, "fspath", None)
     p = str(path) if path is not None else ""
     if _is_external_memory_patched_module(p):

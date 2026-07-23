@@ -819,10 +819,10 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
     # 回退：从环境变量构造（env var 已在 resolve_env_vars 中解密）
     return [{
         "model_client_config": {
-            "api_base": os.getenv("API_BASE", ""),
-            "api_key": os.getenv("API_KEY", ""),
-            "model_name": os.getenv("MODEL_NAME", ""),
-            "client_provider": os.getenv("MODEL_PROVIDER", ""),
+            "api_base": get_local_config("API_BASE", ""),
+            "api_key": get_local_config("API_KEY", ""),
+            "model_name": get_local_config("MODEL_NAME", ""),
+            "client_provider": get_local_config("MODEL_PROVIDER", ""),
             "timeout": 1800,
             "max_retries": 1,
             "verify_ssl": False,

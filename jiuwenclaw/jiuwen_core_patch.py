@@ -9,20 +9,26 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from pydantic import Field
 import httpx
+from pydantic import Field
 from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import \
     AssistantMessageChunk, OpenAIModelClient, ToolCall, UsageMetadata
-from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse
-from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import (
     SiliconFlowModelClient,
 )
+from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.session.stream import OutputSchema
+
+from jiuwenclaw.http_proxy_config import (
+    read_proxy_url,
+    resolve_httpx_proxy,
+    should_bypass_proxy,
+)
 from jiuwenclaw.local_env_config import read_default_headers
 from jiuwenclaw.tool_arguments_validator import (
     tool_arguments_failure_message,
@@ -890,7 +896,7 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
-        proxy_url = UrlUtils.get_global_proxy_url(self.model_client_config.api_base)
+        proxy_url = resolve_httpx_proxy(self.model_client_config.api_base or "")
         # httpx不接受空字符串proxy，需要处理
         if proxy_url and proxy_url.strip():
             http_client = httpx.AsyncClient(proxy=proxy_url, verify=verify)
@@ -1315,8 +1321,27 @@ def apply_siliconflow_model_client_patch() -> None:
             setattr(SiliconFlowModelClient, _attr, getattr(RetryMixin, _attr))
 
 
+def apply_url_utils_proxy_patch() -> None:
+    """Route openjiuwen proxy helpers through overlay-aware env readers."""
+
+    @staticmethod
+    def _patched_get_global_proxy_url(url: str) -> Optional[str]:
+        if url and should_bypass_proxy(url):
+            return None
+        proxy_url = read_proxy_url()
+        return proxy_url or None
+
+    @staticmethod
+    def _patched_should_bypass_proxy(url: str) -> bool:
+        return should_bypass_proxy(url)
+
+    setattr(UrlUtils, "get_global_proxy_url", _patched_get_global_proxy_url)
+    setattr(UrlUtils, "should_bypass_proxy", _patched_should_bypass_proxy)
+
+
 def apply_openai_model_client_patch() -> None:
     """Monkey-patch upstream OpenAIModelClient with JiuwenClaw SSL/headers/stream behavior."""
+    apply_url_utils_proxy_patch()
     global _ORIGINAL_BUILD_REQUEST_PARAMS, _ORIGINAL_PARSE_RESPONSE, _ORIGINAL_GENERATE_IMAGE
     if _ORIGINAL_BUILD_REQUEST_PARAMS is None:
         _ORIGINAL_BUILD_REQUEST_PARAMS = OpenAIModelClient._build_request_params

@@ -16,15 +16,30 @@ from jiuwenclaw.config import (
     resolve_env_vars,
     resolve_template_config_path,
 )
+from jiuwenclaw.local_env_config import ENV_CONFIG_DICT, clear_staged_env, reset_local_env_state_for_tests
+
+
+@pytest.fixture(autouse=True)
+def _reset_env_state():
+    saved_environ = dict(os.environ)
+    reset_local_env_state_for_tests()
+    ENV_CONFIG_DICT.clear()
+    clear_staged_env()
+    yield
+    reset_local_env_state_for_tests()
+    ENV_CONFIG_DICT.clear()
+    clear_staged_env()
+    os.environ.clear()
+    os.environ.update(saved_environ)
 
 
 class TestResolveEnvVars:
     """Test environment variable resolution in config."""
 
     @staticmethod
-    def test_resolve_string_with_env_var(monkeypatch: pytest.MonkeyPatch):
+    def test_resolve_string_with_env_var():
         """Test resolving string with environment variable."""
-        monkeypatch.setenv("TEST_VAR", "test_value")
+        ENV_CONFIG_DICT["TEST_VAR"] = "test_value"
         result = resolve_env_vars("${TEST_VAR}")
         assert result == "test_value"
 
@@ -35,9 +50,9 @@ class TestResolveEnvVars:
         assert result == "default_value"
 
     @staticmethod
-    def test_resolve_string_with_env_and_default(monkeypatch: pytest.MonkeyPatch):
+    def test_resolve_string_with_env_and_default():
         """Test resolving string when env var exists with default."""
-        monkeypatch.setenv("TEST_VAR", "actual_value")
+        ENV_CONFIG_DICT["TEST_VAR"] = "actual_value"
         result = resolve_env_vars("${TEST_VAR:-default_value}")
         assert result == "actual_value"
 
@@ -54,10 +69,10 @@ class TestResolveEnvVars:
         assert result == "plain_string"
 
     @staticmethod
-    def test_resolve_dict_with_env_vars(monkeypatch: pytest.MonkeyPatch):
+    def test_resolve_dict_with_env_vars():
         """Test resolving dictionary with environment variables."""
-        monkeypatch.setenv("API_KEY", "secret_key")
-        monkeypatch.setenv("PORT", "8080")
+        ENV_CONFIG_DICT["API_KEY"] = "secret_key"
+        ENV_CONFIG_DICT["PORT"] = "8080"
         input_dict = {
             "api_key": "${API_KEY}",
             "port": "${PORT:-3000}",
@@ -71,10 +86,10 @@ class TestResolveEnvVars:
         }
 
     @staticmethod
-    def test_resolve_list_with_env_vars(monkeypatch: pytest.MonkeyPatch):
+    def test_resolve_list_with_env_vars():
         """Test resolving list with environment variables."""
-        monkeypatch.setenv("VAR1", "value1")
-        monkeypatch.setenv("VAR2", "value2")
+        ENV_CONFIG_DICT["VAR1"] = "value1"
+        ENV_CONFIG_DICT["VAR2"] = "value2"
         input_list = [
             "${VAR1}",
             "${VAR2:-default}",
@@ -84,9 +99,9 @@ class TestResolveEnvVars:
         assert result == ["value1", "value2", "static_value"]
 
     @staticmethod
-    def test_resolve_nested_structure(monkeypatch: pytest.MonkeyPatch):
+    def test_resolve_nested_structure():
         """Test resolving nested structure with environment variables."""
-        monkeypatch.setenv("HOST", "example.com")
+        ENV_CONFIG_DICT["HOST"] = "example.com"
         input_dict = {
             "server": {
                 "host": "${HOST}",
@@ -104,10 +119,10 @@ class TestResolveEnvVars:
         }
 
     @staticmethod
-    def test_resolve_multiple_vars_in_string(monkeypatch: pytest.MonkeyPatch):
+    def test_resolve_multiple_vars_in_string():
         """Test resolving multiple environment variables in one string."""
-        monkeypatch.setenv("USER", "john")
-        monkeypatch.setenv("DOMAIN", "example.com")
+        ENV_CONFIG_DICT["USER"] = "john"
+        ENV_CONFIG_DICT["DOMAIN"] = "example.com"
         result = resolve_env_vars("${USER}@${DOMAIN}")
         assert result == "john@example.com"
 

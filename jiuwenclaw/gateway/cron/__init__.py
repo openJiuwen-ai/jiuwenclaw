@@ -25,4 +25,5 @@ __all__ = [
 install_lazy_attrs(sys.modules[__name__], {
     "CronSchedulerService": (".scheduler", "CronSchedulerService"),
     "CronController": (".controller", "CronController"),
+    "CronTenantRegistry": (".tenant_registry", "CronTenantRegistry"),
 })

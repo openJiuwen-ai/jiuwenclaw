@@ -9,7 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.utils import get_checkpoint_dir, logger
+from jiuwenclaw.utils import get_checkpoint_dir, get_gateway_dir, logger
 
 
 class SessionMapScope(str, Enum):
@@ -19,6 +19,40 @@ class SessionMapScope(str, Enum):
     PER_CHAT_BOT = "per_chat_bot"
     # One agent session per (provider, chat, bot, user)
     PER_CHAT_BOT_USER = "per_chat_bot_user"
+
+
+def get_session_map_path() -> Path:
+    """Gateway-scoped SessionMap store under ``{JIUWENCLAW_DATA_DIR}/.gateway/``."""
+    return get_gateway_dir() / "session_map.json"
+
+
+def _legacy_session_map_path() -> Path:
+    """Previous location under agent_default checkpoint (pre-gateway-dir layout)."""
+    return get_checkpoint_dir() / "session_map.json"
+
+
+def migrate_legacy_session_map_if_needed() -> None:
+    """One-shot layout migrate: ``agent_default/.checkpoint/session_map.json`` → ``.gateway/``.
+
+    Call from Gateway startup (not from :class:`SessionMap` construction). Idempotent:
+    skips when the new path already exists or there is no legacy file.
+    """
+    target = get_session_map_path()
+    if target.exists():
+        return
+    legacy = _legacy_session_map_path()
+    if not legacy.exists() or not legacy.is_file():
+        return
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(legacy.read_bytes())
+        logger.info(
+            "SessionMap migrated from legacy path %s -> %s",
+            legacy,
+            target,
+        )
+    except Exception as exc:
+        logger.warning("SessionMap legacy migrate failed (%s -> %s): %s", legacy, target, exc)
 
 
 def load_session_map_scope() -> SessionMapScope:
@@ -132,9 +166,14 @@ def _session_to_json_dict(sess: Session) -> dict[str, Any]:
 class SessionMap:
     """Map stable identity (per config scope) -> :class:`Session` (agent ``session_id`` + invoke ids)."""
 
-    def __init__(self, *, scope: SessionMapScope | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        scope: SessionMapScope | None = None,
+        store_path: Path | None = None,
+    ) -> None:
         self._scope = scope if scope is not None else load_session_map_scope()
-        self._store_path: Path = get_checkpoint_dir() / "session_map.json"
+        self._store_path: Path = store_path if store_path is not None else get_session_map_path()
         self._sessions: dict[str, Session] = {}
         self._load()
 

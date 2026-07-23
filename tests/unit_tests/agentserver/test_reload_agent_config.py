@@ -29,8 +29,8 @@ from jiuwenclaw.agentserver.memory.cache_registry import clear_memory_cache_regi
 from jiuwenclaw.agentserver.memory.manager import INDEX_CACHE
 from jiuwenclaw.local_env_config import (
     ENV_CONFIG_DICT,
+    apply_env_overrides_to_active,
     bind_task_env_overlay,
-    clear_staged_env,
     get_local_config,
     get_staged_env,
     parse_default_headers,
@@ -38,6 +38,7 @@ from jiuwenclaw.local_env_config import (
     read_default_headers,
     read_env,
     read_env_if_set,
+    reset_local_env_state_for_tests,
     reset_task_env_overlay,
     stage_env_overrides,
 )
@@ -46,13 +47,11 @@ from jiuwenclaw.local_env_config import (
 @pytest.fixture(autouse=True)
 def _reset_env_state():
     saved_environ = dict(os.environ)
-    ENV_CONFIG_DICT.clear()
-    clear_staged_env()
+    reset_local_env_state_for_tests()
     clear_memory_cache_registry()
     INDEX_CACHE.clear()
     yield
-    ENV_CONFIG_DICT.clear()
-    clear_staged_env()
+    reset_local_env_state_for_tests()
     clear_memory_cache_registry()
     INDEX_CACHE.clear()
     os.environ.clear()
@@ -62,9 +61,10 @@ def _reset_env_state():
 class TestEnvStaging:
     @staticmethod
     def test_stage_without_promote():
+        # Formula B: unbound read = active ∪ staged (staged wins)
         ENV_CONFIG_DICT["API_KEY"] = "old"
         stage_env_overrides({"API_KEY": "new"})
-        assert get_local_config("API_KEY") == "old"
+        assert get_local_config("API_KEY") == "new"
         assert get_staged_env()["API_KEY"] == "new"
 
     @staticmethod
@@ -77,8 +77,9 @@ class TestEnvStaging:
             assert read_env("API_KEY") == "overlay"
         finally:
             reset_task_env_overlay(token)
-        assert get_local_config("API_KEY") == "active"
-        assert read_env("API_KEY") == "active"
+        # Unbound again: formula B → staged wins over active
+        assert get_local_config("API_KEY") == "staged"
+        assert read_env("API_KEY") == "staged"
 
     @staticmethod
     def test_promote_staged():
@@ -86,7 +87,7 @@ class TestEnvStaging:
         promote_staged_env()
         assert get_local_config("MODEL_NAME") == "m1"
         assert get_staged_env() == {}
-        assert os.environ.get("MODEL_NAME") == "m1"
+        assert os.environ.get("default__default__MODEL_NAME") == "m1"
 
     @staticmethod
     def test_null_env_deletes_staged_key():
@@ -95,11 +96,22 @@ class TestEnvStaging:
         assert "API_KEY" not in get_staged_env()
 
     @staticmethod
-    def test_read_env_if_set_sees_staged_without_affecting_get_local_config():
+    def test_formula_b_get_local_config_and_read_env_if_set_agree_unbound():
         ENV_CONFIG_DICT["API_KEY"] = "old"
         stage_env_overrides({"API_KEY": "new"})
-        assert get_local_config("API_KEY") == "old"
+        assert get_local_config("API_KEY") == "new"
         assert read_env_if_set("API_KEY") == "new"
+
+    @staticmethod
+    def test_seal_miss_does_not_fallthrough():
+        ENV_CONFIG_DICT["API_KEY"] = "active"
+        stage_env_overrides({"API_KEY": "staged"})
+        token = bind_task_env_overlay({})
+        try:
+            assert get_local_config("API_KEY") is None
+            assert read_env_if_set("API_KEY") is None
+        finally:
+            reset_task_env_overlay(token)
 
     @staticmethod
     def test_read_env_if_set_returns_none_when_unset():
@@ -118,12 +130,39 @@ class TestEnvStaging:
             assert read_default_headers() == {"Authorization": "Basic overlay"}
         finally:
             reset_task_env_overlay(token)
-        assert read_default_headers() == {"Authorization": "Basic active"}
+        assert read_default_headers() == {"Authorization": "Basic staged"}
 
     @staticmethod
     def test_parse_default_headers_invalid():
         with pytest.raises(ValueError, match="must be a JSON object"):
             parse_default_headers("[]")
+
+    @staticmethod
+    def test_ns_isolation_between_agents():
+        from jiuwenclaw.local_env_config import apply_env_overrides_to_active, make_env_ns_key
+
+        apply_env_overrides_to_active(
+            {"MODEL_NAME": "office-model"},
+            service_id="default",
+            agent_id="office",
+        )
+        apply_env_overrides_to_active(
+            {"MODEL_NAME": "assistant-model"},
+            service_id="default",
+            agent_id="assistant",
+        )
+        assert os.environ.get(make_env_ns_key("default", "office", "MODEL_NAME")) == "office-model"
+        assert (
+            os.environ.get(make_env_ns_key("default", "assistant", "MODEL_NAME"))
+            == "assistant-model"
+        )
+        from jiuwenclaw.local_env_config import bind_agent_env_ns, reset_agent_env_ns
+
+        t = bind_agent_env_ns("default", "office")
+        try:
+            assert get_local_config("MODEL_NAME") == "office-model"
+        finally:
+            reset_agent_env_ns(t)
 
 
 class TestReloadConfigChangeLogging:
@@ -299,14 +338,14 @@ async def test_agent_manager_reload_stages_env_without_os_write():
     mock_agent.reload_agent_config = AsyncMock(return_value=ReloadResult(deferred=True))
     manager.agents["web"] = {"agent.plan": {"sess1": mock_agent}}
 
-    stage_env_overrides({"API_KEY": "after"})
+    stage_env_overrides({"API_KEY": "after"}, service_id="s1", agent_id="a1")
     with patch.object(AgentManager, "is_working", return_value=True):
         result = await manager.reload_agents_config(None, {"API_KEY": "after"})
 
     assert isinstance(result, ReloadAggregateResult)
     assert result.deferred == 1
     assert os.environ.get("API_KEY") == "before"
-    assert get_staged_env().get("API_KEY") == "after"
+    assert get_staged_env(service_id="s1", agent_id="a1").get("API_KEY") == "after"
 
 
 @pytest.mark.asyncio
@@ -318,12 +357,14 @@ async def test_agent_manager_promotes_when_all_idle():
     manager.agents["web"] = {"agent.plan": {"sess1": mock_agent}}
 
     with patch.object(AgentManager, "is_working", return_value=False):
-        stage_env_overrides({"MODEL_NAME": "new-model"})
+        stage_env_overrides(
+            {"MODEL_NAME": "new-model"}, service_id="s1", agent_id="a1"
+        )
         result = await manager.reload_agents_config(None, {"MODEL_NAME": "new-model"})
 
     assert result.applied == 1
-    assert get_staged_env() == {}
-    assert os.environ.get("MODEL_NAME") == "new-model"
+    assert get_staged_env(service_id="s1", agent_id="a1") == {}
+    assert os.environ.get("s1__a1__MODEL_NAME") == "new-model"
 
 
 @pytest.mark.asyncio
@@ -403,6 +444,11 @@ class _DeepAdapterReloadHarness:
 
                 def configure_for_force_apply_test(self) -> MagicMock:
                     self._embed_fingerprint = "old"
+                    self._memory_cache_fingerprint = "mfp"
+                    self._task_memory_fingerprint = None
+                    self._env_service_id = "default"
+                    self._env_agent_id = "default"
+                    self._workspace_dir = "/tmp/reload-ws-a"
                     self._instance_overrides = {}
                     self._tool_cards = []
                     self._model = MagicMock()
@@ -518,7 +564,7 @@ async def test_apply_pending_reload_if_idle_skips_working_checker():
     with patch.object(
         adapter, "reload_agent_config", new=AsyncMock(return_value=ReloadResult(applied=True))
     ) as apply_mock:
-        with patch("jiuwenclaw.local_env_config.promote_staged_env") as promote_mock:
+        with patch("jiuwenclaw.agentserver.deep_agent.interface_deep.promote_staged_env") as promote_mock:
             result = await adapter.apply_pending_reload_if_idle()
 
     assert result is not None
@@ -561,7 +607,10 @@ async def test_force_apply_with_invalidate_memory_false():
     ), patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
     ), patch(
-        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_memory_manager_cache",
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_manager_cache",
+        new=AsyncMock(),
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_wiki_manager_cache",
         new=AsyncMock(),
     ), patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_task_memory_service",
@@ -574,7 +623,10 @@ async def test_force_apply_with_invalidate_memory_false():
         )
 
     assert result.applied is True
-    mock_clear_task_memory.assert_called_once()
+    # MODEL_NAME touches task memory; clear is scoped (not tied to memory invalidate).
+    mock_clear_task_memory.assert_called_once_with(
+        service_id="default", agent_id="default"
+    )
 
 
 @pytest.mark.asyncio
@@ -724,6 +776,8 @@ class TestCreateModelEnvSync:
 
 @pytest.mark.asyncio
 async def test_maybe_apply_pending_reload_promotes_staged_env():
+    from jiuwenclaw.local_env_config import get_active_env
+
     stage_env_overrides({"MODEL_NAME": "new-model"})
     adapter = _DeepAdapterReloadHarness.build(
         working=False,
@@ -733,13 +787,13 @@ async def test_maybe_apply_pending_reload_promotes_staged_env():
     with patch.object(
         adapter, "reload_agent_config", new=AsyncMock(return_value=ReloadResult(applied=True))
     ):
-        with patch("jiuwenclaw.local_env_config.promote_staged_env") as promote_mock:
-            result = await adapter.run_maybe_apply_pending_reload()
+        result = await adapter.run_maybe_apply_pending_reload()
 
     assert result is not None
     assert result.applied is True
     assert adapter.get_pending_reload() is None
-    promote_mock.assert_called_once()
+    assert get_staged_env() == {}
+    assert get_active_env().get("MODEL_NAME") == "new-model"
 
 
 @pytest.mark.asyncio
@@ -807,7 +861,10 @@ async def test_reload_translates_yaml_sandbox_to_env_overlay(monkeypatch: pytest
     ), patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
     ), patch(
-        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_memory_manager_cache",
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_manager_cache",
+        new=AsyncMock(),
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_wiki_manager_cache",
         new=AsyncMock(),
     ):
         result = await adapter.reload_agent_config(
@@ -862,7 +919,10 @@ async def test_reload_yaml_sandbox_overrides_env_overrides(monkeypatch: pytest.M
     ), patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
     ), patch(
-        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_memory_manager_cache",
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_manager_cache",
+        new=AsyncMock(),
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_wiki_manager_cache",
         new=AsyncMock(),
     ):
         await adapter.reload_agent_config(
@@ -893,7 +953,10 @@ async def test_reload_yaml_sandbox_invalid_enabled_raises():
     ), patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
     ), patch(
-        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_memory_manager_cache",
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_manager_cache",
+        new=AsyncMock(),
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_wiki_manager_cache",
         new=AsyncMock(),
     ):
         with pytest.raises(ValueError, match="sandbox.enabled"):
@@ -976,7 +1039,8 @@ async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.Mo
 
     async def _noop_clear_memory(*a, **kw):
         return None
-    monkeypatch.setattr(mod, "clear_memory_manager_cache", _noop_clear_memory)
+    monkeypatch.setattr(mod, "invalidate_memory_manager_cache", _noop_clear_memory)
+    monkeypatch.setattr(mod, "invalidate_memory_wiki_manager_cache", _noop_clear_memory)
     # get_config 返回带 sandbox 的 yaml 块, 让 reload 翻译路径走到
     monkeypatch.setattr(
         mod,
@@ -1060,14 +1124,9 @@ async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.Mo
 
 
 def test_agent_manager_init_applies_yaml_sandbox_to_active_env():
-    """AgentManager.__init__ 接收 config_base[sandbox] 时把 yaml 值写入 active env.
+    """AgentManager.__init__ 接收 config_base[sandbox] 时把 yaml 值写入 active tip/ns."""
+    from jiuwenclaw.local_env_config import get_active_env
 
-    场景 (用户报告的 bug): AgentServer 启动时无 sandbox 配置, reload config 下发
-    yaml sandbox 后第一个请求触发 _ensure_agent_manager → AgentManager(config_base=yaml).
-    此前 lazy-path 首次 _create_sys_operation 在 reload_agent_config overlay 绑定之前
-    执行, 读到的是 env-only (默认 local) 值。__init__ 在 active env 写入 yaml 后,
-    首次 _create_sys_operation 直接读到 yaml 值, 无需依赖后续 overlay 绑定。
-    """
     yaml_sandbox = {"url": "http://init-sb/v1", "type": "init-type", "enabled": True}
 
     manager = AgentManager(
@@ -1076,23 +1135,19 @@ def test_agent_manager_init_applies_yaml_sandbox_to_active_env():
         config_base={"react": {"agent_name": "a"}, "sandbox": yaml_sandbox},
     )
 
-    # active env 已写入 yaml 翻译后的 sandbox 值
-    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_URL"] == "http://init-sb/v1"
-    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_TYPE"] == "init-type"
-    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
-    # os.environ 也应该同步
-    assert os.environ.get("JIUWENCLAW_SANDBOX_URL") == "http://init-sb/v1"
+    active = get_active_env(service_id="s1", agent_id="a1")
+    assert active["JIUWENCLAW_SANDBOX_URL"] == "http://init-sb/v1"
+    assert active["JIUWENCLAW_SANDBOX_TYPE"] == "init-type"
+    assert active["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
+    assert os.environ.get("s1__a1__JIUWENCLAW_SANDBOX_URL") == "http://init-sb/v1"
     assert manager._latest_config_base["sandbox"] is yaml_sandbox
 
 
 @pytest.mark.asyncio
 async def test_agent_manager_reload_stages_yaml_sandbox_for_promote():
-    """reload_agents_config 收到 config['sandbox'] yaml 时 stage 翻译后的 env overlay.
+    """reload_agents_config 收到 config['sandbox'] yaml 时 stage 到该 Manager 的 tip 袋."""
+    from jiuwenclaw.local_env_config import get_active_env
 
-    场景: AgentManager 已存在但有未完成会话 (is_working=True) 时, stage 不 promote.
-    下一次 promote_staged_env (会话结束后) 把 yaml 值写入 active env, 新 session 的
-    懒加载 _create_sys_operation 才能读到。
-    """
     manager = AgentManager(agent_id="a1", service_id="s1")
     mock_agent = MagicMock()
     mock_agent.reload_agent_config = AsyncMock(return_value=ReloadResult(deferred=True))
@@ -1106,22 +1161,23 @@ async def test_agent_manager_reload_stages_yaml_sandbox_for_promote():
             {"OTHER_KEY": "x"},
         )
 
-    # is_working=True → 不 promote, 但 yaml 翻译值已 stage
-    assert get_staged_env().get("JIUWENCLAW_SANDBOX_URL") == "http://reload-sb/v1"
-    assert get_staged_env().get("JIUWENCLAW_SANDBOX_TYPE") == "reload-type"
-    assert get_staged_env().get("JIUWENCLAW_SANDBOX_ENABLED") == "true"
-    # 尚未写入 active env
-    assert "JIUWENCLAW_SANDBOX_URL" not in ENV_CONFIG_DICT
+    staged = get_staged_env(service_id="s1", agent_id="a1")
+    assert staged.get("JIUWENCLAW_SANDBOX_URL") == "http://reload-sb/v1"
+    assert staged.get("JIUWENCLAW_SANDBOX_TYPE") == "reload-type"
+    assert staged.get("JIUWENCLAW_SANDBOX_ENABLED") == "true"
+    assert "JIUWENCLAW_SANDBOX_URL" not in get_active_env(service_id="s1", agent_id="a1")
 
-    # promote 后写入 active env
-    promote_staged_env()
-    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_URL"] == "http://reload-sb/v1"
-    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
+    promote_staged_env(service_id="s1", agent_id="a1")
+    active = get_active_env(service_id="s1", agent_id="a1")
+    assert active["JIUWENCLAW_SANDBOX_URL"] == "http://reload-sb/v1"
+    assert active["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
 
 
 @pytest.mark.asyncio
 async def test_agent_manager_reload_promotes_yaml_sandbox_when_idle():
-    """reload_agents_config 在所有会话空闲 (is_working=False) 时直接 promote yaml sandbox."""
+    """reload_agents_config 空闲时直接 promote yaml sandbox 到该 Manager tip 袋."""
+    from jiuwenclaw.local_env_config import get_active_env
+
     manager = AgentManager(agent_id="a1", service_id="s1")
     mock_agent = MagicMock()
     mock_agent.reload_agent_config = AsyncMock(return_value=ReloadResult(applied=True))
@@ -1132,7 +1188,479 @@ async def test_agent_manager_reload_promotes_yaml_sandbox_when_idle():
     with patch.object(AgentManager, "is_working", return_value=False):
         await manager.reload_agents_config({"sandbox": yaml_sandbox}, {})
 
-    # is_working=False → promote_staged_env 执行 → yaml 值直接写入 active env
-    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_URL"] == "http://idle-sb/v1"
-    assert ENV_CONFIG_DICT["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
-    assert get_staged_env() == {}
+    active = get_active_env(service_id="s1", agent_id="a1")
+    assert active["JIUWENCLAW_SANDBOX_URL"] == "http://idle-sb/v1"
+    assert active["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
+    assert get_staged_env(service_id="s1", agent_id="a1") == {}
+
+
+@pytest.mark.asyncio
+async def test_reload_tenant_config_only_affects_target_manager():
+    from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+
+    TenantAgentPool.reset_instance()
+    pool = TenantAgentPool.get_instance()
+
+    office_manager = MagicMock()
+    office_manager.reload_agents_config = AsyncMock(
+        return_value=ReloadResult(applied=1)
+    )
+    assistant_manager = MagicMock()
+    assistant_manager.reload_agents_config = AsyncMock(
+        return_value=ReloadResult(applied=1)
+    )
+
+    async def _fake_get(key):
+        if key == ("office", "default"):
+            return office_manager
+        if key == ("assistant", "default"):
+            return assistant_manager
+        return None
+
+    pool._agent_wrappers.get = _fake_get
+
+    await pool.reload_tenant_config(
+        "office",
+        "default",
+        {"models": {"default": {"model": "office-model"}}},
+        {"OFFICE_ONLY": "1"},
+    )
+
+    office_manager.reload_agents_config.assert_awaited_once()
+    assistant_manager.reload_agents_config.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_officeclaw_reload_without_ids_targets_default_tenant():
+    import asyncio
+
+    from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
+    from jiuwenclaw.schema.agent import AgentRequest
+    from jiuwenclaw.schema.message import ReqMethod
+
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = MagicMock()
+    server._agent_manager.reload_tenant_config = AsyncMock(
+        return_value=ReloadAggregateResult()
+    )
+    server._agent_manager.reload_agents_config = AsyncMock(
+        return_value=ReloadAggregateResult()
+    )
+    ws = MagicMock()
+    ws.send = AsyncMock()
+    request = AgentRequest(
+        request_id="legacy-reload",
+        channel_id="officeclaw",
+        req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+        params={"config": {}, "env": {"MODEL_NAME": "legacy-model"}},
+        is_stream=False,
+        timestamp=0.0,
+    )
+
+    hook_registry = MagicMock()
+    hook_registry.trigger = AsyncMock()
+    with patch(
+        "jiuwenclaw.extensions.registry.ExtensionRegistry.get_instance",
+        return_value=hook_registry,
+    ):
+        await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+
+    server._agent_manager.reload_tenant_config.assert_awaited_once_with(
+        "default",
+        "default",
+        config={},
+        env={"MODEL_NAME": "legacy-model"},
+        reload_trace_id="legacy-reload",
+    )
+    server._agent_manager.reload_agents_config.assert_not_awaited()
+    ws.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reload_tenant_config_uncached_saves_without_error():
+    from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+    from jiuwenclaw.agentserver.tenant_catalog_registry import TenantCatalogRegistry
+    from jiuwenclaw.schema.agent import AgentRequest
+
+    TenantAgentPool.reset_instance()
+    pool = TenantAgentPool.get_instance()
+
+    async def _fake_get(_key: str):
+        return None
+
+    pool._agent_wrappers.get = _fake_get
+
+    result = await pool.reload_tenant_config(
+        "office",
+        "default",
+        {"memory": {"engine": "builtin"}},
+        {"MODEL": "m"},
+    )
+
+    assert result.applied == 0
+    assert result.failed == []
+    spec = TenantCatalogRegistry.get_instance().get("default", "office")
+    assert spec is not None
+    assert spec.config["memory"] == {"engine": "builtin"}
+    assert spec.env["MODEL"] == "m"
+    request = AgentRequest(
+        request_id="r1",
+        channel_id="officeclaw",
+        agent_id="office",
+        service_id="default",
+        params={},
+    )
+    assert TenantAgentPool.require_officeclaw_agent(request) is None
+
+
+@pytest.mark.asyncio
+async def test_reload_tenant_config_catalog_isolated_on_cold_start():
+    from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+
+    TenantAgentPool.reset_instance()
+    pool = TenantAgentPool.get_instance()
+    office_config = {"models": {"default": {"model": "office-model"}}}
+
+    await pool.reload_tenant_config(
+        "office",
+        "default",
+        office_config,
+        {"OFFICE_ONLY": "1"},
+    )
+
+    with patch("jiuwenclaw.agentserver.agent_manager.AgentManager") as manager_cls:
+        manager_cls.side_effect = [MagicMock(), MagicMock()]
+        await pool._ensure_agent_manager("office", "default")
+        await pool._ensure_agent_manager("default", "default")
+
+    office_kwargs = manager_cls.call_args_list[0].kwargs
+    default_kwargs = manager_cls.call_args_list[1].kwargs
+    assert office_kwargs["config_base"]["models"] == office_config["models"]
+    assert office_kwargs["env_overrides"]["OFFICE_ONLY"] == "1"
+    assert default_kwargs["config_base"] is None
+    assert default_kwargs["env_overrides"] is None
+
+
+@pytest.mark.asyncio
+async def test_broadcast_reload_without_managers_saves_default_catalog():
+    from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+    from jiuwenclaw.agentserver.tenant_catalog_registry import TenantCatalogRegistry
+
+    TenantAgentPool.reset_instance()
+    pool = TenantAgentPool.get_instance()
+
+    result = await pool.reload_agents_config(
+        {"memory": {"engine": "builtin"}},
+        {"MODEL": "m"},
+    )
+
+    assert result.applied == 0
+    spec = TenantCatalogRegistry.get_instance().get("default", "default")
+    assert spec is not None
+    assert spec.config["memory"] == {"engine": "builtin"}
+    assert spec.env["MODEL"] == "m"
+
+
+@pytest.mark.asyncio
+async def test_reload_agent_config_uses_service_id_param():
+    from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+
+    TenantAgentPool.reset_instance()
+    pool = TenantAgentPool.get_instance()
+
+    mock_manager = MagicMock()
+    mock_manager.reload_agent_config = AsyncMock()
+    pool._ensure_agent_manager = AsyncMock(return_value=mock_manager)
+
+    await pool.reload_agent_config("office", service_id="")
+
+    pool._ensure_agent_manager.assert_awaited_once_with("office", "default")
+    mock_manager.reload_agent_config.assert_awaited_once()
+
+
+def _gateway_full_snapshot(**extra: str) -> dict[str, str]:
+    base = {
+        "API_KEY": "main-key",
+        "MODEL_NAME": "glm-5.1",
+        "API_BASE": "https://example/v1",
+    }
+    base.update(extra)
+    return base
+
+
+def test_apply_env_removals_bare_pop_only_default_default():
+    from jiuwenclaw.local_env_config import apply_env_removals, make_env_ns_key
+
+    os.environ["VISION_API_KEY"] = "bare-legacy"
+    apply_env_overrides_to_active(
+        {"VISION_API_KEY": "office-vis"},
+        service_id="default",
+        agent_id="office",
+    )
+
+    apply_env_removals(
+        {"VISION_API_KEY": None},
+        service_id="default",
+        agent_id="office",
+    )
+
+    assert os.environ.get("VISION_API_KEY") == "bare-legacy"
+    assert (
+        os.environ.get(make_env_ns_key("default", "office", "VISION_API_KEY")) is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_deep_adapter_create_binds_request_env_namespace(monkeypatch):
+    from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+        JiuWenClawDeepAdapter,
+    )
+    from jiuwenclaw.local_env_config import (
+        get_active_env,
+        resolve_env_ns,
+        set_os_environ,
+    )
+
+    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter._env_service_id = "service-a"
+    adapter._env_agent_id = "office"
+    observed = {}
+
+    async def _fake_create(self, config=None, *, mode="agent.plan", session_id=None):
+        observed["namespace"] = resolve_env_ns()
+        set_os_environ("VISION_API_KEY", "office-vis")
+
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_create_instance_in_env_ns",
+        _fake_create,
+    )
+
+    await adapter.create_instance()
+
+    assert observed["namespace"] == ("service-a", "office")
+    assert get_active_env("service-a", "office")["VISION_API_KEY"] == "office-vis"
+    assert "VISION_API_KEY" not in get_active_env("default", "default")
+
+
+@pytest.mark.asyncio
+async def test_broadcast_reload_omission_scoped_per_manager():
+    from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+    from jiuwenclaw.local_env_config import make_env_ns_key
+
+    TenantAgentPool.reset_instance()
+    pool = TenantAgentPool.get_instance()
+
+    apply_env_overrides_to_active(
+        {
+            "VISION_API_KEY": "office-vis",
+            "VISION_API_BASE": "https://office/v1",
+            "VISION_MODEL_NAME": "office-vl",
+            "VISION_PROVIDER": "OpenAI",
+        },
+        service_id="default",
+        agent_id="office",
+    )
+    apply_env_overrides_to_active(
+        {
+            "VISION_API_KEY": "assistant-vis",
+            "VISION_API_BASE": "https://assistant/v1",
+            "VISION_MODEL_NAME": "assistant-vl",
+            "VISION_PROVIDER": "OpenAI",
+        },
+        service_id="default",
+        agent_id="assistant",
+    )
+
+    office_manager = MagicMock()
+    office_manager.env_service_id = "default"
+    office_manager.env_agent_id = "office"
+    office_manager.reload_agents_config = AsyncMock(return_value=ReloadAggregateResult())
+
+    async def _fake_keys():
+        return ["office_default"]
+
+    async def _fake_get(key: str):
+        if key == "office_default":
+            return office_manager
+        return None
+
+    pool._agent_wrappers.keys = _fake_keys
+    pool._agent_wrappers.get = _fake_get
+
+    previous = _gateway_full_snapshot(
+        VISION_API_KEY="office-vis",
+        VISION_API_BASE="https://office/v1",
+        VISION_MODEL_NAME="office-vl",
+        VISION_PROVIDER="OpenAI",
+    )
+    new_env = _gateway_full_snapshot()
+
+    await pool.reload_agents_config(None, new_env)
+
+    assert (
+        os.environ.get(make_env_ns_key("default", "office", "VISION_API_KEY")) is None
+    )
+    assert (
+        os.environ.get(make_env_ns_key("default", "assistant", "VISION_API_KEY"))
+        == "assistant-vis"
+    )
+    office_manager.reload_agents_config.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_force_apply_clears_stale_pending_reload():
+    adapter = _DeepAdapterReloadHarness.build(working=False)
+    adapter.configure_for_force_apply_test()
+    adapter._pending_reload = (
+        {"models": {"default": {}}},
+        {"API_BASE": "http://stale/v1"},
+        False,
+    )
+
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        return_value={"react": {"agent_name": "a"}},
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
+        return_value="mfp",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_engine",
+        return_value="builtin",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_manager_cache",
+        new=AsyncMock(),
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_wiki_manager_cache",
+        new=AsyncMock(),
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_task_memory_service",
+    ):
+        result = await adapter.reload_agent_config(
+            config_base={"models": {"default": {"model": "sync-model"}}},
+            env_overrides={"MODEL_NAME": "sync-model"},
+            _force_apply=True,
+        )
+
+    assert result.applied is True
+    assert adapter.get_pending_reload() is None
+
+
+@pytest.mark.asyncio
+async def test_apply_sync_config_idle_clears_stale_gateway_pending():
+    """Idle sync force-apply must drop stale Gateway pending (Scheme A).
+
+    Complements busy-only test_sync_preempt_clears_staged_rebuilds_pending:
+    after sync configures the idle adapter, a later pending drain must not
+    roll tip/configure back to the old Gateway snapshot.
+    """
+    manager = AgentManager(agent_id="office", service_id="default")
+    adapter = _DeepAdapterReloadHarness.build(working=False)
+    adapter.configure_for_force_apply_test()
+    adapter._pending_reload = (
+        {"react": {"agent_name": "gateway-stale"}},
+        {"MODEL_NAME": "gateway-stale-model"},
+        False,
+    )
+
+    mock_claw = MagicMock()
+    mock_claw.is_working.return_value = False
+    mock_claw._adapter = adapter
+    manager.agents["officeclaw"] = {"agent": {"live": mock_claw}}
+
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        return_value={"react": {"agent_name": "a"}},
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
+        return_value="mfp",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_engine",
+        return_value="builtin",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_manager_cache",
+        new=AsyncMock(),
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.invalidate_memory_wiki_manager_cache",
+        new=AsyncMock(),
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_task_memory_service",
+    ), patch.object(
+        manager, "_sync_agent_memory_cache", new=AsyncMock()
+    ):
+        result = await manager.apply_sync_config(
+            {"react": {"agent_name": "office-sync"}},
+            {"MODEL_NAME": "sync-idle-model", "API_KEY": "k", "API_BASE": "http://x"},
+        )
+
+    assert result.applied == 1
+    assert result.failed == []
+    assert adapter.get_pending_reload() is None
+
+
+@pytest.mark.asyncio
+async def test_reload_invalidates_only_own_workspace_memory_cache():
+    """Single-tenant reload must not wipe other tenants' INDEX_CACHE entries."""
+    from jiuwenclaw.agentserver.memory.manager import build_index_cache_key
+
+    ws_a = "/tmp/tenant-a-ws"
+    ws_b = "/tmp/tenant-b-ws"
+    key_a = build_index_cache_key("default", ws_a, "fp-a")
+    key_b = build_index_cache_key("default", ws_b, "fp-b")
+
+    mgr_a = MagicMock()
+    mgr_a.closed = False
+    mgr_a.close = AsyncMock()
+    mgr_a.cache_key = key_a
+    mgr_a.workspace_dir = ws_a
+    mgr_a.file_watcher_active = False
+
+    mgr_b = MagicMock()
+    mgr_b.closed = False
+    mgr_b.close = AsyncMock()
+    mgr_b.cache_key = key_b
+    mgr_b.workspace_dir = ws_b
+    mgr_b.file_watcher_active = False
+
+    INDEX_CACHE[key_a] = mgr_a
+    INDEX_CACHE[key_b] = mgr_b
+
+    adapter = _DeepAdapterReloadHarness.build(working=False)
+    adapter.configure_for_force_apply_test()
+    adapter._workspace_dir = ws_a
+    # Force invalidate path without relying on embed drift alone.
+    adapter._embed_fingerprint = "same"
+    adapter._embed_config_fingerprint = MagicMock(return_value="same")
+    adapter._memory_cache_fingerprint = "old-mfp"
+
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        return_value={"react": {"agent_name": "a"}},
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
+        return_value="new-mfp",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_engine",
+        return_value="builtin",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_task_memory_service",
+    ) as mock_clear_task:
+        result = await adapter.reload_agent_config(
+            config_base=None,
+            env_overrides=None,
+            _force_apply=True,
+            _invalidate_memory_cache=True,
+        )
+
+    assert result.applied is True
+    assert key_a not in INDEX_CACHE
+    assert key_b in INDEX_CACHE
+    assert INDEX_CACHE[key_b] is mgr_b
+    # Memory-only invalidate must not wipe the process-wide task memory pool.
+    mock_clear_task.assert_not_called()

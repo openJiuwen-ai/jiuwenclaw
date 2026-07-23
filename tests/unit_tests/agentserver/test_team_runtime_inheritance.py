@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 from openjiuwen.core.foundation.tool import ToolCard
 
+from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
+    MemberRailConfig,
     filter_inheritable_ability_cards,
 )
 
@@ -51,3 +53,37 @@ def test_filter_inheritable_ability_cards_includes_extended_claw_tools():
     assert "user_todos" in inherited_names
     assert "task_tool" in inherited_names
     assert "send_file_to_user" not in inherited_names
+
+
+def test_member_rail_config_defaults_tenant_to_default():
+    cfg = MemberRailConfig(skills_dir="/tmp/skills")
+    assert cfg.service_id == "default"
+    assert cfg.agent_id == "default"
+
+
+def test_runtime_prompt_rail_office_tenant_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
+        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
+    )
+    rail = RuntimePromptRail(service_id="default", agent_id="office")
+    dirs = rail._get_workspace_dirs()
+    config = dirs["config"].replace("\\", "/")
+    workspace = dirs["workspace"].replace("\\", "/")
+    assert config.endswith("service_default/agent_office/config")
+    assert "service_default/agent_office/agent/jiuwenclaw_workspace" in workspace
+    assert dirs["memory"].replace("\\", "/").endswith(
+        "service_default/agent_office/agent/jiuwenclaw_workspace/memory"
+    )
+
+
+def test_runtime_prompt_rail_none_tenant_normalizes_to_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
+        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
+    )
+    rail = RuntimePromptRail()
+    dirs = rail._get_workspace_dirs()
+    assert dirs["config"].replace("\\", "/").endswith(
+        "service_default/agent_default/config"
+    )

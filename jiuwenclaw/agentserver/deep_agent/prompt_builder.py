@@ -8,7 +8,7 @@ import sys
 from openjiuwen.harness.prompts import SystemPromptBuilder, PromptSection, resolve_language
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.runtime.pip_env import get_runtime_python, get_runtime_venv_dir
-from jiuwenclaw.utils import logger, get_agent_root_dir
+from jiuwenclaw.utils import logger, resolve_tenant_agent_root_dir
 
 
 def _should_show_cron_tools() -> bool:
@@ -277,7 +277,7 @@ def _subagent_principle_prompt(language: str) -> str:
 
 def _subagent_workspace_prompt(language: str, workspace_dir: Path | None = None) -> str:
     """Workspace prompt for subagent."""
-    ws = workspace_dir or Path(get_agent_root_dir())
+    ws = workspace_dir or resolve_tenant_agent_root_dir()
     if language == "cn" or language == "zh":
         return f"""## 工作区
 

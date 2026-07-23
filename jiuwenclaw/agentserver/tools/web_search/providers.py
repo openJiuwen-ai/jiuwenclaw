@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any
 from urllib.parse import urlparse
 
@@ -33,6 +32,7 @@ from jiuwenclaw.agentserver.tools.web_search.types import (
     WebSearchRecord,
     WebSearchSettings,
 )
+from jiuwenclaw.local_env_config import read_env_if_set
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ def paid_provider_available(name: str) -> bool:
     if name == "petal":
         return enable_petal_search()
     env_key = PAID_API_KEYS.get(name)
-    return bool(env_key and os.environ.get(env_key))
+    return bool(env_key and read_env_if_set(env_key))
 
 
 def any_paid_provider_available(order: tuple[str, ...]) -> bool:

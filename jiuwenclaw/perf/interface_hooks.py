@@ -20,6 +20,8 @@ def set_perf_summary_context(
     session_id: str = "",
     request_id: str = "",
     mode: str = "agent.plan",
+    service_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """Bind perf request context at parent-agent request entry."""
     if rail is None:
@@ -32,6 +34,8 @@ def set_perf_summary_context(
             session_id=session_id,
             request_id=request_id,
             mode=mode,
+            service_id=service_id,
+            agent_id=agent_id,
         ),
     )
 

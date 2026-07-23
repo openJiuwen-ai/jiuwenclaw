@@ -15,7 +15,7 @@ from jiuwenclaw.agentserver.tools import (
     tool,
 )
 from jiuwenclaw.local_env_config import read_env
-from jiuwenclaw.utils import get_user_workspace_dir
+from jiuwenclaw.utils import resolve_tenant_agent_workspace_dir, resolve_tenant_env_ns
 
 logger = logging.getLogger(__name__)
 
@@ -72,21 +72,42 @@ class TaskMemoryResolvedConfig:
         return TaskMemoryConfigFingerprint.from_resolved(self)
 
 
-# Path for persisting task_add entries
-def _get_task_data_path() -> str:
-    return str(get_user_workspace_dir() / "agent" / "workspace" / "task-data.json")
+# Cache key: tenant scope + config fingerprint (never fingerprint-only).
+TaskMemoryCacheKey = tuple[str, str, TaskMemoryConfigFingerprint]
+
+
+def _get_task_data_path(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> str:
+    """Persist task_add entries under the current tenant agent workspace."""
+    return str(
+        resolve_tenant_agent_workspace_dir(service_id, agent_id) / "task-data.json"
+    )
 
 
 _connector = JSONFileConnector(indent=2)
 
-# Fingerprint-keyed pool (overlay / hot-reload may yield multiple active configs).
-_SERVICE_CACHE: dict[TaskMemoryConfigFingerprint, Any] = {}
+# Scope-keyed pool (overlay / hot-reload may yield multiple active configs).
+_SERVICE_CACHE: dict[TaskMemoryCacheKey, Any] = {}
 _SERVICE_CACHE_MAX = 32
 
 
 def task_memory_service_cache_size() -> int:
     """Return the number of cached TaskMemoryService instances."""
     return len(_SERVICE_CACHE)
+
+
+def _resolve_task_memory_scope(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> tuple[str, str]:
+    """Resolve (service_id, agent_id): explicit > bound env_ns > TypeError.
+
+    Never silently falls back to default/default.
+    """
+    return resolve_tenant_env_ns(service_id, agent_id)
 
 
 def _first_non_empty(*values: Any) -> str:
@@ -184,30 +205,65 @@ def task_memory_config_fingerprint(cfg: dict[str, Any] | None = None) -> TaskMem
     return resolve_task_memory_config(cfg).fingerprint()
 
 
-def clear_task_memory_service() -> None:
-    """Drop all cached TaskMemoryService instances (e.g. after hot-reload)."""
-    count = len(_SERVICE_CACHE)
-    _SERVICE_CACHE.clear()
+def clear_task_memory_service(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    fingerprint: TaskMemoryConfigFingerprint | None = None,
+    clear_all: bool = False,
+) -> int:
+    """Drop cached TaskMemoryService instances.
+
+    - ``clear_all=True``: wipe the whole process pool (tests / shutdown only).
+    - Otherwise requires tenant scope (explicit or bound env_ns).
+      - with ``fingerprint``: pop that one key
+      - without: drop all entries for ``(service_id, agent_id)``
+    """
+    if clear_all:
+        count = len(_SERVICE_CACHE)
+        _SERVICE_CACHE.clear()
+        logger.debug(
+            "[Experience] TaskMemoryService cache cleared all (%d entr%s)",
+            count,
+            "y" if count == 1 else "ies",
+        )
+        return count
+
+    sid, aid = _resolve_task_memory_scope(service_id, agent_id)
+    if fingerprint is not None:
+        removed = 1 if _SERVICE_CACHE.pop((sid, aid, fingerprint), None) is not None else 0
+    else:
+        keys = [k for k in _SERVICE_CACHE if k[0] == sid and k[1] == aid]
+        for key in keys:
+            _SERVICE_CACHE.pop(key, None)
+        removed = len(keys)
     logger.debug(
-        "[Experience] TaskMemoryService cache cleared (%d entr%s)",
-        count,
-        "y" if count == 1 else "ies",
+        "[Experience] TaskMemoryService cache cleared service_id=%s agent_id=%s "
+        "fingerprint=%s removed=%d",
+        sid,
+        aid,
+        fingerprint is not None,
+        removed,
     )
+    return removed
 
 
 def _evict_service_cache_if_needed() -> None:
     while len(_SERVICE_CACHE) >= _SERVICE_CACHE_MAX:
-        oldest_fp = next(iter(_SERVICE_CACHE))
-        _SERVICE_CACHE.pop(oldest_fp, None)
+        oldest_key = next(iter(_SERVICE_CACHE))
+        _SERVICE_CACHE.pop(oldest_key, None)
         logger.debug(
-            "[Experience] TaskMemoryService cache evicted oldest fingerprint (llm=%s)",
-            oldest_fp.llm_model,
+            "[Experience] TaskMemoryService cache evicted oldest key "
+            "service_id=%s agent_id=%s llm=%s",
+            oldest_key[0],
+            oldest_key[1],
+            oldest_key[2].llm_model,
         )
 
 
 def _build_task_memory_service(
     resolved: TaskMemoryResolvedConfig,
-    fp: TaskMemoryConfigFingerprint,
+    cache_key: TaskMemoryCacheKey,
 ) -> Any | None:
     """Create TaskMemoryService for *resolved*; return None when misconfigured."""
     if TaskMemoryService is None:
@@ -246,9 +302,12 @@ def _build_task_memory_service(
 
         service = TaskMemoryService(**kwargs)
         _evict_service_cache_if_needed()
-        _SERVICE_CACHE[fp] = service
+        _SERVICE_CACHE[cache_key] = service
         logger.info(
-            "[Experience] TaskMemoryService initialized (llm=%s, embed=%s, base=%s, cache_size=%d)",
+            "[Experience] TaskMemoryService initialized "
+            "(service_id=%s agent_id=%s llm=%s, embed=%s, base=%s, cache_size=%d)",
+            cache_key[0],
+            cache_key[1],
             llm_model,
             embedding_model,
             api_base or "(default)",
@@ -289,20 +348,28 @@ def _is_task_memory_enabled() -> bool:
     return bool(task_memory_cfg.get("enabled", False))
 
 
-def get_task_memory_service():
-    """Return TaskMemoryService for the current config fingerprint (pooled by fp)."""
+def get_task_memory_service(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    cfg: dict[str, Any] | None = None,
+):
+    """Return TaskMemoryService for the current tenant + config fingerprint."""
     from jiuwenclaw.config import get_config
 
-    cfg = get_config()
+    sid, aid = _resolve_task_memory_scope(service_id, agent_id)
+    if cfg is None:
+        cfg = get_config()
     resolved = resolve_task_memory_config(cfg)
     fp = resolved.fingerprint()
+    cache_key: TaskMemoryCacheKey = (sid, aid, fp)
 
-    cached = _SERVICE_CACHE.get(fp)
+    cached = _SERVICE_CACHE.get(cache_key)
     if cached is not None:
         _apply_ce_defaults(resolved)
         return cached
 
-    return _build_task_memory_service(resolved, fp)
+    return _build_task_memory_service(resolved, cache_key)
 
 
 @tool(

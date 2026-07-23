@@ -30,12 +30,15 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 
 from jiuwenclaw.utils import (
-    get_agent_root_dir,
-    get_agent_skills_dir,
     get_builtin_skills_dir,
+    get_multi_tenant_skill_dirs,
     is_package_installation,
+    resolve_tenant_agent_root_dir,
+    resolve_tenant_env_ns,
 )
 from jiuwenclaw.evolution.schema import EvolutionEntry, EvolutionFile
+from jiuwenclaw.config import get_config
+from jiuwenclaw.local_env_config import get_local_config
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +92,22 @@ def resolve_string_or_list_config(value: Any) -> list[str]:
     return []
 
 
-_SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
-_SKILLNET_MAX_RETRIES: int = int(os.environ.get("SKILLNET_MAX_RETRIES", "3"))
+def _skillnet_download_timeout() -> int:
+    return int(str(get_local_config("SKILLNET_DOWNLOAD_TIMEOUT", "60") or "60"))
+
+
+def _skillnet_max_retries() -> int:
+    return int(str(get_local_config("SKILLNET_MAX_RETRIES", "3") or "3"))
+
+
+def _openjiuwen_market_timeout() -> float:
+    return float(str(get_local_config("OPENJIUWEN_MARKET_TIMEOUT", "60") or "60"))
+
+
+def _import_local_remote_timeout() -> float:
+    return float(str(get_local_config("IMPORT_LOCAL_REMOTE_TIMEOUT", "60") or "60"))
+
+
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
 _SKILLNET_PROXY_ENV_KEYS = (
@@ -104,10 +121,8 @@ _SKILLNET_PROXY_ENV_KEYS = (
 _SKILLNET_NO_PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy")
 _FREE_SEARCH_DEFAULT_NO_PROXY = "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.com"
 
-_OPENJIUWEN_MARKET_TIMEOUT: float = float(os.environ.get("OPENJIUWEN_MARKET_TIMEOUT", "60"))
 _OPENJIUWEN_MARKET_BASE_URL_DEFAULT = "https://teamskills.openjiuwen.com"
 _OPENJIUWEN_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = ("openjiuwen-market.obs.*.myhuaweicloud.com",)
-_IMPORT_LOCAL_REMOTE_TIMEOUT: float = float(os.environ.get("IMPORT_LOCAL_REMOTE_TIMEOUT", "60"))
 _IMPORT_LOCAL_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = ("*.obs.*.myhuaweicloud.com",)
 
 
@@ -131,15 +146,23 @@ _EVOLUTION_FILENAME = "evolutions.json"
 
 
 def _get_agent_root_dir() -> "Path":
-    return get_agent_root_dir()
+    try:
+        from jiuwenclaw.agentserver.tenant_context import get_bound_agent_root
+
+        bound = get_bound_agent_root()
+        if bound is not None:
+            return bound
+    except ImportError:
+        logger.debug("tenant_context unavailable for skill agent root", exc_info=True)
+    return resolve_tenant_agent_root_dir()
 
 
 def _get_marketplace_dir() -> "Path":
-    return get_agent_skills_dir() / "_marketplace"
+    return get_multi_tenant_skill_dirs(*resolve_tenant_env_ns())[0] / "_marketplace"
 
 
 def _get_state_file() -> "Path":
-    return get_agent_skills_dir() / "skills_state.json"
+    return get_multi_tenant_skill_dirs(*resolve_tenant_env_ns())[0] / "skills_state.json"
 
 
 class SkillNetEmptyDownloadError(Exception):
@@ -167,14 +190,14 @@ def _is_valid_http_mirror_url(url: str) -> bool:
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
-    raw = str(os.environ.get(name, "") or "").strip().lower()
+    raw = str(get_local_config(name, "") or "").strip().lower()
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on", "enabled"}
 
 
 def _get_free_search_proxy_url() -> str:
-    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+    return str(get_local_config(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
 
 
 def _free_search_ssl_verify() -> bool:
@@ -337,9 +360,15 @@ async def _async_safe_rmtree(path: Path) -> bool:
 class SkillManager:
     """Skill 管理器，对应 skills.* 请求方法."""
 
-    def __init__(self, workspace_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        workspace_dir: str | None = None,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
         # 若传入 workspace_dir（harness adapter 使用），优先通过 Workspace/WorkspaceNode
-        # 解析 skills 路径；否则使用全局默认路径（react adapter 或无参数时）。
+        # 解析 skills 路径；否则按显式 sid/aid 或 bound env_ns 解析租户 skills 目录。
         if workspace_dir is not None:
             try:
                 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
@@ -355,10 +384,11 @@ class SkillManager:
             self._marketplace_dir: Path = self._skills_dir / "_marketplace"
             self._state_file: Path = self._skills_dir / "skills_state.json"
         else:
-            self._agent_root = _get_agent_root_dir()
-            self._skills_dir = get_agent_skills_dir()
-            self._marketplace_dir = _get_marketplace_dir()
-            self._state_file = _get_state_file()
+            sid, aid = resolve_tenant_env_ns(service_id, agent_id)
+            self._skills_dir = get_multi_tenant_skill_dirs(sid, aid)[0]
+            self._agent_root = resolve_tenant_agent_root_dir(sid, aid)
+            self._marketplace_dir = self._skills_dir / "_marketplace"
+            self._state_file = self._skills_dir / "skills_state.json"
         self._skills_dir.mkdir(parents=True, exist_ok=True)
         self._state: dict[str, Any] = self._load_state()
         # SkillNet 异步安装：install 立即返回 install_id，后台下载；完成后调用 hook 重载 Agent
@@ -1293,7 +1323,7 @@ class SkillManager:
                     "order_by": "install_count",
                     "desc": "true",
                 },
-                timeout=_OPENJIUWEN_MARKET_TIMEOUT,
+                timeout=_openjiuwen_market_timeout(),
             )
             items = data.get("items", []) if isinstance(data, dict) else []
             normalized: list[dict[str, Any]] = []
@@ -1340,7 +1370,7 @@ class SkillManager:
             artifact_data = await self._openjiuwen_http_get_data(
                 f"/api/v1/artifacts/{asset_id}",
                 params={"version": version_str} if version_str else None,
-                timeout=_OPENJIUWEN_MARKET_TIMEOUT,
+                timeout=_openjiuwen_market_timeout(),
             )
             if not isinstance(artifact_data, dict):
                 return {"success": False, "detail": "marketplace 返回数据格式错误"}
@@ -1766,7 +1796,7 @@ class SkillManager:
     ) -> dict[str, Any]:
         """Download archive by URL, extract by type, then reuse local import flow."""
         self._assert_import_local_download_url_allowed(download_url)
-        timeout = max(30.0, _IMPORT_LOCAL_REMOTE_TIMEOUT)
+        timeout = max(30.0, _import_local_remote_timeout())
         logger.info(
             "[SkillManager] remote import start: url=%s force=%s timeout=%s",
             download_url,
@@ -2153,7 +2183,7 @@ class SkillManager:
         """
         results: list[dict] = []
         builtin_dir = get_builtin_skills_dir()
-        user_skills_dir = get_agent_skills_dir()
+        user_skills_dir = self._skills_dir
 
         if not builtin_dir.exists() or not builtin_dir.is_dir():
             return results
@@ -2417,12 +2447,15 @@ class SkillManager:
 
     @staticmethod
     def _get_openjiuwen_market_base_url() -> str:
-        raw = (os.getenv("OPENJIUWEN_MARKET_BASE_URL") or _OPENJIUWEN_MARKET_BASE_URL_DEFAULT).strip()
+        raw = (
+            get_local_config("OPENJIUWEN_MARKET_BASE_URL", "")
+            or _OPENJIUWEN_MARKET_BASE_URL_DEFAULT
+        ).strip()
         return raw.rstrip("/")
 
     @staticmethod
     def _get_openjiuwen_allowed_download_hosts() -> list[str]:
-        raw = (os.getenv("OPENJIUWEN_ALLOWED_DOWNLOAD_HOSTS") or "").strip()
+        raw = str(get_local_config("OPENJIUWEN_ALLOWED_DOWNLOAD_HOSTS", "") or "").strip()
         if not raw:
             return list(_OPENJIUWEN_DEFAULT_ALLOWED_DOWNLOAD_HOSTS)
         hosts: list[str] = []
@@ -2435,7 +2468,7 @@ class SkillManager:
 
     @staticmethod
     def _get_import_local_allowed_download_hosts() -> list[str]:
-        raw = (os.getenv("IMPORT_LOCAL_ALLOWED_DOWNLOAD_HOSTS") or "").strip()
+        raw = str(get_local_config("IMPORT_LOCAL_ALLOWED_DOWNLOAD_HOSTS", "") or "").strip()
         if not raw:
             return list(_IMPORT_LOCAL_DEFAULT_ALLOWED_DOWNLOAD_HOSTS)
         hosts: list[str] = []
@@ -2504,7 +2537,7 @@ class SkillManager:
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        timeout: float = _OPENJIUWEN_MARKET_TIMEOUT,
+        timeout: float = _openjiuwen_market_timeout(),
     ) -> Any:
         base_url = self._get_openjiuwen_market_base_url()
         rel_path = path if path.startswith("/") else f"/{path}"
@@ -2640,7 +2673,7 @@ class SkillManager:
         checksum_sha256: str = "",
         timeout: float | None = None,
     ) -> bytes:
-        timeout = max(30.0, timeout or _IMPORT_LOCAL_REMOTE_TIMEOUT)
+        timeout = max(30.0, timeout or _import_local_remote_timeout())
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             resp = await client.get(download_url)
             resp.raise_for_status()
@@ -2680,7 +2713,7 @@ class SkillManager:
         checksum_sha256: str = "",
         timeout: float | None = None,
     ) -> bytes:
-        timeout = max(30.0, timeout or _OPENJIUWEN_MARKET_TIMEOUT)
+        timeout = max(30.0, timeout or _openjiuwen_market_timeout())
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             resp = await client.get(download_url)
             resp.raise_for_status()
@@ -2707,26 +2740,26 @@ class SkillManager:
 
     @staticmethod
     def _get_github_token() -> str:
-        return (os.getenv("GITHUB_TOKEN") or "").strip()
+        return str(get_local_config("GITHUB_TOKEN", "") or "").strip()
 
     @staticmethod
     def _skillnet_eval_llm_params() -> dict[str, str | None]:
         """与主对话一致的 API Key / Base URL / 模型名（config.yaml react 段）."""
         try:
-            from jiuwenclaw.config import get_config
+            cfg = get_config() or {}
         except Exception:
             return {
-                "api_key": (os.getenv("API_KEY") or "").strip() or None,
-                "base_url": (os.getenv("API_BASE") or "").strip() or None,
-                "model": (os.getenv("MODEL_NAME") or "gpt-4o").strip(),
+                "api_key": str(get_local_config("API_KEY", "") or "").strip() or None,
+                "base_url": str(get_local_config("API_BASE", "") or "").strip() or None,
+                "model": str(get_local_config("MODEL_NAME", "gpt-4o") or "gpt-4o").strip(),
             }
 
         cfg = get_config() or {}
         react = cfg.get("react") or {}
         mcc = react.get("model_client_config") or {}
-        api_key = (mcc.get("api_key") or os.getenv("API_KEY") or "").strip()
-        base_url = (mcc.get("api_base") or os.getenv("API_BASE") or "").strip()
-        model = (react.get("model_name") or os.getenv("MODEL_NAME") or "gpt-4o").strip()
+        api_key = (mcc.get("api_key") or get_local_config("API_KEY", "") or "").strip()
+        base_url = (mcc.get("api_base") or get_local_config("API_BASE", "") or "").strip()
+        model = (react.get("model_name") or get_local_config("MODEL_NAME", "gpt-4o") or "gpt-4o").strip()
         if base_url.endswith("/chat/completions"):
             base_url = base_url.rsplit("/chat/completions", 1)[0]
         return {
@@ -2811,7 +2844,7 @@ class SkillManager:
         api = f"https://api.github.com/repos/{owner}/{repo}/contents/{dir_path}?ref={ref}"
         try:
             with _skillnet_network_context():
-                r = dl.session.get(api, timeout=_SKILLNET_DOWNLOAD_TIMEOUT)
+                r = dl.session.get(api, timeout=_skillnet_download_timeout())
         except Exception as exc:
             logger.debug("SkillNet 安装错误上下文: GitHub Contents 请求失败: %s", exc)
             return ""
@@ -2864,8 +2897,8 @@ class SkillManager:
         token = SkillManager._get_github_token()
         dl_kwargs: dict[str, Any] = {
             "api_token": token,
-            "timeout": _SKILLNET_DOWNLOAD_TIMEOUT,
-            "max_retries": _SKILLNET_MAX_RETRIES,
+            "timeout": _skillnet_download_timeout(),
+            "max_retries": _skillnet_max_retries(),
         }
         if mirror_url:
             dl_kwargs["mirror_url"] = mirror_url

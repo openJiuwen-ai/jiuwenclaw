@@ -16,13 +16,14 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, Mode
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_image_gen_model_config_from_yaml
+from jiuwenclaw.http_proxy_config import requests_get
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     get_effective_request_workspace_dir,
 )
 from jiuwenclaw.config import get_config
 from jiuwenclaw.local_env_config import read_env
-from jiuwenclaw.utils import get_agent_workspace_dir, get_config_file
+from jiuwenclaw.utils import get_config_file, resolve_tenant_agent_workspace_dir
 
 
 logger = logging.getLogger(__name__)
@@ -174,18 +175,18 @@ def _sanitize_filename_part(value: str, max_len: int = 48) -> str:
 
 
 def _output_dir() -> Path:
-    """Resolve save directory: effective_project_dir/generated_images, else agent workspace."""
+    """Resolve save directory: effective_project_dir/generated_images, else tenant workspace."""
     request_workspace = get_effective_request_workspace_dir()
     if request_workspace and str(request_workspace).strip():
         out = Path(str(request_workspace).strip()) / _OUTPUT_SUBDIR
     else:
-        out = get_agent_workspace_dir() / _OUTPUT_SUBDIR
+        out = resolve_tenant_agent_workspace_dir() / _OUTPUT_SUBDIR
     out.mkdir(parents=True, exist_ok=True)
     return out
 
 
 def _download_image(url: str, dest: Path, timeout: int = 120) -> None:
-    response = requests.get(url, timeout=timeout, verify=get_requests_verify())
+    response = requests_get(url, timeout=timeout, verify=get_requests_verify())
     response.raise_for_status()
     dest.write_bytes(response.content)
 

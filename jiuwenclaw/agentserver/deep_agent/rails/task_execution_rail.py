@@ -21,7 +21,11 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.tools.todo_resume import todo_create_blocked_message
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
-from jiuwenclaw.utils import get_agent_sessions_dir
+from jiuwenclaw.utils import (
+    get_agent_sessions_dir,
+    resolve_tenant_agent_workspace_dir,
+    resolve_tenant_sessions_dir,
+)
 from jiuwenclaw.agentserver.deep_agent.artifact_body_scan import (
     _clean_path_candidate,
     _path_identity,
@@ -735,33 +739,55 @@ class TaskExecutionRail(DeepAgentRail):
 
     def _get_workspace_base_path(self) -> Path | None:
         """获取工作空间基准路径。
-        
+
         用于验证文件路径是否在合法的工作目录中。
-        优先使用Rail配置的workspace，其次使用agent工作空间。
-        
+        优先使用 Rail 配置的 workspace，其次按 sid/aid 解析租户工作空间。
+
         Returns:
-            工作空间路径，若未配置则返回None
+            工作空间路径，若未配置则返回 None
         """
-        # 优先使用Rail配置的workspace
+        # 优先使用 Rail 配置的 workspace
         if self.workspace is not None:
             try:
                 return self.workspace.get_node_path(WorkspaceNode.TODO)
             except Exception as e:
                 logger.warning(
-                    "获取workspace节点路径失败，将尝试使用agent工作空间: %s",
-                    str(e)
+                    "获取 workspace 节点路径失败，将尝试使用租户 workspace: %s",
+                    str(e),
+                )
+
+        service_id: str | None = None
+        agent_id: str | None = None
+        if self._deep_agent is not None:
+            service_id = getattr(self._deep_agent, "_env_service_id", None) or getattr(
+                self._deep_agent, "_service_id", None
+            )
+            agent_id = getattr(self._deep_agent, "_env_agent_id", None) or getattr(
+                self._deep_agent, "_agent_id", None
+            )
+        if service_id is None or agent_id is None:
+            try:
+                from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+
+                ns = get_bound_agent_env_ns()
+                if ns is not None:
+                    service_id, agent_id = ns
+            except Exception:
+                logger.debug(
+                    "TaskExecutionRail resolve bound env_ns for workspace failed",
+                    exc_info=True,
                 )
 
         try:
-            from jiuwenclaw.utils import get_agent_workspace_dir
-            return get_agent_workspace_dir()
+            if service_id is not None or agent_id is not None:
+                return resolve_tenant_agent_workspace_dir(service_id, agent_id)
+            return resolve_tenant_agent_workspace_dir()
         except Exception as e:
             logger.warning(
-                "获取agent工作空间目录失败，将返回None: %s",
-                str(e)
+                "获取租户 workspace 失败，将返回 None: %s",
+                str(e),
             )
-
-        return None
+            return None
 
     async def _init_task_tracking(self, session: Session | None) -> None:
         if session is None:
@@ -1172,6 +1198,30 @@ class TaskExecutionRail(DeepAgentRail):
     def _get_todo_workspace_path(self, session_id: str) -> Path:
         if self.workspace is not None:
             return Path(self.workspace.get_node_path(WorkspaceNode.TODO)) / session_id / "todo.json"
+
+        service_id: str | None = None
+        agent_id: str | None = None
+        if self._deep_agent is not None:
+            service_id = getattr(self._deep_agent, "_env_service_id", None) or getattr(
+                self._deep_agent, "_service_id", None
+            )
+            agent_id = getattr(self._deep_agent, "_env_agent_id", None) or getattr(
+                self._deep_agent, "_agent_id", None
+            )
+        if service_id is None or agent_id is None:
+            try:
+                from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+
+                ns = get_bound_agent_env_ns()
+                if ns is not None:
+                    service_id, agent_id = ns
+            except Exception:
+                logger.debug(
+                    "TaskExecutionRail resolve bound env_ns for todo path failed",
+                    exc_info=True,
+                )
+        if service_id is not None or agent_id is not None:
+            return resolve_tenant_sessions_dir(service_id, agent_id) / session_id / "todo.json"
         return get_agent_sessions_dir() / session_id / "todo.json"
 
 

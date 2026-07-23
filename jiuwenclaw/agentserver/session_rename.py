@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 _RENAME_TITLE_MAX_LEN = 200
@@ -16,6 +17,7 @@ def apply_session_rename(
     connection_session_id: str,
     *,
     init_channel_id: str = "tui",
+    sessions_root: str | Path | None = None,
 ) -> tuple[bool, dict[str, Any] | None, str | None, str | None]:
     """实现 session.rename 三种语义：查询(None) / 清除(空串 strip 后) / 设置。
 
@@ -36,7 +38,7 @@ def apply_session_rename(
     if not target:
         return False, None, "session_id is required", "BAD_REQUEST"
 
-    metadata = get_session_metadata(target)
+    metadata = get_session_metadata(target, sessions_root=sessions_root)
     raw_title = params.get("title")
 
     if raw_title is None:
@@ -49,18 +51,30 @@ def apply_session_rename(
         return True, payload, None, None
 
     if not metadata:
-        init_session_metadata(session_id=target, channel_id=init_channel_id)
-        metadata = get_session_metadata(target)
+        init_session_metadata(
+            session_id=target,
+            channel_id=init_channel_id,
+            sessions_root=sessions_root,
+        )
+        metadata = get_session_metadata(target, sessions_root=sessions_root)
     previous_title = metadata.get("title", "")
 
     new_title = str(raw_title).strip()[:_RENAME_TITLE_MAX_LEN]
 
     if new_title:
-        update_session_metadata(session_id=target, title=new_title)
+        update_session_metadata(
+            session_id=target,
+            title=new_title,
+            sessions_root=sessions_root,
+        )
     else:
-        update_session_metadata(session_id=target, clear_title=True)
+        update_session_metadata(
+            session_id=target,
+            clear_title=True,
+            sessions_root=sessions_root,
+        )
 
-    updated = get_session_metadata(target)
+    updated = get_session_metadata(target, sessions_root=sessions_root)
     payload = {
         "session_id": target,
         "title": updated.get("title", ""),

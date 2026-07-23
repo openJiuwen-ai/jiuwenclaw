@@ -100,6 +100,34 @@ class WecomChannel(BaseChannel):
     def channel_id(self) -> str:
         return self.name
 
+    def _im_tenant_ids(self, chat_id: str = "", user_id: str = "") -> tuple[str, str]:
+        """Resolve SessionMap-aligned tenant ids for WeCom inbound traffic."""
+        from jiuwenclaw.channel.tenant_paths import tenant_ids_from_im_identity
+
+        bot_id = str(
+            getattr(self.config, "bot_id", None)
+            or getattr(self.config, "corp_id", None)
+            or "wecom"
+        )
+        return tenant_ids_from_im_identity(
+            str(chat_id or "").strip(),
+            bot_id,
+            str(user_id or "").strip(),
+        )
+
+    def _file_tenant_scope(self, frame: dict):
+        """Bind file-service tenant for this inbound frame."""
+        chatid, _, _ = self._extract_frame_info(frame)
+        body = frame.get("body") or {}
+        if not isinstance(body, dict):
+            body = {}
+        from_obj = body.get("from") or frame.get("from") or {}
+        if not isinstance(from_obj, dict):
+            from_obj = {}
+        user_id = str(from_obj.get("userid") or from_obj.get("user_id") or "").strip()
+        _svc, _aid = self._im_tenant_ids(chatid, user_id)
+        return self._file_service.tenant_scope(_svc, _aid)
+
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息回调，供 ChannelManager 使用。"""
         self._message_callback = callback
@@ -853,6 +881,16 @@ class WecomChannel(BaseChannel):
 
         if self.config.group_digital_avatar:
             try:
+                from jiuwenclaw.channel.tenant_paths import tenant_ids_from_im_identity
+
+                bot_id = str(
+                    getattr(self.config, "bot_id", None)
+                    or getattr(self.config, "corp_id", None)
+                    or "wecom"
+                )
+                _svc, _aid = tenant_ids_from_im_identity(
+                    chatid, bot_id, sender_user_id or ""
+                )
                 self._message_storage.add_message_to_memory(
                     chat_id=chatid,
                     message={
@@ -861,7 +899,9 @@ class WecomChannel(BaseChannel):
                         "timestamp": int(time.time() * 1000),
                         "user_id": sender_user_id,
                         "chat_type": chat_type,
-                    }
+                    },
+                    service_id=_svc,
+                    agent_id=_aid,
                 )
             except Exception as e:
                 logger.warning(f"[WecomChannel] 记录消息到本地存储失败: {e}")
@@ -1242,6 +1282,9 @@ class WecomChannel(BaseChannel):
 
             if self.config.group_digital_avatar:
                 try:
+                    from jiuwenclaw.channel.tenant_paths import tenant_ids_from_message
+
+                    _svc, _aid = tenant_ids_from_message(msg)
                     self._message_storage.add_message_to_memory(
                         chat_id=chatid,
                         message={
@@ -1250,7 +1293,9 @@ class WecomChannel(BaseChannel):
                             "timestamp": int(time.time() * 1000),
                             "user_id": f"bot_{self.config.bot_id}",
                             "chat_type": "bot_reply",
-                        }
+                        },
+                        service_id=_svc,
+                        agent_id=_aid,
                     )
                 except Exception as e:
                     logger.warning(f"[WecomChannel] 记录机器人回复消息失败: {e}")
@@ -1302,12 +1347,14 @@ class WecomChannel(BaseChannel):
         # 初始化文件服务
         try:
             from jiuwenclaw.channel.wecom_file_service import WecomFileService
-            workspace_dir = self.config.workspace_dir or os.path.expanduser("~/.jiuwenclaw/agent/workspace")
+            workspace_dir = (
+                str(self.config.workspace_dir).strip() if self.config.workspace_dir else None
+            )
             self._file_service = WecomFileService(
                 ws_client=client,
                 max_download_size=self.config.max_download_size,
                 download_timeout=self.config.download_timeout,
-                workspace_dir=workspace_dir,
+                workspace_dir=workspace_dir or None,
             )
             logger.info("WecomChannel 文件服务已初始化")
         except Exception as e:
@@ -1415,12 +1462,13 @@ class WecomChannel(BaseChannel):
         message_id = req_id or f"img_{int(time.time() * 1000)}"
 
         # 下载图片
-        file_info = await self._file_service.download_file(
-            url=url,
-            aes_key=aes_key,
-            message_id=message_id,
-            file_category="images",
-        )
+        with self._file_tenant_scope(frame):
+            file_info = await self._file_service.download_file(
+                url=url,
+                aes_key=aes_key,
+                message_id=message_id,
+                file_category="images",
+            )
 
         if not file_info:
             content = "[图片: 下载失败]"
@@ -1456,13 +1504,14 @@ class WecomChannel(BaseChannel):
         message_id = req_id or f"file_{int(time.time() * 1000)}"
 
         # 下载文件
-        file_info = await self._file_service.download_file(
-            url=url,
-            aes_key=aes_key,
-            message_id=message_id,
-            file_category="files",
-            filename=filename,
-        )
+        with self._file_tenant_scope(frame):
+            file_info = await self._file_service.download_file(
+                url=url,
+                aes_key=aes_key,
+                message_id=message_id,
+                file_category="files",
+                filename=filename,
+            )
 
         if not file_info:
             content = f"[文件: {filename} 下载失败]"
@@ -1497,12 +1546,13 @@ class WecomChannel(BaseChannel):
         message_id = req_id or f"voice_{int(time.time() * 1000)}"
 
         # 下载语音
-        file_info = await self._file_service.download_file(
-            url=url,
-            aes_key=aes_key,
-            message_id=message_id,
-            file_category="voice",
-        )
+        with self._file_tenant_scope(frame):
+            file_info = await self._file_service.download_file(
+                url=url,
+                aes_key=aes_key,
+                message_id=message_id,
+                file_category="voice",
+            )
 
         if not file_info:
             content = "[语音: 下载失败]"
@@ -1537,12 +1587,13 @@ class WecomChannel(BaseChannel):
         message_id = req_id or f"video_{int(time.time() * 1000)}"
 
         # 下载视频
-        file_info = await self._file_service.download_file(
-            url=url,
-            aes_key=aes_key,
-            message_id=message_id,
-            file_category="video",
-        )
+        with self._file_tenant_scope(frame):
+            file_info = await self._file_service.download_file(
+                url=url,
+                aes_key=aes_key,
+                message_id=message_id,
+                file_category="video",
+            )
 
         if not file_info:
             content = "[视频: 下载失败]"
@@ -1581,28 +1632,29 @@ class WecomChannel(BaseChannel):
         chatid, req_id, _ = self._extract_frame_info(frame)
         message_id = req_id or f"mixed_{int(time.time() * 1000)}"
 
-        for idx, item in enumerate(msg_items):
-            item_type = item.get("msgtype", "")
-            
-            if item_type == "text":
-                text_content = item.get("text", {}).get("content", "")
-                if text_content:
-                    text_parts.append(text_content)
-            
-            elif item_type == "image":
-                image_data = item.get("image", {})
-                url = image_data.get("url", "")
-                aes_key = image_data.get("aeskey", "")
-                
-                if url and aes_key:
-                    file_info = await self._file_service.download_file(
-                        url=url,
-                        aes_key=aes_key,
-                        message_id=f"{message_id}_{idx}",
-                        file_category="images",
-                    )
-                    if file_info:
-                        file_infos.append(file_info)
+        with self._file_tenant_scope(frame):
+            for idx, item in enumerate(msg_items):
+                item_type = item.get("msgtype", "")
+
+                if item_type == "text":
+                    text_content = item.get("text", {}).get("content", "")
+                    if text_content:
+                        text_parts.append(text_content)
+
+                elif item_type == "image":
+                    image_data = item.get("image", {})
+                    url = image_data.get("url", "")
+                    aes_key = image_data.get("aeskey", "")
+
+                    if url and aes_key:
+                        file_info = await self._file_service.download_file(
+                            url=url,
+                            aes_key=aes_key,
+                            message_id=f"{message_id}_{idx}",
+                            file_category="images",
+                        )
+                        if file_info:
+                            file_infos.append(file_info)
 
         # 合并文本
         content = " ".join(text_parts) if text_parts else "[图文混排]"

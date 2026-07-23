@@ -7,6 +7,7 @@ from pathlib import Path
 
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
+from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
 from jiuwenclaw.agentserver.team.team_manager import TeamManager
 
 
@@ -37,8 +38,12 @@ def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.utils.get_agent_skills_dir",
-        lambda: global_skills_dir,
+        "jiuwenclaw.utils.get_multi_tenant_skill_dirs",
+        lambda sid, aid: [global_skills_dir],
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.team.team_manager.get_default_model_name",
+        lambda config=None: "test-model",
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.team.team_runtime_inheritance.build_member_rails",
@@ -46,11 +51,12 @@ def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.extensions.rail_manager.get_rail_manager",
-        lambda: type(
+        lambda *args, **kwargs: type(
             "_DummyRailManager",
             (),
             {
                 "get_registered_rail_names": lambda self: [],
+                "create_fresh_rail_instance": lambda self, name: None,
                 "load_rail_instance_without_enabled_check": lambda self, name: None,
             },
         )(),
@@ -79,6 +85,7 @@ def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(
         request_id=None,
         channel_id=None,
         request_metadata=None,
+        runtime_scope=RuntimeScopeKey.from_ids("default", "default", "session-1"),
     )
 
     member_root = tmp_path / "member_workspace"

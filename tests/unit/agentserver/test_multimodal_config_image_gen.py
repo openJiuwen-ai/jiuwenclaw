@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from jiuwenclaw.local_env_config import (
+    ENV_CONFIG_DICT,
+    clear_staged_env,
+    get_local_config,
+    read_env_if_set,
+    reset_local_env_state_for_tests,
+)
 
 _MM_PATH = (
     Path(__file__).resolve().parents[3]
@@ -36,8 +43,6 @@ reset_multimodal_env_omission_disabled = (
     _multimodal_config.reset_multimodal_env_omission_disabled
 )
 
-from jiuwenclaw.local_env_config import ENV_CONFIG_DICT
-
 _APPLY_FN_BY_GROUP: dict[str, Callable[[dict[str, Any] | None], None]] = {
     "audio": apply_audio_model_config_from_yaml,
     "vision": apply_vision_model_config_from_yaml,
@@ -62,18 +67,19 @@ _ALL_MULTIMODAL_ENV_KEYS = tuple(
 
 
 @pytest.fixture(autouse=True)
-def _clear_multimodal_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clear_multimodal_env() -> None:
+    import os
+
+    from jiuwenclaw.local_env_config import make_env_ns_key
+
     reset_multimodal_env_omission_disabled()
+    reset_local_env_state_for_tests()
     ENV_CONFIG_DICT.clear()
-    for key in (
-        *_ALL_MULTIMODAL_ENV_KEYS,
-        "API_KEY",
-        "API_BASE",
-        "MODEL_NAME",
-        "MODEL_PROVIDER",
-        "VIDEO_UNDERSTANDING_STRICT",
-    ):
-        monkeypatch.delenv(key, raising=False)
+    clear_staged_env()
+    for keys in MULTIMODAL_ENV_GROUP_KEYS.values():
+        for key in keys:
+            os.environ.pop(key, None)
+            os.environ.pop(make_env_ns_key("default", "default", key), None)
 
 
 def _model_config(group: str, **fields: str) -> dict[str, Any]:
@@ -98,8 +104,8 @@ def test_apply_literal_yaml_bootstraps_env_without_preexisting_anchor(
         model_provider="OpenAI",
     )
     apply_fn(config)
-    assert os.environ[anchor_key] == "group-key"
-    assert os.environ[model_name_key] == f"{group}-model"
+    assert get_local_config(anchor_key) == "group-key"
+    assert get_local_config(model_name_key) == f"{group}-model"
 
 
 @pytest.mark.parametrize(
@@ -122,8 +128,8 @@ def test_apply_skips_when_env_omission_disabled(
     with caplog.at_level(logging.DEBUG, logger=_multimodal_config.logger.name):
         apply_fn(config)
 
-    assert anchor_key not in os.environ
-    assert model_name_key not in os.environ
+    assert read_env_if_set(anchor_key) is None
+    assert read_env_if_set(model_name_key) is None
     assert "disabled by env omission reconcile" in caplog.text
 
 
@@ -142,19 +148,19 @@ def test_apply_literal_yaml_falls_back_to_main_api(
         "jiuwenclaw.config.get_config_raw",
         lambda: {"models": {group: {"model_client_config": {}}}},
     )
-    monkeypatch.setenv("API_KEY", "main-key")
-    monkeypatch.setenv("API_BASE", "https://main.example/v1")
-    monkeypatch.setenv("MODEL_NAME", "main-model")
-    monkeypatch.setenv("MODEL_PROVIDER", "OpenAI")
+    ENV_CONFIG_DICT["API_KEY"] = "main-key"
+    ENV_CONFIG_DICT["API_BASE"] = "https://main.example/v1"
+    ENV_CONFIG_DICT["MODEL_NAME"] = "main-model"
+    ENV_CONFIG_DICT["MODEL_PROVIDER"] = "OpenAI"
     apply_fn(_model_config(group))
-    assert os.environ[anchor_key] == "main-key"
-    assert os.environ[model_name_key] == "main-model"
+    assert get_local_config(anchor_key) == "main-key"
+    assert get_local_config(model_name_key) == "main-model"
 
 
 def test_apply_env_bound_skips_main_api_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("API_KEY", "main-key")
+    ENV_CONFIG_DICT["API_KEY"] = "main-key"
     raw_config = _model_config("image_gen", api_key="${IMAGE_GEN_API_KEY}")
     resolved_config = _model_config("image_gen", api_key="")
     monkeypatch.setattr(
@@ -162,7 +168,7 @@ def test_apply_env_bound_skips_main_api_fallback(
         lambda: raw_config,
     )
     apply_image_gen_model_config_from_yaml(resolved_config)
-    assert os.environ.get("IMAGE_GEN_API_KEY") is None
+    assert read_env_if_set("IMAGE_GEN_API_KEY") is None
 
 
 @pytest.mark.parametrize("group", ["audio", "vision", "video", "image_gen"])

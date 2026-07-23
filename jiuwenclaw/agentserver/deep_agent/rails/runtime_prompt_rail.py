@@ -20,12 +20,9 @@ from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenclaw.utils import (
-    get_user_workspace_dir,
-    get_agent_memory_dir,
-    resolve_agent_registered_skill_dirs,
-    get_agent_workspace_dir,
-    get_deepagent_todo_dir,
     get_multi_tenant_user_workspace_dir,
+    normalize_tenant_scope_id,
+    resolve_agent_registered_skill_dirs,
 )
 
 _CN_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -126,30 +123,26 @@ class RuntimePromptRail(DeepAgentRail):
         self._request_soul = value
 
     def _get_workspace_dirs(self) -> dict[str, str]:
-        """获取工作空间目录路径，支持多租户。"""
-        if self._agent_id and self._service_id:
-            # 多租户模式
-            base_workspace = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
-            if base_workspace:
-                workspace_root = base_workspace / "agent" / "jiuwenclaw_workspace"
-                return {
-                    "config": str(base_workspace / "config"),
-                    "workspace": self._workspace_dir or str(workspace_root), # 优先使用请求中的 workspace_dir
-                    "memory": str(workspace_root / "memory"),
-                    "daily_memory": str(workspace_root / "memory" / "daily_memory"),
-                    "skills": self._skills_dirs_display(workspace_root),
-                    "todo": str(workspace_root / "todo"),
-                }
-        
-        # 单租户模式
-        workspace_root = Path(self._workspace_dir or str(get_agent_workspace_dir()))
+        """获取工作空间目录路径（始终按租户树；缺省为 default/default）。"""
+        service_id = normalize_tenant_scope_id(self._service_id)
+        agent_id = normalize_tenant_scope_id(self._agent_id)
+        base_workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+        if base_workspace is None:
+            # normalize 后两侧均非空，理论上不会走到；防御性回退 default/default。
+            base_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+        if base_workspace is None:
+            raise RuntimeError(
+                "failed to resolve multi-tenant workspace for RuntimePromptRail "
+                f"(service_id={service_id!r}, agent_id={agent_id!r})"
+            )
+        workspace_root = base_workspace / "agent" / "jiuwenclaw_workspace"
         return {
-            "config": str(get_user_workspace_dir() / "config"),
-            "workspace": self._workspace_dir or str(get_agent_workspace_dir()),
-            "memory": str(get_agent_memory_dir()),
-            "daily_memory": str(get_agent_memory_dir() / "daily_memory"),
+            "config": str(base_workspace / "config"),
+            "workspace": self._workspace_dir or str(workspace_root),
+            "memory": str(workspace_root / "memory"),
+            "daily_memory": str(workspace_root / "memory" / "daily_memory"),
             "skills": self._skills_dirs_display(workspace_root),
-            "todo": str(get_deepagent_todo_dir()),
+            "todo": str(workspace_root / "todo"),
         }
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
