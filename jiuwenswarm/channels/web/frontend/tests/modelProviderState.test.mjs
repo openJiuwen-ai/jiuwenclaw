@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   CODEX_SUBSCRIPTION_MODEL,
   CODEX_SUBSCRIPTION_PROVIDER,
+  CLAUDE_SUBSCRIPTION_MODEL,
+  CLAUDE_SUBSCRIPTION_PROVIDER,
   transitionModelProvider,
 } from "../node_modules/.cache/model-provider-state/components/ConfigPanel/modelProviderState.js";
 import { ModelProviderStateStorage } from "../node_modules/.cache/model-provider-state/components/ConfigPanel/modelProviderStateStorage.js";
@@ -243,4 +245,37 @@ test("OpenAIAccount replacement remains exact and discards prior API snapshots",
   );
   assert.deepEqual(freshAccountRows[0], openAIAccountRow);
   assert.equal(freshAccountRows[0].api_key.includes("openrouter"), false);
+});
+
+test("switching to Claude sets credential-free subscription defaults", () => {
+  const toClaude = transitionModelProvider(openRouterModel, CLAUDE_SUBSCRIPTION_PROVIDER);
+  assert.equal(toClaude.model.model_provider, CLAUDE_SUBSCRIPTION_PROVIDER);
+  assert.equal(toClaude.model.model_name, CLAUDE_SUBSCRIPTION_MODEL);
+  assert.equal(toClaude.model.api_base, "");
+  assert.equal(toClaude.model.api_key, "");
+  // The prior API provider's config is captured for restoration.
+  assert.equal(toClaude.snapshot?.model_provider, "OpenRouter");
+});
+
+test("restores only the exact previous API provider after Claude", () => {
+  const toClaude = transitionModelProvider(openRouterModel, CLAUDE_SUBSCRIPTION_PROVIDER);
+  const back = transitionModelProvider(toClaude.model, "OpenRouter", toClaude.snapshot);
+  assert.equal(back.model.model_provider, "OpenRouter");
+  assert.equal(back.model.api_key, "openrouter-canary-key");
+});
+
+test("clears incompatible fields when Claude switches to another API provider without snapshot", () => {
+  const claudeModel = {
+    model_name: CLAUDE_SUBSCRIPTION_MODEL,
+    api_base: "",
+    api_key: "",
+    model_provider: CLAUDE_SUBSCRIPTION_PROVIDER,
+    alias: "claude",
+    reasoning_level: "",
+  };
+  const switched = transitionModelProvider(claudeModel, "DeepSeek");
+  assert.equal(switched.model.model_provider, "DeepSeek");
+  assert.equal(switched.model.model_name, "");
+  assert.equal(switched.model.api_key, "");
+  assert.equal(switched.model.api_base, "");
 });

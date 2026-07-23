@@ -20,9 +20,12 @@ import {
 } from "./codexAuthHandoff";
 import {
   CODEX_SUBSCRIPTION_PROVIDER,
+  CLAUDE_SUBSCRIPTION_PROVIDER,
   OPENAI_ACCOUNT_PROVIDER,
   buildCodexSubscriptionModelDefaults,
+  buildClaudeSubscriptionModelDefaults,
   isCodexSubscriptionProvider,
+  isClaudeSubscriptionProvider,
   isOpenAIAccountProvider,
   modelRequiresApiBase,
   modelRequiresApiKey,
@@ -217,6 +220,7 @@ interface ConfigPanelProps {
   onCodexAuthStart?: () => Promise<CodexAuthStatus>;
   onCodexAuthCancel?: (operationId: string) => Promise<CodexAuthStatus>;
   onCodexAuthLogout?: () => Promise<CodexAuthStatus>;
+  onClaudeStatus?: () => Promise<{ status: string }>;
   onOpenCodexAuthUrl?: (url: string) => Promise<boolean>;
   /** 多Agent和Teams操作回调 */
   onAgentsTeamsSave?: (payload: {
@@ -1098,6 +1102,7 @@ const MODEL_PROVIDER_OPTIONS = [
   ASCEND_AFFINITY_PROVIDER,
   "DeepSeek",
   CODEX_SUBSCRIPTION_PROVIDER,
+  CLAUDE_SUBSCRIPTION_PROVIDER,
 ] as const;
 const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
 
@@ -2128,6 +2133,7 @@ function MultiModelSection({
     if (!name) return;
     const isNewOpenAIAccount = isOpenAIAccountProvider(newModel.model_provider);
     const isNewCodexSubscription = isCodexSubscriptionProvider(newModel.model_provider);
+    const isNewClaudeSubscription = isClaudeSubscriptionProvider(newModel.model_provider);
 
     // 字段长度校验
     if (name.length > MAX_MODEL_NAME_LENGTH) {
@@ -2173,6 +2179,7 @@ function MultiModelSection({
       ...newModel,
       ...(isNewOpenAIAccount ? buildOpenAIAccountModelDefaults(newModel) : {}),
       ...(isNewCodexSubscription ? buildCodexSubscriptionModelDefaults() : {}),
+      ...(isNewClaudeSubscription ? buildClaudeSubscriptionModelDefaults() : {}),
       model_name: name,
       is_default: !sameNameExists,
     };
@@ -2184,6 +2191,7 @@ function MultiModelSection({
 
   const newModelIsOpenAIAccount = isOpenAIAccountProvider(newModel.model_provider);
   const newModelIsCodexSubscription = isCodexSubscriptionProvider(newModel.model_provider);
+  const newModelIsClaudeSubscription = isClaudeSubscriptionProvider(newModel.model_provider);
 
   return (
     <>
@@ -2217,6 +2225,7 @@ function MultiModelSection({
           const isPrimaryDefault = idx === 0;
           const modelIsOpenAIAccount = isOpenAIAccountProvider(model.model_provider);
           const modelIsCodexSubscription = isCodexSubscriptionProvider(model.model_provider);
+          const modelIsClaudeSubscription = isClaudeSubscriptionProvider(model.model_provider);
           // 同名模型计数，用于区分显示
           const sameNameIndices = models.reduce<number[]>((acc, m, i) => {
             if (m.model_name === model.model_name) acc.push(i);
@@ -2324,7 +2333,8 @@ function MultiModelSection({
                           onChange={(e) => updateModel(idx, field, e.target.value)}
                           disabled={
                             (["api_key", "api_base", "model_name"].includes(field) && modelIsOpenAIAccount) ||
-                            (["api_key", "api_base", "model_name"].includes(field) && modelIsCodexSubscription)
+                            (["api_key", "api_base", "model_name"].includes(field) && modelIsCodexSubscription) ||
+                            (["api_key", "api_base", "model_name"].includes(field) && modelIsClaudeSubscription)
                           }
                           className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
                           placeholder={
@@ -2332,6 +2342,8 @@ function MultiModelSection({
                               ? t("config.openaiAccount.modelNameUseDropdown")
                               : modelIsCodexSubscription && ["api_base", "api_key"].includes(field)
                                 ? "Not used for subscription authentication"
+                              : modelIsClaudeSubscription && ["api_base", "api_key"].includes(field)
+                                ? "Resolved from your Claude login on the server"
                               : field === "api_base" && modelIsOpenAIAccount
                                 ? t("config.openaiAccount.apiBaseManaged")
                               : field === "api_key" ? (
@@ -2411,7 +2423,8 @@ function MultiModelSection({
                     onChange={(e) => handleNewModelChange(field, e.target.value)}
                     disabled={
                       (["api_key", "api_base", "model_name"].includes(field) && newModelIsOpenAIAccount) ||
-                      (["api_key", "api_base", "model_name"].includes(field) && newModelIsCodexSubscription)
+                      (["api_key", "api_base", "model_name"].includes(field) && newModelIsCodexSubscription) ||
+                      (["api_key", "api_base", "model_name"].includes(field) && newModelIsClaudeSubscription)
                     }
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
                     placeholder={
@@ -2421,6 +2434,8 @@ function MultiModelSection({
                           : "e.g. gpt-4o"
                         : newModelIsCodexSubscription && ["api_base", "api_key"].includes(field)
                           ? "Not used for subscription authentication"
+                        : newModelIsClaudeSubscription && ["api_base", "api_key"].includes(field)
+                          ? "Resolved from your Claude login on the server"
                         : field === "api_base" && newModelIsOpenAIAccount
                           ? t("config.openaiAccount.apiBaseManaged")
                         : field === "api_key" ? (
@@ -3535,6 +3550,7 @@ export function ConfigPanel({
   onCodexAuthStart,
   onCodexAuthCancel,
   onCodexAuthLogout,
+  onClaudeStatus,
   onOpenCodexAuthUrl,
   onAgentsTeamsSave,
   onHasChangesChange,
@@ -3580,6 +3596,8 @@ export function ConfigPanel({
   const [codexAuth, setCodexAuth] = useState<CodexAuthStatus | null>(null);
   const [codexAuthHandoff, setCodexAuthHandoff] = useState<CodexAuthStatus | null>(null);
   const [codexAuthBusy, setCodexAuthBusy] = useState(false);
+  const [claudeStatus, setClaudeStatus] = useState<string | null>(null);
+  const [claudeStatusBusy, setClaudeStatusBusy] = useState(false);
   const [codexAuthError, setCodexAuthError] = useState<string | null>(null);
   const hasCodexDraft = useMemo(
     () => draftModels.some((model) => isCodexSubscriptionProvider(model.model_provider)),
@@ -3626,6 +3644,29 @@ export function ConfigPanel({
     setCodexAuthHandoff(null);
     setCodexAuthError(null);
   }, [observeCodexAuth]);
+
+  const hasClaudeDraft = useMemo(
+    () => draftModels.some((model) => isClaudeSubscriptionProvider(model.model_provider)),
+    [draftModels],
+  );
+
+  const refreshClaudeStatus = useCallback(async () => {
+    if (!onClaudeStatus || !isConnected) return;
+    setClaudeStatusBusy(true);
+    try {
+      const result = await onClaudeStatus();
+      setClaudeStatus(result?.status ?? "auth_status_unverifiable");
+    } catch {
+      setClaudeStatus("auth_status_unverifiable");
+    } finally {
+      setClaudeStatusBusy(false);
+    }
+  }, [isConnected, onClaudeStatus]);
+
+  useEffect(() => {
+    if (hasClaudeDraft) void refreshClaudeStatus();
+    else setClaudeStatus(null);
+  }, [hasClaudeDraft, refreshClaudeStatus]);
 
   const startCodexAuth = async () => {
     if (!onCodexAuthStart) return;
@@ -4658,6 +4699,74 @@ export function ConfigPanel({
                         </div>
                       ) : null}
                       {codexAuthError ? <div className="mt-2 text-xs text-danger">{codexAuthError}</div> : null}
+                    </div>
+                  ) : null}
+                  {hasClaudeDraft ? (
+                    <div className="rounded-xl border border-border bg-card/70 p-4 shadow-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-text-strong">
+                            Claude subscription
+                          </div>
+                          <div className="mt-1 text-xs text-text-muted">
+                            Uses your own Claude CLI login on the server. Jiuwen never receives your password or token, and never signs you in or out.
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-xs ${
+                              claudeStatus === "subscription_ready"
+                                ? "text-ok"
+                                : claudeStatus === "login_required"
+                                  ? "text-accent"
+                                  : claudeStatus === "wrong_auth_method" ||
+                                      claudeStatus === "missing_cli" ||
+                                      claudeStatus === "wrong_version"
+                                    ? "text-danger"
+                                    : "text-text-muted"
+                            }`}
+                          >
+                            {claudeStatusBusy
+                              ? "Checking…"
+                              : claudeStatus === "subscription_ready"
+                                ? "Subscription ready"
+                                : claudeStatus === "login_required"
+                                  ? "Login required"
+                                  : claudeStatus === "wrong_auth_method"
+                                    ? "Not a Claude subscription"
+                                    : claudeStatus === "missing_cli"
+                                      ? "Claude CLI not installed"
+                                      : claudeStatus === "wrong_version"
+                                        ? "Unsupported CLI version"
+                                        : claudeStatus === "disabled"
+                                          ? "Disabled for this Jiuwen instance"
+                                          : "Status unavailable"}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn !px-3 !py-1 text-xs"
+                            disabled={claudeStatusBusy || !isConnected}
+                            onClick={() => void refreshClaudeStatus()}
+                          >
+                            Refresh
+                          </button>
+                        </div>
+                      </div>
+                      {claudeStatus === "login_required" ? (
+                        <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-3 text-xs text-text-muted">
+                          Sign in to Claude on the server using the official Claude CLI login command, then choose Refresh. Jiuwen never performs the login for you.
+                        </div>
+                      ) : null}
+                      {claudeStatus === "wrong_auth_method" ? (
+                        <div className="mt-3 rounded-lg border border-[var(--color-border-danger)] bg-danger-subtle p-3 text-xs text-danger">
+                          This provider requires a Claude.ai subscription login. An API key or a cloud provider (Bedrock, Vertex, or Foundry) is not accepted.
+                        </div>
+                      ) : null}
+                      {claudeStatus === "missing_cli" || claudeStatus === "wrong_version" ? (
+                        <div className="mt-3 rounded-lg border border-[var(--color-border-danger)] bg-danger-subtle p-3 text-xs text-danger">
+                          Install the supported Claude CLI version on the server, then choose Refresh.
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                   <div

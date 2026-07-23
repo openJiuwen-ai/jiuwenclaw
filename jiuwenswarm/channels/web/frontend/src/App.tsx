@@ -975,6 +975,10 @@ function AppContent() {
     () => request<CodexAuthStatus>('provider.codex.auth.logout', {}),
     [request],
   );
+  const getClaudeStatus = useCallback(
+    () => request<{ status: string }>('provider.claude.status', {}, { timeoutMs: 60000 }),
+    [request],
+  );
   const openCodexAuthUrl = useCallback(async (url: string) => {
     const desktopApi = (window as WindowWithPyWebview).pywebview?.api;
     if (desktopApi?.open_external_url) {
@@ -2305,6 +2309,7 @@ function AppContent() {
               onCodexAuthStart={startCodexAuth}
               onCodexAuthCancel={cancelCodexAuth}
               onCodexAuthLogout={logoutCodexAuth}
+              onClaudeStatus={getClaudeStatus}
               onOpenCodexAuthUrl={openCodexAuthUrl}
               onAgentsTeamsSave={handleAgentsTeamsSave}
               onHasChangesChange={handleHasChangesChange}
