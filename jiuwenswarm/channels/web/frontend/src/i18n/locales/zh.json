@@ -2226,7 +2226,8 @@
     "nextStep": "下一步",
     "confirm": "确定",
     "customOption": "自定义",
-    "customPlaceholder": "没有合适的选项？输入您的答案..."
+    "customPlaceholder": "没有合适的选项？输入您的答案...",
+    "skippedSummary": "已跳过"
   },
   "qaSummary": {
     "title": "问题澄清"

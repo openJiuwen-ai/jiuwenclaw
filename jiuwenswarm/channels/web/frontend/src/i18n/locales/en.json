@@ -2222,7 +2222,8 @@
     "nextStep": "Next",
     "confirm": "Confirm",
     "customOption": "Custom",
-    "customPlaceholder": "No suitable option? Type your answer..."
+    "customPlaceholder": "No suitable option? Type your answer...",
+    "skippedSummary": "Skipped"
   },
   "qaSummary": {
     "title": "Clarifications"
