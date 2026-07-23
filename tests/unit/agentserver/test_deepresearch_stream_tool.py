@@ -918,6 +918,89 @@ def test_write_report_markdown_rejects_asset_directory_namespace_swap(
     assert not (tmp_path / "研究报告-v1.md").exists()
 
 
+def test_write_report_markdown_cleans_asset_directory_when_open_fails(
+    tmp_path, monkeypatch
+):
+    asset_dir = tmp_path / "研究报告-v1_infer"
+    real_open = dt.os.open
+
+    def failing_open(path, flags, *args, **kwargs):
+        if (
+            os.path.basename(os.fspath(path)) == asset_dir.name
+            and flags & os.O_DIRECTORY
+        ):
+            raise OSError("asset directory open failed")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(dt.os, "open", failing_open)
+    with pytest.raises(OSError, match="asset directory open failed"):
+        _write_report_in(
+            tmp_path, final_result=_report_result_with_assets()
+        )
+
+    assert not asset_dir.exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+def test_write_report_markdown_quarantines_owned_directory_after_fstat_failure(
+    tmp_path, monkeypatch
+):
+    asset_dir = tmp_path / "研究报告-v1_infer"
+    asset_descriptor = None
+    entry_quarantined = threading.Event()
+    replacement_created = threading.Event()
+    real_open = dt.os.open
+    real_fstat = dt.os.fstat
+    real_rename = dt.os.rename
+
+    def recording_open(path, flags, *args, **kwargs):
+        nonlocal asset_descriptor
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if (
+            os.path.basename(os.fspath(path)) == asset_dir.name
+            and flags & os.O_DIRECTORY
+        ):
+            asset_descriptor = descriptor
+        return descriptor
+
+    def failing_fstat(descriptor):
+        nonlocal asset_descriptor
+        if descriptor == asset_descriptor:
+            asset_descriptor = None
+            raise OSError("asset directory fstat failed")
+        return real_fstat(descriptor)
+
+    def synchronizing_rename(source, destination, *args, **kwargs):
+        result = real_rename(source, destination, *args, **kwargs)
+        if os.path.basename(os.fspath(source)) == asset_dir.name:
+            entry_quarantined.set()
+            assert replacement_created.wait(timeout=2)
+        return result
+
+    def replace_public_entry():
+        if not entry_quarantined.wait(timeout=2):
+            return
+        asset_dir.mkdir()
+        (asset_dir / "writer.bin").write_bytes(b"replacement")
+        replacement_created.set()
+
+    monkeypatch.setattr(dt.os, "open", recording_open)
+    monkeypatch.setattr(dt.os, "fstat", failing_fstat)
+    monkeypatch.setattr(dt.os, "rename", synchronizing_rename)
+    replacement = threading.Thread(target=replace_public_entry)
+    replacement.start()
+    with pytest.raises(OSError, match="asset directory fstat failed"):
+        _write_report_in(
+            tmp_path, final_result=_report_result_with_assets()
+        )
+    replacement.join(timeout=2)
+
+    assert entry_quarantined.is_set()
+    assert not replacement.is_alive()
+    assert (asset_dir / "writer.bin").read_bytes() == b"replacement"
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
 def test_write_report_markdown_publishes_snapshot_then_provenance_then_markdown(
     tmp_path, monkeypatch
 ):

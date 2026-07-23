@@ -819,17 +819,45 @@ def _publish_staged_asset_directory(
     created_paths: list[_CreatedArtifact],
 ) -> None:
     """Publish a flat asset directory entirely through a retained dir handle."""
-    os.mkdir(final_directory)
-    directory_fd = os.open(
-        final_directory,
+    parent_fd = os.open(
+        final_directory.parent,
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
     )
-    directory_metadata = os.fstat(directory_fd)
-    created_paths.append(_CreatedArtifact(
-        path=final_directory,
-        metadata=directory_metadata,
-        directory_fd=directory_fd,
-    ))
+    directory_fd = -1
+    try:
+        os.mkdir(final_directory.name, dir_fd=parent_fd)
+        namespace_metadata = os.stat(
+            final_directory.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        directory_artifact = _CreatedArtifact(
+            path=final_directory,
+            metadata=namespace_metadata,
+        )
+        created_paths.append(directory_artifact)
+        directory_fd = os.open(
+            final_directory.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        handle_metadata = os.fstat(directory_fd)
+        if not _same_identity(namespace_metadata, handle_metadata):
+            raise RuntimeError(
+                f"report asset directory namespace changed: {final_directory}"
+            )
+        directory_artifact.directory_fd = directory_fd
+        directory_fd = -1
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        os.close(parent_fd)
+
+    retained_directory_fd = directory_artifact.directory_fd
+    if retained_directory_fd is None:
+        raise RuntimeError(
+            f"report asset directory handle unavailable: {final_directory}"
+        )
     for staged_path in sorted(staged_directory.iterdir()):
         metadata = os.lstat(staged_path)
         if not stat.S_ISREG(metadata.st_mode):
@@ -837,12 +865,14 @@ def _publish_staged_asset_directory(
                 f"staged report asset is not a regular file: {staged_path.name}"
             )
         child_metadata = _atomic_create_bytes_at(
-            directory_fd, staged_path.name, staged_path.read_bytes()
+            retained_directory_fd,
+            staged_path.name,
+            staged_path.read_bytes(),
         )
         created_paths.append(_CreatedArtifact(
             path=final_directory / staged_path.name,
             metadata=child_metadata,
-            parent_fd=directory_fd,
+            parent_fd=retained_directory_fd,
             entry_name=staged_path.name,
         ))
 
