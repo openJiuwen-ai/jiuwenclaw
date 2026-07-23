@@ -9,6 +9,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -543,10 +544,15 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots():
     )
 
 
-def _styled_report_archive(html: str) -> str:
+def _styled_report_archive(
+    html: str,
+    assets: dict[str, bytes | str] | None = None,
+) -> str:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("report_bundle/report.html", html)
+        for name, content in (assets or {}).items():
+            archive.writestr(f"report_bundle/{name}", content)
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
@@ -560,9 +566,22 @@ async def test_generate_report_html_installs_styled_report(tmp_path):
     report_path_md = tmp_path / "report.md"
     report_path_md.write_text("# Report", encoding="utf-8")
     styled_result = SimpleNamespace(
-        convert_content=_styled_report_archive("<html>styled report</html>")
+        convert_content=_styled_report_archive(
+            '<html><a href="infer/new.html">styled</a>'
+            '<img src="charts/new.png"></html>',
+            {
+                "infer/new.html": "<html>new inference</html>",
+                "charts/new.png": b"new chart",
+            },
+        )
     )
     llm = object()
+    infer_dir = tmp_path / "report_infer"
+    chart_dir = tmp_path / "report_charts"
+    infer_dir.mkdir()
+    chart_dir.mkdir()
+    (infer_dir / "existing.html").write_text("existing inference", encoding="utf-8")
+    (chart_dir / "existing.png").write_bytes(b"existing chart")
 
     with patch.object(
         dt,
@@ -577,7 +596,18 @@ async def test_generate_report_html_installs_styled_report(tmp_path):
         )
 
     assert html_path == tmp_path / "report.html"
-    assert html_path.read_text(encoding="utf-8") == "<html>styled report</html>"
+    assert html_path.read_text(encoding="utf-8") == (
+        '<html><a href="report_infer/new.html">styled</a>'
+        '<img src="report_charts/new.png"></html>'
+    )
+    assert (infer_dir / "new.html").read_text(encoding="utf-8") == (
+        "<html>new inference</html>"
+    )
+    assert (chart_dir / "new.png").read_bytes() == b"new chart"
+    assert (infer_dir / "existing.html").read_text(encoding="utf-8") == (
+        "existing inference"
+    )
+    assert (chart_dir / "existing.png").read_bytes() == b"existing chart"
     stylize.assert_awaited_once_with({"response_content": "# Report"}, llm)
 
 
@@ -604,6 +634,178 @@ async def test_generate_report_html_falls_back_to_offline_conversion(tmp_path):
 
     assert html_path == tmp_path / "report.html"
     assert html_path.read_text(encoding="utf-8") == "<html>offline report</html>"
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_fallback_uses_verified_content_after_source_mutation(
+    tmp_path,
+):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Verified report", encoding="utf-8")
+
+    def _mutate_then_fail():
+        report_path_md.write_text("# SECRET mutation", encoding="utf-8")
+        raise RuntimeError("styled export unavailable")
+
+    with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        side_effect=_mutate_then_fail,
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Verified report"}, report_path_md
+        )
+
+    assert html_path == tmp_path / "report.html"
+    html = html_path.read_text(encoding="utf-8")
+    assert "Verified report" in html
+    assert "SECRET mutation" not in html
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_rejects_html_symlink_without_overwriting_target(
+    tmp_path,
+):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    outside = tmp_path / "outside.html"
+    outside.write_text("outside sentinel", encoding="utf-8")
+    (tmp_path / "report.html").symlink_to(outside)
+
+    with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        side_effect=RuntimeError("styled export unavailable"),
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Verified report"}, report_path_md
+        )
+
+    assert html_path is None
+    assert outside.read_text(encoding="utf-8") == "outside sentinel"
+    assert (tmp_path / "report.html").is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_does_not_follow_legacy_fixed_temp_symlink(tmp_path):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    outside = tmp_path / "outside.tmp"
+    outside.write_text("outside sentinel", encoding="utf-8")
+    legacy_temp = tmp_path / "report.html.tmp"
+    legacy_temp.symlink_to(outside)
+    styled_result = SimpleNamespace(
+        convert_content=_styled_report_archive("<html>styled report</html>")
+    )
+
+    with patch.object(
+        dt,
+        "_scoped_report_style_llm_context",
+        return_value=_async_context(object()),
+    ), patch(
+        "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
+        new=AsyncMock(return_value=styled_result),
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Report"}, report_path_md
+        )
+
+    assert html_path == tmp_path / "report.html"
+    assert html_path.read_text(encoding="utf-8") == "<html>styled report</html>"
+    assert outside.read_text(encoding="utf-8") == "outside sentinel"
+    assert legacy_temp.is_symlink()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asset_root_name", "asset_name"),
+    [
+        ("report_infer", "infer/new.html"),
+        ("report_charts", "charts/new.png"),
+    ],
+)
+async def test_generate_report_html_does_not_follow_asset_root_symlink(
+    tmp_path, asset_root_name, asset_name
+):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    outside_dir = tmp_path / f"outside_{asset_root_name}"
+    outside_dir.mkdir()
+    sentinel = outside_dir / "sentinel"
+    sentinel.write_text("outside sentinel", encoding="utf-8")
+    (tmp_path / asset_root_name).symlink_to(outside_dir, target_is_directory=True)
+    styled_result = SimpleNamespace(
+        convert_content=_styled_report_archive(
+            "<html>styled report</html>",
+            {asset_name: b"untrusted asset"},
+        )
+    )
+
+    with patch.object(
+        dt,
+        "_scoped_report_style_llm_context",
+        return_value=_async_context(object()),
+    ), patch(
+        "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
+        new=AsyncMock(return_value=styled_result),
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Verified report"}, report_path_md
+        )
+
+    assert html_path == tmp_path / "report.html"
+    assert "Verified report" in html_path.read_text(encoding="utf-8")
+    assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
+    assert sorted(path.name for path in outside_dir.iterdir()) == ["sentinel"]
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_logs_only_stable_exception_types(tmp_path, caplog):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    caplog.set_level(logging.WARNING, logger=dt.__name__)
+    dt.logger.addHandler(caplog.handler)
+    try:
+        with patch.object(
+            dt,
+            "_build_styled_export_llm_config",
+            side_effect=RuntimeError("SECRET /internal/styled"),
+        ), patch(
+            "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
+            side_effect=OSError("SECRET /internal/fallback"),
+        ):
+            html_path = await dt._generate_report_html(
+                {"response_content": "# Verified report"}, report_path_md
+            )
+    finally:
+        dt.logger.removeHandler(caplog.handler)
+
+    assert html_path is None
+    assert "RuntimeError" in caplog.text
+    assert "OSError" in caplog.text
+    assert "SECRET" not in caplog.text
+    assert "/internal" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_propagates_cancellation(tmp_path):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+
+    @asynccontextmanager
+    async def _cancelled_context(_context_factory, _llm_config):
+        raise asyncio.CancelledError
+        yield  # pragma: no cover
+
+    with patch.object(
+        dt,
+        "_scoped_report_style_llm_context",
+        side_effect=_cancelled_context,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await dt._generate_report_html(
+                {"response_content": "# Verified report"}, report_path_md
+            )
 
 
 @pytest.mark.asyncio
@@ -656,7 +858,7 @@ async def test_generate_report_html_ignores_partial_output_cleanup_failure(
 
     assert html_path is None
     assert any(
-        args[0] == "Failed to remove partial HTML output. output=%s error=%s"
+        args[0] == "Failed to remove partial HTML output. type=%s"
         for args, _kwargs in warning.call_args_list
     )
 

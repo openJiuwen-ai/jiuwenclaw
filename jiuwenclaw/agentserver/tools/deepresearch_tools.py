@@ -10,7 +10,6 @@ import io
 import json
 import logging
 import os
-import shutil
 import sys
 import tempfile
 import uuid
@@ -266,11 +265,54 @@ def _extract_styled_bundle(convert_content: str, destination: Path) -> Path:
     return destination / "report_bundle"
 
 
+def _validate_regular_file_target(path: Path) -> None:
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError("unsafe HTML output target")
+
+
 def _copy_asset_dir(source: Path, destination: Path) -> None:
-    """Copy an asset directory if it exists and is non-empty."""
-    if not source.is_dir() or not any(source.iterdir()):
+    """Atomically merge regular bundle assets into a real sibling directory."""
+    if source.is_symlink():
+        raise ValueError("unsafe styled asset source")
+    if not source.exists():
         return
-    shutil.copytree(source, destination, dirs_exist_ok=True)
+    if not source.is_dir():
+        raise ValueError("unsafe styled asset source")
+
+    entries = list(source.rglob("*"))
+    if not entries:
+        return
+    if destination.is_symlink() or (
+        destination.exists() and not destination.is_dir()
+    ):
+        raise ValueError("unsafe styled asset destination")
+
+    planned: list[tuple[Path, Path]] = []
+    for item in entries:
+        if item.is_symlink():
+            raise ValueError("unsafe styled asset source")
+        relative = item.relative_to(source)
+        target = destination / relative
+        if item.is_dir():
+            if target.is_symlink() or (target.exists() and not target.is_dir()):
+                raise ValueError("unsafe styled asset destination")
+            continue
+        if not item.is_file():
+            raise ValueError("unsafe styled asset source")
+        current = destination
+        for component in relative.parts[:-1]:
+            current /= component
+            if current.is_symlink() or (
+                current.exists() and not current.is_dir()
+            ):
+                raise ValueError("unsafe styled asset destination")
+        _validate_regular_file_target(target)
+        planned.append((item, target))
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for source_file, target in planned:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(target, source_file.read_bytes())
 
 
 def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
@@ -288,12 +330,8 @@ def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
     html = html.replace("src='charts/", f"src='{chart_dir.name}/")
 
     html_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_html_path = html_path.with_suffix(f"{html_path.suffix}.tmp")
-    try:
-        temporary_html_path.write_text(html, encoding="utf-8", newline="\n")
-        temporary_html_path.replace(html_path)
-    finally:
-        temporary_html_path.unlink(missing_ok=True)
+    _validate_regular_file_target(html_path)
+    _atomic_write_bytes(html_path, html.encode("utf-8"))
 
 
 async def _generate_report_html(
@@ -302,6 +340,9 @@ async def _generate_report_html(
 ) -> Path | None:
     """Generate styled report HTML, falling back to offline conversion."""
     report_path_html = report_path_md.with_suffix(".html")
+    if report_path_html.is_symlink():
+        logger.warning("HTML export rejected an unsafe output target")
+        return None
     try:
         from openjiuwen_deepsearch.algorithm.report_style.service import (
             stylize_report,
@@ -323,28 +364,42 @@ async def _generate_report_html(
             _install_styled_bundle(bundle_root, report_path_html)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning(
-            "SDK styled HTML export failed, falling back to offline conversion. error=%s",
-            exc,
+            "SDK styled HTML export failed; using offline conversion. type=%s",
+            type(exc).__name__,
         )
         try:
             from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import (
                 convert_md_to_html,
             )
 
-            convert_md_to_html(str(report_path_md), str(report_path_html))
+            response_content = final_result["response_content"]
+            if not isinstance(response_content, str):
+                raise TypeError("invalid verified report content")
+            with tempfile.TemporaryDirectory(
+                prefix="jiuwenclaw_report_fallback_"
+            ) as temporary_dir:
+                staging_root = Path(temporary_dir)
+                staged_markdown = staging_root / "report.md"
+                staged_html = staging_root / "report.html"
+                staged_markdown.write_text(
+                    response_content, encoding="utf-8", newline="\n"
+                )
+                convert_md_to_html(str(staged_markdown), str(staged_html))
+                html_bytes = staged_html.read_bytes()
+            _validate_regular_file_target(report_path_html)
+            _atomic_write_bytes(report_path_html, html_bytes)
         except Exception as fallback_exc:  # pylint: disable=broad-exception-caught
             logger.warning(
-                "Offline HTML conversion also failed. output=%s error=%s",
-                report_path_html,
-                fallback_exc,
+                "Offline HTML conversion failed. type=%s",
+                type(fallback_exc).__name__,
             )
             try:
-                report_path_html.unlink(missing_ok=True)
+                if not report_path_html.is_symlink():
+                    report_path_html.unlink(missing_ok=True)
             except OSError as cleanup_exc:
                 logger.warning(
-                    "Failed to remove partial HTML output. output=%s error=%s",
-                    report_path_html,
-                    cleanup_exc,
+                    "Failed to remove partial HTML output. type=%s",
+                    type(cleanup_exc).__name__,
                 )
             return None
 
