@@ -231,7 +231,7 @@ function AppContent() {
     const stored = getStoredSessionId();
     return stored || 'new';
   });
-  const [activeNav] = useState<MainNavKey>('chat');
+  const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
@@ -810,9 +810,14 @@ function AppContent() {
     [disposeInFlightHistoryHandles, clearMessages, clearTodos],
   );
 
+  const handleNavigate = useCallback((nav: MainNavKey) => {
+    setActiveNav(nav);
+  }, []);
+
   const handleRestoreSession = useCallback(
     async (sid: string) => {
       if (!sid) return;
+      setActiveNav('chat');
       restoreSeqRef.current += 1;
       const seq = restoreSeqRef.current;
       clearMessages();
@@ -1189,6 +1194,8 @@ function AppContent() {
         currentSessionId={sessionId}
         onSelect={handleRestoreSession}
         onNewSession={handleNewSession}
+        activeNav={activeNav}
+        onNavigate={handleNavigate}
         appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : '0.1.7'}
       />
 

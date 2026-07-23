@@ -84,6 +84,10 @@ class EnterpriseWebWsServer:
         # 历史存储实例（由 _run_ws_server 注入；HTTP 端用 history_store.list_sessions_sync 读同一 db）。
         self._history_store: ChatHistoryStore | None = None
 
+    def set_history_store(self, store: ChatHistoryStore) -> None:
+        """注入历史存储实例（供 _run_ws_server 外部调用，避免直接访问受保护成员）。"""
+        self._history_store = store
+
     async def start(self) -> None:
         if self._running:
             return
@@ -639,7 +643,7 @@ async def _run_ws_server(
     )
     if history_db:
         store = ChatHistoryStore(history_db)
-        ws_server._history_store = store
+        ws_server.set_history_store(store)
         ws_server.on_frame = make_history_callback(store)
         logger.info("[jiuwenclaw-enterprise-web] history db: %s", history_db)
     try:

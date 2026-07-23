@@ -95,8 +95,10 @@ class ChatHistoryStore:
             # 兼容旧库：sessions 无 user 列时补上（已有则忽略）
             try:
                 await conn.execute("ALTER TABLE sessions ADD COLUMN user TEXT")
-            except Exception:
-                pass
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+                logger.debug("[history] sessions.user 列已存在，跳过 ALTER")
             # 迁移：多租户前的旧会话（user 为 NULL）归默认 guest
             await conn.execute("UPDATE sessions SET user = 'guest' WHERE user IS NULL")
             await conn.commit()
@@ -254,7 +256,10 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
         ts = time.time()
         if isinstance(request_id, str) and request_id in pending:
             p = pending.pop(request_id)
-            await store.record_user(request_id=request_id, session_id=session_id, query=p["query"], ts=p["ts"], user=p.get("user"))
+            await store.record_user(
+                request_id=request_id, session_id=session_id,
+                query=p["query"], ts=p["ts"], user=p.get("user"),
+            )
             logger.info("[history] pending 回填 user: rid=%s sid=%s", request_id, session_id)
         await store.record_assistant(
             request_id=request_id if isinstance(request_id, str) else "",
