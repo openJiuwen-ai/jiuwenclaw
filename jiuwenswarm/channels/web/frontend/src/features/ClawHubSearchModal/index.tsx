@@ -348,7 +348,7 @@ export function ClawHubSearchModal({
                   const avatar = getSkillAvatar(item.slug);
                   return (
                     <div
-                      key={item.slug}
+                      key={item.owner_handle ? `${item.owner_handle}/${item.slug}` : item.slug}
                       className={`p-4 rounded-lg border border-border bg-panel ${viewMode === "grid" ? "flex flex-col" : "flex items-start justify-between gap-4"}`}
                       style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
                     >
@@ -632,7 +632,7 @@ export function ClawHubSearchModal({
                     const avatar = getSkillAvatar(item.slug);
                     return (
                       <div
-                        key={item.slug}
+                      key={item.owner_handle ? `${item.owner_handle}/${item.slug}` : item.slug}
                         className="p-4 rounded-lg border border-border bg-panel flex items-start justify-between gap-4"
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1">

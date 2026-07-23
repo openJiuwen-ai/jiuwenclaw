@@ -362,27 +362,44 @@ class SkillToolkit:
 
             resolved_source = normalized_source
             wait_timeout = self._safe_int(timeout_sec, 60)
-            existing_item = self._find_installed_by_target(target, resolved_source)
-            if existing_item is not None:
-                detail = (
-                    f"Skill `{existing_item['name']}` is already installed. "
-                    "Skipping duplicate installation."
-                )
-                return {
-                    "success": True,
-                    "source": resolved_source,
-                    "installed": True,
-                    "already_installed": True,
-                    "name": existing_item["name"],
-                    "description": existing_item["description"],
-                    "identifier": existing_item["identifier"],
-                    "skill_file": existing_item["skill_file"],
-                    "detail": detail,
-                }
 
             if resolved_source == "skillnet":
+                existing_item = self._find_installed_by_target(target, resolved_source)
+                if existing_item is not None:
+                    detail = (
+                        f"Skill `{existing_item['name']}` is already installed. "
+                        "Skipping duplicate installation."
+                    )
+                    return {
+                        "success": True,
+                        "source": resolved_source,
+                        "installed": True,
+                        "already_installed": True,
+                        "name": existing_item["name"],
+                        "description": existing_item["description"],
+                        "identifier": existing_item["identifier"],
+                        "skill_file": existing_item["skill_file"],
+                        "detail": detail,
+                    }
                 payload = await self._install_skillnet_sync_wait(target, wait_timeout)
             elif resolved_source == "teamskillshub":
+                existing_item = self._find_installed_by_target(target, resolved_source)
+                if existing_item is not None:
+                    detail = (
+                        f"Skill `{existing_item['name']}` is already installed. "
+                        "Skipping duplicate installation."
+                    )
+                    return {
+                        "success": True,
+                        "source": resolved_source,
+                        "installed": True,
+                        "already_installed": True,
+                        "name": existing_item["name"],
+                        "description": existing_item["description"],
+                        "identifier": existing_item["identifier"],
+                        "skill_file": existing_item["skill_file"],
+                        "detail": detail,
+                    }
                 payload = await self._manager.handle_skills_team_skills_hub_install(
                     {"asset_id": target, "force": False}
                 )
@@ -391,6 +408,23 @@ class SkillToolkit:
                 clawhub_owner = ""
                 if "/" in target:
                     clawhub_owner, _, clawhub_slug = target.partition("/")
+                existing_item = self._find_installed_by_target(clawhub_slug, resolved_source)
+                if existing_item is not None:
+                    detail = (
+                        f"Skill `{existing_item['name']}` is already installed. "
+                        "Skipping duplicate installation."
+                    )
+                    return {
+                        "success": True,
+                        "source": resolved_source,
+                        "installed": True,
+                        "already_installed": True,
+                        "name": existing_item["name"],
+                        "description": existing_item["description"],
+                        "identifier": existing_item["identifier"],
+                        "skill_file": existing_item["skill_file"],
+                        "detail": detail,
+                    }
                 payload = await self._manager.handle_skills_clawhub_download(
                     {"slug": clawhub_slug, "owner_handle": clawhub_owner, "force": False}
                 )

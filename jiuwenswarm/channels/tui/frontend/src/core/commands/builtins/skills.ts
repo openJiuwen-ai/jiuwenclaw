@@ -263,9 +263,9 @@ export function createSkillsCommand(): SlashCommand {
             let slug = clawhubPart;
             let ownerHandle: string | undefined;
             if (clawhubPart.includes("/")) {
-              const [owner, s] = clawhubPart.split("/");
-              ownerHandle = owner;
-              slug = s;
+              const slashIdx = clawhubPart.indexOf("/");
+              ownerHandle = clawhubPart.substring(0, slashIdx);
+              slug = clawhubPart.substring(slashIdx + 1);
             }
             ctx.addItem(makeItem(ctx.sessionId, "info", `Installing from ClawHub: ${slug}`));
             const downloadPayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }>(
