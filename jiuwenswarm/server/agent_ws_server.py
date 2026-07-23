@@ -567,6 +567,193 @@ def _build_simplify_prompt(target: str = "") -> str:
     return prompt
 
 
+# Platforms /autofix-pr adapts to. One prompt covers both; the agent detects the forge from
+# the git remote (Phase 0), so callers rarely pass one — an explicit value only lets the
+# agent skip detection. GitHub reads remote CI through `gh`. GitCode's CI runs on an external
+# system whose logs are NOT reachable, but the pass/fail status IS: it is served (per PR, per
+# commit) by web-api.gitcode.com's v2 pipeline-check endpoint. That host sits behind a WAF
+# that 418s a bare request, so the call needs browser-like headers; public repos need no
+# token. Because the failure log is unreachable, GitCode diagnosis falls back to running the
+# project's own checks locally. All of this was verified against real jiuwenswarm PRs.
+AUTOFIX_PR_PLATFORM_GITHUB = "github"
+AUTOFIX_PR_PLATFORM_GITCODE = "gitcode"
+
+_AUTOFIX_PR_PROMPT_TEMPLATE = """\
+# Autofix PR: Drive the Pull Request to Green
+
+Fix the open pull request for the current branch until its checks pass and reviewer
+requests are addressed. This works on both GitHub and GitCode remotes.
+
+## Phase 0: Detect the Platform
+
+Run `git remote get-url origin` and note the host:
+- `github.com` → use the `gh` CLI for the PR steps below.
+- `gitcode.com` → there is no `gh` CLI; use the REST calls shown in the GitCode branches.
+  Derive `<owner>/<repo>` from that same remote URL.
+
+Everything from Phase 3 onward is identical for both.
+
+## Phase 1: Identify the PR
+
+You fix only the PR for the branch you are ALREADY checked out on. A PR number below merely
+disambiguates when the branch has more than one open PR; the PR it names must still be THIS
+branch's PR (its `head.ref` equals `git branch --show-current`). If the number names a
+different branch, or a fork you are not on, do NOT add a remote, fetch another fork, or patch
+files in this repo — just read its status, report it, and hand back. Never pull someone
+else's PR into the current repository.
+
+If a PR number is provided below, use it. Otherwise find the open PR whose head branch is
+the current branch (`git branch --show-current`):
+- GitHub: `gh pr view --json number,headRefName,state` (or `gh pr view <number>`).
+- GitCode (public repos need no token): find the PR AND its head commit sha — you will
+  need that exact sha for the status check in Phase 2.
+  - If a PR number is given, read the PR and take its head sha:
+
+        curl -s "https://api.gitcode.com/api/v5/repos/<owner>/<repo>/pulls/<number>"
+        # → use the JSON field  head.sha  as HEAD_SHA
+
+  - Otherwise list open PRs and match the one whose `head.ref` is the current branch:
+
+        curl -s "https://api.gitcode.com/api/v5/repos/<owner>/<repo>/pulls?state=open"
+
+    Take that PR's `head.sha` as HEAD_SHA. When you are checked out on the PR branch this
+    equals `git rev-parse HEAD`.
+
+If there is no open PR for this branch, stop and say so — do not open one.
+
+## Phase 2: Gather the Failure Signal
+
+- GitHub (remote CI, logs reachable):
+  1. `gh pr checks <number>` — list the checks and find the failing ones.
+  2. For each failing check, read its log, e.g. `gh run view <run-id> --log-failed`.
+     The log is the primary evidence — do not guess the cause from the test name alone.
+  3. `gh pr view <number> --comments` — read review comments that request changes.
+- GitCode (remote CI status readable, but its logs are NOT):
+  1. Read the pipeline pass/fail for HEAD_SHA (the PR head sha from Phase 1). The status
+     lives on a WAF-guarded host, so a bare request gets HTTP 418 — you MUST send
+     browser-like headers. No token is needed for a public repo:
+
+         curl -s "https://web-api.gitcode.com/api/v2/projects/pipeline-check/<owner>%2F<repo>/merge_requests/<number>/pipelines?type=report_pipeline&commit_id=<HEAD_SHA>&page=1&per_page=5" \\
+           -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36" \\
+           -H "Referer: https://gitcode.com/<owner>/<repo>/pull/<number>/check" \\
+           -H "Origin: https://gitcode.com"
+
+     Pass the exact HEAD_SHA as `commit_id`: omitting it returns the PR's WHOLE run history
+     (old commits, mixed statuses) and a wrong sha returns nothing. Read `content[].status`
+     (`success` / `failed` / `running`); if several rows come back, the most recent is the
+     current one. `running` means the result is not in yet — rely on your local run below.
+     An EMPTY result (this repo has no remote pipeline at all) is NOT a pass — it means there
+     is no remote signal, so your local run below is the ONLY signal; run it and treat its
+     failures as the checks to fix.
+  2. Read the PR comments — they carry BOTH the reviewer feedback AND, on a repo with a CI
+     bot, a results table that names each failing check with a link to its report:
+
+         curl -s "https://api.gitcode.com/api/v5/repos/<owner>/<repo>/pulls/<number>/comments" -o pr_comments.json
+
+     Parse that file with `encoding='utf-8'` — GitCode returns UTF-8 and a bare read on
+     Windows dies with a cp1252 UnicodeDecodeError. In the comments look for a checks table
+     (rows like `UT测试 / 静态检查 … ✅ / ❌`) with report links. For each FAILED check, fetch
+     its linked report — these are usually public (e.g. a pytest-html report on OBS) — and
+     read the actual failing tests and tracebacks from it. That report IS the "why", the
+     equivalent of GitHub's `--log-failed`. Do not guess the cause from the check name alone.
+  3. If no such report is reachable (the pipeline API itself gives only pass/fail, no log),
+     fall back to running the project's own checks locally (`pytest`, `npm test`, the linter)
+     and read the failure there.
+
+If the checks pass (and, on GitCode, your local run is clean) and no comment requests a
+change, report that the PR is already green and stop without committing.
+
+## Phase 3: Diagnose and Fix
+
+Find the root cause in the source and fix it there. Keep the change minimal and scoped to
+the failure; do not refactor unrelated code. Removing a comment that described the very
+bug you just fixed is fine.
+
+## Phase 4: Verify Locally
+
+Run the failing check's fast local equivalent (the failing test, the linter) and confirm
+it now passes before pushing. On GitCode this local run IS your only reliable check — the
+remote log is unreachable, so never push a "fix" you have not reproduced-then-fixed locally.
+
+## Phase 5: Commit and Push
+
+Run these steps in order. Step 3 is not optional — these two trailers are the only thing
+that tells this commit apart from a hand-written one, and they are the easiest step to
+forget. The commit keeps the human's own author identity (do NOT change the author); the
+`Co-authored-by` trailer is what marks the machine's involvement, mirroring how Claude Code
+attributes its commits.
+
+1. Stage only the files you changed to fix the failure.
+2. Commit with a subject that names the actual defect, plus BOTH trailers:
+
+       git commit -m "fix: total() should sum all items, not skip the first" \\
+                  --trailer "Auto-Fixed-By: jiuwenswarm /autofix-pr" \\
+                  --trailer "Co-authored-by: jiuwenswarm-autofix <noreply@openjiuwen.com>"
+
+3. Verify both trailers landed: run `git log -1 --format=%B` and read the output. If either
+   `Auto-Fixed-By:` or `Co-authored-by:` is missing, repair it before pushing (re-pass only
+   the missing one; --amend is idempotent for a trailer already present):
+
+       git commit --amend --trailer "Auto-Fixed-By: jiuwenswarm /autofix-pr" \\
+                          --trailer "Co-authored-by: jiuwenswarm-autofix <noreply@openjiuwen.com>"
+
+   Amending here is safe and expected — nothing has been pushed yet.
+4. Push to the existing PR branch.
+
+Then report what you changed and the resulting check status.
+
+## Hard Rules
+
+- Operate only on the PR for the branch you are checked out on. NEVER add a remote for, or
+  fetch, someone else's fork to "acquire" a PR's code, and never patch a PR you are not on.
+  If you cannot reach the code by already being on its branch, report the status and hand
+  back — do not modify the repository you happen to be sitting in.
+- Fix the root cause in the source. NEVER make CI pass by deleting or weakening tests,
+  loosening assertions, marking tests skipped, or editing CI/workflow configuration.
+- Every commit you make must carry BOTH the `Auto-Fixed-By: jiuwenswarm /autofix-pr` and the
+  `Co-authored-by: jiuwenswarm-autofix <noreply@openjiuwen.com>` trailers. Keep the human's
+  own author identity — do not `--author` the commit; the co-author trailer, not the author
+  line, is what marks the machine. A correct code change that cannot be told apart from a
+  hand-written commit is still a failed run — verify both trailers before you push (Phase 5
+  step 3).
+- Never force-push and never rewrite already-published history. Amending your own commit
+  before it is pushed is not rewriting published history and is allowed.
+- Stop and hand the PR back to the human — push nothing — when the correct fix is
+  ambiguous, requires a product decision, or the failure looks environmental/flaky
+  rather than a real code defect. Explain what you found and what you need.
+- Do not post comments on the PR unless you are blocked and are handing it back.
+"""
+
+
+def _build_autofix_pr_prompt(pr_arg: str = "", platform: str = "") -> str:
+    """Build the prompt for the /autofix-pr command.
+
+    A single prompt covers both forges; the agent detects which one from the git remote
+    (Phase 0). GitHub reads remote CI (and its logs) through ``gh``. GitCode's pipeline
+    status is read from the ``web-api.gitcode.com`` v2 pipeline-check endpoint (WAF needs
+    browser headers; public repos need no token), but its logs are unreachable, so GitCode
+    diagnosis runs the project's checks locally.
+
+    Args:
+        pr_arg: Optional PR number, URL or free text. Empty means "infer from the current
+            branch".
+        platform: Optional forge hint (``github`` / ``gitcode``). When given, the agent may
+            skip Phase 0 detection. Any other value (including empty) leaves detection to
+            the agent — never an error, so an unknown host degrades gracefully.
+    """
+    prompt = _AUTOFIX_PR_PROMPT_TEMPLATE
+    tail: list[str] = []
+    hint = platform.strip().lower()
+    if hint in (AUTOFIX_PR_PLATFORM_GITHUB, AUTOFIX_PR_PLATFORM_GITCODE):
+        tail.append(f"Detected platform: {hint} (you may skip Phase 0 detection).")
+    target = pr_arg.strip()
+    if target:
+        tail.append(f"PR number: {target}")
+    if tail:
+        prompt += "\n\n" + "\n".join(tail) + "\n"
+    return prompt
+
+
 # System prompt for LLM-based agent generation
 _AGENT_CREATION_SYSTEM_PROMPT = """\
 You are an elite AI agent architect. When given an agent name and description, your job is to design a high-performance agent that EXECUTES tasks to completion — not just analyzes and reports.
@@ -1587,6 +1774,9 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.COMMAND_SIMPLIFY:
                 await self._handle_command_simplify(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.COMMAND_AUTOFIX_PR:
+                await self._handle_command_autofix_pr(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_MODEL:
                 await self._handle_command_model(ws, request, send_lock)
@@ -4018,6 +4208,43 @@ class AgentWebSocketServer:
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] command.simplify failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_command_autofix_pr(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """处理 /autofix-pr 命令：组装 PR 自动修复 prompt 并返回（由前端作为消息发送给 Agent）。
+
+        prompt 指导 Agent 分阶段完成，按 git remote 自动判定平台（GitHub / GitCode）：
+        0) 检测平台（github.com 走 gh / gitcode.com 走 REST）
+        1) 定位当前分支对应的 PR
+        2) 取失败信号（GitHub 拉 CI 日志+评论；GitCode 读 v2 pipeline-check 判红绿+本地跑校验复现+拉评论）
+        3) 定位根因并最小化修复
+        4) 本地复验
+        5) 提交并 push 回 PR 分支；改不动则交还给人
+        """
+        try:
+            params = request.params or {}
+            pr_arg = str(params.get("pr_arg", "")).strip()
+            # Empty/unknown platform is fine — the prompt tells the agent to auto-detect.
+            platform = str(params.get("platform", "") or "").strip()
+
+            prompt = _build_autofix_pr_prompt(pr_arg, platform)
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"prompt": prompt},
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] command.autofix_pr failed: %s", e)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
