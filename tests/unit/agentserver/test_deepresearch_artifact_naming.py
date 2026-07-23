@@ -240,6 +240,18 @@ def test_allocate_initial_paths_fails_with_domain_error_after_bounded_attempts(t
     assert caught.value.code == "ARTIFACT_NAMING_INVALID"
 
 
+def test_allocate_initial_paths_fails_at_total_directory_entry_bound(tmp_path, monkeypatch):
+    api = _api()
+    monkeypatch.setattr(api, "MAX_DIRECTORY_ENTRIES", 3, raising=False)
+    for index in range(10):
+        (tmp_path / f"unrelated-{index}").write_text("noise", encoding="utf-8")
+
+    with pytest.raises(api.ArtifactNamingError) as caught:
+        api.allocate_initial_paths(tmp_path, "report.md")
+
+    assert caught.value.code == "ARTIFACT_NAMING_INVALID"
+
+
 def test_allocate_next_paths_uses_global_same_document_max_across_branches(tmp_path):
     api = _api()
     parent = _write_sidecar(tmp_path, "report-v1", _provenance(version_number=1))
@@ -299,6 +311,17 @@ def test_allocate_next_paths_advances_when_candidate_sidecar_already_exists(tmp_
     assert allocated.version == api.ArtifactVersion("report", 3)
 
 
+def test_allocate_next_paths_rejects_non_mapping_parent_provenance(tmp_path):
+    api = _api()
+    parent = tmp_path / "report-v1.md"
+    parent.write_text("# Report\n", encoding="utf-8")
+
+    with pytest.raises(api.ArtifactNamingError) as caught:
+        api.allocate_next_paths(parent, [], "# Report\n")
+
+    assert caught.value.code == "ARTIFACT_NAMING_INVALID"
+
+
 def test_allocate_next_paths_skips_symlink_sidecars_without_following_them(tmp_path):
     api = _api()
     parent = tmp_path / "report-v1.md"
@@ -349,14 +372,11 @@ def test_allocate_next_paths_does_not_read_markdown_for_explicit_sibling(tmp_pat
     api = _api()
     parent = _write_sidecar(tmp_path, "report-v1", _provenance(version_number=1))
     _write_sidecar(tmp_path, "report-v2", _provenance(version_number=2))
-    original_read_text = Path.read_text
 
-    def reject_markdown(path, *args, **kwargs):
-        if path.name == "report-v2.md":
-            raise AssertionError("explicit version must not read markdown")
-        return original_read_text(path, *args, **kwargs)
+    def reject_markdown(*_args, **_kwargs):
+        raise AssertionError("explicit version must not read markdown")
 
-    monkeypatch.setattr(Path, "read_text", reject_markdown)
+    monkeypatch.setattr(api, "_sibling_markdown", reject_markdown)
 
     allocated = api.allocate_next_paths(parent, _provenance(version_number=1), "# Report\n")
 

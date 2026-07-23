@@ -29,6 +29,7 @@ MAX_PROVENANCE_BYTES = 4 * 1024 * 1024
 # Legacy Markdown is read only for title inference, so one MiB is sufficient.
 MAX_LEGACY_MARKDOWN_BYTES = 1024 * 1024
 MAX_SIDECARS_SCANNED = 512
+MAX_DIRECTORY_ENTRIES = 1024
 MAX_ALLOCATION_ATTEMPTS = 512
 _VERSION_SUFFIX_RE = re.compile(r"-v[1-9]\d*$")
 _ATX_H1_RE = re.compile(r"^[ \t]{0,3}#[ \t]+(?P<text>.*?)[ \t]*$")
@@ -56,6 +57,12 @@ class ArtifactPaths:
     markdown_path: Path
     provenance_path: Path
     final_result_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectorySnapshot:
+    exact_names: frozenset[str]
+    hidden_target_names: frozenset[str]
 
 
 def _invalid(message: str) -> ArtifactNamingError:
@@ -202,19 +209,33 @@ def _paths(output_dir: Path, version: ArtifactVersion) -> ArtifactPaths:
     return paths
 
 
-def _snapshot_directory_names(directory: Path) -> set[str]:
+def _snapshot_directory_names(directory: Path) -> _DirectorySnapshot:
+    exact_names: set[str] = set()
+    hidden_target_names: set[str] = set()
     try:
         with os.scandir(directory) as entries:
-            return {entry.name for entry in entries}
+            for count, entry in enumerate(entries, start=1):
+                if count > MAX_DIRECTORY_ENTRIES:
+                    raise _invalid("artifact directory entry limit exceeded")
+                name = entry.name
+                exact_names.add(name)
+                if name.startswith("."):
+                    components = name[1:].split(".")
+                    hidden_target_names.update(
+                        ".".join(components[:end])
+                        for end in range(1, len(components))
+                    )
     except OSError as exc:
         raise _invalid("artifact directory cannot be scanned") from exc
+    return _DirectorySnapshot(frozenset(exact_names), frozenset(hidden_target_names))
 
 
-def _is_available(paths: ArtifactPaths, occupied_names: set[str]) -> bool:
+def _is_available(paths: ArtifactPaths, snapshot: _DirectorySnapshot) -> bool:
     for path in (paths.markdown_path, paths.provenance_path, paths.final_result_path):
-        if path.name in occupied_names:
-            return False
-        if any(name.startswith(f".{path.name}.") for name in occupied_names):
+        if (
+            path.name in snapshot.exact_names
+            or path.name in snapshot.hidden_target_names
+        ):
             return False
     return True
 
@@ -232,16 +253,18 @@ def allocate_initial_paths(output_dir: Path, requested_name: str) -> ArtifactPat
     if not isinstance(output_dir, Path):
         raise _invalid("output_dir must be a Path")
     version = initial_version(requested_name)
-    occupied_names = _snapshot_directory_names(output_dir)
+    snapshot = _snapshot_directory_names(output_dir)
     for suffix in range(1, MAX_ALLOCATION_ATTEMPTS + 1):
         base_stem = _base_stem_with_ordinal(version.base_stem, suffix)
         candidate = _paths(output_dir, ArtifactVersion(base_stem, 1))
-        if _is_available(candidate, occupied_names):
+        if _is_available(candidate, snapshot):
             return candidate
     raise _invalid("artifact allocation attempts exhausted")
 
 
 def _require_document_id(provenance: dict) -> str:
+    if not isinstance(provenance, dict):
+        raise _invalid("provenance must be a dictionary")
     document_id = provenance.get("document_id")
     if not isinstance(document_id, str) or not document_id:
         raise _invalid("document_id must be a non-empty string")
@@ -283,10 +306,10 @@ def _is_symlink(path: Path) -> bool:
         raise _invalid("artifact directory changed during allocation") from exc
 
 
-def _sibling_markdown(path: Path, occupied_names: set[str]) -> str:
+def _sibling_markdown(path: Path, snapshot: _DirectorySnapshot) -> str:
     """Read at most ``MAX_LEGACY_MARKDOWN_BYTES`` for legacy title inference."""
 
-    if path.name not in occupied_names:
+    if path.name not in snapshot.exact_names:
         return ""
     content = _read_file_bytes(path, MAX_LEGACY_MARKDOWN_BYTES, "legacy markdown")
     try:
@@ -296,11 +319,11 @@ def _sibling_markdown(path: Path, occupied_names: set[str]) -> str:
 
 
 def _sibling_versions(
-    parent_path: Path, document_id: str, occupied_names: set[str]
+    parent_path: Path, document_id: str, snapshot: _DirectorySnapshot
 ) -> list[ArtifactVersion]:
     versions: list[ArtifactVersion] = []
     sidecars_scanned = 0
-    for name in sorted(occupied_names):
+    for name in sorted(snapshot.exact_names):
         if not name.endswith(".provenance.json"):
             continue
         sidecars_scanned += 1
@@ -323,7 +346,7 @@ def _sibling_versions(
         markdown = (
             ""
             if has_number or has_base
-            else _sibling_markdown(markdown_path, occupied_names)
+            else _sibling_markdown(markdown_path, snapshot)
         )
         versions.append(resolve_artifact_version(payload, markdown_path, markdown))
     return versions
@@ -340,12 +363,12 @@ def allocate_next_paths(
     parent_version = resolve_artifact_version(
         parent_provenance, parent_path, parent_markdown
     )
-    occupied_names = _snapshot_directory_names(parent_path.parent)
+    snapshot = _snapshot_directory_names(parent_path.parent)
     max_version = max(
         [parent_version.version_number]
         + [
             version.version_number
-            for version in _sibling_versions(parent_path, document_id, occupied_names)
+            for version in _sibling_versions(parent_path, document_id, snapshot)
         ]
     )
     next_number = max_version + 1
@@ -356,6 +379,6 @@ def allocate_next_paths(
             parent_path.parent,
             ArtifactVersion(parent_version.base_stem, candidate_number),
         )
-        if _is_available(candidate, occupied_names):
+        if _is_available(candidate, snapshot):
             return candidate
     raise _invalid("artifact allocation attempts exhausted")
