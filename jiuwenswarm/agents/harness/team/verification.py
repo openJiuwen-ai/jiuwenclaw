@@ -174,7 +174,7 @@ def _parse_judge_response(raw: str) -> tuple[Optional[bool], str, Optional[float
         text = text[start: end + 1]
     try:
         payload = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return None, "unparseable judge response", None
     if not isinstance(payload, dict):
         return None, "judge response is not an object", None
@@ -273,7 +273,7 @@ class StructuredVerifier:
         candidate = _strip_code_fence(text)
         try:
             parsed = json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:
             return VerificationOutcome(
                 passed=False,
                 reason="Structured output must be valid JSON (object or array).",
