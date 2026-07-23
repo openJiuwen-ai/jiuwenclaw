@@ -16,7 +16,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import (
 )
 from jiuwenswarm.extensions.agentos.agentos_router.registry_client import (
     HeartbeatResult,
-    ImageFrameworkInfo,
+    ImageEntry,
     InstanceRecord,
     LaunchSpec,
     RegistryClient,
@@ -43,7 +43,7 @@ __all__ = [
     "AgentRuntime",
     "AgentStatus",
     "HeartbeatResult",
-    "ImageFrameworkInfo",
+    "ImageEntry",
     "ImageInfo",
     "InstanceRecord",
     "LaunchSpec",

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from pathlib import Path
+from typing import Any, Mapping
 
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
@@ -17,10 +19,15 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentRuntime,
     SUPPORTED_AGENT_TYPES,
 )
-from jiuwenswarm.extensions.agentos.agentos_router.models import AgentInfo, AgentStatus
+from jiuwenswarm.extensions.agentos.agentos_router.models import (
+    AgentInfo,
+    AgentStatus,
+    ImageInfo,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.registry_client import RegistryClient
 from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import YuanrongSshRelay
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
+    AgentRuntimeSpec,
     YuanrongFrontendAgentClient,
 )
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
@@ -28,9 +35,49 @@ from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 
 logger = logging.getLogger(__name__)
 
+_WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
 
 class UnsupportedAgentType(ValueError):
     pass
+
+
+def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
+    """Take registry ``metadata.runtime_spec`` (YuanRong ``RuntimeSpec`` shape)."""
+    meta = image_info.metadata if isinstance(image_info.metadata, dict) else {}
+    raw_spec = meta.get("runtime_spec")
+    if not isinstance(raw_spec, Mapping) or not raw_spec:
+        raise ValueError(
+            f"runtime_spec is required from registry for agent_type={image_info.image_name}"
+        )
+    return dict(raw_spec)  # type: ignore[return-value]
+
+
+def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) -> str:
+    """Resolve host workspace bind path for one agent user.
+
+    Default: ``/home/<user_id>``. Optional ``workspace_root`` overrides the
+    parent directory (``{workspace_root}/<user_id>``).
+
+    Best-effort ``mkdir``: permission errors are ignored so callers (and unit
+    tests) can still pass the path to YuanRong create; the host/deploy side
+    remains responsible for a writable mount source.
+    """
+    safe_user = _WORKSPACE_NAME_RE.sub("_", str(user_id or "").strip()) or "default"
+    if workspace_root:
+        root = Path(workspace_root).expanduser()
+        workspace = (root / safe_user).resolve()
+    else:
+        workspace = Path("/home") / safe_user
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "[AgentOSRouter] workspace mkdir skipped: path=%s error=%s",
+            workspace,
+            exc,
+        )
+    return str(workspace)
 
 
 class AgentOSRouterClient(AgentServerClient):
@@ -338,26 +385,28 @@ class AgentOSRouterClient(AgentServerClient):
             )
 
         image_info = await self._registry.get_image_info(agent_info.agent_type)
-        urn = str(
-            image_info.image_uri
-            or image_info.metadata.get("urn")
-            or self._yuanrong.function_version_urn
-        ).strip()
-        if not urn:
-            raise ValueError(
-                f"function urn is required to create sandbox for agent_type={agent_info.agent_type}"
-            )
+        runtime_spec = build_inline_runtime_spec(image_info)
+        workspace = resolve_agent_workspace(agent_info.user_id)
+        env_raw = image_info.metadata.get("env_vars")
+        env_vars = (
+            {str(k): str(v) for k, v in dict(env_raw).items()}
+            if isinstance(env_raw, dict) and env_raw
+            else None
+        )
         sandbox = await self._yuanrong.create_sandbox(
             namespace=self._yuanrong.agent_namespace,
             name=f"{agent_info.user_id}+{agent_info.agent_type}",
-            urn=urn,
+            workspace=workspace,
+            runtime_spec=runtime_spec,
+            env_vars=env_vars,
         )
         instance_id = sandbox.sandbox_id
         agent_info.sandbox_id = instance_id
         agent_info.metadata.update(
             {
                 "instance_id": instance_id,
-                "urn": urn,
+                "workspace": workspace,
+                "runtime_spec": dict(runtime_spec),
                 "image_info": dict(image_info.metadata),
                 "sandbox": dict(sandbox.metadata),
             }

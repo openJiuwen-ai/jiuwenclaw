@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, TypedDict
+from typing import Any, AsyncIterator, Mapping, TypedDict
 
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.models import E2AEnvelope
@@ -33,6 +33,24 @@ class AgentMount(TypedDict, total=False):
     source: str
     target: str
     readonly: bool
+
+
+class AgentRootfsSpec(TypedDict, total=False):
+    """Inline ``runtime_spec.rootfs`` for POST /api/agent."""
+
+    imageurl: str
+    user: str
+    ports: list[str]
+
+
+class AgentRuntimeSpec(TypedDict, total=False):
+    """Inline ``runtime_spec`` for POST /api/agent (bypass meta_service)."""
+
+    runtime: str
+    sandbox_type: str
+    rootfs: AgentRootfsSpec
+    cpu: int
+    memory: int
 
 
 @dataclass
@@ -119,44 +137,84 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         self._server_ready = False
         logger.info("[YuanrongFrontendAgentClient] disconnected")
 
+    @staticmethod
+    def _normalize_runtime_spec(
+        runtime_spec: AgentRuntimeSpec | Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Normalize inline ``runtime_spec`` for POST /api/agent."""
+        if not isinstance(runtime_spec, Mapping):
+            raise ValueError("runtime_spec is required to create sandbox")
+        runtime = str(runtime_spec.get("runtime") or "").strip()
+        rootfs_raw = runtime_spec.get("rootfs")
+        if not isinstance(rootfs_raw, Mapping):
+            raise ValueError("runtime_spec.rootfs is required to create sandbox")
+        imageurl = str(
+            rootfs_raw.get("imageurl") or rootfs_raw.get("image_url") or ""
+        ).strip()
+        if not runtime:
+            raise ValueError("runtime_spec.runtime is required to create sandbox")
+        if not imageurl:
+            raise ValueError(
+                "runtime_spec.rootfs.imageurl is required to create sandbox"
+            )
+
+        rootfs: dict[str, Any] = {"imageurl": imageurl}
+        user = str(rootfs_raw.get("user") or "").strip()
+        if user:
+            rootfs["user"] = user
+        ports = rootfs_raw.get("ports")
+        if isinstance(ports, list) and ports:
+            rootfs["ports"] = [str(port) for port in ports]
+
+        normalized: dict[str, Any] = {"runtime": runtime, "rootfs": rootfs}
+        sandbox_type = str(runtime_spec.get("sandbox_type") or "").strip()
+        if sandbox_type:
+            normalized["sandbox_type"] = sandbox_type
+        if runtime_spec.get("cpu") is not None:
+            normalized["cpu"] = int(runtime_spec["cpu"])
+        if runtime_spec.get("memory") is not None:
+            normalized["memory"] = int(runtime_spec["memory"])
+        return normalized
+
     async def create_sandbox(
         self,
         *,
         namespace: str,
         name: str,
-        urn: str,
-        workspace: str | None = None,
+        workspace: str,
+        runtime_spec: AgentRuntimeSpec | Mapping[str, Any],
         env_vars: dict[str, str] | None = None,
         mounts: list[AgentMount] | None = None,
     ) -> SandboxInfo:
-        """Create a detached agent instance via POST /api/agent.
+        """Create a detached agent instance via POST /api/agent (inline mode).
 
-        Mirrors Frontend ``CreateRequest``:
+        Mirrors Frontend ``CreateAgentRequest`` inline path:
 
-        - ``namespace`` / ``name`` / ``urn``: required
-        - ``workspace`` / ``env_vars`` / ``mounts``: optional
+        - ``namespace`` / ``name`` / ``workspace`` / ``runtime_spec``: required
+        - ``runtime_spec.runtime`` + ``runtime_spec.rootfs.imageurl``: required
+        - ``env_vars`` / ``mounts``: optional
+        - does not send ``urn`` (inline takes priority over registered)
         """
         self._ensure_connected()
         normalized_namespace = str(namespace or "").strip()
         normalized_name = str(name or "").strip()
-        normalized_urn = str(urn or "").strip()
+        normalized_workspace = str(workspace or "").strip()
         if not normalized_namespace:
             raise ValueError("namespace is required to create sandbox")
         if not normalized_name:
             raise ValueError("name is required to create sandbox")
-        if not normalized_urn:
-            raise ValueError("urn is required to create sandbox")
+        if not normalized_workspace:
+            raise ValueError("workspace is required to create sandbox")
+        if not normalized_workspace.startswith("/"):
+            raise ValueError("workspace must be an absolute path")
 
+        normalized_runtime_spec = self._normalize_runtime_spec(runtime_spec)
         payload: dict[str, Any] = {
             "namespace": normalized_namespace,
             "name": normalized_name,
-            "urn": normalized_urn,
+            "workspace": normalized_workspace,
+            "runtime_spec": normalized_runtime_spec,
         }
-
-        if workspace is not None:
-            normalized_workspace = str(workspace).strip()
-            if normalized_workspace:
-                payload["workspace"] = normalized_workspace
 
         if env_vars:
             payload["env_vars"] = {
@@ -181,20 +239,21 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 "instance_id": instance_id,
                 "namespace": normalized_namespace,
                 "name": normalized_name,
-                "urn": normalized_urn,
-                "workspace": payload.get("workspace"),
+                "workspace": normalized_workspace,
+                "runtime_spec": dict(normalized_runtime_spec),
                 "env_vars": dict(payload.get("env_vars") or {}),
                 "mounts": list(payload.get("mounts") or []),
-                "provisioning": "yuanrong_agent_api",
+                "provisioning": "yuanrong_agent_api_inline",
             },
         )
         logger.info(
             "[YuanrongFrontendAgentClient] create_sandbox: "
-            "instance_id=%s name=%s namespace=%s urn=%s",
+            "instance_id=%s name=%s namespace=%s runtime=%s imageurl=%s",
             instance_id,
             normalized_name,
             normalized_namespace,
-            normalized_urn,
+            normalized_runtime_spec.get("runtime"),
+            (normalized_runtime_spec.get("rootfs") or {}).get("imageurl"),
         )
         return info
 

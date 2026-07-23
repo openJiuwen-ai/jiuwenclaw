@@ -29,6 +29,7 @@ class FakeYuanRongClient:
         self.agent_namespace = "default"
         self.send_calls = 0
         self.create_calls = 0
+        self.create_payloads: list[dict[str, Any]] = []
         self.delete_calls: list[str] = []
         self.config: dict[str, Any] = {}
         self.push_handler = None
@@ -45,22 +46,24 @@ class FakeYuanRongClient:
         *,
         namespace: str,
         name: str,
-        urn: str,
-        workspace: str | None = None,
+        workspace: str,
+        runtime_spec: dict[str, Any],
         env_vars: dict[str, str] | None = None,
         mounts: list[dict[str, Any]] | None = None,
     ) -> SandboxInfo:
         self.create_calls += 1
+        payload = {
+            "namespace": namespace,
+            "name": name,
+            "workspace": workspace,
+            "runtime_spec": dict(runtime_spec),
+            "env_vars": dict(env_vars or {}),
+            "mounts": list(mounts or []),
+        }
+        self.create_payloads.append(payload)
         return SandboxInfo(
             sandbox_id=f"sbx-{self.create_calls}",
-            metadata={
-                "namespace": namespace,
-                "name": name,
-                "urn": urn,
-                "workspace": workspace,
-                "env_vars": dict(env_vars or {}),
-                "mounts": list(mounts or []),
-            },
+            metadata=payload,
         )
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
@@ -104,7 +107,28 @@ class FakeRegistryClient:
 
     async def get_image_info(self, image_name: str) -> ImageInfo:
         self.image_lookups += 1
-        return ImageInfo(image_name=image_name)
+        imageurl = f"harbor.local/adapted/{image_name}:latest"
+        runtime_spec = {
+            "runtime": "python3.11",
+            "sandbox_type": "docker",
+            "rootfs": {
+                "imageurl": imageurl,
+                "user": "agentos",
+                "ports": ["tcp:22"],
+            },
+            "cpu": 1000,
+            "memory": 2048,
+        }
+        return ImageInfo(
+            image_name=image_name,
+            image_uri=imageurl,
+            metadata={
+                "agent_type": image_name,
+                "runtime_spec": runtime_spec,
+                "env_vars": {},
+                "source": "local_stub",
+            },
+        )
 
     async def list_user_images(self, user_id: str) -> list[ImageInfo]:
         self.list_user_images_calls.append(user_id)
@@ -155,6 +179,14 @@ async def test_swarm_request_creates_mapping_then_forwards() -> None:
     assert registry.image_lookups == 1
     assert yuanrong.create_calls == 1
     assert yuanrong.send_calls == 1
+    create_payload = yuanrong.create_payloads[0]
+    assert "urn" not in create_payload
+    assert create_payload["runtime_spec"]["runtime"] == "python3.11"
+    assert create_payload["runtime_spec"]["sandbox_type"] == "docker"
+    assert create_payload["runtime_spec"]["rootfs"]["imageurl"].endswith(
+        "jiuwenswarm:latest"
+    )
+    assert create_payload["workspace"] == "/home/u1"
     agents = await agent_manager.list_user_agents("u1")
     assert len(agents) == 1
     assert agents[0].info.status is AgentStatus.READY
