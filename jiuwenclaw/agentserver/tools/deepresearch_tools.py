@@ -10,7 +10,7 @@ import io
 import json
 import logging
 import os
-import stat
+import shutil
 import sys
 import tempfile
 import uuid
@@ -271,148 +271,100 @@ def _validate_regular_file_target(path: Path) -> None:
         raise ValueError("unsafe HTML output target")
 
 
-_DIRECTORY_OPEN_FLAGS = (
-    os.O_RDONLY
-    | getattr(os, "O_DIRECTORY", 0)
-    | getattr(os, "O_NOFOLLOW", 0)
-)
-
-
-def _directory_fd_matches_path(directory_fd: int, path: str | Path, **stat_kwargs) -> bool:
+def _remove_created_asset_dir(path: Path) -> None:
     try:
-        path_stat = os.stat(path, follow_symlinks=False, **stat_kwargs)
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    opened_stat = os.fstat(directory_fd)
-    return (
-        stat.S_ISDIR(path_stat.st_mode)
-        and path_stat.st_dev == opened_stat.st_dev
-        and path_stat.st_ino == opened_stat.st_ino
-    )
-
-
-def _open_or_create_asset_directory(name: str, parent_fd: int) -> int:
-    try:
-        os.mkdir(name, dir_fd=parent_fd)
-    except FileExistsError:
-        pass
-    return os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
-
-
-def _atomic_write_asset(directory_fd: int, name: str, payload: bytes) -> None:
-    try:
-        target_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(path)
     except FileNotFoundError:
         pass
-    else:
-        if not stat.S_ISREG(target_stat.st_mode):
-            raise ValueError("unsafe styled asset destination")
-
-    temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
-    file_fd = os.open(
-        temporary_name,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-        dir_fd=directory_fd,
-    )
-    try:
-        with os.fdopen(file_fd, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(
-            temporary_name,
-            name,
-            src_dir_fd=directory_fd,
-            dst_dir_fd=directory_fd,
+    except OSError as exc:
+        logger.warning(
+            "Failed to remove generated styled assets. type=%s",
+            type(exc).__name__,
         )
-    finally:
-        try:
-            os.unlink(temporary_name, dir_fd=directory_fd)
-        except FileNotFoundError:
-            pass
 
 
-def _copy_asset_dir(source: Path, destination: Path) -> None:
-    """Merge regular assets through no-follow directory descriptors."""
+def _copy_asset_dir(
+    source: Path,
+    destination_parent: Path,
+    destination_prefix: str,
+) -> Path | None:
+    """Copy validated assets into a new unpredictable sibling directory."""
     if source.is_symlink():
         raise ValueError("unsafe styled asset source")
     if not source.exists():
-        return
+        return None
     if not source.is_dir():
         raise ValueError("unsafe styled asset source")
 
     entries = list(source.rglob("*"))
     if not entries:
-        return
-    planned: list[tuple[Path, Path]] = []
+        return None
+    planned: list[tuple[Path, Path, bool]] = []
     for item in entries:
         if item.is_symlink():
             raise ValueError("unsafe styled asset source")
         relative = item.relative_to(source)
         if item.is_dir():
-            continue
-        if not item.is_file():
+            planned.append((item, relative, True))
+        elif item.is_file():
+            planned.append((item, relative, False))
+        else:
             raise ValueError("unsafe styled asset source")
-        planned.append((item, relative))
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination_parent.mkdir(parents=True, exist_ok=True)
+    destination = Path(
+        tempfile.mkdtemp(prefix=destination_prefix, dir=destination_parent)
+    )
     try:
-        os.mkdir(destination)
-    except FileExistsError:
-        pass
-    root_fd = os.open(destination, _DIRECTORY_OPEN_FLAGS)
-    try:
-        if not _directory_fd_matches_path(root_fd, destination):
-            raise ValueError("unsafe styled asset destination")
-        for source_file, relative in planned:
-            opened_directories: list[tuple[int, int, str]] = []
-            current_fd = root_fd
-            try:
-                for component in relative.parts[:-1]:
-                    child_fd = _open_or_create_asset_directory(
-                        component, current_fd
-                    )
-                    opened_directories.append((current_fd, child_fd, component))
-                    current_fd = child_fd
-                _atomic_write_asset(
-                    current_fd, relative.name, source_file.read_bytes()
-                )
-                for parent_fd, child_fd, component in reversed(
-                    opened_directories
-                ):
-                    if not _directory_fd_matches_path(
-                        child_fd, component, dir_fd=parent_fd
-                    ):
-                        raise ValueError("unsafe styled asset destination")
-            finally:
-                for _parent_fd, child_fd, _component in reversed(
-                    opened_directories
-                ):
-                    os.close(child_fd)
-        if not _directory_fd_matches_path(root_fd, destination):
-            raise ValueError("unsafe styled asset destination")
-    finally:
-        os.close(root_fd)
+        for source_item, relative, is_directory in planned:
+            target = destination / relative
+            if is_directory:
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(target, source_item.read_bytes())
+    except Exception:
+        _remove_created_asset_dir(destination)
+        raise
+    return destination
 
 
 def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
     """Install the extracted bundle: copy assets and rewrite HTML references."""
     report_base = html_path.with_suffix("")
-    infer_dir = report_base.with_name(f"{report_base.name}_infer")
-    chart_dir = report_base.with_name(f"{report_base.name}_charts")
-    _copy_asset_dir(bundle_root / "infer", infer_dir)
-    _copy_asset_dir(bundle_root / "charts", chart_dir)
-
     html = (bundle_root / "report.html").read_text(encoding="utf-8")
-    html = html.replace('href="infer/', f'href="{infer_dir.name}/')
-    html = html.replace("href='infer/", f"href='{infer_dir.name}/")
-    html = html.replace('src="charts/', f'src="{chart_dir.name}/')
-    html = html.replace("src='charts/", f"src='{chart_dir.name}/")
+    created_asset_dirs: list[Path] = []
+    try:
+        infer_dir = _copy_asset_dir(
+            bundle_root / "infer",
+            report_base.parent,
+            f"{report_base.name}_infer_",
+        )
+        if infer_dir is not None:
+            created_asset_dirs.append(infer_dir)
+            html = html.replace('href="infer/', f'href="{infer_dir.name}/')
+            html = html.replace("href='infer/", f"href='{infer_dir.name}/")
 
-    html_path.parent.mkdir(parents=True, exist_ok=True)
-    _validate_regular_file_target(html_path)
-    _atomic_write_bytes(html_path, html.encode("utf-8"))
+        chart_dir = _copy_asset_dir(
+            bundle_root / "charts",
+            report_base.parent,
+            f"{report_base.name}_charts_",
+        )
+        if chart_dir is not None:
+            created_asset_dirs.append(chart_dir)
+            html = html.replace('src="charts/', f'src="{chart_dir.name}/')
+            html = html.replace("src='charts/", f"src='{chart_dir.name}/")
+
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        _validate_regular_file_target(html_path)
+        _atomic_write_bytes(html_path, html.encode("utf-8"))
+    except Exception:
+        for asset_dir in reversed(created_asset_dirs):
+            _remove_created_asset_dir(asset_dir)
+        raise
 
 
 async def _generate_report_html(

@@ -7,6 +7,7 @@
 import asyncio
 import base64
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -599,19 +600,110 @@ async def test_generate_report_html_installs_styled_report(tmp_path):
         )
 
     assert html_path == tmp_path / "report.html"
+    generated_infer_dirs = list(tmp_path.glob("report_infer_*"))
+    generated_chart_dirs = list(tmp_path.glob("report_charts_*"))
+    assert len(generated_infer_dirs) == 1
+    assert len(generated_chart_dirs) == 1
+    generated_infer_dir = generated_infer_dirs[0]
+    generated_chart_dir = generated_chart_dirs[0]
     assert html_path.read_text(encoding="utf-8") == (
-        '<html><a href="report_infer/new.html">styled</a>'
-        '<img src="report_charts/new.png"></html>'
+        f'<html><a href="{generated_infer_dir.name}/new.html">styled</a>'
+        f'<img src="{generated_chart_dir.name}/new.png"></html>'
     )
-    assert (infer_dir / "new.html").read_text(encoding="utf-8") == (
+    assert (generated_infer_dir / "new.html").read_text(encoding="utf-8") == (
         "<html>new inference</html>"
     )
-    assert (chart_dir / "new.png").read_bytes() == b"new chart"
+    assert (generated_chart_dir / "new.png").read_bytes() == b"new chart"
     assert (infer_dir / "existing.html").read_text(encoding="utf-8") == (
         "existing inference"
     )
     assert (chart_dir / "existing.png").read_bytes() == b"existing chart"
+    assert sorted(path.name for path in infer_dir.iterdir()) == ["existing.html"]
+    assert sorted(path.name for path in chart_dir.iterdir()) == ["existing.png"]
     stylize.assert_awaited_once_with({"response_content": "# Report"}, llm)
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_with_assets_does_not_require_dir_fd(tmp_path):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    fixed_infer_dir = tmp_path / "report_infer"
+    fixed_chart_dir = tmp_path / "report_charts"
+    fixed_infer_dir.mkdir()
+    fixed_chart_dir.mkdir()
+    (fixed_infer_dir / "existing.html").write_text("existing", encoding="utf-8")
+    (fixed_chart_dir / "existing.png").write_bytes(b"existing")
+    styled_result = SimpleNamespace(
+        convert_content=_styled_report_archive(
+            '<html><a href="infer/new.html">styled</a>'
+            '<img src="charts/new.png"></html>',
+            {
+                "infer/new.html": "<html>new inference</html>",
+                "charts/new.png": b"new chart",
+            },
+        )
+    )
+    dir_fd_calls = []
+
+    def _without_dir_fd(function):
+        def _wrapped(*args, **kwargs):
+            caller = inspect.currentframe().f_back
+            if (
+                caller is not None
+                and Path(caller.f_code.co_filename) == Path(dt.__file__)
+                and any(
+                    kwargs.get(name) is not None
+                    for name in ("dir_fd", "src_dir_fd", "dst_dir_fd")
+                )
+            ):
+                dir_fd_calls.append(function.__name__)
+                raise NotImplementedError("dir_fd is unavailable")
+            return function(*args, **kwargs)
+
+        return _wrapped
+
+    with patch.object(
+        dt,
+        "_scoped_report_style_llm_context",
+        return_value=_async_context(object()),
+    ), patch(
+        "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
+        new=AsyncMock(return_value=styled_result),
+    ), patch.object(
+        dt.os, "open", side_effect=_without_dir_fd(dt.os.open)
+    ), patch.object(
+        dt.os, "stat", side_effect=_without_dir_fd(dt.os.stat)
+    ), patch.object(
+        dt.os, "mkdir", side_effect=_without_dir_fd(dt.os.mkdir)
+    ), patch.object(
+        dt.os, "replace", side_effect=_without_dir_fd(dt.os.replace)
+    ), patch.object(
+        dt.os, "unlink", side_effect=_without_dir_fd(dt.os.unlink)
+    ), patch.object(
+        dt.os, "supports_dir_fd", set()
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Verified report"},
+            report_path_md,
+            "# Verified report",
+        )
+
+    assert dir_fd_calls == []
+    assert html_path == tmp_path / "report.html"
+    html = html_path.read_text(encoding="utf-8")
+    assert "styled" in html
+    generated_infer_dir = next(tmp_path.glob("report_infer_*"))
+    generated_chart_dir = next(tmp_path.glob("report_charts_*"))
+    assert f'href="{generated_infer_dir.name}/new.html"' in html
+    assert f'src="{generated_chart_dir.name}/new.png"' in html
+    assert (generated_infer_dir / "new.html").is_file()
+    assert (generated_chart_dir / "new.png").read_bytes() == b"new chart"
+    assert sorted(path.name for path in fixed_infer_dir.iterdir()) == [
+        "existing.html"
+    ]
+    assert sorted(path.name for path in fixed_chart_dir.iterdir()) == [
+        "existing.png"
+    ]
 
 
 @pytest.mark.asyncio
@@ -743,7 +835,11 @@ async def test_generate_report_html_does_not_follow_asset_root_symlink(
     (tmp_path / asset_root_name).symlink_to(outside_dir, target_is_directory=True)
     styled_result = SimpleNamespace(
         convert_content=_styled_report_archive(
-            "<html>styled report</html>",
+            (
+                '<html><a href="infer/new.html">styled report</a></html>'
+                if asset_root_name == "report_infer"
+                else '<html><img src="charts/new.png">styled report</html>'
+            ),
             {asset_name: b"untrusted asset"},
         )
     )
@@ -763,7 +859,11 @@ async def test_generate_report_html_does_not_follow_asset_root_symlink(
         )
 
     assert html_path == tmp_path / "report.html"
-    assert "Verified report" in html_path.read_text(encoding="utf-8")
+    html = html_path.read_text(encoding="utf-8")
+    assert "styled report" in html
+    generated_dir = next(tmp_path.glob(f"{asset_root_name}_*"))
+    assert f'{generated_dir.name}/new.' in html
+    assert (generated_dir / Path(asset_name).name).read_bytes() == b"untrusted asset"
     assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
     assert sorted(path.name for path in outside_dir.iterdir()) == ["sentinel"]
 
@@ -776,7 +876,7 @@ async def test_generate_report_html_does_not_follow_asset_root_symlink(
         ("report_charts", "charts/new.png"),
     ],
 )
-async def test_generate_report_html_does_not_follow_asset_root_swapped_after_open(
+async def test_generate_report_html_ignores_fixed_asset_root_swapped_to_symlink(
     tmp_path, asset_root_name, asset_name
 ):
     report_path_md = tmp_path / "report.md"
@@ -789,28 +889,82 @@ async def test_generate_report_html_does_not_follow_asset_root_swapped_after_ope
     outside_dir.mkdir()
     sentinel = outside_dir / "sentinel"
     sentinel.write_text("outside sentinel", encoding="utf-8")
+    asset_root.rename(held_root)
+    asset_root.symlink_to(outside_dir, target_is_directory=True)
     styled_result = SimpleNamespace(
         convert_content=_styled_report_archive(
-            "<html>styled report</html>",
+            (
+                '<html><a href="infer/new.html">styled report</a></html>'
+                if asset_root_name == "report_infer"
+                else '<html><img src="charts/new.png">styled report</html>'
+            ),
             {asset_name: b"untrusted asset"},
         )
     )
-    real_open = dt.os.open
-    swapped = False
 
-    def _open_then_swap(path, flags, *args, dir_fd=None, **kwargs):
-        nonlocal swapped
-        fd = real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+    with patch.object(
+        dt,
+        "_scoped_report_style_llm_context",
+        return_value=_async_context(object()),
+    ), patch(
+        "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
+        new=AsyncMock(return_value=styled_result),
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Verified report"},
+            report_path_md,
+            "# Verified report",
+        )
+
+    assert html_path == tmp_path / "report.html"
+    html = html_path.read_text(encoding="utf-8")
+    assert "styled report" in html
+    generated_dir = next(tmp_path.glob(f"{asset_root_name}_*"))
+    assert f"{generated_dir.name}/new." in html
+    assert (generated_dir / Path(asset_name).name).read_bytes() == b"untrusted asset"
+    assert (held_root / "existing").read_text(encoding="utf-8") == "existing asset"
+    assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
+    assert sorted(path.name for path in outside_dir.iterdir()) == ["sentinel"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["asset_copy", "html_install"])
+async def test_generate_report_html_cleans_unique_assets_when_install_fails(
+    tmp_path, failure_stage
+):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    fixed_infer_dir = tmp_path / "report_infer"
+    fixed_chart_dir = tmp_path / "report_charts"
+    fixed_infer_dir.mkdir()
+    fixed_chart_dir.mkdir()
+    (fixed_infer_dir / "existing").write_text("existing", encoding="utf-8")
+    (fixed_chart_dir / "existing").write_text("existing", encoding="utf-8")
+    styled_result = SimpleNamespace(
+        convert_content=_styled_report_archive(
+            '<html><a href="infer/new.html">styled report</a>'
+            '<img src="charts/new.png"></html>',
+            {
+                "infer/new.html": b"new inference",
+                "charts/new.png": b"new chart",
+            },
+        )
+    )
+    real_atomic_write = dt._atomic_write_bytes
+
+    def _fail_styled_install(path, payload):
         if (
-            not swapped
-            and dir_fd is None
-            and Path(path) == asset_root
-            and flags & getattr(dt.os, "O_DIRECTORY", 0)
+            failure_stage == "asset_copy"
+            and path.parent.name.startswith("report_charts_")
         ):
-            asset_root.rename(held_root)
-            asset_root.symlink_to(outside_dir, target_is_directory=True)
-            swapped = True
-        return fd
+            raise OSError("styled asset copy failed")
+        if (
+            failure_stage == "html_install"
+            and path == tmp_path / "report.html"
+            and b"styled report" in payload
+        ):
+            raise OSError("styled HTML install failed")
+        return real_atomic_write(path, payload)
 
     with patch.object(
         dt,
@@ -820,9 +974,9 @@ async def test_generate_report_html_does_not_follow_asset_root_swapped_after_ope
         "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
         new=AsyncMock(return_value=styled_result),
     ), patch.object(
-        dt.os,
-        "open",
-        side_effect=_open_then_swap,
+        dt,
+        "_atomic_write_bytes",
+        side_effect=_fail_styled_install,
     ):
         html_path = await dt._generate_report_html(
             {"response_content": "# Verified report"},
@@ -830,11 +984,12 @@ async def test_generate_report_html_does_not_follow_asset_root_swapped_after_ope
             "# Verified report",
         )
 
-    assert swapped
     assert html_path == tmp_path / "report.html"
     assert "Verified report" in html_path.read_text(encoding="utf-8")
-    assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
-    assert sorted(path.name for path in outside_dir.iterdir()) == ["sentinel"]
+    assert list(tmp_path.glob("report_infer_*")) == []
+    assert list(tmp_path.glob("report_charts_*")) == []
+    assert sorted(path.name for path in fixed_infer_dir.iterdir()) == ["existing"]
+    assert sorted(path.name for path in fixed_chart_dir.iterdir()) == ["existing"]
 
 
 @pytest.mark.asyncio
