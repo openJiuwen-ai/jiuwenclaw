@@ -437,11 +437,6 @@ def _build_team_capability_specs(
     ]
     if role == "leader":
         rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
-        # GUARDIAN anomaly rail (self-gated on guardian.enabled by the provider).
-        # Guarded: the guardian provider is an in-progress feature that may not be
-        # registered yet; skip gracefully instead of crashing team assembly.
-        if hasattr(registry, "GUARDIAN_MONITOR"):
-            rails_specs.append(RailSpec(type=registry.GUARDIAN_MONITOR))
 
     if _retrieval_enabled(config):
         rails_specs.append(
@@ -529,12 +524,6 @@ def _build_code_capability_specs(
 
     if is_team_plan_leader:
         rails_specs.append(RailSpec(type=registry.TEAM_PLAN_APPROVAL))
-
-    if role == "leader":
-        # GUARDIAN anomaly rail (self-gated on guardian.enabled by the provider).
-        # Guarded: skip gracefully when the in-progress guardian provider is absent.
-        if hasattr(registry, "GUARDIAN_MONITOR"):
-            rails_specs.append(RailSpec(type=registry.GUARDIAN_MONITOR))
 
     if enable_permissions and role == "teammate":
         rails_specs.append(
