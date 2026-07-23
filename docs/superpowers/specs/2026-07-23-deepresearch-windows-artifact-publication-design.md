@@ -163,4 +163,3 @@ Windows race guarantees, but they add a large platform-specific surface and
 packaging burden. The selected rename-and-quarantine design is scoped to the
 current threat model and preserves no-overwrite publication without that
 complexity.
-
