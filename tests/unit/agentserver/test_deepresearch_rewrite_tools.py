@@ -796,7 +796,11 @@ async def test_generate_rewrite_html_passes_inputs_generates_once_and_delivers_o
         report_path="/workspace/child.md",
         revision_id="rev_child",
     )
-    generator.assert_awaited_once_with(final_result, Path("/workspace/child.md"))
+    generator.assert_awaited_once_with(
+        final_result,
+        Path("/workspace/child.md"),
+        "rewritten",
+    )
     delivery.assert_awaited_once_with(html_path, route)
     assert "/workspace" not in raw
 

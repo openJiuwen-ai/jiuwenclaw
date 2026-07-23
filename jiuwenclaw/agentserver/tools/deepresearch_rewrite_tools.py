@@ -500,7 +500,9 @@ async def deepresearch_generate_rewrite_html(
 
     try:
         html_path = await _generate_report_html(
-            export["final_result"], Path(export["report_path"])
+            export["final_result"],
+            Path(export["report_path"]),
+            export["final_result"]["response_content"],
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.error(

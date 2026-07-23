@@ -14,6 +14,7 @@ import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from types import SimpleNamespace
 
 import os
@@ -460,7 +461,7 @@ def _active_stage(update):
 
 
 @pytest.mark.asyncio
-async def test_tool_sends_nested_section_reasoning_without_task_snapshots():
+async def test_tool_sends_nested_section_reasoning_without_task_snapshots(tmp_path):
     raw_process = "原始检索过程第一行\n\n原始检索过程第二行" + "完整内容" * 40
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
@@ -486,13 +487,15 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots():
             "final_result": {"response_content": "done"},
         }),
     ]
+    report_path = tmp_path / "r.md"
+    report_path.write_text("done", encoding="utf-8")
     push = AsyncMock()
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
          patch.object(dt, "_get_route", return_value={
              "request_id": "R1", "channel_id": "CH1", "session_id": "S1"
          }), \
-         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
+         patch.object(dt, "_write_report_markdown", return_value=str(report_path)), \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
          patch(
              "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
@@ -592,7 +595,7 @@ async def test_generate_report_html_installs_styled_report(tmp_path):
         new=AsyncMock(return_value=styled_result),
     ) as stylize:
         html_path = await dt._generate_report_html(
-            {"response_content": "# Report"}, report_path_md
+            {"response_content": "# Report"}, report_path_md, "# Report"
         )
 
     assert html_path == tmp_path / "report.html"
@@ -629,7 +632,7 @@ async def test_generate_report_html_falls_back_to_offline_conversion(tmp_path):
         side_effect=_convert,
     ):
         html_path = await dt._generate_report_html(
-            {"response_content": "# Report"}, report_path_md
+            {"response_content": "# Report"}, report_path_md, "# Report"
         )
 
     assert html_path == tmp_path / "report.html"
@@ -653,7 +656,9 @@ async def test_generate_report_html_fallback_uses_verified_content_after_source_
         side_effect=_mutate_then_fail,
     ):
         html_path = await dt._generate_report_html(
-            {"response_content": "# Verified report"}, report_path_md
+            {"response_content": "# Verified report"},
+            report_path_md,
+            "# Verified report",
         )
 
     assert html_path == tmp_path / "report.html"
@@ -678,7 +683,9 @@ async def test_generate_report_html_rejects_html_symlink_without_overwriting_tar
         side_effect=RuntimeError("styled export unavailable"),
     ):
         html_path = await dt._generate_report_html(
-            {"response_content": "# Verified report"}, report_path_md
+            {"response_content": "# Verified report"},
+            report_path_md,
+            "# Verified report",
         )
 
     assert html_path is None
@@ -707,7 +714,7 @@ async def test_generate_report_html_does_not_follow_legacy_fixed_temp_symlink(tm
         new=AsyncMock(return_value=styled_result),
     ):
         html_path = await dt._generate_report_html(
-            {"response_content": "# Report"}, report_path_md
+            {"response_content": "# Report"}, report_path_md, "# Report"
         )
 
     assert html_path == tmp_path / "report.html"
@@ -750,9 +757,80 @@ async def test_generate_report_html_does_not_follow_asset_root_symlink(
         new=AsyncMock(return_value=styled_result),
     ):
         html_path = await dt._generate_report_html(
-            {"response_content": "# Verified report"}, report_path_md
+            {"response_content": "# Verified report"},
+            report_path_md,
+            "# Verified report",
         )
 
+    assert html_path == tmp_path / "report.html"
+    assert "Verified report" in html_path.read_text(encoding="utf-8")
+    assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
+    assert sorted(path.name for path in outside_dir.iterdir()) == ["sentinel"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asset_root_name", "asset_name"),
+    [
+        ("report_infer", "infer/new.html"),
+        ("report_charts", "charts/new.png"),
+    ],
+)
+async def test_generate_report_html_does_not_follow_asset_root_swapped_after_open(
+    tmp_path, asset_root_name, asset_name
+):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    asset_root = tmp_path / asset_root_name
+    asset_root.mkdir()
+    (asset_root / "existing").write_text("existing asset", encoding="utf-8")
+    held_root = tmp_path / f"held_{asset_root_name}"
+    outside_dir = tmp_path / f"outside_{asset_root_name}"
+    outside_dir.mkdir()
+    sentinel = outside_dir / "sentinel"
+    sentinel.write_text("outside sentinel", encoding="utf-8")
+    styled_result = SimpleNamespace(
+        convert_content=_styled_report_archive(
+            "<html>styled report</html>",
+            {asset_name: b"untrusted asset"},
+        )
+    )
+    real_open = dt.os.open
+    swapped = False
+
+    def _open_then_swap(path, flags, *args, dir_fd=None, **kwargs):
+        nonlocal swapped
+        fd = real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+        if (
+            not swapped
+            and dir_fd is None
+            and Path(path) == asset_root
+            and flags & getattr(dt.os, "O_DIRECTORY", 0)
+        ):
+            asset_root.rename(held_root)
+            asset_root.symlink_to(outside_dir, target_is_directory=True)
+            swapped = True
+        return fd
+
+    with patch.object(
+        dt,
+        "_scoped_report_style_llm_context",
+        return_value=_async_context(object()),
+    ), patch(
+        "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
+        new=AsyncMock(return_value=styled_result),
+    ), patch.object(
+        dt.os,
+        "open",
+        side_effect=_open_then_swap,
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Verified report"},
+            report_path_md,
+            "# Verified report",
+        )
+
+    assert swapped
     assert html_path == tmp_path / "report.html"
     assert "Verified report" in html_path.read_text(encoding="utf-8")
     assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
@@ -775,7 +853,9 @@ async def test_generate_report_html_logs_only_stable_exception_types(tmp_path, c
             side_effect=OSError("SECRET /internal/fallback"),
         ):
             html_path = await dt._generate_report_html(
-                {"response_content": "# Verified report"}, report_path_md
+                {"response_content": "# Verified report"},
+                report_path_md,
+                "# Verified report",
             )
     finally:
         dt.logger.removeHandler(caplog.handler)
@@ -804,7 +884,9 @@ async def test_generate_report_html_propagates_cancellation(tmp_path):
     ):
         with pytest.raises(asyncio.CancelledError):
             await dt._generate_report_html(
-                {"response_content": "# Verified report"}, report_path_md
+                {"response_content": "# Verified report"},
+                report_path_md,
+                "# Verified report",
             )
 
 
@@ -826,7 +908,7 @@ async def test_generate_report_html_removes_partial_output_when_both_paths_fail(
         side_effect=RuntimeError("offline conversion unavailable"),
     ):
         html_path = await dt._generate_report_html(
-            {"response_content": "# Report"}, report_path_md
+            {"response_content": "# Report"}, report_path_md, "# Report"
         )
 
     assert html_path is None
@@ -853,7 +935,7 @@ async def test_generate_report_html_ignores_partial_output_cleanup_failure(
         side_effect=PermissionError("read-only output"),
     ):
         html_path = await dt._generate_report_html(
-            {"response_content": "# Report"}, report_path_md
+            {"response_content": "# Report"}, report_path_md, "# Report"
         )
 
     assert html_path is None
@@ -974,6 +1056,52 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
         "citations_preview_path": "/skill/data/C1.citations.preview.json",
     }
     assert "citations_path" not in provenance["citation_artifacts"]
+
+
+@pytest.mark.asyncio
+async def test_write_report_artifacts_fallback_html_matches_delivered_markdown(tmp_path):
+    final_result = {
+        "response_content": (
+            "# 报告\n\n"
+            "[观点](#inference:7)"
+            "[checked_citation:3][[1]](https://example.com/source)\n\n"
+            "(#insertChart:chart-1)\n"
+        ),
+        "infer_messages": [{
+            "id": "7",
+            "html_base64": base64.b64encode(b"<html>trace</html>").decode("ascii"),
+        }],
+        "chart_messages": [{
+            "chart_id": "chart-1",
+            "chart_title": "趋势图",
+            "base64": base64.b64encode(b"png-bytes").decode("ascii"),
+        }],
+    }
+
+    with patch(
+        "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
+        return_value=str(tmp_path),
+    ), patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        side_effect=RuntimeError("styled unavailable"),
+    ):
+        artifacts = await dt._write_report_artifacts_stream(
+            final_result, "研究报告.md", "C1"
+        )
+
+    markdown = Path(artifacts["md"]).read_text(encoding="utf-8")
+    html = Path(artifacts["html"]).read_text(encoding="utf-8")
+    assert "checked_citation" not in markdown
+    assert "#inference:7" not in markdown
+    assert "#insertChart:chart-1" not in markdown
+    assert "[观点](研究报告_infer/inference_7.html)" in markdown
+    assert "![趋势图](研究报告_charts/chart-1.png)" in markdown
+    assert "checked_citation" not in html
+    assert "#inference:7" not in html
+    assert "#insertChart:chart-1" not in html
+    assert 'href="研究报告_infer/inference_7.html"' in html
+    assert 'src="研究报告_charts/chart-1.png"' in html
 
 
 @pytest.mark.asyncio
@@ -1118,7 +1246,9 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
 
 
 @pytest.mark.asyncio
-async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fails():
+async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fails(
+    tmp_path,
+):
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps({
@@ -1127,6 +1257,8 @@ async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fa
             "final_result": {"response_content": "完整报告"},
         }),
     ]
+    report_path = tmp_path / "r.md"
+    report_path.write_text("完整报告", encoding="utf-8")
     push = AsyncMock()
 
     async def _fail_file(message):
@@ -1139,7 +1271,7 @@ async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fa
          patch.object(dt, "_get_route", return_value={
              "request_id": "R1", "channel_id": "CH1", "session_id": "S1"
          }), \
-         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
+         patch.object(dt, "_write_report_markdown", return_value=str(report_path)), \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
          patch(
              "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
@@ -1340,7 +1472,7 @@ async def test_outline_marker_replaces_sdk_status_placeholder_with_accumulated_o
 
 
 @pytest.mark.asyncio
-async def test_outline_titles_are_reused_by_section_stream_after_resume():
+async def test_outline_titles_are_reused_by_section_stream_after_resume(tmp_path):
     outline = json.dumps({
         "title": "主流 RAG 框架深度对比",
         "sections": [
@@ -1373,10 +1505,12 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume():
     route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
     push = AsyncMock()
     spawn = AsyncMock(side_effect=[_Proc(start_lines), _Proc(resume_lines)])
+    report_path = tmp_path / "r.md"
+    report_path.write_text("done", encoding="utf-8")
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
          patch.object(dt, "_get_route", return_value=route), \
-         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
+         patch.object(dt, "_write_report_markdown", return_value=str(report_path)), \
          patch("asyncio.create_subprocess_exec", new=spawn), \
          patch(
              "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
@@ -1474,13 +1608,15 @@ async def test_interrupted_marker_waits_for_runner_to_exit_naturally():
 
 
 @pytest.mark.asyncio
-async def test_stderr_is_drained_while_subprocess_is_running():
+async def test_stderr_is_drained_while_subprocess_is_running(tmp_path):
     proc = _StderrBackpressureProc()
     push = AsyncMock()
+    report_path = tmp_path / "r.md"
+    report_path.write_text("done", encoding="utf-8")
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
          patch.object(dt, "_get_route", return_value={"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}), \
-         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
+         patch.object(dt, "_write_report_markdown", return_value=str(report_path)), \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)), \
          patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport", return_value=push):
         result = await asyncio.wait_for(
@@ -1493,14 +1629,16 @@ async def test_stderr_is_drained_while_subprocess_is_running():
 
 
 @pytest.mark.asyncio
-async def test_completed_marker_can_exceed_asyncio_stream_line_limit():
+async def test_completed_marker_can_exceed_asyncio_stream_line_limit(tmp_path):
     report_content = "报告正文" * 20000
     proc = _LargeStdoutLineProc(report_content)
     push = AsyncMock()
+    report_path = tmp_path / "r.md"
+    report_path.write_text(report_content, encoding="utf-8")
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
          patch.object(dt, "_get_route", return_value={"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}), \
-         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
+         patch.object(dt, "_write_report_markdown", return_value=str(report_path)), \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)), \
          patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport", return_value=push):
         result = await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
@@ -1511,7 +1649,7 @@ async def test_completed_marker_can_exceed_asyncio_stream_line_limit():
 
 
 @pytest.mark.asyncio
-async def test_start_returns_completed_outcome():
+async def test_start_returns_completed_outcome(tmp_path):
     final_result = {"response_content": "最终报告正文"}
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
@@ -1520,10 +1658,12 @@ async def test_start_returns_completed_outcome():
                     "final_result": final_result}),
     ]
     push = AsyncMock()
+    report_path = tmp_path / "r.md"
+    report_path.write_text(final_result["response_content"], encoding="utf-8")
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
          patch.object(dt, "_get_route", return_value={"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}), \
-         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
+         patch.object(dt, "_write_report_markdown", return_value=str(report_path)), \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
          patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport", return_value=push):
         result = await dt.deepresearch_stream._func(action="start", query="X", file_name="r")

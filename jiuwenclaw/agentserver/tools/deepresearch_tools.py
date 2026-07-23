@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import stat
 import sys
 import tempfile
 import uuid
@@ -270,8 +271,70 @@ def _validate_regular_file_target(path: Path) -> None:
         raise ValueError("unsafe HTML output target")
 
 
+_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _directory_fd_matches_path(directory_fd: int, path: str | Path, **stat_kwargs) -> bool:
+    try:
+        path_stat = os.stat(path, follow_symlinks=False, **stat_kwargs)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    opened_stat = os.fstat(directory_fd)
+    return (
+        stat.S_ISDIR(path_stat.st_mode)
+        and path_stat.st_dev == opened_stat.st_dev
+        and path_stat.st_ino == opened_stat.st_ino
+    )
+
+
+def _open_or_create_asset_directory(name: str, parent_fd: int) -> int:
+    try:
+        os.mkdir(name, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    return os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+
+
+def _atomic_write_asset(directory_fd: int, name: str, payload: bytes) -> None:
+    try:
+        target_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(target_stat.st_mode):
+            raise ValueError("unsafe styled asset destination")
+
+    temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
+    file_fd = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        with os.fdopen(file_fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(
+            temporary_name,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+    finally:
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+
+
 def _copy_asset_dir(source: Path, destination: Path) -> None:
-    """Atomically merge regular bundle assets into a real sibling directory."""
+    """Merge regular assets through no-follow directory descriptors."""
     if source.is_symlink():
         raise ValueError("unsafe styled asset source")
     if not source.exists():
@@ -282,37 +345,55 @@ def _copy_asset_dir(source: Path, destination: Path) -> None:
     entries = list(source.rglob("*"))
     if not entries:
         return
-    if destination.is_symlink() or (
-        destination.exists() and not destination.is_dir()
-    ):
-        raise ValueError("unsafe styled asset destination")
-
     planned: list[tuple[Path, Path]] = []
     for item in entries:
         if item.is_symlink():
             raise ValueError("unsafe styled asset source")
         relative = item.relative_to(source)
-        target = destination / relative
         if item.is_dir():
-            if target.is_symlink() or (target.exists() and not target.is_dir()):
-                raise ValueError("unsafe styled asset destination")
             continue
         if not item.is_file():
             raise ValueError("unsafe styled asset source")
-        current = destination
-        for component in relative.parts[:-1]:
-            current /= component
-            if current.is_symlink() or (
-                current.exists() and not current.is_dir()
-            ):
-                raise ValueError("unsafe styled asset destination")
-        _validate_regular_file_target(target)
-        planned.append((item, target))
+        planned.append((item, relative))
 
-    destination.mkdir(parents=True, exist_ok=True)
-    for source_file, target in planned:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(target, source_file.read_bytes())
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(destination)
+    except FileExistsError:
+        pass
+    root_fd = os.open(destination, _DIRECTORY_OPEN_FLAGS)
+    try:
+        if not _directory_fd_matches_path(root_fd, destination):
+            raise ValueError("unsafe styled asset destination")
+        for source_file, relative in planned:
+            opened_directories: list[tuple[int, int, str]] = []
+            current_fd = root_fd
+            try:
+                for component in relative.parts[:-1]:
+                    child_fd = _open_or_create_asset_directory(
+                        component, current_fd
+                    )
+                    opened_directories.append((current_fd, child_fd, component))
+                    current_fd = child_fd
+                _atomic_write_asset(
+                    current_fd, relative.name, source_file.read_bytes()
+                )
+                for parent_fd, child_fd, component in reversed(
+                    opened_directories
+                ):
+                    if not _directory_fd_matches_path(
+                        child_fd, component, dir_fd=parent_fd
+                    ):
+                        raise ValueError("unsafe styled asset destination")
+            finally:
+                for _parent_fd, child_fd, _component in reversed(
+                    opened_directories
+                ):
+                    os.close(child_fd)
+        if not _directory_fd_matches_path(root_fd, destination):
+            raise ValueError("unsafe styled asset destination")
+    finally:
+        os.close(root_fd)
 
 
 def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
@@ -337,6 +418,7 @@ def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
 async def _generate_report_html(
     final_result: dict,
     report_path_md: Path,
+    fallback_markdown: str,
 ) -> Path | None:
     """Generate styled report HTML, falling back to offline conversion."""
     report_path_html = report_path_md.with_suffix(".html")
@@ -372,9 +454,8 @@ async def _generate_report_html(
                 convert_md_to_html,
             )
 
-            response_content = final_result["response_content"]
-            if not isinstance(response_content, str):
-                raise TypeError("invalid verified report content")
+            if not isinstance(fallback_markdown, str):
+                raise TypeError("invalid fallback report content")
             with tempfile.TemporaryDirectory(
                 prefix="jiuwenclaw_report_fallback_"
             ) as temporary_dir:
@@ -382,7 +463,7 @@ async def _generate_report_html(
                 staged_markdown = staging_root / "report.md"
                 staged_html = staging_root / "report.html"
                 staged_markdown.write_text(
-                    response_content, encoding="utf-8", newline="\n"
+                    fallback_markdown, encoding="utf-8", newline="\n"
                 )
                 convert_md_to_html(str(staged_markdown), str(staged_html))
                 html_bytes = staged_html.read_bytes()
@@ -442,7 +523,10 @@ async def _write_report_artifacts_stream(
     )
     artifacts: dict[str, str] = {"md": str(report_path_md)}
 
-    report_path_html = await _generate_report_html(final_result, report_path_md)
+    fallback_markdown = report_path_md.read_text(encoding="utf-8")
+    report_path_html = await _generate_report_html(
+        final_result, report_path_md, fallback_markdown
+    )
     if report_path_html is not None:
         artifacts["html"] = str(report_path_html)
 
