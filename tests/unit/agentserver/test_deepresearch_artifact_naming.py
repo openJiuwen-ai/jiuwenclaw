@@ -273,10 +273,19 @@ def test_allocate_next_paths_ignores_unrelated_document_sidecars(tmp_path):
     assert allocated.version == api.ArtifactVersion("report", 2)
 
 
-def test_allocate_next_paths_fails_closed_for_invalid_same_document_sibling(tmp_path):
+@pytest.mark.parametrize(
+    "invalid_provenance",
+    [
+        _provenance(version_number=True),
+        _provenance(version_base_stem=None),
+    ],
+)
+def test_allocate_next_paths_fails_closed_for_invalid_same_document_sibling(
+    tmp_path, invalid_provenance
+):
     api = _api()
     parent = _write_sidecar(tmp_path, "report-v1", _provenance(version_number=1))
-    _write_sidecar(tmp_path, "report-v2", _provenance(version_number=True))
+    _write_sidecar(tmp_path, "report-v2", invalid_provenance)
 
     with pytest.raises(api.ArtifactNamingError) as caught:
         api.allocate_next_paths(parent, _provenance(version_number=1), "# Report\n")
@@ -335,6 +344,48 @@ def test_allocate_next_paths_skips_symlink_sidecars_without_following_them(tmp_p
     assert allocated.version == api.ArtifactVersion("report", 2)
 
 
+def test_allocate_next_paths_ignores_malformed_unrelated_sidecar(tmp_path):
+    api = _api()
+    parent = tmp_path / "report-v1.md"
+    parent.write_text("# Report\n", encoding="utf-8")
+    (tmp_path / "unrelated.provenance.json").write_text(
+        "{malformed", encoding="utf-8"
+    )
+
+    allocated = api.allocate_next_paths(
+        parent, _provenance(version_number=1), "# Report\n"
+    )
+
+    assert allocated.version == api.ArtifactVersion("report", 2)
+
+
+def test_allocate_next_paths_ignores_unreadable_unrelated_sidecar(
+    tmp_path, monkeypatch
+):
+    api = _api()
+    parent = tmp_path / "report-v1.md"
+    parent.write_text("# Report\n", encoding="utf-8")
+    unreadable = tmp_path / "unrelated.provenance.json"
+    unreadable.write_text(
+        json.dumps(_provenance("document-b", version_number=99)),
+        encoding="utf-8",
+    )
+    real_open = api.os.open
+
+    def deny_unrelated_sidecar(path, *args, **kwargs):
+        if Path(path) == unreadable:
+            raise PermissionError("unreadable sidecar")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(api.os, "open", deny_unrelated_sidecar)
+
+    allocated = api.allocate_next_paths(
+        parent, _provenance(version_number=1), "# Report\n"
+    )
+
+    assert allocated.version == api.ArtifactVersion("report", 2)
+
+
 def test_allocate_next_paths_rejects_same_document_legacy_symlink_markdown(tmp_path):
     api = _api()
     parent = tmp_path / "report-v1.md"
@@ -352,20 +403,21 @@ def test_allocate_next_paths_rejects_same_document_legacy_symlink_markdown(tmp_p
     assert caught.value.code == "ARTIFACT_NAMING_INVALID"
 
 
-def test_allocate_next_paths_rejects_oversized_sibling_sidecar(tmp_path, monkeypatch):
+def test_allocate_next_paths_ignores_oversized_unrelated_sidecar(tmp_path, monkeypatch):
     api = _api()
     monkeypatch.setattr(api, "MAX_PROVENANCE_BYTES", 32)
     parent = tmp_path / "report-v1.md"
     parent.write_text("# Report\n", encoding="utf-8")
-    (tmp_path / "report-v2.provenance.json").write_text(
-        json.dumps(_provenance(version_number=2)) + " " * 64,
+    (tmp_path / "unrelated.provenance.json").write_text(
+        json.dumps(_provenance("document-b", version_number=99)) + " " * 64,
         encoding="utf-8",
     )
 
-    with pytest.raises(api.ArtifactNamingError) as caught:
-        api.allocate_next_paths(parent, _provenance(version_number=1), "# Report\n")
+    allocated = api.allocate_next_paths(
+        parent, _provenance(version_number=1), "# Report\n"
+    )
 
-    assert caught.value.code == "ARTIFACT_NAMING_INVALID"
+    assert allocated.version == api.ArtifactVersion("report", 2)
 
 
 def test_allocate_next_paths_does_not_read_markdown_for_explicit_sibling(tmp_path, monkeypatch):

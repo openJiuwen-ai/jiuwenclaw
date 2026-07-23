@@ -45,6 +45,10 @@ class ArtifactNamingError(ValueError):
         super().__init__(message)
 
 
+class _UnidentifiableArtifactError(ArtifactNamingError):
+    """Raised when bounded safe reading cannot identify an untrusted artifact."""
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactVersion:
     base_stem: str
@@ -67,6 +71,10 @@ class _DirectorySnapshot:
 
 def _invalid(message: str) -> ArtifactNamingError:
     return ArtifactNamingError(message)
+
+
+def _unidentifiable(message: str) -> _UnidentifiableArtifactError:
+    return _UnidentifiableArtifactError(message)
 
 
 def _strip_terminal_version(value: str) -> str:
@@ -280,11 +288,11 @@ def _read_file_bytes(path: Path, limit: int, label: str) -> bytes:
     try:
         metadata = os.lstat(path)
     except OSError as exc:
-        raise _invalid(f"{label} cannot be inspected") from exc
+        raise _unidentifiable(f"{label} cannot be inspected") from exc
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise _invalid(f"{label} must be a regular file")
+        raise _unidentifiable(f"{label} must be a regular file")
     if metadata.st_size > limit:
-        raise _invalid(f"{label} exceeds the read limit")
+        raise _unidentifiable(f"{label} exceeds the read limit")
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise _invalid("safe no-follow reads are unavailable")
@@ -293,9 +301,9 @@ def _read_file_bytes(path: Path, limit: int, label: str) -> bytes:
         with os.fdopen(descriptor, "rb") as stream:
             content = stream.read(limit + 1)
     except OSError as exc:
-        raise _invalid(f"{label} cannot be read safely") from exc
+        raise _unidentifiable(f"{label} cannot be read safely") from exc
     if len(content) > limit:
-        raise _invalid(f"{label} exceeds the read limit")
+        raise _unidentifiable(f"{label} exceeds the read limit")
     return content
 
 
@@ -336,8 +344,12 @@ def _sibling_versions(
             payload = json.loads(
                 _read_file_bytes(sidecar, MAX_PROVENANCE_BYTES, "provenance sidecar")
             )
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise _invalid("provenance sidecar is malformed") from exc
+        except (
+            _UnidentifiableArtifactError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
+            continue
         if not isinstance(payload, dict) or payload.get("document_id") != document_id:
             continue
         markdown_path = _sidecar_markdown_path(sidecar)
