@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -682,6 +683,24 @@ def _verify_created_directories(
     for value in created_paths:
         artifact = _as_created_artifact(value)
         if artifact.directory_fd is None:
+            if (
+                _uses_windows_path_publication()
+                and stat.S_ISDIR(artifact.metadata.st_mode)
+            ):
+                try:
+                    namespace_metadata = os.lstat(artifact.path)
+                except FileNotFoundError as exc:
+                    raise RuntimeError(
+                        "report asset directory namespace changed: "
+                        f"{artifact.path}"
+                    ) from exc
+                if not _same_identity(
+                    namespace_metadata, artifact.metadata
+                ):
+                    raise RuntimeError(
+                        "report asset directory namespace changed: "
+                        f"{artifact.path}"
+                    )
             continue
         handle_metadata = os.fstat(artifact.directory_fd)
         try:
@@ -864,6 +883,44 @@ def _quarantine_created_artifact(artifact: _CreatedArtifact) -> None:
             os.close(parent_fd)
 
 
+def _remove_quarantined_windows_path(
+    path: Path, metadata: os.stat_result
+) -> None:
+    """Remove a quarantined path whose identity was already verified."""
+    if stat.S_ISDIR(metadata.st_mode):
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _quarantine_created_artifact_windows(
+    artifact: _CreatedArtifact,
+) -> None:
+    """Quarantine one Windows artifact and remove it only if still owned."""
+    quarantine = artifact.path.with_name(
+        f".{artifact.path.name}.quarantine-{uuid.uuid4().hex}"
+    )
+    try:
+        os.rename(artifact.path, quarantine)
+    except FileNotFoundError:
+        return
+
+    quarantined_metadata = os.lstat(quarantine)
+    if _same_identity(quarantined_metadata, artifact.metadata):
+        _remove_quarantined_windows_path(quarantine, quarantined_metadata)
+        return
+
+    try:
+        _rename_windows_no_replace(quarantine, artifact.path)
+    except OSError:
+        logger.warning(
+            "Report cleanup quarantined a replaced entry and left it intact. "
+            "path=%s quarantine=%s",
+            artifact.path,
+            quarantine,
+        )
+
+
 def _remove_created_artifacts(
     created_paths: list[_CreatedArtifact | tuple[Path, os.stat_result]],
 ) -> None:
@@ -871,7 +928,10 @@ def _remove_created_artifacts(
     for value in reversed(created_paths):
         artifact = _as_created_artifact(value)
         try:
-            _quarantine_created_artifact(artifact)
+            if _uses_windows_path_publication():
+                _quarantine_created_artifact_windows(artifact)
+            else:
+                _quarantine_created_artifact(artifact)
         except OSError as exc:
             logger.warning(
                 "Unable to clean current report publication path. "
@@ -888,7 +948,7 @@ def _remove_created_artifacts(
                 artifact.directory_fd = None
 
 
-def _publish_staged_asset_directory(
+def _publish_staged_asset_directory_posix(
     staged_directory: Path,
     final_directory: Path,
     created_paths: list[_CreatedArtifact],
@@ -950,6 +1010,56 @@ def _publish_staged_asset_directory(
             parent_fd=retained_directory_fd,
             entry_name=staged_path.name,
         ))
+
+
+def _publish_staged_asset_directory_windows(
+    staged_directory: Path,
+    final_directory: Path,
+    created_paths: list[_CreatedArtifact],
+) -> None:
+    """Publish a complete asset directory with Windows-compatible operations."""
+    staging_directory = Path(tempfile.mkdtemp(
+        prefix=f".{final_directory.name}.",
+        dir=final_directory.parent,
+    ))
+    published = False
+    try:
+        for staged_path in sorted(staged_directory.iterdir()):
+            metadata = os.lstat(staged_path)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(
+                    "staged report asset is not a regular file: "
+                    f"{staged_path.name}"
+                )
+            _atomic_create_bytes_windows(
+                staging_directory / staged_path.name,
+                staged_path.read_bytes(),
+            )
+        _rename_windows_no_replace(staging_directory, final_directory)
+        published = True
+        created_paths.append(_CreatedArtifact(
+            path=final_directory,
+            metadata=os.lstat(final_directory),
+        ))
+    finally:
+        if not published:
+            shutil.rmtree(staging_directory, ignore_errors=True)
+
+
+def _publish_staged_asset_directory(
+    staged_directory: Path,
+    final_directory: Path,
+    created_paths: list[_CreatedArtifact],
+) -> None:
+    """Publish a complete flat asset directory without replacing a target."""
+    if _uses_windows_path_publication():
+        _publish_staged_asset_directory_windows(
+            staged_directory, final_directory, created_paths
+        )
+        return
+    _publish_staged_asset_directory_posix(
+        staged_directory, final_directory, created_paths
+    )
 
 
 def _create_allocation_reservation(

@@ -1570,6 +1570,76 @@ def test_windows_file_publication_never_overwrites_existing_target(
     assert not list(tmp_path.glob(".report.md.*"))
 
 
+def test_windows_asset_publication_avoids_directory_descriptors(
+    tmp_path, monkeypatch
+):
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "chart.png").write_bytes(b"chart")
+    final = tmp_path / "report_charts"
+    created = []
+    monkeypatch.setattr(dt, "_uses_windows_path_publication", lambda: True)
+
+    dt._publish_staged_asset_directory(staged, final, created)
+
+    assert (final / "chart.png").read_bytes() == b"chart"
+    assert len(created) == 1
+    assert created[0].path == final
+    assert created[0].directory_fd is None
+
+
+def test_windows_asset_publication_preserves_existing_directory(
+    tmp_path, monkeypatch
+):
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "chart.png").write_bytes(b"replacement")
+    final = tmp_path / "report_charts"
+    final.mkdir()
+    (final / "chart.png").write_bytes(b"protected")
+    monkeypatch.setattr(dt, "_uses_windows_path_publication", lambda: True)
+
+    with pytest.raises(FileExistsError):
+        dt._publish_staged_asset_directory(staged, final, [])
+
+    assert (final / "chart.png").read_bytes() == b"protected"
+
+
+def test_windows_directory_verification_rejects_identity_change(
+    tmp_path, monkeypatch
+):
+    public = tmp_path / "assets"
+    public.mkdir()
+    artifact = dt._CreatedArtifact(public, os.lstat(public))
+    public.rename(tmp_path / "owned")
+    public.mkdir()
+    monkeypatch.setattr(dt, "_uses_windows_path_publication", lambda: True)
+
+    with pytest.raises(RuntimeError, match="namespace changed"):
+        dt._verify_created_directories([artifact])
+
+
+def test_windows_rollback_removes_only_matching_owned_artifact(
+    tmp_path, monkeypatch
+):
+    public = tmp_path / "report.md"
+    public.write_bytes(b"owned")
+    artifact = dt._CreatedArtifact(public, os.lstat(public))
+    monkeypatch.setattr(dt, "_uses_windows_path_publication", lambda: True)
+    monkeypatch.setattr(
+        dt,
+        "_quarantine_created_artifact",
+        lambda _artifact: (_ for _ in ()).throw(
+            AssertionError("Windows rollback must not use POSIX quarantine")
+        ),
+    )
+
+    dt._remove_created_artifacts([artifact])
+
+    assert not public.exists()
+    assert not list(tmp_path.glob(".report.md.quarantine-*"))
+
+
 @pytest.mark.parametrize("target_kind", ["file", "symlink"])
 def test_write_report_markdown_never_overwrites_preexisting_target(
     tmp_path, target_kind
