@@ -3982,15 +3982,21 @@ class AgentWebSocketServer:
             command = server_payload.get("command", "")
             if not command:
                 return True, "skipped: no command"
-            params: dict[str, Any] = {"command": command}
-            if isinstance(server_payload.get("args"), list):
-                params["args"] = [str(x) for x in server_payload["args"]]
-            if isinstance(server_payload.get("cwd"), str) and server_payload["cwd"].strip():
-                params["cwd"] = server_payload["cwd"].strip()
-            if isinstance(server_payload.get("env"), dict):
-                params["env"] = {str(k): str(v) for k, v in server_payload["env"].items()}
-            payload["server_path"] = f"stdio://{name}"
-            payload["params"] = params
+            # stdio 预检查改为纯静态校验,静态校验零 spawn、零 anyio。
+            if not shutil.which(command):
+                return False, f"{name} (stdio) pre-check failed: command not found in PATH: {command}"
+            raw_args = server_payload.get("args") or []
+            if isinstance(raw_args, list):
+                for arg in raw_args:
+                    if not isinstance(arg, str):
+                        continue
+                    looks_like_path = (
+                        arg.startswith(("/", "./", "../", "~"))
+                        or arg.endswith((".js", ".mjs", ".cjs", ".json", ".py", ".sh"))
+                    )
+                    if looks_like_path and not Path(arg).expanduser().exists():
+                        return False, f"{name} (stdio) pre-check failed: file not found: {arg}"
+            return True, f"{name} (stdio) pre-check passed (static)"
         else:
             url = server_payload.get("url", "")
             if not url:
