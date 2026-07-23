@@ -1,4 +1,4 @@
-import { Message, MessageRole, UsageSummary, FileDownloadItem, WsEvent } from '../types';
+import { Message, MessageRole, UsageSummary, FileDownloadItem, MediaItem, WsEvent } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
@@ -82,14 +82,19 @@ export interface HistoryRestoreHandle {
 }
 
 let restoreGeneration = 0;
-let activeRestore: HistoryRestoreHandle | null = null;
+const activeHistoryRequests = new Map<string, HistoryRestoreHandle>();
 
-/** 分页拉取与全量恢复互斥，避免 chunk 串台 */
-let activePageFetchDispose: (() => void) | null = null;
+function makeHistoryRestoreKey(sessionId: string): string {
+  return `${sessionId}:restore`;
+}
 
-function disposeActivePageFetch(): void {
-  activePageFetchDispose?.();
-  activePageFetchDispose = null;
+function makeHistoryPageKey(sessionId: string, pageIdx: number): string {
+  return `${sessionId}:page:${pageIdx}`;
+}
+
+function replaceActiveHistoryRequest(key: string): void {
+  activeHistoryRequests.get(key)?.dispose();
+  activeHistoryRequests.delete(key);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -244,6 +249,90 @@ function extractTeamEventRecord(record: Record<string, unknown>): Record<string,
   return Object.keys(payload).length > 0 ? payload : null;
 }
 
+function filenameFromPath(path: string): string {
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] || 'image';
+}
+
+function normalizeHistoryMediaItem(value: unknown): MediaItem | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const rawType = typeof value.type === 'string' ? value.type.trim().toLowerCase() : 'image';
+  if (rawType && rawType !== 'image') {
+    return null;
+  }
+
+  const path = pickFirstString(value, ['path', 'url']);
+  if (!path) {
+    return null;
+  }
+
+  const mimeType = pickFirstString(value, ['mime_type', 'mimeType']) ?? 'image/png';
+  if (!mimeType.startsWith('image/')) {
+    return null;
+  }
+
+  const filename = pickFirstString(value, ['filename', 'name']) ?? filenameFromPath(path);
+  const size = typeof value.size_bytes === 'number'
+    ? value.size_bytes
+    : typeof value.sizeBytes === 'number'
+      ? value.sizeBytes
+      : undefined;
+
+  return {
+    type: 'image',
+    filename,
+    path,
+    mime_type: mimeType,
+    mimeType,
+    ...(typeof size === 'number' ? { size_bytes: size, sizeBytes: size } : {}),
+  };
+}
+
+function appendHistoryMediaItems(
+  target: MediaItem[],
+  seenKeys: Set<string>,
+  value: unknown
+): void {
+  if (!Array.isArray(value)) {
+    return;
+  }
+  for (const item of value) {
+    const normalized = normalizeHistoryMediaItem(item);
+    if (!normalized) {
+      continue;
+    }
+    const key = normalized.path || `${normalized.filename}:${normalized.mimeType}`;
+    if (seenKeys.has(key)) {
+      continue;
+    }
+    seenKeys.add(key);
+    target.push(normalized);
+  }
+}
+
+function extractHistoryMediaItems(record: Record<string, unknown>): MediaItem[] {
+  const mediaItems: MediaItem[] = [];
+  const seenKeys = new Set<string>();
+
+  appendHistoryMediaItems(mediaItems, seenKeys, record.media_items);
+  appendHistoryMediaItems(mediaItems, seenKeys, record.mediaItems);
+
+  if (isRecord(record.files)) {
+    appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_images);
+  }
+  if (isRecord(record.event_payload)) {
+    appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.media_items);
+    if (isRecord(record.event_payload.files)) {
+      appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_images);
+    }
+  }
+
+  return mediaItems;
+}
+
 function parseHistoryTimelineEntry(
   record: Record<string, unknown>,
   sessionId: string
@@ -257,14 +346,21 @@ function parseHistoryTimelineEntry(
       return null;
     }
     const content = typeof rawContent === 'string' ? rawContent : String(rawContent ?? '');
-    if (!content.trim()) {
+    const mediaItems = extractHistoryMediaItems(record);
+    if (!content.trim() && mediaItems.length === 0) {
       return null;
     }
     const id =
       pickFirstString(record, ['id', 'message_id', 'msg_id']) ?? `hist-user-${sessionId}-${at}`;
     return {
       kind: 'message',
-      message: { id, role: 'user', content, timestamp: at },
+      message: {
+        id,
+        role: 'user',
+        content,
+        timestamp: at,
+        ...(mediaItems.length > 0 ? { mediaItems } : {}),
+      },
     };
   }
 
@@ -342,9 +438,23 @@ function parseHistoryTimelineEntry(
         },
       };
     }
+    // 主动推荐消息：从历史记录还原 source/proactive_type，使刷新后仍按
+    // ProactiveRecommendationCard 渲染（否则会退化为普通白色气泡）。
+    const histSource = typeof payload.source === 'string' ? payload.source : '';
+    const isProactiveRecommendation = histSource === 'proactive_recommendation';
+    const histProactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
     return {
       kind: 'message',
-      message: { id, role: 'assistant', content, timestamp: at },
+      message: {
+        id,
+        role: 'assistant',
+        content,
+        timestamp: at,
+        ...(isProactiveRecommendation ? { isProactiveRecommendation } : {}),
+        ...(isProactiveRecommendation && histProactiveType
+          ? { proactiveType: histProactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' }
+          : {}),
+      },
     };
   }
 
@@ -461,7 +571,8 @@ function isHistoryBatchEnd(payload: Record<string, unknown>): boolean {
 function shouldProcessHistoryPayload(
   payload: Record<string, unknown>,
   expectedSessionId: string,
-  expectedPageIdx?: number
+  expectedPageIdx?: number,
+  allowLegacyNoSession = false
 ): boolean {
   const sid = typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
   if (sid && sid !== expectedSessionId) {
@@ -471,14 +582,14 @@ function shouldProcessHistoryPayload(
     return false;
   }
   if (!sid) {
-    return isHistoryRestoreDonePayload(payload) || isHistoryBatchEnd(payload);
+    return allowLegacyNoSession && (isHistoryRestoreDonePayload(payload) || isHistoryBatchEnd(payload));
   }
   return true;
 }
 
 export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
-  disposeActivePageFetch();
-  activeRestore?.dispose();
+  const requestKey = makeHistoryRestoreKey(options.sessionId);
+  replaceActiveHistoryRequest(requestKey);
 
   const generation = restoreGeneration + 1;
   restoreGeneration = generation;
@@ -488,12 +599,12 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   let disposed = false;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
-    if (disposed || generation !== restoreGeneration) {
+    if (disposed) {
       return;
     }
 
     const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId)) {
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, undefined, activeHistoryRequests.size === 1)) {
       return;
     }
 
@@ -524,8 +635,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     if (disposed) return;
     disposed = true;
     unsubscribe();
-    if (activeRestore?.generation === generation) {
-      activeRestore = null;
+    if (activeHistoryRequests.get(requestKey)?.generation === generation) {
+      activeHistoryRequests.delete(requestKey);
     }
   }
 
@@ -608,7 +719,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
-  activeRestore = handle;
+  activeHistoryRequests.set(requestKey, handle);
   return handle;
 }
 
@@ -629,12 +740,12 @@ export interface FetchHistoryPageOptions {
 }
 
 /**
- * 拉取单页历史（用于「加载更早」），与 beginHistoryRestore 互斥。
+ * 拉取单页历史（用于「加载更早」）。
  * 调用方需在订阅建立后再发 `history.get`（含对应 `page_idx`）。
  */
 export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryRestoreHandle {
-  disposeActivePageFetch();
-  activeRestore?.dispose();
+  const requestKey = makeHistoryPageKey(options.sessionId, options.pageIdx);
+  replaceActiveHistoryRequest(requestKey);
 
   const generation = restoreGeneration + 1;
   restoreGeneration = generation;
@@ -644,12 +755,12 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   let disposed = false;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
-    if (disposed || generation !== restoreGeneration) {
+    if (disposed) {
       return;
     }
 
     const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.pageIdx)) {
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.pageIdx, activeHistoryRequests.size === 1)) {
       return;
     }
 
@@ -680,9 +791,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     if (disposed) return;
     disposed = true;
     unsubscribe();
-    activePageFetchDispose = null;
-    if (activeRestore?.generation === generation) {
-      activeRestore = null;
+    if (activeHistoryRequests.get(requestKey)?.generation === generation) {
+      activeHistoryRequests.delete(requestKey);
     }
   }
 
@@ -755,7 +865,6 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
-  activeRestore = handle;
-  activePageFetchDispose = dispose;
+  activeHistoryRequests.set(requestKey, handle);
   return handle;
 }

@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from jiuwenswarm.common.work_mode import (
+    DEFAULT_WEB_WORK_MODE,
+    normalize_work_mode,
+)
 from jiuwenswarm.gateway.cron.cron_expr import validate_cron_expression
 
 
@@ -65,23 +69,36 @@ def _normalize_targets_str(raw: str) -> str:
 # Cron job execution modes (passed to AgentServer as chat.send params["mode"]).
 CRON_JOB_MODES: frozenset[str] = frozenset(
     {
-        "agent",       # default → agent.plan at runtime
-        "plan",        # legacy shorthand (AgentServer resolves separately)
+        "agent",       # 合并后的单一 agent 模式
+        "plan",        # legacy shorthand（归一到 agent）
         "team",        # multi-agent team mode
-        "agent.plan",
-        "agent.fast",
+        "agent.plan",  # legacy（归一到 agent）
+        "agent.fast",  # legacy（归一到 agent）
         "team.plan",
         "code.team",
+        # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
+        # 触发 AgentServer ProactiveEngine.tick_now()。由 proactive_cron_sync 自动注册。
+        "proactive.tick",
     }
 )
 
 
 # Canonical default when create/update/runtime do not specify mode.
-CRON_JOB_DEFAULT_MODE: str = "agent.fast"
+CRON_JOB_DEFAULT_MODE: str = "agent"
+
+_CRON_JOB_MODE_ALIASES: dict[str, str] = {
+    "plan": "agent",
+    "agent.plan": "agent",
+    "agent.fast": "agent",
+}
 
 
 def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
-    """Normalize and validate a cron job execution mode (strict, for create/update APIs)."""
+    """Normalize and validate a cron job execution mode (strict, for create/update APIs).
+
+    legacy 别名（plan / agent.plan / agent.fast）在此处即归一为 "agent" 后落库，
+    而非仅依赖运行时（AgentServer 侧）兜底归一。
+    """
     if raw is None:
         return default
     value = str(raw).strip().lower()
@@ -92,7 +109,7 @@ def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -
             f"Invalid cron job mode {raw!r}. "
             f"Valid: {', '.join(sorted(CRON_JOB_MODES))}"
         )
-    return value
+    return _CRON_JOB_MODE_ALIASES.get(value, value)
 
 
 def coerce_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
@@ -102,9 +119,7 @@ def coerce_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> s
     value = str(raw).strip().lower()
     if not value:
         return default
-    if value in CRON_JOB_MODES:
-        return value
-    return value
+    return _CRON_JOB_MODE_ALIASES.get(value, value)
 
 
 def cron_job_modes_for_tools() -> list[str]:
@@ -144,6 +159,33 @@ def normalize_cron_job_timeout_seconds(raw: Any) -> int | None:
     if value > CRON_MAX_TIMEOUT_SECONDS:
         raise ValueError(f"timeout_seconds must be at most {CRON_MAX_TIMEOUT_SECONDS}")
     return value
+
+
+def validate_cron_model(raw: Any) -> str | None:
+    """Validate model name/alias against configured models. Returns canonical model_name or raises.
+
+    If the input is an alias, resolves to the underlying ``model_client_config.model_name``
+    so the stored value is always a key AgentServer ``_model_cache`` can look up.
+    """
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    from jiuwenswarm.common.config import get_model_config, get_model_names
+
+    entry = get_model_config(value)
+    if entry is not None:
+        mcc = entry.get("model_client_config") or {}
+        canonical = (mcc.get("model_name") or "").strip()
+        return canonical if canonical else value
+    available = get_model_names()
+    hint = ", ".join(available[:20]) if available else "(no models configured)"
+    if len(available) > 20:
+        hint += f" ... and {len(available) - 20} more"
+    raise ValueError(
+        f"Unknown model {value!r}. Available models: {hint}"
+    )
 
 
 def resolve_cron_job_timeout_seconds(job: "CronJob") -> float:
@@ -194,7 +236,7 @@ class CronJob:
     enabled: bool
     cron_expr: str
     timezone: str
-    wake_offset_seconds: int = 300
+    wake_offset_seconds: int = 0
     description: str = ""
     # For one-shot schedules where croniter has no "next" after the run.
     expired: bool = False
@@ -207,12 +249,25 @@ class CronJob:
     updated_at: float | None = None
     # 记录定时任务是在群聊("group")还是私聊("p2p")中创建的，用于推送时决定是否走 IMOutboundPipeline
     chat_type: str | None = None
-    # 定时任务执行时使用的 Agent 模式；未指定时默认 agent.fast
+    # 定时任务执行时使用的 Agent 模式；未指定时默认 agent（plan/fast 已合并）
     mode: str = CRON_JOB_DEFAULT_MODE
     # 执行一次后自动删除（用于提醒类任务）
     delete_after_run: bool = False
     # 单次执行超时（秒）；未配置时普通模式 10 分钟，team 模式 20 分钟
     timeout_seconds: int | None = None
+    # 归属项目 ID；由创建时 project_dir 匹配获得，匹配不到可见项目为空串（默认项目）
+    project_id: str = ""
+    # 最近一次执行产生的会话 ID；调度器在创建执行会话后回写，未执行过为 None
+    last_session_id: str | None = None
+    # 执行时使用的模型；None 表示使用 AgentServer 默认模型
+    model_name: str | None = None
+    # 飞书多应用场景：创建该定时任务的 app_id，用于推送时定位到正确的 app 配置
+    app_id: str = ""
+    # 工作模式派生快照：由 project_id 归属推导（"code" / "work"）。
+    # 不作为独立隔离维度，任务归属仍以 project_id 为准。
+    # from_dict 仅做 normalize + 兜底 "work"，不做跨层 Project 反查；
+    # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
+    work_mode: str = DEFAULT_WEB_WORK_MODE
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -238,6 +293,17 @@ class CronJob:
             d["delete_after_run"] = bool(self.delete_after_run)
         if self.timeout_seconds is not None:
             d["timeout_seconds"] = int(self.timeout_seconds)
+        # project_id 始终输出（空串表示默认项目，与 SessionInfo.project_id 语义一致）
+        d["project_id"] = self.project_id or ""
+        # work_mode 始终输出（派生快照字段，由 project_id 归属推导，与 project_id 一致）
+        d["work_mode"] = self.work_mode or DEFAULT_WEB_WORK_MODE
+        # last_session_id 仅在非空时输出（与 session_id/chat_type 可选字段策略一致）
+        if self.last_session_id:
+            d["last_session_id"] = self.last_session_id
+        if self.model_name:
+            d["model_name"] = self.model_name
+        if self.app_id:
+            d["app_id"] = self.app_id
         return d
 
     @staticmethod
@@ -249,7 +315,7 @@ class CronJob:
         enabled = bool(data.get("enabled", False))
         expired = bool(data.get("expired", False))
 
-        wake_offset_seconds_raw = data.get("wake_offset_seconds", 300)
+        wake_offset_seconds_raw = data.get("wake_offset_seconds", 0)
         try:
             wake_offset_seconds = int(wake_offset_seconds_raw)
         except Exception as exc:  # noqa: BLE001
@@ -317,6 +383,26 @@ class CronJob:
         if timeout_seconds_raw is not None:
             timeout_seconds = normalize_cron_job_timeout_seconds(timeout_seconds_raw)
 
+        # project_id / last_session_id：老数据兜底（无 project_id → ""，无 last_session_id → None）
+        project_id_raw = data.get("project_id", "")
+        project_id = str(project_id_raw).strip() if isinstance(project_id_raw, str) else ""
+        last_session_id_raw = data.get("last_session_id", None)
+        last_session_id = (
+            str(last_session_id_raw).strip()
+            if isinstance(last_session_id_raw, str) and str(last_session_id_raw).strip()
+            else None
+        )
+
+        model_raw = data.get("model_name", None)
+        job_model_name = str(model_raw).strip() if isinstance(model_raw, str) and str(model_raw).strip() else None
+        app_id_raw = data.get("app_id", "")
+        job_app_id = str(app_id_raw).strip() if isinstance(app_id_raw, str) else ""
+
+        # work_mode：仅做 normalize + 兜底 "work"，不做跨层 Project 反查
+        # （gateway.cron.models 是底层数据模型，不应反向依赖 server.runtime.session.project_store）
+        # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
+        job_work_mode = normalize_work_mode(data.get("work_mode"), default=DEFAULT_WEB_WORK_MODE)
+
         return CronJob(
             id=job_id,
             name=name,
@@ -334,6 +420,11 @@ class CronJob:
             mode=job_mode,
             delete_after_run=delete_after_run,
             timeout_seconds=timeout_seconds,
+            project_id=project_id,
+            last_session_id=last_session_id,
+            model_name=job_model_name,
+            app_id=job_app_id,
+            work_mode=job_work_mode,
         )
 
 
@@ -357,3 +448,5 @@ class CronRunState:
     session_id: str | None = None
     chat_type: str | None = None
     timezone: str | None = None
+    exec_channel_id: str | None = None
+    exec_session_id: str | None = None

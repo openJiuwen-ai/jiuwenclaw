@@ -1,6 +1,7 @@
 import { webClient } from '../services/webClient';
 import type { Message } from '../types';
 import type {
+  HumanShareCommand,
   TeamTask,
   TeamMemberExecutionEvent,
   TeamTaskStatus,
@@ -38,6 +39,7 @@ export interface TeamHistoryPanelState {
   taskEvents: TeamTaskEvent[];
   executionEvents: TeamMemberExecutionEvent[];
   messages: Message[];
+  humanShareCommands: HumanShareCommand[];
 }
 
 interface TeamHistoryGetResponse {
@@ -50,8 +52,9 @@ interface TeamHistoryGetResponse {
 const TEAM_TASK_STATUSES = new Set<TeamTaskStatus>([
   'pending',
   'blocked',
-  'claimed',
-  'plan_approved',
+  'planning',
+  'in_progress',
+  'in_review',
   'completed',
   'cancelled',
 ]);
@@ -168,14 +171,10 @@ function normalizeTaskStatusWithFallback(
     : fallback;
 }
 
-function statusFromTaskEvent(type: string, status: unknown): TeamTaskStatus {
-  const normalized = normalizeTaskStatus(status);
-  if (type === 'team.task.claimed') return normalized === 'pending' ? 'claimed' : normalized;
-  if (type === 'team.task.completed') return normalized === 'pending' ? 'completed' : normalized;
-  if (type === 'team.task.cancelled') return normalized === 'pending' ? 'cancelled' : normalized;
-  if (type === 'team.task.unblocked') return normalized;
-  return normalized;
-}
+// Task status is resolved server-side (swarm layer) and carried on the event,
+// so restore reads it directly instead of re-deriving it from the event type.
+// Records persisted before the convergence may lack a status; those fall back
+// to 'pending' via normalizeTaskStatus.
 
 function shouldKeepMember(memberId: string): boolean {
   return Boolean(memberId) && memberId !== 'user' && memberId !== 'team_leader';
@@ -327,6 +326,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
   const taskEvents = new Map<string, TeamTaskEvent>();
   const tasks = new Map<string, TeamTask>();
   const executionEvents = new Map<string, TeamMemberExecutionEvent>();
+  const humanShareCommands = new Map<string, HumanShareCommand>();
   const messages: Message[] = [];
   const shutdownMembers = new Set<string>();
   let hasSeenMember = false;
@@ -357,6 +357,44 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     }
     shutdownMembers.add(memberId);
     members.delete(memberId);
+  };
+
+  const upsertHumanShareCommand = (
+    memberName: string,
+    patch: Partial<HumanShareCommand>,
+    timestamp: number
+  ) => {
+    if (!memberName) {
+      return;
+    }
+    const existing = humanShareCommands.get(memberName);
+    const teamName = patch.teamName || existing?.teamName || '';
+    const sessionRef =
+      patch.sessionRef ||
+      existing?.sessionRef ||
+      (teamName ? `team_${teamName}_session_${sessionId}` : '');
+    humanShareCommands.set(memberName, {
+      memberName,
+      displayName: patch.displayName || existing?.displayName,
+      sessionId,
+      teamName,
+      sessionRef,
+      joinCommand:
+        patch.joinCommand ||
+        existing?.joinCommand ||
+        (sessionRef ? `/join ${sessionRef} as ${memberName}` : ''),
+      exitCommand:
+        patch.exitCommand ||
+        existing?.exitCommand ||
+        (sessionRef ? `/exit ${sessionRef}` : ''),
+      status:
+        patch.status === 'pending' && existing?.status && existing.status !== 'pending'
+          ? existing.status
+          : patch.status || existing?.status || 'pending',
+      sourceChannel: patch.sourceChannel || existing?.sourceChannel,
+      userId: patch.userId || existing?.userId,
+      updatedAt: Math.max(existing?.updatedAt || 0, timestamp),
+    });
   };
 
   const upsertTask = (
@@ -438,12 +476,12 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     if (name === 'claim_task') {
       const task = { ...args };
       if (!task.status) {
-        task.status = 'claimed';
+        task.status = 'in_progress';
       }
       if (!pickString(task, ['assignee', 'member_id', 'claimed_by', 'claimedBy']) && memberId) {
         task.member_id = memberId;
       }
-      upsertTask(task, timestamp, 'claimed', false);
+      upsertTask(task, timestamp, 'in_progress', false);
     }
   };
 
@@ -487,7 +525,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
           merged.status = nextStatus;
         }
       }
-      upsertTask(merged, timestamp, name === 'claim_task' ? 'claimed' : 'pending', false);
+      upsertTask(merged, timestamp, name === 'claim_task' ? 'in_progress' : 'pending', false);
     }
   };
 
@@ -497,6 +535,25 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     const timestamp = recordTimestamp(record);
     const eventType = typeof record.event_type === 'string' ? record.event_type : '';
     const recordSessionId = getRecordSessionId(record);
+    if (eventType === 'chat.final') {
+      const actionPayload = isRecord(record.event_payload)
+        ? { ...record, ...record.event_payload }
+        : record;
+      const memberAction = pickString(actionPayload, ['member_action']);
+      const actionMemberName = pickString(actionPayload, ['member_name']);
+      if (actionMemberName && (memberAction === 'joined' || memberAction === 'left')) {
+        upsertHumanShareCommand(
+          actionMemberName,
+          {
+            displayName: pickString(actionPayload, ['display_name']) || undefined,
+            status: memberAction,
+            sourceChannel: pickString(actionPayload, ['source_channel']) || undefined,
+            userId: pickString(actionPayload, ['user_id']) || undefined,
+          },
+          timestamp
+        );
+      }
+    }
     if (
       isTeamTeammateRecord(record) &&
       (!recordSessionId || recordSessionId === sessionId)
@@ -627,6 +684,22 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       if (!memberId) {
         continue;
       }
+      if (pickString(event, ['mode']) === 'human') {
+        const teamName = pickString(event, ['team_id']);
+        const sessionRef = teamName ? `team_${teamName}_session_${sessionId}` : '';
+        upsertHumanShareCommand(
+          memberId,
+          {
+            displayName: pickString(event, ['name']) || undefined,
+            teamName,
+            sessionRef,
+            joinCommand: sessionRef ? `/join ${sessionRef} as ${memberId}` : '',
+            exitCommand: sessionRef ? `/exit ${sessionRef}` : '',
+            status: 'pending',
+          },
+          eventTimestamp
+        );
+      }
       if (pickString(event, ['type']) === 'team.member.shutdown') {
         applyMemberShutdown(memberId);
         continue;
@@ -668,7 +741,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       continue;
     }
     const type = pickString(event, ['type']);
-    const status = statusFromTaskEvent(type, event.status);
+    const status = normalizeTaskStatus(event.status);
     const assignee = pickString(event, ['assignee', 'member_id', 'claimed_by', 'claimedBy', 'from_member']);
     const title = pickString(event, ['title', 'name', 'description']);
     const content = pickString(event, ['content']);
@@ -698,6 +771,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       taskEvents: [],
       executionEvents: [],
       messages: [],
+      humanShareCommands: [],
     };
   }
 
@@ -707,6 +781,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     taskEvents: Array.from(taskEvents.values()),
     executionEvents: Array.from(executionEvents.values()),
     messages,
+    humanShareCommands: Array.from(humanShareCommands.values()),
   };
 }
 

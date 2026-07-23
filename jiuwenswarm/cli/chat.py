@@ -16,10 +16,34 @@ import time
 import uuid as uuid_module
 from pathlib import Path
 
+# Importing ``readline`` transparently upgrades the builtin ``input()`` with
+# line editing: left/right cursor movement, history, and correct multi-byte
+# UTF-8 deletion (so backspacing a Chinese character removes the whole glyph
+# instead of leaving a broken byte / raw escape sequences like ``^[[C``).
+try:
+    import readline
+    _ = readline  # side-effect import — CPython input() hooks into readline
+except ImportError:
+    # Windows lacks the ``readline`` module.  Reconfigure stdin to UTF-8 so
+    # that multi-byte characters (Chinese, Japanese, etc.) are read and
+    # displayed correctly, and try ``pyreadline3`` (a drop-in ``readline``
+    # replacement for Windows) when available.
+    if sys.platform == "win32":
+        try:
+            sys.stdin.reconfigure(encoding="utf-8")
+        except AttributeError:
+            pass
+        try:
+            import pyreadline3
+            _ = pyreadline3  # Windows readline replacement
+        except ImportError:
+            pass
+
 from jiuwenswarm.cli._terminal import write_stderr, write_stdout
 from jiuwenswarm.cli.gateway_client import GatewayClient
 from jiuwenswarm.cli.events import (
     event_kind,
+    is_content_final,
     is_terminal_event,
 )
 from jiuwenswarm.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
@@ -28,7 +52,20 @@ logger = logging.getLogger(__name__)
 
 # ── Trusted-directory persistence (local, no server/harness changes) ───
 
-_STATE_FILE = Path.home() / ".jiuwenswarm" / "cli_trusted_dirs_state.json"
+# 基于 get_agent_workspace_dir()（~/.jiuwenswarm/agent/workspace），
+# 跟随 JIUWENSWARM_DATA_DIR 做多实例隔离，与 config.yaml 保持同一基准。
+from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+_STATE_FILE = get_agent_workspace_dir() / "cli_trusted_dirs_state.json"
+
+
+def _normalize_dir(path: str) -> str:
+    """将目录路径归一化为绝对、去除末尾分隔符的形式。
+
+    统一 _build_request / _get_persisted_external_dirs / _prompt_and_cleanup_dirs
+    的路径比对基准，避免因末尾 '/'、相对路径或符号链接导致重复或误判。
+    """
+    return str(Path(path).expanduser().resolve())
 
 
 def _load_state() -> dict[str, bool]:
@@ -68,7 +105,7 @@ def _get_persisted_external_dirs() -> list[str]:
     result = []
     for k, v in ext.items():
         if str(k) != "*" and str(v) == "allow":
-            result.append(str(k))
+            result.append(_normalize_dir(str(k)))
     return result
 
 
@@ -92,10 +129,10 @@ def _remove_dir_from_config(dir_path: str) -> bool:
     if not isinstance(ext, dict):
         return False
 
-    target = dir_path.rstrip("/")
+    target = _normalize_dir(dir_path)
     key_to_remove = None
     for key in list(ext.keys()):
-        if str(key).rstrip("/") == target:
+        if _normalize_dir(str(key)) == target:
             key_to_remove = key
             break
     if key_to_remove is None:
@@ -112,7 +149,7 @@ async def _persist_trusted_dirs(client: GatewayClient, trusted_dirs: list[str]) 
     """Tell the agent-server to persist each trusted directory via ``command.add_dir``."""
     failed: list[str] = []
     for d in trusted_dirs:
-        resolved = str(Path(d).resolve())
+        resolved = _normalize_dir(d)
         try:
             await client.send_request({
                 "type": "req",
@@ -134,7 +171,7 @@ async def _persist_trusted_dirs(client: GatewayClient, trusted_dirs: list[str]) 
 
 
 def _prompt_and_cleanup_dirs() -> None:
-    """Check for newly persisted dirs and ask user whether to keep each one.
+    """Check whether persisted dirs are covered by state; if not, ask once for all.
 
     Only called from the REPL loop (interactive TTY).
     """
@@ -143,32 +180,41 @@ def _prompt_and_cleanup_dirs() -> None:
 
     persisted = _get_persisted_external_dirs()
     state = _load_state()
-    new_dirs = [d for d in persisted if d not in state]
+    new_dirs = sorted(d for d in persisted if d not in state)
 
-    for d in sorted(new_dirs):
-        write_stderr(f"\nNew workspace added: {d}\n")
-        try:
-            answer = input("Keep using this workspace? [Y/n]: ").strip().lower()
-        except EOFError:
-            answer = "y"
+    # All persisted dirs already covered by state — nothing to confirm.
+    if not new_dirs:
+        return
 
-        keep = answer not in ("n", "no")
+    write_stderr("\nNew trusted directories detected:\n")
+    for d in new_dirs:
+        write_stderr(f"  {d}\n")
+    try:
+        answer = input("Keep these directories as trusted? [Y/n]: ").strip().lower()
+    except EOFError:
+        answer = "y"
+
+    keep = answer not in ("n", "no")
+    for d in new_dirs:
         state[d] = keep
-        _save_state(state)
+    _save_state(state)
 
-        if not keep:
+    if not keep:
+        for d in new_dirs:
             if _remove_dir_from_config(d):
-                write_stderr(f"Workspace removed: {d}\n")
+                write_stderr(f"Trusted directory removed: {d}\n")
             else:
-                write_stderr(f"Failed to remove workspace: {d}\n")
+                write_stderr(f"Failed to remove trusted directory: {d}\n")
 
 MODE_ALIASES: dict[str, str] = {
-    "agent": "agent.plan",
+    "plan": "agent",
+    "fast": "agent",
     "code": "code.normal",
 }
 
+# plan / fast 已合并为单一 agent 模式；agent.plan / agent.fast 作为历史别名仍可接受，归一到 agent。
 VALID_MODES = frozenset({
-    "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team",
+    "agent", "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team", "team.plan",
 })
 
 # Sources that require the answer to be sent via ``chat.send`` (streaming) to
@@ -185,6 +231,8 @@ def resolve_mode(raw: str) -> str:
     normalized = raw.strip().lower()
     if normalized in MODE_ALIASES:
         normalized = MODE_ALIASES[normalized]
+    if normalized in ("agent.plan", "agent.fast"):
+        normalized = "agent"
     if normalized in VALID_MODES:
         return normalized
     raise ValueError(
@@ -215,7 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mode", default="code.normal",
-        help="Execution mode: agent|code|team|agent.plan|agent.fast|code.plan|code.normal|code.team"
+        help="Execution mode: agent|code|team|team.plan|code.plan|code.normal|code.team"
              " (default: code.normal).",
     )
     p.add_argument(
@@ -294,7 +342,7 @@ def _build_request(args: argparse.Namespace, prompt: str) -> dict:
     if not trusted_dirs:
         trusted_dirs = [project_dir]
     else:
-        trusted_dirs = [str(Path(d).resolve()) for d in trusted_dirs]
+        trusted_dirs = [_normalize_dir(d) for d in trusted_dirs]
 
     # Merge persisted external_directory allow entries into trusted_dirs
     # so that RuntimePromptRail can inject them into the system prompt.
@@ -316,6 +364,10 @@ def _build_request(args: argparse.Namespace, prompt: str) -> dict:
             "cwd": cwd,
             "project_dir": project_dir,
             "trusted_dirs": trusted_dirs,
+            # V2: 显式发 agent_ref，支撑同 session 切 mode 不串窗（设计 §5.2 场景 2）。
+            # gateway 用 (channel, scope, agent_ref) 3 元组注册/查找，AgentServer 回带
+            # 同值，切换 mode 后旧 agent 的延迟 chunk 不会错路由到新 agent 的 UI 区块。
+            "agent_ref": {"mode": args.mode, "id": "default"},
         },
     }
 
@@ -352,13 +404,23 @@ async def _run_interactive_loop(
     # to members, etc.). Only chat.processing_status(is_processing=False)
     # or team.error should terminate the CLI stream.
     team_mode = request.get("params", {}).get("mode", "") in ("team", "team.plan", "code.team")
+    # When the team leader replies with text but creates no tasks (e.g. a
+    # simple greeting), the server's team-completion logic never fires
+    # (is_team_completed() returns None for zero tasks), so the stream
+    # never closes and processing_status(False) never arrives.  We detect
+    # this stall by watching for chat.final (leader reply) and then
+    # waiting a short idle window; if no further events arrive, we treat
+    # the round as complete and prompt the user.
+    team_final_seen = False
+    team_final_time: float = 0.0
+    _team_round_idle_timeout = 3.0
     # In plan mode the agent may end its turn with a text question (without
     # calling ask_user or exit_plan_mode). In that case chat.final arrives
     # but the conversation isn't really done — the user needs to respond.
     # We track plan_exited (set when plan.mode_exited is received) to
     # distinguish "agent finished implementing after approval" from "agent
     # ended turn with text, waiting for user follow-up".
-    plan_mode = request.get("params", {}).get("mode", "") in ("code.plan", "agent.plan")
+    plan_mode = request.get("params", {}).get("mode", "") in ("code.plan", "agent", "agent.plan")
     plan_exited = False
     # When we send an interrupt-resume answer (chat.send with source), the
     # previous stream's trailing chat.final / processing_status(False) may
@@ -448,12 +510,17 @@ async def _run_interactive_loop(
                 return 130
 
             # Compute the remaining budget for the total deadline.
+            # In team mode after the leader's chat.final, use a short idle
+            # window to detect round-completion stall (no tasks created).
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     logger.warning("response timed out")
                     return 1
                 cur_timeout = max(min(remaining, 0.3), 0.01)
+            elif team_final_seen:
+                elapsed = time.monotonic() - team_final_time
+                cur_timeout = max(_team_round_idle_timeout - elapsed, 0.1)
             else:
                 cur_timeout = recv_idle_timeout
 
@@ -485,6 +552,40 @@ async def _run_interactive_loop(
                     return 1
                 continue
 
+            # Team idle-watch: leader's chat.final seen and idle window
+            # elapsed with no further events — server's team-completion
+            # stalled (no tasks). Prompt for next message on TTY.
+            if recv_task not in done and team_final_seen:
+                team_final_seen = False
+                if sys.stdin.isatty():
+                    renderer.clear_loading()
+                    if renderer.streamed_text and not renderer.streamed_text.endswith("\n"):
+                        write_stdout("\n")
+                    try:
+                        line = (await asyncio.to_thread(input, "\n> ")).strip()
+                    except EOFError:
+                        return 0
+                    if not line or line in ("/exit", "/quit", "/q"):
+                        return 0
+                    renderer.reset_streamed_text()
+                    await client.send_request({
+                        "type": "req",
+                        "id": f"chat-{uuid_module.uuid4().hex[:12]}",
+                        "method": "chat.send",
+                        "is_stream": True,
+                        "params": {
+                            "session_id": request["params"]["session_id"],
+                            "query": line,
+                            "mode": request["params"]["mode"],
+                            "cwd": request["params"].get("cwd", ""),
+                            "project_dir": request["params"].get("project_dir", ""),
+                        },
+                    })
+                    renderer.ensure_loading()
+                    continue
+                # Non-TTY: no way to prompt, exit
+                return 0
+
             try:
                 data = recv_task.result()
             except OSError:
@@ -514,6 +615,13 @@ async def _run_interactive_loop(
             payload = data.get("payload", {})
             kind = event_kind(event_type)
 
+            # Any event arriving during the team idle-watch window means
+            # the team is still active (member tool calls, reasoning, etc.).
+            # Reset the idle timer so we don't prematurely prompt the user.
+            # chat.final re-arms it below.
+            if team_final_seen and kind != "final":
+                team_final_seen = False
+
             if kind == "delta":
                 renderer.handle_delta(payload)
             elif kind == "reasoning":
@@ -530,7 +638,19 @@ async def _run_interactive_loop(
                 if payload.get("event_type") == "team.error":
                     renderer.handle_error(payload)
                     return 1
+                # Unknown/control event types are transported in a chat.final
+                # envelope. They must not consume HumanRenderer's one final
+                # slot or arm the team idle timer.
+                if not is_content_final(payload):
+                    continue
                 renderer.handle_final(payload)
+                # In team mode, the leader's chat.final is a turn boundary
+                # but not a terminal event.  Start the idle-watch timer so
+                # we can detect when the server's team-completion logic has
+                # stalled (no tasks created → no processing_status(False)).
+                if team_mode:
+                    team_final_seen = True
+                    team_final_time = time.monotonic()
             elif kind == "error":
                 renderer.handle_error(payload)
                 return 1
@@ -643,6 +763,42 @@ async def _run_interactive_loop(
                         renderer.clear_loading()
                         return 1
                     # leader reply or team control event — keep listening
+                    continue
+                # In team mode, a completed round (processing_status
+                # is_processing=False / team.completed) is NOT the end of
+                # the session — the team runtime is persistent and
+                # inherently conversational. Treat round completion as a
+                # turn boundary: prompt for the next message on TTY.
+                if (
+                    team_mode
+                    and event_type == "chat.processing_status"
+                    and sys.stdin.isatty()
+                ):
+                    team_final_seen = False
+                    renderer.clear_loading()
+                    if renderer.streamed_text and not renderer.streamed_text.endswith("\n"):
+                        write_stdout("\n")
+                    try:
+                        line = (await asyncio.to_thread(input, "\n> ")).strip()
+                    except EOFError:
+                        return 0
+                    if not line or line in ("/exit", "/quit", "/q"):
+                        return 0
+                    renderer.reset_streamed_text()
+                    await client.send_request({
+                        "type": "req",
+                        "id": f"chat-{uuid_module.uuid4().hex[:12]}",
+                        "method": "chat.send",
+                        "is_stream": True,
+                        "params": {
+                            "session_id": request["params"]["session_id"],
+                            "query": line,
+                            "mode": request["params"]["mode"],
+                            "cwd": request["params"].get("cwd", ""),
+                            "project_dir": request["params"].get("project_dir", ""),
+                        },
+                    })
+                    renderer.ensure_loading()
                     continue
                 # In plan mode, chat.final is only terminal if the agent
                 # has exited plan mode (plan_exited=True) or this is an
@@ -833,10 +989,31 @@ def _print_connection_hint(url: str, args: argparse.Namespace) -> None:
 
 
 def run_chat(args: argparse.Namespace) -> int:
+    error = _validate_args(args)
+    if error is not None:
+        return error
+
+    is_team_mode = args.mode in ("team", "team.plan", "code.team")
+
     if args.prompt:
         prompt = " ".join(args.prompt)
     elif not sys.stdin.isatty():
         prompt = sys.stdin.read().strip()
+    elif is_team_mode:
+        # Team runtime is persistent across conversation turns. Use
+        # the same interactive loop model (single connection, multiple
+        # follow-ups) that _run_interactive_loop already supports when
+        # stdin is a TTY — we just need to prime it with the first line
+        # instead of bouncing through _run_repl (which creates a fresh
+        # connection per turn and loses team state).
+        logger.info("Team mode — interactive persistent session.")
+        logger.info("Type your prompt and press Enter. Ctrl+C to interrupt, /exit to exit.")
+        try:
+            prompt = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return 0
+        if not prompt:
+            return 0
     else:
         return _run_repl(args)
 
@@ -844,15 +1021,23 @@ def run_chat(args: argparse.Namespace) -> int:
         logger.error("no prompt provided and stdin is empty")
         return 2
 
-    error = _validate_args(args)
-    if error is not None:
-        return error
+    # Ctrl+C during the synchronous startup phase (before _run_interactive_loop
+    # installs its async SIGINT handler) would otherwise bubble up as a raw
+    # KeyboardInterrupt traceback. Mirror the TUI's keymap.ts behavior: print
+    # a friendly hint and exit with the conventional 128+SIGINT code instead.
+    # The TUI uses a 3-second double-press-to-exit window, but that requires
+    # an event loop already pumping input — the CLI sync phase has none, so a
+    # single Ctrl+C exits cleanly. Once asyncio.run starts, the in-loop
+    # handler takes over with its own double-press semantics.
+    try:
+        # Check for newly persisted dirs before sending the message,
+        # so the user gets a chance to clean up from previous sessions.
+        _prompt_and_cleanup_dirs()
 
-    # Check for newly persisted dirs before sending the message,
-    # so the user gets a chance to clean up from previous sessions.
-    _prompt_and_cleanup_dirs()
-
-    return asyncio.run(_run_chat(args, prompt))
+        return asyncio.run(_run_chat(args, prompt))
+    except KeyboardInterrupt:
+        logger.warning("Interrupted. Exiting (press Ctrl+C again during chat to cancel a running task).")
+        return 130
 
 
 def _run_repl(args: argparse.Namespace) -> int:

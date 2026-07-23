@@ -73,6 +73,7 @@ export function HeartbeatPanel() {
   const [startInput, setStartInput] = useState('08:00');
   const [endInput, setEndInput] = useState('22:00');
   const [filePath, setFilePath] = useState<string>('');
+  const [enabledChannels, setEnabledChannels] = useState<Set<string>>(new Set(['web']));
 
   const loadConf = useCallback(async () => {
     setLoading(true);
@@ -113,6 +114,29 @@ export function HeartbeatPanel() {
     void loadFilePath();
   }, [loadConf, loadFilePath]);
 
+  // 拉取已启用频道列表，与频道面板保持一致：未启用的频道在心跳目标下拉中不可选
+  useEffect(() => {
+    void (async () => {
+      try {
+        const payload = await webRequest<{ channels?: unknown[] }>('channel.get');
+        const channels = Array.isArray(payload?.channels) ? payload.channels : [];
+        const enabled = new Set<string>(['web']);
+        for (const item of channels) {
+          if (!item || typeof item !== 'object') continue;
+          const cid = (item as { channel_id?: unknown }).channel_id;
+          if (typeof cid === 'string' && cid.trim()) {
+            enabled.add(cid.trim().toLowerCase());
+          }
+        }
+        setEnabledChannels(enabled);
+        // 当前选中的频道未启用时，自动回退到 web
+        setTargetInput((prev) => (prev !== 'web' && !enabled.has(prev) ? 'web' : prev));
+      } catch {
+        // 拉取失败时不阻塞面板使用，保持各选项可选
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     if (!success) {
       return;
@@ -129,13 +153,13 @@ export function HeartbeatPanel() {
     if (heartbeatState === 'ok') {
       return {
         text: t('heartbeat.badges.ok'),
-        className: 'text-ok border-[var(--border-ok)] bg-ok-subtle',
+        className: 'text-ok border-[var(--color-border-success)] bg-ok-subtle',
       };
     }
     if (heartbeatState === 'alert') {
       return {
         text: t('heartbeat.badges.alert'),
-        className: 'text-danger border-[var(--border-danger)] bg-danger-subtle',
+        className: 'text-danger border-[var(--color-border-danger)] bg-danger-subtle',
       };
     }
     return {
@@ -262,10 +286,10 @@ export function HeartbeatPanel() {
 
   return (
     <div className="flex-1 min-h-0 relative">
-      <div className="card w-full h-full flex flex-col">
+      <div className="card main-panel-card w-full h-full flex flex-col">
         {success ? (
           <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20">
-            <div className="bg-ok text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+            <div className="bg-ok text-text-inverse px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
               {success}
             </div>
           </div>
@@ -353,9 +377,9 @@ export function HeartbeatPanel() {
                       className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
                     >
                       <option value="web">{t('heartbeat.channels.web')}</option>
-                      <option value="feishu">{t('heartbeat.channels.feishu')}</option>
-                      <option value="xiaoyi" disabled style={{ color: '#8c8c96ff'}}>{t('heartbeat.channels.xiaoyi')}</option>
-                      <option value="dingtalk" disabled style={{ color: '#8c8c96ff' }}>{t('heartbeat.channels.dingtalk')}</option>
+                      <option value="feishu" disabled={!enabledChannels.has('feishu')} style={!enabledChannels.has('feishu') ? { color: 'var(--color-option-disabled)' } : undefined}>{t('heartbeat.channels.feishu')}</option>
+                      <option value="xiaoyi" disabled={!enabledChannels.has('xiaoyi')} style={!enabledChannels.has('xiaoyi') ? { color: 'var(--color-option-disabled)' } : undefined}>{t('heartbeat.channels.xiaoyi')}</option>
+                      <option value="dingtalk" disabled={!enabledChannels.has('dingtalk')} style={!enabledChannels.has('dingtalk') ? { color: 'var(--color-option-disabled)' } : undefined}>{t('heartbeat.channels.dingtalk')}</option>
                     </select>
                   </label>
 
@@ -416,15 +440,15 @@ export function HeartbeatPanel() {
                           <button
                             type="button"
                             key={`${item.updatedAt}-${idx}`}
-                            className="w-full text-left flex items-center gap-3 rounded-md border border-border bg-card/60 px-3 py-2.5 mb-1.5 last:mb-0 hover:bg-card/80 transition-colors"
+                            className="w-full text-left flex items-center gap-3 rounded-md border border-border bg-card/60 px-3 py-2.5 mb-1.5 last:mb-0 hover:bg-card/80 "
                             onClick={() => openMessageModal(item.message)}
                           >
                             <span
                               className={`shrink-0 inline-flex h-8 w-12 items-center justify-center rounded-md border text-sm font-bold tracking-wide ${
                                 item.status === 'ok'
-                                  ? 'text-ok border-[var(--border-ok)] bg-ok-subtle'
+                                  ? 'text-ok border-[var(--color-border-success)] bg-ok-subtle'
                                   : item.status === 'alert'
-                                    ? 'text-ok border-[var(--border-ok)] bg-ok-subtle'
+                                    ? 'text-ok border-[var(--color-border-success)] bg-ok-subtle'
                                     : 'text-text-muted border-border bg-secondary/60'
                               }`}
                             >

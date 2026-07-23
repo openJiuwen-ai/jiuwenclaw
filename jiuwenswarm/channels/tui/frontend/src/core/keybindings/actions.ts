@@ -14,6 +14,7 @@ export const KEYBINDING_CONTEXTS = [
   "TeamPanel",
   "SwarmWorkflows",
   "StatusView",
+  "MemoryView",
   "ResumeList",
   "Overlay",
 ] as const;
@@ -28,6 +29,7 @@ export const KEYBINDING_CONTEXT_DESCRIPTIONS: Record<KeybindingContextName, stri
   TeamPanel: "When the team panel is open",
   SwarmWorkflows: "When the swarm workflows view is open",
   StatusView: "When the status/config view is open (tab navigation only)",
+  MemoryView: "When the memory console view is open (tab navigation only)",
   ResumeList: "When the resume session picker is open",
   Overlay:
     "Generic close binding for MCP detail/tool sub-views (list navigation itself is owned by pi-tui)",
@@ -78,6 +80,11 @@ export const KEYBINDING_ACTIONS = [
   "status:close",
   "status:prevTab",
   "status:nextTab",
+  // MemoryView (tab navigation; list navigation + Enter actions stay hardcoded)
+  "memory:close",
+  "memory:prevTab",
+  "memory:nextTab",
+  "memory:toggleFullPath",
   // ResumeList (session picker shortcuts; list nav + search text entry, plus the
   // rename-input and preview sub-states, stay hardcoded).
   "resume:close",
@@ -126,6 +133,10 @@ export const KEYBINDING_ACTION_DESCRIPTIONS: Record<KeybindingAction, string> = 
   "status:close": "关闭状态/配置视图",
   "status:prevTab": "上一个标签页",
   "status:nextTab": "下一个标签页",
+  "memory:close": "关闭记忆控制台",
+  "memory:prevTab": "上一个页签",
+  "memory:nextTab": "下一个页签",
+  "memory:toggleFullPath": "list/edit 页签切换显示完整路径",
   "resume:close": "关闭会话选择器（先清空搜索）",
   "resume:toggleAllProjects": "切换“所有项目”过滤",
   "resume:toggleBranchFilter": "切换分支过滤",

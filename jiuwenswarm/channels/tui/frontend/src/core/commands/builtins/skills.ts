@@ -759,6 +759,9 @@ export function createSkillsCommand(): SlashCommand {
                   description: `${s.skill_description || "(no description)"} | by ${s.author || "?"} | ⭐${s.stars || 0} | ${s.category || "-"}`,
                 }));
                 ctx.addItem(makeItem(ctx.sessionId, "info", `SkillNet results (${payload.skills.length})`, "*", { view: "list", title: "SkillNet Search Results (use /skills skillnet install <url> to install)", items }));
+              } else if (payload.success) {
+                // Search succeeded but matched nothing — not a failure
+                ctx.addItem(makeItem(ctx.sessionId, "info", `No skills found on SkillNet for: ${q}`));
               } else {
                 ctx.addItem(makeItem(ctx.sessionId, "error", payload.detail || `SkillNet search failed: ${q}`));
               }
@@ -841,15 +844,15 @@ export function createSkillsCommand(): SlashCommand {
         },
         action: async (ctx, args) => {
           const parts = args.trim().split(/\s*,\s*(.*)/);
-          const skill_name = parts[0];
-          const query = parts[1];
+          const skill_name = parts[0]?.trim();
+          const query = parts[1]?.trim();
           if (!skill_name || !query) {
             ctx.addItem(makeItem(ctx.sessionId, "error", "Usage: /skills use <skill_name>, <query>"));
             return;
           }
-          const text = `/skills use ${skill_name}, ${query}`
-
-          const requestId = ctx.sendMessage(text)
+          // 兼容路径：不再拼 `/skills use` 文本，
+          // 直接把干净的 query 作为 content 发送，skill 名走独立的 skills 参数。
+          const requestId = ctx.sendMessage(query, undefined, undefined, undefined, [skill_name]);
           if (!requestId) {
             ctx.addItem(
               makeItem(ctx.sessionId, "error", "offline: waiting for reconnect before sending /skills use request"),

@@ -5,18 +5,45 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import { useChatStore, useSessionStore } from '../../stores';
-import { useEffect, useRef } from 'react';
+import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
+import { useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { FileCheck2, FileText, Minimize2 } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
-import { TodoList } from '../TodoList';
+import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { TeamArea } from '../teamArea';
-import { HarnessExtensionTree } from './HarnessExtensionTree';
 import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
+import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
+import { HarnessExtensionTree } from './HarnessExtensionTree';
 import { type TabType, type TeamDetailTab } from '../teamArea/shared';
+import type { TeamTask, TeamTaskStatus } from '../../stores/sessionStore';
+import type { ProjectInfo, TodoItem, TodoStatus } from '../../types';
+import teamProcessIcon from '../../assets/team-process.svg';
+import { CodeEnvironmentPanel } from '../../features/code-mode/CodeEnvironmentPanel';
+import { CodeReviewPanel } from '../../features/code-mode/CodeReviewPanel';
 import './ToolPanel.css';
+
+/** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
+function todoItemToTeamTask(todo: TodoItem): TeamTask {
+  const statusMap: Record<TodoStatus, TeamTaskStatus> = {
+    pending: 'pending',
+    in_progress: 'in_progress',
+    completed: 'completed',
+  };
+  const ts = todo.updatedAt ? Date.parse(todo.updatedAt) : NaN;
+  return {
+    task_id: todo.id,
+    title: todo.content || todo.activeForm || todo.id,
+    content: todo.activeForm && todo.activeForm !== todo.content ? todo.activeForm : undefined,
+    status: statusMap[todo.status] ?? 'pending',
+    assignee: todo.claimedBy,
+    timestamp: Number.isFinite(ts) ? ts : undefined,
+  };
+}
 
 interface ToolPanelProps {
   sessionId?: string;
+  project?: ProjectInfo | null;
+  isNewSessionPromotion?: boolean;
   teamAreaExpanded: boolean;
   teamAreaActiveTab: TabType;
   teamAreaActiveDetailTab: TeamDetailTab;
@@ -25,7 +52,6 @@ interface ToolPanelProps {
   setTeamAreaActiveTab: (tab: TabType) => void;
   setTeamAreaActiveDetailTab: (detailTab: TeamDetailTab) => void;
   setTeamAreaSelectedMemberId: (memberId: string) => void;
-  sidebarCollapsed?: boolean;
 }
 
 function isEmptyValue(value: unknown): boolean {
@@ -57,8 +83,99 @@ function mergeById<T>(
   return Array.from(itemsById.values());
 }
 
+function ExpandedSingleAgentArea({
+  activeTab,
+  tasks,
+  members,
+  totalTasks,
+  completedTasks,
+  onTabChange,
+  onCollapse,
+  reviewPanel,
+}: {
+  activeTab: TabType;
+  tasks: TeamTask[];
+  members: Parameters<typeof TaskPlanningPanel>[0]['members'];
+  totalTasks: number;
+  completedTasks: number;
+  onTabChange: (tab: TabType) => void;
+  onCollapse: () => void;
+  reviewPanel?: ReactNode;
+}) {
+  const { t } = useTranslation();
+  const artifactsCount = useSessionArtifactsCount();
+  const resolvedTab = activeTab === 'artifacts' ? 'artifacts' : activeTab === 'review' && reviewPanel ? 'review' : 'planning';
+  const tabs = [
+    {
+      key: 'planning',
+      label: t('team.planning.tab'),
+      count: `${completedTasks}/${totalTasks}`,
+      icon: <img src={teamProcessIcon} width={16} height={16} aria-hidden="true" />,
+    },
+    {
+      key: 'artifacts',
+      label: t('artifacts.tab'),
+      count: artifactsCount,
+      icon: <FileText size={16} />,
+    },
+    ...(reviewPanel ? [{ key: 'review' as const, label: t('codeMode.review'), icon: <FileCheck2 size={16} /> }] : []),
+  ];
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden bg-card">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
+        <div className="flex items-center gap-2">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
+                resolvedTab === tab.key
+                  ? 'bg-secondary font-medium text-text'
+                  : 'text-text-muted hover:bg-secondary/50 hover:text-text'
+              }`}
+              onClick={() => onTabChange(tab.key as TabType)}
+            >
+              {tab.icon}
+              {tab.label}{'count' in tab ? ` (${tab.count})` : ''}
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={onCollapse}
+          className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
+          title={t('team.collapse')}
+        >
+          <Minimize2 size={12} />
+        </button>
+      </div>
+
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {resolvedTab === 'artifacts' ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden">
+            <ArtifactsPanel />
+          </div>
+        ) : resolvedTab === 'review' && reviewPanel ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
+        ) : (
+          <TaskPlanningPanel
+            variant="expanded"
+            tasks={tasks}
+            members={members}
+            totalTasks={totalTasks}
+            completedTasks={completedTasks}
+            hideAssignee
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ToolPanel({
   sessionId,
+  project = null,
+  isNewSessionPromotion = false,
   teamAreaExpanded,
   teamAreaActiveTab,
   teamAreaActiveDetailTab,
@@ -69,23 +186,34 @@ export function ToolPanel({
   setTeamAreaSelectedMemberId,
 }: ToolPanelProps) {
   const { t } = useTranslation();
-  const {
-    contextCompressionRate,
-    contextCompressionBefore,
-    contextCompressionAfter,
-    isConnected,
-    memoryUsage,
-    setMemoryUsage,
-    mode,
-    teamMembers,
-    setTeamMembers,
-    setTeamTaskEvents,
-    setTeamTasks,
-    setTeamMemberExecutionEvents,
-    teamHistoryMessages,
-    setTeamHistoryMessages,
-  } = useSessionStore();
-  const { isProcessing, messages } = useChatStore();
+  const { isConnected, memoryUsage, setMemoryUsage } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const contextCompressionRate = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRate ?? 0);
+  const contextCompressionBefore = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionBefore ?? null);
+  const contextCompressionAfter = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionAfter ?? null);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
+  const teamHistoryMessages = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHistoryMessages ?? []);
+  const setTeamMembers = useSessionStore((s) => s.setTeamMembers);
+  const setTeamTaskEvents = useSessionStore((s) => s.setTeamTaskEvents);
+  const setTeamTasks = useSessionStore((s) => s.setTeamTasks);
+  const setTeamMemberExecutionEvents = useSessionStore((s) => s.setTeamMemberExecutionEvents);
+  const setTeamHistoryMessages = useSessionStore((s) => s.setTeamHistoryMessages);
+  const setTeamHumanShareCommands = useSessionStore((s) => s.setTeamHumanShareCommands);
+  const isProcessing = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isProcessing ?? false);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;
+  const canReviewCode = Boolean(codeProject && sessionId && sessionId !== 'new');
+  const codeReviewPanel = canReviewCode && codeProject && sessionId
+    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} />
+    : undefined;
+  const todoTeamTasks = useMemo(() => todos.map(todoItemToTeamTask), [todos]);
+  const todoCompletedTasks = useMemo(
+    () => todos.filter((t) => t.status === 'completed').length,
+    [todos],
+  );
   const hydratedTeamHistorySessionRef = useRef<string | null>(null);
   const loadingTeamHistorySessionRef = useRef<string | null>(null);
 
@@ -135,13 +263,19 @@ export function ToolPanel({
 
   useEffect(() => {
     if (mode !== 'team' || !isConnected || !sessionId?.startsWith('sess_')) {
-      setTeamHistoryMessages([]);
+      if (sessionId) setTeamHistoryMessages(sessionId, []);
       hydratedTeamHistorySessionRef.current = null;
       loadingTeamHistorySessionRef.current = null;
       return;
     }
+    if (isNewSessionPromotion) {
+      setTeamHistoryMessages(sessionId, []);
+      hydratedTeamHistorySessionRef.current = sessionId;
+      loadingTeamHistorySessionRef.current = null;
+      return;
+    }
     if (hydratedTeamHistorySessionRef.current !== sessionId) {
-      setTeamHistoryMessages([]);
+      setTeamHistoryMessages(sessionId, []);
     }
     if (hydratedTeamHistorySessionRef.current === sessionId) {
       return;
@@ -156,44 +290,53 @@ export function ToolPanel({
       .then((historyState) => {
         loadingTeamHistorySessionRef.current = null;
         hydratedTeamHistorySessionRef.current = sessionId;
-        const current = useSessionStore.getState();
+        const current = useSessionStore.getState().runtimes[sessionId];
         const mergedMembers = mergeById(
           historyState.members,
-          current.teamMembers,
+          current?.teamMembers ?? [],
           (member) => member.member_id
         );
         if (mergedMembers.length > 0) {
-          setTeamMembers(mergedMembers);
+          setTeamMembers(sessionId, mergedMembers);
         }
 
         const mergedTaskEvents = mergeById(
           historyState.taskEvents,
-          current.teamTaskEvents,
+          current?.teamTaskEvents ?? [],
           (event) => event.task_id
         );
         if (mergedTaskEvents.length > 0) {
-          setTeamTaskEvents(mergedTaskEvents);
+          setTeamTaskEvents(sessionId, mergedTaskEvents);
         }
 
         const mergedTasks = mergeById(
           historyState.tasks,
-          current.teamTasks,
+          current?.teamTasks ?? [],
           (task) => task.task_id
         );
         if (mergedTasks.length > 0) {
-          setTeamTasks(mergedTasks);
+          setTeamTasks(sessionId, mergedTasks);
         }
 
         const mergedExecutionEvents = mergeById(
           historyState.executionEvents,
-          current.teamMemberExecutionEvents,
+          current?.teamMemberExecutionEvents ?? [],
           (event) => event.id
         );
         if (mergedExecutionEvents.length > 0) {
-          setTeamMemberExecutionEvents(mergedExecutionEvents);
+          setTeamMemberExecutionEvents(sessionId, mergedExecutionEvents);
         }
 
-        setTeamHistoryMessages(historyState.messages);
+        const mergedHumanShareCommands = mergeById(
+          historyState.humanShareCommands,
+          current?.teamHumanShareCommands ?? [],
+          (command) => `${command.sessionId}:${command.memberName}`
+        );
+        if (mergedHumanShareCommands.length > 0) {
+          setTeamHumanShareCommands(sessionId, mergedHumanShareCommands);
+        }
+
+        setTeamHistoryMessages(sessionId, historyState.messages);
       })
       .catch((error) => {
         loadingTeamHistorySessionRef.current = null;
@@ -206,7 +349,7 @@ export function ToolPanel({
     return () => {
       controller.abort();
     };
-  }, [isConnected, mode, sessionId, setTeamHistoryMessages, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
+  }, [isConnected, isNewSessionPromotion, mode, sessionId, setTeamHistoryMessages, setTeamHumanShareCommands, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
 
   const memoryDisplay =
     memoryUsage.rssMb == null
@@ -249,12 +392,34 @@ export function ToolPanel({
   }
   const compressionDisplay = `${afterK}K/${beforeK}K (${compressionRateDisplay}%)`;
 
-  if (teamAreaExpanded && mode === 'team') {
+  if (teamAreaExpanded && mode !== 'auto_harness') {
+    if (mode !== 'team') {
+      return (
+        <div
+          data-testid="tool-panel"
+          className="bg-panel h-full overflow-hidden flex-1 flex flex-col"
+        >
+          <div className="h-full bg-panel flex flex-col overflow-hidden">
+            <ExpandedSingleAgentArea
+              activeTab={teamAreaActiveTab}
+              tasks={todoTeamTasks}
+              members={teamMembers}
+              totalTasks={todos.length}
+              completedTasks={todoCompletedTasks}
+              onTabChange={setTeamAreaActiveTab}
+              onCollapse={() => setTeamAreaExpanded(false)}
+              reviewPanel={codeReviewPanel}
+            />
+          </div>
+        </div>
+      );
+    }
+
     // 展开模式 - 更宽的面板，只显示 TeamArea
     return (
       <div
         data-testid="tool-panel"
-        className="bg-panel h-full overflow-hidden flex-1 flex flex-col rounded-r-lg"
+        className="bg-panel h-full overflow-hidden flex-1 flex flex-col"
       >
         <div className="h-full bg-panel flex flex-col overflow-hidden">
           <TeamArea
@@ -271,6 +436,7 @@ export function ToolPanel({
               setTeamAreaExpanded(false);
               setTeamAreaSelectedMemberId('');
             }}
+            reviewPanel={codeReviewPanel}
           />
         </div>
       </div>
@@ -281,21 +447,21 @@ export function ToolPanel({
   return (
     <div
       data-testid="tool-panel"
-      className="bg-panel border-border h-full overflow-hidden px-3 shrink-0"
+      className="bg-panel border-l border-border h-full overflow-hidden py-3 shrink-0"
       style={{ width: 'var(--tool-panel-width)' }}
     >
       <div className="h-full bg-panel flex flex-col overflow-hidden">
         {/* Auto-harness extension file tree */}
         {mode === 'auto_harness' ? (
-          <div className="flex-1 overflow-hidden mb-4">
-            <div className="bg-card rounded-lg border border-border overflow-hidden h-full">
+          <div className="flex-1 overflow-hidden mb-3">
+            <div className="overflow-hidden h-full flex flex-col px-3">
               <HarnessExtensionTree />
             </div>
           </div>
         ) : mode === 'team' ? (
           /* 团队任务概览和成员列表 */
-          <div className="flex-1 overflow-hidden mb-4">
-            <div className="bg-card rounded-lg overflow-hidden h-full flex flex-col">
+          <div className="flex-1 overflow-hidden mb-3">
+            <div className="overflow-hidden h-full flex flex-col">
               <TeamArea
                 members={teamMembers}
                 historyMessages={teamHistoryMessages}
@@ -310,17 +476,42 @@ export function ToolPanel({
             </div>
           </div>
         ) : (
-          /* Todo 列表 */
-          <div className="flex-1 overflow-y-auto mb-4">
-            <div className="bg-card rounded-lg border border-border overflow-hidden h-full">
-              <TodoList />
-            </div>
+          /* 任务概述（复用集群模式紧凑态样式，数据来自 TodoItem） */
+          <div className="flex-1 overflow-hidden mb-3">
+            <TaskPlanningPanel
+              variant="compact"
+              tasks={todoTeamTasks}
+              members={teamMembers}
+              totalTasks={todos.length}
+              completedTasks={todoCompletedTasks}
+              hideBorder
+              onExpand={() => {
+                setTeamAreaActiveTab('planning');
+                setTeamAreaExpanded(true);
+              }}
+              hideAssignee
+              title={t('chat.recentTasks')}
+            />
           </div>
         )}
 
+        {canReviewCode && codeProject && sessionId ? (
+          <CodeEnvironmentPanel
+            project={codeProject}
+            sessionId={sessionId}
+            isProcessing={isProcessing}
+            onReview={() => {
+              setTeamAreaActiveTab('review');
+              setTeamAreaExpanded(true);
+            }}
+          />
+        ) : null}
+
         {/* 状态显示 - 只在收起模式下显示 */}
         {!teamAreaExpanded && (
-          <div className="toolpanel-status-card">
+          <>
+            <hr className="border-0 border-t border-border m-0" />
+            <div className="toolpanel-status-card px-3">
             <h3 className="toolpanel-status-card__title">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <rect x="1" y="8" width="3" height="7" rx="0.5" fill="currentColor" opacity="0.5" />
@@ -340,18 +531,7 @@ export function ToolPanel({
               </div>
             </div>
           </div>
-        )}
-
-        {/* 底部信息区：与左侧版本信息保持一致 - 只在收起模式下显示 */}
-        {!teamAreaExpanded && (
-          <div
-            className="shrink-0 pt-4 text-text-muted text-center"
-            style={{ fontSize: 'var(--font-size-xs)' }}
-          >
-            <div className="px-2.5">
-              <span>{t('toolPanel.poweredBy')}</span>
-            </div>
-          </div>
+          </>
         )}
       </div>
     </div>

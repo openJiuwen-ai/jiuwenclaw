@@ -8,6 +8,7 @@
     "prebuild": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:openai-account-model-state": "tsc src/components/ConfigPanel/openaiAccountModelState.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/openai-account-model-state --skipLibCheck && node --test tests/openaiAccountModelState.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
@@ -41,8 +42,10 @@
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.0",
     "postcss": "^8.4.0",
+    "prettier": "^3.3.3",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.3.0",
-    "vite": "^5.0.0"
+    "vite": "^5.0.0",
+    "vite-plugin-svgr": "^4.5.0"
   }
 }

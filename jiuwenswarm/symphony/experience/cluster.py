@@ -8,6 +8,7 @@ via FAISS K-Means (cosine distance).
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 
 import numpy as np
@@ -32,13 +33,15 @@ class ClusteredQuery:
 def cluster_traces(
         traces: list[TraceRecord],
         embedder: EmbeddingClient,
+        n_clusters: int | None = None,
         min_cluster_size: int = 1,
+        cluster_max_examples: int | None = None,
 ) -> list[ClusteredQuery]:
     """Cluster traces: first by skill set, then by semantic similarity.
 
     1. Partition traces by their skill set (frozenset of skill_ids).
     2. Within each group, embed queries and cluster via FAISS K-Means.
-    3. Split each semantic cluster into success / failure buckets.
+    3. Split each semantic cluster into success buckets.
     """
     if not traces:
         return []
@@ -49,6 +52,8 @@ def cluster_traces(
         key = frozenset(t.skills) if t.skills else frozenset()
         skill_groups.setdefault(key, []).append(t)
 
+    sampler = random.Random(42)
+
     result: list[ClusteredQuery] = []
     cluster_id_counter = 0
 
@@ -57,14 +62,17 @@ def cluster_traces(
         group_traces = skill_groups.get(skill_key, [])
         if not group_traces:
             continue
-        queries = [t.query for t in group_traces]
+        successes = [t for t in group_traces if t.success]
+        if cluster_max_examples is not None:
+            cap = max(1, cluster_max_examples)
+            successes = (sampler.sample(successes, cap) if len(successes) > cap else successes)
+        queries = [t.query for t in successes]
         embeddings = embedder.embed_batch(queries)
 
-        # Use min_cluster_size=2 for FAISS so small groups still form clusters;
-        # the outer `min_cluster_size` parameter controls discarding, not FAISS.
         labels = _faiss_cluster(
             embeddings,
             max_iterations=50,
+            n_clusters=n_clusters,
             min_cluster_size=min_cluster_size,
         )
 
@@ -75,7 +83,7 @@ def cluster_traces(
 
         for _local_id in sorted(local_clusters.keys()):
             indices = local_clusters.get(_local_id, [])
-            members = [group_traces[i] for i in indices]
+            members = [successes[i] for i in indices]
 
             # Filter clusters smaller than the configured min_cluster_size
             if len(members) < min_cluster_size:
@@ -95,7 +103,7 @@ def populate_cluster(
         members: list[TraceRecord],
 ) -> ClusteredQuery:
     success_traces = [t for t in members if t.success]
-    failure_traces = [t for t in members if not t.success]
+    failure_traces = []
 
     # Find centroid: member whose embedding is closest to the group mean
     member_embeddings = np.array(
@@ -120,7 +128,7 @@ def _faiss_cluster(
         *,
         n_clusters: int | None = None,
         max_iterations: int = 50,
-        min_cluster_size: int = 2,
+        min_cluster_size: int = 1,
 ) -> list[int]:
     """Cluster embeddings using FAISS K-Means with cosine distance.
 
@@ -136,7 +144,7 @@ def _faiss_cluster(
     try:
         import faiss
     except ImportError:
-        LOGGER.debug("FAISS not available, falling back to single-cluster")
+        LOGGER.warning("FAISS not available, falling back to single-cluster")
         return [0] * n
 
     # Normalize vectors for inner-product = cosine similarity
@@ -144,7 +152,7 @@ def _faiss_cluster(
 
     # Auto-determine k: aim for clusters of 3-8 items
     if n_clusters is None:
-        k = max(2, min(n // 3, n))
+        k = max(2, n // 3)
     else:
         k = max(2, min(n_clusters, n))
     k = min(k, n)

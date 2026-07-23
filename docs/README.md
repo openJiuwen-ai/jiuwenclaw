@@ -62,7 +62,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>对话</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="zh/对话.md">对话</a></td>
       <td width="50%">Web 对话入口，支持消息发送、新建会话以及规划 / 性能 / 集群模式切换。</td>
     </tr>
     <tr>
@@ -72,7 +72,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>会话</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="zh/会话.md">会话</a></td>
       <td width="50%">Session 信息管理、历史聊天记录查看与恢复、会话历史删除。</td>
     </tr>
     <tr>
@@ -97,7 +97,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>频道</strong></td>
-      <td width="28%"><a href="zh/频道.md">频道</a> / <a href="zh/ACP插件使用.md">ACP 插件使用</a> / <a href="zh/TUI使用指南.md">TUI 使用指南</a></td>
+      <td width="28%"><a href="zh/频道.md">频道</a></td>
       <td width="50%">JiuwenSwarm 的多渠道接入与交互。</td>
     </tr>
     <tr>
@@ -112,7 +112,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>日志</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="zh/日志.md">日志</a></td>
       <td width="50%">系统日志路径、运行记录与常见排错入口。</td>
     </tr>
     <tr>
@@ -155,7 +155,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>Agent Team</strong></td>
-      <td width="28%"><a href="zh/AgentTeam.md">Agent Teams</a> / Team Skills / <a href="zh/分布式Team.md">分布式 Team</a></td>
+      <td width="28%"><a href="zh/AgentTeam.md">Agent Teams</a> / <a href="zh/SwarmSkills.md">Swarm Skills</a> / <a href="zh/分布式Team.md">分布式 Team</a></td>
       <td width="50%">支持多智能体团队协作、团队级技能编排与复用，以及多进程分布式 Team 的运行模式。</td>
     </tr>
     <tr>
@@ -183,8 +183,8 @@
     </tr>
     <tr>
       <td width="22%"><strong>自动更新</strong></td>
-      <td width="28%"><a href="zh/windows自动更新设计.md">Windows 自动更新设计</a></td>
-      <td width="50%">Windows 客户端自动更新方案、流程与关键模块。</td>
+      <td width="28%"><a href="zh/windows自动更新设计.md">桌面端自动更新设计</a></td>
+      <td width="50%">Windows 与 macOS 桌面端自动更新方案、流程与关键模块（含预发布版推送）。</td>
     </tr>
     <tr>
       <td width="22%"><strong>开发者文档</strong></td>

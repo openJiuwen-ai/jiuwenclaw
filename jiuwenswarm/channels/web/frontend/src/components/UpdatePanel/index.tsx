@@ -68,6 +68,8 @@ function formatPublishedAt(value: string, locale: string): string {
   }).format(date);
 }
 
+const UPDATER_STATUS_EVENT = 'jiuwenswarm:updater-status';
+
 export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   const { t, i18n } = useTranslation();
   const [status, setStatus] = useState<UpdateStatusPayload | null>(null);
@@ -106,7 +108,27 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   }, [refreshConfig, refreshStatus]);
 
   useEffect(() => {
-    if (normalizeString(status?.state) !== 'downloading' && normalizeString(status?.state) !== 'upgrading') {
+    const handleUpdaterStatus = (event: Event) => {
+      const payload = (event as CustomEvent<UpdateStatusPayload>).detail;
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+      setStatus(payload);
+      setError(normalizeString(payload.error) || null);
+    };
+    window.addEventListener(UPDATER_STATUS_EVENT, handleUpdaterStatus);
+    return () => {
+      window.removeEventListener(UPDATER_STATUS_EVENT, handleUpdaterStatus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      normalizeString(status?.state) !== 'checking' &&
+      normalizeString(status?.state) !== 'downloading' &&
+      normalizeString(status?.state) !== 'upgrading' &&
+      normalizeString(status?.state) !== 'installing'
+    ) {
       return;
     }
     const timer = window.setInterval(() => {
@@ -118,7 +140,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   }, [refreshStatus, status?.state]);
 
   const handleCheck = useCallback(async () => {
-    if (!isConnected || checking) return;
+    if (!isConnected || checking || normalizeString(status?.state) === 'downloading') return;
     setChecking(true);
     setError(null);
     try {
@@ -130,7 +152,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
     } finally {
       setChecking(false);
     }
-  }, [checking, isConnected, request, t]);
+  }, [checking, isConnected, status, request, t]);
 
   const handleDownload = useCallback(async () => {
     if (!isConnected) return;
@@ -174,13 +196,18 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
       setError(t('updatePanel.errors.installUnavailable'));
       return;
     }
+    // Optimistically switch to "installing" so the UI reflects the in-progress
+    // state before the desktop app closes the window.
+    setStatus((prev) => ({ ...(prev ?? {}), state: 'installing', installing: true }));
     try {
       const ok = await api.install_update(installerPath);
       if (!ok) {
         setError(t('updatePanel.errors.installFailed'));
+        setStatus((prev) => ({ ...(prev ?? {}), state: 'downloaded', installing: false }));
       }
     } catch (installError) {
       setError(installError instanceof Error ? installError.message : t('updatePanel.errors.installFailed'));
+      setStatus((prev) => ({ ...(prev ?? {}), state: 'downloaded', installing: false }));
     }
   }, [status?.downloaded_path, t]);
 
@@ -221,14 +248,14 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
 
   return (
     <div className="flex-1 min-h-0">
-      <div className="card w-full h-full flex flex-col gap-5">
+      <div className="card main-panel-card w-full h-full flex flex-col gap-5">
         <div className="flex items-center justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold">{t('updatePanel.title')}</h2>
             <p className="text-sm text-text-muted mt-1">{t('updatePanel.subtitle')}</p>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => void handleCheck()} className="btn secondary" disabled={!isConnected || checking}>
+            <button onClick={() => void handleCheck()} className="btn secondary" disabled={!isConnected || checking || state === 'downloading'}>
               {checking ? t('updatePanel.checking') : t('updatePanel.checkNow')}
             </button>
             {isPipMode ? (
@@ -294,7 +321,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
               <span className="mono">{progress}%{isPipMode ? '' : ` · ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`}</span>
             </div>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-secondary/80">
-              <div className="h-full rounded-full bg-accent transition-all duration-200" style={{ width: `${progress}%` }} />
+              <div className="h-full rounded-full bg-accent  " style={{ width: `${progress}%` }} />
             </div>
             {currentActivity && (
               <div className="mt-2 text-xs font-mono text-text-muted truncate" title={currentActivity}>

@@ -23,7 +23,7 @@ memory:
   #
   # 外接 rail 的启用 = (engine ∈ {external, both}) AND (external.provider 非空)
   # 内置 rail 的启用 = (engine ∈ {builtin, both})  AND (mode=local)
-  #                    AND modes.agent.<当前 mode>.memory.enabled=true
+  #                    AND modes.agent.memory.enabled=true
   # ============================================================
 
   mode: ${MEMORY_MODE:-local}            # 内置记忆存储位置：local | cloud
@@ -73,7 +73,7 @@ memory:
   #   └─────────────┴───────────────┴──────────────────────────────────────┘
   #
   # 说明：
-  # - 外接记忆 mode-independent：配置一次，plan / fast 模式全程生效，
+  # - 外接记忆 mode-independent：配置一次，agent 模式全程生效，
   #   跨 config 热重载持久存活（保留 prefetch 缓存、电路断路器、会话状态）
   # - 单 provider 策略：同一时刻 provider 只能选一个
   # - 失败降级：provider 构建失败或网络异常不阻塞主流程
@@ -101,7 +101,7 @@ memory:
     mem0:
       api_key: ${MEM0_API_KEY:-}
       user_id: ${MEM0_USER_ID:-jiuwenswarm-user}
-      agent_id: ${MEM0_AGENT_ID:-jiuwenswarm}
+      agent_id: ${MEM0_AGENT_ID:-jiuwenclaw}
       rerank: true                                       # 搜索结果重排序（更准但更慢）
 
     # -- OpenViking（字节上下文数据库）--
@@ -114,57 +114,58 @@ memory:
       user: ${OPENVIKING_USER:-default}
 
 models:
-  default:
-    model_client_config:
-      api_base: ${API_BASE}
-      api_key: ${API_KEY}
-      model_name: ${MODEL_NAME:-xiaomi/mimo-v2-omni}
-      client_provider: ${MODEL_PROVIDER}
-      timeout: 1800
-      verify_ssl: false
-      custom_headers: {}
-    model_config_obj:
-      temperature: 0.95
+  defaults:
+    - model_client_config:
+        api_base: ${API_BASE}
+        api_key: ${API_KEY}
+        model_name: ${MODEL_NAME:-xiaomi/mimo-v2-omni}
+        client_provider: ${MODEL_PROVIDER}
+        timeout: 1800
+        verify_ssl: false
+        custom_headers: {}
+      model_config_obj:
+        temperature: 0.95
+      is_default: true
   video:
-    model_client_config:
-      api_base: ${VIDEO_API_BASE}
-      api_key: ${VIDEO_API_KEY}
-      model_name: ${VIDEO_MODEL_NAME:-xiaomi/mimo-v2-omni}
-      client_provider: ${VIDEO_PROVIDER}
-      timeout: 1800
-      verify_ssl: false
-    model_config_obj:
-      temperature: 0.95
+      model_client_config:
+        api_base: ${VIDEO_API_BASE}
+        api_key: ${VIDEO_API_KEY}
+        model_name: ${VIDEO_MODEL_NAME:-xiaomi/mimo-v2-omni}
+        client_provider: ${VIDEO_PROVIDER}
+        timeout: 1800
+        verify_ssl: false
+      model_config_obj:
+        temperature: 0.95
   audio:
-    model_client_config:
-      api_base: ${AUDIO_API_BASE}
-      api_key: ${AUDIO_API_KEY}
-      model_name: ${AUDIO_MODEL_NAME:-openai/gpt-4o-audio-preview}
-      client_provider: ${AUDIO_PROVIDER}
-      verify_ssl: false
-      timeout: 1800
-    model_config_obj:
-      temperature: 0.95
+      model_client_config:
+        api_base: ${AUDIO_API_BASE}
+        api_key: ${AUDIO_API_KEY}
+        model_name: ${AUDIO_MODEL_NAME:-openai/gpt-4o-audio-preview}
+        client_provider: ${AUDIO_PROVIDER}
+        verify_ssl: false
+        timeout: 1800
+      model_config_obj:
+        temperature: 0.95
   vision:
-    model_client_config:
-      api_base: ${VISION_API_BASE}
-      api_key: ${VISION_API_KEY}
-      model_name: ${VISION_MODEL_NAME:-bytedance-seed/seed-2.0-mini}
-      client_provider: ${VISION_PROVIDER}
-      verify_ssl: false
-      timeout: 1800
-    model_config_obj:
-      temperature: 0.95
+      model_client_config:
+        api_base: ${VISION_API_BASE}
+        api_key: ${VISION_API_KEY}
+        model_name: ${VISION_MODEL_NAME:-bytedance-seed/seed-2.0-mini}
+        client_provider: ${VISION_PROVIDER}
+        verify_ssl: false
+        timeout: 1800
+      model_config_obj:
+        temperature: 0.95
   image_gen:
-    model_client_config:
-      api_base: ${IMAGE_GEN_API_BASE:-https://dashscope.aliyuncs.com/api/v1}
-      api_key: ${IMAGE_GEN_API_KEY}
-      model_name: ${IMAGE_GEN_MODEL_NAME:-qwen-image-max}
-      client_provider: ${IMAGE_GEN_PROVIDER:-DashScope}
-      verify_ssl: false
-      timeout: 1800
-    model_config_obj:
-      temperature: 0.95
+      model_client_config:
+        api_base: ${IMAGE_GEN_API_BASE:-https://dashscope.aliyuncs.com/api/v1}
+        api_key: ${IMAGE_GEN_API_KEY}
+        model_name: ${IMAGE_GEN_MODEL_NAME:-qwen-image-max}
+        client_provider: ${IMAGE_GEN_PROVIDER:-DashScope}
+        verify_ssl: false
+        timeout: 1800
+      model_config_obj:
+        temperature: 0.95
 
 telemetry:
   enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）
@@ -173,7 +174,7 @@ telemetry:
   protocol: grpc                    # grpc / http
   headers: {}                       # 公共 OTLP headers，可被 traces/metrics 覆盖
   log_messages: true                # 是否在 span event 中记录完整消息内容
-  service_name: jiuwenswarm
+  service_name: jiuwenclaw
   provider_factory:                 # 自定义 provider factory，格式：module:function
   traces:
     exporter:                       # trace exporter，默认回退到 telemetry.exporter
@@ -188,12 +189,15 @@ telemetry:
 
 react:
   agent_name: main_agent
+  enable_task_loop: false
   max_iterations: 100
   model_name: ${MODEL_NAME:-deepseek-chat}
   skill_mode: all
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent 保持原行为，仍由浏览器 runtime 开关决定是否默认注册；这里只支持覆盖其参数
   subagents:
+    general_agent:
+      enabled: true
     code_agent:
       enabled: false
       # max_iterations: 15
@@ -209,9 +213,10 @@ react:
     enabled: true
     message_summary_offloader_config:
       messages_threshold: null
-      large_message_threshold: 15000
+      tokens_threshold: 40000
+      large_message_threshold: 60000
       offload_message_type: [ "tool" ]
-      protected_tool_names: [ "read_file" ]
+      protected_tool_names: ["read_file:*SKILL.md", "reload_original_context_messages"]
       messages_to_keep: null
       keep_last_round: false
       customized_summary_prompt: null
@@ -221,14 +226,14 @@ react:
       step_summary_max_context_messages: 8
       content_max_chars_for_compression: 200000
     dialogue_compressor_config:
-      messages_threshold:
-      tokens_threshold: 100000
+      messages_threshold: null
+      tokens_threshold: 40000
       messages_to_keep: 10
       keep_last_round: false
       compression_target_tokens: 1800
       offload_writeback_enabled: false
     current_round_compressor_config:
-      tokens_threshold: 100000
+      tokens_threshold: 40000
       messages_to_keep: 3
       min_selected_tokens_for_compression: 20000
       compression_target_tokens: 4000
@@ -253,7 +258,10 @@ react:
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
-    auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    auto_scan: false           # 兼容开关：teammate 触发 signal
+    signal_trigger:            # true / false = 显式覆盖规则触发；留空时回退 auto_scan
+    review_trigger:            # teammate 不启用软触发；保留字段以对齐通用配置
+    skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
     auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_base_dir: "agent/skills"  # Skill 根目录
   a2x_registry:
@@ -267,10 +275,10 @@ react:
     role: "teammate"
     # When role=teammate, automatic blank-agent registration during agent
     # initialization calls AsyncA2XRegistryClient.register_blank_agent(...).
-    # Both dataset and endpoint must be configured explicitly; if either is
-    # missing, auto-registration is skipped and only a log is recorded.
+    # endpoint may be omitted in distributed mode; it defaults to
+    # team.transport.params.bootstrap_direct_addr when available.
     dataset: "team_pool"
-    endpoint: "tcp://127.0.0.1:28610"
+    endpoint: ""
 
 tools:
   - todo
@@ -306,7 +314,7 @@ gateway:
   session_map_scope: per_chat_bot
 
 heartbeat:
-  # 心跳间隔（秒），默认 60
+  # 心跳间隔（秒），默认 3600
   every: 3600
   # 心跳结果回传的 channel（如 "web"），
   target: web
@@ -619,7 +627,7 @@ browser:
 updater:
   enabled: true
   repo_owner: openJiuwen
-  repo_name: jiuwenswarm
+  repo_name: jiuwenclaw
   release_api_url: ""
   asset_name_pattern: "JiuwenSwarm-setup-{version}.exe"
   sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
@@ -632,12 +640,10 @@ extensions:
 
 
 team:
-  # Distributed teammate template. Copy this file to
-  # <TEAMMATE_HOME>/.jiuwenswarm/config/config.yaml and adjust registry/storage/ports.
+  # 默认：单机 local + inprocess。双机 pyzmq 示例见 tmp/team-leader.yaml、tmp/team-teammate.yaml（与 .tmp/leader_home、.tmp/teammate_home 内 config 同步）。
   runtime:
-    mode: distributed
-    role: teammate
-    member_name: teammate_1
+    mode: local
+    role: leader
 
   team_name: jiuwen_team
   lifecycle: persistent
@@ -663,22 +669,12 @@ team:
 
   workspace:
     enabled: true
-    root_path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}
-    version_control: false
 
   transport:
-    type: pyzmq
-    params:
-      request_timeout: 20
-      direct_addr: tcp://0.0.0.0:28611
-      bootstrap_direct_addr: tcp://127.0.0.1:28610
-      pubsub_publish_addr: tcp://127.0.0.1:28556
-      pubsub_subscribe_addr: tcp://127.0.0.1:28557
+    type: inprocess
 
   storage:
-    type: postgresql
-    params:
-      connection_string: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/jiuwen_team
+    type: sqlite
 
 mcp:
   servers: []
@@ -703,29 +699,21 @@ mcp:
 modes:
   # 一级模式 agent / code / team
   agent:
-    # agent 模式支持 性能/规划/集群
-    fast:
-      memory:
-        enabled: true
-        is_proactive: false
-      rails:
-      tools:
-    plan:
-      memory:
-        enabled: true
-        is_proactive: true
-      rails:
-      tools:
+    # plan / fast 已合并为单一 agent 模式：记忆固定被动（is_proactive 开关已下线）。
+    memory:
+      enabled: true
+    rails:
+    tools:
   code:
     # 动态 Rails — 列表中出现的 = 启用；不出现的 = 不启用
     # 固定 Rails（以下 Rails 已在代码中固定挂载，无需在此配置）：
-    #   RuntimePromptRail, ResponsePromptRail, JiuSwarmStreamEventRail, SecurityRail,
+    #   RuntimePromptRail, ResponsePromptRail, JiuClawStreamEventRail, SecurityRail,
     #   PermissionInterruptRail, SysOperationRail(FileSystemRail), LspRail,
     #   ProjectMemoryRail, CodingMemoryRail, AgentModeRail, StructuredAskUserRail,
     #   ConfirmInterruptRail, ContextProcessorRail
     rails:
-      - FileSystemRail
       - SkillUseRail
+      - WorktreeRail
 
     # 动态 Tools — 列表中出现的 = 启用
     # send_file_to_user 由运行时 _update_session_tools 注册，不在此配置
@@ -735,11 +723,12 @@ modes:
       - web_fetch_webpage
       - web_paid_search
       - user_todos
+      - skill_toolkit
 
     embedding_config:
-      model_name:
-      base_url:
-      api_key:
+      model_name: null
+      base_url: null
+      api_key: null
   team:
     jiuwen_team:
       team_name: jiuwen_team
@@ -758,38 +747,12 @@ modes:
             stable_base: true
           max_iterations: 200
           completion_timeout: 600.0
-        teammate:
-          workspace:
-            stable_base: true
-          max_iterations: 200
-          completion_timeout: 600.0
 
       workspace:
         enabled: true
-        root_path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}
-        version_control: false
 
       transport:
-        type: pyzmq
-        params:
-          request_timeout: 20
-          direct_addr: tcp://0.0.0.0:28611
-          bootstrap_direct_addr: tcp://127.0.0.1:28610
-          pubsub_publish_addr: tcp://127.0.0.1:28556
-          pubsub_subscribe_addr: tcp://127.0.0.1:28557
+        type: inprocess
 
       storage:
-        type: postgresql
-        params:
-          connection_string: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/jiuwen_team
-
-      # ============================================================
-      # Team 级共享记忆（TeamMemoryConfig）
-      # ============================================================
-      memory:
-        enabled: false
-        scenario: "general"
-        auto_extract: true
-        shared_memory: true
-        member_memory_prompt_mode: "proactive"
-        timezone_offset_hours: 8.0
+        type: sqlite

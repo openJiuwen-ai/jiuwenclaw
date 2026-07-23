@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 import difflib
+import copy
 import json
 import logging
+import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,13 @@ MAX_DIFF_SIZE_BYTES = 1_000_000
 MAX_LINES_PER_FILE = 400
 MAX_FILES_FOR_DETAILS = 500
 
+# change_sets.json 写入锁:保证同一进程内多线程惰性回填时不互相覆盖。
+_CHANGE_SET_LOCK = threading.Lock()
+
+
+class DiffHistoryExpiredError(RuntimeError):
+    """历史 diff 索引仍存在但详情已无法重建。"""
+
 
 class DiffService:
     """提供 turn-based diff 查询服务."""
@@ -30,7 +40,12 @@ class DiffService:
     def __init__(self) -> None:
         self._agent_id = "jiuwenswarm"
 
-    def get_turn_diffs(self, session_id: str, project_dir: str | None = None) -> list[dict[str, Any]]:
+    def get_turn_diffs(
+        self,
+        session_id: str,
+        project_dir: str | None = None,
+        repo_context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """获取 session 的所有 turn diff（完整信息）.
 
         Args:
@@ -41,15 +56,114 @@ class DiffService:
             turn diff 列表，按时间倒序排列（most recent first）
         """
         turns = self._compute_turn_diffs(session_id, project_dir)
+        self._enrich_with_change_sets(session_id, turns, repo_context=repo_context)
         return list(reversed(turns))
+
+    def get_turn_diff_summaries(
+        self,
+        session_id: str,
+        project_dir: str | None = None,
+        repo_context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """获取 session 的历史 turn diff 摘要，包含已持久化快照。
+
+        与 ``get_turn_diffs`` 不同，此方法会把当前 file_ops 已经无法重建、
+        但仍存在于 change_sets/snapshot 中的历史轮次也返回出来（例如已撤销
+        的 turn）。
+        """
+        turns = self._compute_turn_diffs(session_id, project_dir)
+        self._enrich_with_change_sets(session_id, turns, repo_context=repo_context)
+        by_turn = {int(t.get("turnIndex", 0) or 0): t for t in turns}
+        for entry in self._load_change_sets(session_id):
+            try:
+                turn_index = int(entry.get("turn_index", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if turn_index <= 0 or turn_index in by_turn:
+                continue
+            snapshot = self._load_turn_snapshot(session_id, str(entry.get("change_set_id") or ""))
+            if snapshot is None:
+                snapshot = self._turn_from_change_set_entry(entry)
+            by_turn[turn_index] = snapshot
+        return sorted(
+            by_turn.values(),
+            key=lambda t: int(t.get("turnIndex", 0) or 0),
+            reverse=True,
+        )
+
+    def get_turn_diff(
+        self,
+        session_id: str,
+        *,
+        turn_index: int | None = None,
+        change_set_id: str | None = None,
+        project_dir: str | None = None,
+        repo_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """获取指定轮次的 turn diff。
+
+        优先按 ``change_set_id`` 查询;未提供时按 ``turn_index`` 查询。
+        两者均不提供时返回 None。
+
+        Args:
+            session_id: 会话 ID
+            turn_index: 轮次序号(1-based,与 get_turn_diffs 返回的 turnIndex 对齐)
+            change_set_id: 变更集 ID(优先于 turn_index)
+            project_dir: 项目目录路径(可选,若不提供则从 session metadata 读取)
+
+        Returns:
+            匹配轮次的 turn diff dict;未命中时返回 None。
+        """
+        if change_set_id is None and turn_index is None:
+            return None
+        if change_set_id is not None:
+            entries = self._load_change_sets(session_id)
+            indexed_entry = None
+            for entry in entries:
+                if str(entry.get("change_set_id") or "") == change_set_id:
+                    indexed_entry = entry
+                    break
+            if indexed_entry is None:
+                if self._load_turn_snapshot(session_id, change_set_id) is not None:
+                    raise DiffHistoryExpiredError(
+                        f"diff history expired for change_set_id={change_set_id}"
+                    )
+                return None
+            snapshot = self._load_turn_snapshot(session_id, change_set_id)
+            if snapshot is not None:
+                return snapshot
+            turns = self.get_turn_diffs(session_id, project_dir, repo_context=repo_context)
+            for turn in turns:
+                if turn.get("change_set_id") == change_set_id:
+                    return turn
+            raise DiffHistoryExpiredError(
+                f"diff history expired for change_set_id={change_set_id}"
+            )
+        turns = self.get_turn_diffs(session_id, project_dir, repo_context=repo_context)
+        for turn in turns:
+            if int(turn.get("turnIndex", 0) or 0) == turn_index:
+                return turn
+        if turn_index is not None:
+            for entry in self._load_change_sets(session_id):
+                if int(entry.get("turn_index", 0) or 0) == turn_index:
+                    snapshot = self._load_turn_snapshot(
+                        session_id, str(entry.get("change_set_id") or "")
+                    )
+                    if snapshot is not None:
+                        return snapshot
+                    raise DiffHistoryExpiredError(
+                        f"diff history expired for turn_index={turn_index}"
+                    )
+        return None
 
     def _compute_turn_diffs(self, session_id: str, project_dir: str | None = None) -> list[dict[str, Any]]:
         """计算 turn-based diffs."""
         history = self._read_history(session_id)
-        agent_history = self._read_agent_history(session_id, project_dir)
 
         if not history:
             return []
+
+        agent_history = self._read_agent_history(session_id, project_dir)
 
         turns: list[dict[str, Any]] = []
 
@@ -71,6 +185,9 @@ class DiffService:
                     "timestamp": self._timestamp_to_iso(record["timestamp"]),
                     "start_timestamp": turn_start,
                     "end_timestamp": turn_end,
+                    "request_id": record.get("request_id", ""),
+                    "user_message_id": record.get("id", ""),
+                    "assistant_message_id": self._find_assistant_message_id(history, i),
                     "files": {},
                     "stats": {
                         "filesChanged": 0,
@@ -94,6 +211,7 @@ class DiffService:
                         "filePath": file_path,
                         "hunks": [],
                         "isNewFile": False,
+                        "isDeletedFile": False,
                         "isBinary": False,
                         "isLargeFile": False,
                         "isTruncated": False,
@@ -115,6 +233,8 @@ class DiffService:
 
                     if op["action"] == "write" and op["old_content"] is None:
                         turn["files"][file_path]["isNewFile"] = True
+                    if op["new_content"] is None and op["old_content"] is not None:
+                        turn["files"][file_path]["isDeletedFile"] = True
 
                     for hunk in hunks:
                         for line in hunk["lines"]:
@@ -138,6 +258,231 @@ class DiffService:
         return turns_with_files
 
     @staticmethod
+    def _change_sets_path(session_id: str) -> Path:
+        return get_agent_sessions_dir() / session_id / "change_sets.json"
+
+    @staticmethod
+    def _change_set_snapshots_dir(session_id: str) -> Path:
+        return get_agent_sessions_dir() / session_id / "change_sets"
+
+    @classmethod
+    def _change_set_snapshot_path(cls, session_id: str, change_set_id: str) -> Path:
+        safe_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in change_set_id)
+        return cls._change_set_snapshots_dir(session_id) / f"{safe_id}.json"
+
+    def _load_change_sets(self, session_id: str) -> list[dict[str, Any]]:
+        path = self._change_sets_path(session_id)
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to read change_sets.json (%s): %s", path, exc)
+        return []
+
+    def _save_change_sets(self, session_id: str, change_sets: list[dict[str, Any]]) -> None:
+        path = self._change_sets_path(session_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+            tmp_path.write_text(
+                json.dumps(change_sets, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(path)
+        except OSError as exc:
+            logger.warning("Failed to write change_sets.json (%s): %s", path, exc)
+            try:
+                if "tmp_path" in locals() and tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+
+    def _load_turn_snapshot(self, session_id: str, change_set_id: str) -> dict[str, Any] | None:
+        if not change_set_id:
+            return None
+        path = self._change_set_snapshot_path(session_id, change_set_id)
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to read change_set snapshot (%s): %s", path, exc)
+        return None
+
+    def _save_turn_snapshot(self, session_id: str, turn: dict[str, Any]) -> None:
+        change_set_id = str(turn.get("change_set_id") or "")
+        if not change_set_id:
+            return
+        path = self._change_set_snapshot_path(session_id, change_set_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+            tmp_path.write_text(
+                json.dumps(turn, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(path)
+        except OSError as exc:
+            logger.warning("Failed to write change_set snapshot (%s): %s", path, exc)
+            try:
+                if "tmp_path" in locals() and tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _entry_matches_turn(entry: dict[str, Any], turn: dict[str, Any]) -> bool:
+        """校验 change_set entry 是否仍属于当前 turn。"""
+        entry_rid = str(entry.get("request_id", "") or "")
+        turn_rid = str(turn.get("request_id", "") or "")
+        entry_ts = str(entry.get("timestamp", "") or "")
+        turn_ts = str(turn.get("timestamp", "") or "")
+        if not entry_ts or entry_ts != turn_ts:
+            return False
+        if entry_rid or turn_rid:
+            return bool(entry_rid and turn_rid and entry_rid == turn_rid)
+        return True
+
+    @staticmethod
+    def _turn_from_change_set_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "turnIndex": int(entry.get("turn_index", 0) or 0),
+            "timestamp": str(entry.get("timestamp", "") or ""),
+            "start_timestamp": entry.get("start_timestamp"),
+            "end_timestamp": entry.get("end_timestamp"),
+            "userPromptPreview": str(entry.get("user_prompt_preview", "") or ""),
+            "request_id": str(entry.get("request_id", "") or ""),
+            "change_set_id": str(entry.get("change_set_id", "") or ""),
+            "assistant_message_id": str(entry.get("assistant_message_id", "") or ""),
+            "user_message_id": str(entry.get("user_message_id", "") or ""),
+            "status": str(entry.get("status", "completed") or "completed"),
+            "repo_root": entry.get("repo_root"),
+            "branch": entry.get("branch"),
+            "base_head": entry.get("base_head"),
+            "stats": entry.get("stats") if isinstance(entry.get("stats"), dict) else {
+                "filesChanged": 0,
+                "linesAdded": 0,
+                "linesRemoved": 0,
+            },
+            "files": {},
+        }
+
+    @staticmethod
+    def _apply_change_set_entry(turn: dict[str, Any], entry: dict[str, Any]) -> None:
+        turn["change_set_id"] = entry.get("change_set_id", "")
+        turn["request_id"] = entry.get("request_id", "") or turn.get("request_id", "")
+        turn["assistant_message_id"] = entry.get("assistant_message_id", "")
+        turn["user_message_id"] = entry.get("user_message_id", "")
+        turn["status"] = entry.get("status", "completed")
+        turn["repo_root"] = entry.get("repo_root")
+        turn["branch"] = entry.get("branch")
+        turn["base_head"] = entry.get("base_head")
+
+    @staticmethod
+    def _new_change_set_entry(
+        session_id: str,
+        turn: dict[str, Any],
+        turn_index: int,
+        repo_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request_id = str(turn.get("request_id", "") or "")
+        cs_id = f"cs_{session_id}_{turn_index}_{uuid.uuid4().hex[:8]}"
+        user_msg_id = str(turn.get("user_message_id", "") or "")
+        assistant_msg_id = str(turn.get("assistant_message_id", "") or "")
+        if request_id:
+            user_msg_id = user_msg_id or f"{request_id}:user"
+            assistant_msg_id = assistant_msg_id or f"{request_id}:assistant"
+        repo_context = repo_context or {}
+        return {
+            "change_set_id": cs_id,
+            "turn_index": turn_index,
+            "request_id": request_id,
+            "assistant_message_id": assistant_msg_id,
+            "user_message_id": user_msg_id,
+            "timestamp": turn.get("timestamp", ""),
+            "start_timestamp": turn.get("start_timestamp"),
+            "end_timestamp": turn.get("end_timestamp"),
+            "user_prompt_preview": turn.get("userPromptPreview", ""),
+            "status": "completed",
+            "repo_root": repo_context.get("repo_root") or turn.get("repo_root"),
+            "branch": repo_context.get("branch") or turn.get("branch"),
+            "base_head": repo_context.get("base_head") or turn.get("base_head"),
+            "stats": copy.deepcopy(turn.get("stats", {})),
+        }
+
+    def mark_turn_discarded(
+        self, session_id: str, turn_index: int, project_dir: str | None = None
+    ) -> str | None:
+        """将指定 turn 的 change_set 状态标记为 discarded。"""
+        if turn_index <= 0:
+            return None
+        target = self.get_turn_diff(
+            session_id, turn_index=turn_index, project_dir=project_dir,
+        )
+        change_set_id = str((target or {}).get("change_set_id") or "")
+        if not change_set_id:
+            return None
+        with _CHANGE_SET_LOCK:
+            entries = self._load_change_sets(session_id)
+            changed = False
+            for entry in entries:
+                if entry.get("change_set_id") == change_set_id:
+                    entry["status"] = "discarded"
+                    changed = True
+                    break
+            if changed:
+                self._save_change_sets(session_id, entries)
+        snapshot = self._load_turn_snapshot(session_id, change_set_id) or target
+        if snapshot is not None:
+            snapshot["status"] = "discarded"
+            self._save_turn_snapshot(session_id, snapshot)
+        return change_set_id
+
+    def _enrich_with_change_sets(
+        self,
+        session_id: str,
+        turns: list[dict[str, Any]],
+        repo_context: dict[str, Any] | None = None,
+    ) -> None:
+        """惰性回填 change_set 索引并合并元数据到每轮 turn。"""
+        if not turns:
+            return
+        with _CHANGE_SET_LOCK:
+            existing = self._load_change_sets(session_id)
+            index_by_turn: dict[int, dict[str, Any]] = {}
+            for entry in existing:
+                ti = entry.get("turn_index")
+                if isinstance(ti, int):
+                    index_by_turn[ti] = entry
+
+            new_entries: list[dict[str, Any]] = []
+            for turn in turns:
+                turn_index = int(turn.get("turnIndex", 0) or 0)
+                entry = index_by_turn.get(turn_index)
+                if entry is not None and self._entry_matches_turn(entry, turn):
+                    self._apply_change_set_entry(turn, entry)
+                else:
+                    entry = self._new_change_set_entry(
+                        session_id, turn, turn_index, repo_context=repo_context,
+                    )
+                    self._apply_change_set_entry(turn, entry)
+                    new_entries.append(entry)
+                    index_by_turn[turn_index] = entry
+                self._save_turn_snapshot(session_id, turn)
+
+            if new_entries:
+                all_entries = sorted(
+                    list(index_by_turn.values()),
+                    key=lambda e: e.get("turn_index", 0),
+                )
+                self._save_change_sets(session_id, all_entries)
+
+    @staticmethod
     def _is_turn_end(record: dict[str, Any]) -> bool:
         """判断一条记录是否是 turn 的结束."""
         event_type = record.get("event_type")
@@ -158,6 +503,25 @@ class DiffService:
         return None
 
     @staticmethod
+    def _find_assistant_message_id(
+        history: list[dict[str, Any]], user_index: int
+    ) -> str:
+        """查找当前 user turn 后第一条 assistant 消息 ID。"""
+        request_id = str(history[user_index].get("request_id", "") or "")
+        for j in range(user_index + 1, len(history)):
+            record = history[j]
+            if record.get("role") == "user":
+                break
+            if record.get("role") != "assistant":
+                continue
+            if request_id:
+                assistant_request_id = str(record.get("request_id", "") or "")
+                if assistant_request_id and assistant_request_id != request_id:
+                    continue
+            return str(record.get("id", "") or "")
+        return ""
+
+    @staticmethod
     def _read_history(session_id: str) -> list[dict[str, Any]]:
         """读取 session history."""
         try:
@@ -167,18 +531,29 @@ class DiffService:
 
     @staticmethod
     def _get_project_dir_from_metadata(session_id: str) -> str | None:
-        """从 session metadata.json 中读取项目目录."""
+        """从 session metadata.json 中读取项目目录.
+
+        读取顺序(任一命中即返回):
+          1. ``channel_metadata.cwd`` (TUI 等显式传 cwd 的通道)
+          2. ``delivery_context.route_metadata.cwd`` (路由元数据中的 cwd)
+          3. 顶层 ``project_dir`` (Web 等通道由 ``init_session_metadata`` 写入)
+
+        前两者是历史路径,保留以向后兼容;顶层 ``project_dir`` 是新 schema
+        (``init_session_metadata`` 创建会话时必写),覆盖 Web/code 模式等
+        ``channel_metadata`` 不含 ``cwd`` 的场景,避免 file_ops 漏读项目目录。
+        """
         metadata_file = get_agent_sessions_dir() / session_id / "metadata.json"
         if not metadata_file.exists():
             return None
         try:
             metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
-            # 从 channel_metadata.cwd 或 delivery_context.route_metadata.cwd 获取
+            # 1. channel_metadata.cwd
             channel_meta = metadata.get("channel_metadata", {})
             if isinstance(channel_meta, dict):
                 cwd = channel_meta.get("cwd")
                 if isinstance(cwd, str) and cwd.strip():
                     return cwd.strip()
+            # 2. delivery_context.route_metadata.cwd
             delivery_ctx = metadata.get("delivery_context", {})
             if isinstance(delivery_ctx, dict):
                 route_meta = delivery_ctx.get("route_metadata", {})
@@ -186,6 +561,10 @@ class DiffService:
                     cwd = route_meta.get("cwd")
                     if isinstance(cwd, str) and cwd.strip():
                         return cwd.strip()
+            # 3. 顶层 project_dir (新 schema,init_session_metadata 写入)
+            top_level = metadata.get("project_dir")
+            if isinstance(top_level, str) and top_level.strip():
+                return top_level.strip()
         except (json.JSONDecodeError, OSError) as e:
             logger.debug("Failed to read metadata file %s: %s", metadata_file, e)
         return None
@@ -589,6 +968,7 @@ class DiffService:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=10,
             )
             if result.returncode != 0:
@@ -608,6 +988,7 @@ class DiffService:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=5,
             )
             if result.returncode != 0:
@@ -632,6 +1013,7 @@ class DiffService:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=5,
             )
             if result.returncode != 0:
@@ -694,6 +1076,67 @@ class DiffService:
                 "removed": 0 if is_binary else int(removed_str),
                 "isBinary": is_binary,
             }
+        return result
+
+    @staticmethod
+    def _parse_git_name_status(output: str) -> dict[str, str]:
+        """解析 git diff --name-status 输出为路径到状态的映射。"""
+        result: dict[str, str] = {}
+        for line in (output or "").splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            code = parts[0].strip()
+            status_letter = code[0] if code else "M"
+            if status_letter == "R" and len(parts) >= 3:
+                path = "\t".join(parts[2:])
+            else:
+                path = "\t".join(parts[1:])
+            path = DiffService._unquote_git_path(path)
+            status = {
+                "A": "added",
+                "D": "deleted",
+                "R": "renamed",
+                "C": "added",
+                "T": "modified",
+                "M": "modified",
+            }.get(status_letter, "modified")
+            result[path] = status
+        return result
+
+    @staticmethod
+    def _parse_git_porcelain_status(output: str) -> dict[str, str]:
+        """解析 git status --porcelain=v1 输出为路径到状态的映射。"""
+        result: dict[str, str] = {}
+        for line in (output or "").splitlines():
+            if len(line) < 4:
+                continue
+            x_status = line[0]
+            y_status = line[1]
+            raw_path = line[3:]
+            if raw_path.startswith('"'):
+                path = DiffService._unquote_git_path(raw_path)
+            elif " -> " in raw_path:
+                path = raw_path.rsplit(" -> ", 1)[-1]
+            else:
+                path = raw_path
+            path = DiffService._unquote_git_path(path.strip())
+
+            if x_status == "?" and y_status == "?":
+                status = "added"
+            elif "R" in (x_status, y_status):
+                status = "renamed"
+            elif y_status == "D" and x_status != "D":
+                status = "missing"
+            elif x_status == "D" or y_status == "D":
+                status = "deleted"
+            elif x_status == "A" or y_status == "A":
+                status = "added"
+            else:
+                status = "modified"
+            result[path] = status
         return result
 
     @staticmethod
@@ -889,11 +1332,7 @@ class DiffService:
         return files
 
     def get_git_diff(self, project_dir: str | None) -> dict[str, Any] | None:
-        """获取工作区相对于 HEAD 的 git diff.
-
-        包含两类改动：
-        1. 已跟踪文件的修改（git diff HEAD）
-        2. 未跟踪的新文件（git ls-files --others --exclude-standard）
+        """获取工作区相对于 HEAD 的 git diff（仅已跟踪文件的修改）.
 
         Args:
             project_dir: 项目目录路径.
@@ -904,7 +1343,7 @@ class DiffService:
                 "files": { file_path: { "filePath": str, "hunks": [...],
                     "isNewFile": bool, "linesAdded": int, "linesRemoved": int } }
             }
-            如果不是 git 仓库或没有任何改动（含未跟踪文件），返回 None.
+            如果不是 git 仓库或没有任何改动，返回 None.
         """
         if not project_dir:
             return None
@@ -939,9 +1378,17 @@ class DiffService:
 
         if has_tracked_changes:
             numstat_output = self._run_git_command(repo_dir, ["diff", "HEAD", "--numstat"])
+            name_status_output = self._run_git_command(repo_dir, ["diff", "HEAD", "--name-status"])
+            porcelain_status_output = self._run_git_command(
+                repo_dir, ["-c", "core.quotepath=false", "status", "--porcelain=v1"]
+            )
             diff_output = self._run_git_command(repo_dir, ["diff", "HEAD"])
             if numstat_output and diff_output:
                 per_file_stats = self._parse_git_numstat(numstat_output)
+                per_file_status = self._parse_git_name_status(name_status_output or "")
+                per_file_status.update(
+                    self._parse_git_porcelain_status(porcelain_status_output or "")
+                )
                 total_files_changed += len(per_file_stats)
                 total_added += sum(int(stats["added"]) for stats in per_file_stats.values())
                 total_removed += sum(int(stats["removed"]) for stats in per_file_stats.values())
@@ -962,8 +1409,10 @@ class DiffService:
 
                     files[abs_path] = {
                         "filePath": abs_path,
+                        "status": per_file_status.get(rel_path, "modified"),
                         "hunks": hunks,
-                        "isNewFile": False,
+                        "isNewFile": per_file_status.get(rel_path) == "added",
+                        "isDeletedFile": per_file_status.get(rel_path) == "deleted",
                         "isBinary": is_binary,
                         "isLargeFile": is_large,
                         "isTruncated": is_truncated,
@@ -973,17 +1422,11 @@ class DiffService:
                         "lastEditTime": None,
                     }
 
-        # 2. 未跟踪的新文件: 仅填充剩余名额，避免无限加载
-        remaining_slots = max(0, MAX_FILES - len(files))
-        untracked = self._get_untracked_files(repo_dir, max_files=remaining_slots)
-        for abs_path, file_info in untracked.items():
-            if abs_path not in files:  # 避免重复（理论上不会）
-                file_info.setdefault("isBinary", False)
-                file_info.setdefault("isLargeFile", False)
-                file_info.setdefault("isTruncated", False)
-                files[abs_path] = file_info
-                total_files_changed += 1
-                total_added += file_info["linesAdded"]
+        untracked_files = self._get_untracked_files(repo_dir, max_files=max(0, MAX_FILES - len(files)))
+        for file_path, entry in untracked_files.items():
+            entry["status"] = "added"
+            files[file_path] = entry
+        total_files_changed += len(untracked_files)
 
         if not files:
             return None
@@ -1070,19 +1513,39 @@ class DiffService:
         return files_to_restore
 
 
-    def truncate_file_ops_by_timestamp(self, session_id: str, cutoff_ts: float) -> None:
-        """截断 session-specific file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
+    def truncate_file_ops_by_timestamp(
+        self,
+        session_id: str,
+        cutoff_ts: float,
+        project_dir: str | None = None,
+    ) -> None:
+        """截断 file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
 
-        在 rewind 操作后调用，确保 file_ops 日志与截断后的 history.json 一致。
-        仅处理 session-specific 文件（文件名包含 session_id），不动全局 file_ops。
+        在 rewind / discard_turn_changes 操作后调用，确保 file_ops 日志与
+        截断后的 history.json / 实际工作区一致。
+
+        清理范围:
+          - **session-specific file_ops**(文件名包含 session_id):
+            全部条目按 timestamp 过滤(因为这些条目只属于该 session)。
+          - **全局 file_ops**(文件名不含 session_id,如 ``file_ops_jiuwenswarm.json``):
+            **不清理**。全局 file_ops 缺少 session 归属字段,若按路径 + timestamp
+            清理会误伤其他 session 在同一文件上的后续修改(详见 P1 修复)。
+            撤销后 last_turn diff 可能残留历史全局记录,这是已知局限——
+            用户撤销本轮后一般不需要查看 last_turn,且 session-specific 日志
+            已足够支撑单 session 场景的精确恢复。
 
         Args:
             session_id: 会话 ID
             cutoff_ts: 截断阈值（Unix timestamp），>= 此时间的条目将被移除
+            project_dir: 项目目录路径。显式传入可避免底层从 metadata 推断,
+                覆盖 ``channel_metadata.cwd`` 缺失的场景(如 Web/code 模式新会话)。
+                为 ``None`` 时底层从 session metadata 推断(读取顺序见
+                ``_get_project_dir_from_metadata``)。
         """
 
         # 收集所有 session-specific file_ops 文件
         file_ops_paths: list[Path] = []
+
         for base_dir in (get_agent_workspace_dir(), get_user_workspace_dir()):
             hist_dir = base_dir / ".agent_history"
             if not hist_dir.is_dir():
@@ -1091,10 +1554,10 @@ class DiffService:
                 if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
                     file_ops_paths.append(f)
 
-        # 也从项目目录扫描
-        project_dir = self._get_project_dir_from_metadata(session_id)
-        if project_dir:
-            project_hist_dir = Path(project_dir) / ".agent_history"
+        # 也从项目目录扫描(显式传入优先,否则从 metadata 推断)
+        resolved_project_dir = project_dir or self._get_project_dir_from_metadata(session_id)
+        if resolved_project_dir:
+            project_hist_dir = Path(resolved_project_dir) / ".agent_history"
             if project_hist_dir.is_dir():
                 for f in project_hist_dir.iterdir():
                     if self._is_valid_file_ops_file(f.name, session_id, require_session=True):

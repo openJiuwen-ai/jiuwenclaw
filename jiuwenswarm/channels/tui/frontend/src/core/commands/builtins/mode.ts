@@ -83,10 +83,9 @@ export function createModeCommand(): SlashCommand {
         return;
       }
 
-      // Check if leaving team mode with running tasks
+      // Check if switching mode with running team tasks
       const currentMode = ctx.mode;
-      const isLeavingTeamMode = isTeamMode(currentMode) && !isTeamMode(nextMode);
-      if (isLeavingTeamMode && ctx.hasRunningTeamTasks?.()) {
+      if (currentMode !== nextMode && isTeamMode(currentMode) && ctx.hasRunningTeamTasks?.()) {
         const answers = await ctx.askQuestions(
           [
             {
@@ -110,13 +109,18 @@ export function createModeCommand(): SlashCommand {
         ctx.sendEventOnly("chat.interrupt", { intent: "cancel", mode: currentMode });
       }
 
+      // Optimistically update this.mode BEFORE the async mode.set round-trip.
+      // Otherwise a message sent immediately after /mode (e.g. /debug) reads
+      // the stale mode in sendMessage and is dispatched with the old mode.
+      // mode.set is best-effort: many backends carry the mode per chat.send, so
+      // a failed mode.set is ignored (matching prior behavior — no rollback).
+      ctx.setMode(nextMode);
+      ctx.addItem(makeItem(ctx.sessionId, "info", `Mode set to ${nextMode}`, "m"));
       try {
         await ctx.request("mode.set", { mode: nextMode });
       } catch {
         // Some backends still accept mode only on chat.send.
       }
-      ctx.setMode(nextMode);
-      ctx.addItem(makeItem(ctx.sessionId, "info", `Mode set to ${nextMode}`, "m"));
     },
   };
 }

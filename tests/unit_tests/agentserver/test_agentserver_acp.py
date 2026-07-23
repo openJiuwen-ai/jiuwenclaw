@@ -150,6 +150,16 @@ def fake_encode_agent_response_for_wire(resp, response_id):
     }
 
 
+def _patch_session_create_fs(monkeypatch, tmp_path):
+    """隔离 session.create 的文件系统副作用:会话目录指向 tmp_path,
+    init_session_metadata 替换为空操作(这些用例不校验落盘内容)。"""
+    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.init_session_metadata",
+        lambda **kwargs: None,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _reset_acp_output_manager():
     mgr = get_acp_output_manager()
@@ -715,7 +725,7 @@ async def test_handle_initialize_falls_back_to_default_capabilities(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_handle_session_create_returns_session_id(monkeypatch):
+async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="acp_session_001")
     server.set_agent_manager_for_test(fake_manager)
@@ -726,6 +736,7 @@ async def test_handle_session_create_returns_session_id(monkeypatch):
         "encode_agent_response_for_wire",
         fake_encode_agent_response_for_wire,
     )
+    _patch_session_create_fs(monkeypatch, tmp_path)
 
     request = AgentRequest(
         request_id="req-session-create",
@@ -740,14 +751,19 @@ async def test_handle_session_create_returns_session_id(monkeypatch):
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create",
-            "payload": {"sessionId": "acp_session_001"},
+            "payload": {
+                "sessionId": "acp_session_001",
+                "projectId": "default",
+                "projectDir": "",
+                "workMode": "work",
+            },
             "ok": True,
         }
     ]
 
 
 @pytest.mark.asyncio
-async def test_handle_session_create_returns_explicit_session_id(monkeypatch):
+async def test_handle_session_create_returns_explicit_session_id(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="unused-default")
     server.set_agent_manager_for_test(fake_manager)
@@ -758,6 +774,7 @@ async def test_handle_session_create_returns_explicit_session_id(monkeypatch):
         "encode_agent_response_for_wire",
         fake_encode_agent_response_for_wire,
     )
+    _patch_session_create_fs(monkeypatch, tmp_path)
 
     request = AgentRequest(
         request_id="req-session-create-explicit",
@@ -774,14 +791,86 @@ async def test_handle_session_create_returns_explicit_session_id(monkeypatch):
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create-explicit",
-            "payload": {"sessionId": "sess_explicit_001"},
+            "payload": {
+                "sessionId": "sess_explicit_001",
+                "projectId": "default",
+                "projectDir": "",
+                "workMode": "work",
+            },
             "ok": True,
         }
     ]
 
 
 @pytest.mark.asyncio
-async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkeypatch):
+async def test_handle_session_create_injected_default_work_mode_does_not_mismatch_code_project(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="sess_code_project")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    _patch_session_create_fs(monkeypatch, tmp_path)
+
+    from jiuwenswarm.server.runtime.session import project_store
+
+    code_project = types.SimpleNamespace(
+        project_id="proj_code",
+        project_dir=str(tmp_path / "code_proj"),
+        work_mode="code",
+        hidden=False,
+    )
+    monkeypatch.setattr(
+        project_store,
+        "resolve_session_project_binding",
+        lambda project_id, project_dir: (
+            "proj_code",
+            code_project.project_dir,
+            None,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        project_store,
+        "get_project_by_id",
+        lambda project_id, cache_bust=False: code_project if project_id == "proj_code" else None,
+    )
+
+    request = AgentRequest(
+        request_id="req-session-create-code-project",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "project_id": "proj_code",
+            "work_mode": "work",
+            "_work_mode_explicit": False,
+        },
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-create-code-project",
+            "payload": {
+                "sessionId": "sess_code_project",
+                "projectId": "proj_code",
+                "projectDir": code_project.project_dir,
+                "workMode": "code",
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="unused-default")
     fake_team_manager = FakeTeamManager()
@@ -793,6 +882,7 @@ async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkey
         "encode_agent_response_for_wire",
         fake_encode_agent_response_for_wire,
     )
+    _patch_session_create_fs(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.get_team_manager",
         lambda channel_id: fake_team_manager,
@@ -816,7 +906,12 @@ async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkey
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create-team",
-            "payload": {"sessionId": "team_sess_001"},
+            "payload": {
+                "sessionId": "team_sess_001",
+                "projectId": "default",
+                "projectDir": "",
+                "workMode": "work",
+            },
             "ok": True,
         }
     ]

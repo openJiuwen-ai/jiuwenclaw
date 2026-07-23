@@ -77,5 +77,16 @@ For detailed configuration instructions, see: [China Channels](ChinaChannels.md)
 |---------|-------------|
 | [Telegram](InternationalChannels.md#telegram) | International messaging tool, supports private and group chat |
 | [Discord](InternationalChannels.md#discord) | Gaming community platform, supports private and group chat |
+| [WhatsApp](InternationalChannels.md#whatsapp) | Personal messaging tool, supports private chat |
 
 For detailed configuration instructions, see: [International Channels](InternationalChannels.md)
+
+---
+
+## Developer Channels
+
+In addition to the end-user chat platforms above, JiuwenSwarm also provides integration methods for developers:
+
+| Integration | Description |
+|-------------|-------------|
+| [ACP Plugin Usage](ACP_Client_Config.md) | Integrate with JiuwenSwarm via the ACP protocol, suitable for custom integrations |

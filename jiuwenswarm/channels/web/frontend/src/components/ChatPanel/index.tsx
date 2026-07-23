@@ -4,46 +4,80 @@
  * 聊天面板，包含消息列表和输入区域
  */
 
-import React, { useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
-import { ArrowRight, LoaderCircle, Share2, Sparkles } from 'lucide-react';
+import React, { useRef, useEffect, useLayoutEffect, useCallback, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Share2, Sparkles, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
-import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
-import { AgentMode, Message, UserAnswer } from '../../types';
+import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
+import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo } from '../../types';
+import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
+import chatIcon from '../../assets/chat.svg';
+import expandIcon from '../../assets/expand.svg';
+import lineUpIcon from '../../assets/lineUp.svg';
+import loadSendIcon from '../../assets/load-send.svg';
+import editIcon from '../../assets/edit.svg';
+import deleteIcon from '../../assets/delete.svg';
+import moveIcon from '../../assets/move.svg';
+import restartIcon from '../../assets/restart.svg';
 import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
+import { InteractionSlot } from '../InteractionSlot';
 import { HistoryPagerBar } from './HistoryPagerBar';
 import { HarnessProgressBar } from './HarnessProgressBar';
 import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
+import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import welcomeBanner from '../../assets/home-banner.svg';
 import './ChatPanel.css';
+import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
   totalPages: number;
   loadingMore: boolean;
+  prepending?: boolean;
   onLoadMore: () => void | Promise<void>;
 }
 
 interface ChatPanelProps {
-  onSendMessage: (content: string) => void;
+  onSendMessage: (content: string, mediaItems?: MediaItem[]) => void;
+  onPersistMedia: (content: string, mediaItems: MediaItem[]) => Promise<{
+    content?: string;
+    query?: string;
+    media_items?: Record<string, unknown>[];
+    files?: Record<string, unknown>;
+  }>;
   onInterrupt: (newInput?: string) => void;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
-  onNewSession: () => Promise<void>;
-  onUserAnswer: (requestId: string, answers: UserAnswer[]) => void;
+  onUserAnswer: (requestId: string, answers: UserAnswer[], source?: string) => void;
   onExportShare?: () => void | Promise<void>;
   isExportingShare?: boolean;
   canExportShare?: boolean;
+  sessionTitle?: string;
+  sessionProjectName?: string;
+  sessionProject?: ProjectInfo | null;
   /** 自会话管理恢复历史后出现；支持分页加载更早消息 */
   historyPager?: ChatHistoryPagerProps | null;
+  /** 历史会话首屏恢复中：保持聊天布局，避免短暂退回欢迎态 */
+  isHistoryRestoring?: boolean;
   /** 右侧面板展开状态：展开时隐藏对话框上方的活跃成员 */
   teamAreaExpanded?: boolean;
+  autoFocusKey?: string | null;
+  /** 跳转到技能管理页 */
+  onNavigateToSkills?: () => void;
+  /** 切换右侧紧缩面板展开状态 */
+  onToggleTeamArea?: (expanded: boolean) => void;
+  /** 打开右侧面板并切换到代码审核 Tab */
+  onOpenCodeReview?: () => void;
+  permissionsEnabled: boolean;
+  onSavePermission: (updates: Record<string, string>) => Promise<void>;
 }
 
 function ThinkingIndicator() {
@@ -71,7 +105,8 @@ function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }
 }
 
 function InterruptResultBubble() {
-  const { interruptResult } = useChatStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const interruptResult = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.interruptResult ?? null);
   const message = interruptResult?.message?.trim();
 
   if (!message || interruptResult?.success) {
@@ -89,16 +124,15 @@ function InterruptResultBubble() {
 }
 
 function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing: boolean; teamAreaExpanded?: boolean }) {
-  const { messages } = useChatStore();
-  const {
-    mode,
-    teamHistoryMessages,
-    teamMemberExecutionEvents,
-    teamTaskEvents,
-    teamTasks,
-    teamMembers,
-  } = useSessionStore();
-  const { todos } = useTodoStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const teamHistoryMessages = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHistoryMessages ?? []);
+  const teamMemberExecutionEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMemberExecutionEvents ?? []);
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
+  const teamTasks = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTasks ?? []);
+  const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
   const activeTeamMessages = useMemo(
     () => getActiveTeamMessages(teamHistoryMessages, messages),
     [teamHistoryMessages, messages]
@@ -120,6 +154,205 @@ function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing
       todos={todos}
       executionEvents={teamMemberExecutionEvents}
     />
+  );
+}
+
+/** 单 Agent 模式的消息队列卡片，展示在输入框上方 */
+function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProcessing: boolean; onSendTask?: (content: string) => void }) {
+  const [expanded, setExpanded] = useState(true);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const { t } = useTranslation();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const taskQueue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.taskQueue ?? []);
+  const queuePaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.queuePaused ?? false);
+  const removeFromTaskQueue = useChatStore((s) => s.removeFromTaskQueue);
+  const reorderTaskQueue = useChatStore((s) => s.reorderTaskQueue);
+  const setQueuePaused = useChatStore((s) => s.setQueuePaused);
+  const setInputValue = useChatStore((s) => s.setInputValue);
+
+  const isAgentMode = mode === 'agent';
+
+  // 有等待任务时自动展开
+  useEffect(() => {
+    if (taskQueue.length > 0) {
+      setExpanded(true);
+    }
+  }, [taskQueue.length]);
+
+  if (!isAgentMode || taskQueue.length === 0) {
+    return null;
+  }
+
+  const handleResume = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const sid = useChatStore.getState().activeSessionId;
+    if (!sid) return;
+    setQueuePaused(sid, false);
+    // 触发下一条队列任务
+    const runtime = useChatStore.getState().getRuntime(sid);
+    const nextTask = runtime?.taskQueue[0];
+    if (nextTask) {
+      removeFromTaskQueue(sid, nextTask.id);
+      onSendTask?.(nextTask.content);
+    }
+  };
+
+  const handleRemoveTask = (e: React.MouseEvent, taskId: string) => {
+    e.stopPropagation();
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) {
+      removeFromTaskQueue(sid, taskId);
+    }
+  };
+
+  const handleEditTask = (e: React.MouseEvent, taskId: string, content: string) => {
+    e.stopPropagation();
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) {
+      setInputValue(sid, content);
+      removeFromTaskQueue(sid, taskId);
+      window.dispatchEvent(new CustomEvent('chat-input-sync', { detail: { sessionId: sid, value: content } }));
+    }
+  };
+
+  const handleSendTask = (e: React.MouseEvent, taskId: string, content: string) => {
+    e.stopPropagation();
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) {
+      removeFromTaskQueue(sid, taskId);
+    }
+    onSendTask?.(content);
+  };
+
+  const handleDragStart = (index: number) => {
+    setDragIndex(index);
+  };
+
+  const handleDragOver = (e: React.DragEvent, index: number) => {
+    e.preventDefault();
+    setDragOverIndex(index);
+  };
+
+  const handleDrop = (index: number) => {
+    if (dragIndex === null || dragIndex === index) {
+      setDragIndex(null);
+      setDragOverIndex(null);
+      return;
+    }
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) {
+      reorderTaskQueue(sid, dragIndex, index);
+    }
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const handleDragEnd = () => {
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  return (
+    <div className="chat-active-team-group animate-rise">
+      <div className="team-event-group team-event-group--activity">
+        <button
+          type="button"
+          className="team-event-group-summary"
+          onClick={() => setExpanded(prev => !prev)}
+          aria-expanded={expanded}
+        >
+          <span className="team-event-group-summary__main">
+            <span className="team-event-group-summary__title">{t('chatUi.messageQueue')}</span>
+            {queuePaused && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '8px' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-chat-paused)', flexShrink: 0 }} />
+                <span style={{ fontSize: '13px', color: 'var(--color-text-secondary)' }}>{t('chat.paused')}</span>
+              </span>
+            )}
+          </span>
+          {queuePaused && (
+            <span
+              role="button"
+              tabIndex={0}
+              className="team-event-group-summary__activity"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginLeft: 'auto', justifyContent: 'end', flexShrink: 0, cursor: 'pointer' }}
+              onClick={handleResume}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleResume(e as unknown as React.MouseEvent); } }}
+            >
+              <img src={restartIcon} alt="" className="w-3.5 h-3.5" />
+              {t('chat.resume')}
+            </span>
+          )}
+        </button>
+        {expanded && (
+          <div className="team-event-group-list team-event-group-list--activity">
+            {taskQueue.map((task, index) => (
+              <div
+                key={task.id}
+                className="team-event-group-row team-event-group-row--activity"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  opacity: dragIndex === index ? 0.4 : 1,
+                  background: dragOverIndex === index ? 'var(--color-surface-hover)' : 'transparent',
+                }}
+                onDragOver={(e) => handleDragOver(e, index)}
+                onDrop={() => handleDrop(index)}
+                onDragEnd={handleDragEnd}
+              >
+                <div className="team-event-group-row__main" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                  {/* 拖动图标：所有任务可拖，悬浮显示 */}
+                  <img
+                    src={moveIcon}
+                    alt=""
+                    draggable
+                    onDragStart={() => handleDragStart(index)}
+                    className="queue-drag-handle"
+                    title={t('chat.dragTask')}
+                  />
+                  <div className="team-event-group-row__avatar" style={{ display: 'flex', alignItems: 'center' }}>
+                    <img src={lineUpIcon} alt="" className="w-4 h-4" />
+                  </div>
+                  <span className="team-event-group-row__member" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {task.content}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    className="chat-input-task-action chat-input-task-action--send"
+                    title={t('chat.sendTask')}
+                    onClick={(e) => handleSendTask(e, task.id, task.content)}
+                  >
+                    <img src={loadSendIcon} alt="" className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-input-task-action chat-input-task-action--edit"
+                    title={t('chat.editTask')}
+                    onClick={(e) => handleEditTask(e, task.id, task.content)}
+                  >
+                    <img src={editIcon} alt="" className="w-3 h-3" />
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-input-task-action chat-input-task-action--delete"
+                    title={t('chat.removeTask')}
+                    onClick={(e) => handleRemoveTask(e, task.id)}
+                  >
+                    <img src={deleteIcon} alt="" className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -160,14 +393,14 @@ function WelcomeHeading() {
   if (isZh) {
     return (
       <>
-        我是<span className="chat-welcome__brand">JiuwenSwarm</span>，很高兴认识你!
+        JiuwenSwarm 轻松解决工作每个问题！
       </>
     );
   }
 
   return (
     <>
-      Hi, I&apos;m <span className="chat-welcome__brand">JiuwenSwarm</span>. Nice to meet you!
+      JiuwenSwarm makes work easier!
     </>
   );
 }
@@ -186,37 +419,302 @@ function getShareExportTitle(
   return t('share.export');
 }
 
+function getHumanShareStatusLabel(command: HumanShareCommand, t: TFunction): string {
+  if (command.status === 'joined') return t('humanShare.status.joined');
+  if (command.status === 'left') return t('humanShare.status.left');
+  return t('humanShare.status.pending');
+}
+
+function getHumanShareStatusClass(command: HumanShareCommand): string {
+  if (command.status === 'joined') return 'human-share-modal__badge human-share-modal__badge--joined';
+  if (command.status === 'left') return 'human-share-modal__badge human-share-modal__badge--left';
+  return 'human-share-modal__badge';
+}
+
+function HumanSharePanel({
+  commands,
+  onClose,
+}: {
+  commands: HumanShareCommand[];
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const [copiedKey, setCopiedKey] = React.useState<string | null>(null);
+  const sortedCommands = useMemo(
+    () => [...commands].sort((a, b) => a.memberName.localeCompare(b.memberName)),
+    [commands]
+  );
+  const joinedCount = sortedCommands.filter((command) => command.status === 'joined').length;
+  const exitCommand =
+    sortedCommands.find((command) => command.exitCommand)?.exitCommand ||
+    (() => {
+      const commandWithSessionRef = sortedCommands.find((command) => command.sessionRef);
+      return commandWithSessionRef?.sessionRef ? `/exit ${commandWithSessionRef.sessionRef}` : '';
+    })();
+  const allJoined = sortedCommands.length > 0 && joinedCount === sortedCommands.length;
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  const copyText = useCallback(async (key: string, text: string) => {
+    if (!text) return;
+    await navigator.clipboard.writeText(text);
+    setCopiedKey(key);
+    window.setTimeout(() => {
+      setCopiedKey((current) => current === key ? null : current);
+    }, 1200);
+  }, []);
+
+  return createPortal(
+    <div className="human-share-modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="human-share-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="human-share-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="human-share-modal__header">
+          <div>
+            <div className="human-share-modal__title-row">
+              <h2 id="human-share-title" className="human-share-modal__title">{t('humanShare.title')}</h2>
+            </div>
+            <p className="human-share-modal__summary">
+              {allJoined
+                ? t('humanShare.allJoined', { count: sortedCommands.length })
+                : t('humanShare.waiting', { joined: joinedCount, total: sortedCommands.length })}
+            </p>
+          </div>
+          <button type="button" className="human-share-modal__close" onClick={onClose} aria-label={t('common.close')}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="human-share-modal__body">
+          <div className="human-share-modal__notice" role="note">
+            <Info size={18} strokeWidth={2.4} />
+            <span>{t('humanShare.instructionHint')}</span>
+          </div>
+          {sortedCommands.map((command) => {
+            const displayName = command.displayName || command.memberName;
+            const copied = copiedKey === `join:${command.memberName}`;
+            const shouldShowJoinCommand = command.status !== 'joined' && Boolean(command.joinCommand);
+            return (
+              <section key={`${command.sessionId}:${command.memberName}`} className="human-share-modal__item">
+                <div className="human-share-modal__member">
+                  <TeamMemberAvatar member={command.memberName} className="human-share-modal__avatar" />
+                  <div className="human-share-modal__member-copy">
+                    <div className="human-share-modal__member-name">{displayName}</div>
+                    {displayName !== command.memberName && (
+                      <div className="human-share-modal__member-id">{command.memberName}</div>
+                    )}
+                  </div>
+                  <span className={getHumanShareStatusClass(command)}>
+                    {getHumanShareStatusLabel(command, t)}
+                  </span>
+                </div>
+                {shouldShowJoinCommand ? (
+                  <div className="human-share-modal__command-row">
+                    <code className="human-share-modal__command">{command.joinCommand}</code>
+                    <button
+                      type="button"
+                      className="human-share-modal__copy"
+                      onClick={() => void copyText(`join:${command.memberName}`, command.joinCommand)}
+                    >
+                      {copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                      <span>{copied ? t('humanShare.copied') : t('humanShare.copy')}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    className={`human-share-modal__command-note ${
+                      command.status === 'joined'
+                        ? 'human-share-modal__command-note--joined'
+                        : 'human-share-modal__command-note--pending'
+                    }`}
+                  >
+                    {command.status === 'joined' ? <CheckCircle2 size={15} /> : <ClipboardList size={15} />}
+                    <span>
+                      {command.status === 'joined'
+                        ? t('humanShare.joinedNote')
+                        : t('humanShare.commandPending')}
+                    </span>
+                  </div>
+                )}
+              </section>
+            );
+          })}
+
+          {exitCommand && (
+            <section className="human-share-modal__exit">
+              <div className="human-share-modal__exit-title">{t('humanShare.exitTitle')}</div>
+              <div className="human-share-modal__command-row">
+                <code className="human-share-modal__command">{exitCommand}</code>
+                <button
+                  type="button"
+                  className="human-share-modal__copy"
+                  onClick={() => void copyText('exit', exitCommand)}
+                >
+                  {copiedKey === 'exit' ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                  <span>{copiedKey === 'exit' ? t('humanShare.copied') : t('humanShare.copy')}</span>
+                </button>
+              </div>
+            </section>
+          )}
+        </div>
+      </section>
+    </div>,
+    document.body
+  );
+}
+
+function HumanShareCard({
+  commands,
+  onShare,
+}: {
+  commands: HumanShareCommand[];
+  onShare: () => void;
+}) {
+  const { t } = useTranslation();
+  const sortedCommands = useMemo(
+    () => [...commands].sort((a, b) => a.memberName.localeCompare(b.memberName)),
+    [commands]
+  );
+  const joinedCount = sortedCommands.filter((command) => command.status === 'joined').length;
+  const pendingCount = sortedCommands.filter((command) => command.status !== 'joined').length;
+  const previewMembers = sortedCommands.slice(0, 3).map((command) => command.displayName || command.memberName);
+
+  if (sortedCommands.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="human-share-card" data-testid="human-share-card">
+      <div className="human-share-card__icon" aria-hidden="true">
+        <ClipboardList size={18} strokeWidth={2} />
+      </div>
+      <div className="human-share-card__content">
+        <div className="human-share-card__title">{t('humanShare.cardTitle')}</div>
+        <div className="human-share-card__summary">
+          {t('humanShare.cardSummary', {
+            pending: pendingCount,
+            joined: joinedCount,
+            total: sortedCommands.length,
+          })}
+        </div>
+        <div className="human-share-card__members">
+          {previewMembers.map((member) => (
+            <span key={member} className="human-share-card__member-pill">
+              <TeamMemberAvatar member={member} className="human-share-card__avatar" />
+              <span>{member}</span>
+            </span>
+          ))}
+          {sortedCommands.length > previewMembers.length ? (
+            <span className="human-share-card__more">+{sortedCommands.length - previewMembers.length}</span>
+          ) : null}
+        </div>
+      </div>
+      <button
+        type="button"
+        className="human-share-card__button"
+        data-testid="human-share-card-trigger"
+        onClick={onShare}
+      >
+        <Share2 size={15} strokeWidth={2} />
+        <span>{t('humanShare.shareButton')}</span>
+      </button>
+    </section>
+  );
+}
+
+const SCROLL_BOTTOM_THRESHOLD_PX = 40;
+const LOAD_OLDER_THRESHOLD_PX = 8;
+const VISIBILITY_RESTORE_SCROLL_SUPPRESS_MS = 300;
+
+function isScrollAtBottom(el: HTMLDivElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
+}
+
+function scrollToBottom(el: HTMLDivElement): void {
+  el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+}
+
 export function ChatPanel({
   onSendMessage,
+  onPersistMedia,
   onInterrupt,
   onCancel,
   onSwitchMode,
   isProcessing,
-  onNewSession,
   onUserAnswer,
   onExportShare,
   isExportingShare = false,
   canExportShare = false,
+  sessionTitle,
+  sessionProjectName,
+  sessionProject = null,
   historyPager = null,
+  isHistoryRestoring = false,
   teamAreaExpanded = false,
+  autoFocusKey = null,
+  onNavigateToSkills,
+  onToggleTeamArea,
+  onOpenCodeReview,
+  permissionsEnabled,
+  onSavePermission,
 }: ChatPanelProps) {
   const { t } = useTranslation();
-  const {
-    messages,
-    isThinking,
-    toolExecutionOrder,
-    contextCompressionRuntime,
-    contextCompressionSummary,
-  } = useChatStore();
-  const { mode } = useSessionStore();
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  const isThinking = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isThinking ?? false);
+  const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
+  const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
+  const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const hasHarnessProgress = useHarnessStore((s) => (
+    mode === 'auto_harness' && (s.runtimes[activeSessionId ?? '']?.stageResults.length ?? 0) > 0
+  ));
+  const teamHumanShareCommands = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHumanShareCommands ?? []);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const prependScrollSnapRef = useRef<{ sh: number; st: number } | null>(null);
-  const wasHistoryLoadingRef = useRef(false);
+  const historyLayoutSnapshotRef = useRef<{
+    sessionId: string;
+    loadedPages: number;
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
   const suppressNextScrollToEndRef = useRef(false);
+  const stickToBottomUntilStableRef = useRef(false);
   const [isSending, setIsSending] = React.useState(false);
   const hasTimelineContent = messages.length > 0 || toolExecutionOrder.length > 0;
-  const hasConversation = Boolean(historyPager || hasTimelineContent);
+  const hasConversation = Boolean(isHistoryRestoring || historyPager || hasTimelineContent);
+  const historyLoadedPages = historyPager?.loadedPages ?? 0;
+  const historyTotalPages = historyPager?.totalPages ?? 0;
+  const historyLoadingMore = historyPager?.loadingMore ?? false;
+  const historyPrepending = historyPager?.prepending ?? false;
+  const historyOnLoadMore = historyPager?.onLoadMore;
+  const hasHistoryPager = Boolean(historyPager);
+  const canLoadOlderHistory = Boolean(
+    historyOnLoadMore &&
+    historyLoadedPages < historyTotalPages &&
+    !historyLoadingMore &&
+    !historyPrepending
+  );
+  const showHistoryPager = Boolean(
+    !isHistoryRestoring &&
+    historyPager && (
+      historyLoadingMore ||
+      historyLoadedPages < historyTotalPages ||
+      !hasTimelineContent
+    )
+  );
   const chatContentClassName = hasConversation
     ? `chat-content${mode === 'team' ? ' chat-content--team' : ''}`
     : 'chat-content chat-content--welcome';
@@ -224,96 +722,238 @@ export function ChatPanel({
     t('chat.welcomeSuggestions.journey'),
     t('chat.welcomeSuggestions.skills'),
   ];
-  const shouldShowShareExport = Boolean(onExportShare && hasConversation);
+  const shouldShowChatHeader = hasConversation;
   const shareExportTitle = getShareExportTitle(t, isExportingShare, canExportShare);
+  const shouldShowShareExport = Boolean(onExportShare);
+  const shouldShowHumanShare = mode === 'team' && teamHumanShareCommands.length > 0;
+  const [humanShareOpen, setHumanShareOpen] = React.useState(false);
 
   // 跟踪用户是否正在查看历史消息（不在底部）
   const userScrolledUpRef = useRef(false);
+  // 跟踪上一个 sessionId，切换 session 时需要恢复或重置滚动状态
+  const lastSessionIdRef = useRef<string>(activeSessionId ?? '');
+  // 记忆每个访问过的 session 的滚动位置
+  const sessionScrollTopMapRef = useRef<Map<string, number>>(new Map());
+  // 记录 tab 从隐藏恢复为可见的时间，用于抑制恢复后的自动滚底
+  const visibilityRestoredAtRef = useRef<number>(0);
+
+  const rememberSessionScrollTop = useCallback((sessionId: string, el: HTMLDivElement) => {
+    if (sessionId) {
+      sessionScrollTopMapRef.current.set(sessionId, el.scrollTop);
+    }
+  }, []);
+
+  const updateHistoryLayoutSnapshot = useCallback((sessionId: string, el: HTMLDivElement) => {
+    historyLayoutSnapshotRef.current = {
+      sessionId,
+      loadedPages: historyLoadedPages,
+      scrollHeight: el.scrollHeight,
+      scrollTop: el.scrollTop,
+    };
+  }, [historyLoadedPages]);
+
+  const restoreSessionScrollTop = useCallback((sessionId: string, el: HTMLDivElement): boolean => {
+    const savedScrollTop = sessionScrollTopMapRef.current.get(sessionId);
+    if (savedScrollTop === undefined) {
+      return false;
+    }
+
+    el.scrollTop = savedScrollTop;
+    const atBottom = isScrollAtBottom(el);
+    userScrolledUpRef.current = !atBottom;
+    stickToBottomUntilStableRef.current = atBottom;
+    updateHistoryLayoutSnapshot(sessionId, el);
+    return true;
+  }, [updateHistoryLayoutSnapshot]);
 
   // 检测用户滚动位置
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    
-    // 检查是否在底部（有 40px 的阈值）
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+
+    const atBottom = isScrollAtBottom(el);
     userScrolledUpRef.current = !atBottom;
-    
-    // 当滚动到顶部且有更多历史消息时，加载更多
-    if (el.scrollTop <= 8 && historyPager && historyPager.loadedPages < historyPager.totalPages && !historyPager.loadingMore) {
-      void historyPager.onLoadMore();
+    if (!atBottom) {
+      stickToBottomUntilStableRef.current = false;
     }
-  }, [historyPager]);
+
+    const currentSessionId = activeSessionId ?? '';
+    rememberSessionScrollTop(currentSessionId, el);
+
+    // 当滚动到顶部且有更多历史消息时，加载更多
+    if (el.scrollTop <= LOAD_OLDER_THRESHOLD_PX && canLoadOlderHistory && historyOnLoadMore) {
+      void historyOnLoadMore();
+    }
+  }, [activeSessionId, canLoadOlderHistory, historyOnLoadMore, rememberSessionScrollTop]);
+
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    const content = el?.firstElementChild;
+    if (!el || !content || typeof ResizeObserver === 'undefined') return;
+
+    if (stickToBottomUntilStableRef.current && !userScrolledUpRef.current) {
+      scrollToBottom(el);
+    }
+
+    const observer = new ResizeObserver(() => {
+      if (historyLoadingMore || historyPrepending) return;
+      if (!stickToBottomUntilStableRef.current || userScrolledUpRef.current) return;
+      scrollToBottom(el);
+      updateHistoryLayoutSnapshot(activeSessionId ?? '', el);
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [
+    activeSessionId,
+    historyLoadingMore,
+    historyPrepending,
+    updateHistoryLayoutSnapshot,
+  ]);
 
   // 检测鼠标滚轮事件，即使没有滚动条也能触发加载更多
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     // 只有向上滚动时才触发
-    if (e.deltaY < 0 && historyPager && historyPager.loadedPages < historyPager.totalPages && !historyPager.loadingMore) {
+    if (e.deltaY < 0) {
+      stickToBottomUntilStableRef.current = false;
+    }
+    if (e.deltaY < 0 && canLoadOlderHistory && historyOnLoadMore) {
       // 检查是否已经在顶部（没有滚动条时 scrollTop 始终为 0）
       const el = scrollContainerRef.current;
-      if (el && el.scrollTop <= 8) {
-        void historyPager.onLoadMore();
+      if (el && el.scrollTop <= LOAD_OLDER_THRESHOLD_PX) {
+        void historyOnLoadMore();
       }
     }
-  }, [historyPager]);
+  }, [canLoadOlderHistory, historyOnLoadMore]);
 
+  // 监听浏览器 tab 可见性变化：隐藏时记录位置，恢复可见时抑制自动滚底
   useEffect(() => {
+    const handleVisibilityChange = () => {
+      const el = scrollContainerRef.current;
+      const currentSessionId = activeSessionId ?? '';
+      if (document.hidden) {
+        if (el) {
+          rememberSessionScrollTop(currentSessionId, el);
+        }
+      } else {
+        visibilityRestoredAtRef.current = Date.now();
+        if (el) {
+          restoreSessionScrollTop(currentSessionId, el);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [activeSessionId, rememberSessionScrollTop, restoreSessionScrollTop]);
+
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    const snapshot = historyLayoutSnapshotRef.current;
+    const currentSessionId = activeSessionId ?? '';
+
+    if (
+      lastSessionIdRef.current === currentSessionId &&
+      hasHistoryPager &&
+      snapshot &&
+      snapshot.sessionId === currentSessionId &&
+      snapshot.loadedPages > 0 &&
+      historyLoadedPages > snapshot.loadedPages
+    ) {
+      const delta = el.scrollHeight - snapshot.scrollHeight;
+      if (delta !== 0) {
+        el.scrollTop = snapshot.scrollTop + delta;
+        suppressNextScrollToEndRef.current = true;
+      }
+    }
+
+    updateHistoryLayoutSnapshot(currentSessionId, el);
+  }, [
+    activeSessionId,
+    hasHistoryPager,
+    historyLoadedPages,
+    messages.length,
+    toolExecutionOrder.length,
+    updateHistoryLayoutSnapshot,
+  ]);
+
+  useLayoutEffect(() => {
+    const currentSessionId = activeSessionId ?? '';
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    // 切换 session 时恢复记忆位置；第一次访问则默认滚到底部
+    if (lastSessionIdRef.current !== currentSessionId) {
+      // 位置已经在 handleScroll / render 阶段记录，这里只恢复目标 session 的位置
+      const restoredScrollTop = restoreSessionScrollTop(currentSessionId, el);
+      if (!restoredScrollTop) {
+        // 第一次访问该 session，从底部开始
+        userScrolledUpRef.current = false;
+        stickToBottomUntilStableRef.current = true;
+        scrollToBottom(el);
+        updateHistoryLayoutSnapshot(currentSessionId, el);
+      }
+
+      lastSessionIdRef.current = currentSessionId;
+      return;
+    }
+
+    if (historyLoadingMore || historyPrepending) {
+      return;
+    }
+
     if (suppressNextScrollToEndRef.current) {
       suppressNextScrollToEndRef.current = false;
       return;
     }
-    
+
+    // tab 重新可见后 300ms 内不自动滚底，避免切回时被状态更新拉到底部
+    if (Date.now() - visibilityRestoredAtRef.current < VISIBILITY_RESTORE_SCROLL_SUPPRESS_MS) {
+      return;
+    }
+
     // 只有当用户在底部时才自动滚动
     if (!userScrolledUpRef.current) {
-      messagesEndRef.current?.scrollIntoView({
-        behavior: historyPager?.loadedPages === 1 ? 'auto' : 'smooth',
-      });
-    }
-  }, [messages, isThinking, contextCompressionRuntime, contextCompressionSummary, historyPager]);
-
-  useLayoutEffect(() => {
-    if (!historyPager) {
-      wasHistoryLoadingRef.current = false;
-      prependScrollSnapRef.current = null;
-      return;
-    }
-    const el = scrollContainerRef.current;
-    if (!el) return;
-
-    if (historyPager.loadingMore) {
-      if (!wasHistoryLoadingRef.current) {
-        prependScrollSnapRef.current = { sh: el.scrollHeight, st: el.scrollTop };
+      const el = scrollContainerRef.current;
+      if (el) {
+        stickToBottomUntilStableRef.current = true;
+        scrollToBottom(el);
+        updateHistoryLayoutSnapshot(activeSessionId ?? '', el);
       }
-      wasHistoryLoadingRef.current = true;
-      return;
     }
-
-    if (wasHistoryLoadingRef.current && prependScrollSnapRef.current) {
-      const snap = prependScrollSnapRef.current;
-      const delta = el.scrollHeight - snap.sh;
-      if (delta > 0) {
-        el.scrollTop = snap.st + delta;
-        suppressNextScrollToEndRef.current = true;
-      }
-      prependScrollSnapRef.current = null;
-    }
-    wasHistoryLoadingRef.current = false;
-  }, [historyPager, messages.length]);
+  }, [
+    activeSessionId,
+    messages,
+    isThinking,
+    contextCompressionRuntime,
+    contextCompressionSummary,
+    historyLoadedPages,
+    historyLoadingMore,
+    historyPrepending,
+    teamHumanShareCommands.length,
+    updateHistoryLayoutSnapshot,
+  ]);
 
   // 包装发送消息函数，添加滚动逻辑
-  const handleSendMessage = useCallback((content: string) => {
+  const handleSendMessage = useCallback((content: string, mediaItems?: MediaItem[]) => {
     setIsSending(true);
-    onSendMessage(content);
+    onSendMessage(content, mediaItems);
   }, [onSendMessage]);
 
   // 当发送消息时强制滚动到底部
   useEffect(() => {
     if (isSending) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      const el = scrollContainerRef.current;
+      if (el) {
+        scrollToBottom(el);
+        updateHistoryLayoutSnapshot(activeSessionId ?? '', el);
+      }
       userScrolledUpRef.current = false;
+      stickToBottomUntilStableRef.current = true;
       setIsSending(false);
     }
-  }, [isSending]);
+  }, [activeSessionId, isSending, updateHistoryLayoutSnapshot]);
 
   const handleSuggestion = useCallback(
     (text: string) => handleSendMessage(text),
@@ -321,40 +961,86 @@ export function ChatPanel({
   );
   return (
     <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
-      {/* HarnessProgressBar - sticky header, doesn't scroll with messages */}
-      <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
-        {shouldShowShareExport && (
-          <div className="mb-2 flex justify-end">
+      {shouldShowChatHeader && (
+        <div className="chat-panel-header">
+          <div className="chat-panel-header__meta">
+            <div className="chat-panel-header__title" title={sessionTitle}>
+              {sessionTitle}
+            </div>
+            {sessionProjectName && (
+              <div className="chat-panel-header__project" title={sessionProjectName}>
+                <span className="chat-config-icon chat-config-icon--folder" aria-hidden="true" />
+                <span>{sessionProjectName}</span>
+              </div>
+            )}
+          </div>
+          <div className="chat-panel-header__actions">
+            {shouldShowShareExport && (
+              <button
+                type="button"
+                className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
+                data-testid="share-export"
+                title={shareExportTitle}
+                aria-label={shareExportTitle}
+                aria-busy={isExportingShare}
+                disabled={!canExportShare || isExportingShare}
+                onClick={() => {
+                  void onExportShare?.();
+                }}
+              >
+                {isExportingShare ? (
+                  <>
+                    <LoaderCircle className="share-export-btn__spinner" size={14} strokeWidth={2} />
+                    <span className="share-export-btn__label">{t('share.generating')}</span>
+                  </>
+                ) : (
+                  <Share2 size={14} strokeWidth={2} />
+                )}
+              </button>
+            )}
+            {shouldShowHumanShare && (
+              <button
+                type="button"
+                className="chat-header-icon-btn"
+                onClick={() => setHumanShareOpen(true)}
+                title={t('humanShare.title')}
+              >
+                <Sparkles size={16} strokeWidth={2} />
+              </button>
+            )}
             <button
               type="button"
-              className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
-              data-testid="share-export"
-              title={shareExportTitle}
-              aria-label={shareExportTitle}
-              aria-busy={isExportingShare}
-              disabled={!canExportShare || isExportingShare}
-              onClick={() => {
-                void onExportShare?.();
-              }}
+              className={`chat-header-icon-btn ${!teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              onClick={() => onToggleTeamArea?.(false)}
             >
-              {isExportingShare ? (
-                <>
-                  <LoaderCircle className="share-export-btn__spinner" size={16} strokeWidth={2} />
-                  <span className="share-export-btn__label">{t('share.generating')}</span>
-                </>
-              ) : (
-                <Share2 size={16} strokeWidth={2} />
-              )}
+              <img src={chatIcon} alt="" className="chat-header-icon-btn__icon" />
+            </button>
+            <button
+              type="button"
+              className={`chat-header-icon-btn ${teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              onClick={() => onToggleTeamArea?.(true)}
+            >
+              <img src={expandIcon} alt="" className="chat-header-icon-btn__icon" />
             </button>
           </div>
-        )}
-        <HarnessProgressBar />
-      </div>
+        </div>
+      )}
+      {hasHarnessProgress && (
+        <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
+          <HarnessProgressBar />
+        </div>
+      )}
+      {humanShareOpen && (
+        <HumanSharePanel
+          commands={teamHumanShareCommands}
+          onClose={() => setHumanShareOpen(false)}
+        />
+      )}
       <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" onScroll={handleScroll} onWheel={handleWheel}>
         <div className={chatContentClassName}>
           {hasConversation ? (
             <>
-              {historyPager && (
+              {showHistoryPager && historyPager && (
                 <HistoryPagerBar
                   loadedPages={historyPager.loadedPages}
                   totalPages={historyPager.totalPages}
@@ -365,6 +1051,20 @@ export function ChatPanel({
               {hasTimelineContent ? (
                 <>
                   <MessageList messages={messages} />
+                  {activeSessionId && activeSessionId !== 'new' ? (
+                    <CodeChangesCard
+                      project={sessionProject}
+                      sessionId={activeSessionId}
+                      isProcessing={isProcessing}
+                      onReview={() => onOpenCodeReview?.()}
+                    />
+                  ) : null}
+                  {shouldShowHumanShare && (
+                    <HumanShareCard
+                      commands={teamHumanShareCommands}
+                      onShare={() => setHumanShareOpen(true)}
+                    />
+                  )}
                   <SubtaskProgress />
                   {/* 内联审批卡片（演进审批 & 权限审批共用） */}
                   <InlineQuestionCard onSubmit={onUserAnswer} />
@@ -385,20 +1085,24 @@ export function ChatPanel({
             </>
           ) : (
             <div className="chat-welcome">
+              <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} />
               <h2 className="chat-welcome__heading"><WelcomeHeading /></h2>
-              <p className="chat-welcome__subtext">
-                {t('chat.welcomeSubtext')}
-              </p>
               <div className="chat-welcome__composer">
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
+                <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
+                <InteractionSlot onSubmit={onUserAnswer} />
                 <InputArea
                   onSubmit={handleSendMessage}
+                  onPersistMedia={onPersistMedia}
                   onInterrupt={onInterrupt}
                   onCancel={onCancel}
                   onSwitchMode={onSwitchMode}
                   isProcessing={isProcessing}
-                  onNewSession={onNewSession}
+                  autoFocusKey={autoFocusKey}
+                  onNavigateToSkills={onNavigateToSkills}
+                  permissionsEnabled={permissionsEnabled}
+                  onSavePermission={onSavePermission}
                 />
               </div>
               <div className="chat-suggestions">
@@ -408,24 +1112,33 @@ export function ChatPanel({
               </div>
             </div>
           )}
-          <div ref={messagesEndRef} />
+          <div />
         </div>
       </div>
 
       {hasConversation && (
         <div className="chat-compose">
           <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
+          <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
           <InterruptResultBubble />
+          <InteractionSlot onSubmit={onUserAnswer} />
           <InputArea
             onSubmit={handleSendMessage}
+            onPersistMedia={onPersistMedia}
             onInterrupt={onInterrupt}
             onCancel={onCancel}
             onSwitchMode={onSwitchMode}
             isProcessing={isProcessing}
-            onNewSession={onNewSession}
+            autoFocusKey={autoFocusKey}
+            onNavigateToSkills={onNavigateToSkills}
+            permissionsEnabled={permissionsEnabled}
+            onSavePermission={onSavePermission}
           />
         </div>
       )}
+      <div className="chat-ai-disclaimer" data-testid="ai-disclaimer">
+        {t('share.aiNotice')}
+      </div>
     </div>
   );
 }

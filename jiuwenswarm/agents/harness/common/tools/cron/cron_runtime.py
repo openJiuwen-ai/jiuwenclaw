@@ -40,11 +40,15 @@ class _CronToolsCronBackend(CronToolBackend):
             else None
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
+        project_dir = str(metadata.get("project_dir") or "").strip()
+        app_id = str(metadata.get("app_id") or "").strip()
         return CronToolRoute(
             request_id=request_id,
             channel_id=channel_id,
             session_id=session_id,
             chat_type=chat_type,
+            project_dir=project_dir,
+            app_id=app_id,
         )
 
     async def list_jobs(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
@@ -318,6 +322,12 @@ def _extract_legacy_params(
                 "[CronRuntimeBridge] _extract_legacy_params: added session_id=%s from context",
                 out["session_id"],
             )
+
+        # 飞书多应用：传递 app_id，用于调度器定位正确的 app 配置
+        context_metadata = getattr(context, "metadata", None) or {}
+        context_app_id = str(context_metadata.get("app_id") or "").strip() if isinstance(context_metadata, dict) else ""
+        if context_app_id:
+            out["app_id"] = context_app_id
 
         context_mode = getattr(context, "mode", None)
         mode_resolved = context_mode or data.get("mode") or CRON_JOB_DEFAULT_MODE

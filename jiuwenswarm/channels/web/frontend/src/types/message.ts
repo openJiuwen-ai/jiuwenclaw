@@ -9,9 +9,14 @@ export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 export interface MediaItem {
   type: 'image' | 'audio' | 'video' | 'document';
   mimeType: string;
+  mime_type?: string;
   filename: string;
   base64Data?: string;
+  base64_data?: string;
   url?: string;
+  path?: string;
+  sizeBytes?: number;
+  size_bytes?: number;
 }
 
 export interface UsageSummary {
@@ -54,6 +59,8 @@ export interface Message {
   role: MessageRole;
   content: string;
   timestamp: string;
+  /** 前端渲染身份，避免业务 id 重复或历史 prepend 导致 React key 抖动 */
+  renderKey?: string;
   audioBase64?: string;
   audioMime?: string;
   mediaItems?: MediaItem[];
@@ -66,6 +73,11 @@ export interface Message {
   usageSummary?: UsageSummary;
   // Harness message flag for special styling
   isHarnessMessage?: boolean;
+  // 用户消息附带的技能列表（输入栏选中并发送）
+  skills?: string[];
+  // 主动推荐消息标记
+  isProactiveRecommendation?: boolean;
+  proactiveType?: 'skill_recommend' | 'task_reminder' | 'need_exploration';
 }
 
 export interface ToolCall {

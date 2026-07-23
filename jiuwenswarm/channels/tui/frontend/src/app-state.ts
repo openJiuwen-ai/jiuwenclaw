@@ -379,6 +379,15 @@ export class CliPiAppState {
   private _btwActive = false;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
   private interruptRequested = false;
+  /** 是否有一个 cancel interrupt 在途（已发送但未收到 interrupt_result 确认）。
+   *  用于 esc 去抖：为 true 时重复 esc 不再发送新 interrupt。仅由 cancel() 实际发送 interrupt 时置 true、
+   *  由 clearInterruptRequested（收到 result）清 false——不与 requestLocalInterrupt 的 interruptRequested 混用。 */
+  private cancelInterruptInFlight = false;
+  /** 最近一次向服务端发送 chat.interrupt(cancel) 的时间戳；用于 esc 去抖兜底超时，避免 result 丢失时窗口永久锁死。 */
+  private lastInterruptSentAt = 0;
+  /** esc 去抖兜底超时（毫秒）：发送 interrupt 后若 result 迟迟不回来，超过该时长允许下一次 esc 重新发送，
+   *  防止 interrupt_result 丢失导致窗口永久锁死。设得比 AgentServer 最慢的取消响应（含首次初始化阻塞）略长。 */
+  private static readonly INTERRUPT_DEBOUNCE_FALLBACK_MS = 30000;
   /** 当前正在执行的斜杠命令 WS 请求 ID，用于 Ctrl+C 时立即取消。 */
   private activeCommandRequestId: string | null = null;
   /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
@@ -1023,6 +1032,9 @@ export class CliPiAppState {
   /** Clear local interrupt flag (called after handling interrupt) */
   clearInterruptRequested(): void {
     this.interruptRequested = false;
+    // 收到 interrupt_result（成功或失败）即表示在途的 cancel 已确认，解除去抖拦截，允许下一次 esc 重新发送。
+    // 不清 lastInterruptSentAt：兜底超时用它判断"result 丢失"窗口，若清了则兜底失效。
+    this.cancelInterruptInFlight = false;
   }
 
   /** Set the currently running command name (for tracking uninterruptible commands) */
@@ -1591,6 +1603,7 @@ export class CliPiAppState {
     attachments?: FileAttachment[],
     modeOverride?: ClientMode,
     options?: { logAsUser?: boolean },
+    skills?: string[],
   ): string | null => {
     if (this.connectionStatus !== "connected") return null;
     const mode = modeOverride ?? this.mode;
@@ -1601,6 +1614,7 @@ export class CliPiAppState {
       mode,
       ...(attachments?.length ? { attachments } : {}),
       ...(planEntrySource ? { plan_entry_source: planEntrySource } : {}),
+      ...(skills?.length ? { skills } : {}),
     };
     // Pre-check: reject messages whose serialized frame exceeds 7 MB (gateway
     // server max_size is 8 MB; leave 1 MB margin for JSON overhead).
@@ -1701,6 +1715,11 @@ export class CliPiAppState {
       this.localPendingQuestion = null;
       this.pendingQuestion = null;
       this.setStreamingStateInternal(StreamingState.Idle);
+    } else if (this.pendingQuestion) {
+      // Server-side pendingQuestion (ask_user_interrupt, permission_interrupt, etc.)
+      // chat.interrupt sent below will notify the server to cancel the agent work
+      this.pendingQuestion = null;
+      this.setStreamingStateInternal(StreamingState.Idle);
     }
     // Set local interrupt flag immediately for long-running command detection
     this.interruptRequested = true;
@@ -1710,9 +1729,24 @@ export class CliPiAppState {
       this.activeCommandRequestId = null;
     }
     const hadLocalWork = this.getSnapshot().cancellableWork;
-    this.sendEventOnly("chat.interrupt", { intent: "cancel", mode: this.mode });
-    if (options?.showNotice !== false && hadLocalWork) {
-      this.addItem(addInfo(this.sessionId, "Request Interrupted", "i"));
+    // esc 去抖：混合策略。
+    // 主条件：上一个 cancel interrupt 在途、尚未收到 interrupt_result 确认（cancelInterruptInFlight=true）
+    //   → 不再重复发送。这覆盖"用户每隔 1.5-2s 按一次 esc、每次都超过短去抖窗口"的真实连按节奏——
+    //   只要后端还没确认取消，就绝不再发新 interrupt，避免 N 个 interrupt 积压、最后一次性回 N 个"任务已取消"。
+    // 兜底：若 result 丢失迟迟不回（超 INTERRUPT_DEBOUNCE_FALLBACK_MS），允许重新发送，防止窗口永久锁死。
+    // 收到 interrupt_result（成功或失败）时 clearInterruptRequested 会清 cancelInterruptInFlight 提前解锁。
+    const now = Date.now();
+    const fallbackExpired =
+      this.lastInterruptSentAt > 0 &&
+      now - this.lastInterruptSentAt >= CliPiAppState.INTERRUPT_DEBOUNCE_FALLBACK_MS;
+    const withinDebounce = this.cancelInterruptInFlight && !fallbackExpired;
+    if (!withinDebounce) {
+      this.cancelInterruptInFlight = true;
+      this.lastInterruptSentAt = now;
+      this.sendEventOnly("chat.interrupt", { intent: "cancel", mode: this.mode });
+      if (options?.showNotice !== false && hadLocalWork) {
+        this.addItem(addInfo(this.sessionId, "Request Interrupted", "i"));
+      }
     }
     return true;
   }

@@ -1,11 +1,21 @@
-import { useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Music2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Copy, ExternalLink, KeyRound, Loader2, LogOut, Music2, RefreshCw, Workflow } from "lucide-react";
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore } from '../../stores';
 import type { ModelEntry } from '../../types';
 import { webRequest } from '../../services/webClient';
+import {
+  canAutoSaveOpenAIAccountModel,
+  modelEntriesEqual,
+  patchModelSnapshot,
+  preserveConfiguredModelName,
+  shouldContinueOpenAIAccountLoginPoll,
+  syncAgentsWithModelChanges,
+  type ModelIdentity,
+} from "./openaiAccountModelState";
 import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
+import { ModelProviderIcon } from '../ModelProviderIcon';
 
 function MultiSelectDropdown({
   options,
@@ -171,6 +181,7 @@ interface TeamEntry {
 interface ConfigPanelProps {
   config: Record<string, unknown> | null;
   isConnected: boolean;
+  sessionId?: string;
   onSaveConfig: (updates: Record<string, string>) => Promise<void>;
   onSaveAllConfig?: (payload: ConfigSaveAllPayload) => Promise<void>;
   /** 校验默认模型配置（api_base / api_key / model / model_provider）能否完成一次最小 LLM 请求 */
@@ -203,6 +214,8 @@ interface ConfigPanelProps {
       predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
     }>;
   }, showRestartModal?: boolean) => Promise<void>;
+  /** Reports unsaved drafts so cross-window config updates cannot silently overwrite them. */
+  onHasChangesChange?: (hasChanges: boolean) => void;
 }
 
 interface AgentsTeamsPayload {
@@ -227,6 +240,44 @@ interface ConfigSaveAllPayload {
   models?: ModelEntry[];
   agents?: AgentsTeamsPayload["agents"];
   team?: AgentsTeamsPayload["team"];
+}
+
+interface ModelPatchOptions {
+  autoSave?: boolean;
+}
+
+type ModelAutoSaveResult = "saved" | "deferred";
+
+function buildAgentsTeamsPayload(
+  agents: AgentEntry[],
+  teams: TeamEntry[],
+): AgentsTeamsPayload {
+  const agentsPayload: AgentsTeamsPayload["agents"] = {};
+  for (const agent of agents) {
+    if (!agent.name) continue;
+    agentsPayload[agent.name] = {
+      model: { ...agent.model },
+      skills: agent.skills,
+    };
+  }
+  const validAgentKeys = new Set(Object.keys(agentsPayload));
+  return {
+    agents: agentsPayload,
+    team: teams.map((team) => ({
+      ...team,
+      leader: {
+        ...team.leader,
+        agent_key: validAgentKeys.has(team.leader?.agent_key || "") ? team.leader?.agent_key : "",
+      },
+      teammate: {
+        ...team.teammate,
+        agent_key: validAgentKeys.has(team.teammate?.agent_key || "") ? team.teammate?.agent_key : "",
+      },
+      predefined_members: (team.predefined_members || [])
+        .filter((member) => member.agent_key && validAgentKeys.has(member.agent_key))
+        .map((member) => ({ ...member })),
+    })),
+  };
 }
 
 interface ConfigGroup {
@@ -256,7 +307,7 @@ const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
 // 模型字段长度校验常量
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
-const MAX_API_BASE_LENGTH = 256;
+const MAX_API_BASE_LENGTH = 512;
 const MAX_API_KEY_LENGTH = 500;
 
 // URL 格式校验函数
@@ -307,6 +358,7 @@ const HIDDEN_CONFIG_KEYS = new Set([
 ]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
 const A2UI_KEYS = new Set(["a2ui_enabled"]);
+const SWARMFLOW_KEYS = new Set(["swarmflow_enabled"]);
 const SYMPHONY_BOOLEAN_KEYS = new Set(["symphony_enabled"]);
 const SKILL_RETRIEVAL_BOOLEAN_KEYS = new Set([
   "skill_retrieval_enabled",
@@ -327,6 +379,15 @@ const SYMPHONY_KEYS = new Set([
   ...SYMPHONY_BOOLEAN_KEYS,
   ...SKILL_RETRIEVAL_KEYS,
 ]);
+const PROACTIVE_BOOLEAN_KEYS = new Set(["proactive_recommendation_enabled"]);
+const PROACTIVE_KEYS = new Set([
+  ...PROACTIVE_BOOLEAN_KEYS,
+  "proactive_recommendation_max_recommend_per_day",
+  "proactive_recommendation_max_rounds_per_tick",
+]);
+// 调度频率已交给定时任务面板，ConfigPanel 不再暴露 tick_interval。
+// 即便后端残留下发，也在比较/提交时跳过，避免误提交空值。
+const PROACTIVE_HIDDEN_FROM_UI_KEYS = new Set(["proactive_recommendation_tick_interval_minutes"]);
 
 function classifyKey(key: string): string {
   if (MODEL_DEFAULT_KEYS.has(key)) return "model_default";
@@ -342,7 +403,9 @@ function classifyKey(key: string): string {
   if (FREE_SEARCH_KEYS.has(key)) return "free_search";
   if (MEMORY_KEYS.has(key)) return "memory";
   if (A2UI_KEYS.has(key)) return "a2ui";
+  if (SWARMFLOW_KEYS.has(key)) return "swarmflow";
   if (SYMPHONY_KEYS.has(key)) return "symphony";
+  if (PROACTIVE_KEYS.has(key)) return "proactive";
   if (key === "context_engine_enabled" || key === "kv_cache_affinity_enabled") return "context_engine";
   if (key === "permissions_enabled") return "permissions";
   if (key.startsWith("feishu")) return "feishu";
@@ -417,7 +480,7 @@ function getGroupIcon(tag: string) {
   }
   if (tag === "team") {
     return (
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgb(217 70 239)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-users text-text-muted" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-config-team-icon)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-users text-text-muted" aria-hidden="true">
         <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><path d="M16 3.128a4 4 0 0 1 0 7.744"></path>
         <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
         <circle cx="9" cy="7" r="4"></circle>
@@ -446,6 +509,9 @@ function getGroupIcon(tag: string) {
       </svg>
     );
   }
+  if (tag === "swarmflow") {
+    return <Workflow className="w-3.5 h-3.5" strokeWidth={1.8} />;
+  }
   if (tag === "symphony") {
     return <Music2 className="w-3.5 h-3.5" strokeWidth={1.8} />;
   }
@@ -454,6 +520,13 @@ function getGroupIcon(tag: string) {
       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 5.25h16.5M6 5.25v13.5m0 0h12.75M6 18.75l3.75-4.5 3 3 4.5-6" />
         <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 8.25h3M15.75 11.25h3" />
+      </svg>
+    );
+  }
+  if (tag === "proactive") {
+    return (
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.454 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
       </svg>
     );
   }
@@ -479,8 +552,10 @@ function getGroupToneClass(tag: string): string {
   if (tag === "context_engine") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
   if (tag === "permissions") return "text-rose-500 bg-rose-500/10 border-rose-500/20";
   if (tag === "a2ui") return "text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20";
+  if (tag === "swarmflow") return "text-blue-500 bg-blue-500/10 border-blue-500/20";
   if (tag === "symphony") return "text-amber-500 bg-amber-500/10 border-amber-500/20";
   if (tag === "skill_retrieval") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
+  if (tag === "proactive") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
   if (tag === "email") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
   return "text-text-muted bg-secondary/70 border-border";
 }
@@ -505,9 +580,48 @@ function isBooleanKey(key: string): boolean {
     key === "permissions_enabled" ||
     key === "memory_forbidden_enabled" ||
     key === "a2ui_enabled" ||
+    key === "swarmflow_enabled" ||
     SYMPHONY_BOOLEAN_KEYS.has(key) ||
-    SKILL_RETRIEVAL_BOOLEAN_KEYS.has(key)
+    SKILL_RETRIEVAL_BOOLEAN_KEYS.has(key) ||
+    PROACTIVE_BOOLEAN_KEYS.has(key)
   );
+}
+
+// proactive 数值配置项：只接受 1-50 的正整数。
+// 与后端 web handler _validate_proactive_int 保持一致。
+interface ProactiveIntSpec {
+  lo: number;
+  hi: number;
+  labelKey: string;
+}
+const PROACTIVE_INT_SPECS: Record<string, ProactiveIntSpec> = {
+  proactive_recommendation_max_recommend_per_day: {
+    lo: 1, hi: 50, labelKey: "config.keys.proactiveMaxPerDay",
+  },
+  proactive_recommendation_max_rounds_per_tick: {
+    lo: 1, hi: 50, labelKey: "config.keys.proactiveMaxRounds",
+  },
+};
+
+function validateProactiveInt(
+  key: string, raw: string, t: (k: string, opts?: Record<string, unknown>) => string,
+): string | null {
+  const spec = PROACTIVE_INT_SPECS[key];
+  if (!spec) return null;
+  const field = t(spec.labelKey);
+  const s = (raw ?? "").trim();
+  if (!s) {
+    return t("config.errors.proactiveIntEmpty", { field, lo: spec.lo, hi: spec.hi });
+  }
+  // 正则一次挡住浮点(3.5)、负数(-1)、科学计数(1e5)、字符串(abc)
+  if (!/^[0-9]+$/.test(s)) {
+    return t("config.errors.proactiveIntNotInteger", { field, value: s, lo: spec.lo, hi: spec.hi });
+  }
+  const n = parseInt(s, 10);
+  if (n < spec.lo || n > spec.hi) {
+    return t("config.errors.proactiveIntOutOfRange", { field, lo: spec.lo, hi: spec.hi, value: n });
+  }
+  return null;
 }
 
 function parseBoolValue(value: string): boolean {
@@ -525,8 +639,10 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     permissions_enabled: t('config.booleanLabels.enabled'),
     memory_forbidden_enabled: t('config.booleanLabels.enabled'),
     a2ui_enabled: t('config.booleanLabels.enabled'),
+    swarmflow_enabled: t('config.booleanLabels.enabled'),
     symphony_enabled: t('config.booleanLabels.enabled'),
     skill_retrieval_enabled: t('config.booleanLabels.enabled'),
+    proactive_recommendation_enabled: t('config.booleanLabels.enabled'),
   };
   return labels[key] ?? key;
 }
@@ -573,8 +689,10 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     context_engine: { label: t('config.groups.contextEngine.label'), order: 8, hint: t('config.groups.contextEngine.hint') },
     permissions: { label: t('config.groups.permissions.label'), order: 9, hint: t('config.groups.permissions.hint') },
     a2ui: { label: t('config.groups.a2ui.label'), order: 10, hint: t('config.groups.a2ui.hint') },
+    swarmflow: { label: t('config.groups.swarmflow.label'), order: 10.2, hint: t('config.groups.swarmflow.hint') },
     symphony: { label: t('config.groups.symphony.label'), order: 10.4, hint: t('config.groups.symphony.hint') },
     skill_retrieval: { label: t('config.groups.skillRetrieval.label'), order: 10.5, hint: t('config.groups.skillRetrieval.hint') },
+    proactive: { label: t('config.groups.proactive.label'), order: 10.6, hint: t('config.groups.proactive.hint') },
     memory: { label: t('config.groups.memory.label'), order: 11, hint: t('config.groups.memory.hint') },
     email: { label: t('config.groups.email.label'), order: 12, hint: t('config.groups.email.hint') },
     other: { label: t('config.groups.other.label'), order: 13, hint: t('config.groups.other.hint') },
@@ -594,6 +712,7 @@ function isProviderKey(key: string): boolean {
 const KEY_DISPLAY_I18N: Record<string, string> = {
   memory_forbidden_enabled: "config.keys.memoryForbiddenEnabled",
   memory_forbidden_description: "config.keys.memoryForbiddenDescription",
+  swarmflow_enabled: "config.keys.swarmflowEnabled",
   name: "config.keys.agentName",
   model: "config.keys.agentModel",
   skills: "config.keys.agentSkills",
@@ -615,6 +734,9 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   skill_retrieval_retrieve_compact_codes_enabled: "config.keys.skillRetrievalCompactCodes",
   skill_retrieval_retrieve_flatten_tree: "config.keys.skillRetrievalFlattenTree",
   skill_retrieval_retrieve_max_exposure_depth: "config.keys.skillRetrievalMaxExposureDepth",
+  proactive_recommendation_enabled: "config.keys.proactiveEnabled",
+  proactive_recommendation_max_recommend_per_day: "config.keys.proactiveMaxPerDay",
+  proactive_recommendation_max_rounds_per_tick: "config.keys.proactiveMaxRounds",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
@@ -633,6 +755,9 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   free_search_bing_enabled: 1,
   symphony_enabled: 0,
   skill_retrieval_enabled: 1,
+  proactive_recommendation_enabled: 0,
+  proactive_recommendation_max_recommend_per_day: 2,
+  proactive_recommendation_max_rounds_per_tick: 3,
   skill_retrieval_retrieve_max_exposure_depth: 10,
   skill_retrieval_build_max_depth: 20,
   skill_retrieval_build_max_workers: 21,
@@ -694,7 +819,7 @@ function GroupSection({
   };
 
   const nestedStyle = nested ? getNestedModelStyle(group.tag) : "";
-  const headerClass = `w-full flex items-center justify-between transition-colors text-sm ${showNestedChrome ? `py-2 pr-3 pl-4 ${nestedStyle} hover:opacity-90` : "px-4 py-3 bg-secondary/30"
+  const headerClass = `w-full flex items-center justify-between  text-sm ${showNestedChrome ? `py-2 pr-3 pl-4 ${nestedStyle} hover:opacity-90` : "px-4 py-3 bg-secondary/30"
     } ${alwaysExpanded ? "" : showNestedChrome ? "" : "hover:bg-secondary/60"}`;
 
   const headerInner = (
@@ -714,7 +839,7 @@ function GroupSection({
         </span>
         {!alwaysExpanded ? (
           <svg
-            className={`w-4 h-4 transition-transform ${isOpen ? "rotate-180" : ""}`}
+            className={`w-4 h-4  ${isOpen ? "rotate-180" : ""}`}
             fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}
           >
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
@@ -747,7 +872,7 @@ function GroupSection({
           <table className="w-full text-sm border-t border-border">
             <tbody>
               {group.keys.map(([key, value]) => (
-                <tr key={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 transition-colors">
+                <tr key={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 ">
                   <td className="px-4 py-2.5 align-middle text-xs text-text-muted w-[32%]" title={key}>
                     <div className="mono">{getKeyDisplayLabel(key, t)}</div>
                     {getKeyLabelHintText(key, t) ? (
@@ -755,6 +880,12 @@ function GroupSection({
                         {getKeyLabelHintText(key, t)}
                       </div>
                     ) : null}
+                    {PROACTIVE_INT_SPECS[key] ? (() => {
+                      const e = validateProactiveInt(key, draftValues[key] ?? "", t);
+                      return e ? (
+                        <div className="mt-1 text-[11px] leading-4 text-danger">{e}</div>
+                      ) : null;
+                    })() : null}
                   </td>
                   <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                     {isBooleanKey(key) ? (
@@ -773,11 +904,11 @@ function GroupSection({
                             aria-checked={parseBoolValue(draftValues[key] ?? value)}
                             onClick={() => onChange(key, parseBoolValue(draftValues[key] ?? value) ? "false" : "true")}
                             title={getBooleanKeyLabel(key, t) ?? key}
-                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${parseBoolValue(draftValues[key] ?? value) ? "bg-ok" : "bg-secondary"
+                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${parseBoolValue(draftValues[key] ?? value) ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"
                               }`}
                           >
                             <span
-                              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${parseBoolValue(draftValues[key] ?? value) ? "translate-x-4" : "translate-x-0"
+                              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${parseBoolValue(draftValues[key] ?? value) ? "translate-x-4" : "translate-x-0"
                                 }`}
                             />
                           </button>
@@ -852,7 +983,7 @@ function GroupSection({
                             <button
                               type="button"
                               onClick={() => toggleFieldVisible(key)}
-                              className="absolute inset-y-0 right-0 flex items-center justify-center w-9 text-text-muted hover:text-text transition-colors"
+                              className="absolute inset-y-0 right-0 flex items-center justify-center w-9 text-text-muted hover:text-text "
                               aria-label={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
                               title={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
                             >
@@ -887,8 +1018,54 @@ function GroupSection({
   );
 }
 
-const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"] as const;
+const OPENAI_ACCOUNT_PROVIDER = "OpenAIAccount";
+const OPENAI_ACCOUNT_DEFAULT_API_BASE = "https://chatgpt.com/backend-api/codex";
+const OPENAI_ACCOUNT_LOGIN_POLL_COOLDOWN_MS = 15_000;
+const OPENAI_ACCOUNT_STATUS_REFRESH_COOLDOWN_MS = 5_000;
+const OPENAI_ACCOUNT_LOGIN_REFRESH_COOLDOWN_MS = 15_000;
+// Core OAuth calls can queue behind a poll and may perform two network steps sequentially.
+const OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS = 45_000;
+const OPENAI_ACCOUNT_MODEL_REQUEST_TIMEOUT_MS = 75_000;
+const OPENAI_ACCOUNT_LOGIN_START_TIMEOUT_MS = 90_000;
+
+const MODEL_PROVIDER_OPTIONS = [
+  "OpenAI",
+  OPENAI_ACCOUNT_PROVIDER,
+  "OpenRouter",
+  "DashScope",
+  "SiliconFlow",
+  "InferenceAffinity",
+  "DeepSeek",
+] as const;
 const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
+
+function isOpenAIAccountProvider(provider?: string): boolean {
+  return (provider || "").trim().toLowerCase() === OPENAI_ACCOUNT_PROVIDER.toLowerCase();
+}
+
+function buildOpenAIAccountModelDefaults(
+  model: Partial<ModelEntry>,
+  baseUrl = OPENAI_ACCOUNT_DEFAULT_API_BASE,
+  modelIds?: string[],
+): Partial<ModelEntry> {
+  const currentModelName = (model.model_name || "").trim();
+  const normalizedModelIds = modelIds
+    ? Array.from(new Set(modelIds.map((name) => name.trim()).filter(Boolean)))
+    : undefined;
+  const modelName = normalizedModelIds
+    ? preserveConfiguredModelName(currentModelName, normalizedModelIds)
+    : currentModelName;
+  return {
+    model_provider: OPENAI_ACCOUNT_PROVIDER,
+    api_base: baseUrl,
+    api_key: "",
+    model_name: modelName,
+  };
+}
+
+function openAIAccountErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 function getModelValidationKey(model: ModelEntry): string {
   return [
@@ -900,6 +1077,678 @@ function getModelValidationKey(model: ModelEntry): string {
   ].join("\u0000");
 }
 
+interface OpenAIAccountAuthStatus {
+  authenticated: boolean;
+  auth_path?: string;
+  has_refresh_token?: boolean;
+  expires_at?: number | null;
+  needs_refresh?: boolean;
+  error?: string | null;
+  base_url?: string;
+}
+
+interface OpenAIAccountLoginPayload {
+  status: "pending";
+  login_id: string;
+  user_code: string;
+  verification_uri: string;
+  interval: number;
+  expires_in?: number;
+  expires_at?: number;
+  auth?: OpenAIAccountAuthStatus;
+}
+
+interface OpenAIAccountNoPendingLoginPayload {
+  status: "none";
+  auth?: OpenAIAccountAuthStatus;
+}
+
+type OpenAIAccountPendingLoginPayload = OpenAIAccountLoginPayload | OpenAIAccountNoPendingLoginPayload;
+
+interface OpenAIAccountPollPayload {
+  status: "pending" | "authenticated" | "expired" | "error";
+  authenticated?: boolean;
+  expires_at?: number;
+  auth?: OpenAIAccountAuthStatus;
+  error?: string;
+}
+
+interface OpenAIAccountModelsPayload {
+  models?: string[];
+  base_url?: string;
+  auth?: OpenAIAccountAuthStatus;
+}
+
+function OpenAIAccountMark() {
+  return (
+    <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-md border border-border bg-bg px-1.5 text-[10px] font-semibold text-text shadow-sm">
+      OpenAI
+    </span>
+  );
+}
+
+function OpenAIAccountAuthPanel({
+  model,
+  isConnected,
+  onModelPatch,
+  autoSaveOnLogin = true,
+  t,
+}: {
+  model: ModelEntry;
+  isConnected: boolean;
+  onModelPatch: (
+    patch: Partial<ModelEntry>,
+    options?: ModelPatchOptions,
+  ) => Promise<ModelAutoSaveResult> | ModelAutoSaveResult;
+  autoSaveOnLogin?: boolean;
+  t: (key: string, options?: Record<string, unknown>) => string;
+}) {
+  const [status, setStatus] = useState<OpenAIAccountAuthStatus | null>(null);
+  const [login, setLogin] = useState<OpenAIAccountLoginPayload | null>(null);
+  const [loadingStatus, setLoadingStatus] = useState(false);
+  const [startingLogin, setStartingLogin] = useState(false);
+  const [pollingLogin, setPollingLogin] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelsLoadedOnce, setModelsLoadedOnce] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved" | "deferred">("idle");
+  const [refreshCoolingDown, setRefreshCoolingDown] = useState(false);
+  const [loginPollResetToken, setLoginPollResetToken] = useState(0);
+  const pollingLoginRef = useRef(false);
+  const loginRef = useRef<OpenAIAccountLoginPayload | null>(null);
+  const pollLoginOnceRef = useRef<(activeLogin: OpenAIAccountLoginPayload) => Promise<boolean>>(
+    async () => true,
+  );
+  const latestModelRef = useRef(model);
+  const autoSaveTimerRef = useRef<number | undefined>(undefined);
+  const refreshCooldownTimerRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    latestModelRef.current = model;
+  }, [model]);
+
+  useEffect(() => {
+    loginRef.current = login;
+  }, [login]);
+
+  useEffect(() => () => {
+    if (autoSaveTimerRef.current !== undefined) {
+      window.clearTimeout(autoSaveTimerRef.current);
+    }
+    if (refreshCooldownTimerRef.current !== undefined) {
+      window.clearTimeout(refreshCooldownTimerRef.current);
+    }
+  }, []);
+
+  const applyDefaults = useCallback(async (
+    modelIds?: string[],
+    baseUrl?: string,
+    options?: ModelPatchOptions,
+  ) => {
+    const patch = buildOpenAIAccountModelDefaults(
+      latestModelRef.current,
+      baseUrl || status?.base_url || OPENAI_ACCOUNT_DEFAULT_API_BASE,
+      modelIds,
+    );
+    const hasModelName = Boolean(String(patch.model_name || "").trim());
+    const shouldAutoSave = Boolean(options?.autoSave && autoSaveOnLogin && hasModelName);
+    try {
+      if (options?.autoSave && autoSaveTimerRef.current !== undefined) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = undefined;
+      }
+      if (options?.autoSave && !hasModelName) {
+        setAutoSaveState("idle");
+        setModelsError(t("config.openaiAccount.noModelsAvailable"));
+      }
+      if (shouldAutoSave) {
+        setAutoSaveState("saving");
+      }
+      latestModelRef.current = { ...latestModelRef.current, ...patch };
+      const saveResult = await onModelPatch(patch, shouldAutoSave ? options : undefined);
+      if (options?.autoSave && hasModelName) {
+        if (shouldAutoSave && saveResult === "saved") {
+          setAutoSaveState("saved");
+          autoSaveTimerRef.current = window.setTimeout(() => {
+            setAutoSaveState("idle");
+            autoSaveTimerRef.current = undefined;
+          }, 3000);
+        } else {
+          setAutoSaveState("deferred");
+          autoSaveTimerRef.current = window.setTimeout(() => {
+            setAutoSaveState("idle");
+            autoSaveTimerRef.current = undefined;
+          }, 5000);
+        }
+      }
+    } catch (error) {
+      setAutoSaveState("idle");
+      setAuthError(t("config.openaiAccount.autoSaveFailed", {
+        error: openAIAccountErrorMessage(error, t("config.errors.saveFailed")),
+      }));
+    }
+  }, [autoSaveOnLogin, onModelPatch, status?.base_url, t]);
+
+  const refreshModelDefaults = useCallback(async (baseUrl?: string, options?: ModelPatchOptions) => {
+    setModelsLoadedOnce(true);
+    setLoadingModels(true);
+    setModelsError(null);
+    try {
+      const payload = await webRequest<OpenAIAccountModelsPayload>(
+        "openai_account.models.list",
+        {},
+        { timeoutMs: OPENAI_ACCOUNT_MODEL_REQUEST_TIMEOUT_MS },
+      );
+      const nextModels = Array.isArray(payload.models)
+        ? payload.models.filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+        : [];
+      setModelOptions(nextModels);
+      if (payload.auth) {
+        setStatus(payload.auth);
+        if (payload.auth.authenticated && !payload.auth.needs_refresh) {
+          setLogin(null);
+        }
+      }
+      if (nextModels.length === 0) {
+        setModelsError(t("config.openaiAccount.noModelsAvailable"));
+      }
+      await applyDefaults(nextModels, payload.base_url || baseUrl, options);
+    } catch (error) {
+      setModelsError(openAIAccountErrorMessage(error, t("config.openaiAccount.modelsLoadFailed")));
+    } finally {
+      setLoadingModels(false);
+    }
+  }, [applyDefaults, t]);
+
+  const refreshStatus = useCallback(async () => {
+    if (!isConnected) return null;
+    setLoadingStatus(true);
+    setAuthError(null);
+    try {
+      const nextStatus = await webRequest<OpenAIAccountAuthStatus>(
+        "openai_account.auth.status",
+        {},
+        { timeoutMs: OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS },
+      );
+      setStatus(nextStatus);
+      if (nextStatus.authenticated && !nextStatus.needs_refresh) {
+        setLogin(null);
+      }
+      return nextStatus;
+    } catch (error) {
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.statusFailed")));
+      return null;
+    } finally {
+      setLoadingStatus(false);
+    }
+  }, [isConnected, t]);
+
+  const restorePendingLogin = useCallback(async () => {
+    if (!isConnected) {
+      setLogin(null);
+      return null;
+    }
+    setLoadingStatus(true);
+    setAuthError(null);
+    try {
+      const payload = await webRequest<OpenAIAccountPendingLoginPayload>(
+        "openai_account.auth.pending_login",
+        {},
+        { timeoutMs: OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS },
+      );
+      const nextStatus = payload.auth || null;
+      setStatus(nextStatus);
+      if (payload.status === "pending") {
+        setLoginPollResetToken(0);
+        setLogin(payload);
+      } else {
+        setLogin(null);
+      }
+      return payload;
+    } catch (error) {
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.statusFailed")));
+      return null;
+    } finally {
+      setLoadingStatus(false);
+    }
+  }, [isConnected, t]);
+
+  useEffect(() => {
+    void restorePendingLogin();
+  }, [restorePendingLogin]);
+
+  useEffect(() => {
+    if (!isConnected || modelsLoadedOnce || !status?.authenticated) return;
+    void refreshModelDefaults(status?.base_url);
+  }, [isConnected, modelsLoadedOnce, refreshModelDefaults, status?.authenticated, status?.base_url]);
+
+  const pollLoginOnce = useCallback(async (activeLogin: OpenAIAccountLoginPayload) => {
+    if (!isConnected) return true;
+    if (pollingLoginRef.current) return false;
+    pollingLoginRef.current = true;
+    setPollingLogin(true);
+    setAuthError(null);
+    try {
+      const result = await webRequest<OpenAIAccountPollPayload>(
+        "openai_account.auth.poll_login",
+        { login_id: activeLogin.login_id },
+        { timeoutMs: OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS },
+      );
+      if (result.status === "authenticated") {
+        const nextStatus = result.auth || null;
+        setStatus(nextStatus);
+        setLogin(null);
+        setAuthError(null);
+        await refreshModelDefaults(nextStatus?.base_url, { autoSave: true });
+        return true;
+      }
+      if (result.status === "expired") {
+        setLogin(null);
+        setAuthError(t("config.openaiAccount.loginExpired"));
+        return true;
+      }
+      if (result.auth?.authenticated && !result.auth.needs_refresh) {
+        setStatus(result.auth);
+        setLogin(null);
+        setAuthError(null);
+        await refreshModelDefaults(result.auth.base_url, { autoSave: true });
+        return true;
+      }
+      return false;
+    } catch (error) {
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.loginFailed")));
+      if (shouldContinueOpenAIAccountLoginPoll(error)) {
+        return false;
+      }
+      setLogin(null);
+      return true;
+    } finally {
+      pollingLoginRef.current = false;
+      setPollingLogin(false);
+    }
+  }, [isConnected, refreshModelDefaults, t]);
+
+  useEffect(() => {
+    pollLoginOnceRef.current = pollLoginOnce;
+  }, [pollLoginOnce]);
+
+  const resetLoginPollDelay = useCallback(() => {
+    setLoginPollResetToken((value) => value + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!login || !isConnected) return undefined;
+
+    let cancelled = false;
+    let timer: number | undefined;
+    let resumeTimers: number[] = [];
+    let pendingPoll = false;
+    let nextPollAt = 0;
+    const delayMs = Math.max(OPENAI_ACCOUNT_LOGIN_POLL_COOLDOWN_MS, (login.interval || 0) * 1000);
+
+    const canPoll = () => document.visibilityState === "visible" && document.hasFocus();
+    const canResumePoll = () => document.visibilityState === "visible" && document.hasFocus();
+
+    const clearTimer = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+
+    const clearResumeTimers = () => {
+      resumeTimers.forEach((timerId) => window.clearTimeout(timerId));
+      resumeTimers = [];
+    };
+
+    const scheduleNextPoll = (delay = delayMs) => {
+      clearTimer();
+      pendingPoll = false;
+      nextPollAt = Date.now() + delay;
+      timer = window.setTimeout(onPollDue, delay);
+    };
+
+    const runPoll = async () => {
+      clearTimer();
+      pendingPoll = false;
+      nextPollAt = 0;
+      const activeLogin = loginRef.current;
+      if (!activeLogin) return;
+      const finished = await pollLoginOnceRef.current(activeLogin);
+      if (cancelled || finished) return;
+      scheduleNextPoll();
+    };
+
+    const onPollDue = () => {
+      timer = undefined;
+      nextPollAt = 0;
+      if (!canPoll()) {
+        pendingPoll = true;
+        return;
+      }
+      void runPoll();
+    };
+
+    const tryResumePoll = () => {
+      if (cancelled || !canResumePoll()) return;
+      if (pendingPoll) {
+        void runPoll();
+        return;
+      }
+      if (timer !== undefined && nextPollAt > 0 && Date.now() >= nextPollAt) {
+        void runPoll();
+      }
+      if (timer === undefined && nextPollAt > 0 && Date.now() < nextPollAt) {
+        scheduleNextPoll(nextPollAt - Date.now());
+      }
+    };
+
+    const resumeWhenFocused = () => {
+      clearResumeTimers();
+      tryResumePoll();
+      [100, 500].forEach((delay) => {
+        const timerId = window.setTimeout(() => {
+          tryResumePoll();
+        }, delay);
+        resumeTimers.push(timerId);
+      });
+    };
+
+    scheduleNextPoll(delayMs);
+    window.addEventListener("focus", resumeWhenFocused);
+    window.addEventListener("pageshow", resumeWhenFocused);
+    document.addEventListener("focusin", resumeWhenFocused);
+    document.addEventListener("visibilitychange", resumeWhenFocused);
+    document.addEventListener("pointerdown", resumeWhenFocused);
+    document.addEventListener("keydown", resumeWhenFocused);
+    return () => {
+      cancelled = true;
+      clearTimer();
+      clearResumeTimers();
+      window.removeEventListener("focus", resumeWhenFocused);
+      window.removeEventListener("pageshow", resumeWhenFocused);
+      document.removeEventListener("focusin", resumeWhenFocused);
+      document.removeEventListener("visibilitychange", resumeWhenFocused);
+      document.removeEventListener("pointerdown", resumeWhenFocused);
+      document.removeEventListener("keydown", resumeWhenFocused);
+    };
+  }, [isConnected, login?.interval, login?.login_id, loginPollResetToken]);
+
+  const beginRefreshCooldown = useCallback((cooldownMs: number) => {
+    setRefreshCoolingDown(true);
+    if (refreshCooldownTimerRef.current !== undefined) {
+      window.clearTimeout(refreshCooldownTimerRef.current);
+    }
+    refreshCooldownTimerRef.current = window.setTimeout(() => {
+      setRefreshCoolingDown(false);
+      refreshCooldownTimerRef.current = undefined;
+    }, cooldownMs);
+  }, []);
+
+  const handleRefreshAuth = async () => {
+    if (refreshCoolingDown) return;
+    if (login) {
+      beginRefreshCooldown(OPENAI_ACCOUNT_LOGIN_REFRESH_COOLDOWN_MS);
+      resetLoginPollDelay();
+      const finished = await pollLoginOnce(login);
+      if (!finished) {
+        resetLoginPollDelay();
+      }
+      return;
+    }
+    beginRefreshCooldown(OPENAI_ACCOUNT_STATUS_REFRESH_COOLDOWN_MS);
+    const nextStatus = await refreshStatus();
+    if (nextStatus?.authenticated) {
+      await refreshModelDefaults(nextStatus.base_url);
+    }
+  };
+
+  const handleStartLogin = async () => {
+    if (!isConnected) {
+      setAuthError(t("config.openaiAccount.needConnection"));
+      return;
+    }
+    setStartingLogin(true);
+    setAuthError(null);
+    setCopied(false);
+    setCopyError(null);
+    void applyDefaults(undefined, status?.base_url);
+    try {
+      const started = await webRequest<OpenAIAccountLoginPayload>(
+        "openai_account.auth.start_login",
+        {},
+        { timeoutMs: OPENAI_ACCOUNT_LOGIN_START_TIMEOUT_MS },
+      );
+      setLoginPollResetToken(0);
+      setLogin(started);
+      setStatus(started.auth || status);
+      window.open(started.verification_uri, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.loginFailed")));
+    } finally {
+      setStartingLogin(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (!isConnected) return;
+    setLoggingOut(true);
+    setAuthError(null);
+    try {
+      const result = await webRequest<{ auth?: OpenAIAccountAuthStatus }>(
+        "openai_account.auth.logout",
+        {},
+        { timeoutMs: OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS },
+      );
+      setStatus(result.auth || null);
+      setLogin(null);
+      setModelOptions([]);
+      setModelsLoadedOnce(false);
+      setAutoSaveState("idle");
+    } catch (error) {
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.logoutFailed")));
+    } finally {
+      setLoggingOut(false);
+    }
+  };
+
+  const handleCopyCode = async () => {
+    if (!login?.user_code) return;
+    try {
+      await navigator.clipboard.writeText(login.user_code);
+      setCopied(true);
+      setCopyError(null);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+      setCopyError(t("config.openaiAccount.copyFailed"));
+    }
+  };
+
+  const visibleModelOptions = useMemo(() => {
+    return Array.from(new Set(modelOptions.map((name) => name.trim()).filter(Boolean)));
+  }, [modelOptions]);
+  const currentModelName = (model.model_name || "").trim();
+  const selectedModelName = visibleModelOptions.includes(currentModelName) ? currentModelName : "";
+  const hasUnavailableConfiguredModel = Boolean(currentModelName && !selectedModelName && !loadingModels);
+
+  const handleModelSelectChange = (modelName: string) => {
+    if (!visibleModelOptions.includes(modelName)) return;
+    latestModelRef.current = { ...latestModelRef.current, model_name: modelName };
+    void onModelPatch({ model_name: modelName });
+  };
+
+  const hasStoredAuth = Boolean(status?.authenticated);
+  const authenticated = Boolean(hasStoredAuth && !status?.needs_refresh);
+  const statusLabel = authenticated
+    ? t("config.openaiAccount.connected")
+    : status?.needs_refresh
+      ? t("config.openaiAccount.refreshNeeded")
+      : t("config.openaiAccount.notConnected");
+  const statusClass = authenticated
+    ? "border-ok/30 bg-ok-subtle text-ok"
+    : status?.needs_refresh
+      ? "border-warn/30 bg-warn-subtle text-warn"
+      : "border-border bg-bg text-text-muted";
+
+  return (
+    <div className="rounded-md border border-accent/20 bg-accent/5 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <OpenAIAccountMark />
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-text">{t("config.openaiAccount.title")}</span>
+              <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] ${statusClass}`}>
+                {authenticated ? <CheckCircle2 className="h-3 w-3" /> : <KeyRound className="h-3 w-3" />}
+                {statusLabel}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-[11px] text-text-muted">
+              {autoSaveState === "saving"
+                ? t("config.openaiAccount.autoSaving")
+                : autoSaveState === "saved"
+                  ? t("config.openaiAccount.autoSaved")
+                  : autoSaveState === "deferred"
+                    ? t(autoSaveOnLogin
+                      ? "config.openaiAccount.autoSaveDeferred"
+                      : "config.openaiAccount.newModelSaveDeferred")
+                  : status?.auth_path
+                    ? t("config.openaiAccount.statusAuthPath", { path: status.auth_path })
+                    : t("config.openaiAccount.description")}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => void handleRefreshAuth()}
+            disabled={!isConnected || (login ? pollingLogin : loadingStatus) || refreshCoolingDown}
+            className="rounded border border-border bg-bg px-2 py-1 text-[11px] text-text hover:bg-secondary/60 disabled:opacity-40"
+            title={refreshCoolingDown ? t("config.openaiAccount.refreshCoolingDown") : t("config.openaiAccount.refresh")}
+          >
+            {(login ? pollingLogin : loadingStatus) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          </button>
+          {authenticated ? (
+            <button
+              type="button"
+              onClick={() => void handleLogout()}
+              disabled={!isConnected || loggingOut}
+              className="inline-flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 text-[11px] text-text hover:bg-danger-subtle hover:text-danger disabled:opacity-40"
+            >
+              {loggingOut ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <LogOut className="h-3.5 w-3.5" />}
+              {t("config.openaiAccount.logout")}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleStartLogin()}
+              disabled={!isConnected || startingLogin || Boolean(login)}
+              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-white shadow-sm hover:bg-accent-hover disabled:opacity-40"
+            >
+              {startingLogin ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+              {startingLogin
+                ? t("config.openaiAccount.connecting")
+                : login
+                  ? t("config.openaiAccount.waitingAuth")
+                  : t("config.openaiAccount.connect")}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 rounded-md border border-border bg-bg px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-[11px] font-medium text-text">{t("config.openaiAccount.modelSelectLabel")}</div>
+            <div className="mt-0.5 text-[10px] text-text-muted">
+              {loadingModels
+                ? t("config.openaiAccount.loadingModels")
+                : t("config.openaiAccount.modelsLoaded", { count: visibleModelOptions.length })}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshModelDefaults(status?.base_url)}
+            disabled={!isConnected || !hasStoredAuth || loadingModels}
+            className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60 disabled:opacity-40"
+          >
+            {loadingModels ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {t("config.openaiAccount.refreshModels")}
+          </button>
+        </div>
+        <select
+          value={selectedModelName}
+          onChange={(event) => handleModelSelectChange(event.target.value)}
+          disabled={!hasStoredAuth || loadingModels || visibleModelOptions.length === 0}
+          className="mt-2 w-full rounded border border-border bg-card px-2 py-1 text-xs text-text disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
+        >
+          {!selectedModelName ? (
+            <option value="" disabled>{t("config.openaiAccount.modelSelectPlaceholder")}</option>
+          ) : null}
+          {visibleModelOptions.map((modelId) => (
+            <option key={modelId} value={modelId}>{modelId}</option>
+          ))}
+        </select>
+        {hasUnavailableConfiguredModel ? (
+          <div className="mt-1 text-[11px] text-warn">
+            {t("config.openaiAccount.configuredModelUnavailable", { model: currentModelName })}
+          </div>
+        ) : null}
+        {modelsError ? (
+          <div className="mt-1 text-[11px] text-danger">{modelsError}</div>
+        ) : null}
+      </div>
+
+      {login ? (
+        <div className="mt-2 rounded-md border border-border bg-bg px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="text-[11px] text-text-muted">{t("config.openaiAccount.authCodeLabel")}</div>
+              <div className="mt-1 font-mono text-lg font-semibold tracking-wide text-text">{login.user_code}</div>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => window.open(login.verification_uri, "_blank", "noopener,noreferrer")}
+                className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                {t("config.openaiAccount.openAuthPage")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCopyCode()}
+                className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                {copied ? t("config.openaiAccount.copied") : t("config.openaiAccount.copyCode")}
+              </button>
+            </div>
+          </div>
+          <div className="mt-1 text-[11px] text-text-muted">{t("config.openaiAccount.waiting")}</div>
+          <div className="mt-0.5 text-[11px] text-text-muted">{t("config.openaiAccount.loginTimeHint")}</div>
+          {copyError ? (
+            <div className="mt-1 text-[11px] text-danger">{copyError}</div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {authError ? (
+        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-2 py-1.5 text-[11px] text-danger">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{authError}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** 多默认模型管理（受控组件，编辑状态由父组件持有） */
 function MultiModelSection({
   models,
@@ -909,6 +1758,7 @@ function MultiModelSection({
   agents,
   onDeleteModel,
   onClearExternalError,
+  onModelsAutoSave,
   t,
 }: {
   models: ModelEntry[];
@@ -918,6 +1768,7 @@ function MultiModelSection({
   agents?: AgentEntry[];
   onDeleteModel?: (idx: number, modelName: string, references: string[]) => void;
   onClearExternalError?: () => void;
+  onModelsAutoSave?: (models: ModelEntry[], identity: ModelIdentity) => Promise<ModelAutoSaveResult>;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [validatingModel, setValidatingModel] = useState<number | null>(null);
@@ -929,6 +1780,13 @@ function MultiModelSection({
   });
   const [localError, setLocalError] = useState<string | null>(null);
   const [validateToast, setValidateToast] = useState<{ show: boolean; success: boolean; message: string }>({ show: false, success: true, message: "" });
+  const modelsRef = useRef(models);
+  modelsRef.current = models;
+
+  const emitModelsChange = useCallback((nextModels: ModelEntry[]) => {
+    modelsRef.current = nextModels;
+    onModelsChange(nextModels);
+  }, [onModelsChange]);
 
   const resetNewModelDraft = () => {
     setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
@@ -950,7 +1808,16 @@ function MultiModelSection({
   const handleNewModelChange = (field: keyof ModelEntry, value: string) => {
     setLocalError(null);
     onClearExternalError?.();
-    setNewModel((prev) => ({ ...prev, [field]: value }));
+    setNewModel((prev) => {
+      if (field === "model_provider" && isOpenAIAccountProvider(value)) {
+        return {
+          ...prev,
+          ...buildOpenAIAccountModelDefaults(prev),
+          model_name: "",
+        };
+      }
+      return { ...prev, [field]: value };
+    });
   };
 
   const getModelAgentReferences = (modelName: string, modelProvider: string, modelApiBase: string): string[] => {
@@ -1023,7 +1890,15 @@ function MultiModelSection({
     // api_base URL 格式校验（仅在保存时校验，实时校验会导致用户输入过程中不断报错）
 
     const copy = [...models];
-    copy[idx] = { ...copy[idx], [field]: value };
+    if (field === "model_provider" && isOpenAIAccountProvider(value)) {
+      copy[idx] = {
+        ...copy[idx],
+        ...buildOpenAIAccountModelDefaults(copy[idx]),
+        model_name: "",
+      };
+    } else {
+      copy[idx] = { ...copy[idx], [field]: value };
+    }
     if (field === "model_name" && value !== models[idx].model_name) {
       if (idx === 0) {
         // 主对话默认换组：成为新组的组内默认，新组原默认让位
@@ -1038,7 +1913,26 @@ function MultiModelSection({
         copy[idx] = { ...copy[idx], is_default: false };
       }
     }
-    onModelsChange(copy);
+    emitModelsChange(copy);
+  };
+
+  const patchModel = async (
+    identity: ModelIdentity,
+    patch: Partial<ModelEntry>,
+    options?: ModelPatchOptions,
+  ): Promise<ModelAutoSaveResult> => {
+    onClearExternalError?.();
+    setLocalError(null);
+    const currentModels = modelsRef.current;
+    const nextModels = patchModelSnapshot(currentModels, identity, patch);
+    if (nextModels === currentModels) {
+      return "deferred";
+    }
+    emitModelsChange(nextModels);
+    if (options?.autoSave && onModelsAutoSave) {
+      return onModelsAutoSave(nextModels, identity);
+    }
+    return "deferred";
   };
 
   const removeModel = (idx: number) => {
@@ -1068,7 +1962,7 @@ function MultiModelSection({
       }
     }
     copy.unshift(target);
-    onModelsChange(copy);
+    emitModelsChange(copy);
     setExpandedIdx((prev) => {
       if (prev === null) return null;
       if (prev === idx) return 0;
@@ -1116,12 +2010,13 @@ function MultiModelSection({
         return prev;
       });
     }
-    onModelsChange(copy);
+    emitModelsChange(copy);
   };
 
   const handleAddNew = () => {
     const name = newModel.model_name.trim();
     if (!name) return;
+    const isNewOpenAIAccount = isOpenAIAccountProvider(newModel.model_provider);
 
     // 字段长度校验
     if (name.length > MAX_MODEL_NAME_LENGTH) {
@@ -1141,7 +2036,7 @@ function MultiModelSection({
       return;
     }
 
-    if (!newModel.api_key.trim()) {
+    if (!isNewOpenAIAccount && !newModel.api_key.trim()) {
       setLocalError(t("config.modelList.apiKeyRequired"));
       return;
     }
@@ -1163,18 +2058,25 @@ function MultiModelSection({
     setLocalError(null);
     // 新增条目：同名组已有条目时 is_default=false，否则 is_default=true
     const sameNameExists = models.some((m) => m.model_name === name);
-    const entry: ModelEntry = { ...newModel, model_name: name, is_default: !sameNameExists };
-    onModelsChange([...models, entry]);
+    const entry: ModelEntry = {
+      ...newModel,
+      ...(isNewOpenAIAccount ? buildOpenAIAccountModelDefaults(newModel) : {}),
+      model_name: name,
+      is_default: !sameNameExists,
+    };
+    emitModelsChange([...models, entry]);
     setExpandedIdx(models.length); // 自动展开新增的条目
     setAddingNew(false);
     setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
   };
 
+  const newModelIsOpenAIAccount = isOpenAIAccountProvider(newModel.model_provider);
+
   return (
     <>
       <div className="space-y-2">
         {localError && (
-          <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-xs text-danger">
+          <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-xs text-danger">
             {localError}
           </div>
         )}
@@ -1200,6 +2102,7 @@ function MultiModelSection({
           const vr = validateResults[getModelValidationKey(model)];
           const isDefault = model.is_default !== false;
           const isPrimaryDefault = idx === 0;
+          const modelIsOpenAIAccount = isOpenAIAccountProvider(model.model_provider);
           // 同名模型计数，用于区分显示
           const sameNameIndices = models.reduce<number[]>((acc, m, i) => {
             if (m.model_name === model.model_name) acc.push(i);
@@ -1217,9 +2120,10 @@ function MultiModelSection({
                   className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                   onClick={() => setExpandedIdx(isExpanded ? null : idx)}
                 >
-                  <svg className={`w-3 h-3 transition-transform shrink-0 ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <svg className={`w-3 h-3  shrink-0 ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                   </svg>
+                  <ModelProviderIcon model={model} className="shrink-0" />
                   <span className="truncate">{displayName || t("config.modelList.untitled")}</span>
                   {isPrimaryDefault && (
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30">{t("config.modelList.primaryDefault")}</span>
@@ -1275,7 +2179,7 @@ function MultiModelSection({
                   {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
                     <div key={field} className="flex items-center gap-2 text-xs">
                       <label className="w-28 text-text-muted shrink-0">
-                        {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                        {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && modelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
                       </label>
                       {field === "model_provider" ? (
                         <select
@@ -1298,14 +2202,36 @@ function MultiModelSection({
                       ) : (
                         <input
                           type={field === "api_key" ? "password" : "text"}
-                          value={models[idx]?.[field] ?? ""}
+                          value={field === "model_name" && modelIsOpenAIAccount ? "" : models[idx]?.[field] ?? ""}
                           onChange={(e) => updateModel(idx, field, e.target.value)}
-                          className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                          placeholder={field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
+                          disabled={(field === "api_key" || field === "api_base" || field === "model_name") && modelIsOpenAIAccount}
+                          className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
+                          placeholder={
+                            field === "model_name" && modelIsOpenAIAccount
+                              ? t("config.openaiAccount.modelNameUseDropdown")
+                              : field === "api_base" && modelIsOpenAIAccount
+                                ? t("config.openaiAccount.apiBaseManaged")
+                              : field === "api_key" ? (
+                                modelIsOpenAIAccount
+                                  ? t("config.openaiAccount.apiKeyNotNeeded")
+                                  : t("config.modelList.apiKeyPlaceholder")
+                              ) : ""
+                          }
                         />
                       )}
                     </div>
                   ))}
+                  {modelIsOpenAIAccount ? (
+                    <OpenAIAccountAuthPanel
+                      model={model}
+                      isConnected={isConnected}
+                      onModelPatch={(patch, options) => patchModel({
+                        originIndex: model.origin_index,
+                        fallbackIndex: idx,
+                      }, patch, options)}
+                      t={t}
+                    />
+                  ) : null}
                   {/* is_default 勾选框 */}
                   <div className="flex items-center gap-2 text-xs">
                     <label className="w-28 text-text-muted shrink-0">{t("config.modelList.isDefault")}</label>
@@ -1331,7 +2257,7 @@ function MultiModelSection({
             {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0">
-                  {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                  {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && newModelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
                 </label>
                 {field === "model_provider" ? (
                   <select
@@ -1354,20 +2280,45 @@ function MultiModelSection({
                 ) : (
                   <input
                     type={field === "api_key" ? "password" : "text"}
-                    value={newModel[field] ?? ""}
+                    value={field === "model_name" && newModelIsOpenAIAccount ? "" : newModel[field] ?? ""}
                     onChange={(e) => handleNewModelChange(field, e.target.value)}
-                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                    placeholder={field === "model_name" ? "e.g. gpt-4o" : field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
+                    disabled={(field === "api_key" || field === "api_base" || field === "model_name") && newModelIsOpenAIAccount}
+                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
+                    placeholder={
+                      field === "model_name"
+                        ? newModelIsOpenAIAccount
+                          ? t("config.openaiAccount.modelNameUseDropdown")
+                          : "e.g. gpt-4o"
+                        : field === "api_base" && newModelIsOpenAIAccount
+                          ? t("config.openaiAccount.apiBaseManaged")
+                        : field === "api_key" ? (
+                          newModelIsOpenAIAccount
+                            ? t("config.openaiAccount.apiKeyNotNeeded")
+                            : t("config.modelList.apiKeyPlaceholder")
+                        ) : ""
+                    }
                   />
                 )}
               </div>
             ))}
+            {newModelIsOpenAIAccount ? (
+              <OpenAIAccountAuthPanel
+                model={newModel}
+                isConnected={isConnected}
+                autoSaveOnLogin={false}
+                onModelPatch={(patch) => {
+                  setNewModel((prev) => ({ ...prev, ...patch }));
+                  return "deferred";
+                }}
+                t={t}
+              />
+            ) : null}
             <div className="flex justify-end gap-2 pt-1">
               <button type="button" onClick={handleCancelAddNew} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
               <button
                 type="button"
                 onClick={handleAddNew}
-                disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || !newModel.api_key.trim() || !newModel.model_provider.trim()}
+                disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || (!newModelIsOpenAIAccount && !newModel.api_key.trim()) || !newModel.model_provider.trim()}
                 className="btn primary !px-3 !py-1 text-xs"
               >
                 {t("common.confirm")}
@@ -1556,7 +2507,7 @@ function MultiAgentSection({
                 className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                 onClick={() => setExpandedIdx(isExpanded ? null : idx)}
               >
-                <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                <svg className={`w-3 h-3  ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
                 <span className="truncate">{agent.name || t("config.agentList.untitled")}</span>
@@ -1937,6 +2888,21 @@ function TeamItemSection({
     return labels[field] || field;
   };
 
+  // 内置默认 leader 的 display_name/persona 是种子文案，与当前 UI 语言无关；
+  // 未被用户改动时按当前语言展示对应译文，避免切换语言后仍显示另一语言的默认文案。
+  // 只影响展示，不改动 team.leader 里的实际值，因此不会把翻译结果回写进全局 config.yaml。
+  const LEADER_DEFAULT_TEXT_KEYS: Record<string, string> = {
+    display_name: "config.defaults.teamLeaderDisplayName",
+    persona: "config.defaults.teamLeaderPersona",
+  };
+
+  const getLeaderInputDisplayValue = (field: string, rawValue: string): string => {
+    const i18nKey = LEADER_DEFAULT_TEXT_KEYS[field];
+    if (!i18nKey) return rawValue;
+    const isUnmodifiedDefault = ["zh", "en"].some((lng) => rawValue === t(i18nKey, { lng }));
+    return isUnmodifiedDefault ? t(i18nKey) : rawValue;
+  };
+
   const getMemberFieldLabel = (field: string): string => {
     const labels: Record<string, string> = {
       member_name: t("config.keys.teamMemberName"),
@@ -2004,11 +2970,11 @@ function TeamItemSection({
             aria-checked={team.enable_permissions}
             onClick={updateTeamPermissions}
             title={t("config.keys.teamEnablePermissions")}
-            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${team.enable_permissions ? "bg-ok" : "bg-secondary"
+            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${team.enable_permissions ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"
               }`}
           >
             <span
-              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${team.enable_permissions ? "translate-x-4" : "translate-x-0"
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${team.enable_permissions ? "translate-x-4" : "translate-x-0"
                 }`}
             />
           </button>
@@ -2023,7 +2989,7 @@ function TeamItemSection({
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
           <span>{t("config.team.leader")}</span>
-          <svg className={`w-3 h-3 transition-transform ${openLeader ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <svg className={`w-3 h-3  ${openLeader ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
         </button>
@@ -2057,7 +3023,7 @@ function TeamItemSection({
                   <div className="flex-1">
                     <input
                       type="text"
-                      value={team.leader[field] ?? ""}
+                      value={getLeaderInputDisplayValue(field, team.leader[field] ?? "")}
                       onChange={(e) => updateLeader(field, e.target.value)}
                       maxLength={field === "persona" ? 2048 : 64}
                       className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && memberNameError?.field === 'leader' ? "border-danger" : "border-border"}`}
@@ -2081,7 +3047,7 @@ function TeamItemSection({
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
           <span>{t("config.team.teammate")}</span>
-          <svg className={`w-3 h-3 transition-transform ${openTeammate ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <svg className={`w-3 h-3  ${openTeammate ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
         </button>
@@ -2134,7 +3100,7 @@ function TeamItemSection({
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
           <span>{t("config.team.predefinedMembers")} ({team.predefined_members.length})</span>
-          <svg className={`w-3 h-3 transition-transform ${openMembers ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <svg className={`w-3 h-3  ${openMembers ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
         </button>
@@ -2150,7 +3116,7 @@ function TeamItemSection({
                       className="flex items-center gap-2 text-xs font-medium text-text truncate flex-1 text-left"
                       onClick={() => setExpandedMemberIdx(isExpanded ? null : idx)}
                     >
-                      <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                      <svg className={`w-3 h-3  ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                       </svg>
                       <span className="truncate">{member.member_name || t("config.agentList.untitled")}</span>
@@ -2356,7 +3322,7 @@ function TeamsSection({
                 className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                 onClick={() => setExpandedIdx(isExpanded ? null : idx)}
               >
-                <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                <svg className={`w-3 h-3  ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
                 <span className="truncate">{team.team_name || t("config.agentList.untitled")}</span>
@@ -2420,6 +3386,7 @@ function TeamsSection({
 export function ConfigPanel({
   config,
   isConnected,
+  sessionId,
   onSaveConfig,
   onSaveAllConfig,
   onValidateModel: _onValidateModel,
@@ -2428,10 +3395,17 @@ export function ConfigPanel({
   onModelValidate,
   onModelsRefresh,
   onAgentsTeamsSave,
+  onHasChangesChange,
 }: ConfigPanelProps) {
   const { t, i18n } = useTranslation();
-  const isProcessing = useChatStore((s) => s.isProcessing);
-  const { availableModels: storeAvailableModels, mode } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
+  const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
+  const availableModels = useSessionStore((s) => s.availableModels);
+  const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent' : 'agent'));
+  const storeAvailableModels = availableModels;
+  const storeAvailableModelsRef = useRef(storeAvailableModels);
+  storeAvailableModelsRef.current = storeAvailableModels;
   const [draftValues, setDraftValues] = useState<Record<string, string>>(() => {
     if (!config) return {};
     const next: Record<string, string> = {};
@@ -2468,23 +3442,28 @@ export function ConfigPanel({
     setError(null);
   };
 
+  const fetchInstalledSkills = useCallback(async () => {
+    try {
+      const data = await webRequest<{ skills?: { name: string; installed?: boolean }[] }>(
+        "skills.list",
+        { with_installed: true, session_id: sessionId }
+      );
+      const filteredSkills = (data.skills || [])
+        .filter((s) => s.installed !== false)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      setInstalledSkills(filteredSkills);
+    } catch (error) {
+      console.error("Failed to fetch skills:", error);
+    }
+  }, [sessionId]);
+
+  // 挂载时预加载（仅一次），之后仅在切到 Agent 配置 Tab 时刷新
+  const skillsFetchInitRef = useRef(false);
   useEffect(() => {
-    const fetchSkills = async () => {
-      try {
-        const data = await webRequest<{ skills?: { name: string; installed?: boolean }[] }>(
-          "skills.list",
-          { with_installed: true }
-        );
-        const filteredSkills = (data.skills || [])
-          .filter((s) => s.installed !== false)
-          .sort((a, b) => a.name.localeCompare(b.name));
-        setInstalledSkills(filteredSkills);
-      } catch (error) {
-        console.error("Failed to fetch skills:", error);
-      }
-    };
-    fetchSkills();
-  }, []);
+    if (skillsFetchInitRef.current && configTab !== 'agent') return;
+    skillsFetchInitRef.current = true;
+    fetchInstalledSkills();
+  }, [configTab, fetchInstalledSkills]);
 
   // 当技能列表更新时，自动清理 agent 配置中已卸载的技能
   useEffect(() => {
@@ -2834,11 +3813,12 @@ export function ConfigPanel({
   const topLevelGroupCount = groups.length;
   const hasConfigChanges = useMemo(() => {
     const keys = Object.keys(normalizedConfig);
-    return keys.some((key) => (draftValues[key] ?? "") !== normalizedConfig[key]);
+    return keys.some((key) => !PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key) && (draftValues[key] ?? "") !== normalizedConfig[key]);
   }, [draftValues, normalizedConfig]);
   const configUpdates = useMemo(() => {
     const updates: Record<string, string> = {};
     for (const key of Object.keys(normalizedConfig)) {
+      if (PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key)) continue;
       const draftValue = draftValues[key] ?? "";
       if (draftValue !== normalizedConfig[key]) {
         updates[key] = draftValue;
@@ -2848,16 +3828,9 @@ export function ConfigPanel({
   }, [draftValues, normalizedConfig]);
   const hasModelChanges = useMemo(() => {
     if (draftModels.length !== storeAvailableModels.length) return true;
-    return draftModels.some((dm, i) => {
-      const om = storeAvailableModels[i];
-      if (!om) return true;
-      return dm.model_name !== om.model_name || dm.api_base !== om.api_base
-        || dm.api_key !== om.api_key || dm.model_provider !== om.model_provider
-        || (dm.alias ?? "") !== (om.alias ?? "")
-        || (dm.reasoning_level ?? "") !== (om.reasoning_level ?? "")
-        || dm.is_default !== om.is_default
-        || (dm.temperature ?? 0.95) !== (om.temperature ?? 0.95)
-        || (dm.timeout ?? 1800) !== (om.timeout ?? 1800);
+    return draftModels.some((draftModel, index) => {
+      const persistedModel = storeAvailableModels[index];
+      return !persistedModel || !modelEntriesEqual(draftModel, persistedModel);
     });
   }, [draftModels, storeAvailableModels]);
 
@@ -2898,8 +3871,16 @@ export function ConfigPanel({
     return false;
   }, [draftAgents, draftTeams, initialAgents, initialTeams]);
   const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
+  useEffect(() => {
+    onHasChangesChange?.(hasChanges);
+  }, [hasChanges, onHasChangesChange]);
   const missingRequiredModelFields = useMemo(
-    () => REQUIRED_MODEL_FIELDS.filter((key) => !(draftValues[key] ?? "").trim()),
+    () => REQUIRED_MODEL_FIELDS.filter((key) => {
+      if (key === "api_key" && isOpenAIAccountProvider(draftValues.model_provider)) {
+        return false;
+      }
+      return !(draftValues[key] ?? "").trim();
+    }),
     [draftValues],
   );
   const hasMissingRequiredModelFields = missingRequiredModelFields.length > 0;
@@ -2911,7 +3892,11 @@ export function ConfigPanel({
     [draftAgents],
   );
   const hasMissingModelApiKey = useMemo(
-    () => draftModels.some((m) => !m.api_key.trim()),
+    () => draftModels.some((m) => !isOpenAIAccountProvider(m.model_provider) && !m.api_key.trim()),
+    [draftModels],
+  );
+  const hasMissingModelName = useMemo(
+    () => draftModels.some((m) => !m.model_name.trim()),
     [draftModels],
   );
   const hasMissingModelApiBase = useMemo(
@@ -2924,7 +3909,7 @@ export function ConfigPanel({
       if (!agent.name.trim()) return t('config.validation.agentNameRequired');
       if (!agent.model.provider.trim()) return t('config.validation.agentModelProviderRequired');
       if (!agent.model.api_base.trim()) return t('config.validation.agentModelApiBaseRequired');
-      if (!agent.model.api_key.trim()) return t('config.validation.agentModelApiKeyRequired');
+      if (!isOpenAIAccountProvider(agent.model.provider) && !agent.model.api_key.trim()) return t('config.validation.agentModelApiKeyRequired');
       if (!agent.model.model.trim()) return t('config.validation.agentModelNameRequired');
     }
     if (draftAgents.length > 0 && draftTeams.length === 0) {
@@ -2975,51 +3960,69 @@ export function ConfigPanel({
       setError(null);
     }
 
-    // 自动更新引用模型的agent
-    const updatedAgents = draftAgents.map((agent) => {
-      // 找到agent当前引用的模型在旧模型列表中的索引
-      const oldModelIndex = oldModels.findIndex(
-        (m) => m.model_name === agent.model.model
-          && m.model_provider === agent.model.provider
-          && m.api_base === agent.model.api_base
-      );
-      
-      if (oldModelIndex >= 0 && oldModelIndex < models.length) {
-        const newModel = models[oldModelIndex];
-        const oldModel = oldModels[oldModelIndex];
-        
-        // 检查模型是否有变化
-        const hasModelChanged = 
-          newModel.model_name !== oldModel.model_name ||
-          newModel.model_provider !== oldModel.model_provider ||
-          newModel.api_base !== oldModel.api_base ||
-          newModel.api_key !== oldModel.api_key;
-        
-        if (hasModelChanged) {
-          return {
-            ...agent,
-            model: {
-              provider: newModel.model_provider || "",
-              api_base: newModel.api_base || "",
-              api_key: newModel.api_key || "",
-              model: newModel.model_name || "",
-            },
-          };
-        }
-      }
-      return agent;
-    });
-
-    const hasAgentModelUpdated = updatedAgents.some((agent, idx) => 
-      agent.model.model !== draftAgents[idx].model.model ||
-      agent.model.provider !== draftAgents[idx].model.provider ||
-      agent.model.api_base !== draftAgents[idx].model.api_base ||
-      agent.model.api_key !== draftAgents[idx].model.api_key
-    );
-
-    if (hasAgentModelUpdated) {
+    const updatedAgents = syncAgentsWithModelChanges(draftAgents, oldModels, models);
+    if (updatedAgents !== draftAgents) {
       setDraftAgents(updatedAgents);
       setAgentsTeamsEdited(true);
+    }
+  };
+
+  const handleModelsAutoSave = async (
+    models: ModelEntry[],
+    identity: ModelIdentity,
+  ): Promise<ModelAutoSaveResult> => {
+    if (!canAutoSaveOpenAIAccountModel(models, storeAvailableModelsRef.current, identity)) {
+      return "deferred";
+    }
+    if (agentsTeamsUserEdited) {
+      return "deferred";
+    }
+    const synchronizedAgents = syncAgentsWithModelChanges(draftAgents, draftModels, models);
+    const hasDerivedAgentChanges = synchronizedAgents !== draftAgents
+      || (agentsTeamsEdited && hasAgentsTeamsChanges);
+    if (hasDerivedAgentChanges && !onSaveAllConfig) {
+      return "deferred";
+    }
+    if (saving) {
+      throw new Error(t("config.openaiAccount.autoSaveBusy"));
+    }
+    setSaving(true);
+    setError(null);
+    setModelError(null);
+    try {
+      if (onSaveAllConfig) {
+        const payload: ConfigSaveAllPayload = { models };
+        if (hasDerivedAgentChanges) {
+          const agentsTeamsPayload = buildAgentsTeamsPayload(synchronizedAgents, draftTeams);
+          payload.agents = agentsTeamsPayload.agents;
+          payload.team = agentsTeamsPayload.team;
+        }
+        await onSaveAllConfig(payload);
+      } else if (onModelsReplaceAll) {
+        await onModelsReplaceAll(models);
+      } else {
+        throw new Error(t("config.errors.saveFailed"));
+      }
+      if (hasDerivedAgentChanges) {
+        setDraftAgents(synchronizedAgents);
+        setAgentsTeamsJustSaved(true);
+        savedAgentsRef.current = synchronizedAgents;
+        savedTeamsRef.current = draftTeams;
+        setInitialAgents(synchronizedAgents);
+        setInitialTeams(draftTeams);
+        setAgentsTeamsEdited(false);
+        setAgentsTeamsUserEdited(false);
+      }
+      if (onModelsRefresh) {
+        await onModelsRefresh();
+      }
+      return "saved";
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : t("config.errors.saveFailed");
+      setModelError(message);
+      throw new Error(message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -3033,37 +4036,6 @@ export function ConfigPanel({
     setAgentsTeamsUserEdited(false);
     setError(null);
     setModelError(null);
-  };
-
-  const buildAgentsTeamsPayload = (): AgentsTeamsPayload => {
-    const agentsPayload: AgentsTeamsPayload["agents"] = {};
-    for (const agent of draftAgents) {
-      if (!agent.name) continue;
-      agentsPayload[agent.name] = {
-        model: { ...agent.model },
-        skills: agent.skills,
-      };
-    }
-    const validAgentKeys = new Set(Object.keys(agentsPayload));
-    return {
-      agents: agentsPayload,
-      team: draftTeams.map((t) => ({
-        ...t,
-        leader: {
-          ...t.leader,
-          agent_key: validAgentKeys.has(t.leader?.agent_key || "") ? t.leader?.agent_key : "",
-        },
-        teammate: {
-          ...t.teammate,
-          agent_key: validAgentKeys.has(t.teammate?.agent_key || "") ? t.teammate?.agent_key : "",
-        },
-        predefined_members: (t.predefined_members || [])
-          .filter((m) => m.agent_key && validAgentKeys.has(m.agent_key))
-          .map((m) => ({
-            ...m,
-          })),
-      })),
-    };
   };
 
   const resetEditStateAfterSave = () => {
@@ -3082,6 +4054,11 @@ export function ConfigPanel({
     if (hasMissingModelApiKey) {
       setConfigTab("model");
       setModelError(t('config.modelList.apiKeyRequired'));
+      return;
+    }
+    if (hasMissingModelName) {
+      setConfigTab("model");
+      setModelError(t('config.modelList.modelNameRequired'));
       return;
     }
     if (hasMissingModelApiBase) {
@@ -3143,6 +4120,18 @@ export function ConfigPanel({
       return;
     }
 
+    // proactive 数值配置项提交校验：只校验有改动的，挡住负数/浮点/字符串/超范围
+    for (const key of Object.keys(PROACTIVE_INT_SPECS)) {
+      if (key in configUpdates) {
+        const err = validateProactiveInt(key, configUpdates[key], t);
+        if (err) {
+          setConfigTab("other");
+          setError(err);
+          return;
+        }
+      }
+    }
+
     setSaving(true);
     setError(null);
     setModelError(null);
@@ -3156,7 +4145,7 @@ export function ConfigPanel({
           payload.models = draftModels;
         }
         if (hasAgentsTeamsChanges) {
-          const agentsTeamsPayload = buildAgentsTeamsPayload();
+          const agentsTeamsPayload = buildAgentsTeamsPayload(draftAgents, draftTeams);
           payload.agents = agentsTeamsPayload.agents;
           payload.team = agentsTeamsPayload.team;
         }
@@ -3178,7 +4167,7 @@ export function ConfigPanel({
           if (onModelsRefresh) await onModelsRefresh();
         }
         if (hasAgentsTeamsChanges && onAgentsTeamsSave) {
-          const agentsTeamsPayload = buildAgentsTeamsPayload();
+          const agentsTeamsPayload = buildAgentsTeamsPayload(draftAgents, draftTeams);
           const showRestartModal = !(hasConfigChanges || hasModelChanges);
           await onAgentsTeamsSave(agentsTeamsPayload, showRestartModal);
           setAgentsTeamsJustSaved(true);
@@ -3203,7 +4192,7 @@ export function ConfigPanel({
 
   return (
     <div className="flex-1 min-h-0">
-      <div className="card w-full h-full flex flex-col">
+      <div className="card main-panel-card w-full h-full flex flex-col">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
             <h2 className="text-lg font-semibold">{t('config.title')}</h2>
@@ -3212,8 +4201,8 @@ export function ConfigPanel({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {isProcessing && mode !== 'team' ? (
-              <span className="text-xs text-amber-600 dark:text-amber-400">{t('config.errors.processingDisabled')}</span>
+            {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
+              <span className="text-xs text-warn">{t('config.errors.processingDisabled')}</span>
             ) : null}
             <button
               type="button"
@@ -3226,7 +4215,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || (isProcessing && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelName || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}
@@ -3234,29 +4223,34 @@ export function ConfigPanel({
           </div>
         </div>
         {error ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {error}
           </div>
         ) : null}
         {!error && hasMissingRequiredModelFields ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
           </div>
         ) : null}
         {!error && hasMissingModelApiBase ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.apiBaseRequired')}
           </div>
         ) : null}
-        {!error && hasDuplicateAgentNames ? (
+        {!error && hasMissingModelName ? (
           <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+            {t('config.modelList.modelNameRequired')}
+          </div>
+        ) : null}
+        {!error && hasDuplicateAgentNames ? (
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.agentList.duplicateName')}
           </div>
         ) : null
         }
         {
           !error && agentsTeamsValidationError ? (
-            <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+            <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
               {agentsTeamsValidationError}
             </div>
           ) : null
@@ -3292,23 +4286,28 @@ export function ConfigPanel({
               {configTab === "model" ? (
                 <div role="tabpanel" aria-labelledby="config-tab-model" className="space-y-3 pb-2">
                   {modelError ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {modelError}
                     </div>
                   ) : null}
                   {!modelError && hasMissingRequiredModelFields ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelApiKey ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.apiKeyRequired')}
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelApiBase ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.apiBaseRequired')}
+                    </div>
+                  ) : null}
+                  {!modelError && hasMissingModelName ? (
+                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                      {t('config.modelList.modelNameRequired')}
                     </div>
                   ) : null}
                   <div
@@ -3328,6 +4327,7 @@ export function ConfigPanel({
                         agents={draftAgents}
                         onDeleteModel={handleDeleteModel}
                         onClearExternalError={() => setModelError(null)}
+                        onModelsAutoSave={handleModelsAutoSave}
                         t={t}
                       />
                     </div>
@@ -3474,7 +4474,7 @@ export function ConfigPanel({
         deleteAgentConfirm && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
@@ -3514,7 +4514,7 @@ export function ConfigPanel({
         deleteModelConfirm && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
@@ -3554,7 +4554,7 @@ export function ConfigPanel({
         deleteTeamConfirm && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
@@ -3594,7 +4594,7 @@ export function ConfigPanel({
         deleteTeamMemberConfirm && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">

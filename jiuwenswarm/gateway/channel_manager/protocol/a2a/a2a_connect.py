@@ -8,15 +8,28 @@ from dataclasses import dataclass
 from typing import Any
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel
+from jiuwenswarm.common.e2a.acp.acp_tool_updates import is_reasoning_event
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
+
+try:
+    from a2a.server.agent_execution import AgentExecutor as _AgentExecutorBase
+except ImportError:
+    _AgentExecutorBase = object
+
+# Part-level metadata key marking reasoning/thought content, mirroring the
+# convention popularized by Google ADK (`adk_thought`). A2A itself has no
+# first-class thought field; `Part.metadata` is the official extension point.
+A2A_THOUGHT_METADATA_KEY = "jiuwen_thought"
 
 
 def _raise_missing_a2a_sdk(exc: ImportError) -> None:
     raise RuntimeError(
-        "A2A server is enabled but optional dependency `a2a-sdk[http-server]` is not installed. "
-        "Install with `pip install .[a2a]` or `uv sync --extra a2a`."
+        "A2A server is enabled but optional dependency `a2a-sdk[http-server]>=1.0.0` "
+        "is not installed. Install with `pip install -e \".[a2a]\"` or `uv sync --extra a2a`."
     ) from exc
 
 
@@ -33,6 +46,12 @@ class A2AChannelConfig:
     app_name: str = "JiuwenSwarm Gateway A2A Server"
     app_description: str = "A2A ingress for JiuwenSwarm Gateway"
     app_version: str = "0.1.0"
+    # When True (default), reasoning (thinking) content is streamed to A2A
+    # callers as working-state TaskStatusUpdateEvent messages whose parts
+    # carry the `jiuwen_thought` metadata marker. When False, reasoning is
+    # dropped. Reasoning is never written into the final `response` artifact
+    # either way.
+    expose_reasoning: bool = True
 
 
 @dataclass
@@ -40,49 +59,79 @@ class _PendingA2ARequest:
     queue: asyncio.Queue[Message]
 
 
-class _A2AAgentExecutor:
+class _A2AAgentExecutor(_AgentExecutorBase):
     """A2A SDK AgentExecutor that forwards request via channel callback."""
 
     def __init__(self, channel: "A2AChannel") -> None:
         self._channel = channel
 
+    @staticmethod
+    def _resolve_task(context: Any) -> Any:
+        from a2a.helpers import new_task, new_task_from_user_message
+        from a2a.types import TaskState
+
+        if context.current_task is not None:
+            return context.current_task
+        if context.message is not None:
+            try:
+                return new_task_from_user_message(context.message)
+            except ValueError:
+                task_id = str(
+                    context.task_id
+                    or getattr(context.message, "task_id", None)
+                    or f"a2a_{uuid.uuid4().hex[:12]}"
+                )
+                context_id = str(
+                    context.context_id
+                    or getattr(context.message, "context_id", None)
+                    or f"a2a_ctx_{uuid.uuid4().hex[:8]}"
+                )
+                return new_task(task_id, context_id, TaskState.TASK_STATE_SUBMITTED)
+        task_id = str(context.task_id or f"a2a_{uuid.uuid4().hex[:12]}")
+        context_id = str(context.context_id or f"a2a_ctx_{uuid.uuid4().hex[:8]}")
+        return new_task(task_id, context_id, TaskState.TASK_STATE_SUBMITTED)
+
     async def execute(self, context: Any, event_queue: Any) -> None:
+        from a2a.helpers import new_text_status_update_event
         from a2a.types import (
             Artifact,
-            Part,
+            Message as A2AMessage,
+            Role,
             TaskArtifactUpdateEvent,
             TaskState,
             TaskStatus,
             TaskStatusUpdateEvent,
         )
 
-        request_id = str(context.task_id or f"a2a_{uuid.uuid4().hex[:12]}")
-        task_id = str(context.task_id or request_id)
-        context_id = str(context.context_id or f"a2a_ctx_{uuid.uuid4().hex[:8]}")
-        query, files = self._channel.map_a2a_parts_to_params(
-            getattr(context, "message", None)
-        )
+        task = self._resolve_task(context)
+        task_id = str(task.id)
+        context_id = str(task.context_id)
+        request_id = task_id
+
+        query, files = self._channel.map_a2a_parts_to_params(context.message)
         if not query:
             query = str(context.get_user_input() or "").strip()
         if not query:
+            await event_queue.enqueue_event(task)
             await event_queue.enqueue_event(
-                TaskStatusUpdateEvent(
-                    task_id=task_id,
-                    context_id=context_id,
-                    status=TaskStatus(
-                        state=TaskState.TASK_STATE_FAILED,
-                    ),
+                new_text_status_update_event(
+                    task_id,
+                    context_id,
+                    TaskState.TASK_STATE_FAILED,
+                    "empty query",
                 )
             )
             await event_queue.close()
             return
 
         try:
+            await event_queue.enqueue_event(task)
             await event_queue.enqueue_event(
-                TaskStatusUpdateEvent(
-                    task_id=task_id,
-                    context_id=context_id,
-                    status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
+                new_text_status_update_event(
+                    task_id,
+                    context_id,
+                    TaskState.TASK_STATE_WORKING,
+                    "Processing...",
                 )
             )
             pending = await self._channel.dispatch_a2a_request(
@@ -96,11 +145,47 @@ class _A2AAgentExecutor:
             artifact_started = False
             while True:
                 response_msg = await pending.queue.get()
-                response_parts = self._channel.message_to_a2a_parts(
-                    response_msg,
-                    fallback_to_text=False,
-                )
                 is_terminal = self._channel.is_terminal_message(response_msg)
+                is_reasoning = self._channel.is_reasoning_message(response_msg)
+
+                # Reasoning never enters the response artifact. When exposed,
+                # it is streamed as working-state status updates with thought
+                # metadata so callers can render or ignore it structurally.
+                if not is_terminal and is_reasoning:
+                    if self._channel.config.expose_reasoning:
+                        thought_parts = self._channel.message_to_a2a_parts(
+                            response_msg,
+                            fallback_to_text=False,
+                        )
+                        if thought_parts:
+                            await event_queue.enqueue_event(
+                                TaskStatusUpdateEvent(
+                                    task_id=task_id,
+                                    context_id=context_id,
+                                    status=TaskStatus(
+                                        state=TaskState.TASK_STATE_WORKING,
+                                        message=A2AMessage(
+                                            message_id=f"{task_id}_thought_{uuid.uuid4().hex[:8]}",
+                                            task_id=task_id,
+                                            context_id=context_id,
+                                            role=Role.ROLE_AGENT,
+                                            parts=thought_parts,
+                                        ),
+                                    ),
+                                )
+                            )
+                    continue
+
+                # A terminal reasoning chunk still closes the task but must
+                # not leak thinking text into the response artifact.
+                response_parts = (
+                    []
+                    if is_reasoning
+                    else self._channel.message_to_a2a_parts(
+                        response_msg,
+                        fallback_to_text=False,
+                    )
+                )
                 if (
                     is_terminal
                     and not response_parts
@@ -162,10 +247,12 @@ class _A2AAgentExecutor:
             await event_queue.close()
 
     async def cancel(self, context: Any, event_queue: Any) -> None:
-        from a2a.types import Message as A2AMessage, Part, Role, TaskState, TaskStatus, TaskStatusUpdateEvent
+        from a2a.types import TaskState, TaskStatus, TaskStatusUpdateEvent
 
-        task_id = str(context.task_id or "a2a")
-        context_id = str(context.context_id or f"a2a_ctx_{uuid.uuid4().hex[:8]}")
+        task = context.current_task or self._resolve_task(context)
+        task_id = str(context.task_id or task.id)
+        context_id = str(context.context_id or task.context_id)
+        await event_queue.enqueue_event(task)
         await event_queue.enqueue_event(
             TaskStatusUpdateEvent(
                 task_id=task_id,
@@ -202,10 +289,11 @@ class A2AChannel(BaseChannel):
             return
 
         try:
-            from a2a.server.apps import A2AFastAPIApplication
             from a2a.server.request_handlers import DefaultRequestHandler
+            from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
             from a2a.server.tasks import InMemoryPushNotificationConfigStore, InMemoryTaskStore
             from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+            from fastapi import FastAPI
         except ImportError as exc:
             _raise_missing_a2a_sdk(exc)
         import uvicorn
@@ -217,7 +305,7 @@ class A2AChannel(BaseChannel):
             supported_interfaces=[
                 AgentInterface(
                     url=f"http://{self.config.host}:{self.config.port}{self.config.rpc_path}",
-                    protocol_binding="jsonrpc",
+                    protocol_binding="JSONRPC",
                     protocol_version=self.config.protocol_version,
                 )
             ],
@@ -239,17 +327,14 @@ class A2AChannel(BaseChannel):
         request_handler = DefaultRequestHandler(
             agent_executor=_A2AAgentExecutor(self),
             task_store=InMemoryTaskStore(),
+            agent_card=agent_card,
             push_config_store=InMemoryPushNotificationConfigStore(),
         )
-        app_builder = A2AFastAPIApplication(
-            agent_card=agent_card,
-            http_handler=request_handler,
-        )
-        fastapi_app = app_builder.build(
-            rpc_url=self.config.rpc_path,
-            agent_card_url=self.config.card_path,
-            extended_agent_card_url=self.config.extended_card_path,
-        )
+        routes = [
+            *create_agent_card_routes(agent_card, card_url=self.config.card_path),
+            *create_jsonrpc_routes(request_handler, rpc_url=self.config.rpc_path),
+        ]
+        fastapi_app = FastAPI(routes=routes)
 
         uv_cfg = uvicorn.Config(
             app=fastapi_app,
@@ -302,7 +387,7 @@ class A2AChannel(BaseChannel):
         self._pending.clear()
         logger.info("[A2AChannel] stopped")
 
-    async def send(self, msg: Message) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         pending = self._pending.get(str(msg.id))
         if pending is None:
             return
@@ -357,6 +442,12 @@ class A2AChannel(BaseChannel):
         return ""
 
     @staticmethod
+    def is_reasoning_message(msg: Message) -> bool:
+        """Whether the message carries reasoning (thinking) content."""
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        return is_reasoning_event(msg.event_type, payload)
+
+    @staticmethod
     def message_to_a2a_parts(msg: Message, *, fallback_to_text: bool = True) -> list[Any]:
         """Map internal message payload to A2A response parts."""
         from a2a.types import Part
@@ -369,13 +460,17 @@ class A2AChannel(BaseChannel):
             error_text = str(payload.get("error") or payload.get("content") or "agent request failed")
             return [Part(text=error_text)]
 
+        thought_metadata = (
+            {A2A_THOUGHT_METADATA_KEY: True} if A2AChannel.is_reasoning_message(msg) else None
+        )
+
         content = payload.get("content")
         if isinstance(content, str) and content.strip():
             normalized_content = content.strip()
             if not A2AChannel.is_completion_sentinel_text(normalized_content):
-                parts.append(Part(text=normalized_content))
+                parts.append(Part(text=normalized_content, metadata=thought_metadata))
         elif content is not None and not isinstance(content, (dict, list)):
-            parts.append(Part(text=str(content)))
+            parts.append(Part(text=str(content), metadata=thought_metadata))
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             normalized_result = result.strip()

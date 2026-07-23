@@ -228,10 +228,112 @@ def test_format_skills_list_for_notice_im_invariants() -> None:
     assert format_skills_list_for_notice({}).strip()
 
 
+def test_format_skills_list_for_notice_groups_like_tui() -> None:
+    """与 TUI skills.ts listSkills 对齐：按 installed 分组、标注来源标签。
+
+    后端 handle_skills_list 对本地已装技能置 installed=True、内置未装置
+    installed=False；渲染须据此分"已安装/可安装"两组，并给每项打
+    [builtin]/[local]/[project] 标签，使 IM 端 /skills list 与 TUI 一致。
+    """
+    out = format_skills_list_for_notice(
+        {
+            "skills": [
+                {"name": "merge-pr", "source": "local", "installed": True, "description": "合并 PR"},
+                {"name": "daily-report", "is_builtin_source": True, "installed": False, "description": "日报"},
+                {"name": "my-proj", "source": "project", "installed": True},
+            ]
+        }
+    )
+    # 分组标题
+    assert "已安装" in out
+    assert "可安装" in out
+    # 标签：local→[local]，builtin_source→[builtin]，project→[project]
+    assert "[local]" in out
+    assert "[builtin]" in out
+    assert "[project]" in out
+    # 名字均出现
+    assert "merge-pr" in out and "daily-report" in out and "my-proj" in out
+    # 已安装组出现在可安装组之前
+    assert out.index("已安装") < out.index("可安装")
+    # 编号各组独立从 1 开始（不跨组连续）：可安装组首项 daily-report 的编号是 1，
+    # 而非接着已安装组的 2。已安装组有 2 项，若跨组连续 daily-report 应为 3。
+    avail_section = out.split("可安装", 1)[1]
+    assert "\n1. daily-report" in avail_section
+
+
+def test_format_skills_list_for_notice_max_items_truncates() -> None:
+    """max_items 形参切实限制输出条目数，超限时显示截断提示。
+
+    回归：重写分组渲染时一度让 for item in skills 全量遍历、底部提示条件
+    shown < len(skills) 恒 False，导致 max_items 成为摆设。本用例锁定：
+    超过 max_items 时只渲染前 max_items 项、分组标题计数反映实际显示数、
+    底部出现"...共 N 项，仅显示前 max_items 项"提示。
+    """
+    skills = [
+        *[{"name": f"ins-{i}", "installed": True} for i in range(3)],  # 3 已安装
+        *[{"name": f"avail-{i}", "installed": False} for i in range(10)],  # 10 可安装
+    ]
+    out = format_skills_list_for_notice({"skills": skills}, max_items=5)
+    # 总数 13 > max_items 5 → 出现截断提示
+    assert "共 13 项" in out
+    assert "仅显示前 5 项" in out
+    # 已安装组 3 项全部显示（配额先满足已安装组）
+    assert "已安装（3）" in out
+    # 可安装组只剩 2 项配额，标题计数应为 2 而非 10
+    assert "可安装（2）" in out
+    # 可安装组只渲染到 avail-1（avail-2..9 不应出现）
+    assert "avail-0" in out
+    assert "avail-1" in out
+    assert "avail-2" not in out
+
+
+def test_truncate_desc_by_bytes_byte_budget_and_word_boundary() -> None:
+    """按 UTF-8 字节预算截断：中英文视觉长度一致，英文不在单词中间断。
+
+    旧实现按字符数(len)截断到 200：中文 200 字符≈600 字节很长很完整，英文 200
+    字符≈200 字节一句话没说完就被切在单词中间(如 immediatel…)。现按 600 字节
+    预算截断，且英文截断点落在词界(空格)。
+    """
+    from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
+        _truncate_desc_by_bytes,
+    )
+    # 短描述原样返回
+    assert _truncate_desc_by_bytes("短描述") == "短描述"
+    assert _truncate_desc_by_bytes("short desc") == "short desc"
+    assert _truncate_desc_by_bytes("") == ""
+
+    # 英文超长：截断点落在空格(词界)，不把单词劈成两半；以 … 结尾。
+    # "word " 每段 5 字符；600 字节恰好容纳若干完整段，截断后不含半截 "wor"/"wo"。
+    long_en = "word " * 200  # 1000 字符，远超 600 字节
+    cut_en = _truncate_desc_by_bytes(long_en)
+    assert cut_en.endswith("…")
+    body = cut_en.rstrip("…").rstrip()
+    # 截断处应落在词界：body 末尾是一个完整 "word"，而非被劈开的 "wor"/"wo"
+    assert body.endswith("word")
+    # 反向验证：若硬截在单词中间会得到 "wor…"/"wo…"，这里不应发生
+    assert not body.endswith("wor")
+    assert not body.endswith("wo")
+
+    # 中文超长：200 汉字 = 600 字节，刚好不超；201 汉字超预算被截
+    exactly_200_cn = "字" * 200
+    assert _truncate_desc_by_bytes(exactly_200_cn) == exactly_200_cn  # 边界：刚好不截
+    over_201_cn = "字" * 201
+    cut_cn = _truncate_desc_by_bytes(over_201_cn)
+    assert cut_cn.endswith("…")
+    # 截断后字节数 <= 600 + "…"(3字节)
+    assert len(cut_cn.encode("utf-8")) <= 600 + 3
+
+    # 中英视觉长度一致：600 字节预算下，英文≈600 字符、中文≈200 字符触发截断
+    assert _truncate_desc_by_bytes("a" * 600) == "a" * 600  # 600 字节，边界不截
+    assert _truncate_desc_by_bytes("a" * 601) != "a" * 601  # 超过即截
+    assert _truncate_desc_by_bytes("字" * 201) != "字" * 201  # 201 汉字=603 字节，超即截
+
+
 def test_first_batch_registry_ids() -> None:
     ids = {e.id for e in FIRST_BATCH_REGISTRY}
     expected = {
         "new_session", "mode", "switch", "skills", "resume",
         "workspace_dir", "branch", "rewind", "recap", "agents", "review", "security-review",
+        "goal",
     }
     assert ids == expected

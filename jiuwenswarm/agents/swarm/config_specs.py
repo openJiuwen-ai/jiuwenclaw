@@ -40,6 +40,8 @@ from openjiuwen.harness.rails import SkillUseRail
 from jiuwenswarm.common.config import (
     get_evolution_auto_save_enabled,
     get_evolution_auto_scan_enabled,
+    get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
     get_skill_create_enabled,
 )
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
@@ -69,6 +71,7 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.CONTEXT_PROCESSOR,
     registry.PLUGIN_RAILS,
     registry.SKILL_RETRIEVAL_PROMPT,
+    registry.SYMPHONY_ORCHESTRATION_PROMPT,
 )
 
 # Tools common to both roles. Each element self-gates on config, so all are
@@ -115,6 +118,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.USER_HOOKS,
     registry.CODE_SKILL_USE,
     registry.SKILL_RETRIEVAL_PROMPT,
+    registry.SYMPHONY_ORCHESTRATION_PROMPT,
 )
 
 # Rails shared with the team profile, appended to the code profile.
@@ -275,10 +279,16 @@ def _acp_enabled(config: dict[str, Any]) -> bool:
 
 
 def _context_processor_params(config: dict[str, Any]) -> dict[str, Any]:
-    """Attribute params for the context-compression rail."""
+    """Attribute params for the context-compression rail.
+
+    ``context_engine_config`` lives under ``react`` in config.yaml; reading it
+    at the top level returned ``{}``, leaving the rail with an empty config and
+    no compressors mounted.
+    """
+    react = _config_section(config, "react")
     return {
         "context_engine_enabled": get_context_engine_enabled(config),
-        "context_engine_config": _config_section(config, "context_engine_config"),
+        "context_engine_config": _config_section(react, "context_engine_config"),
     }
 
 
@@ -292,9 +302,13 @@ def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
 
 def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the leader team skill-evolution rail."""
+    auto_scan = get_evolution_auto_scan_enabled(config)
     return {
         "evolution_model_config": _evolution_model_config(config),
-        "auto_scan": get_evolution_auto_scan_enabled(config),
+        "review_trigger": get_evolution_review_trigger_enabled(
+            config,
+            fallback=auto_scan,
+        ),
         "auto_save": get_evolution_auto_save_enabled(config),
     }
 
@@ -303,7 +317,10 @@ def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the member skill-evolution rail."""
     return {
         "evolution_model_config": _evolution_model_config(config),
-        "auto_scan": get_evolution_auto_scan_enabled(config),
+        "signal_trigger": get_evolution_signal_trigger_enabled(
+            config,
+            fallback=get_evolution_auto_scan_enabled(config),
+        ),
     }
 
 

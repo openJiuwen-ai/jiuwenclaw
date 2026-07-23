@@ -62,7 +62,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Conversation</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="en/Conversation.md">Conversation</a></td>
       <td width="50%">Web conversation entry point, supporting message sending, new sessions, and planning / performance / cluster mode switching.</td>
     </tr>
     <tr>
@@ -72,7 +72,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Session</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="en/Session.md">Session</a></td>
       <td width="50%">Session information management, viewing and restoring historical chats, and deleting session history.</td>
     </tr>
     <tr>
@@ -97,7 +97,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Channels</strong></td>
-      <td width="28%"><a href="en/Channels.md">Channels</a> / <a href="en/ACP_Client_Config.md">ACP Plugin Usage</a> / <a href="en/CLI.md">TUI User Guide</a></td>
+      <td width="28%"><a href="en/Channels.md">Channels</a></td>
       <td width="50%">JiuwenSwarm multi-channel access and interaction.</td>
     </tr>
     <tr>
@@ -112,7 +112,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Logs</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="en/Logs.md">Logs</a></td>
       <td width="50%">System log paths, runtime records, and common troubleshooting entry points.</td>
     </tr>
     <tr>
@@ -155,7 +155,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Agent Team</strong></td>
-      <td width="28%"><a href="en/AgentTeam.md">Agent Teams</a> / Team Skills / <a href="en/DistributedTeam.md">Distributed Team</a></td>
+      <td width="28%"><a href="en/AgentTeam.md">Agent Teams</a> / <a href="en/SwarmSkills.md">Swarm Skills</a> / <a href="en/DistributedTeam.md">Distributed Team</a></td>
       <td width="50%">Supports multi-agent team collaboration, team-level skill orchestration and reuse, and multi-process distributed Team runtime mode.</td>
     </tr>
     <tr>
@@ -183,8 +183,8 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Auto Update</strong></td>
-      <td width="28%"><a href="en/WindowsAutoUpdateDesign.md">Windows Auto-Update Design</a></td>
-      <td width="50%">Windows client auto-update design, flow, and key modules.</td>
+      <td width="28%"><a href="en/WindowsAutoUpdateDesign.md">Desktop Auto-Update Design</a></td>
+      <td width="50%">Windows and macOS desktop auto-update design, flow, and key modules (including pre-release pushes).</td>
     </tr>
     <tr>
       <td width="22%"><strong>Developer Documentation</strong></td>

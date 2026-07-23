@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Orchestrate AgentServer + Gateway in two processes (split layout, one command).
 
 Runs ``jiuwenswarm.server.app_agentserver`` then ``jiuwenswarm.gateway.app_gateway`` with the same
@@ -20,6 +20,7 @@ from jiuwenswarm.dotenv_early import parse_dotenv_early, get_parsed_dotenv
 parse_dotenv_early("jiuwenswarm-app")
 
 # --- Now safe to import jiuwenswarm modules ---
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     cleanup_team_files,
     get_env_file,
@@ -67,6 +68,8 @@ def main() -> None:
         help="Start a named instance from instances.yaml.",
     )
     args = parser.parse_args()
+
+    install_async_dump_handler("app")
 
     # Handle --name: check if bootstrap .env was loaded successfully
     # (parse_dotenv_early() already processed it at module import time)

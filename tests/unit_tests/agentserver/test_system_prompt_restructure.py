@@ -14,10 +14,15 @@ from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 from jiuwenswarm.common import utils as _utils_mod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
-from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
+    build_agent_identity_prompt,
+)
 from jiuwenswarm.agents.harness.common.rails import skill_retrieval_prompt_rail as _skill_retrieval_prompt_mod
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
+from jiuwenswarm.agents.harness.common.rails.symphony_orchestration_prompt_rail import (
+    SymphonyOrchestrationPromptRail,
+)
 
 
 class _TestableJiuWenSwarmDeepAdapter(JiuWenSwarmDeepAdapter):
@@ -96,50 +101,140 @@ class _FakeRuntimeInstance:
         self.ability_manager = _FakeAbilityManager()
 
 
-def test_build_agent_identity_prompt_contains_identity_section_only(monkeypatch):
+def test_build_agent_identity_prompt_contains_identity_section_only():
+    prompt = build_agent_identity_prompt(language="zh")
+
+    assert "# JiuwenSwarm 内部数据" in prompt
+    assert "## Symphony Orchestration" not in prompt
+    assert "`symphony_compose_score`" not in prompt
+    assert "# 消息说明" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
+    enabled_builder = SystemPromptBuilder(language="cn")
+    enabled_agent = _FakeAgent(enabled_builder)
+    enabled_ctx = AgentCallbackContext(
+        agent=enabled_agent,
+        inputs=SimpleNamespace(
+            tools=[SimpleNamespace(name="symphony_compose_score")],
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
+    enabled_rail = SymphonyOrchestrationPromptRail(
+        config_base={"symphony": {"enabled": True}},
+    )
+    enabled_rail.init(enabled_agent)
+    await enabled_rail.before_model_call(enabled_ctx)
+
+    disabled_builder = SystemPromptBuilder(language="cn")
+    disabled_agent = _FakeAgent(disabled_builder)
+    disabled_ctx = AgentCallbackContext(
+        agent=disabled_agent,
+        inputs=SimpleNamespace(
+            tools=[SimpleNamespace(name="symphony_compose_score")],
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
+    disabled_rail = SymphonyOrchestrationPromptRail(
+        config_base={"symphony": {"enabled": False}},
+    )
+    disabled_rail.init(disabled_agent)
+    await disabled_rail.before_model_call(disabled_ctx)
+
+    enabled_prompt = enabled_builder.build()
+    disabled_prompt = disabled_builder.build()
+    assert "## Symphony Orchestration" in enabled_prompt
+    assert "`symphony_compose_score`" in enabled_prompt
+    assert "## Symphony Orchestration" not in disabled_prompt
+    assert "`symphony_compose_score`" not in disabled_prompt
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_prompt_rail_injects_when_tool_visible(
+    monkeypatch,
+):
     monkeypatch.setattr(
         "jiuwenswarm.symphony.config.load_symphony_config",
         lambda: SimpleNamespace(enabled=True),
     )
-    prompt = build_agent_identity_prompt(language="zh")
-    prompt_inline = " ".join(prompt.split())
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=SimpleNamespace(
+            tools=[SimpleNamespace(name="symphony_compose_score")],
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
 
-    assert "# 你的家" in prompt
-    assert "## Symphony Routing" in prompt
+    rail = SymphonyOrchestrationPromptRail()
+    rail.init(agent)
+    await rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "## Symphony Orchestration" in prompt
     assert "`symphony_compose_score`" in prompt
-    assert "skill capabilities, skill chaining, skill ordering" in prompt_inline
-    assert "use `search_skill` to discover external skills" in prompt_inline
-    assert "call `symphony_refresh_score`" in prompt_inline
-    assert "present its returned `content` directly" in prompt
-    assert "# 消息说明" not in prompt
 
 
-def test_build_agent_identity_prompt_omits_symphony_when_disabled(monkeypatch):
+@pytest.mark.asyncio
+async def test_symphony_orchestration_prompt_rail_clears_when_unavailable(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.config.load_symphony_config",
+        lambda: SimpleNamespace(enabled=True),
+    )
+    builder = SystemPromptBuilder(language="cn")
+    builder.add_section(
+        PromptSection(
+            name="symphony_orchestration",
+            content={"cn": "stale orchestration prompt"},
+            priority=42,
+        )
+    )
+    agent = _FakeAgent(builder)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=SimpleNamespace(tools=[SimpleNamespace(name="other_tool")]),
+        session=_FakeSession(),
+        extra={},
+    )
+
+    rail = SymphonyOrchestrationPromptRail()
+    rail.init(agent)
+    await rail.before_model_call(ctx)
+
+    assert "stale orchestration prompt" not in builder.build()
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_prompt_rail_clears_when_disabled(
+    monkeypatch,
+):
     monkeypatch.setattr(
         "jiuwenswarm.symphony.config.load_symphony_config",
         lambda: SimpleNamespace(enabled=False),
     )
-
-    prompt = build_agent_identity_prompt(language="zh")
-
-    assert "## Symphony Routing" not in prompt
-    assert "`symphony_compose_score`" not in prompt
-
-
-def test_build_agent_identity_prompt_respects_config_snapshot():
-    enabled_prompt = build_agent_identity_prompt(
-        language="zh",
-        config_base={"symphony": {"enabled": True}},
-    )
-    disabled_prompt = build_agent_identity_prompt(
-        language="zh",
-        config_base={"symphony": {"enabled": False}},
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=SimpleNamespace(
+            tools=[SimpleNamespace(name="symphony_compose_score")],
+        ),
+        session=_FakeSession(),
+        extra={},
     )
 
-    assert "## Symphony Routing" in enabled_prompt
-    assert "`symphony_compose_score`" in enabled_prompt
-    assert "## Symphony Routing" not in disabled_prompt
-    assert "`symphony_compose_score`" not in disabled_prompt
+    rail = SymphonyOrchestrationPromptRail()
+    rail.init(agent)
+    await rail.before_model_call(ctx)
+
+    assert "## Symphony Orchestration" not in builder.build()
 
 
 def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
@@ -312,15 +407,25 @@ async def test_runtime_git_status_attachment_clears_when_git_context_disappears(
 
 
 @pytest.mark.asyncio
-async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path):
+async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, monkeypatch):
     builder = SystemPromptBuilder(language="en")
     agent = _FakeAgent(builder)
     stale_dir = tmp_path / "missing-worktree"
     project_dir = tmp_path / "project"
     current_dir = project_dir / "current"
     extra_dir = tmp_path / "extra"
+    agent_data_dir = tmp_path / "agent-data"
     current_dir.mkdir(parents=True)
     extra_dir.mkdir()
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
 
     runtime_rail = RuntimePromptRail(language="en", channel="tui")
     runtime_rail.init(agent)
@@ -336,16 +441,90 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path):
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# Current Project Workspace" in prompt
-    assert "Current project directory" in prompt
-    assert "Do not call `pwd`, `ls`" in prompt
+    assert "# Runtime Directory Context" in prompt
+    assert "Current project directory (project root and workspace boundary)" in prompt
+    assert "Current working directory (cwd and Bash default directory)" in prompt
+    assert "Agent internal data directory" in prompt
     assert "# Working Directory Policy" in prompt
+    assert str(project_dir) in prompt
     assert str(current_dir) in prompt
     assert str(stale_dir) not in prompt
     assert str(extra_dir) in prompt
+    assert "System directory" not in prompt
 
     items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     assert [item.id for item in items if item.id.endswith(".trusted_dirs_policy")] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_describes_external_cwd_without_project(tmp_path, monkeypatch):
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeAgent(builder)
+    agent_data_dir = tmp_path / "agent-data"
+    task_dir = tmp_path / "standalone-task"
+    agent_data_dir.mkdir()
+    task_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="en", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=str(task_dir), project_dir=None)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "Current project directory: not set" in prompt
+    assert str(task_dir) in prompt
+    assert "No user project is currently bound" in prompt
+    assert "it is not a project directory" in prompt
+    assert "fallen back to the Agent internal data directory" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_describes_agent_data_cwd_fallback(tmp_path, monkeypatch):
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    agent_data_dir = tmp_path / "agent-data"
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="cn", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=None, project_dir=None)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "当前项目目录：未设置" in prompt
+    assert str(agent_data_dir) in prompt
+    assert "当前工作目录暂时回退到 Agent 内部数据目录" in prompt
+    assert "它仍然是 Agent 内部数据目录，不是用户项目" in prompt
 
 
 @pytest.mark.asyncio
@@ -712,8 +891,20 @@ def test_resolve_enable_task_loop_forces_true_when_skill_create_enabled(monkeypa
     )
 
 
-def test_resolve_enable_task_loop_forces_true_when_auto_scan_enabled(monkeypatch):
+def test_resolve_enable_task_loop_forces_true_when_review_trigger_enabled(monkeypatch):
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    assert (
+        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
+            {"enable_task_loop": False},
+            {"evolution": {"review_trigger": True}},
+        )
+        is True
+    )
+
+
+def test_resolve_enable_task_loop_forces_true_when_legacy_auto_scan_enabled(monkeypatch):
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
@@ -724,12 +915,20 @@ def test_resolve_enable_task_loop_forces_true_when_auto_scan_enabled(monkeypatch
 
 
 def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(monkeypatch):
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
-            {"evolution": {"enabled": True, "auto_scan": False, "skill_create": False}},
+            {
+                "evolution": {
+                    "enabled": True,
+                    "signal_trigger": True,
+                    "review_trigger": False,
+                    "skill_create": False,
+                }
+            },
         )
         is False
     )
@@ -737,6 +936,7 @@ def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(mo
 
 def test_resolve_enable_task_loop_preserves_false_without_enforcers(monkeypatch):
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(

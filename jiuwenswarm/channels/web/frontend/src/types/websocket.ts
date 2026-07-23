@@ -45,7 +45,7 @@ export interface WebConnectOptions {
   apiKey?: string;
   apiBase?: string;
   model?: string;
-  projectPath?: string;
+  projectDir?: string;
 }
 
 export interface WebError extends Error {

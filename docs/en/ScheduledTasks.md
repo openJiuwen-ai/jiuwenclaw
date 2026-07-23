@@ -98,10 +98,15 @@ JiuwenSwarm provides two automation mechanisms: **Scheduled Tasks (Cron)** and *
 | **Cron Expression** | Cron expression | `0 9 * * *` (every day at 9am) |
 | **Status** | Task status | Enable/Disable |
 | **Description** | Task content description | Generate today's work reminder |
-| **Wake Offset Seconds** | Wake-up advance seconds | `300` (5 minutes advance) |
+| **Wake Offset Seconds** | Wake-up advance seconds | `0` (default, no advance wake-up) |
 | **Delivery Channel** | Result delivery channel | `web`, `feishu`, `wechat`, `wecom`, `whatsapp`, `telegram`, etc. |
+| **Project Directory** | Project working directory (absolute path) for task归属 | `/home/user/my-project`; defaults to current session's project |
 
 4. Click **"Create"**, the task will take effect automatically
+
+**Project归属:**
+
+The task is automatically assigned to the project matching `project_dir` (falls back to the default project if no visible project matches). You can then manage cron jobs and their execution sessions by project in the project view.
 
 **Storage Location:**
 
@@ -170,11 +175,25 @@ After creation, tasks can be managed on the frontend page with the following ope
 
 | Operation | Description |
 |-----------|-------------|
-| **Run Now** | Manually trigger the task to execute immediately |
-| **Preview** | View task configuration details |
+| **Run Now** | Manually trigger the task; returns `{accepted, run_id, session_id}` so you can jump to the execution session |
+| **Preview** | View task details (includes `project_id` and `last_session_id`) |
 | **Disable** | Pause the task, no longer auto-trigger |
-| **Update** | Modify task configuration |
+| **Update** | Modify task config (including `project_dir` to reassign project) |
 | **Delete** | Delete the task |
+
+### Bidirectional Task–Session Linking
+
+Each cron execution creates a session. The following fields link tasks and sessions in both directions:
+
+| Field | Location | Description |
+|-------|----------|-------------|
+| `project_id` | CronJob | Project ID the task belongs to |
+| `last_session_id` | CronJob | Session ID of the most recent execution (`null` if never run) |
+| `cron_id` | SessionInfo | Source cron job ID (empty for regular sessions) |
+
+- Task → session: use `last_session_id` from `cron.job.get`
+- Session → task: filter by `cron_id` via `project.get_cron_sessions`
+- Project view: `project.get_sessions` (regular) + `project.get_cron_sessions` (cron) are mutually exclusive
 
 ---
 
@@ -259,7 +278,7 @@ Scheduled task execution results are:
 
 ### Q4: What does wake_offset_seconds do?
 
-`wake_offset_seconds` defines how early to wake up the Agent. For example:
+`wake_offset_seconds` defines how early to wake up the Agent (default `0`, i.e. no advance wake-up). For example, when set to `300` (5 minutes):
 - Task scheduled for 9:00 AM
 - `wake_offset_seconds: 300` (5 minutes)
 - Agent starts preparing at 8:55 AM to ensure execution at 9:00 AM sharp

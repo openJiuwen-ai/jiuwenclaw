@@ -4,9 +4,10 @@
  * 单条消息显示，支持 TTS 朗读
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, memo } from 'react';
 import type { ReactNode } from 'react';
 import {
+  Check,
   Copy,
   Info,
   Square,
@@ -23,6 +24,8 @@ import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
 import { MediaRenderer } from './MediaRenderer';
 import { A2UIMessageContent } from '../../features/a2ui/A2UIMessageContent';
+import { QaSummaryCard } from '../InteractionSlot/QaSummaryCard';
+import { isQaSummaryContent } from '../InteractionSlot/qaSummary';
 import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
 import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
 import { useSpeechSynthesis } from '../../hooks';
@@ -30,8 +33,9 @@ import clsx from 'clsx';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 
-export function MarkdownMessageBody({
+export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
   className,
   testId,
@@ -47,7 +51,7 @@ export function MarkdownMessageBody({
       testId={testId}
     />
   );
-}
+});
 
 export function TeamMemberMessageFrame({
   member,
@@ -160,6 +164,31 @@ export function ContextCompressionLines({
   );
 }
 
+/** 解析 content 里的 {{skill:名称}} 标记，返回 chip 与文字交织的节点数组 */
+function renderRichContent(content: string): ReactNode[] {
+  const parts: ReactNode[] = [];
+  const regex = /\{\{skill:([^}]+)\}\}/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+  while ((match = regex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(content.slice(lastIndex, match.index));
+    }
+    parts.push(
+      <span key={`skill-${key++}`} className="chat-message-skill-chip">
+        <span className="chat-message-skill-chip__icon" aria-hidden="true" />
+        <span className="chat-message-skill-chip__label">{match[1]}</span>
+      </span>
+    );
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < content.length) {
+    parts.push(content.slice(lastIndex));
+  }
+  return parts;
+}
+
 export function getMessageActor(message: Message): string | null {
   if (message.role !== 'system') {
     return null;
@@ -184,7 +213,7 @@ interface MessageItemProps {
   disableA2UIInteraction?: boolean;
 }
 
-export function MessageItem({
+export const MessageItem = memo(function MessageItem({
   message,
   autoSpeak = false,
   showAvatar = true,
@@ -207,6 +236,7 @@ export function MessageItem({
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // TTS
@@ -297,6 +327,8 @@ export function MessageItem({
       document.execCommand('copy');
       document.body.removeChild(textarea);
     }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
   }, [content]);
 
   // 自动朗读新消息（仅助手消息，由父组件通过 autoSpeak 控制）
@@ -320,6 +352,11 @@ export function MessageItem({
     });
   }, [stopGeneratedAudio, stop]);
 
+  // 主动推荐消息 - 使用特殊卡片样式
+  if (message.isProactiveRecommendation) {
+    return <ProactiveRecommendationCard message={message} />;
+  }
+
   // 工具调用/结果消息
   if (role === 'tool') {
     return (
@@ -328,6 +365,11 @@ export function MessageItem({
         toolResult={toolResult}
       />
     );
+  }
+
+  // 交互问答「问题澄清」回显卡（ask_user 确认后前端合成注入）
+  if (isQaSummaryContent(content)) {
+    return <QaSummaryCard content={content} />;
   }
 
   // 系统消息
@@ -532,7 +574,7 @@ export function MessageItem({
               <>
                 {isUser ? (
                   <div className="chat-text">
-                    <span className="whitespace-pre-wrap">{content}</span>
+                    <span className="whitespace-pre-wrap">{renderRichContent(content)}</span>
                   </div>
                 ) : (
                   <A2UIMessageContent
@@ -581,20 +623,34 @@ export function MessageItem({
             <span>{formatTimestamp(timestamp)}</span>
             
             {showCopy && (
-              <button
-                onClick={handleCopy}
-                className="p-1.5 rounded-md transition-colors hover:text-accent hover:bg-secondary"
-                title={t('chatUi.copyMessage')}
-              >
-                <Copy className="w-4 h-4" strokeWidth={1.5} />
-              </button>
+              <div className="relative">
+                {copied && (
+                  <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md">
+                    {t('chatUi.copied')}
+                  </span>
+                )}
+                <button
+                  onClick={handleCopy}
+                  className={clsx(
+                    'p-1.5 rounded-md ',
+                    copied ? 'text-accent' : 'hover:text-accent hover:bg-secondary'
+                  )}
+                  title={t('chatUi.copyMessage')}
+                >
+                  {copied ? (
+                    <Check className="w-4 h-4" strokeWidth={1.5} />
+                  ) : (
+                    <Copy className="w-4 h-4" strokeWidth={1.5} />
+                  )}
+                </button>
+              </div>
             )}
 
             {showTTS && (
               <button
                 onClick={handleSpeak}
                 className={clsx(
-                  'p-1.5 rounded-md transition-colors',
+                  'p-1.5 rounded-md ',
                   isPlaying
                     ? 'text-accent bg-accent/10'
                     : 'hover:text-accent hover:bg-secondary'
@@ -613,7 +669,7 @@ export function MessageItem({
       </div>
     </div>
   );
-}
+});
 
 function formatFileSize(bytes: number | undefined): string {
   if (bytes === undefined || bytes === null || isNaN(bytes)) return '';
@@ -725,7 +781,7 @@ function FileDownloadList({
           <div
             key={`${file.name}-${index}`}
             className={clsx(
-              'flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-all duration-fast',
+              'flex items-center gap-3 rounded-lg border px-3 py-2.5  ',
               expired
                 ? 'border-border/50 bg-card/50 cursor-not-allowed opacity-60'
                 : 'border-border bg-card hover:shadow-md hover:border-border-hover cursor-pointer group'
@@ -755,7 +811,7 @@ function FileDownloadList({
             </div>
             <div
               className={clsx(
-                'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-colors duration-fast',
+                'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
                 expired
                   ? 'text-text-muted/40'
                   : 'text-text-muted group-hover:text-accent group-hover:bg-accent-subtle'

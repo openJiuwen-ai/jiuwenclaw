@@ -38,6 +38,9 @@ from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import (
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
+from jiuwenswarm.agents.harness.common.rails.symphony_orchestration_prompt_rail import (
+    SymphonyOrchestrationPromptRail,
+)
 from jiuwenswarm.agents.harness.team.rails.team_skill_storage_policy_rail import (
     TeamSkillStoragePolicyRail,
 )
@@ -61,6 +64,7 @@ TEAM_WORKSPACE_REPORT_PATH = "swarm.team_workspace_report_path"
 CONTEXT_PROCESSOR = "swarm.context_processor"
 PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
+SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
 
 
@@ -106,6 +110,22 @@ def _build_skill_retrieval_prompt_rail(
     )
 
 
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=SYMPHONY_ORCHESTRATION_PROMPT,
+    description="Leader-only prompt guidance for Symphony orchestration.",
+)
+def _build_symphony_orchestration_prompt_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> SymphonyOrchestrationPromptRail | None:
+    """Build the Symphony orchestration prompt rail for the team leader."""
+    _ = params
+    if getattr(context, "role", "") != "leader":
+        return None
+    return SymphonyOrchestrationPromptRail()
+
+
 class RuntimePromptInput(ConstructionInput):
     """Construction inputs for the member runtime prompt rail."""
 
@@ -146,6 +166,11 @@ def _build_runtime_prompt_rail(
     """
     inp = RuntimePromptInput.resolve(params, context)
     rail = RuntimePromptRail(language=inp.language, channel=inp.channel)
+    # Team members use their own RuntimePromptRail instance. Bind it to the
+    # originating request so runtime state is read from the active session
+    # instead of the process-wide ``default`` state file.
+    rail.set_mode(context.mode)
+    rail.set_session_id(context.session_id)
     # Seed cwd/project_dir so the TUI branch injects the "current project
     # directory" policy and the model answers with the project dir instead of
     # calling `pwd` (which would surface the per-member workspace path).
@@ -399,6 +424,7 @@ __all__ = [
     "CONTEXT_PROCESSOR",
     "PLUGIN_RAILS",
     "SKILL_RETRIEVAL_PROMPT",
+    "SYMPHONY_ORCHESTRATION_PROMPT",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
 ]

@@ -5,6 +5,8 @@ import logging
 import os
 import re
 import sys
+import threading
+import time
 import uuid
 from copy import deepcopy
 from pathlib import Path
@@ -13,6 +15,7 @@ from typing import Any, Optional
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 import yaml
+import portalocker
 
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
@@ -20,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
+SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
+DEFAULT_SWARMFLOW_ENABLED = False
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -101,15 +106,35 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
         mcc = react.get("model_client_config")
         if isinstance(mcc, dict) and "custom_headers" in mcc:
             mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
-    # web channel enable send file tool default
+    # send_file 工具默认开关：web/feishu/xiaoyi 顶层缺 send_file_allowed 时兜底 True。
     channels = config.get("channels", {})
-    if channels.get("web", {}).get("send_file_allowed") is None:
-        channels["web"] = {"send_file_allowed": True}
+    for _ch in ("web", "feishu", "xiaoyi"):
+        _ch_conf = channels.get(_ch)
+        if not isinstance(_ch_conf, dict):
+            _ch_conf = {}
+            channels[_ch] = _ch_conf
+        if _ch_conf.get("send_file_allowed") is None:
+            _ch_conf["send_file_allowed"] = True
+
+
+def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
+    """读取 YAML，遇解析错误重试（应对跨进程写竞态）。"""
+    for attempt in range(max_attempts):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except yaml.YAMLError:
+            if attempt < max_attempts - 1:
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            raise
+    return {}
 
 
 def get_config():
-    with open(get_config_file(), "r", encoding="utf-8") as f:
-        config_base = yaml.safe_load(f) or {}
+    """读取并解析 config.yaml（锁保护 + 跨进程降级重试）。"""
+    config_base = _read_with_retry(get_config_file())
+    # resolve_env_vars 和 _normalize_config 只操作内存数据，在锁外执行以缩短锁持有时间
     config_base = resolve_env_vars(config_base)
     _normalize_config(config_base)
 
@@ -118,28 +143,12 @@ def get_config():
 
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
-    with open(CONFIG_YAML_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    return _read_with_retry(CONFIG_YAML_PATH)
 
 
 def set_config(config):
     with open(CONFIG_YAML_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
-
-
-def is_auto_memory_enabled() -> bool:
-    """Check if auto-memory feature is enabled in config.
-
-    Returns:
-        True if auto_memory_enabled is True in config.yaml, False otherwise.
-        Defaults to True if not configured.
-    """
-    try:
-        config = get_config()
-        return bool(config.get("auto_memory_enabled", False))
-    except Exception:
-        # Default to True if config cannot be read
-        return True
 
 
 def _get_bool_env(value: str | None) -> bool | None:
@@ -164,7 +173,35 @@ def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
     env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
     if env_auto_scan is not None:
         return env_auto_scan
-    return _get_evolution_config(config).get("auto_scan", False)
+    return _get_evolution_config(config).get("auto_scan") is True
+
+
+def get_evolution_signal_trigger_enabled(
+    config: dict[str, Any] | None,
+    *,
+    fallback: bool = False,
+) -> bool:
+    env_signal_trigger = _get_bool_env(os.getenv("EVOLUTION_SIGNAL_TRIGGER"))
+    if env_signal_trigger is not None:
+        return env_signal_trigger
+    signal_trigger = _get_evolution_config(config).get("signal_trigger")
+    if isinstance(signal_trigger, bool):
+        return signal_trigger
+    return fallback
+
+
+def get_evolution_review_trigger_enabled(
+    config: dict[str, Any] | None,
+    *,
+    fallback: bool = False,
+) -> bool:
+    env_review_trigger = _get_bool_env(os.getenv("EVOLUTION_REVIEW_TRIGGER"))
+    if env_review_trigger is not None:
+        return env_review_trigger
+    review_trigger = _get_evolution_config(config).get("review_trigger")
+    if isinstance(review_trigger, bool):
+        return review_trigger
+    return fallback
 
 
 def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
@@ -209,15 +246,76 @@ def load_yaml_round_trip(config_path: Path):
 
 
 def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
-    """ruamel 写回 config，保留注释与格式。"""
+    """ruamel 写回 config，保留注释与格式（原子写入：临时文件 + os.replace）。"""
     rt = YAML()
     rt.preserve_quotes = True
     rt.default_flow_style = False
-    # mapping 2 空格；list 用 sequence=4 + offset=2 保证 dash 前有 2 空格（tools: 下 - todo），否则 list 会变成无缩进
     rt.indent(mapping=2, sequence=4, offset=2)
     rt.width = 4096
-    with open(config_path, "w", encoding="utf-8") as f:
-        rt.dump(data, f)
+    tmp = config_path.with_name(f"{config_path.stem}.{uuid.uuid4().hex}.yaml.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            rt.dump(data, f)
+        _atomic_replace(tmp, config_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _atomic_replace(src: Path, dst: Path, max_attempts: int = 10) -> None:
+    """os.replace 重试：应对 Windows 下目标文件被并发占用导致的 PermissionError。
+
+    max_attempts 为总尝试次数（含首次），非重试次数；至少尝试 1 次。
+    """
+    for attempt in range(max(1, max_attempts)):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == max(1, max_attempts) - 1:
+                raise
+            time.sleep(0.002 * (attempt + 1))
+
+
+# 进程内不可重入锁。portalocker 文件锁同样不可同进程重入，
+# 因此 update_config 的 mutator 内禁止再调用任何走 update_config 的函数
+# （如 ensure_defaults_list_in_config / update_default_models_in_config），
+# 否则同进程二次获取锁会死锁。展示用数据请在事务外、另起独立事务读取。
+_CONFIG_WRITE_LOCK = threading.Lock()
+
+
+def _config_lock_path(config_path: Path) -> Path:
+    """锁文件路径跟随当前 CONFIG_YAML_PATH，避免模块加载时静态绑定。"""
+    return config_path.with_name(f"{config_path.stem}.lock")
+
+
+def update_config(mutator, *, lock_timeout: float = 10.0) -> Any:
+    """跨进程互斥地读-改-写 config.yaml。
+
+    portalocker 文件锁防跨进程并发（AgentServer+Gateway 两个 PID 同时写），
+    threading.Lock 防同进程多线程。整个 load→mutate→dump 在锁内为原子临界区。
+
+    警告：双层锁均不可重入。mutator 内不得调用任何会再次进入 update_config
+    的函数（ensure_defaults_list_in_config、update_default_models_in_config 等），
+    否则同进程二次获取锁将死锁。如需在写盘后读取展示数据，请在 update_config
+    返回后另起一次独立调用（此时锁已释放，安全）。
+    """
+    with _CONFIG_WRITE_LOCK:
+        with portalocker.Lock(
+            str(_config_lock_path(CONFIG_YAML_PATH)),
+            timeout=lock_timeout,
+        ):
+            data = load_yaml_round_trip(CONFIG_YAML_PATH)
+            if data is None:
+                data = {}
+            new_data = mutator(data)
+            if new_data is None:
+                return data
+            dump_yaml_round_trip(CONFIG_YAML_PATH, new_data)
+            return new_data
 
 
 # Backward-compat aliases — downstream modules import the underscore-prefixed names
@@ -258,9 +356,13 @@ def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
 def update_channel_subsection_in_config(
     channel_id: str,
     subsection_id: str,
-    conf: dict[str, Any],
+    conf: dict[str, Any] | list[Any] | Any,
 ) -> None:
-    """更新 channels[channel_id][subsection_id] 并写回。"""
+    """更新 channels[channel_id][subsection_id] 并写回。
+
+    若 ``conf`` 为 dict，则合并（partial update）到现有 subsection 中；
+    若为 list 或其他非 dict 类型，则整体替换 subsection。
+    """
     data = load_yaml_round_trip(CONFIG_YAML_PATH)
     if "channels" not in data:
         data["channels"] = {}
@@ -268,12 +370,78 @@ def update_channel_subsection_in_config(
     if channel_id not in channels:
         channels[channel_id] = {}
     section = channels[channel_id]
-    if subsection_id not in section:
-        section[subsection_id] = {}
-    subsection = section[subsection_id]
-    for k, v in conf.items():
-        subsection[k] = v
+
+    if isinstance(conf, dict):
+        # 合并（partial update）—— 用于 feishu_enterprise 按 bot 维度保存状态等场景
+        if subsection_id not in section:
+            section[subsection_id] = {}
+        for k, v in conf.items():
+            section[subsection_id][k] = v
+    else:
+        # 整体替换 —— 用于 apps 列表等非 dict 类型
+        section[subsection_id] = conf
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def replace_channel_subsection_with_cleanup(
+    channel_id: str,
+    subsection_id: str,
+    conf: dict[str, Any] | list[Any] | Any,
+    keep_keys: set[str],
+) -> None:
+    """整体替换 channels[channel_id][subsection_id] 并清理旧字段，一次 IO 完成。
+
+    写入 subsection 后，删除 channels[channel_id] 下不在 ``keep_keys`` 中的字段。
+    用于多应用模式下替换 apps 并清理旧平铺字段，避免两套数据源不一致。
+    """
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "channels" not in data:
+        data["channels"] = {}
+    channels = data["channels"]
+    if channel_id not in channels:
+        channels[channel_id] = {}
+    section = channels[channel_id]
+
+    section[subsection_id] = conf
+
+    for k in list(section.keys()):
+        if k not in keep_keys:
+            del section[k]
+
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_channel_app_field(
+    channel_id: str,
+    app_identifier: str,
+    field_values: dict[str, Any],
+    *,
+    app_id_key: str = "app_id",
+) -> bool:
+    """更新 ``channels[channel_id].apps`` 列表中某个 app 条目的字段。
+
+    用于多应用模式下运行时状态（如 ``last_chat_id``、``bot_open_id``）写回
+    对应 app 条目，避免所有 app 争抢同一个平铺字段。
+
+    Args:
+        channel_id: 通道 ID，如 ``"feishu"`` / ``"xiaoyi"``。
+        app_identifier: app 标识值，如 ``"cli_a"``。
+        field_values: 要更新的字段 dict，如 ``{"last_chat_id": "oc_xxx"}``。
+        app_id_key: 匹配 app 条目的键名，默认 ``"app_id"``。
+
+    Returns:
+        ``True`` 表示更新成功，``False`` 表示未找到匹配 app。
+    """
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    apps = data.get("channels", {}).get(channel_id, {}).get("apps", [])
+    if not isinstance(apps, list):
+        return False
+    for app in apps:
+        if isinstance(app, dict) and app.get(app_id_key) == app_identifier:
+            app.update(field_values)
+            dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+            return True
+    return False
 
 
 def update_preferred_language_in_config(lang: str) -> None:
@@ -383,6 +551,16 @@ def update_auto_recap_enabled_in_config(value: bool) -> None:
     if "auto_recap" not in data:
         data["auto_recap"] = {}
     data["auto_recap"]["enabled"] = value
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_proactive_recommendation_in_config(updates: dict[str, Any]) -> None:
+    """更新 proactive_recommendation 配置段并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "proactive_recommendation" not in data or data["proactive_recommendation"] is None:
+        data["proactive_recommendation"] = {}
+    section = data["proactive_recommendation"]
+    _merge_config_dict(section, updates)
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
@@ -864,55 +1042,52 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
 
 
 def update_default_models_in_config(models_list: list[dict[str, Any]]) -> None:
-    """将默认模型列表写入 config.yaml 的 models.defaults 段。"""
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "models" not in data:
-        data["models"] = {}
-    # alias 为字符串时强制带双引号写出，避免 "yes"/"no"/"on"/"off" 等被 YAML 1.1 解析为布尔值
-    for entry in models_list:
-        if isinstance(entry, dict) and isinstance(entry.get("alias"), str):
-            entry["alias"] = DoubleQuotedScalarString(entry["alias"])
-    data["models"]["defaults"] = models_list
-    if "default" in data["models"]:
-        del data["models"]["default"]
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    def _mutate(data):
+        if "models" not in data:
+            data["models"] = {}
+        for entry in models_list:
+            if isinstance(entry, dict) and isinstance(entry.get("alias"), str):
+                entry["alias"] = DoubleQuotedScalarString(entry["alias"])
+        data["models"]["defaults"] = models_list
+        if "default" in data["models"]:
+            del data["models"]["default"]
+        return data
+    update_config(_mutate)
 
 
 def ensure_defaults_list_in_config() -> list[dict[str, Any]]:
-    """确保 config.yaml 中 models.defaults 列表存在。
+    def _mutate(data):
+        models = data.get("models") or {}
+        if not isinstance(models, dict):
+            models = {}
+        defaults = models.get("defaults")
+        if isinstance(defaults, list) and defaults:
+            return None
+        default_entry = models.get("default")
+        if isinstance(default_entry, dict):
+            if "is_default" not in default_entry:
+                default_entry["is_default"] = True
+            defaults_list = [default_entry]
+        else:
+            defaults_list = [{
+                "model_client_config": {
+                    "api_base": "${API_BASE}",
+                    "api_key": "${API_KEY}",
+                    "model_name": "${MODEL_NAME}",
+                    "client_provider": "${MODEL_PROVIDER}",
+                },
+                "model_config_obj": {"temperature": 0.95},
+                "is_default": True,
+            }]
+        models["defaults"] = defaults_list
+        data["models"] = models
+        if "default" in data["models"]:
+            del data["models"]["default"]
+        return data
 
-    如果不存在，将 models.default 单对象迁移为列表条目，
-    并删除冗余的 models.default key。返回 defaults 列表。
-    """
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    models = data.get("models") or {}
-    defaults = models.get("defaults")
-    if isinstance(defaults, list) and defaults:
-        return defaults
-
-    default_entry = models.get("default")
-    if isinstance(default_entry, dict):
-        if "is_default" not in default_entry:
-            default_entry["is_default"] = True
-        defaults_list = [default_entry]
-    else:
-        defaults_list = [{
-            "model_client_config": {
-                "api_base": "${API_BASE}",
-                "api_key": "${API_KEY}",
-                "model_name": "${MODEL_NAME}",
-                "client_provider": "${MODEL_PROVIDER}",
-            },
-            "model_config_obj": {"temperature": 0.95},
-            "is_default": True,
-        }]
-
-    data["models"] = models
-    data["models"]["defaults"] = defaults_list
-    if "default" in data["models"]:
-        del data["models"]["default"]
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
-    return defaults_list
+    result = update_config(_mutate)
+    defs = (result.get("models") or {}).get("defaults")
+    return defs if isinstance(defs, list) else []
 
 
 def _require_dict(value: Any, field_name: str) -> dict[str, Any]:
@@ -1174,6 +1349,28 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def _ensure_config_object(parent: dict[str, Any], key: str, path: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if value is None:
+        value = {}
+        parent[key] = value
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} config must be an object")
+    return value
+
+
+def update_swarmflow_enabled_in_config(enabled: bool) -> None:
+    """Update ``modes.team.jiuwen_team.enable_swarmflow`` in config.yaml."""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    path_so_far: list[str] = []
+    for segment in SWARMFLOW_ENABLED_CONFIG_PATH[:-1]:
+        path_so_far.append(segment)
+        current = _ensure_config_object(current, segment, ".".join(path_so_far))
+    current[SWARMFLOW_ENABLED_CONFIG_PATH[-1]] = bool(enabled)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
 def get_mcp_servers() -> list[dict[str, Any]]:
     """读取 config.yaml 中的 mcp.servers（原始结构，不解析环境变量）。"""
     data = get_config_raw()
@@ -1416,6 +1613,38 @@ def _deep_merge(
     return result
 
 
+
+_LEGACY_AGENT_SUBMODE_KEYS: tuple[str, ...] = ("plan", "fast", "agent.plan", "agent.fast")
+
+
+def _migrate_legacy_agent_submode_memory(user_data: dict[str, Any]) -> None:
+    modes = user_data.get("modes")
+    if not isinstance(modes, dict):
+        return
+    agent_node = modes.get("agent")
+    if not isinstance(agent_node, dict):
+        return
+
+    legacy_enabled_values: list[bool] = []
+    for key in _LEGACY_AGENT_SUBMODE_KEYS:
+        sub_node = agent_node.get(key)
+        if isinstance(sub_node, dict):
+            sub_memory = sub_node.get("memory")
+            if isinstance(sub_memory, dict) and "enabled" in sub_memory:
+                legacy_enabled_values.append(bool(sub_memory["enabled"]))
+
+    if not legacy_enabled_values:
+        return
+
+    flat_memory = agent_node.get("memory")
+    if not isinstance(flat_memory, dict):
+        flat_memory = {}
+        agent_node["memory"] = flat_memory
+
+    if "enabled" not in flat_memory:
+        flat_memory["enabled"] = all(legacy_enabled_values)
+
+
 def migrate_config_from_template(
     template_path: Path,
     user_config_path: Path,
@@ -1453,6 +1682,10 @@ def migrate_config_from_template(
 
     if user_data is None:
         user_data = {}
+
+    # 结构性迁移：plan/fast 子模式 memory 配置 -> 合并后的 modes.agent.memory
+    # 必须在 _deep_merge 之前执行，否则旧子节点会被静默丢弃而非迁移。
+    _migrate_legacy_agent_submode_memory(user_data)
 
     # Deep merge: template provides defaults, user values preserved
     merged_data = _deep_merge(template_data, user_data)

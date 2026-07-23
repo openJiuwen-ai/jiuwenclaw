@@ -3,6 +3,15 @@ from pathlib import Path
 import yaml
 
 
+def test_default_team_config_enables_managed_worktrees():
+    repo_root = Path(__file__).resolve().parents[2]
+    config_file = repo_root / "jiuwenswarm" / "resources" / "config.yaml"
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+
+    assert data["modes"]["team"]["jiuwen_team"]["worktree"] == {"enabled": True}
+
+
 def test_default_round_level_compressor_config_uses_context_ratio():
     repo_root = Path(__file__).resolve().parents[2]
     config_files = [

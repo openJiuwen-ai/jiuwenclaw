@@ -46,13 +46,15 @@ def _is_regular_skill_evolution_rail(rail):
     ("raw_mode", "expected"),
     [
         ("team", ("team", None, "team")),
-        ("agent", ("agent", "plan", "agent.plan")),
+        ("agent", ("agent", None, "agent")),
+        ("plan", ("agent", None, "agent")),
+        ("fast", ("agent", None, "agent")),
         ("code", ("code", "normal", "code.normal")),
-        ("agent.fast", ("agent", "fast", "agent.fast")),
+        ("agent.fast", ("agent", None, "agent")),
         ("code.plan", ("code", "plan", "code.plan")),
         ("code.team", ("code", "team", "code.team")),
         ("team.plan", ("code", "team", "team.plan")),
-        (None, ("agent", "plan", "agent.plan")),
+        (None, ("agent", None, "agent")),
     ],
 )
 def test_resolve_agent_request_mode_accepts_primary_and_dotted_modes(raw_mode, expected):
@@ -1018,7 +1020,10 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
 
     chunks = asyncio.run(collect_chunks())
 
-    assert FakeSessionManager.submit_task_calls == ["team-session"]
+    # Ordinary chat (including team first request) is scheduled by the facade
+    # task itself; DeepAgent interaction owns session concurrency, so
+    # SessionManager.submit_task is no longer used on this path.
+    assert FakeSessionManager.submit_task_calls == []
     assert fake_adapter.seen_inputs["query"] == "你好"
     assert chunks[0].payload == {"event_type": "chat.done"}
     assert chunks[-1].is_complete is True
@@ -1165,6 +1170,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
 
     adapter = JiuWenSwarmDeepAdapter()
     ask_user_rail = object()
+    orchestration_rail = object()
 
     monkeypatch.setattr(adapter, "_filesystem_rail_enabled_for_profile", lambda: False)
     monkeypatch.setattr(adapter, "_build_runtime_prompt_rail", lambda: None)
@@ -1178,6 +1184,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_build_skill_retrieval_prompt_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_symphony_orchestration_prompt_rail", lambda: orchestration_rail)
     monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
     monkeypatch.setattr(interface_deep_module, "build_permission_rail", lambda **_kwargs: None)
     monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda **_kwargs: None)
@@ -1186,6 +1193,8 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     plan_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.plan")
     fast_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.fast")
 
+    assert orchestration_rail in plan_rails
+    assert orchestration_rail in fast_rails
     assert ask_user_rail in plan_rails
     assert ask_user_rail in fast_rails
 
@@ -1193,10 +1202,16 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
 def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
+    class FakeAbilityManager:
+        @staticmethod
+        def list():
+            return []
+
     class FakeInstance:
         def __init__(self):
             self.unregistered = []
             self.registered = []
+            self.ability_manager = FakeAbilityManager()
 
         async def register_rail(self, rail):
             self.registered.append(rail)
@@ -1214,25 +1229,24 @@ def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monk
     adapter._evolution_interrupt_rail = "evolution-interrupt-rail"
     adapter._skill_evolution_rail = "skill-evolution-rail"
     adapter._context_assemble_rail = "agent-context-assemble-rail"
-    adapter._context_assemble_mode = "agent.fast"
+    adapter._context_assemble_mode = "agent"
+    adapter._config_cache = {"evolution": {"enabled": True}}
 
     ask_user_rail = object()
     monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
     monkeypatch.setattr(adapter, "_handle_external_memory_rail_by_config", _noop)
     monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
+    monkeypatch.setattr(adapter, "_ensure_active_evolution_rails_registered", _noop)
     monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda _config: None)
 
     asyncio.run(adapter._update_rails_for_mode("agent.fast"))
 
-    assert adapter._instance.unregistered[:4] == [
-        "task-planning-rail",
-        "skill-evolution-rail",
-        "evolution-interrupt-rail",
-        "subagent-rail",
-    ]
-    assert adapter._skill_evolution_rail is None
-    assert adapter._evolution_interrupt_rail is None
-    assert adapter._subagent_rail is None
+    # agent.fast is now a legacy token for the merged agent mode. It should no
+    # longer unload the former plan-mode rails.
+    assert adapter._instance.unregistered == []
+    assert adapter._skill_evolution_rail == "skill-evolution-rail"
+    assert adapter._evolution_interrupt_rail == "evolution-interrupt-rail"
+    assert adapter._subagent_rail == "subagent-rail"
     assert adapter._ask_user_rail is ask_user_rail
 
 
@@ -1279,9 +1293,15 @@ def test_deep_adapter_registers_ask_user_rail_when_entering_plan_mode(monkeypatc
 def test_deep_adapter_registers_ask_user_rail_when_entering_fast_mode(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
+    class FakeAbilityManager:
+        @staticmethod
+        def list():
+            return []
+
     class FakeInstance:
         def __init__(self):
             self.registered = []
+            self.ability_manager = FakeAbilityManager()
 
         async def register_rail(self, rail):
             self.registered.append(rail)
@@ -1313,6 +1333,8 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
 
     class FakeAbilityManager:
         @staticmethod
@@ -1398,8 +1420,8 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
         for rail in registered
         if _is_regular_skill_evolution_rail(rail)
     )
-    assert skill_evolution_rail.auto_scan is False
-    assert skill_evolution_rail.fuzzy_review is False
+    assert skill_evolution_rail.signal_trigger is False
+    assert skill_evolution_rail.review_trigger is False
 
 
 def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkeypatch, tmp_path):

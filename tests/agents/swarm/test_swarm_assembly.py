@@ -31,7 +31,7 @@ import pytest
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
-from openjiuwen.agent_teams.schema import deep_agent_spec as das
+from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
@@ -86,6 +86,16 @@ from jiuwenswarm.common.config import get_config
 
 logger = logging.getLogger(__name__)
 
+
+@pytest.mark.parametrize("mode", ["team", "team.plan", "code.team"])
+def test_member_runtime_prompt_rail_binds_request_identity(mode: str) -> None:
+    context = SwarmBuildContext(session_id="session-123", mode=mode)
+
+    rail = member_rails._build_runtime_prompt_rail({}, context)
+
+    assert rail._session_id == "session-123"
+    assert rail._mode == mode
+
 # Rail provider names shared by both roles (no role-specific evolution rails).
 # Sourced from the registry symbols so the test tracks renames automatically.
 _COMMON_RAIL_NAMES: frozenset[str] = frozenset(
@@ -104,6 +114,7 @@ _COMMON_RAIL_NAMES: frozenset[str] = frozenset(
         registry.CONTEXT_PROCESSOR,
         registry.PLUGIN_RAILS,
         registry.SKILL_RETRIEVAL_PROMPT,
+        registry.SYMPHONY_ORCHESTRATION_PROMPT,
         registry.MEMBER_SKILL_TOOLKIT,
     }
 )
@@ -189,7 +200,7 @@ def _assert_evolution_approval_stack(
     assert isinstance(interrupt_rail, _FakeEvolutionInterruptRail)
     assert "review_runtime" in rail.kwargs
     assert rail.kwargs["review_runtime"] is not None
-    assert rail.kwargs["fuzzy_review"] is False
+    assert "fuzzy_review" not in rail.kwargs
     assert interrupt_rail.kwargs == {
         "review_runtime": rail.kwargs["review_runtime"],
         "submission_service": rail.approval_submission_service,
@@ -399,9 +410,9 @@ def test_build_member_capability_specs_rail_names(
 
     assert _COMMON_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    # The common set has exactly 15 entries; the role adds only its explicit
+    # The common set has exactly 16 entries; the role adds only its explicit
     # extra rails on top.
-    assert len(_COMMON_RAIL_NAMES) == 15
+    assert len(_COMMON_RAIL_NAMES) == 16
     assert rail_names == _COMMON_RAIL_NAMES | extra_rails
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -1041,6 +1052,34 @@ def test_symphony_toolkit_respects_disabled_config(
     assert tools.build_symphony_toolkit({}, SwarmBuildContext(role="leader")) == []
 
 
+def test_symphony_orchestration_prompt_provider_is_leader_only() -> None:
+    """Only the leader gets the Symphony orchestration prompt rail."""
+    factory = resolve_factory(
+        get_catalog()[registry.SYMPHONY_ORCHESTRATION_PROMPT].factory_ref,
+    )
+
+    leader_rail = factory({}, SwarmBuildContext(role="leader"))
+    teammate_rail = factory({}, SwarmBuildContext(role="teammate"))
+
+    assert type(leader_rail).__name__ == "SymphonyOrchestrationPromptRail"
+    assert teammate_rail is None
+
+
+def test_team_leader_spec_includes_symphony_orchestration_prompt() -> None:
+    """The team leader spec declares the Symphony orchestration prompt provider."""
+    spec = build_member_deep_agent_spec(
+        {"symphony": {"enabled": True}},
+        "team",
+        "leader",
+        DeepAgentSpec(),
+    )
+
+    assert any(
+        rail.type == registry.SYMPHONY_ORCHESTRATION_PROMPT
+        for rail in (spec.rails or [])
+    )
+
+
 def test_vision_model_config_params_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     """Vision config params are empty without a dedicated model, filled when complete."""
     assert tools.vision_model_config_params({}) == {}
@@ -1108,7 +1147,11 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_team_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": True, "auto_save": auto_save},
+        {
+            "evolution_model_config": {},
+            "review_trigger": True,
+            "auto_save": auto_save,
+        },
         ctx,
     )
 
@@ -1119,9 +1162,9 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         language="cn",
     )
     rail = built[1]
-    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
-    assert rail.kwargs["completion_followup_enabled"] is True
+    assert rail.kwargs["review_trigger"] is True
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
@@ -1208,7 +1251,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_member_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": False},
+        {"evolution_model_config": {}, "signal_trigger": False},
         ctx,
     )
 
@@ -1219,7 +1262,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         language="en",
     )
     assert rail.kwargs["language"] == "en"
-    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is True
     assert rail.bound_sink == (registry_obj, "t", "teammate")
 
@@ -1340,6 +1383,7 @@ _EXPECTED_CODE_RAIL_NAMES: frozenset[str] = frozenset(
         registry.USER_HOOKS,
         registry.CODE_SKILL_USE,
         registry.SKILL_RETRIEVAL_PROMPT,
+        registry.SYMPHONY_ORCHESTRATION_PROMPT,
         registry.CODE_CONFIRM_INTERRUPT,
         registry.MEMBER_SKILL_TOOLKIT,
         registry.TEAM_WORKSPACE_REPORT_PATH,
@@ -1446,6 +1490,7 @@ def test_code_runtime_prompt_provider_carries_project_dir(tmp_path: Path) -> Non
     ctx = SwarmBuildContext(
         mode="code.team",
         role="leader",
+        session_id="sess-code-team-runtime",
         channel="tui",
         project_dir=str(project_dir),
     )
@@ -1457,6 +1502,8 @@ def test_code_runtime_prompt_provider_carries_project_dir(tmp_path: Path) -> Non
 
     assert getattr(rail, "_project_dir") == str(project_dir)
     assert getattr(rail, "_cwd") == str(project_dir)
+    assert getattr(rail, "_mode") == "code.team"
+    assert getattr(rail, "_session_id") == "sess-code-team-runtime"
 
 
 def test_team_plan_approval_provider_builds_only_for_leader() -> None:
@@ -1833,8 +1880,8 @@ def test_code_member_builds_declaratively_without_post_processing(
     assert "WorktreeRail" not in rail_types
     # The code system prompt is set declaratively on the spec.
     assert agent.deep_config.system_prompt
-    # CodingMemoryRail is published for the code_agent sub-agent to reuse.
-    assert ctx.extras.get(code_rails.CODING_MEMORY_EXTRAS_KEY) is not None
+    # CodingMemoryRail materializes through the derived build context.
+    assert "CodingMemoryRail" in rail_types
     coding_memory_dir = resolve_project_coding_memory_dir(
         agent_workspace_dir=str(tmp_path),
         project_dir=str(tmp_path),

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.sdk import BaseExtension
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 from jiuwenswarm.symphony.llm import LLMConfig
@@ -218,7 +219,10 @@ class SymphonyExtension(BaseExtension):
                 "mode": orchestration_config.mode,
                 **payload,
             }
-        presentation = _build_presentation(payload)
+        preferred_language = str(
+            get_config().get("preferred_language") or "zh"
+        ).strip().lower()
+        presentation = _build_presentation(payload, language=preferred_language)
         return {
             "success": True,
             "score_dir": str(score_dir),
@@ -604,7 +608,11 @@ def _compact_details(details: dict[str, Any]) -> str:
     return rendered if len(rendered) <= 500 else rendered[:497] + "..."
 
 
-def _build_presentation(payload: dict[str, Any]) -> dict[str, str]:
+def _build_presentation(
+    payload: dict[str, Any],
+    *,
+    language: str = "zh",
+) -> dict[str, str]:
     plan = select_primary_plan(payload)
     title = str(plan.get("title") or "Symphony plan").strip()
     mermaid = _plan_to_mermaid(plan, payload.get("execution_graph") or {})
@@ -618,6 +626,14 @@ def _build_presentation(payload: dict[str, Any]) -> dict[str, str]:
     reason = str(plan.get("reason") or payload.get("reason") or "").strip()
     if reason:
         lines.extend(["", reason])
+    steps = plan.get("steps") if isinstance(plan, dict) else []
+    if isinstance(steps, list) and steps:
+        confirmation = (
+            "Would you like to proceed with the orchestration plan above?"
+            if language == "en"
+            else "是否按照上述编排结果执行？"
+        )
+        lines.extend(["", confirmation])
     return {"markdown": "\n".join(lines), "mermaid": mermaid}
 
 

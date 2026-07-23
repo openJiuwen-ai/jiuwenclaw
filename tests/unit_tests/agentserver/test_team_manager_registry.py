@@ -32,6 +32,9 @@ class _TeamManagerHarness(TeamManager):
     def cache_local_team_agent_for_test(self, session_id: str, team_agent) -> None:
         getattr(self, "_team_agents")[session_id] = team_agent
 
+    def register_stream_task_for_test(self, session_id: str, task: asyncio.Task) -> None:
+        getattr(self, "_stream_tasks")[session_id] = task
+
     def resolve_session_team_name_for_test(self, session_id: str) -> str | None:
         return self._resolve_session_team_name(session_id)
 
@@ -50,14 +53,14 @@ class _FakeRail:
 
 
 class _FakeSkillEvolutionRail:
-    def __init__(self, auto_scan: bool = True) -> None:
-        self.auto_scan = auto_scan
+    def __init__(self, signal_trigger: bool = True) -> None:
+        self.signal_trigger = signal_trigger
 
 
 class _FakeTeamSkillEvolutionRail:
-    def __init__(self, *, auto_scan: bool = True, completion_followup_enabled: bool = True) -> None:
-        self.auto_scan = auto_scan
-        self.completion_followup_enabled = completion_followup_enabled
+    def __init__(self, *, signal_trigger: bool = True, review_trigger: bool = True) -> None:
+        self.signal_trigger = signal_trigger
+        self.review_trigger = review_trigger
         self._pending_approval_snapshots: dict[str, object] = {}
         self._pending_governance: dict[str, object] = {}
 
@@ -93,7 +96,12 @@ def teardown_function() -> None:
     reset_team_manager()
 
 
-def test_get_team_manager_is_scoped_by_channel() -> None:
+def test_get_team_manager_is_singleton() -> None:
+    # TeamManager is a process-wide singleton shared across channels so that
+    # bridged follow-up requests (e.g. a /join member replying from feishu
+    # while the originating web stream is still alive) can see the
+    # originating channel's runtime markers and avoid being misidentified as
+    # a first request.
     web_manager = get_team_manager("web")
     feishu_manager = get_team_manager("feishu")
     web_manager_again = get_team_manager("web")
@@ -101,25 +109,30 @@ def test_get_team_manager_is_scoped_by_channel() -> None:
     assert isinstance(web_manager, TeamManager)
     assert isinstance(feishu_manager, TeamManager)
     assert web_manager is web_manager_again
-    assert web_manager is not feishu_manager
+    assert web_manager is feishu_manager  # singleton: same instance regardless of channel
+
+    reset_team_manager()
+    after_reset = get_team_manager("web")
+    assert after_reset is not web_manager  # reset yields a fresh instance
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_updates_member_skill_evolution_auto_scan(
+async def test_update_evolution_config_updates_member_skill_evolution_signal_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
-    rail = _FakeSkillEvolutionRail(auto_scan=True)
+    rail = _FakeSkillEvolutionRail(signal_trigger=True)
     manager.register_team_member_skill_evolution_rail("sess-1", rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    await manager.update_evolution_config({"evolution": {"auto_scan": False}})
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+    await manager.update_evolution_config({"evolution": {"signal_trigger": False}})
 
-    assert rail.auto_scan is False
+    assert rail.signal_trigger is False
 
-    await manager.update_evolution_config({"evolution": {"auto_scan": True}})
+    await manager.update_evolution_config({"evolution": {"signal_trigger": True}})
 
-    assert rail.auto_scan is True
+    assert rail.signal_trigger is True
 
 
 @pytest.mark.asyncio
@@ -132,11 +145,12 @@ async def test_update_evolution_config_enabled_false_keeps_team_skill_rail_and_w
     task = asyncio.create_task(asyncio.sleep(3600))
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     manager.register_team_skill_rail("sess-1", rail)
     manager.register_team_live_rail("sess-1", agent, rail)
     manager.register_team_evolution_watcher("sess-1", task)
 
-    await manager.update_evolution_config({"evolution": {"enabled": False, "auto_scan": False}})
+    await manager.update_evolution_config({"evolution": {"enabled": False, "review_trigger": False}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
     assert manager.get_team_evolution_watcher("sess-1") is task
@@ -148,54 +162,61 @@ async def test_update_evolution_config_enabled_false_keeps_team_skill_rail_and_w
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_keeps_team_skill_rail_when_only_auto_scan_disabled(
+async def test_update_evolution_config_keeps_team_skill_rail_when_review_trigger_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
-    rail = _FakeTeamSkillEvolutionRail(auto_scan=True)
+    rail = _FakeTeamSkillEvolutionRail(signal_trigger=True)
     manager.register_team_skill_rail("sess-1", rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    await manager.update_evolution_config({"evolution": {"enabled": True, "auto_scan": False}})
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    await manager.update_evolution_config({"evolution": {"enabled": True, "review_trigger": False}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
-    assert rail.auto_scan is True
-    assert rail.completion_followup_enabled is False
+    assert rail.signal_trigger is True
+    assert rail.review_trigger is False
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_enabled_false_does_not_override_auto_scan(
+async def test_update_evolution_config_enabled_false_does_not_override_signal_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
-    rail = _FakeTeamSkillEvolutionRail(auto_scan=False)
+    rail = _FakeTeamSkillEvolutionRail(signal_trigger=False)
     manager.register_team_skill_rail("sess-1", rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    await manager.update_evolution_config({"evolution": {"enabled": False, "auto_scan": True}})
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    await manager.update_evolution_config({"evolution": {"enabled": False, "review_trigger": True}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
-    assert rail.auto_scan is False
-    assert rail.completion_followup_enabled is True
+    assert rail.signal_trigger is False
+    assert rail.review_trigger is True
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_auto_scan_only_updates_existing_rails(
+async def test_update_evolution_config_only_updates_existing_rails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
-    team_rail = _FakeTeamSkillEvolutionRail(auto_scan=True)
-    member_rail = _FakeSkillEvolutionRail(auto_scan=True)
+    team_rail = _FakeTeamSkillEvolutionRail(
+        signal_trigger=False,
+        review_trigger=False,
+    )
+    member_rail = _FakeSkillEvolutionRail(signal_trigger=False)
     manager.register_team_skill_rail("sess-1", team_rail)
     manager.register_team_member_skill_evolution_rail("sess-1", member_rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.setenv("SKILL_CREATE", "false")
-    await manager.update_evolution_config({"evolution": {"auto_scan": False}})
+    await manager.update_evolution_config({"evolution": {"auto_scan": True}})
 
-    assert team_rail.auto_scan is True
-    assert team_rail.completion_followup_enabled is False
-    assert member_rail.auto_scan is False
+    assert team_rail.signal_trigger is False
+    assert team_rail.review_trigger is True
+    assert member_rail.signal_trigger is True
     assert manager.get_team_skill_rail("sess-1") is team_rail
     assert manager.get_team_skill_create_rail("sess-1") is None
 
@@ -243,7 +264,10 @@ def test_refresh_team_shared_skill_links_across_managers_uses_registered_session
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_disables_team_skill_create_rail() -> None:
+async def test_update_evolution_config_disables_team_skill_create_rail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
     manager = TeamManager()
     rail = _FakeRail()
     agent = _FakeAgent()
@@ -473,7 +497,7 @@ async def test_create_team_does_not_run_global_runtime_cleanup(monkeypatch: pyte
 
             @staticmethod
             def build():
-                return object()
+                return SimpleNamespace()
 
         return _Spec()
 
@@ -512,7 +536,7 @@ async def test_create_team_appends_session_id_to_team_name(monkeypatch: pytest.M
 
         def build(self):
             created_team_names.append(self.team_name)
-            return object()
+            return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
     monkeypatch.setattr(
@@ -548,7 +572,7 @@ async def test_create_team_appends_session_id_to_web_team_name(monkeypatch: pyte
 
         def build(self):
             created_team_names.append(self.team_name)
-            return object()
+            return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
     monkeypatch.setattr(
@@ -933,6 +957,96 @@ async def test_pause_session_runtime_pauses_runner_owned_team_runtime(
     assert paused is True
     assert pause_calls == [("demo-team", "sess-1")]
     assert manager.is_runtime_active("sess-1") is False
+
+
+@pytest.mark.asyncio
+async def test_pause_session_runtime_waits_for_stream_task_graceful_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    manager.set_active_runtime_for_test("sess-1", "demo-team")
+    stream_can_exit = asyncio.Event()
+    stream_exited = asyncio.Event()
+
+    async def stream_task_body() -> None:
+        await stream_can_exit.wait()
+        stream_exited.set()
+
+    stream_task = asyncio.create_task(stream_task_body())
+    manager.register_stream_task_for_test("sess-1", stream_task)
+
+    async def fake_pause_agent_team(*, team_name: str, session_id: str) -> bool:
+        assert (team_name, session_id) == ("demo-team", "sess-1")
+        stream_can_exit.set()
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Runner.pause_agent_team",
+        fake_pause_agent_team,
+    )
+
+    paused = await manager.pause_session_runtime("sess-1", reason="interrupt(intent=pause): ")
+
+    assert paused is True
+    assert stream_exited.is_set()
+    assert stream_task.done()
+    assert not stream_task.cancelled()
+    assert manager.has_stream_task("sess-1") is False
+
+
+@pytest.mark.asyncio
+async def test_pause_session_runtime_warns_and_cancels_stream_task_after_grace_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    manager.set_active_runtime_for_test("sess-1", "demo-team")
+    stream_cancelled = asyncio.Event()
+
+    async def stream_task_body() -> None:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            stream_cancelled.set()
+            raise
+
+    stream_task = asyncio.create_task(stream_task_body())
+    manager.register_stream_task_for_test("sess-1", stream_task)
+
+    async def fake_pause_agent_team(*, team_name: str, session_id: str) -> bool:
+        assert (team_name, session_id) == ("demo-team", "sess-1")
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Runner.pause_agent_team",
+        fake_pause_agent_team,
+    )
+    original_wait_for_stream_task_exit = manager._wait_for_stream_task_exit
+
+    async def wait_for_stream_task_exit_with_short_timeout(session_id: str) -> bool:
+        return await original_wait_for_stream_task_exit(session_id, timeout_sec=0.01)
+
+    monkeypatch.setattr(
+        manager,
+        "_wait_for_stream_task_exit",
+        wait_for_stream_task_exit_with_short_timeout,
+    )
+    warning_messages: list[str] = []
+
+    def fake_warning(message: str, *args) -> None:
+        warning_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.logger.warning",
+        fake_warning,
+    )
+
+    paused = await manager.pause_session_runtime("sess-1", reason="interrupt(intent=pause): ")
+
+    assert paused is True
+    assert stream_cancelled.is_set()
+    assert stream_task.cancelled()
+    assert manager.has_stream_task("sess-1") is False
+    assert any("stream task did not exit within grace timeout" in message for message in warning_messages)
 
 
 @pytest.mark.asyncio

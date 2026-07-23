@@ -478,7 +478,7 @@ class WebClient {
     if (options.apiKey) params.set('api_key', options.apiKey);
     if (options.apiBase) params.set('api_base', options.apiBase);
     if (options.model) params.set('model', options.model);
-    if (options.projectPath) params.set('project_path', options.projectPath);
+    if (options.projectDir) params.set('project_dir', options.projectDir);
     const query = params.toString();
     const target = `${base}${path}`;
     return query ? `${target}?${query}` : target;
@@ -520,6 +520,11 @@ export async function webRequest<T = unknown>(
   options?: WebRequestOptions
 ): Promise<T> {
   return webClient.request<T>(method, params, options);
+}
+
+// Expose webClient to window for debugging in development
+if (import.meta.env.DEV) {
+  (window as any).webClient = webClient;
 }
 
 export type { WsEvent, WebMessage };

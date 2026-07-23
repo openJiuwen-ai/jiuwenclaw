@@ -27,7 +27,6 @@ DEFAULT_BUILD_MIN_EDGE_CONFIDENCE = 0.7
 DEFAULT_SYMPHONY_ENABLED = False
 
 DEFAULT_ORCHESTRATION_MODE = "fast"
-DEFAULT_ORCHESTRATION_TOP_K = 3
 DEFAULT_ORCHESTRATION_MAX_DEPTH = 4
 DEFAULT_ORCHESTRATION_MIN_EDGE_CONFIDENCE = 0.7
 
@@ -78,7 +77,6 @@ class SymphonyBuildConfig:
 @dataclass(frozen=True)
 class SymphonyOrchestrationConfig:
     mode: str = DEFAULT_ORCHESTRATION_MODE
-    top_k: int = DEFAULT_ORCHESTRATION_TOP_K
     max_depth: int = DEFAULT_ORCHESTRATION_MAX_DEPTH
     min_edge_confidence: float = DEFAULT_ORCHESTRATION_MIN_EDGE_CONFIDENCE
 
@@ -200,10 +198,6 @@ def symphony_config_from_dict(raw: dict[str, Any] | None) -> SymphonyConfig:
             mode=_orchestration_mode(
                 orchestration.get("mode"),
                 DEFAULT_ORCHESTRATION_MODE,
-            ),
-            top_k=_positive_int(
-                orchestration.get("top_k"),
-                DEFAULT_ORCHESTRATION_TOP_K,
             ),
             max_depth=_positive_int(
                 orchestration.get("max_depth"),

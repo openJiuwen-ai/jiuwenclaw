@@ -14,6 +14,7 @@ from jiuwenswarm.gateway.cron.models import (
     is_valid_target_channel_id,
     normalize_cron_job_mode,
     normalize_target_channel_id,
+    validate_cron_model,
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenswarm.gateway.cron.store import CronJobStore
@@ -144,6 +145,8 @@ class CronController:
             mode = normalize_cron_job_mode(mode)
         else:
             mode = None
+        model_name = validate_cron_model(params.get("model_name"))
+
         targets = self._normalize_targets(raw_targets)
 
         self._validate_schedule(cron_expr=cron_expr, timezone=timezone)
@@ -153,6 +156,37 @@ class CronController:
         chat_type = params.get("chat_type")
         delete_after_run = params.get("delete_after_run")
         timeout_seconds = params.get("timeout_seconds")
+        # work_mode 解析(严格校验:非法值由 resolve_request_work_mode 返回 BAD_REQUEST);
+        # 默认值按 controller 目标通道推断(tui→code,web/未设置→work)
+        from jiuwenswarm.server.runtime.session.work_mode import resolve_request_work_mode
+        default_channel = (
+            self._target_channel.value if self._target_channel is not None else "web"
+        )
+        work_mode, mode_err = resolve_request_work_mode(params, default_channel)
+        if mode_err is not None:
+            raise ValueError(f"invalid work_mode: {params.get('work_mode')!r}")
+        # project_id / project_dir → project_id 解析(设计文档 §6.1 + work_mode 隔离):
+        # 优先接受显式 project_id(修改计划 §5 链路 A,与 CronTools 保持一致):
+        # 1. 默认项目 ID(default/default_code)→ 直接使用,按 project_id 映射 work_mode
+        # 2. 真实 project_id → 校验存在且未隐藏,从 Project 记录注入精确 work_mode
+        # 3. 无显式 project_id → 按 (work_mode, project_dir) 解析可见项目,
+        #    匹配不到(含命中隐藏项目 / 无命中)归默认项目
+        # 非绝对路径抛 ValueError → BAD_REQUEST
+        from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_binding
+
+        raw_project_id = str(params.get("project_id") or "").strip()
+        project_dir_raw = params.get("project_dir")
+        project_dir_val = (
+            str(project_dir_raw).strip()
+            if isinstance(project_dir_raw, str) and project_dir_raw.strip()
+            else ""
+        )
+        binding = resolve_cron_project_binding(raw_project_id, project_dir_val, work_mode)
+        if binding.error is not None:
+            raise ValueError(binding.error)
+        resolved_project_id = binding.project_id
+        work_mode = binding.work_mode
+        app_id = str(params.get("app_id") or "").strip()
         job = await self._store.create_job(
             job_id=str(params.get("id") or "").strip() or None,
             name=name,
@@ -167,6 +201,10 @@ class CronController:
             mode=mode,
             delete_after_run=delete_after_run,
             timeout_seconds=timeout_seconds,
+            project_id=resolved_project_id,
+            model_name=model_name,
+            app_id=app_id,
+            work_mode=work_mode,
         )
         await self._scheduler.reload()
         return job.to_dict()
@@ -175,6 +213,8 @@ class CronController:
         patch = dict(patch or {})
         if "mode" in patch:
             patch["mode"] = normalize_cron_job_mode(patch.get("mode"))
+        if "model_name" in patch:
+            patch["model_name"] = validate_cron_model(patch.get("model_name"))
         if "targets" in patch:
             patch["targets"] = self._normalize_targets(patch["targets"])
         existing = await self._store.get_job(job_id)
@@ -190,6 +230,16 @@ class CronController:
             name = str(patch.get("name") or existing.name or "").strip()
             patch["description"] = self._normalize_description(str(patch.get("description") or ""), name)
 
+        # work_mode / project_id / project_dir 重解析(共享 helper):
+        # 与 cron_tools.py update_job 共用同一 ``resolve_cron_job_patch``,
+        # 确保 Web RPC 与 AgentTool 两条链路逻辑一致。
+        from jiuwenswarm.server.runtime.session.project_store import resolve_cron_job_patch
+        resolve_cron_job_patch(
+            patch,
+            existing_work_mode=existing.work_mode or "",
+            channel_id="web",
+        )
+
         final_targets = str(patch.get("targets") or existing.targets).strip()
         if "session_id" in patch:
             patch["session_id"] = self._routing_session_id(
@@ -204,8 +254,8 @@ class CronController:
         await self._scheduler.reload()
         return job.to_dict()
 
-    async def delete_job(self, job_id: str) -> bool:
-        deleted = await self._store.delete_job(job_id)
+    async def delete_job(self, job_id: str, *, force: bool = False) -> bool:
+        deleted = await self._store.delete_job(job_id, force=force)
         if deleted:
             await self._scheduler.reload()
         return deleted
@@ -243,6 +293,9 @@ class CronController:
         run_id = await self._scheduler.trigger_run_now(job_id)
         return run_id
 
+    async def run_now_info(self, job_id: str) -> dict[str, str]:
+        return await self._scheduler.trigger_run_now_info(job_id)
+
     async def _create_job_tool(
         self,
         name: str,
@@ -254,6 +307,10 @@ class CronController:
         wake_offset_seconds: int | None = None,
         mode: str | None = None,
         timeout_seconds: int | None = None,
+        model_name: str | None = None,
+        project_dir: str | None = None,
+        project_id: str | None = None,
+        work_mode: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "name": name,
@@ -269,6 +326,14 @@ class CronController:
             params["mode"] = mode
         if timeout_seconds is not None:
             params["timeout_seconds"] = timeout_seconds
+        if model_name is not None and str(model_name).strip():
+            params["model_name"] = validate_cron_model(model_name)
+        if project_dir is not None:
+            params["project_dir"] = str(project_dir).strip()
+        if project_id is not None and str(project_id).strip():
+            params["project_id"] = str(project_id).strip()
+        if work_mode is not None and str(work_mode).strip():
+            params["work_mode"] = str(work_mode).strip()
         return await self.create_job(params)
 
     async def _update_job_tool(
@@ -405,15 +470,15 @@ class CronController:
                         },
                         "wake_offset_seconds": {
                             "type": "integer",
-                            "description": "Seconds to wake before push. Default 300",
-                            "default": 300,
+                            "description": "Seconds to wake before push. Default 0",
+                            "default": 0,
                         },
                         "mode": {
                             "type": "string",
                             "enum": cron_job_modes_for_tools(),
                             "description": (
                                 "Agent runtime mode when the job runs. "
-                                "Default agent.fast. Use team for multi-agent team execution."
+                                "Default agent. Use team for multi-agent team execution."
                             ),
                         },
                         "timeout_seconds": {
@@ -421,6 +486,37 @@ class CronController:
                             "description": (
                                 "Execution timeout in seconds (60-259200). "
                                 "Default 600 for normal modes and 1200 for team modes."
+                            ),
+                        },
+                        "model_name": {
+                            "type": "string",
+                            "description": (
+                                "Model name or alias to use when the job runs. "
+                                "If omitted, uses the AgentServer default model."
+                            ),
+                        },
+                        "project_dir": {
+                            "type": "string",
+                            "description": (
+                                "Absolute path to the project directory this job belongs to. "
+                                "If omitted, uses the current session's project."
+                            ),
+                        },
+                        "project_id": {
+                            "type": "string",
+                            "description": (
+                                "Explicit project id (takes priority over project_dir). "
+                                "Omit to resolve from project_dir + work_mode."
+                            ),
+                        },
+                        "work_mode": {
+                            "type": "string",
+                            "enum": ["code", "work"],
+                            "description": (
+                                "Working mode of the target project (code/work). "
+                                "Defaults to current channel default (tui->code, web->work). "
+                                "Only used when project_id is not provided; ignored if project_id "
+                                "is provided (work_mode inherited from the project)."
                             ),
                         },
                     },
@@ -432,7 +528,8 @@ class CronController:
                 name="cron_update_job",
                 description=(
                     "Update an existing cron job. Pass job_id and a patch dict with fields to update "
-                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, targets, mode)."
+                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, "
+                    "targets, mode, model_name, project_dir, project_id)."
                 ),
                 input_params={
                     "type": "object",
@@ -442,7 +539,11 @@ class CronController:
                             "type": "object",
                             "description": (
                                 "Fields to update (name, enabled, cron_expr, timezone, "
-                                "description, wake_offset_seconds, targets, mode)"
+                                "description, wake_offset_seconds, targets, mode, model_name, "
+                                "project_dir, project_id). work_mode is not accepted as an "
+                                "independent patch field; to change work_mode, patch project_id "
+                                "or project_dir + work_mode (work_mode only disambiguates the "
+                                "target project when resolving project_dir)."
                             ),
                             "properties": {
                                 "targets": {
@@ -455,7 +556,33 @@ class CronController:
                                 "mode": {
                                     "type": "string",
                                     "enum": cron_job_modes_for_tools(),
-                                    "description": "Agent runtime mode (agent, team, agent.plan, ...)",
+                                    "description": "Agent runtime mode (agent, team, ...)",
+                                },
+                                "model_name": {
+                                    "type": "string",
+                                    "description": "Model to use when the job runs. \
+                                        Set to empty string to reset to default.",
+                                },
+                                "project_dir": {
+                                    "type": "string",
+                                    "description": "Absolute path to the project directory. \
+                                        Set to empty string for default project.",
+                                },
+                                "project_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "Directly patch the project_id (takes priority over "
+                                        "project_dir). work_mode is re-injected from the "
+                                        "project record."
+                                    ),
+                                },
+                                "work_mode": {
+                                    "type": "string",
+                                    "enum": ["code", "work"],
+                                    "description": (
+                                        "Disambiguates target project when patching "
+                                        "project_dir. Not a standalone patchable field."
+                                    ),
                                 },
                             },
                         },

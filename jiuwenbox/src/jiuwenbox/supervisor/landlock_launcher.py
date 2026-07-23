@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import sys
+import types
 
 LANDLOCK_CREATE_RULESET = 444
 LANDLOCK_ADD_RULE = 445
@@ -238,10 +239,13 @@ def _run_daemon_in_process(daemon_path: str, payload: dict) -> int:
     except LandlockHardRequirementError:
         return 126
 
-    daemon_globals: dict = {
-        "__name__": "jiuwenbox.supervisor.sandbox_daemon_inproc",
-        "__file__": daemon_path,
-    }
+    module_name = "jiuwenbox.supervisor.sandbox_daemon_inproc"
+    module = types.ModuleType(module_name)
+    module.__file__ = daemon_path
+    sys.modules[module_name] = module
+    daemon_globals = module.__dict__
+    daemon_globals["__name__"] = module_name
+    daemon_globals["__file__"] = daemon_path
     try:
         compiled = compile(daemon_source, daemon_path, "exec")
     except SyntaxError as exc:
@@ -263,44 +267,20 @@ def _run_daemon_in_process(daemon_path: str, payload: dict) -> int:
         return 1
 
 
-def _run_command(command: list[str], payload: dict) -> int:
-    """Apply Landlock and ``execvp`` the user command (legacy path).
-
-    Used by ``exec_background``-style callers that still spawn a fresh
-    bubblewrap per command and need Landlock to be inherited by the
-    user binary they exec into.
-    """
-    try:
-        apply_landlock(payload)
-    except LandlockHardRequirementError:
-        return 126
-    try:
-        os.execvp(command[0], command)
-    except OSError as exc:
-        logger.error("Failed to exec command %s: %s", command[0], exc)
-        return 127
-    return 0
-
-
 def main() -> int:
-    """Dispatch between the daemon and generic-exec launcher modes.
+    """Apply Landlock and run the in-sandbox daemon in this process.
 
-    Layouts:
+    Layout:
       ``landlock_launcher.py PAYLOAD --daemon DAEMON_SCRIPT_PATH``
-        Apply Landlock and run the daemon script via ``compile``/``exec``.
-      ``landlock_launcher.py PAYLOAD -- COMMAND [ARGS...]``
-        Apply Landlock and ``execvp`` the user command (legacy path,
-        used by ``exec_background`` for one-shot bwrap invocations).
     """
-    if len(sys.argv) < 4:
+    if len(sys.argv) != 4 or sys.argv[2] != "--daemon":
         logger.error(
-            "Usage: landlock_launcher.py <payload> --daemon <daemon_script>"
-            " | landlock_launcher.py <payload> -- <command> [args...]",
+            "Usage: landlock_launcher.py <payload> --daemon <daemon_script>",
         )
         return 2
 
     payload_b64 = sys.argv[1]
-    mode_token = sys.argv[2]
+    daemon_path = sys.argv[3]
 
     try:
         payload = _decode_payload(payload_b64)
@@ -309,17 +289,7 @@ def main() -> int:
         logger.error("Failed to decode landlock payload: %s", exc)
         return 2
 
-    if mode_token == "--daemon":
-        return _run_daemon_in_process(sys.argv[3], payload)
-    if mode_token == "--":
-        command = sys.argv[3:]
-        if not command:
-            logger.error("Generic launcher mode requires a command after '--'")
-            return 2
-        return _run_command(command, payload)
-
-    logger.error("Unknown launcher mode token %r", mode_token)
-    return 2
+    return _run_daemon_in_process(daemon_path, payload)
 
 
 if __name__ == "__main__":

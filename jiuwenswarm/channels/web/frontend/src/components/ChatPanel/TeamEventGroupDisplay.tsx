@@ -8,9 +8,9 @@ import {
 } from './teamEventUtils';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { openTeamPanel } from '../../features/teamPanelState';
-import teamProcessIcon from '../../assets/team-process.svg';
+import TeamProcessIcon from '../../assets/team-process.svg?react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import { useSessionStore } from '../../stores';
+import { useChatStore, useSessionStore } from '../../stores';
 import type {
   TeamMemberExecutionEvent,
   TeamTask,
@@ -104,7 +104,11 @@ function getTaskStatusLabel(status: ActivityStatus, t: Translate): string {
 }
 
 function isRunningTaskStatus(status: ActivityStatus): boolean {
-  return status === 'claimed' || status === 'in_progress' || status === 'plan_approved';
+  return (
+    status === 'in_progress' ||
+    status === 'planning' ||
+    status === 'in_review'
+  );
 }
 
 function getMemberName(memberId: string, members: TeamMemberLike[]): string {
@@ -480,7 +484,7 @@ function AgentTeamHeader({
     >
       <span className="team-event-group-summary__main">
         <span className="team-event-group-summary__icon" aria-hidden="true">
-          <img src={teamProcessIcon} alt="" />
+          <TeamProcessIcon aria-hidden />
         </span>
         <span className="team-event-group-summary__title">
           {buildProgressLabel(memberCount, isProcessing, t)}
@@ -516,7 +520,8 @@ export function AgentTeamActivityCard({
 }: AgentTeamActivityCardProps) {
   const [expanded, setExpanded] = useState(false);
   const { t } = useTranslation();
-  const { teamMembers } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
   const members = teamMembers as TeamMemberLike[];
   const { activities, activeCount } = useMemo(() => {
     const count = members.filter(isActiveTeamMember).length;

@@ -17,12 +17,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, Literal
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
-from jiuwenswarm.common.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
+from jiuwenswarm.common.e2a.constants import (
+    E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
+    E2A_INTERNAL_CANCEL_SOURCE_KEY,
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
+)
 from jiuwenswarm.common.config import get_evolution_auto_save_enabled
 from jiuwenswarm.gateway.routing.session_map import SessionMap
 from jiuwenswarm.gateway.routing.agent_request_timeout import (
     send_agent_request_with_timeout,
 )
+from jiuwenswarm.gateway.message_handler.join_exit_handlers import JoinExitHandlers
 from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
     ParsedControlAction,
     parse_channel_control_text,
@@ -43,6 +48,8 @@ from jiuwenswarm.extensions.hook_event import GatewayHookEvents
 from jiuwenswarm.extensions.hooks_context import GatewayChatHookContext
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.gateway.hooks.handler import GatewayHookHandler
+from jiuwenswarm.gateway.routing.keys import RoutingKey, AgentRef, make_delivery_target
+from jiuwenswarm.gateway.routing.session_sharing import SessionSharingRegistry, SubRole
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +83,16 @@ _INTERRUPT_RESUME_SOURCES = frozenset({
     "evolution_interrupt",
 })
 _A2UI_OPEN_TAG_MARKER = "<a2ui-json>"
+_DELIVERY_IDENTITY_METADATA_KEYS = frozenset({
+    "app_id",
+    "chat_type",
+    "im_chat_type",
+    "feishu_chat_id",
+    "feishu_open_id",
+    "open_id",
+    "im_sender_user_id",
+    "im_thread_id",
+})
 
 
 def apply_a2ui_text_fallback_to_gateway_payload(
@@ -94,18 +111,26 @@ def apply_a2ui_text_fallback_to_gateway_payload(
 
 
 class ChannelMode(str, Enum):
+    AGENT = "agent"
+    # 历史值：plan / fast 已合并为 agent，保留以兼容旧持久化 channel state。
     AGENT_PLAN = "agent.plan"
     AGENT_FAST = "agent.fast"
     CODE_PLAN = "code.plan"
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
     TEAM = "team"
+    TEAM_PLAN = "team.plan"
+
+    @classmethod
+    def is_team_mode(cls, mode: str) -> bool:
+        """Return True if *mode* resolves to any team variant (case-insensitive)."""
+        return mode.strip().lower() in {cls.TEAM.value, cls.CODE_TEAM.value, cls.TEAM_PLAN.value}
 
 
 @dataclass
 class ChannelControlState:
     session_id: str | None = None
-    mode: ChannelMode = ChannelMode.AGENT_PLAN
+    mode: ChannelMode = ChannelMode.AGENT
 
 
 @dataclass
@@ -164,7 +189,7 @@ class MessageHandler(ABC):
         if getattr(self, "_singleton_initialized", False):
             return
         self._singleton_initialized = True
-        self._agent_client = agent_client
+        self.agent_client = agent_client
         self._user_messages: asyncio.Queue["Message"] = asyncio.Queue()
         self._robot_messages: asyncio.Queue["Message"] = asyncio.Queue()
         self._running = False
@@ -175,10 +200,20 @@ class MessageHandler(ABC):
         self._stream_metadata: dict[str, dict[str, Any] | None] = {}  # request_id -> request metadata
         self._stream_modes: dict[str, str] = {}  # request_id -> mode
         self._stream_emits_processing_status: dict[str, bool] = {}  # request_id -> emits chat.processing_status
+        # 非流式 chat.send（如飞书 enable_streaming=False）任务追踪：rid -> mode。
+        # 流式任务走 _stream_emits_processing_status；非流式 chat 不产生 processing_status，
+        # 但同样是“用户发起的对话任务在跑”，配置保存锁须覆盖，故单列此集合。
+        # value 存 mode（与 _stream_modes 同款），供 has_active_streams() 判断 team 排除用。
+        self._active_chat_tasks: dict[str, str] = {}
         self._disconnect_cancel_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._stream_app_ids: dict[str, str] = {}  # request_id -> app_id, 多应用流式精确路由
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
         self._evolution_approval = EvolutionApprovalCoordinator()
         self._session_last_user_query: dict[str, str] = {}
+        # session_id -> 最近一次人类发起请求的 (channel_id, member_name)。
+        # team 模式下 file msg 不携带发起者身份（rid 固定为建会话那轮），send_file 定向
+        # 投递时按 session_id 取最近发起者兜底（并发时可能取到另一 human，仅投错人不泄漏）。
+        self._session_last_originator: dict[str, tuple[str, str]] = {}
         self._acp_session_aliases: dict[str, str] = {}  # external_session_id -> internal_session_id
         self._acp_session_alias_lock = asyncio.Lock()
 
@@ -198,6 +233,9 @@ class MessageHandler(ABC):
         })
         self._channel_states: Dict[str, ChannelControlState] = {}
         self._session_map = SessionMap()
+        self._session_sharing = SessionSharingRegistry()
+        # 组合：/join /exit 团队成员管理逻辑（独立文件维护，通过 self._h 访问宿主能力）
+        self._join_exit = JoinExitHandlers(self)
         self._cron_controller = None
 
         # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
@@ -213,6 +251,10 @@ class MessageHandler(ABC):
         except Exception as e:
             logger.warning("[MessageHandler] Failed to init GatewayHookHandler: %s", e)
             self._gateway_hook_handler = None
+
+    def get_session_sharing_registry(self) -> SessionSharingRegistry:
+        """返回 SessionSharingRegistry 实例，供 V2 共享会话路由使用."""
+        return self._session_sharing
 
     def trigger_session_start_hook(self, session_id: str, source: str = "startup") -> None:
         """供 Channel 层调用，触发 SessionStart hook."""
@@ -236,8 +278,8 @@ class MessageHandler(ABC):
 
         from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
 
-        if isinstance(self._agent_client, WebSocketAgentServerClient):
-            self._agent_client.set_server_push_handler(self._handle_agent_server_push)
+        if isinstance(self.agent_client, WebSocketAgentServerClient):
+            self.agent_client.set_server_push_handler(self._handle_agent_server_push)
 
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
@@ -254,13 +296,141 @@ class MessageHandler(ABC):
             )
         return cls(agent_client)
 
-    def handle_message(self, msg: "Message") -> None:
+    @staticmethod
+    def extract_session_id_from_ref(session_ref: str | None) -> str | None:
+        """从 session_ref 提取 session_id。
+
+        支持两种格式：
+        - 完整: team_<name>_session_<id> → 提取 <id>
+        - 简化: <session_id> → 直接返回
+        """
+        if not session_ref:
+            return None
+        parts = session_ref.split("_session_")
+        if len(parts) == 2:
+            return parts[1]
+        # 简化格式：直接就是 session_id（如 sess_xxx）
+        return session_ref
+
+    @staticmethod
+    def extract_team_name_from_ref(session_ref: str | None) -> str:
+        if not session_ref:
+            return "unknown"
+        prefix = session_ref.replace("team_", "", 1)
+        return prefix.split("_session_")[0]
+
+    @staticmethod
+    def resolve_app_id(msg: "Message") -> str:
+        """从 Message 提取有效的 app_id。
+
+        msg.app_id 是 V2 新增字段，渠道尚未迁移填充（始终为 None）；
+        兜底读 msg.bot_id——渠道已将其设为 channel.config.app_id。
+        修复后后续可将 msg.bot_id 逐步迁移为 msg.app_id。
+        """
+        return getattr(msg, "app_id", None) or getattr(msg, "bot_id", None) or "default"
+
+    async def handle_message(self, msg: "Message") -> None:
         """Channel 同步回调：将消息放入 user_messages 队列，由转发循环发给 AgentServer."""
+        # 非控制指令: 反查发送者身份
+        result = self._session_sharing.resolve_member_by_user(
+            msg.channel_id,
+            MessageHandler.resolve_app_id(msg),
+            msg.user_id or msg.metadata.get("im_sender_user_id", ""),
+            chat_id=msg.metadata.get("im_thread_id", "") if isinstance(msg.metadata, dict) else "",
+        )
+        if result:
+            sid, mname = result
+            # V2: whoami 命中时始终覆盖为 team session_id，
+            # 因为 IM 消息的 session_id 是 chat_id（如 oc_xxx），
+            # 不加覆盖则消息发到错误 session，LLM 视为普通对话。
+            msg.session_id = sid
+            msg.metadata = dict(msg.metadata or {})
+            msg.metadata["member_name"] = mname
+
         self._remember_user_query_context(msg)
         self._user_messages.put_nowait(msg)
         logger.info(
             "[MessageHandler] _user_messages 入队: id=%s channel_id=%s session_id=%s",
             msg.id, msg.channel_id, msg.session_id,
+        )
+
+    async def _maybe_register_godview(self, msg: "Message") -> None:
+        """V2: auto-register a GodView subscriber for the channel.
+
+        Called from _forward_loop after _apply_channel_state, so msg.session_id is
+        already the real team session_id (not the inbound chat_id like oc_xxx) and
+        msg.params.mode has been injected. Registering here ensures GodView lands
+        under the same session_id that team-event dispatch uses, so fan_out's
+        godview intent can resolve.
+
+        Trigger when:
+        - params.mode is a team variant (team / code.team / team.plan), or
+        - session already has subscribers (already a team session; web mode may be "agent")
+        """
+        if not msg.session_id:
+            return
+        # member 已通过 /join 认领席位（resolve_member_by_user 命中），其消息走
+        # mention/private intent 精确投递即可，无需再为本 channel 注册 GodView
+        # （否则 member 会多收一份 godview 全量输出，飞书端还会与 mention/private
+        # 拼到同一 buffer 串台）。单人 /mode team 无 member_name，正常注册 GodView。
+        if isinstance(msg.metadata, dict) and msg.metadata.get("member_name"):
+            return
+        _params = msg.params if isinstance(msg.params, dict) else {}
+        _mode = str(_params.get("mode") or "")
+        _session_has_subs = bool(self._session_sharing.lookup_all(msg.session_id))
+        if not (ChannelMode.is_team_mode(_mode) or _session_has_subs):
+            return
+        godview_subs = self._session_sharing.lookup_member(msg.session_id, SubRole.GODVIEW)
+        _ch = msg.channel_id or "web"
+        _has_godview_for_this_channel = any(
+            s.routing_key.channel_id == _ch for s in godview_subs
+        )
+        if _has_godview_for_this_channel:
+            logger.info(
+                "[MessageHandler] GodView already registered for channel %s: session=%s count=%d",
+                _ch, msg.session_id, len(godview_subs),
+            )
+            return
+        _app = MessageHandler.resolve_app_id(msg)
+        # ws_id is generated by Channel handshake and injected into msg.metadata;
+        # send resolves by delivery.ws_id first. IM channel has no ws_id, uses chat_id
+        # as container.
+        _ws_id = (msg.metadata or {}).get("ws_id", "")
+        _user = (
+            (msg.metadata or {}).get("user_id")
+            or msg.user_id
+            or str(getattr(msg, "chat_id", None) or _ch)
+        )
+        # V2: tui 同 web 走 ws 物理寻址——TuiChannel 持有 _ws_by_id，GodView 订阅
+        # 需带真 ws_id 才能让 team 出站 dispatch_to_session → TuiChannel.send 命中 ws。
+        # GatewayServer forward 分支已把 ws_id 注入 msg.metadata（委托 TuiChannel._register）。
+        _kind = "ws" if _ch in ("web", "tui") else "group"
+        # 阶段2: GodView RoutingKey.agent_ref 与入站 _register 的 rk.agent_ref 同源
+        # （用 msg.agent_ref，tui 已在 GatewayServer forward 分支按 mode/agent_id 合成），
+        # 使出站 routing_keys 兜底能命中 _clients_by_key。msg.agent_ref 缺失/非 AgentRef
+        # 时回退 AgentRef("team","default")（IM 等非 ws_channel 路径原语义）。
+        _godview_agent_ref = getattr(msg, "agent_ref", None)
+        if not isinstance(_godview_agent_ref, AgentRef):
+            _godview_agent_ref = AgentRef("team", "default")
+        rk = RoutingKey(
+            user_id=_user,
+            channel_id=_ch,
+            app_id=_app,
+            agent_ref=_godview_agent_ref,
+            session_id=msg.session_id,
+        )
+        dt = make_delivery_target(
+            _ch,
+            chat_id=getattr(msg, "chat_id", None) or "",
+            ws_id=_ws_id if _kind == "ws" else "",
+        )
+        await self._session_sharing.register(msg.session_id, SubRole.GODVIEW, rk, dt)
+        logger.info(
+            "[MessageHandler] GodView auto-registered: session=%s channel=%s user=%s app=%s kind=%s"
+            " rk_full=%s",
+            msg.session_id, _ch, _user, _app, _kind,
+            {"user_id": rk.user_id, "channel_id": rk.channel_id, "app_id": rk.app_id,
+             "agent_ref": str(rk.agent_ref), "session_id": rk.session_id},
         )
 
     # ---------- Channel 控制状态：\new_session / \mode ----------
@@ -277,11 +447,30 @@ class MessageHandler(ABC):
         if not query:
             return
         self._session_last_user_query[session_id] = query[:8000]
+        # 记录最近人类发起者身份（member_name 由 resolve_member_by_user 注入 msg.metadata），
+        # 供 send_file 在 file msg 不携带发起者时按 session_id 反查定向。
+        # 排除 GodView：它是通道级自动注册的伪 member，非真实 /join 人类席位，不应作为发起者定向。
+        # 无 member_name 的入站（如 web：web 不 /join，resolve_member_by_user 不命中）→ 清空
+        # last-originator，避免 web 发起时残留上一次 feishu 用户导致文件误投到 feishu。
+        origin_member = str((msg.metadata or {}).get("member_name") or "").strip()
+        if origin_member and origin_member != SubRole.GODVIEW:
+            self._session_last_originator[session_id] = (
+                str(msg.channel_id or "").strip(),
+                origin_member,
+            )
+        else:
+            self._session_last_originator.pop(session_id, None)
 
     def _get_session_last_user_query(self, session_id: str | None) -> str:
         if not session_id:
             return ""
         return self._session_last_user_query.get(str(session_id), "")
+
+    def get_session_last_originator(self, session_id: str | None) -> tuple[str, str] | None:
+        """返回该 session 最近一次人类发起请求的 (channel_id, member_name)，供 send_file 定向。"""
+        if not session_id:
+            return None
+        return self._session_last_originator.get(str(session_id))
 
     def _attach_original_request_to_ask_user_answer(self, msg: "Message") -> "Message":
         if not isinstance(msg.params, dict):
@@ -308,7 +497,7 @@ class MessageHandler(ABC):
     def _is_team_chat_send(msg: "Message") -> bool:
         if not isinstance(msg.params, dict):
             return False
-        return str(msg.params.get("mode") or "").strip().lower() == "team"
+        return ChannelMode.is_team_mode(str(msg.params.get("mode") or ""))
 
     @classmethod
     def _is_interrupt_resume_chat_send(cls, msg: "Message") -> bool:
@@ -323,11 +512,38 @@ class MessageHandler(ABC):
 
     @classmethod
     def _should_cancel_existing_stream_before_chat_send(cls, msg: "Message") -> bool:
+        # 主动推荐消息不取消现有流式任务，避免干扰用户当前对话
+        if isinstance(msg.params, dict) and msg.params.get("source") == "proactive_recommendation":
+            return False
         return (
             cls._is_chat_send_message(msg)
             and not cls._is_team_chat_send(msg)
             and not cls._is_interrupt_resume_chat_send(msg)
+            and not cls._is_interaction_managed_chat_send(msg)
         )
+
+    @staticmethod
+    def _is_interaction_managed_chat_send(msg: "Message") -> bool:
+        """Whether this input must reach DeepAgent without host stream replacement.
+
+        Ordinary chat keeps JiuwenSwarm's established replace flow: Gateway
+        finishes the previous host stream before starting the next request.
+        Clients that explicitly set ``input_mode`` / ``runtime_mode`` to
+        ``steer`` or ``follow_up``, or set ``attach_goal=true`` for the second
+        step of goal set/resume, must not cancel the existing host stream —
+        OpenJiuwen routes those inputs atomically while the output consumer
+        remains attached.
+
+        Requests without those fields still cancel-then-start (pre-Goal
+        behavior).
+        """
+        params = msg.params if isinstance(msg.params, dict) else {}
+        if params.get("attach_goal") is True:
+            return True
+        input_mode = str(
+            params.get("input_mode") or params.get("runtime_mode") or ""
+        ).strip().lower()
+        return input_mode in {"follow_up", "steer"}
 
     def _get_channel_default_state(self, channel_id: str) -> ChannelControlState:
         """从 config.yaml 读取 Channel 的默认 session_id / mode."""
@@ -342,16 +558,19 @@ class MessageHandler(ABC):
         # 若未在 config 中指定默认 session_id，为该 channel 生成一个带时间戳的新 session_id
         if not sid:
             sid = self._generate_channel_session_id(channel_id)
-        mode_raw = str(ch_cfg.get("default_mode") or "agent.plan").strip().lower()
+        mode_raw = str(ch_cfg.get("default_mode") or "agent").strip().lower()
         mode_map = {
-            "agent.plan": ChannelMode.AGENT_PLAN,
-            "agent.fast": ChannelMode.AGENT_FAST,
+            "agent": ChannelMode.AGENT,
+            # plan / fast 已合并：历史 default_mode 归一到 agent。
+            "agent.plan": ChannelMode.AGENT,
+            "agent.fast": ChannelMode.AGENT,
             "code.plan": ChannelMode.CODE_PLAN,
             "code.normal": ChannelMode.CODE_NORMAL,
             "code.team": ChannelMode.CODE_TEAM,
             "team": ChannelMode.TEAM,
+            "team.plan": ChannelMode.TEAM_PLAN,
         }
-        mode = mode_map.get(mode_raw, ChannelMode.AGENT_PLAN)
+        mode = mode_map.get(mode_raw, ChannelMode.AGENT)
         return ChannelControlState(session_id=sid, mode=mode)
 
     def _get_channel_state_key(self, channel_id: str, conversation_id: str | None) -> str:
@@ -360,7 +579,7 @@ class MessageHandler(ABC):
             return f"{channel_id}:{conversation_id}"
         return channel_id
 
-    def _get_or_create_channel_state(self, msg: "Message") -> ChannelControlState:
+    def get_or_create_channel_state(self, msg: "Message") -> ChannelControlState:
         """获取或创建消息对应 channel 状态（使用复合键）。
 
         conversation_id 从 msg.metadata 获取，如 feishu 的 feishu_chat_id。
@@ -429,7 +648,7 @@ class MessageHandler(ABC):
             return provider
         return str(getattr(msg, "channel_id", "") or "")
 
-    async def _send_channel_notice(
+    async def send_channel_notice(
         self,
         user_infos: dict,
         channel_id: str,
@@ -443,12 +662,15 @@ class MessageHandler(ABC):
         """
         from jiuwenswarm.common.schema.message import Message, EventType
 
+        # 小艺 channel 按 payload.is_complete 判定任务结束（收到 True 即关闭接收周期）。
+        _default_complete = False if channel_id == "xiaoyi" else True
         if isinstance(text_or_payload, dict):
             payload = dict(text_or_payload)
-            payload.setdefault("is_complete", True)
+            payload.setdefault("is_complete", _default_complete)
         else:
-            payload = {"content": text_or_payload, "is_complete": True}
+            payload = {"content": text_or_payload, "is_complete": _default_complete}
 
+        _app_id = user_infos.get("app_id") or user_infos.get("bot_id", "")
         msg = Message(
             id=user_infos['id'],
             type="event",
@@ -459,7 +681,8 @@ class MessageHandler(ABC):
             ok=True,
             payload=payload,
             event_type=EventType.CHAT_FINAL,
-            metadata=user_infos['meta_data']
+            metadata=user_infos['meta_data'],
+            app_id=_app_id or None,
         )
         await self.publish_robot_messages(msg)
 
@@ -470,7 +693,28 @@ class MessageHandler(ABC):
         self._stream_sessions.pop(rid, None)
         self._stream_metadata.pop(rid, None)
         self._stream_emits_processing_status.pop(rid, None)
+        self._stream_app_ids.pop(rid, None)
         self._stream_modes.pop(rid, None)
+
+    async def _pop_stream_tracking_and_broadcast(self, rids: list[str]) -> None:
+        """Pop per-request stream tracking for *rids* then refresh the global
+        running snapshot to all web windows.
+
+        Centralizes the pop+broadcast sequence so every cancel/interrupt exit
+        path stays in sync. The broadcast is best-effort and never breaks the
+        surrounding cancel flow.
+        """
+        for rid in rids:
+            self._pop_stream_tracking(rid)
+        if not rids:
+            return
+        try:
+            await self._broadcast_task_global_running()
+        except Exception:
+            logger.debug(
+                "[task.global_running] broadcast after cancel failed",
+                exc_info=True,
+            )
 
     @staticmethod
     def _is_single_user_channel(channel_id: str) -> bool:
@@ -496,7 +740,15 @@ class MessageHandler(ABC):
         new_session_id: str | None,
         task_session: str | None,
     ) -> bool:
-        """Whether an in-flight stream on *channel_id* should be replaced by a new chat.send."""
+        """Whether an ordinary chat.send replaces this in-flight host stream.
+
+        Same-session ordinary chat preserves the pre-Goal JiuwenSwarm
+        lifecycle: finish/cancel the old request before the new request starts.
+        Runtime-managed Goal input is filtered by
+        ``_should_cancel_existing_stream_before_chat_send`` before this method
+        is reached. ACP additionally replaces an orphan stream from another
+        session because it is a single-user channel.
+        """
         if new_session_id and task_session == new_session_id:
             return True
         return self._is_single_user_channel(channel_id)
@@ -531,8 +783,10 @@ class MessageHandler(ABC):
         """Cancel in-flight stream work on *msg.channel_id* before starting a new chat.send.
 
         Stops both gateway stream consumers and AgentServer work (via interrupt).
-        ACP also drops orphan tasks from other session_ids; TUI/CLI only cancel
-        streams that share the same session_id as the incoming chat.send.
+        Ordinary same-session chat retains the established cancel-then-start
+        ordering. Explicit runtime-managed Goal input bypasses this function;
+        ACP additionally drops orphan work from another session because it is
+        a single-user channel.
         """
         channel_id = msg.channel_id
         new_session_id = msg.session_id
@@ -585,8 +839,11 @@ class MessageHandler(ABC):
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks_to_stop, return_exceptions=True)
-        for rid, _, _, _ in candidates:
-            self._pop_stream_tracking(rid)
+        # 走集中化 pop+broadcast：新消息顶替旧流式任务后，须让跨窗口配置保存锁
+        # 感知运行态变化（否则前端保存锁卡在最后一次广播值，仅靠重连自愈）。
+        await self._pop_stream_tracking_and_broadcast(
+            [rid for rid, _, _, _ in candidates],
+        )
 
         for old_sid, mode in sid_mode.items():
             cancel_msg = self._clone_message_for_session_cancel(msg, old_sid, mode=mode)
@@ -618,6 +875,7 @@ class MessageHandler(ABC):
         channel_id: str | None = None,
         cancel_gateway_tasks: bool = True,
         agent_notify: Literal["await", "fire_and_forget"] = "await",
+        cancel_source: str | None = None,
     ) -> None:
         """Cancel gateway and AgentServer work for a session.
 
@@ -661,8 +919,7 @@ class MessageHandler(ABC):
         sid_for_agent = (old_sid or "").strip()
         if not sid_for_agent:
             await _cancel_tasks(tasks_to_cancel)
-            for rid in rids_cancelled:
-                self._pop_stream_tracking(rid)
+            await self._pop_stream_tracking_and_broadcast(rids_cancelled)
             return
 
         # 即使网关侧已无活跃流式拉取任务（例如 Agent 正在执行 shell/工具），也必须通知 AgentServer，
@@ -693,6 +950,11 @@ class MessageHandler(ABC):
             cancel_params["team"] = msg.params["team"]
         if isinstance(msg.params, dict) and msg.params.get("trusted_dirs"):
             cancel_params["trusted_dirs"] = msg.params["trusted_dirs"]
+        cancel_metadata = dict(msg.metadata or {})
+        cancel_metadata.pop(E2A_INTERNAL_CANCEL_SOURCE_KEY, None)
+        cancel_source_value = (
+            cancel_source.strip() if isinstance(cancel_source, str) else ""
+        )
 
         cancel_req = Message(
             id=f"interrupt_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
@@ -703,7 +965,7 @@ class MessageHandler(ABC):
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_CANCEL,
-            metadata=msg.metadata,
+            metadata=cancel_metadata or None,
             provider=getattr(msg, "provider", None),
             chat_id=getattr(msg, "chat_id", None),
             user_id=getattr(msg, "user_id", None),
@@ -711,11 +973,12 @@ class MessageHandler(ABC):
         )
         agent_msg = await self._prepare_agent_dispatch_message(cancel_req)
         env_interrupt = self.message_to_e2a(agent_msg)
+        if cancel_source_value:
+            env_interrupt.channel_context[E2A_INTERNAL_CANCEL_SOURCE_KEY] = cancel_source_value
 
         if cancel_gateway_tasks:
             await _cancel_tasks(tasks_to_cancel)
-            for rid in rids_cancelled:
-                self._pop_stream_tracking(rid)
+            await self._pop_stream_tracking_and_broadcast(rids_cancelled)
 
         if agent_notify == "fire_and_forget":
             task = asyncio.create_task(self._send_interrupt_to_agent(env_interrupt))
@@ -725,6 +988,14 @@ class MessageHandler(ABC):
                 "[MessageHandler] 已 fire-and-forget 发送 AgentServer 中断: session_id=%s",
                 sid_for_agent,
             )
+            if publish_interrupt_result:
+                await self._send_interrupt_result_notification(
+                    msg.id,
+                    msg.channel_id,
+                    sid_for_agent,
+                    "cancel",
+                    success=True,
+                )
             return
 
         try:
@@ -735,8 +1006,7 @@ class MessageHandler(ABC):
                 pass  # gateway tasks already cancelled above
             else:
                 await _cancel_tasks(tasks_to_cancel)
-                for rid in rids_cancelled:
-                    self._pop_stream_tracking(rid)
+                await self._pop_stream_tracking_and_broadcast(rids_cancelled)
             if publish_interrupt_result:
                 await self._send_interrupt_result_notification(
                     msg.id, msg.channel_id, sid_for_agent, "cancel",
@@ -746,8 +1016,7 @@ class MessageHandler(ABC):
 
         if not cancel_gateway_tasks:
             await _cancel_tasks(tasks_to_cancel)
-            for rid in rids_cancelled:
-                self._pop_stream_tracking(rid)
+            await self._pop_stream_tracking_and_broadcast(rids_cancelled)
 
         payload = resp.payload if isinstance(resp.payload, dict) else {}
         if payload.get("event_type") == "chat.interrupt_result":
@@ -762,6 +1031,7 @@ class MessageHandler(ABC):
                 resp,
                 sid_for_agent,
                 request_metadata=msg.metadata,
+                app_id=msg.app_id or "",
             )
             await self.publish_robot_messages(out)
             logger.info(
@@ -921,7 +1191,10 @@ class MessageHandler(ABC):
     def _build_disconnect_cancel_message(self, channel_id: str, session_id: str) -> "Message":
         from jiuwenswarm.common.schema.message import Message, ReqMethod
 
-        disconnect_params = {"intent": "cancel", "session_id": session_id}
+        disconnect_params = {
+            "intent": "cancel",
+            "session_id": session_id,
+        }
         disconnect_state = self._channel_states.get(
             self._get_channel_state_key(channel_id, session_id)
         ) or self._channel_states.get(channel_id)
@@ -946,7 +1219,11 @@ class MessageHandler(ABC):
     async def _cancel_disconnect_session(self, channel_id: str, session_id: str) -> None:
         stub = self._build_disconnect_cancel_message(channel_id, session_id)
         try:
-            await self._cancel_agent_work_for_session(stub, session_id)
+            await self._cancel_agent_work_for_session(
+                stub,
+                session_id,
+                cancel_source=E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
+            )
         except Exception:
             logger.warning(
                 "[MessageHandler] disconnect cancel failed: channel_id=%s session_id=%s",
@@ -980,7 +1257,7 @@ class MessageHandler(ABC):
             params.old_sid,
             publish_interrupt_result=False,
         )
-        await self._send_channel_notice(
+        await self.send_channel_notice(
             params.user_infos,
             params.channel_id,
             params.reply_session_id,
@@ -998,7 +1275,7 @@ class MessageHandler(ABC):
             params.old_sid,
             publish_interrupt_result=False,
         )
-        await self._send_channel_notice(
+        await self.send_channel_notice(
             params.user_infos,
             params.channel_id,
             params.reply_session_id,
@@ -1016,7 +1293,12 @@ class MessageHandler(ABC):
             True: 该消息是控制指令，已处理完毕，不需要转发给 Agent。
             False: 非控制指令，继续正常处理。
         """
-        user_infos = {"id": msg.id, "meta_data": msg.metadata}
+        user_infos = {
+            "id": msg.id,
+            "meta_data": msg.metadata,
+            "app_id": getattr(msg, "app_id", None) or getattr(msg, "bot_id", None) or "",
+            "bot_id": getattr(msg, "bot_id", None) or "",
+        }
 
         ch = msg.channel_id
         channel_type = self._resolve_control_channel_type(msg)
@@ -1046,7 +1328,24 @@ class MessageHandler(ABC):
             return True
 
         # 获取当前会话的状态（使用复合键）
-        state = self._get_or_create_channel_state(msg)
+        state = self.get_or_create_channel_state(msg)
+
+        # /join 已认领 team 席位后，除白名单（/exit、只读 /skills list 等）外的控制指令
+        # 一律拒绝——执行类指令会改 session/mode/分支/历史或注入 query，破坏席位绑定
+        # 或扰乱 team 流程。必须先 /exit。白名单与判定收敛在 JoinExitHandlers，见该类。
+        if (
+            not self._join_exit.is_allowed_when_joined(parsed.action)
+            and self._join_exit.sender_has_joined(msg)
+        ):
+            asyncio.create_task(
+                self.send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    "⚠️ 当前已加入 team session，不能执行该指令。请先执行 **/exit** 退出后再试。",
+                )
+            )
+            return True
 
         if parsed.action is ParsedControlAction.NEW_SESSION_OK:
             old_sid = state.session_id
@@ -1077,7 +1376,7 @@ class MessageHandler(ABC):
             return True
         if parsed.action is ParsedControlAction.NEW_SESSION_BAD:
             asyncio.create_task(
-                self._send_channel_notice(
+                self.send_channel_notice(
                     user_infos,
                     ch,
                     msg.session_id,
@@ -1097,9 +1396,10 @@ class MessageHandler(ABC):
                 "code.plan",
                 "code.normal",
                 "code.team",
+                "team.plan",
             ):
                 asyncio.create_task(
-                    self._send_channel_notice(
+                    self.send_channel_notice(
                         user_infos,
                         ch,
                         msg.session_id,
@@ -1110,21 +1410,23 @@ class MessageHandler(ABC):
             old_mode = state.mode
             old_sid = state.session_id
             if mode_str == "agent":
-                state.mode = ChannelMode.AGENT_PLAN
+                state.mode = ChannelMode.AGENT
             elif mode_str == "code":
                 state.mode = ChannelMode.CODE_NORMAL
             elif mode_str == "team":
                 state.mode = ChannelMode.TEAM
             elif mode_str == "agent.plan":
-                state.mode = ChannelMode.AGENT_PLAN
+                state.mode = ChannelMode.AGENT
             elif mode_str == "agent.fast":
-                state.mode = ChannelMode.AGENT_FAST
+                state.mode = ChannelMode.AGENT
             elif mode_str == "code.plan":
                 state.mode = ChannelMode.CODE_PLAN
             elif mode_str == "code.normal":
                 state.mode = ChannelMode.CODE_NORMAL
             elif mode_str == "code.team":
                 state.mode = ChannelMode.CODE_TEAM
+            elif mode_str == "team.plan":
+                state.mode = ChannelMode.TEAM_PLAN
             new_label = state.mode.value
             if old_mode != state.mode:
                 asyncio.create_task(
@@ -1141,7 +1443,7 @@ class MessageHandler(ABC):
                 )
             else:
                 asyncio.create_task(
-                    self._send_channel_notice(
+                    self.send_channel_notice(
                         user_infos,
                         ch,
                         msg.session_id,
@@ -1153,8 +1455,13 @@ class MessageHandler(ABC):
             switch_str = parsed.switch_subcommand or ""
             target_mode: ChannelMode | None = None
             if switch_str == "plan":
-                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
-                    target_mode = ChannelMode.AGENT_PLAN
+                # agent 下 plan / fast 已合并：/switch plan 保持 agent 。
+                if state.mode in (
+                    ChannelMode.AGENT,
+                    ChannelMode.AGENT_PLAN,
+                    ChannelMode.AGENT_FAST,
+                ):
+                    target_mode = ChannelMode.AGENT
                 elif state.mode in (
                     ChannelMode.CODE_PLAN,
                     ChannelMode.CODE_NORMAL,
@@ -1162,8 +1469,13 @@ class MessageHandler(ABC):
                 ):
                     target_mode = ChannelMode.CODE_PLAN
             elif switch_str == "fast":
-                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
-                    target_mode = ChannelMode.AGENT_FAST
+                # agent 下 plan / fast 已合并：/switch fast 保持 agent 。
+                if state.mode in (
+                    ChannelMode.AGENT,
+                    ChannelMode.AGENT_PLAN,
+                    ChannelMode.AGENT_FAST,
+                ):
+                    target_mode = ChannelMode.AGENT
             elif switch_str == "normal":
                 if state.mode in (
                     ChannelMode.CODE_PLAN,
@@ -1180,7 +1492,7 @@ class MessageHandler(ABC):
                     target_mode = ChannelMode.CODE_TEAM
             if target_mode is None:
                 asyncio.create_task(
-                    self._send_channel_notice(
+                    self.send_channel_notice(
                         user_infos,
                         ch,
                         msg.session_id,
@@ -1207,7 +1519,7 @@ class MessageHandler(ABC):
                 )
             else:
                 asyncio.create_task(
-                    self._send_channel_notice(
+                    self.send_channel_notice(
                         user_infos,
                         ch,
                         msg.session_id,
@@ -1217,7 +1529,7 @@ class MessageHandler(ABC):
             return True
         if parsed.action in (ParsedControlAction.MODE_BAD, ParsedControlAction.SWITCH_BAD):
             asyncio.create_task(
-                self._send_channel_notice(
+                self.send_channel_notice(
                     user_infos,
                     ch,
                     msg.session_id,
@@ -1259,7 +1571,7 @@ class MessageHandler(ABC):
         if parsed.action is ParsedControlAction.REWIND_CANCEL:
             # 用户取消 rewind
             asyncio.create_task(
-                self._send_channel_notice(
+                self.send_channel_notice(
                     user_infos, ch, msg.session_id,
                     "[收到 /rewind cancel] 已取消回退操作。",
                 )
@@ -1268,7 +1580,7 @@ class MessageHandler(ABC):
 
         if parsed.action is ParsedControlAction.REWIND_BAD:
             asyncio.create_task(
-                self._send_channel_notice(
+                self.send_channel_notice(
                     user_infos,
                     ch,
                     msg.session_id,
@@ -1277,9 +1589,10 @@ class MessageHandler(ABC):
             )
             return True
 
+        # ── origin/develop: /review / /security-review 指令 ──
         if parsed.action is ParsedControlAction.REVIEW_BAD:
             asyncio.create_task(
-                self._send_channel_notice(
+                self.send_channel_notice(
                     user_infos,
                     ch,
                     msg.session_id,
@@ -1288,6 +1601,35 @@ class MessageHandler(ABC):
             )
             return True
 
+        # ── V2: /join / /exit 共享会话指令 ──
+        if parsed.action is ParsedControlAction.JOIN_OK:
+            asyncio.create_task(
+                self._join_exit.join_slash_handler(user_infos, ch, msg, parsed)
+            )
+            return True
+        if parsed.action is ParsedControlAction.JOIN_BAD:
+            asyncio.create_task(
+                self.send_channel_notice(
+                    user_infos, ch, msg.session_id,
+                    "⚠️ join 指令格式错误",
+                )
+            )
+            return True
+        if parsed.action is ParsedControlAction.EXIT_OK:
+            asyncio.create_task(
+                self._join_exit.exit_slash_handler(user_infos, ch, msg, parsed)
+            )
+            return True
+        if parsed.action is ParsedControlAction.EXIT_BAD:
+            asyncio.create_task(
+                self.send_channel_notice(
+                    user_infos, ch, msg.session_id,
+                    "exit 指令格式错误。正确格式：/exit <session_id>",
+                )
+            )
+            return True
+
+        # ── origin/develop: /review / /security-review 指令 ──
         if parsed.action is ParsedControlAction.REVIEW_OK:
             # /review [args]：注入 review prompt，转发 Agent 执行 gh pr list/view/diff 并分析
             pr_arg = parsed.pr_arg or ""
@@ -1304,7 +1646,7 @@ class MessageHandler(ABC):
 
         if parsed.action is ParsedControlAction.SECURITY_REVIEW_BAD:
             asyncio.create_task(
-                self._send_channel_notice(
+                self.send_channel_notice(
                     user_infos,
                     ch,
                     msg.session_id,
@@ -1329,7 +1671,7 @@ class MessageHandler(ABC):
                     None, build_security_review_prompt, extra_arg, cwd
                 )
             except GitPreExecError as exc:
-                await self._send_channel_notice(
+                await self.send_channel_notice(
                     user_infos,
                     ch,
                     msg.session_id,
@@ -1406,12 +1748,12 @@ class MessageHandler(ABC):
             notice_payload["content"] = format_skills_list_for_notice(
                 notice_payload if isinstance(notice_payload, dict) else None
             )
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id, notice_payload
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("[MessageHandler] /skills list 请求失败: %s", exc)
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos,
                 channel_id,
                 reply_session_id,
@@ -1436,10 +1778,10 @@ class MessageHandler(ABC):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
-        state = self._get_or_create_channel_state(msg)
+        state = self.get_or_create_channel_state(msg)
         source_sid = state.session_id
         if not source_sid:
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id,
                 {"error": "当前无活跃会话，无法分叉"},
             )
@@ -1476,7 +1818,7 @@ class MessageHandler(ABC):
 
             await self._cancel_agent_work_for_session(msg, old_sid)
 
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id,
                 f"[收到 /branch 指令] 已分叉会话「{fork_title}」，当前已切换到新会话。",
             )
@@ -1485,13 +1827,13 @@ class MessageHandler(ABC):
                 source_sid, fork_sid, fork_title,
             )
         except ValueError as e:
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id,
                 {"error": f"分叉失败：{e}"},
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("[MessageHandler] /branch 失败: %s", exc)
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id,
                 {"error": f"分叉失败：{exc}"},
             )
@@ -1509,16 +1851,16 @@ class MessageHandler(ABC):
 
         IM 渠道 /rewind 是不可逆操作，需要确认后才执行。
         """
-        state = self._get_or_create_channel_state(msg)
+        state = self.get_or_create_channel_state(msg)
         target_sid = state.session_id
         if not target_sid:
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id,
                 {"error": "当前无活跃会话，无法回退"},
             )
             return
 
-        await self._send_channel_notice(
+        await self.send_channel_notice(
             user_infos, channel_id, reply_session_id,
             f"[收到 /rewind {turn_index} 指令] 确认要回退到第 {turn_index} 轮吗？\n"
             f"此操作不可逆，将删除第 {turn_index} 轮及之后的所有对话。\n"
@@ -1545,10 +1887,10 @@ class MessageHandler(ABC):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
-        state = self._get_or_create_channel_state(msg)
+        state = self.get_or_create_channel_state(msg)
         target_sid = state.session_id
         if not target_sid:
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id,
                 {"error": "当前无活跃会话，无法回退"},
             )
@@ -1577,7 +1919,7 @@ class MessageHandler(ABC):
                     removed = pl.get("removed_records", 0)
                     context_ok = pl.get("rewind_context", False)
 
-                    await self._send_channel_notice(
+                    await self.send_channel_notice(
                         user_infos, channel_id, reply_session_id,
                         f"[收到 /rewind 指令] 已回退到第 {turn_index} 轮"
                         f'（"{preview[:50]}"）'
@@ -1600,7 +1942,7 @@ class MessageHandler(ABC):
             remaining = result.get("remaining_records", 0)
             removed = result.get("removed_records", 0)
 
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id,
                 f"[收到 /rewind 指令] 已回退到第 {turn_index} 轮"
                 f'（"{preview[:50]}"）'
@@ -1612,13 +1954,13 @@ class MessageHandler(ABC):
                 target_sid, turn_index, remaining, removed,
             )
         except ValueError as e:
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id,
                 {"error": f"回退失败：{e}"},
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("[MessageHandler] /rewind 失败: %s", exc)
-            await self._send_channel_notice(
+            await self.send_channel_notice(
                 user_infos, channel_id, reply_session_id,
                 {"error": f"回退失败：{exc}"},
             )
@@ -1628,7 +1970,18 @@ class MessageHandler(ABC):
         channel_type = self._resolve_control_channel_type(msg)
         if channel_type not in self._control_channel_types:
             return
-        state = self._get_or_create_channel_state(msg)
+
+        # V2: 若 resolve_member_by_user 已识别为 team 成员（metadata 含 member_name），
+        # 则 session_id 和 mode 已由 handle_message 正确设置，不覆盖。
+        if isinstance(msg.metadata, dict) and msg.metadata.get("member_name"):
+            # 确保 mode=team，否则 AgentServer 不会走 process_team_message_stream
+            if msg.params is None:
+                msg.params = {}
+            if isinstance(msg.params, dict):
+                msg.params["mode"] = "team"
+            return
+
+        state = self.get_or_create_channel_state(msg)
 
         # 仅 _session_map_channel_types 中的通道族使用 SessionMap；其它受控通道仍按 config/state 与入站 session_id。
         cid = str(getattr(msg, "channel_id", "") or "")
@@ -1671,6 +2024,123 @@ class MessageHandler(ABC):
             return None
 
     # ---------- robot_messages ----------
+
+    def _is_chat_stream(self, rid: str) -> bool:
+        """``rid`` 是否为计入运行态的对话流（``chat.send``）。
+
+        计数口径与 ``_should_emit_processing_status_for_stream`` 对齐：只有
+        会发 processing_status 的流式任务（emit=True，即 chat.send）算“对话
+        任务在跑”。``history.get`` / ``chat.error`` 等只读/异常流登记在
+        ``_stream_modes`` 供取消取 mode 与 cron 回填 mode 用，但**不计入运行态**，
+        否则它们退出时会让保存锁计数悬空在最后一次广播值。emit 标志在启动时
+        先于 mode 写入、两者成对 pop（见 ``_pop_stream_tracking``），故
+        ``_stream_modes`` 中的 rid 必有对应标志项。
+        """
+        return bool(self._stream_emits_processing_status.get(rid))
+
+    def _iter_active_stream_modes(self) -> list[str]:
+        """计入运行态的活跃对话任务 mode 快照（流式 chat + 非流式 chat）。
+
+        流式只取对话流（见 ``_is_chat_stream``），``_active_chat_tasks`` 天然
+        都是对话任务，二者合并即覆盖全部“需触发配置保存锁”的任务。
+        """
+        return [
+            mode
+            for rid, mode in self._stream_modes.items()
+            if self._is_chat_stream(rid)
+        ] + [*self._active_chat_tasks.values()]
+
+    def has_active_streams(self) -> bool:
+        """是否有非 team 模式的用户对话任务正在运行（配置保存锁用，只读）。
+
+        team 任务用隔离 cron_* 会话、不受配置热更新影响，故配置保存锁
+        （前端禁用 + ack task_running + 后端拒绝）只看非 team 任务。
+        覆盖流式（``_stream_modes``）与非流式 chat（``_active_chat_tasks`` 存 mode）。
+
+        default fallback mode（如 ``"plan"``）经 ``is_team_mode`` 返回 False，
+        不会误判为 team，故历史无 mode 的路径仍计入锁。
+        """
+        return any(
+            not ChannelMode.is_team_mode(mode)
+            for mode in self._iter_active_stream_modes()
+        )
+
+    def active_non_team_modes(self) -> list[tuple[str, str]]:
+        """非 team 活跃对话任务的 (request_id, mode) 明细（只读，调试/日志用）。
+
+        口径与 ``_iter_active_stream_modes`` 一致，再按 team 排除。
+        供保存锁拒绝日志定位“是哪个 rid 让运行态误判为 true”。
+        """
+        result: list[tuple[str, str]] = []
+        for rid, mode in self._stream_modes.items():
+            if self._is_chat_stream(rid) and not ChannelMode.is_team_mode(mode):
+                result.append((rid, mode))
+        for rid, mode in self._active_chat_tasks.items():
+            if not ChannelMode.is_team_mode(mode):
+                result.append((rid, mode))
+        return result
+
+    async def _broadcast_task_global_running(self) -> None:
+        """向所有 web ws 客户端广播当前全局运行态快照（task.global_running）。
+
+        running/count 只计非 team 任务（team 任务不受配置热更新影响，不触发
+        配置保存锁），保证多任务并发时计数准确、幂等。
+        任何 chat 任务的起止点都应调用，让跨窗口配置保存锁感知运行态变化。
+        """
+        try:
+            web_channel = self._resolve_web_channel()
+            if web_channel is not None:
+                all_modes = self._iter_active_stream_modes()
+                count = sum(
+                    1 for mode in all_modes
+                    if not ChannelMode.is_team_mode(mode)
+                )
+                # 非团队活跃 mode 明细，供排查“保存锁卡禁用”时定位是哪个 rid 残留。
+                non_team_modes = [m for m in all_modes if not ChannelMode.is_team_mode(m)]
+                team_modes = [m for m in all_modes if ChannelMode.is_team_mode(m)]
+                await web_channel.broadcast_event("task.global_running", {
+                    "event_type": "task.global_running",
+                    "running": bool(count),
+                    "count": count,
+                })
+                # chat_stream_rids 计入运行态的对话流数；stream_rids 为注册流总数
+                # （含 history.get 等 emit=False 非对话流），故前者 <= 后者。
+                chat_stream_rids = sum(
+                    1 for rid in self._stream_modes if self._is_chat_stream(rid)
+                )
+                logger.info(
+                    "[task.global_running] broadcast: running=%s non_team_count=%d "
+                    "non_team_modes=%s team_modes=%s chat_stream_rids=%d "
+                    "stream_rids=%d active_chat_rids=%d",
+                    bool(count), count, non_team_modes, team_modes, chat_stream_rids,
+                    len(self._stream_modes), len(self._active_chat_tasks),
+                )
+            else:
+                logger.info(
+                    "[task.global_running] skip broadcast: web channel 未就绪 "
+                    "(stream_rids=%d active_chat_rids=%d)",
+                    len(self._stream_modes), len(self._active_chat_tasks),
+                )
+        except Exception:
+            logger.debug("[task.global_running] broadcast failed", exc_info=True)
+
+    def set_channel_manager(self, channel_manager: Any) -> None:
+        """注入 ChannelManager 引用，供广播全局事件（如 task.global_running）取 web channel 用。
+
+        MessageHandler 在 ChannelManager 之前实例化（ChannelManager 构造需要 message_handler），
+        故通过此方法在装配阶段回填引用。
+        """
+        self._channel_manager = channel_manager
+
+    def _resolve_web_channel(self) -> Any:
+        """从 ChannelManager 取 web channel 实例（广播用）；取不到返回 None。"""
+        cm = getattr(self, "_channel_manager", None)
+        if cm is None:
+            return None
+        try:
+            return cm.get_channel("web")
+        except Exception:
+            return None
 
     async def publish_robot_messages(self, msg: "Message") -> None:
         """将 Agent 响应放入 robot_messages 队列."""
@@ -2030,6 +2500,9 @@ class MessageHandler(ABC):
         if not req_md and not resp_md:
             return None
         merged: dict[str, Any] = {**req_md, **resp_md}
+        for key in _DELIVERY_IDENTITY_METADATA_KEYS:
+            if key in req_md:
+                merged[key] = req_md[key]
         return merged
 
     @staticmethod
@@ -2038,10 +2511,14 @@ class MessageHandler(ABC):
         session_id: str | None,
         *,
         request_metadata: dict[str, Any] | None = None,
+        app_id: str | None = None,
     ) -> "Message":
         from jiuwenswarm.common.schema.message import Message, EventType
 
         metadata = MessageHandler._merge_agent_metadata(request_metadata, resp.metadata)
+
+        # ── V2: 合并 resp 的 agent_ref ──
+        resp_agent_ref = getattr(resp, "agent_ref", None)
 
         # 从 metadata 中提取 group_digital_avatar 和 enable_memory 字段
         # 这些字段在 message_to_e2a 中被放入 metadata，需要在这里提取出来
@@ -2072,6 +2549,8 @@ class MessageHandler(ABC):
                         payload=payload,
                         event_type=event_type,
                         metadata=metadata,
+                        app_id=app_id,
+                        agent_ref=resp_agent_ref,
                         group_digital_avatar=group_digital_avatar,
                         enable_memory=enable_memory,
                     )
@@ -2091,6 +2570,8 @@ class MessageHandler(ABC):
             payload=payload,
             event_type=EventType.CHAT_FINAL,
             metadata=metadata,
+            app_id=app_id,
+            agent_ref=resp_agent_ref,
             group_digital_avatar=group_digital_avatar,
             enable_memory=enable_memory,
         )
@@ -2150,14 +2631,28 @@ class MessageHandler(ABC):
         if not await self._handle_evolution_chunk(chunk, session_id, bus_metadata):
             return
 
+        # 多应用：push 重建 Message 时补 app_id，否则 _resolve_app_id 兜底 "default"，
+        # channel_manager 精确路由 ChannelKey(channel_id, "default") 在多 app 场景拿不到
+        # 正确 channel 实例（feishu config.app_id 非空时注册 key 是真实 app_id），
+        # 退到 _get_channel_by_id 扫描会命中第一个实例，导致 send_user_file 等工具 push
+        # 投递到错误 app 的 channel（config.chat_id/last_chat_id 不符）→ 文件发错人或发不出。
+        # 流式请求取 _stream_app_ids[rid]（与 process_stream 一致）；非流式请求
+        # _stream_app_ids 未注册，回退 request_metadata["app_id"]（入站已透传）。
+        _push_app_id = (
+            self._stream_app_ids.get(rid, "")
+            or (request_metadata.get("app_id") if isinstance(request_metadata, dict) else "")
+            or (resp_md.get("app_id") if isinstance(resp_md, dict) else "")
+        )
         out = self._chunk_to_message(
-            chunk, session_id=session_id, metadata=bus_metadata
+            chunk, session_id=session_id, metadata=bus_metadata,
+            app_id=_push_app_id,
         )
         await self.publish_robot_messages(out)
         logger.info(
-            "[MessageHandler] server_push 已写入 robot_messages: request_id=%s channel_id=%s",
+            "[MessageHandler] server_push 已写入 robot_messages: request_id=%s channel_id=%s app_id=%s",
             rid,
             chunk.channel_id,
+            _push_app_id,
         )
 
     def set_cron_controller(self, controller: Any) -> None:
@@ -2229,7 +2724,9 @@ class MessageHandler(ABC):
     def _chunk_to_message(
         chunk: AgentResponseChunk,
         session_id: str | None,
+        *,
         metadata: dict[str, Any] | None = None,
+        app_id: str | None = None,
     ) -> Message:
         """将 AgentResponseChunk 转换为 Message（用于流式处理）。
         metadata 传入 request 的 metadata，供 Feishu/Xiaoyi 等通道回发时使用平台身份。
@@ -2240,6 +2737,14 @@ class MessageHandler(ABC):
         # 这些字段在 message_to_e2a 中被放入 metadata，需要在这里提取出来
         group_digital_avatar = bool(metadata.get("group_digital_avatar", False)) if metadata else False
         enable_memory = bool(metadata.get("enable_memory", True)) if metadata else True
+
+        # ── V2: 合并 chunk.metadata（含 fan_out_targets）+ chunk.agent_ref ──
+        chunk_md = getattr(chunk, "metadata", None) or {}
+        merged_metadata: dict[str, Any] | None = None
+        if metadata or chunk_md:
+            merged_metadata = {**(metadata or {}), **chunk_md}
+
+        chunk_agent_ref = getattr(chunk, "agent_ref", None)
 
         # 从 payload 中提取 event_type（如果存在）
         event_type = None
@@ -2266,7 +2771,9 @@ class MessageHandler(ABC):
             ok=True,
             payload=payload,
             event_type=event_type,
-            metadata=metadata,
+            metadata=merged_metadata,
+            app_id=app_id,
+            agent_ref=chunk_agent_ref,
             group_digital_avatar=group_digital_avatar,
             enable_memory=enable_memory,
         )
@@ -2308,6 +2815,7 @@ class MessageHandler(ABC):
             chunk,
             session_id=session_id,
             metadata=request_metadata,
+            app_id=self._stream_app_ids.get(chunk.request_id, ""),
         )
         await self.publish_robot_messages(out)
         return True
@@ -2522,6 +3030,7 @@ class MessageHandler(ABC):
                 promoted_chunk,
                 session_id=msg.session_id,
                 metadata=promoted_approval.metadata,
+                app_id=msg.app_id or "",
             )
             await self.publish_robot_messages(out)
             logger.info(
@@ -2535,6 +3044,7 @@ class MessageHandler(ABC):
                 msg.session_id,
                 msg.channel_id,
                 is_processing=False,
+                app_id=msg.app_id or "",
             )
             return
 
@@ -2567,6 +3077,7 @@ class MessageHandler(ABC):
             msg.session_id,
             msg.channel_id,
             is_processing=False,
+            app_id=msg.app_id or "",
         )
 
     @staticmethod
@@ -2677,7 +3188,7 @@ class MessageHandler(ABC):
         env: "E2AEnvelope",
     ) -> "AgentResponse":
         return await send_agent_request_with_timeout(
-            self._agent_client,
+            self.agent_client,
             env,
             label="MessageHandler",
         )
@@ -2690,6 +3201,7 @@ class MessageHandler(ABC):
                 resp,
                 session_id=msg.session_id,
                 request_metadata=msg.metadata,
+                app_id=msg.app_id or "",
             )
             await self.publish_robot_messages(out)
             logger.info(
@@ -2745,6 +3257,11 @@ class MessageHandler(ABC):
                 # 将当前 Channel 的控制状态应用到消息上
                 self._apply_channel_state(msg)
 
+                # V2: _apply_channel_state has resolved msg.session_id to the real team
+                # session_id and injected params.mode; register GodView now so it lands
+                # under the same session team-event dispatch uses.
+                await self._maybe_register_godview(msg)
+
                 # Gateway hook: UserPromptSubmit
                 if self._gateway_hook_handler:
                     try:
@@ -2757,7 +3274,7 @@ class MessageHandler(ABC):
                     except Exception:
                         logger.debug("Gateway hook UserPromptSubmit failed", exc_info=True)
 
-                # 检查是否是中断请求
+
                 if msg.req_method == ReqMethod.CHAT_ANSWER:
                     answer_payload = msg.params if isinstance(msg.params, dict) else {}
                     is_evolution_approval_answer = self._is_evolution_approval_payload(answer_payload)
@@ -2820,6 +3337,7 @@ class MessageHandler(ABC):
                                 message="已加入队列，等待演进完成",
                             )
                             continue
+
 
                         # 有新输入：取消旧任务 → 保留 todo → 启动新任务（非并发）
 
@@ -2946,11 +3464,10 @@ class MessageHandler(ABC):
                         )
 
                     elif intent == "cancel":
-                        # 使用 fire_and_forget 模式，避免 await AgentServer 响应阻塞 _forward_loop，
+                        # 使用 await 模式，若cancel过长时间可能导致session残余
                         # 导致后续 session.create 等请求在队列中等待超时
                         await self._cancel_agent_work_for_session(
-                            msg, msg.session_id,
-                            agent_notify="fire_and_forget",
+                            msg, msg.session_id
                         )
 
                     elif intent in ("pause", "resume"):
@@ -3005,7 +3522,7 @@ class MessageHandler(ABC):
                             parsed = parse_channel_control_text(stripped)
                             if parsed.action is ParsedControlAction.REVIEW_BAD:
                                 asyncio.create_task(
-                                    self._send_channel_notice(
+                                    self.send_channel_notice(
                                         {"id": msg.id, "meta_data": msg.metadata},
                                         msg.channel_id,
                                         msg.session_id,
@@ -3029,7 +3546,7 @@ class MessageHandler(ABC):
                                 )
                             elif parsed.action is ParsedControlAction.SECURITY_REVIEW_BAD:
                                 asyncio.create_task(
-                                    self._send_channel_notice(
+                                    self.send_channel_notice(
                                         {"id": msg.id, "meta_data": msg.metadata},
                                         msg.channel_id,
                                         msg.session_id,
@@ -3057,7 +3574,7 @@ class MessageHandler(ABC):
                                         )
                                     )
                                 except GitPreExecError as exc:
-                                    await self._send_channel_notice(
+                                    await self.send_channel_notice(
                                         {"id": msg.id, "meta_data": msg.metadata},
                                         msg.channel_id,
                                         msg.session_id,
@@ -3148,33 +3665,7 @@ class MessageHandler(ABC):
                         # （例如 TUI 发送新消息时，旧 session 仍在后台空跑）
                         if self._should_cancel_existing_stream_before_chat_send(msg):
                             await self._cancel_stream_tasks_for_channel(msg)
-                        # 流式处理：启动后台任务
-                        # 通知前端新任务开始处理
-                        emit_processing_status = self._should_emit_processing_status_for_stream(msg)
-                        if emit_processing_status:
-                            await self._send_processing_status(
-                                stream_rid, msg.session_id, msg.channel_id, is_processing=True,
-                            )
-                        task = asyncio.create_task(
-                            self.process_stream(
-                                env,
-                                msg.session_id,
-                                msg.metadata,
-                                emit_processing_status=emit_processing_status,
-                            )
-                        )
-                        self._stream_tasks[stream_rid] = task
-                        self._stream_channels[stream_rid] = msg.channel_id
-                        self._stream_sessions[stream_rid] = msg.session_id
-                        self._stream_metadata[stream_rid] = msg.metadata
-                        self._stream_emits_processing_status[stream_rid] = emit_processing_status
-                        self._stream_modes[stream_rid] = (
-                            msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
-                        )
-                        logger.info(
-                            "[MessageHandler] Stream 任务已启动（后台运行）: request_id=%s channel_id=%s 当前并发=%d",
-                            stream_rid, msg.channel_id, len(self._stream_tasks),
-                        )
+                        await self._start_stream_task(msg, env, stream_rid)
                         # 不 await，让流式任务在后台运行，_forward_loop 继续处理下一个消息
                     elif self._non_stream_rpc_may_run_parallel(env):
                         # 非流式且非聊天：后台执行，避免慢 RPC（如 SkillNet）阻塞队列中的其它请求
@@ -3189,9 +3680,33 @@ class MessageHandler(ABC):
                             method_label,
                         )
                     else:
-                        await self._process_non_stream_request(msg, env)
+                        # 非流式 chat.send（如飞书 enable_streaming=False）：同样属于
+                        # “用户对话任务在跑”，需让跨窗口配置保存锁感知。流式靠
+                        # _send_processing_status 广播；非流式无 processing_status，故在此
+                        # 起止点显式写入 _active_chat_tasks 并广播 task.global_running。
+                        # value 存 mode，供 has_active_streams() 判断 team 排除用。
+                        self._active_chat_tasks[stream_rid] = (
+                            msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
+                        )
+                        await self._broadcast_task_global_running()
+                        try:
+                            await self._process_non_stream_request(msg, env)
+                        finally:
+                            self._active_chat_tasks.pop(stream_rid, None)
+                            await self._broadcast_task_global_running()
                 except Exception as e:
                     logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
+                    # 流式任务启动在 tracking 写入后、process_stream 成功登记前
+                    # 抛异常（典型如 _send_processing_status / create_task 失败）时，
+                    # process_stream 自身的 finally 不会执行，残留的
+                    # _stream_modes / _stream_emits_processing_status 会让
+                    # has_active_streams() 永久误判、前端保存锁永久禁用。
+                    # 此处做防御性清理：stream_rid 的 tracking 已写入但任务未登记时清掉。
+                    if (
+                        stream_rid in self._stream_modes
+                        and stream_rid not in self._stream_tasks
+                    ):
+                        await self._pop_stream_tracking_and_broadcast([stream_rid])
                     err_msg = self._build_error_out_message(msg, e)
                     await self.publish_robot_messages(err_msg)
                     logger.info(
@@ -3216,15 +3731,25 @@ class MessageHandler(ABC):
         """
         rid = env.request_id or ""
         channel_id = env.channel or ""
+        stream_app_id = self._stream_app_ids.get(rid, "")  # 提前捕获，_pop_stream_tracking 后会清除
         cancelled = False
-        has_processing_status_false = False  # 追踪 AgentServer 是否已发送 processing_status=false
+        has_processing_status_false = False
+        _proc_count = 0
+        logger.info(
+            "[MessageHandler] process_stream started: request_id=%s channel=%s session=%s",
+            rid, channel_id, session_id,
+        )
         try:
-            async for chunk in self._agent_client.send_request_stream(env):
-                if self._is_terminal_stream_chunk(chunk):
-                    logger.debug(
-                        "[MessageHandler] 跳过终止 chunk: request_id=%s",
-                        chunk.request_id,
+            async for chunk in self.agent_client.send_request_stream(env):
+                _proc_count += 1
+                if _proc_count <= 3:
+                    _pl = getattr(chunk, "payload", None) or {}
+                    _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                    logger.info(
+                        "[MessageHandler] process_stream chunk #%s: request_id=%s event_type=%s",
+                        _proc_count, rid, _et,
                     )
+                if self._is_terminal_stream_chunk(chunk):
                     continue
                 published = await self.publish_stream_chunk(
                     chunk,
@@ -3250,25 +3775,24 @@ class MessageHandler(ABC):
                         has_processing_status_false = True
                         continue
 
+                _has_fanout = bool((getattr(chunk, "metadata", None) or {}).get("fan_out_targets"))
                 logger.debug(
-                    "[MessageHandler] Stream chunk 已写入 robot_messages: request_id=%s event_type=%s",
+                    "[MessageHandler] Stream chunk 已写入 robot_messages:"
+                    " request_id=%s event_type=%s has_fanout=%s",
                     chunk.request_id,
                     payload.get("event_type") if isinstance(payload, dict) else None,
+                    _has_fanout,
                 )
             logger.info(
-                "[MessageHandler] Stream 正常完成: request_id=%s",
-                rid,
+                "[MessageHandler] Stream 正常完成: request_id=%s total_chunks=%s",
+                rid, _proc_count,
             )
         except asyncio.CancelledError:
             cancelled = True
             logger.info(
-                "[MessageHandler] Stream 被取消: request_id=%s",
-                rid,
+                "[MessageHandler] Stream 被取消: request_id=%s total_chunks=%s",
+                rid, _proc_count,
             )
-            await self._publish_stream_cancelled_final(
-                rid, channel_id, session_id, request_metadata,
-            )
-            raise  # 重新抛出，让调用者知道任务被取消
         except RuntimeError as exc:
             if "AgentServer WebSocket connection closed" not in str(exc):
                 raise
@@ -3279,6 +3803,15 @@ class MessageHandler(ABC):
                 request_metadata,
                 str(exc),
             )
+        except Exception as exc:
+            logger.exception(
+                "[MessageHandler] Stream 异常: request_id=%s total_chunks=%s error=%s",
+                rid, _proc_count, exc,
+            )
+            await self._publish_stream_cancelled_final(
+                rid, channel_id, session_id, request_metadata,
+            )
+            raise  # 重新抛出，让调用者知道任务被取消
         finally:
             if (
                 not cancelled
@@ -3302,18 +3835,47 @@ class MessageHandler(ABC):
                     str((env.params or {}).get("request_id") or ""),
                 )
                 has_processing_status_false = True
-            # 清理状态
-            self._pop_stream_tracking(rid)
+            # 清理状态：pop tracking 后必须广播 task.global_running 最新快照。
+            # 若只裸 pop（不广播），非 chat.send 流（history.get / chat.error 等
+            # emit=False 路径）退出时会让 has_active_streams() 计数悬空，前端保存锁
+            # 卡在最后一次广播值（通常为 True），仅靠重连自愈。
+            await self._pop_stream_tracking_and_broadcast([rid])
             if session_id is not None and session_id not in self._stream_sessions.values():
                 # Fallback cleanup when stream exits unexpectedly without evolution end signal.
                 self._evolution_approval.clear_session_in_progress(session_id)
+            # 标注本 rid 退出后是否还会触发 task.global_running 广播。
+            # 若以下分支均不进入 _send_processing_status（其内部会广播），
+            # 则前端保存锁可能卡在最后一次广播值，仅靠重连自愈。
+            # cancelled 也会补发 is_processing=false（见下方），故不再排除 cancelled。
+            _will_broadcast = (
+                emit_processing_status
+                and not has_processing_status_false
+                and not any(
+                    sid == session_id
+                    and self._stream_emits_processing_status.get(active_rid, True)
+                    for active_rid, sid in self._stream_sessions.items()
+                )
+            )
+            logger.info(
+                "[task.global_running] stream 退出: rid=%s cancelled=%s emit=%s "
+                "has_status_false=%s remaining_stream=%d remaining_chat=%d "
+                "will_broadcast_processing_status=%s",
+                rid, cancelled, emit_processing_status, has_processing_status_false,
+                len(self._stream_modes), len(self._active_chat_tasks),
+                _will_broadcast,
+            )
             logger.debug(
                 "[MessageHandler] Stream 任务状态已清理: request_id=%s",
                 rid,
             )
-            # 该 session 流式任务正常结束后，通知前端处理完成
-            # 只有当 AgentServer 没有发送过 processing_status=false 时才发送
-            if emit_processing_status and not cancelled and not has_processing_status_false:
+            # 该 session 流式任务结束后，通知前端处理完成（is_processing=false）。
+            # 只有当 AgentServer 没有发送过 processing_status=false 时才补发。
+            # 注意：这里不再排除 cancelled 分支。stream 被 esc 取消（cancelled=True）时，
+            # AgentServer 的 interrupt_result 可能要等很久（如命中 agent 首次初始化的同步阻塞窗口，
+            # 事件循环读不出 cancel 消息），此时前端会一直转圈。主动补发一次 is_processing=false，
+            # 让 TUI 立刻停转圈，不等 AgentServer 回 interrupt_result。
+            # session_has_active_tasks 守卫仍保证：同 session 还有其它活跃流时不误发 false。
+            if emit_processing_status and not has_processing_status_false:
                 # 检查该 session_id 是否还有活跃任务
                 session_has_active_tasks = any(
                     sid == session_id
@@ -3322,10 +3884,12 @@ class MessageHandler(ABC):
                 )
                 if not session_has_active_tasks:
                     await self._send_processing_status(
-                        rid, session_id, channel_id, is_processing=False,
+                        rid, session_id, channel_id,
+                        is_processing=False, app_id=stream_app_id,
                     )
                     logger.info(
-                        "[MessageHandler] 该 session 流式任务已完成，已发送 is_processing=false: session_id=%s",
+                        "[MessageHandler] 该 session 流式任务已结束（cancelled=%s），已发送 is_processing=false: session_id=%s",
+                        cancelled,
                         session_id,
                     )
 
@@ -3359,6 +3923,45 @@ class MessageHandler(ABC):
         logger.info(
             "[MessageHandler] 已发送流式任务取消通知: request_id=%s",
             request_id,
+        )
+
+    async def _start_stream_task(
+        self,
+        msg: "Message",
+        env: "E2AEnvelope",
+        stream_rid: str,
+    ) -> None:
+        """Start a Gateway stream consumer and register stream bookkeeping."""
+        emit_processing_status = self._should_emit_processing_status_for_stream(msg)
+        self._stream_emits_processing_status[stream_rid] = emit_processing_status
+        self._stream_modes[stream_rid] = (
+            msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
+        )
+        if emit_processing_status:
+            await self._send_processing_status(
+                stream_rid,
+                msg.session_id,
+                msg.channel_id,
+                is_processing=True,
+                app_id=msg.app_id or "",
+            )
+        task = asyncio.create_task(
+            self.process_stream(
+                env,
+                msg.session_id,
+                msg.metadata,
+                emit_processing_status=emit_processing_status,
+            )
+        )
+        self._stream_tasks[stream_rid] = task
+        self._stream_channels[stream_rid] = msg.channel_id
+        self._stream_sessions[stream_rid] = msg.session_id
+        self._stream_metadata[stream_rid] = msg.metadata
+        self._stream_app_ids[stream_rid] = msg.app_id or ""
+        logger.info(
+            "[MessageHandler] Stream 任务已启动（后台运行）: request_id=%s "
+            "channel_id=%s 当前并发=%d",
+            stream_rid, msg.channel_id, len(self._stream_tasks),
         )
 
     async def _send_interrupt_to_agent(self, env: "E2AEnvelope") -> None:
@@ -3430,15 +4033,17 @@ class MessageHandler(ABC):
         )
 
     async def _send_processing_status(
-        self, request_id: str, session_id: str | None, channel_id: str, *, is_processing: bool,
+        self, request_id: str, session_id: str | None, channel_id: str, *,
+        is_processing: bool, app_id: str = "",
     ) -> None:
-        """发送 chat.processing_status 事件到客户端."""
+        """发送 chat.processing_status 事件到客户端。"""
         from jiuwenswarm.common.schema.message import Message, EventType
 
         status_msg = Message(
             id=request_id,
             type="event",
             channel_id=channel_id,
+            app_id=app_id,
             session_id=session_id,
             params={},
             timestamp=time.time(),
@@ -3453,6 +4058,10 @@ class MessageHandler(ABC):
             metadata=None,
         )
         await self.publish_robot_messages(status_msg)
+        # 广播全局运行态快照给所有 ws 客户端（不按 session 路由），用于多窗口配置保存锁。
+        # running 取当前活跃任务集合快照（任务结束时该 dict 已 pop 对应 rid），
+        # 而非本函数的 is_processing 参数，保证多任务并发时计数准确、幂等。
+        await self._broadcast_task_global_running()
         logger.info(
             "[MessageHandler] processing status sent: request_id=%s session_id=%s is_processing=%s",
             request_id,
@@ -3478,6 +4087,7 @@ class MessageHandler(ABC):
             ok=False,
             payload=payload,
             metadata=msg.metadata,
+            app_id=msg.app_id or "",
         )
 
     def _build_tool_result_message(

@@ -12,6 +12,22 @@ import { useChatStore, useSessionStore } from '../../stores';
 import { isTeamMemberCollaborationMessage } from './teamEventUtils';
 import { isA2UIClientEventContent } from '../../features/a2ui/a2uiContent';
 
+const legacyMessageKeyCache = new WeakMap<Message, string>();
+let legacyMessageKeyCounter = 0;
+
+function getMessageRenderKey(message: Message): string {
+  if (message.renderKey) {
+    return message.renderKey;
+  }
+  let key = legacyMessageKeyCache.get(message);
+  if (!key) {
+    legacyMessageKeyCounter += 1;
+    key = `legacy-message-${legacyMessageKeyCounter}`;
+    legacyMessageKeyCache.set(message, key);
+  }
+  return key;
+}
+
 interface MessageListProps {
   messages: Message[];
 }
@@ -51,6 +67,7 @@ type RenderItem =
       key: string;
       showAvatar: boolean;
       executions: ToolExecution[];
+      notices: string[];
       collapseSkillTreeWhenContentStarts: boolean;
       turnId: number;
       viewedSkillIds: string[];
@@ -95,7 +112,7 @@ function buildTimelineItems(
     })
     .map((message, index) => ({
       type: 'message',
-      key: `message-${message.id}-${index}`,
+      key: getMessageRenderKey(message),
       timestampMs: toTimestampMs(message.timestamp),
       sourceIndex: index,
       message,
@@ -122,6 +139,67 @@ function isFinalMessage(message: Message): boolean {
   return false;
 }
 
+const IMAGE_TOOL_FALLBACK_NOTICE_PREFIX = 'notice-image_tool_fallback-';
+
+function getImageToolFallbackNoticeRequestId(message: Message): string | undefined {
+  if (message.role !== 'system' || !message.id.startsWith(IMAGE_TOOL_FALLBACK_NOTICE_PREFIX)) {
+    return undefined;
+  }
+  const requestId = message.id.slice(IMAGE_TOOL_FALLBACK_NOTICE_PREFIX.length).trim();
+  return requestId || undefined;
+}
+
+function addToolGroupNotice(notices: string[], content: string) {
+  const normalized = content.trim();
+  if (normalized && !notices.includes(normalized)) {
+    notices.push(normalized);
+  }
+}
+
+function attachToolGroupNotices(renderItems: RenderItem[]): RenderItem[] {
+  const nextItems = renderItems.map((item) =>
+    item.type === 'toolGroup'
+      ? { ...item, notices: [...item.notices] }
+      : item
+  );
+  const groupsByRequestId = new Map<string, Extract<RenderItem, { type: 'toolGroup' }>[]>();
+
+  for (const item of nextItems) {
+    if (item.type !== 'toolGroup') {
+      continue;
+    }
+    const requestIds = new Set(
+      item.executions
+        .map((execution) => execution.requestId)
+        .filter((requestId): requestId is string => Boolean(requestId))
+    );
+    for (const requestId of requestIds) {
+      const groups = groupsByRequestId.get(requestId) || [];
+      groups.push(item);
+      groupsByRequestId.set(requestId, groups);
+    }
+  }
+
+  const attachedNoticeIndexes = new Set<number>();
+  nextItems.forEach((item, index) => {
+    if (item.type !== 'message') {
+      return;
+    }
+    const requestId = getImageToolFallbackNoticeRequestId(item.message);
+    if (!requestId) {
+      return;
+    }
+    const targetGroup = groupsByRequestId.get(requestId)?.[0];
+    if (!targetGroup) {
+      return;
+    }
+    addToolGroupNotice(targetGroup.notices, item.message.content);
+    attachedNoticeIndexes.add(index);
+  });
+
+  return nextItems.filter((_, index) => !attachedNoticeIndexes.has(index));
+}
+
 function buildRenderItems(items: TimelineItem[], isTeamMode: boolean): RenderItem[] {
   const renderItems: RenderItem[] = [];
   let currentTurnId = 0;
@@ -137,6 +215,7 @@ function buildRenderItems(items: TimelineItem[], isTeamMode: boolean): RenderIte
         key: `tool-group-${currentSegment.toolExecutions[0].toolCallId}`,
         showAvatar: true,
         executions: currentSegment.toolExecutions,
+        notices: [],
         collapseSkillTreeWhenContentStarts,
         turnId: currentTurnId,
         viewedSkillIds: [],
@@ -219,17 +298,19 @@ function buildRenderItems(items: TimelineItem[], isTeamMode: boolean): RenderIte
     }
   }
 
+  const renderItemsWithNotices = attachToolGroupNotices(renderItems);
+
   if (!isTeamMode) {
-    for (const renderItem of renderItems) {
+    for (const renderItem of renderItemsWithNotices) {
       if (renderItem.type === 'toolGroup') {
         renderItem.showAvatar = false;
       }
     }
-    return renderItems;
+    return renderItemsWithNotices;
   }
 
   let clusterBlockActive = false;
-  for (const renderItem of renderItems) {
+  for (const renderItem of renderItemsWithNotices) {
     if (renderItem.type === 'toolGroup') {
       renderItem.showAvatar = !clusterBlockActive;
       clusterBlockActive = true;
@@ -246,7 +327,7 @@ function buildRenderItems(items: TimelineItem[], isTeamMode: boolean): RenderIte
     clusterBlockActive = false;
   }
 
-  return renderItems;
+  return renderItemsWithNotices;
 }
 
 export function ChatTimelineList({
@@ -282,6 +363,7 @@ export function ChatTimelineList({
           <ToolGroupDisplay
             key={item.key}
             executions={item.executions}
+            notices={item.notices}
             showAvatar={item.showAvatar}
             teamLayout={isTeamMode}
             collapseSkillTreeWhenContentStarts={item.collapseSkillTreeWhenContentStarts}
@@ -294,8 +376,10 @@ export function ChatTimelineList({
 }
 
 export function MessageList({ messages }: MessageListProps) {
-  const { toolExecutions, toolExecutionOrder } = useChatStore();
-  const { mode } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const toolExecutions = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutions ?? new Map());
+  const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const executions = useMemo(
     () => toolExecutionOrder
       .map((toolCallId) => toolExecutions.get(toolCallId))

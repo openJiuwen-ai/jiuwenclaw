@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr
-from jiuwenswarm.gateway.cron.store import CronJobStore
+from jiuwenswarm.gateway.cron.store import CronJobStore, _PROACTIVE_TICK_MODE
 from jiuwenswarm.gateway.cron.scheduler import _cron_next_push_dt, CronSchedulerService
 from jiuwenswarm.gateway.cron.models import (
     CronTargetChannel,
@@ -18,6 +18,7 @@ from jiuwenswarm.gateway.cron.models import (
     is_valid_target_channel_id,
     normalize_cron_job_mode,
     normalize_target_channel_id,
+    validate_cron_model,
 )
 from jiuwenswarm.server.gateway_push import (
     GatewayPushTransport,
@@ -35,12 +36,14 @@ _cron_route_ctx: contextvars.ContextVar[CronToolRoute | None] = contextvars.Cont
 
 @dataclass(frozen=True, slots=True)
 class CronToolRoute:
-    """当前请求同步到 Gateway 时使用的路由（request_id / channel / session / chat_type）。"""
+    """当前请求同步到 Gateway 时使用的路由（request_id / channel / session / chat_type / app_id）。"""
 
     request_id: str = ""
     channel_id: str = CronTargetChannel.WEB.value
     session_id: str | None = None
     chat_type: str | None = None  # "group" 表示群聊, "p2p" 或 None 表示私聊
+    app_id: str = ""
+    project_dir: str = ""  # 当前 agent 工作目录，用于 cron 任务归属项目解析
 
 
 class CronTools:
@@ -228,9 +231,49 @@ class CronTools:
         )
         return fallback
 
+    @staticmethod
+    def _resolve_work_mode_from_params(
+        params: dict[str, Any],
+        *,
+        channel_id: str = "",
+    ) -> tuple[str, str | None]:
+        """从请求参数解析 work_mode(严格校验)。
+
+        与 ``CronController.create_job`` 保持一致:非法值返回 BAD_REQUEST,
+        由调用方决定如何处理。
+
+        Returns:
+            ``(work_mode, error_code)``:成功时 ``error_code`` 为 ``None``,
+            失败时 ``work_mode`` 为空串。
+        """
+        from jiuwenswarm.server.runtime.session.work_mode import resolve_request_work_mode
+
+        work_mode, mode_err = resolve_request_work_mode(params, channel_id)
+        if mode_err is not None:
+            return "", mode_err
+        return work_mode, None
+
+    @staticmethod
+    def _sync_patch_payload(patch: dict[str, Any]) -> dict[str, Any]:
+        payload = {k: v for k, v in patch.items() if k != "project_dir"}
+        if "model_name" in payload:
+            payload["model_name"] = payload["model_name"] or ""
+        return payload
+
     async def list_jobs(self) -> Any:
         jobs = await self._local_store.list_jobs()
-        return [j.to_dict() for j in jobs]
+        # 给受保护的 proactive.tick job 标记 protected，让 LLM 在批量操作时
+        # （如"删除所有定时任务"）能识别并优雅跳过，而不是删到一半才遇错。
+        out = []
+        for j in jobs:
+            d = j.to_dict()
+            if str(d.get("mode") or "").strip().lower() == _PROACTIVE_TICK_MODE:
+                d["protected"] = True
+                d["protected_reason"] = (
+                    "由主动推荐开关自动维护，不可删除/启停；如需关闭请到设置→主动推荐关闭开关。"
+                )
+            out.append(d)
+        return out
 
     async def get_job(self, job_id: str) -> Any:
         job = await self._local_store.get_job(job_id)
@@ -251,16 +294,54 @@ class CronTools:
             targets_str,
         )
         session_kw: dict[str, Any] = {}
-        sid = self._route().session_id
+        r = self._route()
+        sid = r.session_id
         if isinstance(sid, str) and sid.strip():
             session_kw["session_id"] = sid.strip()
-        chat_type = self._route().chat_type
+        chat_type = r.chat_type
         if chat_type:
             session_kw["chat_type"] = chat_type
+        app_id = str(getattr(r, "app_id", None) or "").strip()
+        if app_id:
+            session_kw["app_id"] = app_id
         mode_kw: dict[str, Any] = {}
         mode_raw = normalized.get("mode")
         if mode_raw is not None and str(mode_raw).strip():
             mode_kw["mode"] = normalize_cron_job_mode(mode_raw)
+        model_kw: dict[str, Any] = {}
+        model_name_raw = normalized.get("model_name")
+        if model_name_raw is not None and str(model_name_raw).strip():
+            model_kw["model_name"] = validate_cron_model(model_name_raw)
+        # project_dir -> project_id follows the same rules as the gateway controller.
+        # 用 key presence 区分「未传」和「显式空串」：显式传 "" 归默认项目，
+        # 未传时从 route 上下文取 project_dir（设计文档 §5.1）。
+        if "project_dir" in normalized:
+            project_dir_val = str(normalized.get("project_dir") or "").strip()
+        else:
+            project_dir_val = str(self._route().project_dir or "").strip()
+
+        # work_mode 解析(严格校验,与 CronController.create_job 保持一致)
+        channel_id_val = self._resolve_channel_id() or "web"
+        work_mode, mode_err = self._resolve_work_mode_from_params(
+            normalized, channel_id=channel_id_val,
+        )
+        if mode_err is not None:
+            raise ValueError(f"invalid work_mode: {normalized.get('work_mode')!r}")
+
+        # 优先接受显式 project_id(修改计划 §5 链路 B):
+        # 1. 真实 project_id 命中 → 从 Project 记录注入精确 work_mode
+        # 2. 默认项目 / 不存在 → 按 (work_mode, project_dir) 解析
+        from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_binding
+
+        raw_project_id = str(normalized.get("project_id") or "").strip()
+        binding = resolve_cron_project_binding(raw_project_id, project_dir_val, work_mode)
+        if binding.error is not None:
+            if binding.hidden:
+                raise ValueError(f"project not found: {raw_project_id!r}")
+            raise ValueError(binding.error)
+        resolved_project_id = binding.project_id
+        work_mode = binding.work_mode
+
         job = await self._local_store.create_job(
             job_id=str(normalized.get("id") or "").strip() or None,
             name=str(normalized.get("name") or "").strip(),
@@ -271,11 +352,16 @@ class CronTools:
             enabled=bool(normalized.get("enabled", True)),
             wake_offset_seconds=normalized.get("wake_offset_seconds"),
             delete_after_run=normalized.get("delete_after_run"),
+            project_id=resolved_project_id,
+            work_mode=work_mode,
             **session_kw,
             **mode_kw,
+            **model_kw,
         )
         try:
-            await self._send("create", job.to_dict())
+            sync_payload = job.to_dict()
+            sync_payload["project_dir"] = project_dir_val
+            await self._send("create", sync_payload)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync create to gateway failed: %s", exc)
         
@@ -300,17 +386,42 @@ class CronTools:
                 normalized_patch["session_id"] = None
         if "mode" in normalized_patch:
             normalized_patch["mode"] = normalize_cron_job_mode(normalized_patch.get("mode"))
-        chat_type = self._route().chat_type
-        normalized_patch["chat_type"] = chat_type if chat_type else None
+        if "model_name" in normalized_patch:
+            normalized_patch["model_name"] = validate_cron_model(normalized_patch.get("model_name"))
+
+        # work_mode / project_id / project_dir 重解析(共享 helper):
+        # 与 CronController.update_job 共用同一 ``resolve_cron_job_patch``,
+        # 确保 AgentTool 与 Web RPC 两条链路逻辑一致。
+        existing = await self._local_store.get_job(job_id)
+        if existing is None:
+            raise KeyError("job not found")
+
+        channel_id_val = self._resolve_channel_id() or "web"
+        from jiuwenswarm.server.runtime.session.project_store import resolve_cron_job_patch
+        resolve_cron_job_patch(
+            normalized_patch,
+            existing_work_mode=existing.work_mode or "",
+            resolve_work_mode_fn=self._resolve_work_mode_from_params,
+            channel_id=channel_id_val,
+        )
+
+        # 仅在 patch 包含 session_id 或 targets 时才更新 chat_type
+        # (与 CronController.update_job 一致),避免无关更新静默覆盖推送路由
+        if "session_id" in normalized_patch or "targets" in normalized_patch:
+            chat_type = self._route().chat_type
+            normalized_patch["chat_type"] = chat_type if chat_type else None
         job = await self._local_store.update_job(job_id, normalized_patch)
         try:
-            await self._send("update", {"job_id": job_id, "patch": normalized_patch})
+            await self._send(
+                "update",
+                {"job_id": job_id, "patch": self._sync_patch_payload(normalized_patch)},
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync update to gateway failed: %s", exc)
-        
+
         # Reload scheduler to pick up the changes
         await self._reload_scheduler()
-        
+
         return job.to_dict()
 
     async def delete_job(self, job_id: str) -> Any:
@@ -326,6 +437,13 @@ class CronTools:
         return deleted
 
     async def toggle_job(self, job_id: str, enabled: bool) -> Any:
+        # proactive.tick job 的开关由 config 的 proactive_recommendation.enabled 驱动，
+        # 禁止手动 toggle——否则会与 config 开关不一致。引导用户去设置关开关。
+        existing = await self._local_store.get_job(job_id)
+        if existing is not None and str(getattr(existing, "mode", "") or "").strip().lower() == "proactive.tick":
+            raise RuntimeError(
+                "主动推荐定时任务由设置→主动推荐开关控制，不能手动启停；请到设置→主动推荐操作。"
+            )
         job = await self._local_store.update_job(job_id, {"enabled": bool(enabled)})
         try:
             await self._send("toggle", {"job_id": job_id, "enabled": bool(enabled)})
@@ -378,6 +496,15 @@ class CronTools:
         mode = kwargs.get("mode")
         if mode is not None and str(mode).strip():
             params["mode"] = mode
+        model_name = kwargs.get("model_name")
+        if model_name is not None and str(model_name).strip():
+            params["model_name"] = model_name
+        if "project_dir" in kwargs and kwargs.get("project_dir") is not None:
+            params["project_dir"] = str(kwargs.get("project_dir") or "").strip()
+        if "project_id" in kwargs and kwargs.get("project_id") is not None:
+            params["project_id"] = str(kwargs.get("project_id") or "").strip()
+        if "work_mode" in kwargs and kwargs.get("work_mode") is not None:
+            params["work_mode"] = str(kwargs.get("work_mode") or "").strip()
         return await self.create_job(params)
 
     async def _update_job_tool(self, job_id: str, patch: dict[str, Any]) -> Any:
@@ -430,7 +557,33 @@ class CronTools:
                             "enum": cron_job_modes_for_tools(),
                             "description": (
                                 "Agent runtime mode when the job runs "
-                                "(agent, team, agent.plan, agent.fast, ...). Default: agent.fast."
+                                "(agent, team, ...). Default: agent."
+                            ),
+                        },
+                        "model_name": {
+                            "type": "string",
+                            "description": "Model name or alias to use. Omit for default.",
+                        },
+                        "project_dir": {
+                            "type": "string",
+                            "description": "Absolute path to the project directory. \
+                                Omit for current session's project.",
+                        },
+                        "project_id": {
+                            "type": "string",
+                            "description": (
+                                "Explicit project id (takes priority over project_dir). "
+                                "Omit to resolve from project_dir + work_mode."
+                            ),
+                        },
+                        "work_mode": {
+                            "type": "string",
+                            "enum": ["code", "work"],
+                            "description": (
+                                "Working mode of the target project (code/work). "
+                                "Defaults to current channel default (tui->code, web->work). "
+                                "Only used when project_id is not provided; ignored if project_id "
+                                "is provided (work_mode inherited from the project)."
                             ),
                         },
                     },
@@ -442,7 +595,8 @@ class CronTools:
                 name="cron_update_job",
                 description=(
                     "Update an existing cron job. Pass job_id and a patch dict with fields to update "
-                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, targets, mode)."
+                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, "
+                    "targets, mode, model_name, project_dir, project_id)."
                 ),
                 input_params={
                     "type": "object",
@@ -452,7 +606,11 @@ class CronTools:
                             "type": "object",
                             "description": (
                                 "Fields to update (name, enabled, cron_expr, timezone, "
-                                "description, wake_offset_seconds, targets, mode)"
+                                "description, wake_offset_seconds, targets, mode, model_name, "
+                                "project_dir, project_id). work_mode is not accepted as an "
+                                "independent patch field; to change work_mode, patch project_id "
+                                "or project_dir + work_mode (work_mode only disambiguates the "
+                                "target project when resolving project_dir)."
                             ),
                             "properties": {
                                 "name": {"type": "string"},
@@ -472,7 +630,37 @@ class CronTools:
                                 "mode": {
                                     "type": "string",
                                     "enum": cron_job_modes_for_tools(),
-                                    "description": "Agent runtime mode (agent, team, agent.plan, ...)",
+                                    "description": "Agent runtime mode (agent, team, ...)",
+                                },
+                                "model_name": {
+                                    "type": "string",
+                                    "description": "Model name or alias. Set to empty string to reset to default.",
+                                },
+                                "project_dir": {
+                                    "type": "string",
+                                    "description": (
+                                        "Absolute path to the project directory. Set to empty "
+                                        "string for default project. When set, project_id is "
+                                        "re-resolved from (work_mode, project_dir)."
+                                    ),
+                                },
+                                "project_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "Directly patch the project_id (takes priority over "
+                                        "project_dir). work_mode is re-injected from the "
+                                        "project record. Must reference an existing visible "
+                                        "project or a default project (default / default_code)."
+                                    ),
+                                },
+                                "work_mode": {
+                                    "type": "string",
+                                    "enum": ["code", "work"],
+                                    "description": (
+                                        "Disambiguates target project when patching "
+                                        "project_dir. Ignored if project_id is patched "
+                                        "directly. Not a standalone patchable field."
+                                    ),
                                 },
                             },
                         },
@@ -483,13 +671,22 @@ class CronTools:
             ),
             make_tool(
                 name="cron_delete_job",
-                description="Delete cron job by id.",
+                description=(
+                    "Delete cron job by id. "
+                    "Note: jobs with protected=true (from cron_list_jobs) are managed by "
+                    "system config and cannot be deleted here; tell the user to toggle the "
+                    "corresponding config switch instead."
+                ),
                 input_params={"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
                 func=self.delete_job,
             ),
             make_tool(
                 name="cron_toggle_job",
-                description="Enable or disable cron job.",
+                description=(
+                    "Enable or disable cron job. "
+                    "Note: jobs with protected=true cannot be toggled here; they are driven by "
+                    "system config."
+                ),
                 input_params={
                     "type": "object",
                     "properties": {
