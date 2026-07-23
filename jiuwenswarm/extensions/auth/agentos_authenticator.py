@@ -79,13 +79,12 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             )
 
         # HTTP 验证：合并自定义 header
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}"
+        }
         if extra_headers:
             headers.update(extra_headers)
-
-        # 添加 Authorization header（不覆盖用户自定义的 Authorization）
-        headers.setdefault("Authorization", f"Bearer {token}")
-
         try:
             resp = await self._auth_client.post(
                 f"{self._auth_service_url}/api/v1/auth/verify",
