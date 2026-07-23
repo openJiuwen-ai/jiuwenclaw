@@ -284,19 +284,29 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
 
     setDeletingTeamName(teamName);
     try {
-      const response = await webRequest<TeamDeleteResponse>('team.delete', {
-        team_name: teamName,
-        mode: 'team',
-      });
-      await onSessionsDeleted?.(response.session_ids);
+      let response: TeamDeleteResponse;
+      try {
+        response = await webRequest<TeamDeleteResponse>('team.delete', {
+          team_name: teamName,
+          mode: 'team',
+        });
+      } catch (deleteError) {
+        console.error('Failed to delete team:', deleteError);
+        setError(t('teams.errors.deleteTeam', { team: teamName }));
+        return;
+      }
+
       if (selectedTeamName === teamName) {
         setSelectedFile(null);
         setDirChildren(new Map());
       }
       await loadTeams();
-    } catch (deleteError) {
-      console.error('Failed to delete team:', deleteError);
-      setError(t('teams.errors.deleteTeam', { team: teamName }));
+
+      try {
+        await onSessionsDeleted?.(response.session_ids);
+      } catch (syncError) {
+        console.error('Failed to synchronize deleted team sessions:', syncError);
+      }
     } finally {
       setDeletingTeamName('');
     }
