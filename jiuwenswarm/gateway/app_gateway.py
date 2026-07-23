@@ -248,7 +248,43 @@ async def _connect_with_retry(
         max_retries: int = 20,
         interval: float = 3.0,
 ) -> None:
+    """连接 AgentServer, 失败重试.
+
+    相比固定 3s 间隔: 先做轻量 TCP 端口探测, 端口通了再 ws 握手, 避免 AgentServer
+    尚未 listen 时反复走完整 WS 握手; 重试间隔改为指数退避 (0.2s 起, 翻倍至上限
+    ``interval``), 让 AgentServer 一旦 listen 即在亚秒级连上, 而非硬等下一个 3s 节拍.
+    """
+    import socket as _socket
+    from urllib.parse import urlparse as _urlparse
+
+    parsed = _urlparse(uri)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+
+    def _tcp_ready(timeout: float = 0.5) -> bool:
+        try:
+            with _socket.create_connection(("127.0.0.1", port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    backoff = 0.2
     for attempt in range(1, max_retries + 1):
+        # 先 TCP 探测: 端口未通则不浪费一次 WS 握手, 直接进入退避等待.
+        if not _tcp_ready():
+            if attempt >= max_retries:
+                logger.error(
+                    "[App] connect AgentServer failed after %d tries: port %s not listening  uri=%s",
+                    attempt, port, uri,
+                )
+                raise ConnectionRefusedError(f"AgentServer port {port} not listening")
+            logger.info(
+                "[App] AgentServer port %s not listening yet (%d/%d), retry in %.2fs...",
+                port, attempt, max_retries, backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, interval)
+            continue
         try:
             await client.connect(uri)
             logger.info("[App] connected to AgentServer: %s", uri)
@@ -263,13 +299,14 @@ async def _connect_with_retry(
                 )
                 raise
             logger.warning(
-                "[App] connect AgentServer failed (%d/%d): %s  retry in %s s...",
+                "[App] connect AgentServer failed (%d/%d): %s  retry in %.2fs...",
                 attempt,
                 max_retries,
                 exc,
-                interval,
+                backoff,
             )
-            await asyncio.sleep(interval)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, interval)
 
 
 def _exec_gateway_restart() -> None:

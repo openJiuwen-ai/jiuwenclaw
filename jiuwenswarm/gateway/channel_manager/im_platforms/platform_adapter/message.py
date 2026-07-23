@@ -5,16 +5,43 @@ from typing import Any
 from pathlib import Path
 from jiuwenswarm.common.utils import logger, get_agent_memory_dir
 
-try:
-    import lark_oapi as lark
-    from lark_oapi.api.im.v1 import ListMessageRequest
-    from lark_oapi.api.contact.v3 import GetUserRequest
-    FEISHU_AVAILABLE = True
-except ImportError:
-    FEISHU_AVAILABLE = False
-    lark = None
-    ListMessageRequest = None
-    GetUserRequest = None
+# lark_oapi (飞书 SDK) 体积巨大 (21175 文件 / 49MB), 启动期 import 耗时 ~5-8s/进程.
+# 历史在模块顶层 try-import, 导致只要 import MessageStore 就强制加载 lark_oapi
+# (本模块是所有 im_platforms 的共享基类, 经 wecom_connect -> channel_manager.__init__
+# 进入启动链路). 实际 lark_oapi 仅在 load_feishu_history 里用到, 改为惰性:
+# 首次调用 _load_feishu_symbols() 时才 import, 未启用飞书时永不加载.
+lark = None
+ListMessageRequest = None
+GetUserRequest = None
+_FEISHU_SYMBOLS_LOADED = False
+
+
+def _load_feishu_symbols() -> bool:
+    """惰性加载 lark_oapi 符号. 首次调用时 import, 之后从缓存读. 返回是否可用."""
+    global lark, ListMessageRequest, GetUserRequest, _FEISHU_SYMBOLS_LOADED
+    if _FEISHU_SYMBOLS_LOADED:
+        return lark is not None
+    _FEISHU_SYMBOLS_LOADED = True
+    try:
+        import lark_oapi as _lark  # noqa: F401  (绑定到模块名 lark 供历史代码使用)
+        from lark_oapi.api.im.v1 import ListMessageRequest as _LMR
+        from lark_oapi.api.contact.v3 import GetUserRequest as _GUR
+
+        lark = _lark
+        ListMessageRequest = _LMR
+        GetUserRequest = _GUR
+        return True
+    except ImportError:
+        return False
+
+
+# 兼容性: 保留 FEISHU_AVAILABLE 名字 (历史代码可能引用), 但改为惰性判定.
+# 调用方应在真正需要时调用 _load_feishu_symbols() 而非直接读这个标志.
+def _feishu_available() -> bool:
+    return _load_feishu_symbols()
+
+
+FEISHU_AVAILABLE = False  # 历史值: 模块加载期未知可用性, 真实判定走 _load_feishu_symbols()
 
 MSG_TYPE_MAP = {
     "image": "[image]",
@@ -224,7 +251,7 @@ class MessageStore:
         Returns:
             list: 历史消息列表
         """
-        if not self._api_client or not FEISHU_AVAILABLE:
+        if not self._api_client or not _load_feishu_symbols():
             logger.warning("飞书API客户端未初始化，无法拉取历史消息")
             return []
 

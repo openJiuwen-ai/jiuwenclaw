@@ -81,7 +81,113 @@ def find_free_port(start_port: int) -> int:
 
 # ─── Global state ───
 children: list[subprocess.Popen] = []
-service_names: dict[int, str] = {}  # pid → service name
+service_names: dict[int, str] = {}  # pid -> service name
+
+
+def _precompile_pycache() -> None:
+    """用设备自身 python3.12 预编译 site-packages 内 .py -> .pyc 写盘.
+
+    HNP 打包不含 pyc (打包机与设备 cpython magic 不同). 首启若让 agent/gateway
+    子进程各自现编译, 两进程对同一批 .py (openjiuwen 3264 文件、lark_oapi 等)
+    重复编译, 浪费数十秒. 此处主进程一次性 compileall, 子进程复用 pyc 跳过编译.
+
+    幂等: pyc 已存在且源未变时 compileall 跳过 (mtime 校验), 二次启动近零开销.
+    非致命: 失败则回退运行时按需编译, 不阻断启动.
+    """
+    exe_dir = os.path.dirname(sys.executable)
+    candidates = [
+        os.path.join(exe_dir, "..", "lib", "python3.12", "site-packages"),
+        os.path.join(exe_dir, "..", "lib", "python3.12"),
+    ]
+    site_pkgs = next((os.path.normpath(p) for p in candidates if os.path.isdir(p)), None)
+    if not site_pkgs:
+        print("HARMONY_INFO:pyc_precompile:site_packages_not_found:skip")
+        sys.stdout.flush()
+        return
+
+    # 抽样短路: 若已存在较多 .pyc, 认为已预编译过, 跳过整树遍历.
+    try:
+        sample_pyc = 0
+        for _root, _dirs, files in os.walk(site_pkgs):
+            for f in files:
+                if f.endswith(".pyc"):
+                    sample_pyc += 1
+                    break
+            if sample_pyc > 20:
+                break
+        if sample_pyc > 20:
+            print("HARMONY_INFO:pyc_precompile:already_compiled:skip")
+            sys.stdout.flush()
+            return
+    except OSError:
+        pass
+
+    print("HARMONY_INFO:pyc_precompile:compiling " + site_pkgs)
+    sys.stdout.flush()
+    import time as _time
+    t0 = _time.time()
+    try:
+        env = os.environ.copy()
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        result = subprocess.run(
+            [sys.executable, "-m", "compileall", "-q", "-j", "0", site_pkgs],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=180,
+        )
+        elapsed = _time.time() - t0
+        if result.returncode == 0:
+            print("HARMONY_INFO:pyc_precompile:done:" + f"{elapsed:.1f}s")
+        else:
+            err = (result.stderr or b"").decode("utf-8", "replace")[:200]
+            print("HARMONY_INFO:pyc_precompile:partial:" + f"{elapsed:.1f}s rc={result.returncode} {err}")
+        sys.stdout.flush()
+    except subprocess.TimeoutExpired:
+        print("HARMONY_INFO:pyc_precompile:timeout:180s:falling_back_to_runtime")
+        sys.stdout.flush()
+    except Exception as e:  # noqa: BLE001
+        print("HARMONY_INFO:pyc_precompile:failed:" + str(e) + ":falling_back_to_runtime")
+        sys.stdout.flush()
+
+
+def _warmup_page_cache_background() -> None:
+    """启动子进程后, 起后台线程预读关键包入 OS page cache.
+
+    设备冷启动时 site-packages 的 .py/.so 首次从闪存读很慢. 主进程预读这些
+    文件入 page cache 后, 子进程 import 时命中内存而非闪存, 降低 import 耗时.
+    在子进程已启动的背景下后台进行, 不阻塞 HARMONY_READY. 只读不执行, 零副作用.
+    """
+    import threading
+
+    exe_dir = os.path.dirname(sys.executable)
+    site_pkgs = os.path.join(exe_dir, "..", "lib", "python3.12", "site-packages")
+    if not os.path.isdir(site_pkgs):
+        return
+
+    # 预热目标: 启动链路实测最重的几个包. lark_oapi 已惰性化不在启动链, 不预读.
+    targets = ["openjiuwen", "faiss", "pymilvus", "google", "a2ui"]
+
+    def _read_all(pkg_dir):
+        try:
+            for root, _dirs, files in os.walk(pkg_dir):
+                for f in files:
+                    p = os.path.join(root, f)
+                    try:
+                        with open(p, "rb") as fh:
+                            _ = fh.read(4096)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    def _worker():
+        for pkg in targets:
+            d = os.path.join(site_pkgs, pkg)
+            if os.path.isdir(d):
+                _read_all(d)
+
+    threading.Thread(target=_worker, name="page-cache-warmup", daemon=True).start()
 
 
 def start_service(module_path: str, args: list[str], service_name: str) -> subprocess.Popen:
@@ -210,6 +316,14 @@ def main() -> None:
         sys.stdout.flush()
         # Don't exit — services may still work with defaults
 
+    # ─── pyc 预编译 (设备自身 python3.12) ───
+    # HNP 打包时不含 pyc (打包机与设备 python magic 不同, 无法交叉预编译),
+    # 设备首次启动若让子进程各自现编译 openjiuwen (3264 文件) / lark_oapi 等,
+    # agent + gateway 两进程会重复编译同一批 .py, 浪费数十秒.
+    # 此处用设备自身 python3.12 一次性 compileall 整个 site-packages, 写盘后
+    # 子进程直接复用 pyc 跳过编译; 失败则回退到运行时按需编译 (非致命).
+    _precompile_pycache()
+
     # ─── Port allocation ───
     agentserver_port = args.agentserver_port
     gateway_port = args.gateway_port
@@ -332,6 +446,9 @@ def main() -> None:
 
     print(f"HARMONY_READY:{service_url}")
     sys.stdout.flush()
+
+    # ─── 后台预读 page cache (不阻塞, 仅降低后续子进程 import 闪存读延迟) ───
+    _warmup_page_cache_background()
 
     # ─── Register SIGTERM handler ───
     signal.signal(signal.SIGTERM, handle_sigterm)
