@@ -258,7 +258,7 @@ def prepare_html_export(
     try:
         root = Path(workspace_root).expanduser().resolve()
         report = Path(report_path).expanduser().resolve()
-    except (TypeError, OSError, RuntimeError) as exc:
+    except (TypeError, OSError, RuntimeError, ValueError) as exc:
         raise RewriteError("BAD_REQUEST", "invalid HTML export request") from exc
     if (
         not _inside(report, root)
@@ -300,6 +300,7 @@ def prepare_html_export(
         TypeError,
         RuntimeError,
         UnicodeDecodeError,
+        ValueError,
         RewriteError,
     ) as exc:
         raise RewriteError("REVISION_CONFLICT", "rewrite export source changed") from exc

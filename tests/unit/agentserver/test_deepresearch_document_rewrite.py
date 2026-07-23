@@ -259,6 +259,56 @@ def test_prepare_html_export_rejects_path_outside_workspace(tmp_path):
     assert caught.value.code == "BAD_REQUEST"
 
 
+def test_prepare_html_export_normalizes_invalid_request_path(tmp_path):
+    with pytest.raises(RewriteError) as caught:
+        prepare_html_export(
+            workspace_root=tmp_path,
+            report_path="bad\0.md",
+            revision_id="rev_export",
+        )
+
+    assert caught.value.code == "BAD_REQUEST"
+    assert str(caught.value) == "invalid HTML export request"
+
+
+def test_prepare_html_export_normalizes_invalid_provenance_markdown_path(
+    tmp_path,
+):
+    _, result = _committed_child(tmp_path)
+    sidecar = Path(result["provenance_path"])
+    provenance = json.loads(sidecar.read_text(encoding="utf-8"))
+    provenance["markdown_path"] = "bad\0path"
+    sidecar.write_text(json.dumps(provenance), encoding="utf-8")
+
+    with pytest.raises(RewriteError) as caught:
+        prepare_html_export(
+            workspace_root=tmp_path,
+            report_path=result["report_path"],
+            revision_id=result["revision_id"],
+        )
+
+    assert caught.value.code == "REVISION_CONFLICT"
+    assert str(caught.value) == "rewrite export source changed"
+
+
+def test_prepare_html_export_normalizes_invalid_final_result_path(tmp_path):
+    _, result = _committed_child(tmp_path)
+    sidecar = Path(result["provenance_path"])
+    provenance = json.loads(sidecar.read_text(encoding="utf-8"))
+    provenance["final_result_path"] = "bad\0path"
+    sidecar.write_text(json.dumps(provenance), encoding="utf-8")
+
+    with pytest.raises(RewriteError) as caught:
+        prepare_html_export(
+            workspace_root=tmp_path,
+            report_path=result["report_path"],
+            revision_id=result["revision_id"],
+        )
+
+    assert caught.value.code == "REVISION_CONFLICT"
+    assert str(caught.value) == "rewrite export source changed"
+
+
 @pytest.mark.parametrize(
     "selection",
     [None, [], {}, {"protocol_version": 1}, {"protocol_version": True}, {"protocol_version": "2"},
