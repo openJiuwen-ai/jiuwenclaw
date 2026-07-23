@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 
 
 class UnsupportedOperationError(Exception):
-
     """不支持的操作异常"""
     pass
+
 
 # 认证上下文
 @dataclass
@@ -18,6 +18,7 @@ class AuthContext:
     headers: dict = field(default_factory=dict)  # HTTP Headers
     remote_addr: str = ""  # 客户端地址
 
+
 # 认证结果
 @dataclass
 class AuthResult:
@@ -26,16 +27,19 @@ class AuthResult:
     error: str = ""        # 错误信息（认证失败时）
     extensions: dict = field(default_factory=dict)   # 扩展信息（如token解析后的claims）
 
+
 @dataclass
 class KeyPair:
     public_key: str
     private_key: str
+
 
 @dataclass
 class SSHCertificate:
     public_key: str
     certificate: str
     expires_at: datetime
+
 
 # 抽象接口：统一认证和凭证管理
 class CredentialAuthenticator(ABC):

@@ -84,6 +84,7 @@ logger = logging.getLogger("jiuwenswarm.gateway")
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
 
+
 #3rd
 def _init_auth_handler():
     registry = ExtensionRegistry.get_instance()
@@ -91,6 +92,7 @@ def _init_auth_handler():
 
 # 全局认证器实例
 _auth_handler: CredentialAuthenticator | None = None
+
 
 def get_auth_handler() -> CredentialAuthenticator:
     global _auth_handler

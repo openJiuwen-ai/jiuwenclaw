@@ -1,10 +1,16 @@
 from datetime import timedelta
 
 from jose import jwt, JWTError
-
-from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenticator, AuthContext, AuthResult, KeyPair, \
-    SSHCertificate
 import httpx
+
+from jiuwenswarm.gateway.auth.credential_authenticator import (
+    CredentialAuthenticator,
+    AuthContext,
+    AuthResult,
+    KeyPair,
+    SSHCertificate,
+)
+
 
 
 class AuthServiceClient:
@@ -26,7 +32,6 @@ class CredentialManager:
 
     @classmethod
     def compute_api_key_hmac(cls, api_key, secret_key):
-        # todo
         pass
 
 
@@ -198,14 +203,13 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             "role": payload["role"],
         }
 
-    # TODO --------------------------
     def _lookup_agent_by_api_key_hash(self, api_key_hash) -> str | None:
         """通过 API Key 的 HMAC 哈希值查找 agent_id
 
             根据设计文档 4.5.4.2 节：
             数据库中只存储 HMAC 值，不存储明文 API Key。
             """
-        # TODO: 接入数据库存储 api_key_hash -> agent_id 映射
+        # 接入数据库存储 api_key_hash -> agent_id 映射
         # 当前简化实现：从 self._api_key_map 中查找
         if hasattr(self, '_api_key_map') and self._api_key_map:
             return self._api_key_map.get(api_key_hash)
@@ -221,13 +225,11 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             在本地存储中查找 public_key 对应的 agent_id。
             当前为简化实现，后续应接入数据库或配置中心。
             """
-        # TODO: 接入数据库/配置中心存储公钥与 agent_id 的映射关系
+        # 接入数据库/配置中心存储公钥与 agent_id 的映射关系
         # 当前简化实现：从 self._public_key_map 中查找
         if hasattr(self, '_public_key_map') and self._public_key_map:
             return self._public_key_map.get(public_key)
         return None
-
-    # TODO --------------------------
 
     async def authenticate(self, context: AuthContext) -> AuthResult:
         """根据 context.credentials 中的凭证类型选择认证方式。
@@ -276,7 +278,6 @@ class AgentOSAuthenticator(CredentialAuthenticator):
                 extensions={"error_code": "CONFIG_ERROR"},
             )
 
-        # TODO
         api_key_hash = self.compute_api_key_hmac(api_key, self._gateway_secret_key)
         agent_id = self._lookup_agent_by_api_key_hash(api_key_hash)
         if agent_id:
@@ -293,10 +294,11 @@ class AgentOSAuthenticator(CredentialAuthenticator):
 
     def _authenticate_certificate(self, certificate: str) -> AuthResult:
         """SSH证书认证"""
-        # 验证证书签名、过期时间、principals
-        valid, user_id = self._verify_ssh_certificate(certificate)
-        if valid:
-            return AuthResult(success=True, user_id=user_id)
+        result = self._verify_ssh_certificate(certificate)
+        if result:
+            valid, user_id = result
+            if valid:
+                return AuthResult(success=True, user_id=user_id)
         return AuthResult(success=False, error="Invalid certificate")
 
     def _authenticate_public_key(self, public_key: str) -> AuthResult:

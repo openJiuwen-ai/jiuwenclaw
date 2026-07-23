@@ -1,22 +1,27 @@
+import secrets
+import string
+import time
 from datetime import timedelta
+from datetime import datetime, timezone
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
-
-from jiuwenswarm.gateway.auth.credential_authenticator import UnsupportedOperationError, KeyPair, AuthResult, \
-    CredentialAuthenticator, AuthContext, SSHCertificate
-import secrets
-import string
-import time
 from cryptography.hazmat.primitives.serialization.ssh import (
             SSHCertificateBuilder, SSHCertificateType
-        )
+)
 from cryptography.hazmat.primitives.serialization import (
         load_ssh_public_key, load_pem_private_key
-        )
-from datetime import datetime, timezone
+)
 
+from jiuwenswarm.gateway.auth.credential_authenticator import (
+    UnsupportedOperationError,
+    KeyPair,
+    AuthResult,
+    CredentialAuthenticator,
+    AuthContext,
+    SSHCertificate
+)
 
 class PassthroughAuthenticator(CredentialAuthenticator):
 
