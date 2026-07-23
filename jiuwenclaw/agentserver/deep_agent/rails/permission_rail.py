@@ -1254,11 +1254,15 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             auto_confirm_key,
         )
         try:
-            response = await get_acp_output_manager().send_jsonrpc_request(
-                "session/request_permission",
-                request_params,
-                session_id=session_id,
-            )
+            # ACP permission HITL must not consume StreamingToolExecutor.wait_all budget.
+            from jiuwenclaw.jiuwen_core_patch import streaming_tool_wait_timeout_paused
+
+            async with streaming_tool_wait_timeout_paused():
+                response = await get_acp_output_manager().send_jsonrpc_request(
+                    "session/request_permission",
+                    request_params,
+                    session_id=session_id,
+                )
         except Exception as exc:
             logger.warning("[PermissionEngine] permission.acp.request_failed error=%s", exc)
             return None
