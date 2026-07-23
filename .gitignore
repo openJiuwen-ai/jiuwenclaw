@@ -55,6 +55,9 @@ workspace/agent-data.json
 *.iml
 .cursor
 .VSCodeCounter/
+.agent_history/
+.ua/
+.codegraph/
 
 # reference
 reference/
