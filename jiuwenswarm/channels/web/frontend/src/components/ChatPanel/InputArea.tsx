@@ -317,6 +317,8 @@ export function InputArea({
   // 用户明确要求改成这个语义（steer 目前收不到任何反馈，体验上等同于消息发出去石沉大海，
   // 见 backend-requests.md #1）。走排队后消息复用现有的通用队列机制，行为和普通排队一致。
   const isGoalActive = currentGoal?.status === 'active';
+  // 未完成目标：active/paused/blocked 都算，只有 completed（或没有目标）才能再设新目标
+  const hasUnfinishedGoal = currentGoal != null && currentGoal.status !== 'completed';
   const isInterruptible = isProcessing || isPaused || isGoalActive;
   const isAgentMode = mode === 'agent';
   const isTeamMode = mode === 'team';
@@ -433,6 +435,9 @@ export function InputArea({
   });
 
   const imageInputDisabled = isListening || (isInterruptible && !isTeamMode);
+  // "+" 触发按钮本身不跟图片/目标的可用性挂钩：菜单以后可能挂其他跟图片/目标无关的功能，
+  // 触发按钮只要不在录音就该能点开；具体某一项能不能选，交给菜单里每一项各自的禁用态处理。
+  const attachTriggerDisabled = isListening;
   const readyAttachments = useMemo(
     () => attachments.filter((attachment) => attachment.status === 'ready' && attachment.base64Data),
     [attachments],
@@ -816,6 +821,7 @@ export function InputArea({
         role: 'user',
         content: trimmed,
         timestamp: new Date().toISOString(),
+        isGoalObjectiveMessage: true,
       });
       useGoalStore.getState().setArmed(sid, false);
       onSetGoal(sid, trimmed);
@@ -1564,19 +1570,19 @@ export function InputArea({
               <button
                 type="button"
                 onClick={() => {
-                  if (imageInputDisabled) return;
+                  if (attachTriggerDisabled) return;
                   if (!attachMenuOpen && attachMenuRef.current) {
                     setAttachMenuAnchor(attachMenuRef.current.getBoundingClientRect());
                   }
                   setAttachMenuOpen((open) => !open);
                 }}
-                disabled={imageInputDisabled}
+                disabled={attachTriggerDisabled}
                 className={cx(
                   'chat-input-btn chat-input-btn--add-file',
-                  imageInputDisabled && 'chat-input-btn--disabled',
+                  attachTriggerDisabled && 'chat-input-btn--disabled',
                 )}
-                title={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
-                aria-label={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+                title={attachTriggerDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+                aria-label={attachTriggerDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
                 aria-haspopup="menu"
                 aria-expanded={attachMenuOpen}
               >
@@ -1615,7 +1621,10 @@ export function InputArea({
                   type="button"
                   className="chat-mode-select__option"
                   role="menuitem"
+                  disabled={imageInputDisabled}
+                  title={imageInputDisabled ? t('chat.addImageDisabled') : undefined}
                   onClick={() => {
+                    if (imageInputDisabled) return;
                     setAttachMenuOpen(false);
                     fileInputRef.current?.click();
                   }}
@@ -1632,7 +1641,10 @@ export function InputArea({
                     type="button"
                     className="chat-mode-select__option"
                     role="menuitem"
+                    disabled={hasUnfinishedGoal}
+                    title={hasUnfinishedGoal ? t('goal.toolbarUnavailable') : undefined}
                     onClick={() => {
+                      if (hasUnfinishedGoal) return;
                       setAttachMenuOpen(false);
                       if (activeSessionId) {
                         useGoalStore.getState().setArmed(activeSessionId, true);
@@ -1812,7 +1824,10 @@ export function InputArea({
             </button>
           )} */}
 
-          <ModelSelector disabled={hasHistory || isProcessing} />
+          <ModelSelector
+            disabled={isTeamMode || hasHistory || isProcessing}
+            lockedToDefault={isTeamMode}
+          />
 
           <button
             type="button"
@@ -2088,10 +2103,17 @@ function ComposerSuggestionMenu({
   );
 }
 
-function ModelSelector({ disabled = false }: { disabled?: boolean }) {
+function ModelSelector({
+  disabled = false,
+  lockedToDefault = false,
+}: {
+  disabled?: boolean;
+  lockedToDefault?: boolean;
+}) {
   const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectedModelName = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.selectedModelName ?? null);
+  const defaultModelName = useSessionStore((s) => s.defaultModelName);
   const setSelectedModelName = useSessionStore((s) => s.setSelectedModelName);
   const { t } = useTranslation();
 
@@ -2115,8 +2137,9 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
 
   if (chatAvailableModels.length === 0) return null;
 
+  const displayedModelName = lockedToDefault ? defaultModelName : selectedModelName;
   const selectedModel =
-    chatAvailableModels.find((m) => (m.alias || m.model_name) === selectedModelName) ??
+    chatAvailableModels.find((m) => (m.alias || m.model_name) === displayedModelName) ??
     chatAvailableModels[0];
 
   const handleSelect = (modelKey: string) => {
@@ -2137,7 +2160,7 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
       <button
         type="button"
         className="chat-mode-select__trigger"
-        title={t('chat.modelSelector.tooltip')}
+        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
         onClick={() => {
           if (disabled) return;
           if (!isOpen && menuRef.current) {
@@ -2148,6 +2171,7 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
           setIsOpen((v) => !v);
         }}
         style={disabled ? { cursor: 'default' } : undefined}
+        aria-disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={isOpen}
         data-testid="chat-model-selector"

@@ -123,7 +123,11 @@ function ExpandedTeamArea({
   const { t } = useTranslation();
   const { completedTasks, progressTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
   const artifactsCount = useSessionArtifactsCount();
-  const resolvedTab = activeTab === 'review' && !reviewPanel ? 'planning' : activeTab;
+  const resolvedTab =
+    (activeTab === 'artifacts' && artifactsCount === 0) ||
+    (activeTab === 'review' && !reviewPanel)
+      ? 'planning'
+      : activeTab;
 
   const selectedMember = useMemo(() => {
     if (!externalSelectedMemberId) return null;
@@ -146,12 +150,14 @@ function ExpandedTeamArea({
       label: t('team.membersTab'),
       icon: <img src={teamIcon} width={16} height={16} />,
     },
-    {
-      key: 'artifacts',
-      label: t('artifacts.tab'),
-      count: artifactsCount,
-      icon: <FileText size={16} />,
-    },
+    ...(artifactsCount > 0
+      ? [{
+          key: 'artifacts' as const,
+          label: t('artifacts.tab'),
+          count: artifactsCount,
+          icon: <FileText size={16} />,
+        }]
+      : []),
     ...(reviewPanel ? [{ key: 'review' as const, label: t('codeMode.review'), icon: <FileCheck2 size={16} /> }] : []),
   ];
 

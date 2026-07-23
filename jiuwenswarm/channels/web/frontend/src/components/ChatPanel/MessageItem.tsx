@@ -214,8 +214,6 @@ interface MessageItemProps {
   autoSpeak?: boolean;
   showAvatar?: boolean;
   disableA2UIInteraction?: boolean;
-  /** 当前会话的目标文本；message.content 与其完全匹配时显示"设为目标"徽章（纯前端字符串匹配派生，不依赖后端字段） */
-  goalObjective?: string | null;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -223,7 +221,6 @@ export const MessageItem = memo(function MessageItem({
   autoSpeak = false,
   showAvatar = true,
   disableA2UIInteraction = false,
-  goalObjective,
 }: MessageItemProps) {
   const { t } = useTranslation();
   const {
@@ -238,6 +235,7 @@ export const MessageItem = memo(function MessageItem({
     audioMime,
     mediaItems,
     fileItems,
+    isGoalObjectiveMessage,
   } = message;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
@@ -633,8 +631,8 @@ export const MessageItem = memo(function MessageItem({
           >
             <span>{formatTimestamp(timestamp)}</span>
 
-            {isUser && goalObjective && content === goalObjective && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-accent-subtle px-2 py-0.5 text-xs text-accent">
+            {isUser && isGoalObjectiveMessage && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted">
                 <Target className="w-3 h-3" strokeWidth={2} />
                 {t('goal.badge')}
               </span>

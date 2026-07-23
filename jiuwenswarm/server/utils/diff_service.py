@@ -8,6 +8,7 @@ import difflib
 import copy
 import json
 import logging
+import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -27,6 +28,14 @@ MAX_FILES = 50
 MAX_DIFF_SIZE_BYTES = 1_000_000
 MAX_LINES_PER_FILE = 400
 MAX_FILES_FOR_DETAILS = 500
+HISTORY_PRIORITY_PROJECT_ROOT = 0
+HISTORY_PRIORITY_SHARED_WORKSPACE = 10
+HISTORY_PRIORITY_EXTRA_ROOT = 20
+HISTORY_PRIORITY_UNKNOWN = 50
+WORKTREE_HISTORY_CONTAINERS: tuple[tuple[str, ...], ...] = (
+    (".worktrees",),
+    (".jiuwen", "worktrees"),
+)
 
 # change_sets.json 写入锁:保证同一进程内多线程惰性回填时不互相覆盖。
 _CHANGE_SET_LOCK = threading.Lock()
@@ -655,6 +664,98 @@ class DiffService:
         return result
 
     @staticmethod
+    def _default_worktree_history_roots(project_dir: str | None) -> list[str]:
+        """Return known local worktree container dirs under the project root."""
+        if not project_dir:
+            return []
+        root = Path(project_dir)
+        return [str(root.joinpath(*parts)) for parts in WORKTREE_HISTORY_CONTAINERS]
+
+    @classmethod
+    def _history_roots_with_worktree_containers(
+        cls,
+        project_dir: str | None,
+        extra_history_roots: list[str] | None = None,
+    ) -> list[str]:
+        """Return explicit roots plus known worktree containers below each root."""
+        roots: list[str] = []
+        seen: set[str] = set()
+
+        def add_root(value: str | None) -> None:
+            raw = str(value or "").strip()
+            if not raw:
+                return
+            try:
+                key = os.path.normcase(str(Path(raw).expanduser().resolve()))
+            except Exception:
+                key = os.path.normcase(raw)
+            if key in seen:
+                return
+            seen.add(key)
+            roots.append(raw)
+
+        for root in cls._default_worktree_history_roots(project_dir):
+            add_root(root)
+        for root in extra_history_roots or []:
+            if not isinstance(root, str):
+                continue
+            raw = root.strip()
+            if not raw:
+                continue
+            add_root(raw)
+            for child_root in cls._default_worktree_history_roots(raw):
+                add_root(child_root)
+        return roots
+
+    @staticmethod
+    def _get_git_common_worktree_root(worktree_root: Path) -> Path | None:
+        """Return the canonical repo root for a linked git worktree, if known."""
+        if not worktree_root.is_dir():
+            return None
+        common_dir = DiffService._run_git_command(
+            str(worktree_root),
+            ["rev-parse", "--git-common-dir"],
+        )
+        if not common_dir or not common_dir.strip():
+            return None
+        common_path = Path(common_dir.strip())
+        if not common_path.is_absolute():
+            common_path = worktree_root / common_path
+        try:
+            common_path = common_path.resolve()
+        except OSError:
+            pass
+        if common_path.name != ".git":
+            return None
+        canonical_root = common_path.parent
+        try:
+            worktree_resolved = worktree_root.resolve()
+            canonical_resolved = canonical_root.resolve()
+        except OSError:
+            return None
+        if worktree_resolved == canonical_resolved:
+            return None
+        return canonical_resolved
+
+    @staticmethod
+    def _map_worktree_file_path(
+        file_path: str,
+        *,
+        source_root: Path,
+        target_root: Path | None,
+    ) -> str:
+        """Map a file-op path from a linked worktree back to the canonical repo."""
+        if target_root is None:
+            return file_path
+        try:
+            path = Path(file_path).expanduser().resolve()
+            source = source_root.expanduser().resolve()
+            rel = path.relative_to(source)
+        except Exception:
+            return file_path
+        return str(target_root / rel)
+
+    @staticmethod
     def _is_internal_team_workspace_file(file_path: str) -> bool:
         """Return whether an edited file is an internal team workspace artifact."""
         parts = str(file_path or "").replace("\\", "/").lower().split("/")
@@ -675,12 +776,28 @@ class DiffService:
             extra_history_roots: 额外写入根目录，例如 team/member workspace。
         """
         result: dict[str, Any] = {}
+        history_file_priorities: dict[str, int] = {}
+
+        def path_key(path: Path) -> str:
+            try:
+                return os.path.normcase(str(path.resolve()))
+            except OSError:
+                return os.path.normcase(str(path))
+
+        def add_history_file(path: Path, priority: int) -> None:
+            paths.append(path)
+            history_file_priorities.setdefault(path_key(path), priority)
 
         # 1. 从 Agent Workspace 和 User Workspace 读取（公共位置）
-        paths = [
+        paths: list[Path] = []
+        add_history_file(
             get_agent_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
+            HISTORY_PRIORITY_SHARED_WORKSPACE,
+        )
+        add_history_file(
             get_user_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
-        ]
+            HISTORY_PRIORITY_SHARED_WORKSPACE,
+        )
 
         # 2. session-specific file_ops（如 file_ops_jiuwenswarm_tui_xxx.json）
         if session_id:
@@ -691,7 +808,7 @@ class DiffService:
                 for f in hist_dir.iterdir():
                     name = f.name
                     if self._is_valid_file_ops_file(name, session_id, require_session=True):
-                        paths.append(f)
+                        add_history_file(f, HISTORY_PRIORITY_SHARED_WORKSPACE)
 
         # 3. 从项目目录读取（实际写入位置）
         # 如果未传入 project_dir，尝试从 session metadata 获取
@@ -703,17 +820,14 @@ class DiffService:
                 for f in project_hist_dir.iterdir():
                     name = f.name
                     if self._is_valid_file_ops_file(name, session_id):
-                        paths.append(f)
+                        add_history_file(f, HISTORY_PRIORITY_PROJECT_ROOT)
                 global_file = project_hist_dir / f"file_ops_{self._agent_id}.json"
                 if global_file.exists():
-                    paths.append(global_file)
-        extra_roots: list[str] = []
-        if extra_history_roots:
-            extra_roots.extend(
-                str(root).strip()
-                for root in extra_history_roots
-                if isinstance(root, str) and str(root).strip()
-            )
+                    add_history_file(global_file, HISTORY_PRIORITY_PROJECT_ROOT)
+        extra_roots = self._history_roots_with_worktree_containers(
+            project_dir,
+            extra_history_roots,
+        )
 
         for project_hist_dir in self._agent_history_dirs_for_roots(
             extra_roots,
@@ -724,11 +838,27 @@ class DiffService:
                 for f in project_hist_dir.iterdir():
                     name = f.name
                     if self._is_valid_file_ops_file(name, session_id):
-                        paths.append(f)
+                        add_history_file(f, HISTORY_PRIORITY_EXTRA_ROOT)
                 # 也读取全局 file_ops 文件（不带 session_id 后缀的）
                 global_file = project_hist_dir / f"file_ops_{self._agent_id}.json"
                 if global_file.exists():
-                    paths.append(global_file)
+                    add_history_file(global_file, HISTORY_PRIORITY_EXTRA_ROOT)
+
+        worktree_root_cache: dict[Path, Path | None] = {}
+
+        def mapped_file_path_for_history(file_path: str, history_file: Path) -> str:
+            source_root = history_file.parent.parent
+            try:
+                source_key = source_root.resolve()
+            except OSError:
+                source_key = source_root
+            if source_key not in worktree_root_cache:
+                worktree_root_cache[source_key] = self._get_git_common_worktree_root(source_root)
+            return self._map_worktree_file_path(
+                file_path,
+                source_root=source_root,
+                target_root=worktree_root_cache[source_key],
+            )
 
         # 用于规范化路径，避免大小写差异导致的重复
         def normalize_path(p: str) -> str:
@@ -736,44 +866,77 @@ class DiffService:
             # 使用 pathlib.Path 规范化路径
             try:
                 return str(Path(p).resolve())
-            except Exception:
+            except OSError:
                 return p.replace("\\", "/").lower()
+
+        def comparable_path_key(p: str) -> str:
+            return p.lower()
+
+        result_entry_priorities: dict[str, list[int]] = {}
+        result_path_by_comparable_key: dict[str, str] = {}
 
         for history_file in paths:
             if history_file.exists():
                 try:
                     data = json.loads(history_file.read_text(encoding="utf-8"))
+                    history_priority = history_file_priorities.get(
+                        path_key(history_file),
+                        HISTORY_PRIORITY_UNKNOWN,
+                    )
                     for file_path, entries in data.items():
-                        if self._is_internal_team_workspace_file(file_path):
+                        mapped_file_path = mapped_file_path_for_history(file_path, history_file)
+                        if self._is_internal_team_workspace_file(mapped_file_path):
                             continue
                         # 规范化路径，避免大小写差异导致的重复
-                        normalized_path = normalize_path(file_path)
+                        normalized_path = normalize_path(mapped_file_path)
+                        comparable_key = comparable_path_key(normalized_path)
+                        normalized_path = result_path_by_comparable_key.setdefault(
+                            comparable_key,
+                            normalized_path,
+                        )
                         if normalized_path not in result:
                             result[normalized_path] = []
+                            result_entry_priorities[normalized_path] = []
                         # 合并条目，避免时间戳相近的重复记录
                         for entry in entries:
                             # 检查是否已存在相同时间戳（±1秒）的相同操作
                             ts = entry.get("timestamp", "")
                             action = entry.get("action", "")
                             is_duplicate = False
-                            for existing in result[normalized_path]:
+                            duplicate_index: int | None = None
+                            for idx, existing in enumerate(result[normalized_path]):
                                 existing_ts = existing.get("timestamp", "")
                                 existing_action = existing.get("action", "")
-                                if action == existing_action:
+                                same_content = (
+                                    entry.get("old_content") == existing.get("old_content")
+                                    and entry.get("new_content") == existing.get("new_content")
+                                )
+                                if action == existing_action and same_content:
                                     # 比较时间戳是否相近（同一秒内）
                                     try:
                                         t1 = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                                         t2 = datetime.fromisoformat(existing_ts.replace("Z", "+00:00"))
                                         if abs((t1 - t2).total_seconds()) < 2:
                                             is_duplicate = True
+                                            duplicate_index = idx
                                             break
                                     except (ValueError, TypeError):
                                         # 时间戳格式无效，无法比较，跳过此条目比较
                                         continue
-                            if not is_duplicate:
+                            if is_duplicate:
+                                priorities = result_entry_priorities[normalized_path]
+                                if (
+                                    duplicate_index is not None
+                                    and duplicate_index < len(priorities)
+                                    and history_priority < priorities[duplicate_index]
+                                ):
+                                    result[normalized_path][duplicate_index] = entry
+                                    priorities[duplicate_index] = history_priority
+                            else:
                                 result[normalized_path].append(entry)
-                except Exception as e:
-                    logger.warning(f"Failed to read agent history file {history_file}: {e}")
+                                result_entry_priorities[normalized_path].append(history_priority)
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Failed to read agent history file %s: %s", history_file, e)
 
         return result
 
@@ -1756,13 +1919,10 @@ class DiffService:
                     if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
                         if f not in file_ops_paths:
                             file_ops_paths.append(f)
-        extra_roots: list[str] = []
-        if extra_history_roots:
-            extra_roots.extend(
-                str(root).strip()
-                for root in extra_history_roots
-                if isinstance(root, str) and str(root).strip()
-            )
+        extra_roots = self._history_roots_with_worktree_containers(
+            resolved_project_dir,
+            extra_history_roots,
+        )
 
         for project_hist_dir in self._agent_history_dirs_for_roots(
             extra_roots,

@@ -2,12 +2,53 @@
 
 import asyncio
 import json
+import threading
+from concurrent.futures import Future
 from dataclasses import asdict
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
+
+
+# 长生命周期事件循环：避免每次请求 asyncio.run() 新建循环导致 SDK 内部
+# asyncio.Queue/Event/Lock 跨循环绑定（"bound to a different event loop"）。
+_loop: Optional[asyncio.AbstractEventLoop] = None
+_loop_lock = threading.Lock()
+_loop_thread: Optional[threading.Thread] = None
+
+
+def _get_loop() -> asyncio.AbstractEventLoop:
+    """返回（必要时启动）长生命周期事件循环，跑在专用后台线程。"""
+    global _loop, _loop_thread
+    if _loop is not None and not _loop.is_closed():
+        return _loop
+    with _loop_lock:
+        if _loop is not None and not _loop.is_closed():
+            return _loop
+        loop = asyncio.new_event_loop()
+
+        def _run_forever() -> None:
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        thread = threading.Thread(
+            target=_run_forever,
+            name="clawee-async-loop",
+            daemon=True,
+        )
+        thread.start()
+        _loop = loop
+        _loop_thread = thread
+        return loop
+
+
+def _run_async(coro: Awaitable[Any]) -> Any:
+    """把协程提交到长生命周期 loop 同步等待结果。"""
+    loop = _get_loop()
+    future: Future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
 
 
 def payload_to_request(request: dict[str, Any]) -> AgentRequest:
@@ -164,10 +205,23 @@ async def ahandler(event, context=None):
 
 
 def handler(event, context=None):
-    """同步入口."""
-    return asyncio.run(ahandler(event, context))
+    """同步入口.
+
+    用 _run_async 把协程提交到长生命周期事件循环执行，避免每次请求
+    asyncio.run() 新建循环导致 SDK 内部 asyncio.Queue/Event/Lock 跨循环绑定。
+    """
+    return _run_async(ahandler(event, context))
 
 
 def pre_stop():
     """函数停止前的清理."""
-    pass
+    global _loop, _loop_thread
+    if _loop is not None and not _loop.is_closed():
+        try:
+            _loop.call_soon_threadsafe(_loop.stop)
+        except RuntimeError:
+            pass
+        if _loop_thread is not None:
+            _loop_thread.join(timeout=5)
+    _loop = None
+    _loop_thread = None

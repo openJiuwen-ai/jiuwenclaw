@@ -47,34 +47,30 @@ class RegistryConfig:
 
 @dataclass(frozen=True)
 class LaunchSpec:
-    """YuanRong Docker sandbox image-level launch fields from the registry."""
+    """Image launch-spec from registry ``GET .../launch-spec``.
+
+    Top-level response fields used for agent create:
+    ``runtime_spec`` (YuanRong RuntimeSpec) and ``env_vars``.
+    """
 
     framework: str
     framework_version: str
-    rootfs: dict[str, Any] = field(default_factory=dict)
-    cpu: int | None = None
-    memory: int | None = None
-    ports: list[dict[str, Any]] = field(default_factory=list)
-    env: dict[str, Any] = field(default_factory=dict)
+    runtime_spec: dict[str, Any] = field(default_factory=dict)
+    env_vars: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchSpec:
         payload = dict(data or {})
+        runtime_spec = payload.get("runtime_spec")
+        env_vars = payload.get("env_vars")
         return cls(
             framework=str(payload.get("framework") or "").strip(),
             framework_version=str(payload.get("framework_version") or "").strip(),
-            rootfs=dict(payload.get("rootfs") or {})
-            if isinstance(payload.get("rootfs"), dict)
+            runtime_spec=dict(runtime_spec)
+            if isinstance(runtime_spec, dict)
             else {},
-            cpu=_optional_int(payload.get("cpu")),
-            memory=_optional_int(payload.get("memory")),
-            ports=list(payload.get("ports") or [])
-            if isinstance(payload.get("ports"), list)
-            else [],
-            env=dict(payload.get("env") or {})
-            if isinstance(payload.get("env"), dict)
-            else {},
+            env_vars=dict(env_vars) if isinstance(env_vars, dict) else {},
             raw=payload,
         )
 
@@ -134,20 +130,44 @@ class HeartbeatResult:
 
 
 @dataclass(frozen=True)
-class ImageFrameworkInfo:
+class ImageEntry:
+    """One row from registry ``GET /api/images`` (flat: one framework version)."""
+
     framework: str
-    default: str = ""
-    versions: list[dict[str, Any]] = field(default_factory=list)
+    framework_version: str = ""
+    is_default: bool = False
+    imageurl: str = ""
+    workdir: str = ""
+    mounts: list[dict[str, Any]] = field(default_factory=list)
+    cpu: int | None = None
+    memory: int | None = None
+    ports: list[Any] = field(default_factory=list)
+    env: dict[str, Any] = field(default_factory=dict)
+    uploaded_by: str = ""
+    image_module_version: str = ""
+    created_at: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ImageFrameworkInfo:
+    def from_dict(cls, data: dict[str, Any]) -> ImageEntry:
         payload = dict(data or {})
-        versions = payload.get("versions")
+        mounts = payload.get("mounts")
+        ports = payload.get("ports")
+        env = payload.get("env")
         return cls(
             framework=str(payload.get("framework") or "").strip(),
-            default=str(payload.get("default") or "").strip(),
-            versions=list(versions) if isinstance(versions, list) else [],
+            framework_version=str(payload.get("framework_version") or "").strip(),
+            is_default=bool(payload.get("is_default")),
+            imageurl=str(payload.get("imageurl") or "").strip(),
+            workdir=str(payload.get("workdir") or "").strip(),
+            mounts=list(mounts) if isinstance(mounts, list) else [],
+            cpu=_optional_int(payload.get("cpu")),
+            memory=_optional_int(payload.get("memory")),
+            ports=list(ports) if isinstance(ports, list) else [],
+            env=dict(env) if isinstance(env, dict) else {},
+            uploaded_by=str(payload.get("uploaded_by") or "").strip(),
+            image_module_version=str(payload.get("image_module_version") or "").strip(),
+            created_at=str(payload.get("created_at") or "").strip(),
             raw=payload,
         )
 
@@ -299,8 +319,9 @@ class RegistryClient:
         self,
         *,
         framework: str | None = None,
-    ) -> list[ImageFrameworkInfo]:
-        """``GET /api/images`` (optional ``?framework=``)."""
+        uploaded_by: str | None = None,
+    ) -> list[ImageEntry]:
+        """``GET /api/images`` — flat list, one entry = one framework version."""
         if not self.enabled:
             names = (
                 [str(framework).strip()]
@@ -308,10 +329,11 @@ class RegistryClient:
                 else sorted(SUPPORTED_AGENT_TYPES)
             )
             return [
-                ImageFrameworkInfo(
+                ImageEntry(
                     framework=name,
-                    default="default",
-                    versions=[{"framework_version": "default"}],
+                    framework_version="default",
+                    is_default=True,
+                    imageurl=f"local/stub/{name}:latest",
                     raw={"source": "local_stub"},
                 )
                 for name in names
@@ -320,6 +342,8 @@ class RegistryClient:
         params: dict[str, Any] = {}
         if framework is not None and str(framework).strip():
             params["framework"] = str(framework).strip()
+        if uploaded_by is not None and str(uploaded_by).strip():
+            params["uploaded_by"] = str(uploaded_by).strip()
         data = await self._request_json(
             "GET",
             "api/images",
@@ -328,7 +352,7 @@ class RegistryClient:
         )
         items = data if isinstance(data, list) else []
         return [
-            ImageFrameworkInfo.from_dict(item)
+            ImageEntry.from_dict(item)
             for item in items
             if isinstance(item, dict)
         ]
@@ -449,9 +473,27 @@ class RegistryClient:
         """Resolve framework launch-spec into ``ImageInfo`` for sandbox create."""
         framework = str(image_name or "").strip()
         if not self.enabled:
+            imageurl = f"local/stub/{framework}:latest"
+            runtime_spec = {
+                "runtime": "python3.11",
+                "sandbox_type": "docker",
+                "rootfs": {
+                    "imageurl": imageurl,
+                    "user": "agentos",
+                    "ports": ["tcp:22"],
+                },
+                "cpu": 1000,
+                "memory": 2048,
+            }
             return ImageInfo(
                 image_name=framework,
-                metadata={"source": "local_stub", "agent_type": framework},
+                image_uri=imageurl,
+                metadata={
+                    "source": "local_stub",
+                    "agent_type": framework,
+                    "runtime_spec": runtime_spec,
+                    "env_vars": {},
+                },
             )
         try:
             spec = await self.get_launch_spec(framework)
@@ -460,8 +502,11 @@ class RegistryClient:
                 "[RegistryClient] get_launch_spec failed: framework=%s", framework
             )
             raise
-        rootfs = spec.rootfs if isinstance(spec.rootfs, dict) else {}
-        image_uri = str(rootfs.get("imageurl") or rootfs.get("image_url") or "").strip() or None
+        runtime_spec = dict(spec.runtime_spec) if isinstance(spec.runtime_spec, dict) else {}
+        rootfs = runtime_spec.get("rootfs") if isinstance(runtime_spec.get("rootfs"), dict) else {}
+        image_uri = (
+            str(rootfs.get("imageurl") or rootfs.get("image_url") or "").strip() or None
+        )
         return ImageInfo(
             image_name=framework,
             image_uri=image_uri,
@@ -470,37 +515,45 @@ class RegistryClient:
                 "framework": spec.framework or framework,
                 "framework_version": spec.framework_version,
                 "launch_spec": dict(spec.raw),
-                "rootfs": dict(spec.rootfs),
-                "cpu": spec.cpu,
-                "memory": spec.memory,
-                "ports": list(spec.ports),
-                "env": dict(spec.env),
+                "runtime_spec": runtime_spec,
+                "env_vars": dict(spec.env_vars),
                 "source": "registry",
             },
         )
 
     async def list_user_images(self, user_id: str) -> list[ImageInfo]:
-        """List switchable frameworks; attaches ``user_id`` in metadata."""
+        """List switchable frameworks; one ``ImageInfo`` per framework.
+
+        ``GET /api/images`` is flat (one row per version). For UI listing we
+        keep a single entry per framework, preferring ``is_default=true``.
+        """
         uid = str(user_id or "").strip()
-        frameworks = await self.list_images()
+        entries = await self.list_images()
+        by_framework: dict[str, ImageEntry] = {}
+        for entry in entries:
+            framework = str(entry.framework or "").strip()
+            if not framework:
+                continue
+            existing = by_framework.get(framework)
+            if existing is None or (entry.is_default and not existing.is_default):
+                by_framework[framework] = entry
+
         images: list[ImageInfo] = []
-        for item in frameworks:
-            version_meta: dict[str, Any] = {}
-            if item.versions:
-                first = item.versions[0]
-                if isinstance(first, dict):
-                    version_meta = dict(first)
+        for framework, entry in by_framework.items():
+            imageurl = str(entry.imageurl or "").strip() or None
             images.append(
                 ImageInfo(
-                    image_name=item.framework,
-                    image_uri=None,
+                    image_name=framework,
+                    image_uri=imageurl,
                     metadata={
-                        "agent_type": item.framework,
+                        "agent_type": framework,
                         "user_id": uid,
-                        "default": item.default,
-                        "versions": list(item.versions),
+                        "framework": framework,
+                        "framework_version": entry.framework_version,
+                        "is_default": entry.is_default,
+                        "imageurl": entry.imageurl,
+                        "uploaded_by": entry.uploaded_by,
                         "source": "registry" if self.enabled else "local_stub",
-                        **version_meta,
                     },
                 )
             )

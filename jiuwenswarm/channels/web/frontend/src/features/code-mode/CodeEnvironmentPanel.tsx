@@ -22,10 +22,7 @@ const EMPTY_STATS: GitDiffStats = {
 const DIFF_STATS_POLL_MS = 3000;
 
 function getEnvironmentStats(status: ProjectGitDiffStatus): GitDiffStats {
-  if (!status.repo.is_git) {
-    return status.last_turn?.stats ?? EMPTY_STATS;
-  }
-  return status.current?.stats ?? EMPTY_STATS;
+  return status.last_turn?.stats ?? EMPTY_STATS;
 }
 
 export function CodeEnvironmentPanel({ project, sessionId, isProcessing, onReview }: CodeEnvironmentPanelProps) {

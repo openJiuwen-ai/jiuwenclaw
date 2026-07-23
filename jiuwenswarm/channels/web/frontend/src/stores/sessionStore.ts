@@ -116,14 +116,6 @@ interface ConnectionStats {
   lastError: string | null;
 }
 
-type HeartbeatState = 'unknown' | 'ok' | 'alert';
-
-interface HeartbeatHistoryItem {
-  message: string;
-  updatedAt: string;
-  status: HeartbeatState;
-}
-
 interface MemoryUsage {
   rssMb: number | null;
   usedPercent: number | null;
@@ -280,10 +272,6 @@ interface SessionState {
   availableTools: string[];
   connectionStats: ConnectionStats;
   memoryUsage: MemoryUsage;
-  heartbeatState: HeartbeatState;
-  heartbeatMessage: string | null;
-  heartbeatUpdatedAt: string | null;
-  heartbeatHistory: HeartbeatHistoryItem[];
   availableModels: ModelEntry[];
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
   chatAvailableModels: ModelEntry[];
@@ -296,6 +284,7 @@ interface SessionState {
   // Runtime 管理方法
   ensureRuntime: (sessionId: string) => SessionRuntime;
   getRuntime: (sessionId: string | null) => SessionRuntime | undefined;
+  getEffectiveModelName: (sessionId: string | null) => string | null;
   removeRuntime: (sessionId: string) => void;
 
   // A 类 actions（不加 sessionId）
@@ -309,11 +298,6 @@ interface SessionState {
   setConnectionStats: (stats: Partial<ConnectionStats>) => void;
   setContextCompressionStats: (sessionId: string, stats: Partial<ContextCompressionStats> | null) => void;
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
-  setHeartbeatStatus: (
-    status: HeartbeatState,
-    message?: string | null,
-    updatedAt?: string | null
-  ) => void;
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
   setSelectedModelName: (sessionId: string, name: string) => void;
 
@@ -373,10 +357,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     rssMb: null,
     usedPercent: null,
   },
-  heartbeatState: 'unknown',
-  heartbeatMessage: null,
-  heartbeatUpdatedAt: null,
-  heartbeatHistory: [],
   availableModels: [],
   chatAvailableModels: [],
   defaultModelName: null,
@@ -395,6 +375,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   getRuntime: (sessionId) => {
     if (!sessionId) return undefined;
     return get().runtimes[sessionId];
+  },
+
+  getEffectiveModelName: (sessionId) => {
+    if (!sessionId) return null;
+    const state = get();
+    const runtime = state.runtimes[sessionId];
+    if (!runtime) return null;
+    return runtime.mode === 'team'
+      ? state.defaultModelName
+      : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {
@@ -569,26 +559,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         rssMb: normalizedRssMb,
         usedPercent: normalizedUsedPercent,
       },
-    });
-  },
-
-  setHeartbeatStatus: (status, message = null, updatedAt) => {
-    set((state) => {
-      const resolvedUpdatedAt = updatedAt === undefined ? new Date().toISOString() : updatedAt;
-      const shouldClearHistory = message == null && updatedAt === null;
-      const nextHistory = shouldClearHistory
-        ? []
-        : (message
-          ? [{ message, updatedAt: resolvedUpdatedAt ?? new Date().toISOString(), status }, ...state.heartbeatHistory]
-              .slice(0, 20)
-          : state.heartbeatHistory);
-
-      return {
-        heartbeatState: status,
-        heartbeatMessage: message,
-        heartbeatUpdatedAt: resolvedUpdatedAt,
-        heartbeatHistory: nextHistory,
-      };
     });
   },
 

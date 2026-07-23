@@ -1515,13 +1515,27 @@ async def test_process_team_message_stream_retries_followup_while_native_starts(
                 "reason: NativeHarness not started.",
             )
 
-    async def _fake_retry(team_manager: object, session_id: str, query: str):
+    async def _fake_retry(
+        team_manager: object,
+        session_id: str,
+        query: str,
+        *,
+        initial_reason: str | None = None,
+    ):
         assert team_manager is not None
+        assert initial_reason == (
+            "deliver_to_leader_failed:[123023] deepagent runtime error, "
+            "reason: NativeHarness not started."
+        )
         _FakeManager.interact_calls.append((session_id, f"retry:{query}"))
-        return True, None
+        return team_helpers._FollowupInteractBoundaryResult(
+            success=True,
+            reason=None,
+            first_request_ready=False,
+        )
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_retry_followup_interact_until_ready", _fake_retry)
+    monkeypatch.setattr(team_helpers, "_deliver_followup_interact_across_boundary", _fake_retry)
 
     request = SimpleNamespace(
         session_id="sess-team-followup-starting",
@@ -1589,20 +1603,25 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
         def register_stream_task(session_id: str, task: object) -> None:
             captured["registered"] = session_id
 
-    async def _fake_wait_first_request(team_manager: object, session_id: str, **kwargs) -> bool:
-        assert team_manager is not None
-        assert session_id == "sess-team-followup-stopped"
-        _FakeManager.stream_active = False
-        return True
-
-    async def _fake_retry(team_manager: object, session_id: str, query: str):
+    async def _fake_retry(
+        team_manager: object,
+        session_id: str,
+        query: str,
+        *,
+        initial_reason: str | None = None,
+    ):
         assert team_manager is not None
         assert session_id == "sess-team-followup-stopped"
         assert query
-        return (
-            False,
+        assert initial_reason == (
             "deliver_to_leader_failed:[123023] deepagent runtime error, "
-            "reason: NativeHarness already stopped.",
+            "reason: NativeHarness already stopped."
+        )
+        _FakeManager.stream_active = False
+        return team_helpers._FollowupInteractBoundaryResult(
+            success=False,
+            reason=initial_reason,
+            first_request_ready=True,
         )
 
     async def _fake_consume_stream_with_query(
@@ -1618,12 +1637,7 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
         captured["consumed"] = (session_id, query, round_id)
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_retry_followup_interact_until_ready", _fake_retry)
-    monkeypatch.setattr(
-        team_helpers,
-        "_wait_for_team_first_request_condition",
-        _fake_wait_first_request,
-    )
+    monkeypatch.setattr(team_helpers, "_deliver_followup_interact_across_boundary", _fake_retry)
     monkeypatch.setattr(team_helpers, "increment_session_round_count", lambda session_id: 7)
     monkeypatch.setattr(team_helpers, "_consume_stream_with_query", _fake_consume_stream_with_query)
 
@@ -1691,17 +1705,23 @@ async def test_process_team_message_stream_fallback_reuses_first_request_directi
         def register_stream_task(session_id: str, task: object) -> None:
             captured["registered"] = session_id
 
-    async def _fake_retry(team_manager: object, session_id: str, query: str):
+    async def _fake_retry(
+        team_manager: object,
+        session_id: str,
+        query: str,
+        *,
+        initial_reason: str | None = None,
+    ):
         assert team_manager is not None
         assert session_id == "sess-team-followup-directives"
         assert query == "/hide_dm /debug weather"
-        return False, "gate_closed"
-
-    async def _fake_wait_first_request(team_manager: object, session_id: str, **kwargs) -> bool:
-        assert team_manager is not None
-        assert session_id == "sess-team-followup-directives"
+        assert initial_reason == "gate_closed"
         _FakeManager.stream_active = False
-        return True
+        return team_helpers._FollowupInteractBoundaryResult(
+            success=False,
+            reason=initial_reason,
+            first_request_ready=True,
+        )
 
     async def _fake_consume_stream_with_query(
         channel_id: str | None,
@@ -1716,12 +1736,7 @@ async def test_process_team_message_stream_fallback_reuses_first_request_directi
         captured["consumed"] = (session_id, query, round_id, envs)
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_retry_followup_interact_until_ready", _fake_retry)
-    monkeypatch.setattr(
-        team_helpers,
-        "_wait_for_team_first_request_condition",
-        _fake_wait_first_request,
-    )
+    monkeypatch.setattr(team_helpers, "_deliver_followup_interact_across_boundary", _fake_retry)
     monkeypatch.setattr(team_helpers, "increment_session_round_count", lambda session_id: 9)
     monkeypatch.setattr(team_helpers, "_consume_stream_with_query", _fake_consume_stream_with_query)
 
@@ -1776,24 +1791,25 @@ async def test_process_team_message_stream_silences_gate_closed_when_shutdown_ra
         async def prepare_runtime_activation(session_id: str, team_name: str):
             raise AssertionError("timed-out shutdown race should not start a new stream")
 
-    async def _fake_wait_first_request(team_manager: object, session_id: str, **kwargs) -> bool:
-        assert team_manager is not None
-        assert session_id == "sess-team-followup-timeout"
-        return False
-
-    async def _fake_retry(team_manager: object, session_id: str, query: str):
+    async def _fake_retry(
+        team_manager: object,
+        session_id: str,
+        query: str,
+        *,
+        initial_reason: str | None = None,
+    ):
         assert team_manager is not None
         assert session_id == "sess-team-followup-timeout"
         assert query
-        return False, "gate_closed"
+        assert initial_reason == "gate_closed"
+        return team_helpers._FollowupInteractBoundaryResult(
+            success=False,
+            reason=initial_reason,
+            first_request_ready=False,
+        )
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_retry_followup_interact_until_ready", _fake_retry)
-    monkeypatch.setattr(
-        team_helpers,
-        "_wait_for_team_first_request_condition",
-        _fake_wait_first_request,
-    )
+    monkeypatch.setattr(team_helpers, "_deliver_followup_interact_across_boundary", _fake_retry)
 
     request = SimpleNamespace(
         session_id="sess-team-followup-timeout",
@@ -3950,6 +3966,12 @@ def test_persist_team_file_monitor_roots_replaces_stale_roots(monkeypatch: pytes
         "jiuwenswarm.server.runtime.agent_adapter.team_helpers.team_home",
         lambda name: fake_home,
     )
+    # independent_member_workspace 内部调用 openjiuwen 的 get_openjiuwen_home(),
+    # 无法被 team_home patch 覆盖,这里显式 patch 以保持测试路径稳定。
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.team_helpers.independent_member_workspace",
+        lambda name: fake_home / f"{name}_workspace",
+    )
 
     team_spec = SimpleNamespace(
         team_name="unit-team",
@@ -3970,7 +3992,11 @@ def test_persist_team_file_monitor_roots_replaces_stale_roots(monkeypatch: pytes
     home = fake_home.resolve()
     assert str(home / "team-workspace") in persisted_roots
     assert str(home / "workspaces") in persisted_roots
+    # session_id 经 _safe_segment sanitize(此处 "sess-1" 无特殊字符,保持原样)
+    assert str(home / "sessions" / "sess-1" / "worktrees") in persisted_roots
     assert str(home / "workspaces" / "worker_workspace") in persisted_roots
+    # 漏洞4修复: independent_member_workspace 路径也应被收集
+    assert str(home / "worker_workspace") in persisted_roots
 
 
 def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3981,7 +4007,10 @@ def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest
     expected_roots = [
         str(fake_home.resolve() / "team-workspace"),
         str(fake_home.resolve() / "workspaces"),
+        str(fake_home.resolve() / "sessions" / "sess-1" / "worktrees"),
         str(fake_home.resolve() / "workspaces" / "worker_workspace"),
+        # 漏洞4修复: independent_member_workspace 路径
+        str(fake_home.resolve() / "worker_workspace"),
     ]
 
     def _fake_read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
@@ -4006,6 +4035,10 @@ def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.team_helpers.team_home",
         lambda name: fake_home,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.team_helpers.independent_member_workspace",
+        lambda name: fake_home / f"{name}_workspace",
     )
 
     team_spec = SimpleNamespace(
