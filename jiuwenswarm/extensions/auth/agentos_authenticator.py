@@ -4,7 +4,7 @@ from jose import jwt, JWTError
 import httpx
 
 from jiuwenswarm.gateway.auth.credential_authenticator import (
-    CredentialAuthenticator,
+    TokenAuthenticator,
     AuthContext,
     AuthResult,
     KeyPair,
@@ -35,7 +35,7 @@ class CredentialManager:
         pass
 
 
-class AgentOSAuthenticator(CredentialAuthenticator):
+class AgentOSAuthenticator(TokenAuthenticator):
 
     def __init__(self, auth_service_url: str,  # agent-os 后端地址，例如 "http://localhost:8000"
                  gateway_secret_key: str,  # jwt_secret_key

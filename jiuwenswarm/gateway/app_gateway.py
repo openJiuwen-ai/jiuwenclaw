@@ -54,7 +54,7 @@ from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
 
 from jiuwenswarm.extensions.registry import ExtensionRegistry
-from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenticator
+from jiuwenswarm.gateway.auth.credential_authenticator import TokenAuthenticator
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -91,10 +91,10 @@ def _init_auth_handler():
     return registry.get_authenticator()
 
 # 全局认证器实例
-_auth_handler: CredentialAuthenticator | None = None
+_auth_handler: TokenAuthenticator | None = None
 
 
-def get_auth_handler() -> CredentialAuthenticator:
+def get_auth_handler() -> TokenAuthenticator:
     global _auth_handler
     if _auth_handler is None:
         _auth_handler = _init_auth_handler()

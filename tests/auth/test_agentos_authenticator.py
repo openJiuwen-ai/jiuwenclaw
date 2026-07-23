@@ -154,7 +154,6 @@ class TestAuthenticateTokenHttp:
             gateway_secret_key=None,
         )
 
-    #pass
     @pytest.mark.asyncio
     @respx.mock
     async def test_http_verify_success(self, auth):
@@ -171,7 +170,6 @@ class TestAuthenticateTokenHttp:
         assert result.user_id == "user-456"
         assert route.called
 
-    #PASS
     @pytest.mark.asyncio
     @respx.mock
     async def test_http_verify_invalid(self, auth):
@@ -181,7 +179,6 @@ class TestAuthenticateTokenHttp:
         result = await auth._authenticate_token("invalid-token")
         assert result.success is False
 
-    #PASS
     @pytest.mark.asyncio
     @respx.mock
     async def test_http_401(self, auth):
@@ -192,7 +189,6 @@ class TestAuthenticateTokenHttp:
         assert result.success is False
         assert "已过期" in result.error
 
-    #PASS
     @pytest.mark.asyncio
     @respx.mock
     async def test_http_403(self, auth):
@@ -203,7 +199,6 @@ class TestAuthenticateTokenHttp:
         assert result.success is False
         assert "无权限" in result.error
 
-    #PASS
     @pytest.mark.asyncio
     @respx.mock
     async def test_http_429(self, auth):
@@ -214,7 +209,6 @@ class TestAuthenticateTokenHttp:
         assert result.success is False
         assert "频繁" in result.error
 
-    #PASS
     @pytest.mark.asyncio
     @respx.mock
     async def test_http_500(self, auth):
@@ -234,6 +228,26 @@ class TestAuthenticateTokenHttp:
         result = await auth._authenticate_token("bad-response")
         assert result.success is False
         assert "非法的响应格式" in result.error
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_http_connect_error(self, auth):
+        respx.post("http://test-auth:8000/api/v1/auth/verify").mock(
+            side_effect=httpx.ConnectError("connection refused"),
+        )
+        result = await auth._authenticate_token("some-token")
+        assert result.success is False
+        assert "无法连接到认证服务" in result.error
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_http_timeout(self, auth):
+        respx.post("http://test-auth:8000/api/v1/auth/verify").mock(
+            side_effect=httpx.TimeoutException("timeout"),
+        )
+        result = await auth._authenticate_token("some-token")
+        assert result.success is False
+        assert "超时" in result.error
 
 #PASS
 class TestAuthenticate:
@@ -273,7 +287,6 @@ class TestAuthenticate:
         result = await auth.authenticate(context)
         assert result.success is True
         assert result.user_id == "user-123"
-
 
 #PASS
 class TestCredentialManager:

@@ -16,12 +16,17 @@ ExtensionRegistry.create_instance(
     logger=MagicMock(),
 )
 
+# 确保使用 PassthroughAuthenticator（防止 gateway.yaml 覆盖为 AgentOSAuthenticator）
+from jiuwenswarm.gateway.auth.passthrough_authenticator import PassthroughAuthenticator
+registry = ExtensionRegistry.get_instance()
+registry.register_authenticator(PassthroughAuthenticator())
+
 from jiuwenswarm.gateway.app_gateway import (
     _init_auth_handler,
     get_auth_handler,
 )
 from jiuwenswarm.gateway.auth.credential_authenticator import (
-    CredentialAuthenticator, AuthResult, AuthContext,
+    TokenAuthenticator, AuthContext,
 )
 
 #PASS
@@ -31,7 +36,7 @@ class TestInitAuthHandler:
         """验证 _init_auth_handler 返回 ExtensionRegistry 中的认证器"""
         registry = ExtensionRegistry.get_instance()
 
-        mock_auth = MagicMock(spec=CredentialAuthenticator)
+        mock_auth = MagicMock(spec=TokenAuthenticator)
         registry.register_authenticator(mock_auth)
 
         result = _init_auth_handler()
@@ -57,7 +62,7 @@ class TestGetAuthHandler:
     def test_returns_authenticator(self):
         """验证 get_auth_handler 返回认证器实例"""
         result = get_auth_handler()
-        assert isinstance(result, CredentialAuthenticator)
+        assert isinstance(result, TokenAuthenticator)
 
     def test_caches_instance(self):
         """验证多次调用返回同一对象（缓存机制）"""

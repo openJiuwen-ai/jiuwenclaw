@@ -13,7 +13,7 @@ from jiuwenswarm.extensions.types import ExtensionConfig
 from jiuwenswarm.common.security.base_crypto import CryptoProvider
 from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
 
-from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenticator
+from jiuwenswarm.gateway.auth.credential_authenticator import TokenAuthenticator
 from jiuwenswarm.gateway.auth.passthrough_authenticator import PassthroughAuthenticator
 from jiuwenswarm.extensions.auth.agentos_authenticator import AgentOSAuthenticator
 
@@ -31,7 +31,7 @@ class ExtensionRegistry:
         self._crypto_tool: CryptoUtility | None = None
         self._third_agent: ThirdAgentExtension | None = None
         self._rpc_handlers: dict[str, Callable] = {}
-        self._authenticator: CredentialAuthenticator = PassthroughAuthenticator()
+        self._authenticator: TokenAuthenticator = PassthroughAuthenticator()
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
 
@@ -83,11 +83,11 @@ class ExtensionRegistry:
         cls._instance = None
 
     # 3rd
-    def register_authenticator(self, authenticator: CredentialAuthenticator) -> None:
+    def register_authenticator(self, authenticator: TokenAuthenticator) -> None:
         """注册认证器（替换默认的PassthroughAuthenticator）"""
         self._authenticator = authenticator
 
-    def get_authenticator(self) -> CredentialAuthenticator:
+    def get_authenticator(self) -> TokenAuthenticator:
         """获取认证器"""
         return self._authenticator
 

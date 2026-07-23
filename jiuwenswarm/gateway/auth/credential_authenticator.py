@@ -41,15 +41,79 @@ class SSHCertificate:
     expires_at: datetime
 
 
-# 抽象接口：统一认证和凭证管理
-class CredentialAuthenticator(ABC):
+# ── Token 认证接口 ──
+
+class TokenAuthenticator(ABC):
+    """Token 认证器"""
     @abstractmethod
     async def authenticate(self, context: AuthContext) -> AuthResult:
-        """认证用户身份，支持Token、API-KEY、SSH证书等多种认证方式"""
+        """通过 Token 认证用户身份"""
         pass
 
     @abstractmethod
     def generate_api_key(self) -> str:
+        """生成 API Key"""
+        raise UnsupportedOperationError("generate_api_key not supported")
+
+    @abstractmethod
+    def compute_api_key_hmac(self, api_key: str, secret_key: str) -> str:
+        """计算 API Key 的 HMAC 值，用于存储验证"""
+        raise UnsupportedOperationError("compute_api_key_hmac not supported")
+
+
+# ── SSH 认证接口 ──
+class SSHAuthenticator(ABC):
+    """SSH 认证器"""
+    @abstractmethod
+    async def authenticate(self, context: AuthContext) -> AuthResult:
+        """通过 SSH 证书/公钥认证用户身份"""
+        pass
+
+    @abstractmethod
+    def generate_user_keypair(self) -> KeyPair:
+        """生成用户公私钥对"""
+        raise UnsupportedOperationError("generate_user_keypair not supported")
+
+    @abstractmethod
+    def generate_ssh_certificate(self, public_key: str, user_id: str, validity: timedelta) -> SSHCertificate:
+        """生成 SSH 证书"""
+        raise UnsupportedOperationError("generate_ssh_certificate not supported")
+
+
+
+# # 抽象接口：统一认证和凭证管理
+# class CredentialAuthenticator(ABC):
+#     @abstractmethod
+#     async def authenticate(self, context: AuthContext) -> AuthResult:
+#         """认证用户身份，支持Token、API-KEY、SSH证书等多种认证方式"""
+#         pass
+#
+#     @abstractmethod
+#     def generate_api_key(self) -> str:
+#         raise UnsupportedOperationError("generate_api_key not supported")
+#
+#     @abstractmethod
+#     def generate_user_keypair(self) -> KeyPair:
+#         """生成用户公私钥对，用于SSH认证"""
+#         raise UnsupportedOperationError("generate_user_keypair not supported")
+#
+#     @abstractmethod
+#     def generate_ssh_certificate(self, public_key: str, user_id: str, validity: timedelta) -> SSHCertificate:
+#         """生成SSH证书"""
+#         raise UnsupportedOperationError("generate_ssh_certificate not supported")
+#
+#     @abstractmethod
+#     def compute_api_key_hmac(self, api_key: str, secret_key: str) -> str:
+#         """计算API-KEY的HMAC值，用于存储验证"""
+#         raise UnsupportedOperationError("compute_api_key_hmac not supported")
+
+
+# ── 凭证管理接口 ──
+class CredentialManager(ABC):
+    """凭证管理器"""
+    @abstractmethod
+    def generate_api_key(self) -> str:
+        """生成 API Key"""
         raise UnsupportedOperationError("generate_api_key not supported")
 
     @abstractmethod
@@ -59,10 +123,10 @@ class CredentialAuthenticator(ABC):
 
     @abstractmethod
     def generate_ssh_certificate(self, public_key: str, user_id: str, validity: timedelta) -> SSHCertificate:
-        """生成SSH证书"""
+        """生成 SSH 证书"""
         raise UnsupportedOperationError("generate_ssh_certificate not supported")
 
     @abstractmethod
     def compute_api_key_hmac(self, api_key: str, secret_key: str) -> str:
-        """计算API-KEY的HMAC值，用于存储验证"""
+        """计算 API Key 的 HMAC 值，用于存储验证"""
         raise UnsupportedOperationError("compute_api_key_hmac not supported")

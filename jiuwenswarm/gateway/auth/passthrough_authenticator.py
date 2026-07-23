@@ -18,12 +18,13 @@ from jiuwenswarm.gateway.auth.credential_authenticator import (
     UnsupportedOperationError,
     KeyPair,
     AuthResult,
-    CredentialAuthenticator,
+    TokenAuthenticator,
+    SSHAuthenticator,
     AuthContext,
     SSHCertificate
 )
 
-class PassthroughAuthenticator(CredentialAuthenticator):
+class PassthroughAuthenticator(TokenAuthenticator, SSHAuthenticator):
 
     def __init__(self, ca_private_key_pem: bytes | None = None):
         self._ca_private_key = ca_private_key_pem
