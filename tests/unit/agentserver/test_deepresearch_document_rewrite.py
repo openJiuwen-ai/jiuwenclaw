@@ -10,6 +10,7 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin import document_rewrite as
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.document_rewrite import (
     RewriteError,
     commit_rewrite,
+    prepare_html_export,
     prepare_rewrite,
 )
 
@@ -32,6 +33,7 @@ def _write_document(root: Path, body: str) -> tuple[Path, dict]:
         "citation_messages": {"code": 0, "msg": "success", "data": [authoritative_citation]},
         "infer_messages": [],
         "chart_messages": [],
+        "request_metadata": {"query": "authoritative request"},
     }
     snapshot_bytes = json.dumps(
         snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -128,6 +130,133 @@ def _structured_payload(prepared, replacements=None):
         ],
         "facts_added": False,
     }
+
+
+def _committed_child(root: Path, body: str = "original text\n"):
+    report, _ = _write_document(root, body)
+    prepared = _prepare(root, report, body.rstrip("\n"))
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(
+            prepared, {slot_id: "rewritten text"}
+        ),
+    )
+    return report, result
+
+
+def test_prepare_html_export_uses_child_markdown_and_preserves_snapshot_metadata(
+    tmp_path,
+):
+    report, result = _committed_child(tmp_path)
+    child = Path(result["report_path"])
+    snapshot = json.loads(
+        report.with_suffix(".final-result.json").read_text(encoding="utf-8")
+    )
+
+    exported = prepare_html_export(
+        workspace_root=tmp_path,
+        report_path=child,
+        revision_id=result["revision_id"],
+    )
+
+    assert exported["report_path"] == str(child.resolve())
+    assert exported["final_result"]["response_content"] == child.read_text(
+        encoding="utf-8"
+    )
+    for field in (
+        "citation_messages",
+        "infer_messages",
+        "chart_messages",
+        "request_metadata",
+    ):
+        assert exported["final_result"][field] == snapshot[field]
+    assert snapshot["response_content"] != exported["final_result"]["response_content"]
+
+
+def test_prepare_html_export_rejects_stale_revision_id(tmp_path):
+    _, result = _committed_child(tmp_path)
+
+    with pytest.raises(RewriteError) as caught:
+        prepare_html_export(
+            workspace_root=tmp_path,
+            report_path=result["report_path"],
+            revision_id="rev_stale",
+        )
+
+    assert caught.value.code == "REVISION_CONFLICT"
+
+
+def test_prepare_html_export_rejects_parent_report(tmp_path):
+    report, _ = _write_document(tmp_path, "original text\n")
+
+    with pytest.raises(RewriteError) as caught:
+        prepare_html_export(
+            workspace_root=tmp_path,
+            report_path=report,
+            revision_id="rev_parent",
+        )
+
+    assert caught.value.code == "REVISION_CONFLICT"
+
+
+def test_prepare_html_export_rejects_changed_child_markdown(tmp_path):
+    _, result = _committed_child(tmp_path)
+    Path(result["report_path"]).write_text("mutated\n", encoding="utf-8")
+
+    with pytest.raises(RewriteError) as caught:
+        prepare_html_export(
+            workspace_root=tmp_path,
+            report_path=result["report_path"],
+            revision_id=result["revision_id"],
+        )
+
+    assert caught.value.code == "REVISION_CONFLICT"
+
+
+def test_prepare_html_export_rejects_changed_snapshot(tmp_path):
+    report, result = _committed_child(tmp_path)
+    report.with_suffix(".final-result.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RewriteError) as caught:
+        prepare_html_export(
+            workspace_root=tmp_path,
+            report_path=result["report_path"],
+            revision_id=result["revision_id"],
+        )
+
+    assert caught.value.code == "REVISION_CONFLICT"
+
+
+def test_prepare_html_export_rejects_provenance_markdown_path_mismatch(tmp_path):
+    report, result = _committed_child(tmp_path)
+    sidecar = Path(result["provenance_path"])
+    provenance = json.loads(sidecar.read_text(encoding="utf-8"))
+    provenance["markdown_path"] = str(report)
+    sidecar.write_text(json.dumps(provenance), encoding="utf-8")
+
+    with pytest.raises(RewriteError) as caught:
+        prepare_html_export(
+            workspace_root=tmp_path,
+            report_path=result["report_path"],
+            revision_id=result["revision_id"],
+        )
+
+    assert caught.value.code == "REVISION_CONFLICT"
+
+
+def test_prepare_html_export_rejects_path_outside_workspace(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+
+    with pytest.raises(RewriteError) as caught:
+        prepare_html_export(
+            workspace_root=tmp_path,
+            report_path=outside,
+            revision_id="rev_export",
+        )
+
+    assert caught.value.code == "BAD_REQUEST"
 
 
 @pytest.mark.parametrize(

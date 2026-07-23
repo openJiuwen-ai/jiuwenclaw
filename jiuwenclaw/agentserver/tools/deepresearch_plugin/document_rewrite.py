@@ -207,7 +207,9 @@ def _load_provenance(report_path: Path) -> tuple[dict, str]:
     return value, _sha256(payload)
 
 
-def _load_final_result_citations(report_path: Path, provenance: dict, root: Path) -> list[dict]:
+def _load_final_result_snapshot(
+    report_path: Path, provenance: dict, root: Path
+) -> object:
     raw_path = provenance.get("final_result_path")
     expected_hash = provenance.get("final_result_sha256")
     if not isinstance(raw_path, str) or not raw_path or not isinstance(expected_hash, str):
@@ -230,6 +232,11 @@ def _load_final_result_citations(report_path: Path, provenance: dict, root: Path
         snapshot = json.loads(snapshot_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report final result is invalid") from exc
+    return snapshot
+
+
+def _load_final_result_citations(report_path: Path, provenance: dict, root: Path) -> list[dict]:
+    snapshot = _load_final_result_snapshot(report_path, provenance, root)
     citation_messages = snapshot.get("citation_messages") if isinstance(snapshot, dict) else None
     citations = citation_messages.get("data") if isinstance(citation_messages, dict) else None
     if (
@@ -240,6 +247,66 @@ def _load_final_result_citations(report_path: Path, provenance: dict, root: Path
         raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is invalid")
     _citation_index(citations)
     return citations
+
+
+def prepare_html_export(
+    *,
+    workspace_root: str | Path,
+    report_path: str | Path,
+    revision_id: str,
+) -> dict:
+    try:
+        root = Path(workspace_root).expanduser().resolve()
+        report = Path(report_path).expanduser().resolve()
+    except (TypeError, OSError, RuntimeError) as exc:
+        raise RewriteError("BAD_REQUEST", "invalid HTML export request") from exc
+    if (
+        not _inside(report, root)
+        or report.suffix.lower() != ".md"
+        or not isinstance(revision_id, str)
+        or re.fullmatch(r"rev_[A-Za-z0-9_-]{1,128}", revision_id) is None
+    ):
+        raise RewriteError("BAD_REQUEST", "invalid HTML export request")
+
+    try:
+        markdown_bytes = report.read_bytes()
+        markdown = markdown_bytes.decode("utf-8")
+        provenance, _ = _load_provenance(report)
+        raw_markdown_path = provenance.get("markdown_path")
+        if not isinstance(raw_markdown_path, str) or not raw_markdown_path:
+            raise RewriteError("REVISION_CONFLICT", "rewrite export source changed")
+        provenance_markdown_path = Path(raw_markdown_path).expanduser()
+        if not provenance_markdown_path.is_absolute():
+            provenance_markdown_path = report.parent / provenance_markdown_path
+        provenance_markdown_path = provenance_markdown_path.resolve()
+        parent_revision_id = provenance.get("parent_revision_id")
+        if (
+            provenance_markdown_path != report
+            or provenance.get("revision_id") != revision_id
+            or not isinstance(parent_revision_id, str)
+            or re.fullmatch(r"rev_[A-Za-z0-9_-]{1,128}", parent_revision_id) is None
+            or type(provenance.get("rewrite_protocol_version")) is not int
+            or provenance.get("rewrite_protocol_version") != 2
+            or not isinstance(provenance.get("rewrite_history"), list)
+            or not provenance["rewrite_history"]
+            or provenance.get("content_sha256") != _sha256(markdown_bytes)
+        ):
+            raise RewriteError("REVISION_CONFLICT", "rewrite export source changed")
+        snapshot = _load_final_result_snapshot(report, provenance, root)
+        if not isinstance(snapshot, dict):
+            raise RewriteError("REVISION_CONFLICT", "rewrite export source changed")
+    except (
+        OSError,
+        TypeError,
+        RuntimeError,
+        UnicodeDecodeError,
+        RewriteError,
+    ) as exc:
+        raise RewriteError("REVISION_CONFLICT", "rewrite export source changed") from exc
+
+    style_input = dict(snapshot)
+    style_input["response_content"] = markdown
+    return {"report_path": str(report), "final_result": style_input}
 
 
 def _citation_index(
