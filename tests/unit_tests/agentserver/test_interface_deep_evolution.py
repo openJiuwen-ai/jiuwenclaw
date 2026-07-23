@@ -4,6 +4,7 @@
 
 # pylint: disable=protected-access
 
+import asyncio
 import os
 import logging
 from pathlib import Path
@@ -836,6 +837,102 @@ async def test_collect_evolution_summary_stashes_auto_rebuild_skills(adapter):
 
     assert text
     assert adapter._pending_auto_rebuild_skills == ["demo-skill", "other-skill"]  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_schedule_background_evolution_followup_is_fire_and_forget(adapter, monkeypatch):
+    """Chat stream must schedule followup without awaiting rail evolution."""
+    started = asyncio.Event()
+    released = asyncio.Event()
+
+    async def _slow_followup(**_kwargs):
+        started.set()
+        await released.wait()
+
+    monkeypatch.setattr(adapter, "_background_evolution_followup", _slow_followup)
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        has_pending_evolution=True,
+    )
+
+    adapter._schedule_background_evolution_followup(  # pylint: disable=protected-access
+        request_id="req-bg",
+        session_id="sess-bg",
+    )
+
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert len(adapter._pending_evolution_followup_tasks) == 1  # pylint: disable=protected-access
+    task = next(iter(adapter._pending_evolution_followup_tasks))  # pylint: disable=protected-access
+    released.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_background_evolution_followup_waits_then_rebuilds(adapter, monkeypatch):
+    waited: list[float | None] = []
+    rebuilt: list[str] = []
+
+    async def _wait(*, timeout=None):
+        waited.append(timeout)
+
+    async def _rebuild(**_kwargs):
+        rebuilt.extend(adapter._pending_auto_rebuild_skills)  # pylint: disable=protected-access
+
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        has_pending_evolution=True,
+        wait_for_pending_evolution=_wait,
+        auto_save=True,
+        take_run_summary=lambda: {
+            "skills": [{"skill_name": "weather", "records_count": 1}],
+            "new_skills": [],
+            "display_text": "\n\n---\n### note",
+        },
+        drain_pending_approval_events=lambda: [],
+    )
+    monkeypatch.setattr(adapter, "_run_auto_rebuild_skills_detached", _rebuild)
+
+    await adapter._background_evolution_followup(  # pylint: disable=protected-access
+        request_id="req-follow",
+        session_id="sess-follow",
+    )
+
+    assert waited == [300.0]
+    assert adapter._pending_evolution_summary_by_session["sess-follow"]  # pylint: disable=protected-access
+    assert rebuilt == ["weather"]
+
+
+@pytest.mark.asyncio
+async def test_background_evolution_followup_hitl_stashes_but_skips_rebuild(adapter, monkeypatch):
+    """HITL pause must still stash the footnote, but must not auto-rebuild."""
+    rebuilt: list[str] = []
+
+    async def _wait(*, timeout=None):
+        return None
+
+    async def _rebuild(**_kwargs):
+        rebuilt.append("ran")
+
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        has_pending_evolution=True,
+        wait_for_pending_evolution=_wait,
+        auto_save=True,
+        take_run_summary=lambda: {
+            "skills": [{"skill_name": "weather", "records_count": 1}],
+            "new_skills": [],
+            "display_text": "\n\n---\n### note",
+        },
+        drain_pending_approval_events=lambda: [],
+    )
+    monkeypatch.setattr(adapter, "_run_auto_rebuild_skills_detached", _rebuild)
+
+    await adapter._background_evolution_followup(  # pylint: disable=protected-access
+        request_id="req-hitl",
+        session_id="sess-hitl",
+        hitl_pending=True,
+    )
+
+    assert adapter._pending_evolution_summary_by_session["sess-hitl"]  # pylint: disable=protected-access
+    assert rebuilt == []
+    assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
 
 
 @pytest.mark.asyncio
