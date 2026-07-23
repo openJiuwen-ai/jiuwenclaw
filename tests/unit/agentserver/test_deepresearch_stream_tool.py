@@ -1640,6 +1640,36 @@ def test_windows_rollback_removes_only_matching_owned_artifact(
     assert not list(tmp_path.glob(".report.md.quarantine-*"))
 
 
+def test_windows_rollback_restores_replaced_artifact(
+    tmp_path, monkeypatch
+):
+    public = tmp_path / "report.md"
+    public.write_bytes(b"owned")
+    artifact = dt._CreatedArtifact(public, os.lstat(public))
+    public.rename(tmp_path / "owned.md")
+    public.write_bytes(b"replacement")
+    monkeypatch.setattr(dt, "_uses_windows_path_publication", lambda: True)
+
+    dt._remove_created_artifacts([artifact])
+
+    assert public.read_bytes() == b"replacement"
+    assert not list(tmp_path.glob(".report.md.quarantine-*"))
+
+
+def test_write_report_markdown_uses_windows_publication_backend(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(dt, "_uses_windows_path_publication", lambda: True)
+
+    report_path = _write_report_in(
+        tmp_path, final_result=_report_result_with_assets()
+    )
+
+    assert Path(report_path).read_text(encoding="utf-8")
+    assert (tmp_path / "研究报告-v1_infer" / "inference_7.html").exists()
+    assert (tmp_path / "研究报告-v1_charts" / "chart-1.png").exists()
+
+
 @pytest.mark.parametrize("target_kind", ["file", "symlink"])
 def test_write_report_markdown_never_overwrites_preexisting_target(
     tmp_path, target_kind
@@ -1995,6 +2025,23 @@ def _styled_bundle(tmp_path):
         encoding="utf-8",
     )
     return bundle_root
+
+
+def test_install_styled_bundle_uses_windows_publication_backend(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(dt, "_uses_windows_path_publication", lambda: True)
+    html_path = tmp_path / "研究报告-v1.html"
+
+    dt._install_styled_bundle(_styled_bundle(tmp_path), html_path)
+
+    assert html_path.exists()
+    assert (
+        tmp_path / "研究报告-v1_html_infer" / "inference_7.html"
+    ).exists()
+    assert (
+        tmp_path / "研究报告-v1_html_charts" / "chart-1.png"
+    ).exists()
 
 
 def test_install_styled_bundle_uses_dedicated_assets_without_mutating_provenance(
