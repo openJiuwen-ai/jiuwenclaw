@@ -1095,17 +1095,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         if env_updates or yaml_updated:
             if on_config_saved:
-                try:
-                    config_payload = get_config()
-                    callback_result = on_config_saved(
-                        set(env_updates.keys()) | set(yaml_updated),
-                        env_updates=dict(env_updates),
-                        config_payload=config_payload,
-                    )
-                    if inspect.isawaitable(callback_result):
-                        await callback_result
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[cli config.set] on_config_saved failed: %s", e)
+                # on_config_saved 内部会 await agent.reload_config（app_gateway._on_config_saved），
+                # reload 在 AgentServer 端要重建全部 agent + session adapter（全量并发下可达 25~34s）。
+                # 若同步 await 会阻塞当前 WebSocket 连接的 `async for raw in ws` 串行循环，
+                # 导致后续 config.get 等本地帧排队等满，前端 30s 超时报 request timeout: config.get。
+                # 故丢后台 fire-and-forget，与上面 _config_set_reload_background 对齐。
+                # 写盘已完成且已回包，reload 仅用于 AgentServer 内存热更新，本就尽力而为。
+                async def _config_set_on_saved_background() -> None:
+                    try:
+                        config_payload = get_config()
+                        callback_result = on_config_saved(
+                            set(env_updates.keys()) | set(yaml_updated),
+                            env_updates=dict(env_updates),
+                            config_payload=config_payload,
+                        )
+                        if inspect.isawaitable(callback_result):
+                            await callback_result
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[cli config.set] on_config_saved failed: %s", e)
+
+                asyncio.create_task(_config_set_on_saved_background())
 
     async def _config_validate_model(ws, req_id, params, session_id):
         if not isinstance(params, dict):
