@@ -687,6 +687,19 @@ def _minimal_report_result():
     }
 
 
+def _report_result_with_assets():
+    final_result = _minimal_report_result()
+    final_result["infer_messages"] = [{
+        "id": "7",
+        "html_base64": base64.b64encode(b"<html>trace</html>").decode("ascii"),
+    }]
+    final_result["chart_messages"] = [{
+        "chart_id": "chart-1",
+        "base64": base64.b64encode(b"png-bytes").decode("ascii"),
+    }]
+    return final_result
+
+
 def _write_report_in(tmp_path, file_name="研究报告.md", final_result=None):
     with patch(
         "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
@@ -757,6 +770,65 @@ def test_write_report_markdown_never_overwrites_preexisting_target(
         assert target.is_symlink()
 
 
+@pytest.mark.parametrize(
+    ("asset_suffix", "asset_name", "expected_bytes"),
+    [
+        ("_infer", "inference_7.html", b"<html>trace</html>"),
+        ("_charts", "chart-1.png", b"png-bytes"),
+    ],
+)
+def test_write_report_markdown_reallocates_without_overwriting_preexisting_asset(
+    tmp_path, asset_suffix, asset_name, expected_bytes
+):
+    protected_dir = tmp_path / f"研究报告-v1{asset_suffix}"
+    protected_dir.mkdir()
+    protected_file = protected_dir / asset_name
+    protected_file.write_bytes(b"protected")
+
+    report_path = _write_report_in(
+        tmp_path, final_result=_report_result_with_assets()
+    )
+
+    assert report_path == str(tmp_path / "研究报告-2-v1.md")
+    assert protected_file.read_bytes() == b"protected"
+    assert (
+        tmp_path / f"研究报告-2-v1{asset_suffix}" / asset_name
+    ).read_bytes() == expected_bytes
+    assert not (tmp_path / "研究报告-v1.final-result.json").exists()
+    assert not (tmp_path / "研究报告-v1.provenance.json").exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+@pytest.mark.parametrize(
+    ("asset_suffix", "asset_name"),
+    [
+        ("_infer", "inference_7.html"),
+        ("_charts", "chart-1.png"),
+    ],
+)
+def test_write_report_markdown_does_not_follow_symlinked_asset_directory(
+    tmp_path, asset_suffix, asset_name
+):
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / asset_name
+    external_file.write_bytes(b"external")
+    (tmp_path / f"研究报告-v1{asset_suffix}").symlink_to(
+        external_dir, target_is_directory=True
+    )
+
+    report_path = _write_report_in(
+        tmp_path, final_result=_report_result_with_assets()
+    )
+
+    assert report_path == str(tmp_path / "研究报告-2-v1.md")
+    assert external_file.read_bytes() == b"external"
+    assert (tmp_path / f"研究报告-v1{asset_suffix}").is_symlink()
+    assert not (tmp_path / "研究报告-v1.final-result.json").exists()
+    assert not (tmp_path / "研究报告-v1.provenance.json").exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
 def test_write_report_markdown_publishes_snapshot_then_provenance_then_markdown(
     tmp_path, monkeypatch
 ):
@@ -816,18 +888,10 @@ def test_write_report_markdown_cleans_current_partial_files_on_write_failure(
         return atomic_create(path, payload)
 
     monkeypatch.setattr(dt, "_atomic_create_bytes", failing_create)
-    final_result = _minimal_report_result()
-    final_result["infer_messages"] = [{
-        "id": "7",
-        "html_base64": base64.b64encode(b"<html>trace</html>").decode("ascii"),
-    }]
-    final_result["chart_messages"] = [{
-        "chart_id": "chart-1",
-        "base64": base64.b64encode(b"png-bytes").decode("ascii"),
-    }]
-
     with pytest.raises(OSError, match="disk unavailable"):
-        _write_report_in(tmp_path, final_result=final_result)
+        _write_report_in(
+            tmp_path, final_result=_report_result_with_assets()
+        )
 
     assert preserved.read_text(encoding="utf-8") == "keep"
     assert not (tmp_path / "研究报告-v1.final-result.json").exists()
@@ -835,6 +899,21 @@ def test_write_report_markdown_cleans_current_partial_files_on_write_failure(
     assert not (tmp_path / "研究报告-v1.md").exists()
     assert not (tmp_path / "研究报告-v1_infer").exists()
     assert not (tmp_path / "研究报告-v1_charts").exists()
+
+
+def test_write_report_markdown_cleans_staging_when_snapshot_serialization_fails(
+    tmp_path,
+):
+    with patch(
+        "jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle.serialize_final_result_snapshot",
+        side_effect=RuntimeError("snapshot serialization failed"),
+    ):
+        with pytest.raises(RuntimeError, match="snapshot serialization failed"):
+            _write_report_in(
+                tmp_path, final_result=_report_result_with_assets()
+            )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_build_related_artifact_bundle_exposes_only_hidden_preview_companions():
