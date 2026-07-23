@@ -52,9 +52,19 @@ AgentServer 内全部打到同一 Agent 实例；``shards2>=2`` 时在实例间�
     uv run python .../enterprise_runtime_concurrent_test.py \\
         --ws-url ws://host:30105/ws --concurrency 9 --shards 3 --service-shard-key bot_id
 
-默认等待整轮 Agent 任务结束。loadtest 小说场景须先收到 ``chat.file``（交付物），
-再收到 stage 8 收尾文本（``chat.delta`` / 带正文 ``chat.final``），之后才采纳
-``chat.processing_status idle`` / ``chat.usage_summary`` 等终态信号。
+    # loadtest 四步流程（travel → skill → file → cron，配合 mock_llm_server --profile loadtest）
+    uv run python .../enterprise_runtime_concurrent_test.py \\
+        --ws-url ws://host:30105/ws --concurrency 3 --flow loadtest
+
+默认等待整轮 Agent 任务结束。``--flow loadtest``（默认）时，每路会话在同一 ``session_id`` 内
+**依次**发送 4 条用户消息（travel → skill → file 上传扩写 → cron），与 ``mock_llm_server.py``
+``--profile loadtest`` 场景顺序一致；``--flow single`` 时仍为单条 ``--content`` 消息。
+含文件交付的步骤须先收到 ``chat.file``（或 ``send_file_to_user`` 的 ``chat.tool_result``），
+再采纳 ``chat.processing_status idle`` / ``chat.usage_summary`` 等终态信号；定时任务步骤须等
+约 1 分钟后收到喝水提醒投递文案（``🥤 喝水时间到啦！…``），创建确认 alone 不算完成。
+``file`` 扩写步骤在收到 ``chat.file`` 后，会把交付文件下载到脚本目录下带时间戳的
+``download_YYYYMMDD_HHMMSS/``（同一次压测共用一个目录），本地文件名再追加请求编号
+（如 ``童趣的春天_扩写版_00.md``）以免并发覆盖。
 DeepAgent 在流式文本 iteration 结束时可能发出 **content 为空** 的 ``chat.final`` 标记，
 该帧仅表示当前 LLM 轮次结束，**不是**整轮任务完成，脚本会忽略并继续等待。
 权限放行（``auto-allow``）后，忽略紧随其后的假 idle / 子流 ``usage_summary``，
@@ -84,7 +94,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +114,74 @@ class RoutePlan:
     user_id: str
 
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_DEFAULT_SPRING_ESSAY = _SCRIPT_DIR / "童趣的春天.md"
+_DOWNLOAD_DIR_PREFIX = _SCRIPT_DIR / "download"
+
+
+def _make_run_download_dir(*, when: time.struct_time | None = None) -> Path:
+    """生成本次压测专用下载目录：download_YYYYMMDD_HHMMSS。"""
+    stamp = time.strftime("%Y%m%d_%H%M%S", when or time.localtime())
+    return Path(f"{_DOWNLOAD_DIR_PREFIX}_{stamp}")
+
+
+@dataclass(frozen=True)
+class LoadTestStep:
+    """loadtest 单步用户请求（与 mock_llm_server loadtest 场景顺序一致）。"""
+
+    name: str
+    content: str
+    expect_file: bool = True
+    files: tuple[dict[str, str], ...] = ()
+    expect_delayed_text: bool = False
+    download_deliverable: bool = False
+
+
+_CRON_CREATION_MARKERS = ("喝水提醒已创建", "执行时间：")
+_CRON_DELIVERY_MARKERS = ("喝水时间到啦",)
+
+
+def _build_default_loadtest_steps(essay_path: Path) -> tuple[LoadTestStep, ...]:
+    if not essay_path.is_file():
+        raise FileNotFoundError(f"loadtest 附件不存在: {essay_path}")
+    resolved = str(essay_path.resolve())
+    essay_name = essay_path.name
+    return (
+        LoadTestStep(
+            name="travel",
+            content=(
+                "帮我写一篇十万字的小说，主题是旅行的意义，写完后保存到txt发给我。"
+                "直接开始写，不要问我其他问题"
+            ),
+            expect_file=True,
+        ),
+        LoadTestStep(
+            name="skill",
+            content=(
+                "先使用skillnet安装这个旅游攻略技能"
+                "https://github.com/Asif2BD/openclaw.tours/tree/main，"
+                "然后再给我制作一个北京3日游的旅游攻略"
+            ),
+            expect_file=True,
+        ),
+        LoadTestStep(
+            name="file",
+            content="帮我把这个文件里的作文扩写到6000字，然后发回给我",
+            expect_file=True,
+            files=({"path": resolved, "name": essay_name},),
+            download_deliverable=True,
+        ),
+        LoadTestStep(
+            name="cron",
+            content="创建一个定时任务，1分钟后提醒我喝水",
+            expect_file=False,
+            expect_delayed_text=True,
+        ),
+    )
+
+
 _DEFAULT_CONTENT = (
-    " 帮我写一篇十万字的小说，主题是人生的意义，写完后保存到txt文件发给我。直接开始写，不要问我其他问题。"
+    "帮我写一篇十万字的小说，主题是旅行的意义，写完后保存到txt发给我。直接开始写，不要问我其他问题"
 )
 
 
@@ -124,6 +201,9 @@ class RequestResult:
     accept_ms: float = 0.0
     total_ms: float = 0.0
     final_received: bool = False
+    steps_completed: int = 0
+    steps_total: int = 0
+    failed_step: str = ""
 
 
 @dataclass
@@ -143,17 +223,20 @@ class LoadTestStats:
         if self.accept_ms:
             sorted_accept = sorted(self.accept_ms)
             lines.append(
-                f"accept_ms: p50={_percentile(sorted_accept, 0.5):.0f} "
-                f"p95={_percentile(sorted_accept, 0.95):.0f} "
+                f"accept_ms: avg={statistics.mean(sorted_accept):.0f} "
+                f"min={min(sorted_accept):.0f} "
                 f"max={max(sorted_accept):.0f} "
-                f"stdev={statistics.pstdev(sorted_accept):.1f}"
+                f"p50={_percentile(sorted_accept, 0.5):.0f} "
+                f"p95={_percentile(sorted_accept, 0.95):.0f}"
             )
         if self.total_ms:
             sorted_total = sorted(self.total_ms)
             lines.append(
-                f"total_ms: p50={_percentile(sorted_total, 0.5):.0f} "
-                f"p95={_percentile(sorted_total, 0.95):.0f} "
-                f"max={max(sorted_total):.0f}"
+                f"total_ms: avg={statistics.mean(sorted_total):.0f} "
+                f"min={min(sorted_total):.0f} "
+                f"max={max(sorted_total):.0f} "
+                f"p50={_percentile(sorted_total, 0.5):.0f} "
+                f"p95={_percentile(sorted_total, 0.95):.0f}"
             )
         return "\n".join(lines)
 
@@ -355,6 +438,79 @@ def _browser_origin_header(ws_url: str) -> dict[str, str]:
     return {"Origin": origin}
 
 
+def _http_origin_from_ws_url(ws_url: str) -> str:
+    """由 WebSocket URL 推导 HTTP Origin（用于相对 download_url）。"""
+    return _browser_origin_header(ws_url)["Origin"]
+
+
+def _absolute_download_url(ws_url: str, download_url: str) -> str:
+    url = str(download_url or "").strip()
+    if not url:
+        raise ValueError("download_url 为空")
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return urljoin(_http_origin_from_ws_url(ws_url) + "/", url.lstrip("/"))
+
+
+def _indexed_download_filename(name: str, index: int) -> str:
+    """并发下载时在文件名后追加请求编号，避免互相覆盖。"""
+    path = Path(str(name or "download.bin").strip() or "download.bin")
+    return f"{path.stem}_{index:02d}{path.suffix}"
+
+
+def _extract_downloadable_files(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """从 chat.file / tool_result payload 提取带 download_url 的文件项。"""
+    raw = payload.get("files")
+    if not isinstance(raw, list):
+        return []
+    entries: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        download_url = str(item.get("download_url") or "").strip()
+        if not download_url:
+            continue
+        name = str(item.get("name") or item.get("filename") or Path(download_url).name or "download.bin")
+        entries.append({"name": name, "download_url": download_url})
+    return entries
+
+
+def _http_download_to_path(url: str, dest: Path, *, timeout: float = 60.0) -> None:
+    req = Request(url, method="GET")
+    with urlopen(req, timeout=timeout) as resp:  # noqa: S310 — loadtest 下载 Gateway 自身签发的 URL
+        data = resp.read()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+
+
+async def _download_deliverable_files(
+    *,
+    ws_url: str,
+    files: list[dict[str, str]],
+    index: int,
+    download_dir: Path,
+) -> list[Path]:
+    """把 chat.file 交付物下载到 download_dir，文件名带请求编号。"""
+    if not files:
+        return []
+    download_dir.mkdir(parents=True, exist_ok=True)
+    saved: list[Path] = []
+    for item in files:
+        abs_url = _absolute_download_url(ws_url, item["download_url"])
+        local_name = _indexed_download_filename(item["name"], index)
+        dest = download_dir / local_name
+        await asyncio.to_thread(_http_download_to_path, abs_url, dest)
+        saved.append(dest)
+        logger.info(
+            "[download] idx=%d saved=%s bytes=%d url=%s",
+            index,
+            dest,
+            dest.stat().st_size,
+            abs_url,
+        )
+    return saved
+
+
 def _build_route_plan(
     concurrency: int,
     shards: int,
@@ -445,6 +601,100 @@ def _final_content(payload: dict[str, Any]) -> str:
     return str(content).strip()
 
 
+def _event_session_id(frame: dict[str, Any], payload: dict[str, Any]) -> str:
+    """从 WS event 帧提取 session_id（WebChannel 广播时靠它区分会话）。"""
+    for source in (payload, frame):
+        if not isinstance(source, dict):
+            continue
+        sid = source.get("session_id")
+        if isinstance(sid, str) and sid.strip():
+            return sid.strip()
+    return ""
+
+
+def _is_cron_creation_text(content: str) -> bool:
+    text = content.strip()
+    return bool(text) and any(marker in text for marker in _CRON_CREATION_MARKERS)
+
+
+def _is_cron_delivery_text(content: str) -> bool:
+    """到点投递文案；创建确认里也含提醒正文，须排除。"""
+    text = content.strip()
+    if not text or _is_cron_creation_text(text):
+        return False
+    return any(marker in text for marker in _CRON_DELIVERY_MARKERS)
+
+
+def _matches_cron_delivery(
+    *,
+    expect_delayed_text: bool,
+    content: str,
+    logged_cron_creation: bool,
+    step_text_buf: str,
+) -> bool:
+    """delayed-text 步：当前片段或累计缓冲是否已是到点投递文案。"""
+    if not expect_delayed_text:
+        return False
+    if _is_cron_delivery_text(content):
+        return True
+    return logged_cron_creation and _is_cron_delivery_text(step_text_buf)
+
+
+def _matches_cron_creation(
+    *,
+    expect_delayed_text: bool,
+    logged_cron_creation: bool,
+    content: str,
+    step_text_buf: str,
+) -> bool:
+    """delayed-text 步：尚未记过创建确认，且当前/缓冲命中创建文案。"""
+    if not expect_delayed_text or logged_cron_creation:
+        return False
+    return _is_cron_creation_text(content) or _is_cron_creation_text(step_text_buf)
+
+
+def _content_marks_step_done(
+    *,
+    expect_file: bool,
+    expect_delayed_text: bool,
+    content: str,
+) -> bool:
+    text = content.strip()
+    if not text or expect_file:
+        return False
+    if expect_delayed_text:
+        return _is_cron_delivery_text(text)
+    return True
+
+
+def _tool_name_from_payload(payload: dict[str, Any]) -> str:
+    """从 chat.tool_call / chat.tool_result payload 提取工具名。"""
+    for key in ("tool_name", "name"):
+        val = payload.get(key)
+        if val:
+            return str(val).strip()
+    tool_call = payload.get("tool_call")
+    if isinstance(tool_call, dict):
+        for key in ("name", "tool_name"):
+            val = tool_call.get(key)
+            if val:
+                return str(val).strip()
+    return ""
+
+
+def _is_send_file_tool_success(payload: dict[str, Any]) -> bool:
+    """send_file_to_user 成功时 Gateway 可能只有 tool_result、没有 chat.file。"""
+    tool_name = _tool_name_from_payload(payload)
+    blob = _payload_text_blob(payload)
+    if "send_file" not in tool_name.lower() and "send_file_to_user" not in blob:
+        return False
+    result = str(payload.get("result") or payload.get("raw_output") or blob)
+    if "成功发送" in result:
+        return True
+    files = payload.get("files")
+    return isinstance(files, list) and bool(files)
+
+
 def _is_intra_turn_chat_final(event: str | None, payload: dict[str, Any]) -> bool:
     """DeepAgent 流式文本 iteration 结束时的空 chat.final，仅标记当前 LLM 轮次完成。"""
     return event == "chat.final" and not _final_content(payload)
@@ -461,26 +711,27 @@ def _is_invoke_terminal_event(event: str | None, payload: dict[str, Any]) -> boo
 
 def _loadtest_terminal_ready(
     *,
+    expect_file: bool = True,
     saw_deliverable_file: bool,
+    saw_step_text: bool = False,
     saw_post_deliverable_text: bool = False,
 ) -> bool:
-    """loadtest 小说场景：已交付文件即可收尾。
-
-    收尾文本（stage 8）仍会记录到 saw_post_deliverable_text 便于诊断，
-    但不作为完成硬条件——短子流里 usage_summary 可能抢在收尾 delta 前/后，
-    强依赖 post-text 会导致假超时（如 idx=5）。
-    """
-    _ = saw_post_deliverable_text
-    return saw_deliverable_file
+    """单步完成判定：有文件交付的步骤须 chat.file；cron 须收到到点喝水提醒文案。"""
+    if expect_file:
+        _ = saw_post_deliverable_text
+        return saw_deliverable_file
+    return saw_step_text or saw_post_deliverable_text
 
 
 def _should_complete_invoke(
     *,
+    expect_file: bool = True,
     accepted: bool,
     saw_agent_output: bool,
     hitl_paused: bool,
     hitl_await_agent_resume: bool,
     saw_deliverable_file: bool,
+    saw_step_text: bool = False,
     saw_post_deliverable_text: bool = False,
     event: str | None,
     payload: dict[str, Any],
@@ -488,12 +739,21 @@ def _should_complete_invoke(
     """usage_summary / chat.final 完成判定。"""
     if not accepted or not saw_agent_output:
         return False
-    if hitl_paused or hitl_await_agent_resume:
+    if hitl_paused:
         return False
-    if not _loadtest_terminal_ready(
+    terminal_ready = _loadtest_terminal_ready(
+        expect_file=expect_file,
         saw_deliverable_file=saw_deliverable_file,
+        saw_step_text=saw_step_text,
         saw_post_deliverable_text=saw_post_deliverable_text,
+    )
+    # 放行后若交付里程碑已达成，usage_summary 可直接收尾（skill_complete 后未必再有 delta）。
+    if hitl_await_agent_resume and not (
+        terminal_ready
+        and event in {"chat.usage_summary", "chat.final"}
     ):
+        return False
+    if not terminal_ready:
         return False
     return _is_invoke_terminal_event(event, payload)
 
@@ -507,23 +767,30 @@ def _is_processing_idle(payload: dict[str, Any]) -> bool:
 
 def _should_complete_on_processing_idle(
     *,
+    expect_file: bool = True,
     accepted: bool,
     saw_agent_output: bool,
     hitl_paused: bool,
     hitl_suppress_next_idle: bool,
     hitl_await_agent_resume: bool,
     saw_deliverable_file: bool,
+    saw_step_text: bool = False,
     saw_post_deliverable_text: bool = False,
     payload: dict[str, Any],
 ) -> bool:
     if not accepted or not saw_agent_output:
         return False
-    if hitl_paused or hitl_suppress_next_idle or hitl_await_agent_resume:
+    if hitl_paused or hitl_suppress_next_idle:
         return False
-    if not _loadtest_terminal_ready(
+    terminal_ready = _loadtest_terminal_ready(
+        expect_file=expect_file,
         saw_deliverable_file=saw_deliverable_file,
+        saw_step_text=saw_step_text,
         saw_post_deliverable_text=saw_post_deliverable_text,
-    ):
+    )
+    if hitl_await_agent_resume and not terminal_ready:
+        return False
+    if not terminal_ready:
         return False
     return _is_processing_idle(payload)
 
@@ -581,11 +848,14 @@ def _extract_runtime_failure(event: str | None, payload: dict[str, Any]) -> str 
 
 def _should_fail_on_premature_idle(
     *,
+    expect_file: bool = True,
+    expect_delayed_text: bool = False,
     accepted: bool,
     hitl_paused: bool,
     hitl_suppress_next_idle: bool,
     hitl_await_agent_resume: bool,
     saw_deliverable_file: bool,
+    saw_step_text: bool = False,
     saw_post_deliverable_text: bool = False,
     payload: dict[str, Any],
 ) -> bool:
@@ -594,13 +864,18 @@ def _should_fail_on_premature_idle(
     - HITL 等待用户作答（paused 且尚未放行）时仍可能出现 idle，不能当失败。
     - 紧随 auto-allow 的假 idle 由 suppress 分支吞掉，不进入本判断。
     - 放行后仍 await resume、却一直未交付就收到 idle：Agent 流已死，应失败。
+    - cron 创建完成后须再等约 1 分钟投递，创建子流的 idle 不算失败。
     """
+    if expect_delayed_text:
+        return False
     if not accepted or hitl_suppress_next_idle:
         return False
     if hitl_paused and not hitl_await_agent_resume:
         return False
     if _loadtest_terminal_ready(
+        expect_file=expect_file,
         saw_deliverable_file=saw_deliverable_file,
+        saw_step_text=saw_step_text,
         saw_post_deliverable_text=saw_post_deliverable_text,
     ):
         return False
@@ -618,11 +893,11 @@ _AGENT_ACTIVITY_EVENTS = frozenset({
     "chat.final",
 })
 
-# 权限放行后：chat.delta 表示新一轮文本；chat.file 表示交付已落地（Agent 已恢复）。
-# tool_call / tool_result 可能仍是同一子流尾部，故意不清除 await。
+# 权限放行后：chat.delta / chat.file 表示 Agent 已恢复；tool_result 表示工具环继续推进。
 _HITL_RESUME_CLEAR_EVENTS = frozenset({
     "chat.delta",
     "chat.file",
+    "chat.tool_result",
 })
 
 
@@ -788,14 +1063,23 @@ async def _run_single_request(
     accept_timeout: float,
     accept_only: bool,
     final_timeout: float,
+    cron_delivery_timeout: float,
     auto_allow: bool,
     ws_event_log: bool,
     progress: _ProgressTracker,
     registry: _ActiveSessionRegistry,
+    steps: tuple[LoadTestStep, ...] | None = None,
+    download_dir: Path | None = None,
 ) -> RequestResult:
     import websockets
 
+    run_download_dir = download_dir or _make_run_download_dir()
     session_id = f"sess_load_{index:02d}_{uuid.uuid4().hex[:8]}"
+    run_steps: tuple[LoadTestStep, ...] = steps or (
+        LoadTestStep(name="single", content=content, expect_file=True),
+    )
+    if accept_only:
+        run_steps = run_steps[:1]
     req_id = f"req_load_{index:02d}_{uuid.uuid4().hex[:8]}"
     result = RequestResult(
         index=index,
@@ -808,36 +1092,20 @@ async def _run_single_request(
         user_id=user_id,
         ok=False,
         accepted=False,
+        steps_total=len(run_steps),
     )
     logger.info(
-        "[send] idx=%d shard=%d shard2=%d session_id=%s req_id=%s group_id=%s bot_id=%s user_id=%s",
+        "[send] idx=%d shard=%d shard2=%d session_id=%s steps=%d group_id=%s bot_id=%s user_id=%s",
         index,
         shard,
         shard2,
         session_id,
-        req_id,
+        len(run_steps),
         group_id,
         bot_id,
         user_id,
     )
     t0 = time.perf_counter()
-
-    params: dict[str, Any] = {
-        "session_id": session_id,
-        "content": content,
-        "query": content,
-        "mode": mode,
-        "group_id": group_id,
-        "bot_id": bot_id,
-        "user_id": user_id,
-    }
-    req = {
-        "type": "req",
-        "id": req_id,
-        "method": "chat.send",
-        "params": params,
-    }
-
     deadline = t0 + (accept_timeout if accept_only else final_timeout)
 
     async def _log_terminal(*, success: bool, event: str, detail: str = "") -> None:
@@ -845,7 +1113,7 @@ async def _run_single_request(
         level = logger.info if success else logger.error
         level(
             "[%s] %d/%d idx=%d shard=%d shard2=%d total_ms=%.0f session_id=%s req_id=%s "
-            "group_id=%s user_id=%s%s",
+            "group_id=%s user_id=%s steps=%d/%d%s",
             event,
             done_n,
             progress.total,
@@ -857,6 +1125,8 @@ async def _run_single_request(
             req_id,
             group_id,
             user_id,
+            result.steps_completed,
+            result.steps_total,
             f" {detail}" if detail else "",
         )
 
@@ -868,66 +1138,208 @@ async def _run_single_request(
         ) as ws:
             await registry.add(_ActiveSession(index=index, session_id=session_id, ws=ws))
             try:
-                await ws.send(json.dumps(req, ensure_ascii=False))
-                accepted = False
                 answered_interrupt_ids: set[str] = set()
-                hitl_paused = False
-                hitl_suppress_next_idle = False
-                hitl_await_agent_resume = False
-                saw_agent_output = False
-                saw_deliverable_file = False
-                saw_post_deliverable_text = False
 
-                while time.perf_counter() < deadline:
-                    remaining = max(0.1, deadline - time.perf_counter())
-                    try:
-                        frame = await _recv_json(ws, remaining)
-                    except asyncio.TimeoutError:
-                        break
+                for step_idx, step in enumerate(run_steps):
+                    expect_file = step.expect_file
+                    expect_delayed_text = step.expect_delayed_text
+                    req_id = f"req_load_{index:02d}_s{step_idx}_{uuid.uuid4().hex[:8]}"
+                    result.req_id = req_id
 
-                    ftype = frame.get("type")
+                    params: dict[str, Any] = {
+                        "session_id": session_id,
+                        "content": step.content,
+                        "query": step.content,
+                        "mode": mode,
+                        "group_id": group_id,
+                        "bot_id": bot_id,
+                        "user_id": user_id,
+                    }
+                    if step.files:
+                        params["files"] = [dict(item) for item in step.files]
 
-                    if ftype == "res" and frame.get("id") == req_id:
-                        ok = bool(frame.get("ok"))
-                        payload = frame.get("payload") or {}
-                        result.ok = ok
-                        if not ok:
-                            err = frame.get("error") or payload.get("error") or frame
-                            result.error = json.dumps(err, ensure_ascii=False)
+                    req = {
+                        "type": "req",
+                        "id": req_id,
+                        "method": "chat.send",
+                        "params": params,
+                    }
+                    logger.info(
+                        "[send-step] idx=%d step=%d/%d name=%s session_id=%s req_id=%s files=%d",
+                        index,
+                        step_idx + 1,
+                        len(run_steps),
+                        step.name,
+                        session_id,
+                        req_id,
+                        len(step.files),
+                    )
+
+                    accepted = False
+                    hitl_paused = False
+                    hitl_suppress_next_idle = False
+                    hitl_await_agent_resume = False
+                    saw_agent_output = False
+                    saw_deliverable_file = False
+                    saw_post_deliverable_text = False
+                    saw_step_text = False
+                    step_text_buf = ""
+                    step_done = False
+                    logged_cron_creation = False
+                    downloaded_paths: list[Path] = []
+
+                    async def _maybe_download_deliverable(
+                        payload: dict[str, Any],
+                        *,
+                        _paths: list[Path],
+                        _step=step,
+                    ) -> bool:
+                        """file 扩写步：下载 chat.file 交付物。成功返回 True；无需下载也返回 True。"""
+                        if not _step.download_deliverable or _paths:
+                            return True
+                        entries = _extract_downloadable_files(payload)
+                        if not entries:
+                            return True
+                        try:
+                            paths = await _download_deliverable_files(
+                                ws_url=ws_url,
+                                files=entries,
+                                index=index,
+                                download_dir=run_download_dir,
+                            )
+                            _paths.extend(paths)
+                            return True
+                        except Exception as download_err:
+                            result.error = f"download_failed@{_step.name}: {download_err}"
+                            result.failed_step = _step.name
                             result.total_ms = (time.perf_counter() - t0) * 1000
-                            await _log_terminal(success=False, event="fail", detail=f"error={result.error}")
-                            return result
-                        accepted = bool(payload.get("accepted", True))
-                        result.accepted = accepted
-                        result.accept_ms = (time.perf_counter() - t0) * 1000
-                        if accepted:
-                            await registry.mark_accepted(session_id)
-                        if not accepted:
-                            result.error = "chat.send 未被接受"
-                            result.total_ms = result.accept_ms
-                            await _log_terminal(success=False, event="reject")
-                            return result
-                        logger.info(
-                            "[accepted] idx=%d accept_ms=%.0f session_id=%s req_id=%s "
-                            "group_id=%s bot_id=%s user_id=%s",
-                            index,
-                            result.accept_ms,
-                            session_id,
-                            req_id,
-                            group_id,
-                            bot_id,
-                            user_id,
-                        )
-                        if accept_only:
-                            result.ok = True
-                            result.final_received = False
-                            result.total_ms = result.accept_ms
-                            await _log_terminal(success=True, event="done")
-                            return result
-                        continue
+                            await _log_terminal(
+                                success=False,
+                                event="fail",
+                                detail=f"error={result.error}",
+                            )
+                            return False
 
-                    if ftype == "event":
+                    async def _complete_current_step(
+                        *,
+                        reason: str,
+                        saw_deliverable_file: bool,
+                        saw_step_text: bool,
+                        saw_post_deliverable_text: bool,
+                        _paths: list[Path],
+                        _step=step,
+                        _step_idx=step_idx,
+                        _run_download_dir=run_download_dir,
+                    ) -> bool:
+                        """标记当前步完成；若需下载但未落盘则失败。返回是否成功完成。"""
+                        nonlocal step_done
+                        if _step.download_deliverable and not _paths:
+                            result.error = (
+                                f"download_missing@{_step.name}: 已交付但未下载到本地 "
+                                f"(期望目录={_run_download_dir})"
+                            )
+                            result.failed_step = _step.name
+                            result.total_ms = (time.perf_counter() - t0) * 1000
+                            await _log_terminal(
+                                success=False,
+                                event="fail",
+                                detail=f"error={result.error}",
+                            )
+                            return False
+                        step_done = True
+                        result.steps_completed += 1
+                        logger.info(
+                            "[step-done] idx=%d step=%d/%d name=%s reason=%s file=%s text=%s post=%s "
+                            "downloaded=%d",
+                            index,
+                            _step_idx + 1,
+                            len(run_steps),
+                            _step.name,
+                            reason,
+                            saw_deliverable_file,
+                            saw_step_text,
+                            saw_post_deliverable_text,
+                            len(_paths),
+                        )
+                        return True
+
+                    await ws.send(json.dumps(req, ensure_ascii=False))
+
+                    while time.perf_counter() < deadline and not step_done:
+                        remaining = max(0.1, deadline - time.perf_counter())
+                        try:
+                            frame = await _recv_json(ws, remaining)
+                        except asyncio.TimeoutError:
+                            break
+
+                        ftype = frame.get("type")
+
+                        if ftype == "res" and frame.get("id") == req_id:
+                            ok = bool(frame.get("ok"))
+                            payload = frame.get("payload") or {}
+                            result.ok = ok
+                            if not ok:
+                                err = frame.get("error") or payload.get("error") or frame
+                                result.error = json.dumps(err, ensure_ascii=False)
+                                result.failed_step = step.name
+                                result.total_ms = (time.perf_counter() - t0) * 1000
+                                await _log_terminal(
+                                    success=False,
+                                    event="fail",
+                                    detail=f"step={step.name} error={result.error}",
+                                )
+                                return result
+                            accepted = bool(payload.get("accepted", True))
+                            result.accepted = accepted
+                            if result.accept_ms <= 0:
+                                result.accept_ms = (time.perf_counter() - t0) * 1000
+                            if accepted:
+                                await registry.mark_accepted(session_id)
+                            if not accepted:
+                                result.error = "chat.send 未被接受"
+                                result.failed_step = step.name
+                                result.total_ms = (time.perf_counter() - t0) * 1000
+                                await _log_terminal(
+                                    success=False,
+                                    event="reject",
+                                    detail=f"step={step.name}",
+                                )
+                                return result
+                            logger.info(
+                                "[accepted] idx=%d step=%d/%d name=%s accept_ms=%.0f session_id=%s req_id=%s",
+                                index,
+                                step_idx + 1,
+                                len(run_steps),
+                                step.name,
+                                result.accept_ms,
+                                session_id,
+                                req_id,
+                            )
+                            if accept_only:
+                                result.ok = True
+                                result.final_received = False
+                                result.steps_completed = 1
+                                result.total_ms = (time.perf_counter() - t0) * 1000
+                                await _log_terminal(success=True, event="done", detail=f"step={step.name}")
+                                return result
+                            continue
+
+                        if ftype != "event":
+                            continue
+
                         event, payload = _normalize_event_frame(frame)
+                        event_sid = _event_session_id(frame, payload)
+                        # WebChannel 向所有连接广播；并发压测必须忽略其他 session 的事件。
+                        if event_sid and event_sid != session_id:
+                            if ws_event_log:
+                                logger.info(
+                                    "[ws-event] idx=%d session_id=%s skip foreign session_id=%s event=%s",
+                                    index,
+                                    session_id,
+                                    event_sid,
+                                    event,
+                                )
+                            continue
                         if ws_event_log:
                             _log_ws_event(
                                 index=index,
@@ -939,11 +1351,12 @@ async def _run_single_request(
                         failure = _extract_runtime_failure(event, payload)
                         if failure:
                             result.error = failure
+                            result.failed_step = step.name
                             result.total_ms = (time.perf_counter() - t0) * 1000
                             await _log_terminal(
                                 success=False,
                                 event="fail",
-                                detail=f"error={result.error}",
+                                detail=f"step={step.name} error={result.error}",
                             )
                             return result
                         if auto_allow and event == "chat.ask_user_question":
@@ -959,7 +1372,6 @@ async def _run_single_request(
                                 answered_ids=answered_interrupt_ids,
                             )
                             if allowed:
-                                # 放行后当前子流结束；忽略紧随其后的假 idle / usage_summary。
                                 hitl_suppress_next_idle = True
                                 hitl_await_agent_resume = True
                                 hitl_paused = False
@@ -981,62 +1393,187 @@ async def _run_single_request(
                                 hitl_paused = False
                                 hitl_await_agent_resume = False
                                 saw_deliverable_file = True
-                            elif event == "chat.delta" and saw_deliverable_file:
-                                saw_post_deliverable_text = True
+                                if not await _maybe_download_deliverable(
+                                    payload, _paths=downloaded_paths
+                                ):
+                                    return result
+                            elif event == "chat.tool_result" and _is_send_file_tool_success(payload):
+                                hitl_paused = False
+                                hitl_await_agent_resume = False
+                                saw_deliverable_file = True
+                                if not await _maybe_download_deliverable(
+                                    payload, _paths=downloaded_paths
+                                ):
+                                    return result
+                            elif event == "chat.delta":
+                                content = _final_content(payload)
+                                if expect_delayed_text and content:
+                                    step_text_buf += content
+                                if expect_file and saw_deliverable_file:
+                                    saw_post_deliverable_text = True
+                                elif _matches_cron_delivery(
+                                    expect_delayed_text=expect_delayed_text,
+                                    content=content,
+                                    logged_cron_creation=logged_cron_creation,
+                                    step_text_buf=step_text_buf,
+                                ):
+                                    saw_step_text = True
+                                    logger.info(
+                                        "[cron-delivery] idx=%d step=%d/%d name=%s session_id=%s",
+                                        index,
+                                        step_idx + 1,
+                                        len(run_steps),
+                                        step.name,
+                                        session_id,
+                                    )
+                                    if not await _complete_current_step(
+                                        reason="cron_delivery",
+                                        saw_deliverable_file=saw_deliverable_file,
+                                        saw_step_text=saw_step_text,
+                                        saw_post_deliverable_text=saw_post_deliverable_text,
+                                        _paths=downloaded_paths,
+                                    ):
+                                        return result
+                                    break
+                                elif _matches_cron_creation(
+                                    expect_delayed_text=expect_delayed_text,
+                                    logged_cron_creation=logged_cron_creation,
+                                    content=content,
+                                    step_text_buf=step_text_buf,
+                                ):
+                                    logged_cron_creation = True
+                                    step_text_buf = ""
+                                    if cron_delivery_timeout > 0:
+                                        deadline = min(
+                                            deadline,
+                                            time.perf_counter() + cron_delivery_timeout,
+                                        )
+                                    logger.info(
+                                        "[cron-wait] idx=%d step=%d/%d name=%s session_id=%s "
+                                        "creation confirmed, waiting for delivery "
+                                        "(timeout=%.0fs)...",
+                                        index,
+                                        step_idx + 1,
+                                        len(run_steps),
+                                        step.name,
+                                        session_id,
+                                        cron_delivery_timeout if cron_delivery_timeout > 0 else final_timeout,
+                                    )
                             elif (
                                 event == "chat.final"
-                                and saw_deliverable_file
                                 and not _is_intra_turn_chat_final(event, payload)
                             ):
-                                saw_post_deliverable_text = True
+                                content = _final_content(payload)
+                                if expect_delayed_text and content:
+                                    step_text_buf += content
+                                if expect_file and saw_deliverable_file:
+                                    saw_post_deliverable_text = True
+                                elif _matches_cron_delivery(
+                                    expect_delayed_text=expect_delayed_text,
+                                    content=content,
+                                    logged_cron_creation=logged_cron_creation,
+                                    step_text_buf=step_text_buf,
+                                ):
+                                    saw_step_text = True
+                                    logger.info(
+                                        "[cron-delivery] idx=%d step=%d/%d name=%s session_id=%s",
+                                        index,
+                                        step_idx + 1,
+                                        len(run_steps),
+                                        step.name,
+                                        session_id,
+                                    )
+                                    if not await _complete_current_step(
+                                        reason="cron_delivery",
+                                        saw_deliverable_file=saw_deliverable_file,
+                                        saw_step_text=saw_step_text,
+                                        saw_post_deliverable_text=saw_post_deliverable_text,
+                                        _paths=downloaded_paths,
+                                    ):
+                                        return result
+                                    break
+                                elif _matches_cron_creation(
+                                    expect_delayed_text=expect_delayed_text,
+                                    logged_cron_creation=logged_cron_creation,
+                                    content=content,
+                                    step_text_buf=step_text_buf,
+                                ):
+                                    logged_cron_creation = True
+                                    step_text_buf = ""
+                                    if cron_delivery_timeout > 0:
+                                        deadline = min(
+                                            deadline,
+                                            time.perf_counter() + cron_delivery_timeout,
+                                        )
+                                    logger.info(
+                                        "[cron-wait] idx=%d step=%d/%d name=%s session_id=%s "
+                                        "creation confirmed, waiting for delivery "
+                                        "(timeout=%.0fs)...",
+                                        index,
+                                        step_idx + 1,
+                                        len(run_steps),
+                                        step.name,
+                                        session_id,
+                                        cron_delivery_timeout if cron_delivery_timeout > 0 else final_timeout,
+                                    )
+                                elif _content_marks_step_done(
+                                    expect_file=expect_file,
+                                    expect_delayed_text=expect_delayed_text,
+                                    content=content,
+                                ):
+                                    saw_step_text = True
                         if event == "chat.processing_status":
                             if payload.get("is_processing") is True:
                                 hitl_paused = False
                                 hitl_suppress_next_idle = False
+                                hitl_await_agent_resume = False
                             elif _is_processing_idle(payload):
                                 if hitl_suppress_next_idle:
                                     hitl_suppress_next_idle = False
                                     hitl_paused = False
                                     continue
                                 if _should_complete_on_processing_idle(
+                                    expect_file=expect_file,
                                     accepted=accepted,
                                     saw_agent_output=saw_agent_output,
                                     hitl_paused=hitl_paused,
                                     hitl_suppress_next_idle=False,
                                     hitl_await_agent_resume=hitl_await_agent_resume,
                                     saw_deliverable_file=saw_deliverable_file,
+                                    saw_step_text=saw_step_text,
                                     saw_post_deliverable_text=saw_post_deliverable_text,
                                     payload=payload,
                                 ):
-                                    result.final_received = True
-                                    result.ok = True
-                                    result.accepted = True
-                                    result.total_ms = (time.perf_counter() - t0) * 1000
-                                    await _log_terminal(
-                                        success=True,
-                                        event="done",
-                                        detail=(
-                                            "reason=processing_status_idle "
-                                            f"file={saw_deliverable_file} post={saw_post_deliverable_text}"
-                                        ),
-                                    )
-                                    return result
+                                    if not await _complete_current_step(
+                                        reason="processing_status_idle",
+                                        saw_deliverable_file=saw_deliverable_file,
+                                        saw_step_text=saw_step_text,
+                                        saw_post_deliverable_text=saw_post_deliverable_text,
+                                        _paths=downloaded_paths,
+                                    ):
+                                        return result
+                                    break
                                 if _should_fail_on_premature_idle(
+                                    expect_file=expect_file,
+                                    expect_delayed_text=expect_delayed_text,
                                     accepted=accepted,
                                     hitl_paused=hitl_paused,
                                     hitl_suppress_next_idle=False,
                                     hitl_await_agent_resume=hitl_await_agent_resume,
                                     saw_deliverable_file=saw_deliverable_file,
+                                    saw_step_text=saw_step_text,
                                     saw_post_deliverable_text=saw_post_deliverable_text,
                                     payload=payload,
                                 ):
                                     result.error = (
-                                        "premature_idle: Agent 已 is_processing=false，但未完成交付 "
-                                        f"(file={saw_deliverable_file} post={saw_post_deliverable_text} "
+                                        f"premature_idle@{step.name}: Agent 已 is_processing=false，但未完成交付 "
+                                        f"(file={saw_deliverable_file} text={saw_step_text} "
+                                        f"post={saw_post_deliverable_text} "
                                         f"agent_output={saw_agent_output} "
                                         f"hitl_await={hitl_await_agent_resume} hitl_paused={hitl_paused})；"
                                         "常见于资源已满(100001)/无法预留 session(100002) 后流提前结束"
                                     )
+                                    result.failed_step = step.name
                                     result.total_ms = (time.perf_counter() - t0) * 1000
                                     await _log_terminal(
                                         success=False,
@@ -1055,40 +1592,60 @@ async def _run_single_request(
                                 )
                             continue
                         if _should_complete_invoke(
+                            expect_file=expect_file,
                             accepted=accepted,
                             saw_agent_output=saw_agent_output,
                             hitl_paused=hitl_paused,
                             hitl_await_agent_resume=hitl_await_agent_resume,
                             saw_deliverable_file=saw_deliverable_file,
+                            saw_step_text=saw_step_text,
                             saw_post_deliverable_text=saw_post_deliverable_text,
                             event=event,
                             payload=payload,
                         ):
-                            result.final_received = True
-                            result.ok = True
-                            result.accepted = True
-                            result.total_ms = (time.perf_counter() - t0) * 1000
-                            await _log_terminal(
-                                success=True,
-                                event="done",
-                                detail=(
-                                    f"reason={event} file={saw_deliverable_file} "
-                                    f"post={saw_post_deliverable_text}"
-                                ),
-                            )
-                            return result
-                        continue
+                            if not await _complete_current_step(
+                                reason=str(event),
+                                saw_deliverable_file=saw_deliverable_file,
+                                saw_step_text=saw_step_text,
+                                saw_post_deliverable_text=saw_post_deliverable_text,
+                                _paths=downloaded_paths,
+                            ):
+                                return result
+                            break
 
-                if not accepted:
-                    result.error = "超时：未收到 chat.send 确认"
-                elif not accept_only:
-                    result.error = (
-                        "超时：已接受但未收到交付文件后的 processing idle / usage_summary / chat.final "
-                        f"(file={saw_deliverable_file} post={saw_post_deliverable_text} "
-                        f"hitl_await={hitl_await_agent_resume} hitl_paused={hitl_paused})"
-                    )
+                    if not step_done:
+                        if not accepted:
+                            result.error = f"超时@{step.name}：未收到 chat.send 确认"
+                        elif (
+                            expect_delayed_text
+                            and logged_cron_creation
+                            and not saw_step_text
+                        ):
+                            result.error = (
+                                f"cron_delivery_timeout@{step.name}: 已创建但未收到投递"
+                            )
+                        else:
+                            result.error = (
+                                f"超时@{step.name}：已接受但未收到步骤完成信号 "
+                                f"(expect_file={expect_file} expect_delayed_text={expect_delayed_text} "
+                                f"file={saw_deliverable_file} "
+                                f"text={saw_step_text} post={saw_post_deliverable_text} "
+                                f"hitl_await={hitl_await_agent_resume} hitl_paused={hitl_paused})"
+                            )
+                        result.failed_step = step.name
+                        result.total_ms = (time.perf_counter() - t0) * 1000
+                        await _log_terminal(success=False, event="timeout", detail=result.error)
+                        return result
+
+                result.final_received = True
+                result.ok = True
+                result.accepted = True
                 result.total_ms = (time.perf_counter() - t0) * 1000
-                await _log_terminal(success=False, event="timeout", detail=result.error)
+                await _log_terminal(
+                    success=True,
+                    event="done",
+                    detail=f"all_steps={result.steps_completed}/{result.steps_total}",
+                )
                 return result
             except asyncio.CancelledError:
                 if result.accepted and not result.final_received:
@@ -1122,22 +1679,42 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
         service_shard_key=args.service_shard_key,
     )
 
+    loadtest_steps: tuple[LoadTestStep, ...] | None = None
+    if args.flow == "loadtest":
+        loadtest_steps = _build_default_loadtest_steps(args.essay_file)
+    run_download_dir = _make_run_download_dir()
+    need_download = bool(
+        loadtest_steps and any(step.download_deliverable for step in loadtest_steps)
+    )
+
     logger.info(
-        "[plan] ws=%s concurrency=%d shards=%d shards2=%d service_shard_key=%s",
+        "[plan] ws=%s concurrency=%d shards=%d shards2=%d service_shard_key=%s flow=%s",
         ws_url,
         args.concurrency,
         args.shards,
         args.shards2,
         args.service_shard_key,
+        args.flow,
     )
-    logger.info("[plan] content=%r", args.content)
+    if loadtest_steps:
+        logger.info(
+            "[plan] loadtest steps=%s essay_file=%s",
+            " -> ".join(step.name for step in loadtest_steps),
+            args.essay_file,
+        )
+    else:
+        logger.info("[plan] content=%r", args.content)
+    if need_download:
+        logger.info("[plan] download_dir=%s", run_download_dir)
     logger.info(
-        "[plan] accept_only=%s auto_allow=%s ws_event_log=%s accept_timeout=%ss final_timeout=%ss",
+        "[plan] accept_only=%s auto_allow=%s ws_event_log=%s accept_timeout=%ss "
+        "final_timeout=%ss cron_delivery_timeout=%ss",
         args.accept_only,
         args.auto_allow,
         args.ws_event_log,
         args.accept_timeout,
         args.final_timeout,
+        args.cron_delivery_timeout,
     )
     for shard in range(args.shards):
         indices = [i for i, plan in enumerate(route_plan) if plan.shard == shard]
@@ -1188,10 +1765,13 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
                 accept_timeout=args.accept_timeout,
                 accept_only=args.accept_only,
                 final_timeout=args.final_timeout,
+                cron_delivery_timeout=args.cron_delivery_timeout,
                 auto_allow=args.auto_allow,
                 ws_event_log=args.ws_event_log,
                 progress=progress,
                 registry=registry,
+                steps=loadtest_steps,
+                download_dir=run_download_dir if need_download else None,
             )
         )
         for idx, plan in enumerate(route_plan)
@@ -1258,19 +1838,20 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
         total_ms=[r.total_ms for r in results if r.total_ms > 0],
     )
 
-    logger.info("\n[result] %s", stats.summary())
-
     logger.info("\n[requests] 各请求路由参数汇总（按 idx 排序）:")
     for r in sorted(results, key=lambda x: x.index):
         status = "ok" if _is_success(r) else "fail"
         logger.info(
-            "[requests] idx=%02d shard=%d shard2=%d status=%s final=%s total_ms=%.0f accept_ms=%.0f "
-            "session_id=%s req_id=%s group_id=%s bot_id=%s user_id=%s",
+            "[requests] idx=%02d shard=%d shard2=%d status=%s final=%s steps=%d/%d failed_step=%s "
+            "total_ms=%.0f accept_ms=%.0f session_id=%s req_id=%s group_id=%s bot_id=%s user_id=%s",
             r.index,
             r.shard,
             r.shard2,
             status,
             r.final_received,
+            r.steps_completed,
+            r.steps_total,
+            r.failed_step or "-",
             r.total_ms,
             r.accept_ms,
             r.session_id,
@@ -1301,14 +1882,8 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
                 ok_n,
                 len(bucket),
             )
-    if stats.total_ms:
-        logger.info(
-            "[total_ms] min=%.0f avg=%.0f max=%.0f (n=%d)",
-            min(stats.total_ms),
-            statistics.mean(stats.total_ms),
-            max(stats.total_ms),
-            len(stats.total_ms),
-        )
+
+    logger.info("\n[result] %s", stats.summary())
 
     return 0 if failed == 0 else 1
 
@@ -1320,9 +1895,24 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--host", default="127.0.0.1", help="Gateway 主机，默认 127.0.0.1")
     p.add_argument("--ws-path", default="/ws", help="WebSocket 路径，默认 /ws")
     p.add_argument(
+        "--flow",
+        choices=("loadtest", "single"),
+        default="loadtest",
+        help=(
+            "loadtest（默认）：每路会话依次发送 travel/skill/file/cron 四条消息，"
+            "与 mock_llm_server --profile loadtest 对齐；single：仅发送一条 --content"
+        ),
+    )
+    p.add_argument(
         "--content",
         default=_DEFAULT_CONTENT,
-        help="用户消息正文（同时写入 content 与 query）",
+        help="--flow single 时的用户消息正文（同时写入 content 与 query）",
+    )
+    p.add_argument(
+        "--essay-file",
+        type=Path,
+        default=_DEFAULT_SPRING_ESSAY,
+        help="loadtest 第 3 步上传的作文附件路径，默认 scripts/童趣的春天.md",
     )
     p.add_argument(
         "--bot-id",
@@ -1405,6 +1995,12 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=7200.0,
         help="等待任务完成的最长时间（秒），默认 7200",
+    )
+    p.add_argument(
+        "--cron-delivery-timeout",
+        type=float,
+        default=120.0,
+        help="cron 步创建确认后等待到点投递的最长时间（秒），默认 120",
     )
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--web-port", type=int, help="Gateway WebChannel 端口")
