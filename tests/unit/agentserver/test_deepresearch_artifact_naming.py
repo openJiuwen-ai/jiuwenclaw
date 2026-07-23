@@ -63,6 +63,7 @@ def test_artifact_paths_is_frozen(tmp_path):
         (_provenance(version_number=True), "ARTIFACT_NAMING_INVALID"),
         (_provenance(version_number=1.0), "ARTIFACT_NAMING_INVALID"),
         (_provenance(version_number=0), "ARTIFACT_NAMING_INVALID"),
+        (_provenance(version_number=10**100), "ARTIFACT_NAMING_INVALID"),
         (_provenance(version_base_stem="unsafe/name"), "ARTIFACT_NAMING_INVALID"),
         (_provenance(version_base_stem=""), "ARTIFACT_NAMING_INVALID"),
         (_provenance(version_base_stem="report-v2"), "ARTIFACT_NAMING_INVALID"),
@@ -134,6 +135,18 @@ def test_legacy_resolution_derives_logical_version_from_rewrite_history(tmp_path
     assert version == api.ArtifactVersion("Legacy_title", 3)
 
 
+def test_legacy_resolution_rejects_derived_version_above_limit(tmp_path, monkeypatch):
+    api = _api()
+    monkeypatch.setattr(api, "MAX_VERSION_NUMBER", 1)
+
+    with pytest.raises(api.ArtifactNamingError) as caught:
+        api.resolve_artifact_version(
+            {"rewrite_history": [{}]}, tmp_path / "report.md", "# Report\n"
+        )
+
+    assert caught.value.code == "ARTIFACT_NAMING_INVALID"
+
+
 def test_allocate_initial_paths_adds_same_title_suffix_for_markdown_and_sidecar_collisions(tmp_path):
     api = _api()
 
@@ -178,6 +191,53 @@ def test_allocate_initial_paths_caps_base_before_appending_same_title_ordinal(tm
 
     assert allocated.version.base_stem == f"{'x' * 118}-2"
     assert len(allocated.version.base_stem) == 120
+
+
+def test_allocate_initial_paths_bounds_complete_utf8_filenames_for_cjk_title(tmp_path):
+    api = _api()
+    requested_name = "深" * 100
+    first = api.allocate_initial_paths(tmp_path, requested_name)
+    first.markdown_path.write_text("report", encoding="utf-8")
+
+    allocated = api.allocate_initial_paths(tmp_path, requested_name)
+
+    assert allocated.version.base_stem.endswith("-2")
+    assert all(
+        len(path.name.encode("utf-8")) <= getattr(api, "MAX_FILENAME_BYTES", 240)
+        for path in (
+            allocated.markdown_path,
+            allocated.provenance_path,
+            allocated.final_result_path,
+        )
+    )
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_allocate_initial_paths_treats_direct_and_dangling_candidate_symlinks_as_occupied(
+    tmp_path, dangling
+):
+    api = _api()
+    first = api.allocate_initial_paths(tmp_path, "report.md")
+    target = tmp_path / "target.md"
+    if not dangling:
+        target.write_text("target", encoding="utf-8")
+    first.markdown_path.symlink_to(target)
+
+    allocated = api.allocate_initial_paths(tmp_path, "report.md")
+
+    assert allocated.markdown_path.name == "report-2-v1.md"
+
+
+def test_allocate_initial_paths_fails_with_domain_error_after_bounded_attempts(tmp_path, monkeypatch):
+    api = _api()
+    monkeypatch.setattr(api, "MAX_ALLOCATION_ATTEMPTS", 2)
+    (tmp_path / "report-v1.md").write_text("occupied", encoding="utf-8")
+    (tmp_path / "report-2-v1.md").write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(api.ArtifactNamingError) as caught:
+        api.allocate_initial_paths(tmp_path, "report.md")
+
+    assert caught.value.code == "ARTIFACT_NAMING_INVALID"
 
 
 def test_allocate_next_paths_uses_global_same_document_max_across_branches(tmp_path):
@@ -237,3 +297,83 @@ def test_allocate_next_paths_advances_when_candidate_sidecar_already_exists(tmp_
     allocated = api.allocate_next_paths(parent, _provenance(version_number=1), "# Report\n")
 
     assert allocated.version == api.ArtifactVersion("report", 3)
+
+
+def test_allocate_next_paths_skips_symlink_sidecars_without_following_them(tmp_path):
+    api = _api()
+    parent = tmp_path / "report-v1.md"
+    parent.write_text("# Report\n", encoding="utf-8")
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps(_provenance(version_number=99)), encoding="utf-8")
+    (tmp_path / "linked.provenance.json").symlink_to(target)
+
+    allocated = api.allocate_next_paths(parent, _provenance(version_number=1), "# Report\n")
+
+    assert allocated.version == api.ArtifactVersion("report", 2)
+
+
+def test_allocate_next_paths_rejects_same_document_legacy_symlink_markdown(tmp_path):
+    api = _api()
+    parent = tmp_path / "report-v1.md"
+    parent.write_text("# Report\n", encoding="utf-8")
+    legacy = tmp_path / "legacy-v2.md"
+    legacy.symlink_to(tmp_path / "outside.md")
+    legacy.with_suffix(".provenance.json").write_text(
+        json.dumps({"document_id": "document-a", "rewrite_history": [{}]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(api.ArtifactNamingError) as caught:
+        api.allocate_next_paths(parent, _provenance(version_number=1), "# Report\n")
+
+    assert caught.value.code == "ARTIFACT_NAMING_INVALID"
+
+
+def test_allocate_next_paths_rejects_oversized_sibling_sidecar(tmp_path, monkeypatch):
+    api = _api()
+    monkeypatch.setattr(api, "MAX_PROVENANCE_BYTES", 32)
+    parent = tmp_path / "report-v1.md"
+    parent.write_text("# Report\n", encoding="utf-8")
+    (tmp_path / "report-v2.provenance.json").write_text(
+        json.dumps(_provenance(version_number=2)) + " " * 64,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(api.ArtifactNamingError) as caught:
+        api.allocate_next_paths(parent, _provenance(version_number=1), "# Report\n")
+
+    assert caught.value.code == "ARTIFACT_NAMING_INVALID"
+
+
+def test_allocate_next_paths_does_not_read_markdown_for_explicit_sibling(tmp_path, monkeypatch):
+    api = _api()
+    parent = _write_sidecar(tmp_path, "report-v1", _provenance(version_number=1))
+    _write_sidecar(tmp_path, "report-v2", _provenance(version_number=2))
+    original_read_text = Path.read_text
+
+    def reject_markdown(path, *args, **kwargs):
+        if path.name == "report-v2.md":
+            raise AssertionError("explicit version must not read markdown")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", reject_markdown)
+
+    allocated = api.allocate_next_paths(parent, _provenance(version_number=1), "# Report\n")
+
+    assert allocated.version == api.ArtifactVersion("report", 3)
+
+
+def test_allocate_next_paths_enforces_bounded_sidecar_scan(tmp_path, monkeypatch):
+    api = _api()
+    monkeypatch.setattr(api, "MAX_SIDECARS_SCANNED", 1)
+    parent = tmp_path / "report-v1.md"
+    parent.write_text("# Report\n", encoding="utf-8")
+    for name in ("unrelated-a", "unrelated-b"):
+        (tmp_path / f"{name}.provenance.json").write_text(
+            json.dumps(_provenance("document-b", version_number=1)), encoding="utf-8"
+        )
+
+    with pytest.raises(api.ArtifactNamingError) as caught:
+        api.allocate_next_paths(parent, _provenance(version_number=1), "# Report\n")
+
+    assert caught.value.code == "ARTIFACT_NAMING_INVALID"

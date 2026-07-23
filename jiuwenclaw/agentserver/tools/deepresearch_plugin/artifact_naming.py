@@ -1,14 +1,17 @@
 """Pure versioned filename allocation for DeepResearch artifacts.
 
-Artifact revision identity belongs to provenance.  Filenames are only a
-human-facing allocation concern, so this module neither writes nor publishes
-artifact payloads.
+Allocation returns a path that appears available in one directory snapshot;
+it does not reserve that path.  Callers must serialize allocation through
+publication and use no-replace writes.  Artifact revision identity belongs to
+provenance, so this module neither writes nor publishes artifact payloads.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,7 +20,16 @@ from .conversion_utils import make_safe_filename_component
 
 _ERROR_CODE = "ARTIFACT_NAMING_INVALID"
 _DEFAULT_BASE_STEM = "深度研究报告"
-_MAX_BASE_STEM_LENGTH = 120
+MAX_FILENAME_BYTES = 240
+# This conservative base budget leaves more than 100 bytes for every bounded
+# version suffix and the longest sidecar suffix.
+_MAX_BASE_STEM_BYTES = 120
+MAX_VERSION_NUMBER = 1_000_000
+MAX_PROVENANCE_BYTES = 4 * 1024 * 1024
+# Legacy Markdown is read only for title inference, so one MiB is sufficient.
+MAX_LEGACY_MARKDOWN_BYTES = 1024 * 1024
+MAX_SIDECARS_SCANNED = 512
+MAX_ALLOCATION_ATTEMPTS = 512
 _VERSION_SUFFIX_RE = re.compile(r"-v[1-9]\d*$")
 _ATX_H1_RE = re.compile(r"^[ \t]{0,3}#[ \t]+(?P<text>.*?)[ \t]*$")
 _SETEXT_H1_RE = re.compile(r"^[ \t]{0,3}=+[ \t]*$")
@@ -54,8 +66,12 @@ def _strip_terminal_version(value: str) -> str:
     return _VERSION_SUFFIX_RE.sub("", value)
 
 
-def _cap_base_stem(value: str) -> str:
-    return value[:_MAX_BASE_STEM_LENGTH].rstrip("._-")
+def _truncate_utf8(value: str, byte_limit: int) -> str:
+    return value.encode("utf-8")[:byte_limit].decode("utf-8", "ignore")
+
+
+def _cap_base_stem(value: str, byte_limit: int = _MAX_BASE_STEM_BYTES) -> str:
+    return _truncate_utf8(value, byte_limit).rstrip("._-")
 
 
 def _safe_base_stem_or_empty(value: str) -> str:
@@ -80,6 +96,12 @@ def _validate_explicit_base_stem(value: object) -> str:
         raise _invalid("version_base_stem is not a safe filename component")
     if _cap_base_stem(value) != value:
         raise _invalid("version_base_stem exceeds the filename allocation limit")
+    return value
+
+
+def _validate_version_number(value: object) -> int:
+    if type(value) is not int or value < 1 or value > MAX_VERSION_NUMBER:
+        raise _invalid("version_number must be a bounded positive integer")
     return value
 
 
@@ -150,9 +172,7 @@ def resolve_artifact_version(
     if has_number != has_base:
         raise _invalid("version metadata must include both fields")
     if has_number:
-        version_number = provenance["version_number"]
-        if type(version_number) is not int or version_number < 1:
-            raise _invalid("version_number must be a positive integer")
+        version_number = _validate_version_number(provenance["version_number"])
         return ArtifactVersion(
             _validate_explicit_base_stem(provenance["version_base_stem"]), version_number
         )
@@ -160,46 +180,65 @@ def resolve_artifact_version(
     history = provenance.get("rewrite_history", [])
     if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
         raise _invalid("legacy rewrite_history must be a list of mappings")
-    return ArtifactVersion(_legacy_base_stem(report_path, markdown), len(history) + 1)
+    return ArtifactVersion(
+        _legacy_base_stem(report_path, markdown), _validate_version_number(len(history) + 1)
+    )
 
 
 def _paths(output_dir: Path, version: ArtifactVersion) -> ArtifactPaths:
+    _validate_version_number(version.version_number)
     markdown_path = output_dir / f"{version.base_stem}-v{version.version_number}.md"
-    return ArtifactPaths(
+    paths = ArtifactPaths(
         version=version,
         markdown_path=markdown_path,
         provenance_path=markdown_path.with_suffix(".provenance.json"),
         final_result_path=markdown_path.with_suffix(".final-result.json"),
     )
-
-
-def _is_available(paths: ArtifactPaths) -> bool:
-    return not any(
-        path.exists() or any(path.parent.glob(f".{path.name}.*"))
+    if any(
+        len(path.name.encode("utf-8")) > MAX_FILENAME_BYTES
         for path in (paths.markdown_path, paths.provenance_path, paths.final_result_path)
-    )
+    ):
+        raise _invalid("artifact filename exceeds the byte limit")
+    return paths
+
+
+def _snapshot_directory_names(directory: Path) -> set[str]:
+    try:
+        with os.scandir(directory) as entries:
+            return {entry.name for entry in entries}
+    except OSError as exc:
+        raise _invalid("artifact directory cannot be scanned") from exc
+
+
+def _is_available(paths: ArtifactPaths, occupied_names: set[str]) -> bool:
+    for path in (paths.markdown_path, paths.provenance_path, paths.final_result_path):
+        if path.name in occupied_names:
+            return False
+        if any(name.startswith(f".{path.name}.") for name in occupied_names):
+            return False
+    return True
 
 
 def _base_stem_with_ordinal(base_stem: str, ordinal: int) -> str:
     if ordinal == 1:
         return base_stem
     suffix = f"-{ordinal}"
-    return f"{base_stem[:_MAX_BASE_STEM_LENGTH - len(suffix)].rstrip('._-')}{suffix}"
+    return f"{_cap_base_stem(base_stem, _MAX_BASE_STEM_BYTES - len(suffix.encode('utf-8')))}{suffix}"
 
 
 def allocate_initial_paths(output_dir: Path, requested_name: str) -> ArtifactPaths:
-    """Allocate a collision-free initial artifact path without creating it."""
+    """Return a currently available initial path; this does not reserve it."""
 
     if not isinstance(output_dir, Path):
         raise _invalid("output_dir must be a Path")
     version = initial_version(requested_name)
-    suffix = 1
-    while True:
+    occupied_names = _snapshot_directory_names(output_dir)
+    for suffix in range(1, MAX_ALLOCATION_ATTEMPTS + 1):
         base_stem = _base_stem_with_ordinal(version.base_stem, suffix)
         candidate = _paths(output_dir, ArtifactVersion(base_stem, 1))
-        if _is_available(candidate):
+        if _is_available(candidate, occupied_names):
             return candidate
-        suffix += 1
+    raise _invalid("artifact allocation attempts exhausted")
 
 
 def _require_document_id(provenance: dict) -> str:
@@ -214,20 +253,78 @@ def _sidecar_markdown_path(sidecar: Path) -> Path:
     return sidecar.with_name(f"{sidecar.name.removesuffix(suffix)}.md")
 
 
-def _sibling_versions(parent_path: Path, document_id: str) -> list[ArtifactVersion]:
+def _read_file_bytes(path: Path, limit: int, label: str) -> bytes:
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise _invalid(f"{label} cannot be inspected") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise _invalid(f"{label} must be a regular file")
+    if metadata.st_size > limit:
+        raise _invalid(f"{label} exceeds the read limit")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise _invalid("safe no-follow reads are unavailable")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow)
+        with os.fdopen(descriptor, "rb") as stream:
+            content = stream.read(limit + 1)
+    except OSError as exc:
+        raise _invalid(f"{label} cannot be read safely") from exc
+    if len(content) > limit:
+        raise _invalid(f"{label} exceeds the read limit")
+    return content
+
+
+def _is_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except OSError as exc:
+        raise _invalid("artifact directory changed during allocation") from exc
+
+
+def _sibling_markdown(path: Path, occupied_names: set[str]) -> str:
+    """Read at most ``MAX_LEGACY_MARKDOWN_BYTES`` for legacy title inference."""
+
+    if path.name not in occupied_names:
+        return ""
+    content = _read_file_bytes(path, MAX_LEGACY_MARKDOWN_BYTES, "legacy markdown")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _invalid("legacy markdown is not UTF-8") from exc
+
+
+def _sibling_versions(
+    parent_path: Path, document_id: str, occupied_names: set[str]
+) -> list[ArtifactVersion]:
     versions: list[ArtifactVersion] = []
-    for sidecar in sorted(parent_path.parent.glob("*.provenance.json")):
-        try:
-            payload = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    sidecars_scanned = 0
+    for name in sorted(occupied_names):
+        if not name.endswith(".provenance.json"):
             continue
+        sidecars_scanned += 1
+        if sidecars_scanned > MAX_SIDECARS_SCANNED:
+            raise _invalid("too many provenance sidecars to scan")
+        sidecar = parent_path.parent / name
+        if _is_symlink(sidecar):
+            continue
+        try:
+            payload = json.loads(
+                _read_file_bytes(sidecar, MAX_PROVENANCE_BYTES, "provenance sidecar")
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _invalid("provenance sidecar is malformed") from exc
         if not isinstance(payload, dict) or payload.get("document_id") != document_id:
             continue
         markdown_path = _sidecar_markdown_path(sidecar)
-        try:
-            markdown = markdown_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            markdown = ""
+        has_number = "version_number" in payload
+        has_base = "version_base_stem" in payload
+        markdown = (
+            ""
+            if has_number or has_base
+            else _sibling_markdown(markdown_path, occupied_names)
+        )
         versions.append(resolve_artifact_version(payload, markdown_path, markdown))
     return versions
 
@@ -235,7 +332,7 @@ def _sibling_versions(parent_path: Path, document_id: str) -> list[ArtifactVersi
 def allocate_next_paths(
     parent_path: Path, parent_provenance: dict, parent_markdown: str
 ) -> ArtifactPaths:
-    """Allocate the next document-global version without writing any artifacts."""
+    """Return a currently available next path; this does not reserve it."""
 
     if not isinstance(parent_path, Path):
         raise _invalid("parent_path must be a Path")
@@ -243,16 +340,22 @@ def allocate_next_paths(
     parent_version = resolve_artifact_version(
         parent_provenance, parent_path, parent_markdown
     )
+    occupied_names = _snapshot_directory_names(parent_path.parent)
     max_version = max(
         [parent_version.version_number]
-        + [version.version_number for version in _sibling_versions(parent_path, document_id)]
+        + [
+            version.version_number
+            for version in _sibling_versions(parent_path, document_id, occupied_names)
+        ]
     )
     next_number = max_version + 1
-    while True:
+    for offset in range(MAX_ALLOCATION_ATTEMPTS):
+        candidate_number = next_number + offset
+        _validate_version_number(candidate_number)
         candidate = _paths(
             parent_path.parent,
-            ArtifactVersion(parent_version.base_stem, next_number),
+            ArtifactVersion(parent_version.base_stem, candidate_number),
         )
-        if _is_available(candidate):
+        if _is_available(candidate, occupied_names):
             return candidate
-        next_number += 1
+    raise _invalid("artifact allocation attempts exhausted")
