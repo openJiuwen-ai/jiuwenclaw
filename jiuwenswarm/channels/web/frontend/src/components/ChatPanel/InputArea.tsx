@@ -1,4 +1,4 @@
-﻿﻿﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
+﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { AtSign, CircleX, FileImage, Loader2, Plus, Square, Target, X } from 'lucide-react';
