@@ -1,5 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import json
 from typing import Union, List, Optional, AsyncIterator, Type, Dict
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -15,6 +16,7 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
     AudioGenerationResponse,
     VideoGenerationResponse
 )
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import SiliconFlowModelClient
@@ -126,6 +128,26 @@ class Model:
         Returns:
             AssistantMessage
         """
+        payload = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "stop": stop,
+            "timeout": timeout,
+            "kwargs": kwargs,
+            "client_provider": getattr(self.model_client_config, "client_provider", None),
+            "api_base": getattr(self.model_client_config, "api_base", None),
+        }
+        try:
+            logger.info(
+                "Browser runtime LLM invoke payload: %s",
+                json.dumps(payload, ensure_ascii=False, default=str),
+            )
+        except Exception:
+            logger.info("Browser runtime LLM invoke payload (fallback): %s", str(payload))
         return await self._client.invoke(
             messages=messages,
             stop=stop,
