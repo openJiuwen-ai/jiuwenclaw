@@ -427,6 +427,7 @@
     "formCancel": "Cancel",
     "editTitle": "Edit goal",
     "toolbarTag": "Goal",
+    "toolbarUnavailable": "A goal is already in progress. Finish or clear it first.",
     "closeTag": "Cancel goal",
     "badge": "Goal",
     "status": {

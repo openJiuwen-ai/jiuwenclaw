@@ -73,7 +73,7 @@ function isCompletedResumeResult(interruptResult: unknown): boolean {
   return result.intent === 'resume' && result.success === true && result.has_active_task === false;
 }
 
-const GOAL_COMPLETED_AUTO_HIDE_MS = 2000;
+const GOAL_COMPLETED_AUTO_HIDE_MS = 4000;
 const GOAL_COMPLETED_SETTLE_FALLBACK_MS = 8000;
 /** get 失败后的重试间隔（毫秒）：首次失败后再试 2 次，都失败才判定为 unknown（真实环境联调方案）。 */
 const GOAL_GET_RETRY_DELAYS_MS = [3000, 5000];

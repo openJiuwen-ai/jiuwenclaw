@@ -1391,6 +1391,21 @@ overflow: hidden;
   color: var(--color-text-strong);
 }
 
+.chat-mode-select__option:disabled {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
+}
+
+.chat-mode-select__option:disabled:hover,
+.chat-mode-select__option:disabled:focus-visible {
+  background: transparent;
+  color: var(--color-text-placeholder);
+}
+
+.chat-mode-select__option:disabled .chat-mode-select__icon {
+  color: var(--color-text-placeholder);
+}
+
 /* Trigger turns red when full_access is selected */
 .chat-mode-select__trigger--danger,
 .chat-mode-select__trigger--danger .chat-mode-select__icon {
