@@ -275,6 +275,8 @@ jiuwenswarm chat "Hello, introduce yourself"
 | `--show-reasoning` | — | Include reasoning output (to stderr) |
 | `--show-tools` | — | Include compact tool call/result status (to stderr) |
 | `--timeout <seconds>` | — | Total response timeout in seconds |
+| `--swarmflow-max-workflows <count>` | Server config | Cap concurrent SwarmFlow runs for a new Team session |
+| `--swarmflow-max-agents <count>` | Server config | Cap concurrent SwarmFlow worker agents for a new Team session |
 
 ### Modes (`--mode`)
 
@@ -296,7 +298,14 @@ jiuwenswarm chat --mode code "help me analyze the code"
 
 # Using canonical values
 jiuwenswarm chat --mode code.plan "design a user system"
+
+# Bound a large multi-agent build without changing server configuration
+jiuwenswarm chat --mode code.team --swarmflow-max-workflows 2 \
+  --swarmflow-max-agents 6 "build and test the service"
 ```
+
+SwarmFlow limits can only tighten the server's configured caps. They take effect
+when the Team runtime is created; a reused `--session` retains its original limits.
 
 ### Session Reuse
 

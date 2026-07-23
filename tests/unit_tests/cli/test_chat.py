@@ -221,6 +221,22 @@ class TestBuildRequest:
         ids = {_build_request(args, "test")["id"] for _ in range(5)}
         assert len(ids) == 5
 
+    @staticmethod
+    def test_swarmflow_limits_are_sent_for_team_mode(monkeypatch):
+        monkeypatch.setattr(os, "getcwd", lambda: "/cwd")
+        args = build_parser().parse_args([
+            "--mode", "code.team",
+            "--swarmflow-max-workflows", "2",
+            "--swarmflow-max-agents", "6",
+            "build it",
+        ])
+
+        assert _validate_args(args) is None
+        assert _build_request(args, "build it")["params"]["swarmflow_concurrency"] == {
+            "max_workflows": 2,
+            "max_agents_total": 6,
+        }
+
 
 class TestValidateArgs:
     @staticmethod
@@ -260,6 +276,11 @@ class TestValidateArgs:
                                   show_reasoning=False, show_tools=False, timeout=None)
         assert _validate_args(args) is None
         assert args.mode == "agent"
+
+    @staticmethod
+    def test_swarmflow_limits_require_team_mode():
+        args = build_parser().parse_args(["--swarmflow-max-agents", "2", "test"])
+        assert _validate_args(args) == 2
 
 
 class TestParser:

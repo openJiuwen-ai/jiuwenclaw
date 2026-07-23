@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_teams.paths import get_agent_teams_home
+from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyLimits
+from openjiuwen.agent_teams.workflow.engine.cap import resolve_agents_per_run_cap
 
 from jiuwenswarm.common.config import get_config
 
@@ -20,6 +22,7 @@ _DEFAULT_COMPLETION_TIMEOUT = 600.0
 _DEFAULT_AGENT_WORKSPACE = {"stable_base": True}
 _DEFAULT_TEAM_WORKSPACE = {"enabled": True}
 _DEFAULT_TRANSPORT = {"type": "inprocess"}
+_SWARMFLOW_OVERRIDE_FIELDS = frozenset({"max_workflows", "max_agents_total"})
 
 
 def _select_first_modes_team(config_base: dict[str, Any]) -> dict[str, Any]:
@@ -356,10 +359,54 @@ def _resolve_enable_permissions(config_base: dict[str, Any], team_raw: dict[str,
     return global_enabled and team_enabled
 
 
+def _apply_swarmflow_concurrency_override(
+    spec_dict: dict[str, Any],
+    override: dict[str, Any] | None,
+) -> None:
+    """Apply request limits without allowing them to exceed administrator caps."""
+    if override is None:
+        return
+    if not isinstance(override, dict):
+        raise ValueError("swarmflow_concurrency must be an object")
+    unknown = set(override) - _SWARMFLOW_OVERRIDE_FIELDS
+    if unknown:
+        raise ValueError(
+            f"unsupported swarmflow_concurrency fields: {', '.join(sorted(unknown))}"
+        )
+    for name, value in override.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"swarmflow_concurrency.{name} must be a positive integer")
+    if not override:
+        return
+
+    defaults = ConcurrencyLimits()
+    limits = deepcopy(spec_dict.get("swarmflow_concurrency") or {})
+    configured_max_agents = limits.get("max_agents_total", defaults.max_agents_total)
+    max_agents = min(
+        configured_max_agents,
+        override.get("max_agents_total", configured_max_agents),
+    )
+    limits["max_agents_total"] = max_agents
+    configured_max_workflows = limits.get("max_workflows", defaults.max_workflows)
+    limits["max_workflows"] = min(
+        configured_max_workflows,
+        override.get("max_workflows", configured_max_workflows),
+        max_agents,
+    )
+    limits["agents_per_run"] = min(
+        resolve_agents_per_run_cap(
+            limits.get("agents_per_run", defaults.agents_per_run)
+        ),
+        max_agents,
+    )
+    spec_dict["swarmflow_concurrency"] = limits
+
+
 def load_team_spec_dict(
     config_base: dict[str, Any] | None = None,
     *,
     requested_model_name: str | None = None,
+    swarmflow_concurrency: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Load team config and build a TeamAgentSpec-compatible dict.
 
@@ -383,6 +430,7 @@ def load_team_spec_dict(
     )
     spec_dict = deepcopy(team_raw)
     spec_dict.pop("enable_team_plan", None)
+    _apply_swarmflow_concurrency_override(spec_dict, swarmflow_concurrency)
 
     spec_dict["team_name"] = str(team_raw.get("team_name", "team")).strip() or "team"
     spec_dict["lifecycle"] = team_raw.get("lifecycle", "persistent")

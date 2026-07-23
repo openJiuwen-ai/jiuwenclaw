@@ -1389,6 +1389,7 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
         records=[_evolution_record("First summary line")],
     )
     captured_spec: list[object] = []
+    captured_kwargs: dict[str, object] = {}
 
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         @staticmethod
@@ -1397,6 +1398,7 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
 
         @staticmethod
         async def get_swarm_enriched_team_spec(**kwargs):
+            captured_kwargs.update(kwargs)
             spec = SimpleNamespace(
                 team_name="unit-team",
                 workspace=SimpleNamespace(root_path=str(tmp_path / "team-workspace")),
@@ -1411,6 +1413,10 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
         request_id="req-team-stream",
         channel_id="web",
         metadata=None,
+        params={
+            "mode": "code.team",
+            "swarmflow_concurrency": {"max_agents_total": 4},
+        },
     )
     inputs = {"query": "/evolve_list demo-skill"}
 
@@ -1435,6 +1441,7 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
     assert chunks[1].is_complete is False
     assert chunks[2].is_complete is True
     assert captured_spec
+    assert captured_kwargs["swarmflow_concurrency"] == {"max_agents_total": 4}
 
 
 @pytest.mark.anyio

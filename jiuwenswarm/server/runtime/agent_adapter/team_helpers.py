@@ -1483,6 +1483,11 @@ async def process_team_message_stream(
             if isinstance(params_obj, dict)
             else ""
         ) or None
+        swarmflow_concurrency = (
+            params_obj.get("swarmflow_concurrency")
+            if isinstance(params_obj, dict)
+            else None
+        )
         # Provider-based assembly: build members from the shared config source,
         # no pre-built parent DeepAgent required.
         team_spec = await team_manager.get_swarm_enriched_team_spec(
@@ -1493,6 +1498,7 @@ async def process_team_message_stream(
             channel_id=channel_id,
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,
+            swarmflow_concurrency=swarmflow_concurrency,
         )
         _persist_team_file_monitor_roots(session_id, team_spec)
     except Exception as exc:

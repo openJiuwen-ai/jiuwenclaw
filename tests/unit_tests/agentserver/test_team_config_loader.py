@@ -15,6 +15,41 @@ def _wrap_modes_team(team_mapping: dict[str, dict]) -> dict:
     return {"modes": {"team": team_mapping}}
 
 
+def test_request_swarmflow_limits_are_validated_and_clamped_to_admin_config():
+    configured = {
+        "max_workflows": 8,
+        "agents_per_run": 6,
+        "max_agents_total": 12,
+    }
+    config = _wrap_modes_team({"demo": {"swarmflow_concurrency": configured}})
+
+    spec = load_team_spec_dict(
+        config_base=config,
+        swarmflow_concurrency={"max_workflows": 20, "max_agents_total": 4},
+    )
+
+    assert spec["swarmflow_concurrency"] == {
+        "max_workflows": 4,
+        "agents_per_run": 4,
+        "max_agents_total": 4,
+    }
+    assert configured == {
+        "max_workflows": 8,
+        "agents_per_run": 6,
+        "max_agents_total": 12,
+    }
+    workflows_only = load_team_spec_dict(
+        config_base=config,
+        swarmflow_concurrency={"max_workflows": 2},
+    )
+    assert workflows_only["swarmflow_concurrency"]["max_agents_total"] == 12
+    with pytest.raises(ValueError, match="positive integer"):
+        load_team_spec_dict(
+            config_base=config,
+            swarmflow_concurrency={"max_agents_total": 0},
+        )
+
+
 def test_load_team_spec_dict_reads_models_defaults_from_repository_config(monkeypatch):
     """Repository config template should provide the default team model from models.defaults."""
     repo_config = Path(__file__).resolve().parents[3] / "jiuwenswarm" / "resources" / "config.yaml"
