@@ -338,7 +338,14 @@ async def _generate_report_html(
                 report_path_html,
                 fallback_exc,
             )
-            report_path_html.unlink(missing_ok=True)
+            try:
+                report_path_html.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                logger.warning(
+                    "Failed to remove partial HTML output. output=%s error=%s",
+                    report_path_html,
+                    cleanup_exc,
+                )
             return None
 
     return report_path_html

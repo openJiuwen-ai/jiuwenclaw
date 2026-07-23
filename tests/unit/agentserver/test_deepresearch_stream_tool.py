@@ -631,6 +631,36 @@ async def test_generate_report_html_removes_partial_output_when_both_paths_fail(
     assert not report_path_html.exists()
 
 
+@pytest.mark.asyncio
+async def test_generate_report_html_ignores_partial_output_cleanup_failure(
+    tmp_path,
+):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+
+    with patch.object(dt.logger, "warning") as warning, patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        side_effect=RuntimeError("styled export unavailable"),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
+        side_effect=RuntimeError("offline conversion unavailable"),
+    ), patch.object(
+        dt.Path,
+        "unlink",
+        side_effect=PermissionError("read-only output"),
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Report"}, report_path_md
+        )
+
+    assert html_path is None
+    assert any(
+        args[0] == "Failed to remove partial HTML output. output=%s error=%s"
+        for args, _kwargs in warning.call_args_list
+    )
+
+
 def test_write_report_markdown_builds_inference_bundle_and_strips_internal_markers(tmp_path):
     final_result = {
         "response_content": (
