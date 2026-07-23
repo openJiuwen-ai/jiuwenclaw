@@ -26,6 +26,7 @@ class StylePrepareNode(PlanNode):
                 "1. 根据用户选择的 `style_id` 取得风格定义内容\n"
                 "2. 将风格内容落盘到 `{output_dir}/style-{style_id}.md`\n"
                 "3. 通过 `style_file_path` 单字段交付给下游 P8（设计师节点）\n"
+                "4. `style_mode == template_canvas` 时跳过风格文件生成，直接透传 `pack_dir` 给下游\n"
                 "\n"
                 "### 前置条件\n"
                 "- `read_file` / `write_file` 工具可用（skill_codes/ 内禁止直接 IO，必须走工具）\n"
@@ -47,11 +48,12 @@ class StylePrepareNode(PlanNode):
                 "\n"
                 "### 执行流程\n"
                 "1. **校验 output_dir**：为空直接返回空 style_file_path（记录 error）\n"
-                "2. **预设风格分支**（`style_id` ∈ {business-classic/tech-minimal/elegant-narrative/industrial-tech}）：\n"
+                "2. **模板画布分支**（`style_mode == template_canvas`）：跳过风格文件生成，校验 `pack_dir` 非空后透传给下游 P8\n"
+                "3. **预设风格分支**（`style_id` ∈ {business-classic/tech-minimal/elegant-narrative/industrial-tech}）：\n"
                 "   - 优先从 `pptx_root/styles/{style_id}.md` 读取（外部 skill 目录），兜底 `__file__` 同级 styles 目录\n"
-                "   - 读取成功且非空 → 跳到步骤 4\n"
-                "   - 读取失败/为空 → 落入步骤 3（降级）\n"
-                "3. **自定义风格分支**（free/custom 或预设降级）：\n"
+                "   - 读取成功且非空 → 跳到步骤 5\n"
+                "   - 读取失败/为空 → 落入步骤 4（降级）\n"
+                "4. **自定义风格分支**（free/custom 或预设降级）：\n"
                 "   - 调用 LLM 生成包含 5 段结构的风格规范 Markdown：\n"
                 "     - 整体风格描述\n"
                 "     - 配色方案（主色/辅色/背景色/文字色/强调色，HEX）\n"
@@ -59,11 +61,12 @@ class StylePrepareNode(PlanNode):
                 "     - 排版与组件规范（页面尺寸 1280×720px、字号、卡片风格）\n"
                 "     - 设计禁忌（禁止未定义颜色/字体、禁止动画）\n"
                 "   - free：仅靠 `topic` 推断；custom：参考 `style_description`\n"
-                "4. **统一落盘**：调用 `write_file(file_path={output_dir}/style-{style_id}.md, content=...)`\n"
-                "5. **返回**：`style_file_path` = `{output_dir}/style-{style_id}.md`\n"
+                "5. **统一落盘**：调用 `write_file(file_path={output_dir}/style-{style_id}.md, content=...)`\n"
+                "6. **返回**：`style_file_path` = `{output_dir}/style-{style_id}.md`\n"
                 "\n"
                 "### 失败兜底（按短路顺序）\n"
                 "- `output_dir` 为空：直接返回空 `style_file_path` + error 日志\n"
+                "- `style_mode == template_canvas` 但 `pack_dir` 为空：返回空 `style_file_path` + 空 `pack_dir` + error 日志\n"
                 "- read_file 工具不可用 / 预设文件读取失败 / 内容为空：降级走 LLM 自定义生成路径\n"
                 "- LLM 自定义生成失败/返回空：返回空 `style_file_path`，**不擅自构造默认风格**，由 P8 决定降级\n"
                 "- write_file 不可用 / 写入异常：返回 `style_file_path` 但仅记录 error 日志，下游若拿到不存在的文件需自行处理\n"
@@ -82,11 +85,11 @@ class StylePrepareNode(PlanNode):
             logger.error("[P7] output_dir 为空，无法落盘风格文件")
             return {"style_file_path": ""}
 
-        # 模板包模式：跳过风格文件读取，直接透传 pack_dir
-        if style_mode == "template_pack":
+        # 模板画布模式：跳过风格文件读取，直接透传 pack_dir
+        if style_mode == "template_canvas":
             pack_dir = str(inputs.get("pack_dir") or "").strip()
             if not pack_dir:
-                logger.error("[P7] style_mode=template_pack 但 pack_dir 为空")
+                logger.error("[P7] style_mode=template_canvas 但 pack_dir 为空")
                 return {"style_file_path": "", "pack_dir": ""}
             logger.info("[P7] 模板包模式，跳过风格文件生成，pack_dir=%s", pack_dir)
             return {
@@ -157,7 +160,7 @@ class StylePrepareNode(PlanNode):
     async def _load_preset_style(self, style_id: str, pptx_root: str = "") -> str:
         candidates: list[Path] = []
         if pptx_root:
-            candidates.append(Path(pptx_root) / "styles" / f"{style_id}.md")
+            candidates.append(Path(pptx_root) / "references" / "styles" / style_id / "style.md")
         candidates.append(_PRESET_STYLES_DIR / f"{style_id}.md")
 
         if not self.has_tool("read_file"):

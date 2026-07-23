@@ -218,7 +218,11 @@ _DESIGN_RULES_DIGEST = (
     "这些子元素增加总内容高度，在 PPTX 导出时 `overflow-hidden` 不被尊重会导致溢出\n"
     "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体"
     "（除非用户在原始 query 中明确指定了字体或配色，此时以用户指定值为准）；"
-    "所有页面 `<body>` 背景色必须统一，从风格规范中取一致的背景色，禁止部分页面用浅灰/灰色背景而其他页用白色\n"
+    "所有页面 `<body>` 背景色必须统一，从风格规范中取一致的背景色，禁止部分页面用浅灰/灰色背景而其他页用白色；"
+    "**字体强制声明**：风格规范文件 frontmatter 中的 `font-family` 字段声明了字体栈（如 `WenYuan Sans SC, Arial, Noto Sans SC, sans-serif`），"
+    "每个页面的 `<style>` 块中必须在 `body` 选择器或 `.ppt-slide` 选择器上声明该完整字体栈，例如："
+    "`body { font-family: 'WenYuan Sans SC', 'Arial', 'Noto Sans SC', sans-serif; }`；"
+    "禁止仅在 CSS 中声明而漏掉 HTML 元素上的字体继承——所有文本元素必须继承 `body` 的 `font-family`，不得单独使用其他字体\n"
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚；"
     "禁止页脚出现纯数字页码编号（除非用户在原始 query 中明确要求页码，此时应在用户指定位置添加页码，格式如 3/12）\n"
     "13. 布局实现：所有区域用 `flex-1 min-h-0` 自动分配高度，禁止手动计算 px 值；"
@@ -281,16 +285,24 @@ _STRUCTURAL_DESIGN_RULES = (
     "所有页面背景色必须统一，从风格规范中取一致的背景色，禁止部分页面自行使用不同背景色；"
     "页面背景色必须与风格规范一致，深色主题用深色底色、浅色主题用浅色底色，"
     "禁止自行使用与风格不符的渐变或底色；"
-    "封面/结束页如使用图片背景，`from-black/*` 渐变层是遮罩(overlay)非底色\n"
+    "封面/结束页如使用图片背景，`from-black/*` 渐变层是遮罩(overlay)非底色；"
+    "**字体强制声明**：风格规范文件 frontmatter 中的 `font-family` 字段声明了字体栈，"
+    "每个页面的 `<style>` 块中必须在 `body` 或 `.ppt-slide` 选择器上声明该完整字体栈，例如："
+    "`body { font-family: 'WenYuan Sans SC', 'Arial', 'Noto Sans SC', sans-serif; }`\n"
     "6. 布局：居中排列（`flex flex-col items-center justify-center`），"
     "不强制 grid-cols-2 双栏\n"
-    "7. 留白：允许较高留白，不强制数据卡片、图表或数据来源页脚\n"
+    "7. 留白：允许较高留白，**禁止堆砌数据卡片**：封面页最多保留 3 个数据卡，结束页最多保留 4 个数据回响卡；"
+    "结构页核心是标题+副标题+日期/汇报人信息，不得塞入研究报告中的详细数据或图表\n"
     "8. 全局禁止 `rounded-*` 类，所有元素 border-radius:0\n"
 )
 
 _STRUCTURAL_HTML_SKELETON = (
     "### 标准 HTML 骨架（结构页专用）\n"
     "```html\n"
+    "<style>\n"
+    "body { font-family: 'WenYuan Sans SC', 'Arial', 'Noto Sans SC', sans-serif; margin: 0; }\n"
+    ".ppt-slide { width: 1280px; height: 720px; overflow: hidden; box-sizing: border-box; }\n"
+    "</style>\n"
     '<div class="ppt-slide">\n'
     '  <div class="content-safe flex flex-col items-center justify-center h-full">\n'
     "    <h1 class=\"text-center\">标题</h1>\n"
@@ -300,6 +312,7 @@ _STRUCTURAL_HTML_SKELETON = (
     "```\n"
     "- 居中布局，不使用 grid-cols-2\n"
     "- 无需 header/main/footer 三段式，无需数据来源页脚\n"
+    "- **font-family 必须从风格规范文件 frontmatter 中取完整字体栈**，在 <style> 中声明\n"
 )
 
 
@@ -2158,12 +2171,14 @@ class PPTPageGenNode(PlanNode):
                 "2. 三阶段串行编排：预处理 → per-page 闭环生成 → QA 与自动修复\n"
                 "   - per-page 闭环内部 N 页 asyncio.gather 并发，单页内生成→密度判定→搜索补充→重写串行\n"
                 "3. 不区分单 Agent 模式，LLM 并发度由框架 semaphore 控制\n"
+                "4. `style_mode == template_canvas` 时走模板画布分支：跳过普通三阶段，改由 `_execute_template_pack` 用模板包 + LLM 填充生成页面\n"
                 "\n"
                 "### 输入\n"
                 "- `output_dir`（必填）: 工作目录（含 outline.md / research-P{N}.md）\n"
                 "- `pages_dir`（必填）: HTML 输出目录\n"
-                "- `style_file_path`（必填）: P7 落盘的风格文件\n"
-                "- `style_id`（必填）: 用于预设风格强约束\n"
+                "- `style_file_path`（普通分支必填）: P7 落盘的风格文件；`template_canvas` 分支为空，改用 `pack_dir`\n"
+                "- `pack_dir`（`template_canvas` 分支必填）: 模板包目录绝对路径\n"
+                "- `style_id`（普通分支必填）: 用于预设风格强约束\n"
                 "- `page_count`（必填）: 大纲页数 N\n"
                 "- `topic`（可选）: PPT 主题，密度检查搜索补充用\n"
                 "- `search_mode`（可选）: 密度阈值放宽依据\n"
@@ -2183,15 +2198,17 @@ class PPTPageGenNode(PlanNode):
                 "\n"
                 "### 执行流程\n"
                 "1. 输入校验：必填字段任一空 → failed\n"
-                "2. 调用 P8.0 PrepareNode → 读资料 + 按页拆分，产出共享只读数据；prepare_status=failed → 直接 failed\n"
-                "3. 调用 P8.1 PageWorkerNode → per-page 闭环"
+                "2. `style_mode == template_canvas` 时走 `_execute_template_pack`：用模板包 + LLM 填充生成页面，不进入普通三阶段\n"
+                "3. 调用 P8.0 PrepareNode → 读资料 + 按页拆分，产出共享只读数据；prepare_status=failed → 直接 failed\n"
+                "4. 调用 P8.1 PageWorkerNode → per-page 闭环"
                 "（生成→密度判定→搜索补充→重写）"
                 "→ page_files / missing_pages / low_density_pages\n"
-                "4. 调用 P8.2 QAFixNode → qa_status / final_page_files / fix_report\n"
-                "5. 汇总状态：missing 空 + low 空 + qa=ok → ok；qa=failed → failed；其余 partial\n"
+                "5. 调用 P8.2 QAFixNode → qa_status / final_page_files / fix_report\n"
+                "6. 汇总状态：missing 空 + low 空 + qa=ok → ok；qa=failed → failed；其余 partial\n"
                 "\n"
                 "### 失败兜底\n"
                 "- 必填校验失败：直接返回 failed，不进入子节点\n"
+                "- `template_canvas` 分支 `pack_dir` 为空或 `page_count` 非法：直接返回 failed\n"
                 "- P8.0 prepare_status=failed：直接返回 failed，不进入 P8.1\n"
                 "- 子节点透传错误，根节点不阻塞，按汇总规则归并状态\n"
             ),
@@ -2203,13 +2220,13 @@ class PPTPageGenNode(PlanNode):
         )
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        # 模板包分支优先判断：style_mode == template_pack 时走 template-filler 流程
+        # 模板画布分支优先判断：style_mode == template_canvas 时走模板画布流程
         style_mode = str(inputs.get("style_mode") or "").strip()
-        if style_mode == "template_pack":
-            # template_pack 分支只需要 pack_dir，不需要 style_file_path
+        if style_mode == "template_canvas":
+            # template_canvas 分支只需要 pack_dir，不需要 style_file_path
             pack_dir = str(inputs.get("pack_dir") or "").strip()
             if not pack_dir:
-                logger.error("[P8] template_pack 分支必填字段 pack_dir 为空")
+                logger.error("[P8] template_canvas 分支必填字段 pack_dir 为空")
                 return {
                     "pages_dir": str(inputs.get("pages_dir") or ""),
                     "page_files": [],
@@ -2232,7 +2249,7 @@ class PPTPageGenNode(PlanNode):
             )
             return await self._execute_template_pack(inputs, page_count, total_pages)
 
-        # 非 template_pack 分支：需要 style_file_path 等字段
+        # 非 template_canvas 分支：需要 style_file_path 等字段
         required_fields = (
             "output_dir",
             "pages_dir",
@@ -2366,7 +2383,7 @@ class PPTPageGenNode(PlanNode):
         # 1. preflight 预检
         try:
             preflight_cmd = (
-                f"{fill_js_path(pptx_root)} preflight "
+                f"{cli_path('preflight', pptx_root)} "
                 f"{quote_path(pack_dir)} {quote_path(output_dir)} {quote_path(pages_dir)}"
             )
             await run_bash(
@@ -2434,9 +2451,9 @@ class PPTPageGenNode(PlanNode):
             check_ok = True
             try:
                 check_cmd = (
-                    f"{fill_js_path(pptx_root)} check "
-                    f"{quote_path(pack_dir)} {quote_path(pages_dir)}"
-                )
+                f"{cli_path('check', pptx_root)} "
+                f"{quote_path(pack_dir)} {quote_path(pages_dir)}"
+            )
                 check_result = await run_bash(
                     self, check_cmd,
                     timeout_seconds=300, required=False, workdir=pptx_root,
@@ -2769,7 +2786,7 @@ class PPTPageGenNode(PlanNode):
         page_path = f"{pages_dir}/page-{page_num}.pptx.html"
         try:
             seed_cmd = (
-                f"{fill_js_path(pptx_root)} seed "
+                f"{cli_path('seed', pptx_root)} "
                 f"{quote_path(pack_dir)} {template_id} {quote_path(page_path)} copy"
             )
             await run_bash(

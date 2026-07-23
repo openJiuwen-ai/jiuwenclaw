@@ -18,6 +18,7 @@ from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.image_prepare import Ima
 from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.ppt_page_gen import PPTPageGenNode
 from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.ppt_export import PPTExportNode
 from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.delivery import DeliveryNode
+from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.speaker_notes import SpeakerNotesNode
 
 _P3_SKIP_MESSAGE = "未检测到待解析文档，跳过文档解析"
 _P3_SKIP_FIELDS = {
@@ -56,6 +57,8 @@ class PPTGenRootNode(PlanNode):
         self._p2 = RequirementCollectNode()
         self._p3 = DocumentParseNode()
         self._p3_5 = TemplateContextNode()
+        self._speaker_notes = SpeakerNotesNode()
+        self._delivery = DeliveryNode()
         self._tail_plans = [
             ContentPlanNode(),
             OutlineReviewNode(),
@@ -64,11 +67,13 @@ class PPTGenRootNode(PlanNode):
             ImagePrepareNode(),
             PPTPageGenNode(),
             PPTExportNode(),
-            DeliveryNode(),
+            # Stage 8: 演讲备注（仅 need_speaker_notes=True 时执行，best-effort 不阻塞交付）
+            self._speaker_notes,
+            self._delivery,
         ]
         super().__init__(
             plan_name="ppt_gen_root",
-            instruction="PPT生成任务流根节点，串联P0-P10全流程",
+            instruction="PPT生成任务流根节点，串联P0-P10全流程（含Stage 8演讲备注）",
             # P3 固定保留在任务列表；无附件时运行时 skip 并标记 completed。
             sub_plans=[
                 self._p0,

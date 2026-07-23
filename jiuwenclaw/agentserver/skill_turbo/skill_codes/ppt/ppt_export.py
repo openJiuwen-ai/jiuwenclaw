@@ -15,6 +15,9 @@ from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.utils.bash_utils import 
     run_bash,
 )
 
+# fill_js_path 已废除，旧 fill.js 子命令改为 cli_path 子命令
+fill_js_path = None
+
 _PPT_DIR = Path(__file__).resolve().parent
 
 logger = logging.getLogger(__name__)
@@ -64,6 +67,12 @@ class PPTExportNode(PlanNode):
             instruction=(
                 "## P9 PPTX 导出\n"
                 "\n"
+                "### 节点职责\n"
+                "1. sanitize topic → 生成 PPTX 文件名\n"
+                "2. 普通分支：cli.js convert 将 pages_dir 下 HTML 转为 PPTX\n"
+                "3. `template_canvas` 分支：走 `_execute_template_finalizer`，执行 check → snapshot-dna → template-safe fix → convert → check-pptx-artifact 终检导出流程\n"
+                "4. 验证 PPTX 产物（文件存在 + 大小 > 10KB）\n"
+                "\n"
                 "### 前置条件\n"
                 "- `bash` 工具可用\n"
                 "- Node.js >= 18 已安装\n"
@@ -73,6 +82,8 @@ class PPTExportNode(PlanNode):
                 "- `output_dir`（必填）: 会话产物目录\n"
                 "- `pages_dir`（必填）: HTML 页面目录\n"
                 "- `topic`（必填）: PPT 主题，用于生成 PPTX 文件名\n"
+                "- `style_mode`（可选）: `template_canvas` 时走模板终检导出流程\n"
+                "- `pack_dir`（`template_canvas` 分支必填）: 模板包目录绝对路径\n"
                 "\n"
                 "### 输出\n"
                 "- `pptx_path`: 最终 PPTX 文件绝对路径（失败时为空字符串）\n"
@@ -81,10 +92,14 @@ class PPTExportNode(PlanNode):
                 "\n"
                 "### 执行流程\n"
                 "1. sanitize topic → 生成 PPTX 文件名\n"
-                "2. cli.js convert：将 pages_dir 下 HTML 转为 PPTX\n"
-                "3. 验证 PPTX 产物（文件存在 + 大小 > 10KB）\n"
+                "2. `style_mode == template_canvas` 时走 `_execute_template_finalizer`：check → snapshot-dna → template-safe fix → convert → check-pptx-artifact\n"
+                "3. 普通分支：cli.js convert 将 pages_dir 下 HTML 转为 PPTX\n"
+                "4. 验证 PPTX 产物（文件存在 + 大小 > 10KB）\n"
                 "\n"
                 "### 失败兜底\n"
+                "- `template_canvas` 分支 `pack_dir` 为空：export_status = failed\n"
+                "- fill.js check 出现内容质量类 HARD 错误：export_status = failed（manifest 声明类警告忽略）\n"
+                "- snapshot-template-dna / template-safe fix 失败：export_status = failed\n"
                 "- cli.js convert 失败：export_status = failed，pptx_path 为空\n"
                 "- PPTX 文件过小（< 10KB）：export_status = partial\n"
                 "- bash 不可用：export_status = failed\n"
@@ -113,9 +128,9 @@ class PPTExportNode(PlanNode):
 
         pptx_root = str(inputs.get("pptx_root") or str(_PPT_DIR))
 
-        # 模板包分支：style_mode == template_pack 时走 template-finalizer 流程
+        # 模板画布分支：style_mode == template_canvas 时走模板终检导出流程
         style_mode = str(inputs.get("style_mode") or "").strip()
-        if style_mode == "template_pack":
+        if style_mode == "template_canvas":
             paths = ExportPaths(
                 output_dir=output_dir,
                 pages_dir=pages_dir,
@@ -171,8 +186,8 @@ class PPTExportNode(PlanNode):
         # 1. 复核 template-filler 输出
         try:
             check_cmd = (
-                f"{fill_js_path(pptx_root)} check "
-                f"{quote_path(pack_dir)} {quote_path(pages_dir)}"
+                f"{cli_path('check', pptx_root)} "
+                f"{quote_path(pages_dir)}"
             )
             result = await run_bash(
                 self, check_cmd,
@@ -209,7 +224,7 @@ class PPTExportNode(PlanNode):
         # 2. DNA 快照（在 fix 之前保存原始 DNA）
         try:
             snapshot_cmd = (
-                f"{fill_js_path(pptx_root)} snapshot-template-dna "
+                f"{cli_path('snapshot-template-dna', pptx_root)} "
                 f"{quote_path(pages_dir)} {quote_path(dna_path)}"
             )
             result = await run_bash(
@@ -259,7 +274,7 @@ class PPTExportNode(PlanNode):
         # 4. post-fix 安全闸（字号/内容跨度问题不阻塞导出，仅警告）
         try:
             post_fix_cmd = (
-                f"{fill_js_path(pptx_root)} check-post-fix-template-pages "
+                f"{cli_path('check-post-fix-template-pages', pptx_root)} "
                 f"{quote_path(pages_dir)} {quote_path(dna_path)}"
             )
             result = await run_bash(
@@ -283,7 +298,7 @@ class PPTExportNode(PlanNode):
         # 6. 产物硬闸
         try:
             artifact_cmd = (
-                f"{fill_js_path(pptx_root)} check-pptx-artifact "
+                f"{cli_path('check-pptx-artifact', pptx_root)} "
                 f"{quote_path(pages_dir)} {quote_path(pptx_path)}"
             )
             result = await run_bash(

@@ -103,14 +103,16 @@ def _resolve_pptx_root(inputs: dict[str, Any]) -> str:
 
 
 _NPM_DEPS = {
-    "commander": "^12.0.0",
-    "express": "^4.21.0",
-    "get-port": "^7.1.0",
-    "playwright": "^1.52.0",
+    "commander": "^13.0.0",
+    "express": "^5.2.1",
+    "get-port": "^7.2.0",
+    "playwright": "1.57.0",
+    "jszip": "^3.10.1",
 }
 
 _PACKAGE_JSON_CONTENT = (
-    '{"name":"ppt-scripts","version":"1.0.0","private":true,"type":"module",'
+    '{"name":"pptx-craft-runtime","version":"2.0.0","private":true,"type":"module",'
+    f'"bin":{{"pptx-craft-cli":"./packages/cli/dist/cli.js"}},'
     f'"dependencies":{json.dumps(_NPM_DEPS)}}}\n'
 )
 

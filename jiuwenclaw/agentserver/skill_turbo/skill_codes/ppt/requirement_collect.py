@@ -1455,18 +1455,18 @@ class RequirementCollectNode(PlanNode):
             return  # 已显式设置，不覆盖
         pack_dir = str(ctx.get("pack_dir") or "").strip()
         if pack_dir:
-            # 检查模板包完整性：template-manifest.json 是 fill.js check 的硬性依赖
-            manifest_path = Path(pack_dir) / "template-manifest.json"
-            if not manifest_path.is_file():
+            # prod 版模板包用 template-spec.json，不再依赖 template-manifest.json
+            spec_path = Path(pack_dir) / "template-spec.json"
+            if not spec_path.is_file():
                 logger.warning(
-                    "[P2] 模板包不完整（缺少 template-manifest.json），降级为 custom 模式: %s",
+                    "[P2] 模板包不完整（缺少 template-spec.json），降级为 custom 模式: %s",
                     pack_dir,
                 )
                 ctx["style_mode"] = "custom"
                 ctx["style_id"] = "custom"
                 ctx["template_pack_degraded"] = True
                 return
-            ctx["style_mode"] = "template_pack"
+            ctx["style_mode"] = "template_canvas"
             return
         style_id = str(ctx.get("style_id") or "").strip()
         if style_id in _VALID_STYLE_IDS - {"free", "custom"}:
