@@ -119,6 +119,10 @@ echo "✅ 前端 dist 已嵌入 HNP 包"
 echo ""
 
 # 清理缓存（减小体积）
+# 注: 不在此处预编译 pyc —— 打包机 python (cpython-311/win) 与设备 HNP python
+# (cpython-312/aarch64-linux-ohos) magic tag 不同, 打包态生成的 pyc 设备会忽略
+# 并重新编译. pyc 预编译改由设备首启时用自身 python3.12 跑 compileall 完成
+# (见 scripts/harmony_entry.py 的 _precompile_pycache).
 echo "清理 HNP 包内缓存..."
 find "$HNP_WORK_DIR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 find "$HNP_WORK_DIR" -name '*.pyc' -delete 2>/dev/null || true
