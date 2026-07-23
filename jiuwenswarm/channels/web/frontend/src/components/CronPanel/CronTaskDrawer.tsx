@@ -89,12 +89,32 @@ interface CronTaskDrawerProps {
 
 const fieldClass = 'w-full rounded-md border border-border bg-card px-3 py-1.5 text-sm text-text outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50';
 
+// 后端存在两条"默认项目"记录（project_id 分别为 'default'/'default_code'，对应普通/代码工作模式），
+// 二者 project_dir 均为空串，展示名也都被 getProjectDisplayName 统一成"默认项目"（见 workspaceStore.ts）。
+// 项目下拉框按原始 projects 直接 map 会把这两条都列出来，造成"默认项目"重复出现两次（bug005）。
+// 这里只保留第一条命中的默认类项目，其余同类项目过滤掉——跟 ConversationSidebar.tsx 里对默认项目的
+// 收敛处理是同一思路，但收敛范围只限于这个下拉框的可选项，不改 CronPanel 里传入的 projects 原始列表
+// （cronJobToUI 还要用完整列表按 project_id 精确匹配任务归属的项目名，见 index.tsx）。
+function isDefaultLikeProject(p: ProjectInfo): boolean {
+  return p.is_default || p.project_id === 'default' || p.project_id === 'default_code';
+}
+
+function dedupeDefaultProjects(projects: ProjectInfo[]): ProjectInfo[] {
+  let seenDefault = false;
+  return projects.filter((p) => {
+    if (!isDefaultLikeProject(p)) return true;
+    if (seenDefault) return false;
+    seenDefault = true;
+    return true;
+  });
+}
+
 export default function CronTaskDrawer({ mode, initial, projects, targetOptions, proactiveLocked = false, onClose, onSubmit, onSwitchToManual, onSwitchToTemplate }: CronTaskDrawerProps) {
   const { t } = useTranslation();
   const [form, setForm] = useState<CronTaskFormValue>(initial ?? emptyForm());
 
   const title = mode === 'edit' ? t('cron.drawer.titleEdit') : mode === 'template' ? t('cron.drawer.titleTemplate') : t('cron.drawer.titleCreate');
-  const projectOptions = projects.map((p) => ({ value: p.project_dir, label: getProjectDisplayName(p) }));
+  const projectOptions = dedupeDefaultProjects(projects).map((p) => ({ value: p.project_dir, label: getProjectDisplayName(p) }));
   const timezoneOptions = TIMEZONE_OPTIONS.map((tz) => ({ value: tz, label: tz }));
   // 必填项缺失时，收集清单用来在"确定"按钮旁给出具体提示（而不是只让按钮变灰、不说原因）
   const missingFieldLabels: string[] = [];
