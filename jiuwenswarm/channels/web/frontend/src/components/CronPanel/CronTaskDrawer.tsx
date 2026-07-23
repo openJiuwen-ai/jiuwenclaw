@@ -249,21 +249,32 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           </div>
         </div>
 
-        <div className="mt-8 flex justify-center gap-3">
-          <button
-            onClick={() => onSubmit(form)}
-            disabled={!canSubmit}
-            title={missingFieldsHint}
-            className="rounded-full bg-cron-action px-10 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:opacity-50"
-          >
-            {t('cron.actions.confirm')}
-          </button>
-          <button
-            onClick={onClose}
-            className="rounded-full border border-border bg-card px-10 py-1.5 text-sm font-bold text-text hover:bg-bg-hover"
-          >
-            {t('common.cancel')}
-          </button>
+        <div className="mt-8 flex flex-col items-center gap-2">
+          <div className="flex justify-center gap-3">
+            {/* title 挂在按钮外层这个非 disabled 的 span 上，而不是挂在 disabled 的 <button> 本身——
+                主流浏览器（Chromium/Firefox）对 disabled 的原生表单控件不派发 hover 事件，title
+                tooltip 因此根本不会弹出，之前的实现导致"按钮置灰但怎么悬停都没有提示"
+                （见 2026-07-23 bugfix，bug002）。这里额外在按钮下方常驻展示同一段文案作为主要
+                提示渠道，span 上的 title 只是锦上添花的 hover 备份。 */}
+            <span title={missingFieldsHint}>
+              <button
+                onClick={() => onSubmit(form)}
+                disabled={!canSubmit}
+                className="rounded-full bg-cron-action px-10 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:opacity-50"
+              >
+                {t('cron.actions.confirm')}
+              </button>
+            </span>
+            <button
+              onClick={onClose}
+              className="rounded-full border border-border bg-card px-10 py-1.5 text-sm font-bold text-text hover:bg-bg-hover"
+            >
+              {t('common.cancel')}
+            </button>
+          </div>
+          {missingFieldsHint && (
+            <p className="text-xs text-danger">{missingFieldsHint}</p>
+          )}
         </div>
       </div>
     </div>
