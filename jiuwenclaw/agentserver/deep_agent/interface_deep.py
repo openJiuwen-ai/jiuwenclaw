@@ -138,6 +138,9 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
 )
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 from jiuwenclaw.agentserver.tools.harness_named_web_tools import build_jiuwen_harness_named_web_tools
+from jiuwenclaw.agentserver.tool_registration import (
+    ensure_tool_registered as _ensure_tool_registered,
+)
 
 from jiuwenclaw.agentserver.tools import SendFileToolkit, SkillToolkit
 from jiuwenclaw.agentserver.tools.ask_user_question_tool import get_ask_user_question_tool
@@ -2320,9 +2323,8 @@ class JiuWenClawDeepAdapter:
                 agent_id=agent_id,
                 language=self._resolve_runtime_language(),
         ):
-            if Runner.resource_mgr.get_tool(tool.card.id) is None:
-                Runner.resource_mgr.add_tool(tool)
-            tool_cards.append(tool.card)
+            registered = _ensure_tool_registered(tool)
+            tool_cards.append(registered.card)
 
         # 付费搜索工具：有任意一个付费 key 就注册
         if any(
@@ -2330,18 +2332,18 @@ class JiuWenClawDeepAdapter:
                 for key in ("BOCHA_API_KEY", "PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
         ):
             self._paid_search_tool = WebPaidSearchTool(language=self._resolve_runtime_language(), agent_id=agent_id)
-            Runner.resource_mgr.add_tool(self._paid_search_tool)
-            tool_cards.append(self._paid_search_tool.card)
+            registered = _ensure_tool_registered(self._paid_search_tool)
+            self._paid_search_tool = registered
+            tool_cards.append(registered.card)
             self._paid_search_registered = True
 
         self._petal_search_tools = []
         self._petal_search_registered = False
         if enable_petal_search():
             try:
-                if not Runner.resource_mgr.get_tool(mcp_petal_search.card.id):
-                    Runner.resource_mgr.add_tool(mcp_petal_search)
-                tool_cards.append(mcp_petal_search.card)
-                self._petal_search_tools = [mcp_petal_search]
+                registered = _ensure_tool_registered(mcp_petal_search)
+                tool_cards.append(registered.card)
+                self._petal_search_tools = [registered]
                 self._petal_search_registered = True
             except Exception as exc:
                 logger.warning(
@@ -2358,9 +2360,9 @@ class JiuWenClawDeepAdapter:
                         vision_model_config=self._vision_model_config,
                         agent_id=agent_id
                 ):
-                    Runner.resource_mgr.add_tool(tool)
-                    tool_cards.append(tool.card)
-                    self._vision_tools.append(tool)
+                    registered = _ensure_tool_registered(tool)
+                    tool_cards.append(registered.card)
+                    self._vision_tools.append(registered)
                 self._vision_tools_registered = bool(self._vision_tools)
             except Exception as exc:
                 self._vision_tools = []
@@ -2372,10 +2374,12 @@ class JiuWenClawDeepAdapter:
         self._audio_tools = []
         self._audio_tools_registered = False
         try:
-            self._audio_tools = self._iter_runtime_audio_tools(agent_id)
-            for tool in self._audio_tools:
-                Runner.resource_mgr.add_tool(tool)
-                tool_cards.append(tool.card)
+            audio_tools = self._iter_runtime_audio_tools(agent_id)
+            self._audio_tools = []
+            for tool in audio_tools:
+                registered = _ensure_tool_registered(tool)
+                tool_cards.append(registered.card)
+                self._audio_tools.append(registered)
             self._audio_tools_registered = bool(self._audio_tools)
         except Exception as exc:
             self._audio_tools = []
@@ -2387,9 +2391,8 @@ class JiuWenClawDeepAdapter:
         self._video_tool_registered = False
         if self._video_model_config:
             try:
-                if not Runner.resource_mgr.get_tool(video_understanding.card.id):
-                    Runner.resource_mgr.add_tool(video_understanding)
-                tool_cards.append(video_understanding.card)
+                registered = _ensure_tool_registered(video_understanding)
+                tool_cards.append(registered.card)
                 self._video_tool_registered = True
             except Exception as exc:
                 logger.warning(
@@ -2422,8 +2425,8 @@ class JiuWenClawDeepAdapter:
             ]
             try:
                 for xt in _xiaoyi_tools:
-                    Runner.resource_mgr.add_tool(xt)
-                    tool_cards.append(xt.card)
+                    registered = _ensure_tool_registered(xt)
+                    tool_cards.append(registered.card)
                 self._xiaoyi_phone_tools_registered = True
                 logger.info(
                     "[JiuWenClawDeepAdapter] %d xiaoyi phone tools registered", len(_xiaoyi_tools)
@@ -2437,10 +2440,9 @@ class JiuWenClawDeepAdapter:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
             skill_tool_names: list[str] = []
             for tool in skill_toolkit.get_tools():
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
-                tool_cards.append(tool.card)
-                skill_tool_names.append(tool.card.name)
+                registered = _ensure_tool_registered(tool)
+                tool_cards.append(registered.card)
+                skill_tool_names.append(registered.card.name)
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillToolkit registered: tools=%s",
                 skill_tool_names,
@@ -2451,9 +2453,8 @@ class JiuWenClawDeepAdapter:
         # AskUserQuestion 工具：用于 LLM 主动结构化追问并等待用户回答
         try:
             ask_tool = get_ask_user_question_tool()
-            if not Runner.resource_mgr.get_tool(ask_tool.card.id):
-                Runner.resource_mgr.add_tool(ask_tool)
-            tool_cards.append(ask_tool.card)
+            registered = _ensure_tool_registered(ask_tool)
+            tool_cards.append(registered.card)
             logger.info("[JiuWenClawDeepAdapter] AskUserQuestion tool registered")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] AskUserQuestion tool registration failed: %s", exc)
@@ -2461,9 +2462,8 @@ class JiuWenClawDeepAdapter:
         # DeepResearch 执行工具
         try:
             for tool in get_deepresearch_tools():
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
-                tool_cards.append(tool.card)
+                registered = _ensure_tool_registered(tool)
+                tool_cards.append(registered.card)
             logger.info(
                 "[JiuWenClawDeepAdapter] deepresearch tools registered successfully",
             )
