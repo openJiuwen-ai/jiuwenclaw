@@ -10,7 +10,6 @@ import io
 import json
 import logging
 import os
-import shutil
 import sys
 import tempfile
 import uuid
@@ -271,21 +270,6 @@ def _validate_regular_file_target(path: Path) -> None:
         raise ValueError("unsafe HTML output target")
 
 
-def _remove_created_asset_dir(path: Path) -> None:
-    try:
-        if path.is_symlink() or path.is_file():
-            path.unlink(missing_ok=True)
-        else:
-            shutil.rmtree(path)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        logger.warning(
-            "Failed to remove generated styled assets. type=%s",
-            type(exc).__name__,
-        )
-
-
 def _copy_asset_dir(
     source: Path,
     destination_parent: Path,
@@ -315,20 +299,21 @@ def _copy_asset_dir(
             raise ValueError("unsafe styled asset source")
 
     destination_parent.mkdir(parents=True, exist_ok=True)
-    destination = Path(
-        tempfile.mkdtemp(prefix=destination_prefix, dir=destination_parent)
-    )
-    try:
+    destination = destination_parent / f"{destination_prefix}{uuid.uuid4().hex}"
+    with tempfile.TemporaryDirectory(
+        prefix=f".{destination_prefix}staging_",
+        dir=destination_parent,
+    ) as staging_root:
+        staged_assets = Path(staging_root) / "assets"
+        staged_assets.mkdir()
         for source_item, relative, is_directory in planned:
-            target = destination / relative
+            target = staged_assets / relative
             if is_directory:
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_bytes(target, source_item.read_bytes())
-    except Exception:
-        _remove_created_asset_dir(destination)
-        raise
+        os.replace(staged_assets, destination)
     return destination
 
 
@@ -336,35 +321,27 @@ def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
     """Install the extracted bundle: copy assets and rewrite HTML references."""
     report_base = html_path.with_suffix("")
     html = (bundle_root / "report.html").read_text(encoding="utf-8")
-    created_asset_dirs: list[Path] = []
-    try:
-        infer_dir = _copy_asset_dir(
-            bundle_root / "infer",
-            report_base.parent,
-            f"{report_base.name}_infer_",
-        )
-        if infer_dir is not None:
-            created_asset_dirs.append(infer_dir)
-            html = html.replace('href="infer/', f'href="{infer_dir.name}/')
-            html = html.replace("href='infer/", f"href='{infer_dir.name}/")
+    infer_dir = _copy_asset_dir(
+        bundle_root / "infer",
+        report_base.parent,
+        f"{report_base.name}_infer_",
+    )
+    if infer_dir is not None:
+        html = html.replace('href="infer/', f'href="{infer_dir.name}/')
+        html = html.replace("href='infer/", f"href='{infer_dir.name}/")
 
-        chart_dir = _copy_asset_dir(
-            bundle_root / "charts",
-            report_base.parent,
-            f"{report_base.name}_charts_",
-        )
-        if chart_dir is not None:
-            created_asset_dirs.append(chart_dir)
-            html = html.replace('src="charts/', f'src="{chart_dir.name}/')
-            html = html.replace("src='charts/", f"src='{chart_dir.name}/")
+    chart_dir = _copy_asset_dir(
+        bundle_root / "charts",
+        report_base.parent,
+        f"{report_base.name}_charts_",
+    )
+    if chart_dir is not None:
+        html = html.replace('src="charts/', f'src="{chart_dir.name}/')
+        html = html.replace("src='charts/", f"src='{chart_dir.name}/")
 
-        html_path.parent.mkdir(parents=True, exist_ok=True)
-        _validate_regular_file_target(html_path)
-        _atomic_write_bytes(html_path, html.encode("utf-8"))
-    except Exception:
-        for asset_dir in reversed(created_asset_dirs):
-            _remove_created_asset_dir(asset_dir)
-        raise
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_regular_file_target(html_path)
+    _atomic_write_bytes(html_path, html.encode("utf-8"))
 
 
 async def _generate_report_html(

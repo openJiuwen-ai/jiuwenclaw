@@ -928,8 +928,88 @@ async def test_generate_report_html_ignores_fixed_asset_root_swapped_to_symlink(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asset_root_name", "asset_name"),
+    [
+        ("report_infer", "infer/new.html"),
+        ("report_charts", "charts/new.png"),
+    ],
+)
+async def test_generate_report_html_atomically_replaces_final_asset_symlink(
+    tmp_path, asset_root_name, asset_name
+):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    outside_dir = tmp_path / f"outside_{asset_root_name}"
+    outside_dir.mkdir()
+    sentinel = outside_dir / "sentinel"
+    sentinel.write_text("outside sentinel", encoding="utf-8")
+    styled_result = SimpleNamespace(
+        convert_content=_styled_report_archive(
+            (
+                '<html><a href="infer/new.html">styled report</a></html>'
+                if asset_root_name == "report_infer"
+                else '<html><img src="charts/new.png">styled report</html>'
+            ),
+            {asset_name: b"published asset"},
+        )
+    )
+    real_replace = dt.os.replace
+    injected_symlink = False
+
+    def _precreate_final_symlink(source, destination, *args, **kwargs):
+        nonlocal injected_symlink
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            not injected_symlink
+            and source_path.is_dir()
+            and destination_path.parent == tmp_path
+            and destination_path.name.startswith(f"{asset_root_name}_")
+        ):
+            destination_path.symlink_to(outside_dir, target_is_directory=True)
+            injected_symlink = True
+        return real_replace(source, destination, *args, **kwargs)
+
+    with patch.object(
+        dt,
+        "_scoped_report_style_llm_context",
+        return_value=_async_context(object()),
+    ), patch(
+        "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
+        new=AsyncMock(return_value=styled_result),
+    ), patch.object(
+        dt.os,
+        "replace",
+        side_effect=_precreate_final_symlink,
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Verified report"},
+            report_path_md,
+            "# Verified report",
+        )
+
+    assert injected_symlink
+    assert html_path == tmp_path / "report.html"
+    generated_dir = next(tmp_path.glob(f"{asset_root_name}_*"))
+    html = html_path.read_text(encoding="utf-8")
+    if "styled report" in html:
+        assert generated_dir.is_dir()
+        assert not generated_dir.is_symlink()
+        assert (
+            generated_dir / Path(asset_name).name
+        ).read_bytes() == b"published asset"
+        assert f"{generated_dir.name}/new." in html
+    else:
+        assert "Verified report" in html
+        assert generated_dir.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
+    assert sorted(path.name for path in outside_dir.iterdir()) == ["sentinel"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["asset_copy", "html_install"])
-async def test_generate_report_html_cleans_unique_assets_when_install_fails(
+async def test_generate_report_html_retains_published_assets_when_install_fails(
     tmp_path, failure_stage
 ):
     report_path_md = tmp_path / "report.md"
@@ -955,7 +1035,11 @@ async def test_generate_report_html_cleans_unique_assets_when_install_fails(
     def _fail_styled_install(path, payload):
         if (
             failure_stage == "asset_copy"
-            and path.parent.name.startswith("report_charts_")
+            and payload == b"new chart"
+            and any(
+                part.startswith(("report_charts_", ".report_charts_"))
+                for part in path.parts
+            )
         ):
             raise OSError("styled asset copy failed")
         if (
@@ -986,10 +1070,67 @@ async def test_generate_report_html_cleans_unique_assets_when_install_fails(
 
     assert html_path == tmp_path / "report.html"
     assert "Verified report" in html_path.read_text(encoding="utf-8")
-    assert list(tmp_path.glob("report_infer_*")) == []
-    assert list(tmp_path.glob("report_charts_*")) == []
+    assert len(list(tmp_path.glob("report_infer_*"))) == 1
+    expected_chart_dirs = 0 if failure_stage == "asset_copy" else 1
+    assert len(list(tmp_path.glob("report_charts_*"))) == expected_chart_dirs
     assert sorted(path.name for path in fixed_infer_dir.iterdir()) == ["existing"]
     assert sorted(path.name for path in fixed_chart_dir.iterdir()) == ["existing"]
+
+
+@pytest.mark.asyncio
+async def test_generate_report_html_does_not_remove_replaced_published_asset_dir(
+    tmp_path,
+):
+    report_path_md = tmp_path / "report.md"
+    report_path_md.write_text("# Report", encoding="utf-8")
+    styled_result = SimpleNamespace(
+        convert_content=_styled_report_archive(
+            '<html><a href="infer/new.html">styled report</a></html>',
+            {"infer/new.html": b"published asset"},
+        )
+    )
+    real_atomic_write = dt._atomic_write_bytes
+    held_published = tmp_path / "held_published_assets"
+    replacement_dir = None
+
+    def _replace_final_then_fail_html(path, payload):
+        nonlocal replacement_dir
+        if path == tmp_path / "report.html" and b"styled report" in payload:
+            published_dir = next(tmp_path.glob("report_infer_*"))
+            published_dir.rename(held_published)
+            published_dir.mkdir()
+            (published_dir / "replacement-sentinel").write_text(
+                "replacement sentinel", encoding="utf-8"
+            )
+            replacement_dir = published_dir
+            raise OSError("styled HTML install failed")
+        return real_atomic_write(path, payload)
+
+    with patch.object(
+        dt,
+        "_scoped_report_style_llm_context",
+        return_value=_async_context(object()),
+    ), patch(
+        "openjiuwen_deepsearch.algorithm.report_style.service.stylize_report",
+        new=AsyncMock(return_value=styled_result),
+    ), patch.object(
+        dt,
+        "_atomic_write_bytes",
+        side_effect=_replace_final_then_fail_html,
+    ):
+        html_path = await dt._generate_report_html(
+            {"response_content": "# Verified report"},
+            report_path_md,
+            "# Verified report",
+        )
+
+    assert html_path == tmp_path / "report.html"
+    assert "Verified report" in html_path.read_text(encoding="utf-8")
+    assert replacement_dir is not None
+    assert (replacement_dir / "replacement-sentinel").read_text(
+        encoding="utf-8"
+    ) == "replacement sentinel"
+    assert (held_published / "new.html").read_bytes() == b"published asset"
 
 
 @pytest.mark.asyncio
