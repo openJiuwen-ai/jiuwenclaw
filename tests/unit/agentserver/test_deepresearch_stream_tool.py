@@ -746,6 +746,51 @@ def test_write_report_markdown_serializes_same_title_allocation_across_threads(
         str(tmp_path / "研究报告-v1.md"),
         str(tmp_path / "研究报告-2-v1.md"),
     }
+    assert dt._REPORT_OUTPUT_LOCKS == {}
+
+
+def test_report_output_lock_registry_releases_sequential_unique_outputs(tmp_path):
+    for index in range(20):
+        output_path = (tmp_path / f"output-{index}").resolve()
+        with dt._report_output_lock(output_path):
+            assert output_path in dt._REPORT_OUTPUT_LOCKS
+
+    assert dt._REPORT_OUTPUT_LOCKS == {}
+
+
+def test_report_output_lock_serializes_waiters_and_releases_registry(tmp_path):
+    output_path = tmp_path.resolve()
+    release_first = threading.Event()
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    order = []
+
+    def worker(label):
+        with dt._report_output_lock(output_path):
+            order.append(f"{label}:enter")
+            if label == "first":
+                first_entered.set()
+                assert release_first.wait(timeout=2)
+            else:
+                second_entered.set()
+            order.append(f"{label}:exit")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(worker, "first")
+        assert first_entered.wait(timeout=2)
+        second = executor.submit(worker, "second")
+        assert not second_entered.wait(timeout=0.05)
+        release_first.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+
+    assert order == [
+        "first:enter",
+        "first:exit",
+        "second:enter",
+        "second:exit",
+    ]
+    assert dt._REPORT_OUTPUT_LOCKS == {}
 
 
 @pytest.mark.parametrize("target_kind", ["file", "symlink"])
@@ -826,6 +871,50 @@ def test_write_report_markdown_does_not_follow_symlinked_asset_directory(
     assert (tmp_path / f"研究报告-v1{asset_suffix}").is_symlink()
     assert not (tmp_path / "研究报告-v1.final-result.json").exists()
     assert not (tmp_path / "研究报告-v1.provenance.json").exists()
+    assert not (tmp_path / "研究报告-v1.md").exists()
+
+
+def test_write_report_markdown_rejects_asset_directory_namespace_swap(
+    tmp_path, monkeypatch
+):
+    asset_dir = tmp_path / "研究报告-v1_infer"
+    displaced_dir = tmp_path / "displaced-owned-infer"
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / "inference_7.html"
+    external_file.write_bytes(b"external")
+    directory_opened = threading.Event()
+    namespace_swapped = threading.Event()
+    real_open = dt.os.open
+
+    def synchronizing_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if (
+            os.path.basename(os.fspath(path)) == asset_dir.name
+            and flags & os.O_DIRECTORY
+            and not directory_opened.is_set()
+        ):
+            directory_opened.set()
+            assert namespace_swapped.wait(timeout=2)
+        return descriptor
+
+    monkeypatch.setattr(dt.os, "open", synchronizing_open)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            _write_report_in,
+            tmp_path,
+            "研究报告.md",
+            _report_result_with_assets(),
+        )
+        assert directory_opened.wait(timeout=2)
+        os.rename(asset_dir, displaced_dir)
+        asset_dir.symlink_to(external_dir, target_is_directory=True)
+        namespace_swapped.set()
+        with pytest.raises(RuntimeError, match="namespace"):
+            future.result(timeout=2)
+
+    assert external_file.read_bytes() == b"external"
+    assert asset_dir.is_symlink()
     assert not (tmp_path / "研究报告-v1.md").exists()
 
 
@@ -914,6 +1003,186 @@ def test_write_report_markdown_cleans_staging_when_snapshot_serialization_fails(
             )
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_remove_created_artifacts_preserves_replacement_created_during_cleanup(
+    tmp_path, monkeypatch
+):
+    owned_path = tmp_path / "owned.bin"
+    owned_path.write_bytes(b"owned")
+    owned_metadata = os.lstat(owned_path)
+    entry_quarantined = threading.Event()
+    replacement_created = threading.Event()
+    real_rename = dt.os.rename
+
+    def synchronizing_rename(source, destination, *args, **kwargs):
+        result = real_rename(source, destination, *args, **kwargs)
+        if os.path.basename(os.fspath(source)) == owned_path.name:
+            entry_quarantined.set()
+            assert replacement_created.wait(timeout=2)
+        return result
+
+    def replace_public_entry():
+        assert entry_quarantined.wait(timeout=2)
+        owned_path.write_bytes(b"replacement")
+        replacement_created.set()
+
+    monkeypatch.setattr(dt.os, "rename", synchronizing_rename)
+    replacement = threading.Thread(target=replace_public_entry)
+    replacement.start()
+    dt._remove_created_artifacts([(owned_path, owned_metadata)])
+    replacement.join(timeout=2)
+
+    assert not replacement.is_alive()
+    assert owned_path.read_bytes() == b"replacement"
+
+
+def test_remove_created_artifacts_restores_replacement_directory(tmp_path):
+    public_dir = tmp_path / "assets"
+    displaced_owned_dir = tmp_path / "displaced-owned-assets"
+    public_dir.mkdir()
+    owned_metadata = os.lstat(public_dir)
+    os.rename(public_dir, displaced_owned_dir)
+    public_dir.mkdir()
+    replacement_file = public_dir / "writer.bin"
+    replacement_file.write_bytes(b"replacement")
+
+    dt._remove_created_artifacts([(public_dir, owned_metadata)])
+
+    assert replacement_file.read_bytes() == b"replacement"
+    assert displaced_owned_dir.is_dir()
+
+
+def _styled_bundle(tmp_path):
+    bundle_root = tmp_path / "styled-bundle"
+    (bundle_root / "infer").mkdir(parents=True)
+    (bundle_root / "charts").mkdir()
+    (bundle_root / "infer" / "inference_7.html").write_bytes(b"styled-infer")
+    (bundle_root / "charts" / "chart-1.png").write_bytes(b"styled-chart")
+    (bundle_root / "report.html").write_text(
+        '<link href="infer/inference_7.html">'
+        '<img src="charts/chart-1.png">',
+        encoding="utf-8",
+    )
+    return bundle_root
+
+
+def test_install_styled_bundle_uses_dedicated_assets_without_mutating_provenance(
+    tmp_path,
+):
+    html_path = tmp_path / "研究报告-v1.html"
+    original_infer = tmp_path / "研究报告-v1_infer"
+    original_charts = tmp_path / "研究报告-v1_charts"
+    original_infer.mkdir()
+    original_charts.mkdir()
+    infer_file = original_infer / "inference_7.html"
+    chart_file = original_charts / "chart-1.png"
+    infer_file.write_bytes(b"provenance-infer")
+    chart_file.write_bytes(b"provenance-chart")
+    before_hashes = {
+        infer_file: hashlib.sha256(infer_file.read_bytes()).hexdigest(),
+        chart_file: hashlib.sha256(chart_file.read_bytes()).hexdigest(),
+    }
+    provenance_path = tmp_path / "研究报告-v1.provenance.json"
+    provenance_path.write_text(json.dumps({
+        "inference_manifest": [{"sha256": before_hashes[infer_file]}],
+        "chart_manifest": [{"sha256": before_hashes[chart_file]}],
+    }), encoding="utf-8")
+    provenance_bytes = provenance_path.read_bytes()
+
+    dt._install_styled_bundle(_styled_bundle(tmp_path), html_path)
+
+    assert {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in before_hashes
+    } == before_hashes
+    assert provenance_path.read_bytes() == provenance_bytes
+    manifests = json.loads(provenance_path.read_text(encoding="utf-8"))
+    assert manifests["inference_manifest"][0]["sha256"] == before_hashes[infer_file]
+    assert manifests["chart_manifest"][0]["sha256"] == before_hashes[chart_file]
+    assert (
+        tmp_path / "研究报告-v1_html_infer" / "inference_7.html"
+    ).read_bytes() == b"styled-infer"
+    assert (
+        tmp_path / "研究报告-v1_html_charts" / "chart-1.png"
+    ).read_bytes() == b"styled-chart"
+    html = html_path.read_text(encoding="utf-8")
+    assert 'href="研究报告-v1_html_infer/' in html
+    assert 'src="研究报告-v1_html_charts/' in html
+
+
+def test_install_styled_bundle_rolls_back_owned_assets_after_collision(tmp_path):
+    html_path = tmp_path / "研究报告-v1.html"
+    protected_chart_dir = tmp_path / "研究报告-v1_html_charts"
+    protected_chart_dir.mkdir()
+    protected_file = protected_chart_dir / "chart-1.png"
+    protected_file.write_bytes(b"protected")
+
+    with pytest.raises(FileExistsError):
+        dt._install_styled_bundle(_styled_bundle(tmp_path), html_path)
+
+    assert protected_file.read_bytes() == b"protected"
+    assert not (tmp_path / "研究报告-v1_html_infer").exists()
+    assert not html_path.exists()
+
+
+def test_install_styled_bundle_does_not_follow_symlinked_asset_target(tmp_path):
+    html_path = tmp_path / "研究报告-v1.html"
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / "inference_7.html"
+    external_file.write_bytes(b"external")
+    (tmp_path / "研究报告-v1_html_infer").symlink_to(
+        external_dir, target_is_directory=True
+    )
+
+    with pytest.raises(FileExistsError):
+        dt._install_styled_bundle(_styled_bundle(tmp_path), html_path)
+
+    assert external_file.read_bytes() == b"external"
+    assert not html_path.exists()
+
+
+def test_install_styled_bundle_rejects_asset_directory_namespace_swap(
+    tmp_path, monkeypatch
+):
+    html_path = tmp_path / "研究报告-v1.html"
+    asset_dir = tmp_path / "研究报告-v1_html_infer"
+    displaced_dir = tmp_path / "displaced-styled-infer"
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / "inference_7.html"
+    external_file.write_bytes(b"external")
+    directory_opened = threading.Event()
+    namespace_swapped = threading.Event()
+    real_open = dt.os.open
+
+    def synchronizing_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if (
+            os.path.basename(os.fspath(path)) == asset_dir.name
+            and flags & os.O_DIRECTORY
+            and not directory_opened.is_set()
+        ):
+            directory_opened.set()
+            assert namespace_swapped.wait(timeout=2)
+        return descriptor
+
+    monkeypatch.setattr(dt.os, "open", synchronizing_open)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            dt._install_styled_bundle, _styled_bundle(tmp_path), html_path
+        )
+        assert directory_opened.wait(timeout=2)
+        os.rename(asset_dir, displaced_dir)
+        asset_dir.symlink_to(external_dir, target_is_directory=True)
+        namespace_swapped.set()
+        with pytest.raises(RuntimeError, match="namespace"):
+            future.result(timeout=2)
+
+    assert external_file.read_bytes() == b"external"
+    assert asset_dir.is_symlink()
+    assert not html_path.exists()
 
 
 def test_build_related_artifact_bundle_exposes_only_hidden_preview_companions():

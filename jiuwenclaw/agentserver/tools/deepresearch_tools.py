@@ -10,14 +10,14 @@ import io
 import json
 import logging
 import os
-import shutil
 import stat
 import sys
 import tempfile
 import threading
 import uuid
 import zipfile
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,7 +32,24 @@ from jiuwenclaw.agentserver.tools._deepresearch_tls import (
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
 _REPORT_PUBLICATION_ATTEMPTS = 8
-_REPORT_OUTPUT_LOCKS: dict[Path, threading.Lock] = {}
+
+
+@dataclass
+class _KeyedLock:
+    lock: threading.Lock
+    references: int = 0
+
+
+@dataclass
+class _CreatedArtifact:
+    path: Path
+    metadata: os.stat_result
+    parent_fd: int | None = None
+    entry_name: str | None = None
+    directory_fd: int | None = None
+
+
+_REPORT_OUTPUT_LOCKS: dict[Path, _KeyedLock] = {}
 _REPORT_OUTPUT_LOCKS_GUARD = threading.Lock()
 
 # 使用 contextvars
@@ -152,13 +169,12 @@ def _write_report_markdown(
 
     output_path = Path(output_dir).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
-    output_lock = _get_report_output_lock(output_path)
-    with output_lock:
-        allocation_reservations: list[tuple[Path, os.stat_result]] = []
+    with _report_output_lock(output_path):
+        allocation_reservations: list[_CreatedArtifact] = []
         try:
             for _attempt in range(_REPORT_PUBLICATION_ATTEMPTS):
                 paths = allocate_initial_paths(output_path, file_name)
-                created_paths: list[tuple[Path, os.stat_result]] = []
+                created_paths: list[_CreatedArtifact] = []
                 try:
                     with tempfile.TemporaryDirectory(
                         prefix=".deepresearch-report-", dir=output_path
@@ -226,24 +242,26 @@ def _write_report_markdown(
                                     created_paths,
                                 )
 
-                        created_paths.append((
-                            paths.final_result_path,
-                            _atomic_create_bytes(
+                        _verify_created_directories(created_paths)
+                        created_paths.append(_CreatedArtifact(
+                            path=paths.final_result_path,
+                            metadata=_atomic_create_bytes(
                                 paths.final_result_path, snapshot_bytes
                             ),
                         ))
-                        created_paths.append((
-                            paths.provenance_path,
-                            _atomic_create_bytes(
+                        created_paths.append(_CreatedArtifact(
+                            path=paths.provenance_path,
+                            metadata=_atomic_create_bytes(
                                 paths.provenance_path, provenance_bytes
                             ),
                         ))
-                        created_paths.append((
-                            paths.markdown_path,
-                            _atomic_create_bytes(
+                        created_paths.append(_CreatedArtifact(
+                            path=paths.markdown_path,
+                            metadata=_atomic_create_bytes(
                                 paths.markdown_path, markdown_bytes
                             ),
                         ))
+                        _verify_created_directories(created_paths)
                 except FileExistsError:
                     _remove_created_artifacts(created_paths)
                     allocation_reservations.append(
@@ -253,6 +271,7 @@ def _write_report_markdown(
                 except BaseException:
                     _remove_created_artifacts(created_paths)
                     raise
+                _close_created_artifact_handles(created_paths)
                 return str(paths.markdown_path)
         finally:
             _remove_created_artifacts(allocation_reservations)
@@ -343,20 +362,11 @@ def _extract_styled_bundle(convert_content: str, destination: Path) -> Path:
     return destination / "report_bundle"
 
 
-def _copy_asset_dir(source: Path, destination: Path) -> None:
-    """Copy an asset directory if it exists and is non-empty."""
-    if not source.is_dir() or not any(source.iterdir()):
-        return
-    shutil.copytree(source, destination, dirs_exist_ok=True)
-
-
 def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
-    """Install the extracted bundle: copy assets and rewrite HTML references."""
+    """Install styled assets without mutating the provenance-bearing bundle."""
     report_base = html_path.with_suffix("")
-    infer_dir = report_base.with_name(f"{report_base.name}_infer")
-    chart_dir = report_base.with_name(f"{report_base.name}_charts")
-    _copy_asset_dir(bundle_root / "infer", infer_dir)
-    _copy_asset_dir(bundle_root / "charts", chart_dir)
+    infer_dir = report_base.with_name(f"{report_base.name}_html_infer")
+    chart_dir = report_base.with_name(f"{report_base.name}_html_charts")
 
     html = (bundle_root / "report.html").read_text(encoding="utf-8")
     html = html.replace('href="infer/', f'href="{infer_dir.name}/')
@@ -365,12 +375,28 @@ def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
     html = html.replace("src='charts/", f"src='{chart_dir.name}/")
 
     html_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_html_path = html_path.with_suffix(f"{html_path.suffix}.tmp")
+    created_paths: list[_CreatedArtifact] = []
     try:
-        temporary_html_path.write_text(html, encoding="utf-8", newline="\n")
-        temporary_html_path.replace(html_path)
-    finally:
-        temporary_html_path.unlink(missing_ok=True)
+        for staged_directory, final_directory in (
+            (bundle_root / "infer", infer_dir),
+            (bundle_root / "charts", chart_dir),
+        ):
+            if staged_directory.is_dir() and any(staged_directory.iterdir()):
+                _publish_staged_asset_directory(
+                    staged_directory, final_directory, created_paths
+                )
+        _verify_created_directories(created_paths)
+        created_paths.append(_CreatedArtifact(
+            path=html_path,
+            metadata=_atomic_create_bytes(
+                html_path, html.replace("\r\n", "\n").encode("utf-8")
+            ),
+        ))
+        _verify_created_directories(created_paths)
+    except BaseException:
+        _remove_created_artifacts(created_paths)
+        raise
+    _close_created_artifact_handles(created_paths)
 
 
 async def _write_report_artifacts_stream(
@@ -473,10 +499,27 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             pass
 
 
-def _get_report_output_lock(output_dir: Path) -> threading.Lock:
-    """Return the process-local publication lock for one resolved output directory."""
+@contextmanager
+def _report_output_lock(output_dir: Path):
+    """Serialize one output directory and retire the keyed lock when unused."""
     with _REPORT_OUTPUT_LOCKS_GUARD:
-        return _REPORT_OUTPUT_LOCKS.setdefault(output_dir, threading.Lock())
+        keyed_lock = _REPORT_OUTPUT_LOCKS.get(output_dir)
+        if keyed_lock is None:
+            keyed_lock = _KeyedLock(lock=threading.Lock())
+            _REPORT_OUTPUT_LOCKS[output_dir] = keyed_lock
+        keyed_lock.references += 1
+    keyed_lock.lock.acquire()
+    try:
+        yield
+    finally:
+        keyed_lock.lock.release()
+        with _REPORT_OUTPUT_LOCKS_GUARD:
+            keyed_lock.references -= 1
+            if (
+                keyed_lock.references == 0
+                and _REPORT_OUTPUT_LOCKS.get(output_dir) is keyed_lock
+            ):
+                del _REPORT_OUTPUT_LOCKS[output_dir]
 
 
 def _atomic_create_bytes(path: Path, payload: bytes) -> os.stat_result:
@@ -497,57 +540,316 @@ def _atomic_create_bytes(path: Path, payload: bytes) -> os.stat_result:
             pass
 
 
-def _remove_created_artifacts(
-    created_paths: list[tuple[Path, os.stat_result]],
-) -> None:
-    """Remove only paths whose identity still matches this publication attempt."""
-    for path, created_metadata in reversed(created_paths):
+def _atomic_create_bytes_at(
+    directory_fd: int, name: str, payload: bytes
+) -> os.stat_result:
+    """Publish one immutable child relative to a retained directory handle."""
+    temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+            metadata = os.fstat(stream.fileno())
+        os.link(
+            temporary_name,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        return metadata
+    finally:
         try:
-            current_metadata = os.lstat(path)
+            os.unlink(temporary_name, dir_fd=directory_fd)
         except FileNotFoundError:
-            continue
-        if (
-            current_metadata.st_dev == created_metadata.st_dev
-            and current_metadata.st_ino == created_metadata.st_ino
-        ):
+            pass
+
+
+def _same_identity(
+    left: os.stat_result, right: os.stat_result
+) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _as_created_artifact(
+    value: _CreatedArtifact | tuple[Path, os.stat_result],
+) -> _CreatedArtifact:
+    if isinstance(value, _CreatedArtifact):
+        return value
+    path, metadata = value
+    return _CreatedArtifact(path=path, metadata=metadata)
+
+
+def _close_created_artifact_handles(
+    created_paths: list[_CreatedArtifact | tuple[Path, os.stat_result]],
+) -> None:
+    for value in created_paths:
+        artifact = _as_created_artifact(value)
+        if artifact.directory_fd is not None:
             try:
-                if stat.S_ISDIR(created_metadata.st_mode):
-                    path.rmdir()
-                else:
-                    path.unlink()
-            except OSError as exc:
-                logger.warning(
-                    "Unable to clean current report publication path. "
-                    "path=%s error=%s",
-                    path,
-                    exc,
-                )
+                os.close(artifact.directory_fd)
+            except OSError:
+                pass
+            artifact.directory_fd = None
+
+
+def _verify_created_directories(
+    created_paths: list[_CreatedArtifact | tuple[Path, os.stat_result]],
+) -> None:
+    """Ensure every public directory name still denotes its retained handle."""
+    for value in created_paths:
+        artifact = _as_created_artifact(value)
+        if artifact.directory_fd is None:
+            continue
+        handle_metadata = os.fstat(artifact.directory_fd)
+        try:
+            namespace_metadata = os.stat(
+                artifact.path, follow_symlinks=False
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"report asset directory namespace changed: {artifact.path}"
+            ) from exc
+        if not _same_identity(handle_metadata, namespace_metadata):
+            raise RuntimeError(
+                f"report asset directory namespace changed: {artifact.path}"
+            )
+
+
+def _make_quarantine_directory(parent_fd: int, entry_name: str) -> tuple[str, int]:
+    for _attempt in range(8):
+        quarantine_name = (
+            f".{entry_name}.quarantine-{uuid.uuid4().hex}"
+        )
+        try:
+            os.mkdir(quarantine_name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        try:
+            quarantine_fd = os.open(
+                quarantine_name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+        except BaseException:
+            try:
+                os.rmdir(quarantine_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+        return quarantine_name, quarantine_fd
+    raise FileExistsError("unable to allocate report cleanup quarantine")
+
+
+def _restore_quarantined_entry(
+    quarantine_fd: int,
+    parent_fd: int,
+    entry_name: str,
+) -> bool:
+    """Restore a non-directory entry without replacing a concurrent writer."""
+    try:
+        os.link(
+            "entry",
+            entry_name,
+            src_dir_fd=quarantine_fd,
+            dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except OSError:
+        return False
+    os.unlink("entry", dir_fd=quarantine_fd)
+    return True
+
+
+def _restore_quarantined_directory(
+    quarantine_fd: int,
+    parent_fd: int,
+    entry_name: str,
+    metadata: os.stat_result,
+) -> bool:
+    """Recreate a quarantined directory only after claiming the public name."""
+    try:
+        os.mkdir(
+            entry_name,
+            mode=stat.S_IMODE(metadata.st_mode),
+            dir_fd=parent_fd,
+        )
+    except FileExistsError:
+        return False
+
+    source_fd = -1
+    destination_fd = -1
+    try:
+        source_fd = os.open(
+            "entry",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=quarantine_fd,
+        )
+        destination_fd = os.open(
+            entry_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        os.fchmod(destination_fd, stat.S_IMODE(metadata.st_mode))
+        public_metadata = os.stat(
+            entry_name, dir_fd=parent_fd, follow_symlinks=False
+        )
+        if not _same_identity(os.fstat(destination_fd), public_metadata):
+            return False
+        for child_name in os.listdir(source_fd):
+            os.rename(
+                child_name,
+                child_name,
+                src_dir_fd=source_fd,
+                dst_dir_fd=destination_fd,
+            )
+        os.rmdir("entry", dir_fd=quarantine_fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        if source_fd >= 0:
+            os.close(source_fd)
+
+
+def _quarantine_created_artifact(artifact: _CreatedArtifact) -> None:
+    parent_fd = artifact.parent_fd
+    close_parent_fd = False
+    entry_name = artifact.entry_name or artifact.path.name
+    if parent_fd is None:
+        parent_fd = os.open(
+            artifact.path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        close_parent_fd = True
+
+    quarantine_name = ""
+    quarantine_fd = -1
+    try:
+        quarantine_name, quarantine_fd = _make_quarantine_directory(
+            parent_fd, entry_name
+        )
+        try:
+            os.rename(
+                entry_name,
+                "entry",
+                src_dir_fd=parent_fd,
+                dst_dir_fd=quarantine_fd,
+            )
+        except FileNotFoundError:
+            return
+
+        quarantined_metadata = os.stat(
+            "entry", dir_fd=quarantine_fd, follow_symlinks=False
+        )
+        if _same_identity(quarantined_metadata, artifact.metadata):
+            if stat.S_ISDIR(quarantined_metadata.st_mode):
+                os.rmdir("entry", dir_fd=quarantine_fd)
+            else:
+                os.unlink("entry", dir_fd=quarantine_fd)
+            return
+
+        if stat.S_ISDIR(quarantined_metadata.st_mode):
+            restored = _restore_quarantined_directory(
+                quarantine_fd,
+                parent_fd,
+                entry_name,
+                quarantined_metadata,
+            )
+        else:
+            restored = _restore_quarantined_entry(
+                quarantine_fd, parent_fd, entry_name
+            )
+        if restored:
+            return
+        logger.warning(
+            "Report cleanup quarantined a replaced entry and left it intact. "
+            "path=%s quarantine=%s",
+            artifact.path,
+            artifact.path.parent / quarantine_name / "entry",
+        )
+    finally:
+        if quarantine_fd >= 0:
+            os.close(quarantine_fd)
+        if quarantine_name:
+            try:
+                os.rmdir(quarantine_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if close_parent_fd:
+            os.close(parent_fd)
+
+
+def _remove_created_artifacts(
+    created_paths: list[_CreatedArtifact | tuple[Path, os.stat_result]],
+) -> None:
+    """Quarantine names atomically, then delete only matching owned entries."""
+    for value in reversed(created_paths):
+        artifact = _as_created_artifact(value)
+        try:
+            _quarantine_created_artifact(artifact)
+        except OSError as exc:
+            logger.warning(
+                "Unable to clean current report publication path. "
+                "path=%s error=%s",
+                artifact.path,
+                exc,
+            )
+        finally:
+            if artifact.directory_fd is not None:
+                try:
+                    os.close(artifact.directory_fd)
+                except OSError:
+                    pass
+                artifact.directory_fd = None
 
 
 def _publish_staged_asset_directory(
     staged_directory: Path,
     final_directory: Path,
-    created_paths: list[tuple[Path, os.stat_result]],
+    created_paths: list[_CreatedArtifact],
 ) -> None:
-    """Publish one flat staged asset directory without replacing any target."""
+    """Publish a flat asset directory entirely through a retained dir handle."""
     os.mkdir(final_directory)
-    created_paths.append((final_directory, os.lstat(final_directory)))
+    directory_fd = os.open(
+        final_directory,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    directory_metadata = os.fstat(directory_fd)
+    created_paths.append(_CreatedArtifact(
+        path=final_directory,
+        metadata=directory_metadata,
+        directory_fd=directory_fd,
+    ))
     for staged_path in sorted(staged_directory.iterdir()):
         metadata = os.lstat(staged_path)
         if not stat.S_ISREG(metadata.st_mode):
             raise ValueError(
                 f"staged report asset is not a regular file: {staged_path.name}"
             )
-        final_path = final_directory / staged_path.name
-        created_paths.append((
-            final_path,
-            _atomic_create_bytes(final_path, staged_path.read_bytes()),
+        child_metadata = _atomic_create_bytes_at(
+            directory_fd, staged_path.name, staged_path.read_bytes()
+        )
+        created_paths.append(_CreatedArtifact(
+            path=final_directory / staged_path.name,
+            metadata=child_metadata,
+            parent_fd=directory_fd,
+            entry_name=staged_path.name,
         ))
 
 
 def _create_allocation_reservation(
     markdown_path: Path,
-) -> tuple[Path, os.stat_result]:
+) -> _CreatedArtifact:
     """Make a hidden marker that causes the allocator to skip one rejected base."""
     descriptor, reservation_name = tempfile.mkstemp(
         prefix=f".{markdown_path.name}.", dir=markdown_path.parent
@@ -556,7 +858,7 @@ def _create_allocation_reservation(
         metadata = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    return Path(reservation_name), metadata
+    return _CreatedArtifact(path=Path(reservation_name), metadata=metadata)
 
 
 def _deepresearch_dependency_available() -> bool:
