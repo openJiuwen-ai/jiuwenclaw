@@ -297,15 +297,7 @@ def _read_file_bytes(path: Path, limit: int, label: str) -> bytes:
     # os.lstat symlink/regular-file guard directly above already refuses
     # symlink targets, so a plain O_RDONLY open is a safe fallback there.
     nofollow = getattr(os, "O_NOFOLLOW", None)
-    open_flags = os.O_RDONLY
-    if nofollow is not None:
-        open_flags |= nofollow
-    # Match the write side (_publish_create opens with O_BINARY): without O_BINARY
-    # the lowio read fd defaults to text mode on Windows, which normalizes
-    # CRLF->LF and treats 0x1A as EOF, so the bytes we read could differ from
-    # the on-disk bytes and mask provenance tampering.
-    if hasattr(os, "O_BINARY"):
-        open_flags |= os.O_BINARY
+    open_flags = os.O_RDONLY | nofollow if nofollow is not None else os.O_RDONLY
     try:
         descriptor = os.open(path, open_flags)
         with os.fdopen(descriptor, "rb") as stream:

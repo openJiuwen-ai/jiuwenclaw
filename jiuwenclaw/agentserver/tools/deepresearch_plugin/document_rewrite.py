@@ -1417,13 +1417,6 @@ def _publish_child(
 def _atomic_write(path: Path, payload: bytes) -> None:
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        # tempfile.mkstemp opens via os.open WITHOUT O_BINARY on Windows, so the
-        # lowio fd defaults to text mode and os.fdopen(fd, "wb") cannot retroactively
-        # force binary on the already-open fd -> writes would translate "\n"->"\r\n"
-        # and any sha256 computed over `payload` would no longer match disk bytes.
-        # Match _publish_create's binary handling before wrapping the fd.
-        if hasattr(os, "setmode"):
-            os.setmode(fd, os.O_BINARY)
         with os.fdopen(fd, "wb") as stream:
             stream.write(payload)
             stream.flush()
