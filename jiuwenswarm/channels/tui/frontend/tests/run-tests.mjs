@@ -13,6 +13,7 @@ import {
   shouldCollectPlanRejectFeedback,
 } from "../dist/ui/app-screen.js";
 import { planSwarmflowToggle } from "../dist/core/commands/builtins/swarmflow.js";
+import { buildAppScreenLines } from "../dist/ui/screen-layout.js";
 import {
   canOpenSessionHistory,
   groupWorkflowAgentsByName,
@@ -81,6 +82,84 @@ assert.deepEqual(getPlanApprovalListLayout(), { minPrimaryColumnWidth: 10, maxPr
 assert.equal(shouldCaptureTerminalMouse(false, false), false);
 assert.equal(shouldCaptureTerminalMouse(true, false), true);
 assert.equal(shouldCaptureTerminalMouse(false, true), true);
+
+const teamSnapshot = {
+  connectionStatus: "connected",
+  sessionId: "team-session",
+  mode: "code.normal",
+  themeName: "default",
+  accentColor: "blue",
+  transcriptMode: "compact",
+  transcriptFoldMode: "none",
+  collapsedToolGroupIds: new Set(),
+  entries: [],
+  toolExecutions: [],
+  streamingState: "idle",
+  pendingQuestion: null,
+  lastError: null,
+  isProcessing: false,
+  cancellableWork: false,
+  isPaused: false,
+  isInterrupted: false,
+  activeSubtasks: [],
+  todos: [],
+  teamMemberEvents: [
+    {
+      id: "member-ready",
+      type: "team.member.status_changed",
+      teamId: "team-1",
+      memberId: "member-1",
+      newStatus: "idle",
+      timestamp: Date.now(),
+    },
+  ],
+  teamTaskEvents: [],
+  teamMessageEvents: [],
+  workflowRuns: [],
+  pendingHumanPrompts: new Map(),
+  evolutionStatus: "idle",
+  contextCompression: null,
+  contextWindowLimit: null,
+  contextUsedPercentage: null,
+  modelInfo: { provider: "", model: "", version: "" },
+  preferredLanguage: "zh",
+  sessionTitle: "",
+  statusLineText: null,
+  memoryWarnings: [],
+  runningCommand: null,
+  streamStalled: false,
+  streamIdleMs: null,
+  currentQueryUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+  btwOverlay: null,
+  btwOverlayIndex: -1,
+  btwOverlayTotal: 0,
+  btwActive: false,
+};
+const teamLayoutOptions = {
+  width: 80,
+  questionLines: [],
+  editorLines: [],
+  composerPreviewLines: [],
+  showFullThinking: false,
+  showToolDetails: false,
+  showShortcutHelp: false,
+  todosCollapsed: false,
+  showTeamPanel: false,
+  selectedTeamMemberId: "member-1",
+  viewedTeamMemberId: null,
+  transientNotice: null,
+  animationPhase: 0,
+  overlayTranscriptLines: [],
+};
+const collapsedTeamLines = buildAppScreenLines(teamSnapshot, teamLayoutOptions);
+assert.equal(collapsedTeamLines.some((line) => line.includes("teammate")), false);
+assert.equal(collapsedTeamLines.some((line) => line.includes("Member 1")), false);
+
+const expandedTeamLines = buildAppScreenLines(teamSnapshot, {
+  ...teamLayoutOptions,
+  showTeamPanel: true,
+});
+assert.equal(expandedTeamLines.some((line) => line.includes("teammate")), true);
 
 const slashCommands = AppScreen.prototype.buildSlashCommands.call({
   commands: {
