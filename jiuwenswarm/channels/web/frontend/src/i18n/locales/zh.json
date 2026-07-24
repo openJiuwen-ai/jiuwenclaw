@@ -1107,7 +1107,9 @@
       "placeholderSelect": "请选择",
       "placeholderEffectiveDate": "请选择生效日期",
       "missingFieldsHint": "还需要填写：{{fields}}",
-      "scheduleAlreadyExpiredHint": "所选的执行时间已经过去，请重新选择"
+      "scheduleAlreadyExpiredHint": "所选的执行时间已经过去，请重新选择",
+      "charCount": "{{count}}/{{max}}",
+      "maxLengthReachedHint": "已达到最大长度限制（{{max}} 字）"
     },
     "schedule": {
       "title": "执行计划",

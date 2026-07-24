@@ -18,6 +18,12 @@ import { getProjectDisplayName } from '../../stores/workspaceStore';
 // 等后端接口交付后再打开——代码/state（`CronTaskFormValue.effectiveDate`）都保留，不用重写
 const CRON_EFFECTIVE_DATE_UI_ENABLED = false;
 
+// 名称/描述最大长度：需与后端 jiuwenswarm/gateway/cron/models.py 里的
+// CRON_JOB_NAME_MAX_LENGTH / CRON_JOB_DESCRIPTION_MAX_LENGTH 保持一致，
+// 前端负责提前拦截+提示，后端负责兜底校验（防止绕过前端直接调 API/MCP 工具）。
+const CRON_NAME_MAX_LENGTH = 64;
+const CRON_DESCRIPTION_MAX_LENGTH = 500;
+
 export interface CronTaskFormValue {
   name: string;
   projectDir: string | null; // 仅创建/模板创建模式使用；编辑模式不展示项目字段，不参与提交
@@ -172,18 +178,27 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           )}
 
           <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">
-              {t('cron.drawer.fieldName')} <span className="text-danger">*</span>
-            </label>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <label className="block text-sm font-bold text-text-strong">
+                {t('cron.drawer.fieldName')} <span className="text-danger">*</span>
+              </label>
+              <span className={`shrink-0 text-xs ${form.name.length >= CRON_NAME_MAX_LENGTH ? 'text-danger' : 'text-text-muted'}`}>
+                {t('cron.drawer.charCount', { count: form.name.length, max: CRON_NAME_MAX_LENGTH })}
+              </span>
+            </div>
             <input
               type="text"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               placeholder={t('cron.drawer.placeholderInput') ?? undefined}
+              maxLength={CRON_NAME_MAX_LENGTH}
               disabled={proactiveLocked}
               title={lockedTitle}
               className={fieldClass}
             />
+            {form.name.length >= CRON_NAME_MAX_LENGTH && (
+              <p className="mt-1 text-xs text-danger">{t('cron.drawer.maxLengthReachedHint', { max: CRON_NAME_MAX_LENGTH })}</p>
+            )}
           </div>
 
           {mode !== 'edit' && (
@@ -204,18 +219,27 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">
-              {t('cron.drawer.fieldDescription')} <span className="text-danger">*</span>
-            </label>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <label className="block text-sm font-bold text-text-strong">
+                {t('cron.drawer.fieldDescription')} <span className="text-danger">*</span>
+              </label>
+              <span className={`shrink-0 text-xs ${form.description.length >= CRON_DESCRIPTION_MAX_LENGTH ? 'text-danger' : 'text-text-muted'}`}>
+                {t('cron.drawer.charCount', { count: form.description.length, max: CRON_DESCRIPTION_MAX_LENGTH })}
+              </span>
+            </div>
             <textarea
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
               placeholder={t('cron.drawer.placeholderInput') ?? undefined}
               rows={4}
+              maxLength={CRON_DESCRIPTION_MAX_LENGTH}
               disabled={proactiveLocked}
               title={lockedTitle}
               className={`${fieldClass} resize-none`}
             />
+            {form.description.length >= CRON_DESCRIPTION_MAX_LENGTH && (
+              <p className="mt-1 text-xs text-danger">{t('cron.drawer.maxLengthReachedHint', { max: CRON_DESCRIPTION_MAX_LENGTH })}</p>
+            )}
           </div>
 
           <div>

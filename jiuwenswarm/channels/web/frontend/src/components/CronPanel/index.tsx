@@ -822,7 +822,13 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                     <tr key={job.id} className="border-b border-border last:border-0">
                       <td className="px-4 py-3 text-text">
                         <div className="flex items-center gap-1">
-                          {job.name}
+                          {/* 名称过长（超过 maxLength=64 加限制前的存量任务可能更长）会撑宽整列/整张表
+                              （bug004 追加问题）；这里用 CSS truncate + title 纯展示层截断，不改
+                              job.name 本身，hover 仍可看到全名。max-w 限制只加在文本节点自己身上，
+                              不包住徽标，避免徽标被一起裁掉——徽标始终 shrink-0 独立展示。 */}
+                          <span className="max-w-[200px] truncate" title={job.name}>
+                            {job.name}
+                          </span>
                           {isProactive && (
                             <span
                               className="inline-flex shrink-0 items-center rounded-full bg-cron-auto-managed-surface px-1.5 py-0.5 text-[10px] font-medium text-cron-auto-managed-text"
