@@ -9,6 +9,12 @@ or embedding metric pools. See ``service.AgentDropoutService``.
 from jiuwenswarm.agents.dropout.auditor import RectifyOrRejectAuditor
 from jiuwenswarm.agents.dropout.member_tracker import MemberDropoutTracker
 from jiuwenswarm.agents.dropout.metrics import get_simple_team_metrics
+from jiuwenswarm.agents.dropout.resolve import (
+    DEFAULT_TEAM_PRUNING_STRATEGY,
+    TEAM_PRUNING_STRATEGIES,
+    resolve_agent_dropout_config,
+    resolve_team_pruning,
+)
 from jiuwenswarm.agents.dropout.scoreboard import ContributionScoreboard
 from jiuwenswarm.agents.dropout.service import AgentDropoutConfig, AgentDropoutService
 from jiuwenswarm.agents.dropout.types import (
@@ -27,10 +33,14 @@ __all__ = [
     "AuditResult",
     "ContributionAction",
     "ContributionScoreboard",
+    "DEFAULT_TEAM_PRUNING_STRATEGY",
     "DropoutDecision",
     "EvaluationResult",
     "MemberDropoutTracker",
     "RectifyOrRejectAuditor",
     "ScoreboardEntry",
+    "TEAM_PRUNING_STRATEGIES",
     "get_simple_team_metrics",
+    "resolve_agent_dropout_config",
+    "resolve_team_pruning",
 ]

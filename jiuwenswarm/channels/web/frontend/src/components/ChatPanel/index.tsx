@@ -14,6 +14,7 @@ import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo } from '../
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
+import type { TeamPruningStrategy } from '../../config/chatConfig';
 import { InputArea } from './InputArea';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
@@ -81,6 +82,8 @@ interface ChatPanelProps {
   onOpenCodeReview?: (target: CodeReviewTarget) => void;
   permissionsEnabled: boolean;
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
+  teamPruningStrategy?: TeamPruningStrategy;
+  onSaveTeamPruning?: (updates: Record<string, string>) => Promise<void>;
   /** Goal（持续目标）控制，见 GoalBar 组件 */
   onSetGoal?: (sessionId: string, objective: string) => void;
   onPauseGoal?: (sessionId: string) => void;
@@ -680,6 +683,8 @@ export function ChatPanel({
   onOpenCodeReview,
   permissionsEnabled,
   onSavePermission,
+  teamPruningStrategy = '',
+  onSaveTeamPruning,
   onSetGoal,
   onPauseGoal,
   onResumeGoal,
@@ -1133,6 +1138,8 @@ export function ChatPanel({
                   onNavigateToSkills={onNavigateToSkills}
                   permissionsEnabled={permissionsEnabled}
                   onSavePermission={onSavePermission}
+                  teamPruningStrategy={teamPruningStrategy}
+                  onSaveTeamPruning={onSaveTeamPruning}
                   onSetGoal={onSetGoal}
                   onClearGoal={onClearGoal}
                 />
@@ -1173,6 +1180,8 @@ export function ChatPanel({
             onNavigateToSkills={onNavigateToSkills}
             permissionsEnabled={permissionsEnabled}
             onSavePermission={onSavePermission}
+            teamPruningStrategy={teamPruningStrategy}
+            onSaveTeamPruning={onSaveTeamPruning}
             onSetGoal={onSetGoal}
             onClearGoal={onClearGoal}
             onDrainTaskQueueIfIdle={onDrainTaskQueueIfIdle}

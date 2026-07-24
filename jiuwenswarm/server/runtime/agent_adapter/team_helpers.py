@@ -121,6 +121,36 @@ def _team_hide_teammate_enabled() -> bool:
     """Return whether non-leader teammate frames should be filtered out in team mode."""
     return os.environ.get(_HIDE_TEAMMATE_ENV_KEY, "").strip().lower() == "true"
 
+
+def _is_agent_dropout_visibility_event(parsed: dict[str, Any] | None) -> bool:
+    """Keep AgentDropout notices / shutdown / audit events visible even if teammate frames are hidden."""
+    if not isinstance(parsed, dict):
+        return False
+    event_type = str(parsed.get("event_type") or "").strip()
+    if event_type == "chat.notice":
+        notice_type = str(parsed.get("notice_type") or "").strip()
+        return notice_type.startswith("agent_dropout")
+    if event_type == "chat.reasoning":
+        return str(parsed.get("source") or "").strip() == "agent_dropout"
+    if event_type == "chat.tool_call":
+        tool_call = parsed.get("tool_call")
+        name = ""
+        if isinstance(tool_call, dict):
+            name = str(tool_call.get("name") or "")
+        return name.startswith("agent_dropout")
+    if event_type == "chat.tool_result":
+        tool_name = str(parsed.get("tool_name") or "").strip()
+        if not tool_name:
+            tool_result = parsed.get("tool_result")
+            if isinstance(tool_result, dict):
+                tool_name = str(tool_result.get("tool_name") or "")
+        return tool_name.startswith("agent_dropout")
+    if event_type == "team.member":
+        inner = str(parsed.get("type") or "").strip()
+        return inner == "team.member.shutdown" and str(parsed.get("reason") or "") == "agent_dropout"
+    return False
+
+
 _INTERACT_REASON_ERROR_MAP: dict[str, str] = {
     "not_active": "Team is initializing, please try again later",
     "session_mismatch": "Session state mismatch, please refresh and retry",
@@ -1986,11 +2016,20 @@ async def _consume_stream_with_query(
             # sees leader output. Leader-level control events
             # (team.runtime_ready / team.completed) are kept because
             # _is_leader_output returns True.
+            # AgentDropout notices/shutdown must still reach the GUI.
+            parsed_preview = None
             if _team_hide_teammate_enabled() and not is_leader:
-                continue
-            parsed = parse_stream_chunk(chunk)
+                parsed_preview = parse_stream_chunk(chunk)
+                if not _is_agent_dropout_visibility_event(parsed_preview):
+                    continue
+            parsed = parsed_preview if parsed_preview is not None else parse_stream_chunk(chunk)
             if parsed is not None:
-                if not is_leader and parsed.get("event_type") == "chat.reasoning":
+                # Teammate model reasoning is usually hidden; keep AgentDropout audit traces.
+                if (
+                    not is_leader
+                    and parsed.get("event_type") == "chat.reasoning"
+                    and str(parsed.get("source") or "").strip() != "agent_dropout"
+                ):
                     continue
                 if _is_duplicate_ask_user_question(parsed, emitted_ask_user_request_ids):
                     continue

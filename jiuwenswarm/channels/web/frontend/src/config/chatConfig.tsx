@@ -1,4 +1,4 @@
-import { CircleAlert } from 'lucide-react';
+import { CircleAlert, Filter, ShieldOff } from 'lucide-react';
 import type { AgentMode, Permission } from '../types';
 
 export interface ChatOptionDef<T extends string> {
@@ -7,6 +7,9 @@ export interface ChatOptionDef<T extends string> {
   descriptionI18nKey?: string;
   icon: (props: { className?: string }) => JSX.Element;
 }
+
+/** Team pruning strategy values ('' = off). Extend as new strategies ship. */
+export type TeamPruningStrategy = '' | 'agent_dropout';
 
 // ── 工作模式图标 ────────────────────────────────────────────────
 
@@ -26,6 +29,16 @@ function DefaultPermissionIcon({ className }: { className?: string }) {
 
 function SafeAccessPermissionIcon({ className }: { className?: string }) {
   return <CircleAlert className={className} aria-hidden="true" />;
+}
+
+// ── Team pruning icons ──────────────────────────────────────────
+
+function PruningOffIcon({ className }: { className?: string }) {
+  return <ShieldOff className={className} aria-hidden="true" />;
+}
+
+function AgentDropoutIcon({ className }: { className?: string }) {
+  return <Filter className={className} aria-hidden="true" />;
 }
 
 // ── 工作模式选项 ────────────────────────────────────────────────
@@ -59,5 +72,22 @@ export const PERMISSION_OPTIONS: ChatOptionDef<Permission>[] = [
     i18nKey: 'chat.config.permission.fullAccess',
     descriptionI18nKey: 'chat.config.permission.fullAccessDesc',
     icon: SafeAccessPermissionIcon,
+  },
+];
+
+// ── Team pruning options (cluster mode) ─────────────────────────
+
+export const TEAM_PRUNING_OPTIONS: ChatOptionDef<TeamPruningStrategy>[] = [
+  {
+    value: '',
+    i18nKey: 'chat.config.pruning.off',
+    descriptionI18nKey: 'chat.config.pruning.offDesc',
+    icon: PruningOffIcon,
+  },
+  {
+    value: 'agent_dropout',
+    i18nKey: 'chat.config.pruning.agentDropout',
+    descriptionI18nKey: 'chat.config.pruning.agentDropoutDesc',
+    icon: AgentDropoutIcon,
   },
 ];

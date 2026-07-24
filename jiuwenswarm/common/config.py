@@ -589,6 +589,42 @@ def update_permissions_enabled_in_config(value: bool) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def update_team_pruning_in_config(updates: dict[str, Any]) -> None:
+    """Update ``team_pruning`` (and sync legacy ``agent_dropout.enabled``)."""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "team_pruning" not in data or data["team_pruning"] is None:
+        data["team_pruning"] = {}
+    section = data["team_pruning"]
+    if not isinstance(section, dict):
+        section = {}
+        data["team_pruning"] = section
+
+    if "enabled" in updates:
+        section["enabled"] = bool(updates["enabled"])
+    if "strategy" in updates:
+        strategy = str(updates["strategy"] or "agent_dropout").strip() or "agent_dropout"
+        section["strategy"] = strategy
+
+    # Keep nested strategy defaults present for agent_dropout.
+    strategies = section.get("strategies")
+    if not isinstance(strategies, dict):
+        strategies = {}
+        section["strategies"] = strategies
+    if "agent_dropout" not in strategies or not isinstance(strategies.get("agent_dropout"), dict):
+        strategies["agent_dropout"] = {}
+
+    # Sync legacy agent_dropout.enabled for older readers.
+    if "agent_dropout" not in data or data["agent_dropout"] is None:
+        data["agent_dropout"] = {}
+    agent_dropout = data["agent_dropout"]
+    if isinstance(agent_dropout, dict):
+        enabled = bool(section.get("enabled", False))
+        strategy = str(section.get("strategy") or "agent_dropout")
+        agent_dropout["enabled"] = enabled and strategy == "agent_dropout"
+
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
 def update_auto_recap_enabled_in_config(value: bool) -> None:
     """更新 auto_recap.enabled（自动回顾开关）并写回。"""
     data = load_yaml_round_trip(CONFIG_YAML_PATH)

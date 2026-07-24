@@ -318,6 +318,13 @@
           "cancel": "取消",
           "confirm": "仍然继续"
         }
+      },
+      "pruning": {
+        "tooltip": "集群模式下的团队剪枝策略",
+        "off": "关闭剪枝",
+        "offDesc": "不审核队友输出，直接共享到团队",
+        "agentDropout": "AgentDropout",
+        "agentDropoutDesc": "审核队友分享内容，先纠正再拒绝，持续失败则剔除该成员"
       }
     }
   },
@@ -745,6 +752,8 @@
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
+      "teamPruningEnabled": "启用团队剪枝",
+      "teamPruningStrategy": "剪枝策略",
       "swarmflowEnabled": "启用 SwarmFlow",
       "kvCacheReleaseEnabled": "旧链路（KV 释放）",
       "kvCacheAffinityEnabled": "新链路（Ascend 亲和）",
@@ -800,7 +809,14 @@
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
       "symphonyDynamicGraphEnabled": "关闭后仅使用静态图谱，已有运行时数据会保留。",
-      "skillRetrievalBuildRootCategories": "直接编辑包含 tree_root_categories 或 root_categories 的 YAML/JSON；页面会展示默认分层供参考。保存后会写入配置内容本身，而不是外部文件路径。"
+      "skillRetrievalBuildRootCategories": "直接编辑包含 tree_root_categories 或 root_categories 的 YAML/JSON；页面会展示默认分层供参考。保存后会写入配置内容本身，而不是外部文件路径。",
+      "teamPruningEnabled": "开启后，集群模式下会在队友分享前审核内容",
+      "teamPruningStrategy": "选择使用的剪枝算法；后续可扩展更多策略"
+    },
+    "teamPruning": {
+      "strategies": {
+        "agentDropout": "AgentDropout（纠正 → 拒绝 → 剔除）"
+      }
     },
     "hideValue": "隐藏明文",
     "showValue": "显示明文",
@@ -929,6 +945,7 @@
       "evolution": { "label": "自演进配置", "hint": "Skills 在线自演进参数" },
       "agents": { "label": "多Agent配置", "hint": "仅供集群模式使用，且必须添加Team" },
       "team": { "label": "Team配置", "hint": "多智能体团队配置" },
+      "teamPruning": { "label": "团队剪枝", "hint": "选择集群模式下如何审核并剔除低质量队友" },
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
       "kvCacheAffinity": { "label": "算力亲和", "hint": "控制 Ascend KV Cache 亲和能力" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
@@ -1801,6 +1818,19 @@
     "waitingTasks": "等待任务",
     "messageQueue": "消息队列",
     "parallelProgress": "并行任务执行中 ({{completedCount}}/{{total}} 完成)",
+    "agentDropout": {
+      "brand": "剪枝",
+      "phases": {
+        "check": "检查中",
+        "pass": "通过",
+        "rectify": "纠正",
+        "reject": "拒绝",
+        "drop": "剔除",
+        "blocked": "已拦截",
+        "error": "错误",
+        "unknown": "审核"
+      }
+    },
     "subtask": {
       "starting": "启动中...",
       "toolCall": "调用 {{tool}} (#{{count}})",

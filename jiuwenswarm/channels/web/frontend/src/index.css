@@ -1235,6 +1235,157 @@ select {
     color: var(--color-feedback-warning);
   }
 
+  /* ====== AgentDropout audit rail (quiet system notices) ====== */
+  .agent-dropout-notice {
+    width: min(100%, 640px);
+    margin: 6px auto;
+    padding: 0;
+    border: none;
+    background: transparent;
+  }
+
+  .agent-dropout-notice__row {
+    display: grid;
+    grid-template-columns: 2px auto minmax(0, auto) minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin: 0;
+    padding: 4px 8px 4px 6px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-text-muted);
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 120ms ease;
+  }
+
+  .agent-dropout-notice__row:hover {
+    background: color-mix(in srgb, var(--color-secondary) 55%, transparent);
+  }
+
+  .agent-dropout-notice__rail {
+    align-self: stretch;
+    width: 2px;
+    min-height: 14px;
+    border-radius: 1px;
+    background: color-mix(in srgb, var(--color-text-muted) 45%, transparent);
+  }
+
+  .agent-dropout-notice__icon {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    opacity: 0.7;
+  }
+
+  .agent-dropout-notice__meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  .agent-dropout-notice__brand {
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+  }
+
+  .agent-dropout-notice__dot {
+    opacity: 0.45;
+  }
+
+  .agent-dropout-notice__phase {
+    font-weight: 500;
+    color: var(--color-text-secondary, var(--color-text-muted));
+  }
+
+  .agent-dropout-notice__member {
+    color: var(--color-text-muted);
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .agent-dropout-notice__summary {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    line-height: 1.35;
+    opacity: 0.85;
+  }
+
+  .agent-dropout-notice__chevron {
+    display: inline-flex;
+    opacity: 0.45;
+  }
+
+  .agent-dropout-notice__detail {
+    margin: 0 0 2px 18px;
+    padding: 6px 8px;
+    border-left: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: transparent;
+  }
+
+  .agent-dropout-notice--quiet .agent-dropout-notice__summary {
+    opacity: 0.65;
+  }
+
+  .agent-dropout-notice--check .agent-dropout-notice__rail {
+    background: color-mix(in srgb, var(--color-feedback-info, #5b7c99) 55%, transparent);
+  }
+
+  .agent-dropout-notice--pass .agent-dropout-notice__rail {
+    background: color-mix(in srgb, var(--color-feedback-success, #3d8b6a) 70%, transparent);
+  }
+
+  .agent-dropout-notice--pass .agent-dropout-notice__icon,
+  .agent-dropout-notice--pass .agent-dropout-notice__phase {
+    color: var(--color-feedback-success, #3d8b6a);
+  }
+
+  .agent-dropout-notice--rectify .agent-dropout-notice__rail {
+    background: color-mix(in srgb, var(--color-feedback-warning, #b08900) 65%, transparent);
+  }
+
+  .agent-dropout-notice--rectify .agent-dropout-notice__icon,
+  .agent-dropout-notice--rectify .agent-dropout-notice__phase {
+    color: var(--color-feedback-warning, #b08900);
+  }
+
+  .agent-dropout-notice--reject .agent-dropout-notice__rail,
+  .agent-dropout-notice--blocked .agent-dropout-notice__rail,
+  .agent-dropout-notice--error .agent-dropout-notice__rail,
+  .agent-dropout-notice--drop .agent-dropout-notice__rail {
+    background: color-mix(in srgb, var(--color-feedback-danger, #c45c5c) 70%, transparent);
+  }
+
+  .agent-dropout-notice--reject .agent-dropout-notice__phase,
+  .agent-dropout-notice--blocked .agent-dropout-notice__phase,
+  .agent-dropout-notice--error .agent-dropout-notice__phase,
+  .agent-dropout-notice--drop .agent-dropout-notice__phase,
+  .agent-dropout-notice--reject .agent-dropout-notice__icon,
+  .agent-dropout-notice--blocked .agent-dropout-notice__icon,
+  .agent-dropout-notice--error .agent-dropout-notice__icon,
+  .agent-dropout-notice--drop .agent-dropout-notice__icon {
+    color: var(--color-feedback-danger, #c45c5c);
+  }
+
   /* ====== Tool Tree ====== */
   .tool-group-frame {
     margin: 8px 0;
