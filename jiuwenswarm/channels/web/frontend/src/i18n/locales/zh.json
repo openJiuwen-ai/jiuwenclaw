@@ -2081,7 +2081,7 @@
     "workDescription": "处理办公、协作和通用任务",
     "codeDescription": "在项目目录中查看并修改代码",
     "environment": "环境信息",
-    "changes": "变更",
+    "changes": "本轮变更",
     "review": "审核"
   },
   "multiSession": {

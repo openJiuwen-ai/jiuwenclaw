@@ -2077,7 +2077,7 @@
     "workDescription": "Office, collaboration, and general tasks",
     "codeDescription": "Inspect and modify code in a project directory",
     "environment": "Environment",
-    "changes": "Changes",
+    "changes": "Current Turn Changes",
     "review": "Review"
   },
   "multiSession": {
