@@ -364,6 +364,12 @@ _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     registry.TEAM_PERMISSION_POLICY: lambda c: {
         "permissions_config": _config_section(c, "permissions"),
     },
+    registry.AGENT_DROPOUT: lambda c: {
+        "agent_dropout_config": _config_section(c, "agent_dropout"),
+        "active_members": int(
+            (_config_section(c, "agent_dropout").get("active_members") or 2)
+        ),
+    },
     registry.CODE_CODING_MEMORY: lambda c: {
         "embed_config": _config_section(c, "embed")
     },
@@ -478,12 +484,28 @@ def _build_team_capability_specs(
         )
 
     rails_specs.extend(_role_evolution_rails(config, role))
+    rails_specs.extend(_agent_dropout_rails(config, role))
 
     tool_specs: list[BuiltinToolSpec] = [
         BuiltinToolSpec(type=name, params=_tool_params(name, config))
         for name in _COMMON_TOOL_NAMES
     ]
     return rails_specs, tool_specs
+
+
+def _agent_dropout_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
+    """Append AgentDropout rail when enabled (primarily teammates)."""
+    dropout_cfg = _config_section(config, "agent_dropout")
+    if not dropout_cfg.get("enabled"):
+        return []
+    if role == "leader" and not dropout_cfg.get("apply_to_leader", False):
+        return []
+    return [
+        RailSpec(
+            type=registry.AGENT_DROPOUT,
+            params=_rail_params(registry.AGENT_DROPOUT, config),
+        )
+    ]
 
 
 def _build_code_capability_specs(
@@ -557,6 +579,7 @@ def _build_code_capability_specs(
         for name in _CODE_SHARED_RAIL_NAMES
     )
     rails_specs.extend(_role_evolution_rails(config, role))
+    rails_specs.extend(_agent_dropout_rails(config, role))
 
     tool_specs: list[BuiltinToolSpec] = [
         BuiltinToolSpec(type=name, params=_tool_params(name, config))

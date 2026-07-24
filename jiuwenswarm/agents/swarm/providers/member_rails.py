@@ -66,6 +66,7 @@ PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
 SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
+AGENT_DROPOUT = "swarm.agent_dropout"
 
 
 def _workspace_root(ctx: SwarmBuildContext) -> str | None:
@@ -427,6 +428,7 @@ __all__ = [
     "SYMPHONY_ORCHESTRATION_PROMPT",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
+    "AGENT_DROPOUT",
 ]
 
 
@@ -551,4 +553,64 @@ def _build_team_permission_rail(params: dict[str, Any], context: Any) -> Any | N
     return TeamPermissionRail(
         config=narrowed_config,
         host=host,
+    )
+
+
+# ---------------------------------------------------------------------------
+# swarm.agent_dropout — AgentDropoutRail (teammate rectify-or-reject)
+# ---------------------------------------------------------------------------
+
+
+class AgentDropoutInput(ConstructionInput):
+    """Construction inputs for the AgentDropout rail."""
+
+    agent_dropout_config: dict[str, Any] = param_field(
+        default_factory=dict,
+        description="agent_dropout section from config.yaml.",
+    )
+    member_name: str = context_field(
+        attr="member_name",
+        default="teammate",
+        description="Per-member display name.",
+    )
+    role: str = context_field(
+        attr="role",
+        default="teammate",
+        description="Member role (leader / teammate).",
+    )
+    active_members: int = param_field(
+        default=2,
+        description="Active team size used for collapse-fallback checks.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=AGENT_DROPOUT,
+    description="Rectify-or-reject teammate contributions; drop after failed corrections.",
+    input_model=AgentDropoutInput,
+)
+def _build_agent_dropout_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> Any | None:
+    """Build AgentDropoutRail when ``agent_dropout.enabled`` is true (teammates)."""
+    inp = AgentDropoutInput.resolve(params, context)
+    cfg = inp.agent_dropout_config if isinstance(inp.agent_dropout_config, dict) else {}
+    if not cfg.get("enabled"):
+        return None
+    # Primarily for teammates; leaders skip unless explicitly allowed.
+    role = str(inp.role or "teammate").strip().lower()
+    if role == "leader" and not cfg.get("apply_to_leader", False):
+        return None
+
+    from jiuwenswarm.agents.harness.team.rails.agent_dropout_rail import (
+        build_agent_dropout_rail,
+    )
+
+    return build_agent_dropout_rail(
+        config=cfg,
+        member_name=str(inp.member_name or "teammate"),
+        role=role or "teammate",
+        active_members=int(inp.active_members or 2),
     )
