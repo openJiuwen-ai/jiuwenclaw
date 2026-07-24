@@ -22,6 +22,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -166,6 +167,164 @@ def test_marker_write_failure_still_blocks(monkeypatch, tmp_path):
         _kill_group(proc)
     _wait_group_gone(proc.pid)
     reconcile_claude_quarantine(runtime.root)  # gone -> clears in-process record
+
+
+# --------------------------------------------------------------------------- #
+# Adversarial: persistence failures and concurrency
+# --------------------------------------------------------------------------- #
+
+def _impossible_pgid_base() -> int:
+    """A pgid value the kernel can never assign (above pid_max), so it is
+    always provably gone yet still a positive int the recorder accepts."""
+    try:
+        return int(Path("/proc/sys/kernel/pid_max").read_text()) + 10_000
+    except OSError:
+        return 2**22 + 10_000
+
+
+def test_concurrent_records_lose_nothing(monkeypatch, tmp_path):
+    """16 threads recording disjoint groups concurrently: every group survives
+    in the marker, and reconcile clears them all once proven gone."""
+    runtime = _patch_workspace(monkeypatch, tmp_path)
+    base = _impossible_pgid_base()
+    per_thread = [[base + t * 8 + i for i in range(8)] for t in range(16)]
+    threads = [
+        threading.Thread(target=record_uncertain_groups, args=(runtime.root, groups))
+        for groups in per_thread
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    document = json.loads(_marker_path(runtime.root).read_text(encoding="utf-8"))
+    expected = sorted(pgid for groups in per_thread for pgid in groups)
+    assert sorted(document["process_groups"]) == expected
+    reconcile_claude_quarantine(runtime.root)  # all impossible pgids are gone
+    assert not _marker_path(runtime.root).exists()
+
+
+def test_concurrent_record_and_reconcile_never_fail_open(monkeypatch, tmp_path):
+    """Reconcile hammered from several threads while records land concurrently
+    must never clear the quarantine while the recorded group is still alive."""
+    runtime = _patch_workspace(monkeypatch, tmp_path)
+    base = _impossible_pgid_base()
+    proc = _spawn_owned_group()
+    failures: list[str] = []
+    try:
+        record_uncertain_groups(runtime.root, [proc.pid])
+
+        def hammer_reconcile() -> None:
+            for _ in range(25):
+                try:
+                    reconcile_claude_quarantine(runtime.root)
+                    failures.append("reconcile cleared while the group was alive")
+                except ClaudeProviderError:
+                    pass
+
+        def hammer_record(offset: int) -> None:
+            for i in range(25):
+                record_uncertain_groups(runtime.root, [base + offset + i])
+
+        threads = [threading.Thread(target=hammer_reconcile) for _ in range(4)] + [
+            threading.Thread(target=hammer_record, args=(1000 * (n + 1),)) for n in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert not failures
+        document = json.loads(_marker_path(runtime.root).read_text(encoding="utf-8"))
+        assert proc.pid in document["process_groups"]
+        with pytest.raises(ClaudeProviderError):
+            reconcile_claude_quarantine(runtime.root)
+    finally:
+        _kill_group(proc)
+    _wait_group_gone(proc.pid)
+    reconcile_claude_quarantine(runtime.root)
+    assert not _marker_path(runtime.root).exists()
+
+
+def test_unlink_failure_keeps_blocking(monkeypatch, tmp_path):
+    """If clearing the marker fails (read-only directory), reconcile raises and
+    the marker survives, so the NEXT turn is still blocked - never fail open."""
+    if os.geteuid() == 0:
+        pytest.skip("directory permissions do not bind root")
+    runtime = _patch_workspace(monkeypatch, tmp_path)
+    proc = _spawn_owned_group()
+    pgid = proc.pid
+    _kill_group(proc)
+    _wait_group_gone(pgid)
+    record_uncertain_groups(runtime.root, [pgid])
+    os.chmod(runtime.root, 0o500)
+    try:
+        with pytest.raises(ClaudeProviderError) as exc:
+            reconcile_claude_quarantine(runtime.root)
+        assert exc.value.code == "provider_unavailable"
+        assert _marker_path(runtime.root).exists()
+        with pytest.raises(ClaudeProviderError):
+            reconcile_claude_quarantine(runtime.root)  # still blocked next turn
+    finally:
+        os.chmod(runtime.root, 0o700)
+    reconcile_claude_quarantine(runtime.root)
+    assert not _marker_path(runtime.root).exists()
+
+
+def test_unreadable_marker_fails_closed(monkeypatch, tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("file permissions do not bind root")
+    runtime = _patch_workspace(monkeypatch, tmp_path)
+    marker = _marker_path(runtime.root)
+    marker.write_text(json.dumps({"process_groups": []}), encoding="utf-8")
+    os.chmod(marker, 0o000)
+    try:
+        with pytest.raises(ClaudeProviderError) as exc:
+            reconcile_claude_quarantine(runtime.root)
+        assert exc.value.code == "provider_unavailable"
+    finally:
+        os.chmod(marker, 0o600)
+
+
+def test_boolean_pgid_tampering_fails_closed(monkeypatch, tmp_path):
+    """JSON true/false are ints in Python; the marker must reject them."""
+    runtime = _patch_workspace(monkeypatch, tmp_path)
+    _marker_path(runtime.root).write_text(
+        json.dumps({"process_groups": [True]}), encoding="utf-8"
+    )
+    with pytest.raises(ClaudeProviderError) as exc:
+        reconcile_claude_quarantine(runtime.root)
+    assert exc.value.code == "provider_unavailable"
+
+
+def test_nonlist_groups_tampering_fails_closed(monkeypatch, tmp_path):
+    runtime = _patch_workspace(monkeypatch, tmp_path)
+    _marker_path(runtime.root).write_text(
+        json.dumps({"process_groups": {"pgid": 123}}), encoding="utf-8"
+    )
+    with pytest.raises(ClaudeProviderError) as exc:
+        reconcile_claude_quarantine(runtime.root)
+    assert exc.value.code == "provider_unavailable"
+
+
+def test_nonpositive_pgids_block_and_are_never_signalled(monkeypatch, tmp_path):
+    """A tampered marker holding 0 or -1 must block the turn WITHOUT ever
+    calling killpg on a non-positive pgid (which would signal our own group
+    or every process we can reach)."""
+    runtime = _patch_workspace(monkeypatch, tmp_path)
+    _marker_path(runtime.root).write_text(
+        json.dumps({"process_groups": [0, -1]}), encoding="utf-8"
+    )
+    signalled: list[int] = []
+    real_killpg = os.killpg
+
+    def spy(pgid, sig):
+        signalled.append(pgid)
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", spy)
+    with pytest.raises(ClaudeProviderError) as exc:
+        reconcile_claude_quarantine(runtime.root)
+    assert exc.value.code == "provider_unavailable"
+    assert signalled == []
 
 
 # --------------------------------------------------------------------------- #
