@@ -8630,7 +8630,6 @@ class JiuWenSwarmDeepAdapter:
             macro_mode_label,
             route_macro_mode,
         )
-        from jiuwenswarm.common.config import get_config
 
         params = request.params if isinstance(request.params, dict) else {}
         requested = str(params.get("mode") or "agent.plan").strip()
@@ -8654,11 +8653,6 @@ class JiuWenSwarmDeepAdapter:
             request.metadata = dict(request.metadata)
             request.metadata["macro_routing"] = decision.to_dict()
             request.metadata["mode"] = resolved
-        print(
-            f"[MacroRouter] Selected: {label} "
-            f"(source={decision.source}, confidence={decision.confidence:.2f})",
-            flush=True,
-        )
         logger.info(
             "[MacroRouter] Selected: %s (%s) conf=%.2f source=%s rationale=%s",
             label,

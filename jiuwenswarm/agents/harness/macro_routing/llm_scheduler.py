@@ -37,7 +37,7 @@ def _extract_json(text: str) -> dict[str, Any]:
     end = text.rfind("}")
     if start >= 0 and end > start:
         try:
-            parsed = json.loads(text[start : end + 1])
+            parsed = json.loads(text[start:end + 1])
             return parsed if isinstance(parsed, dict) else {}
         except json.JSONDecodeError:
             pass

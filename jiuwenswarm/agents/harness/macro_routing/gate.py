@@ -135,7 +135,7 @@ def route_with_gate(
     }
     features["scores"] = dict(scores)
     best_mode = max(scores, key=scores.get)
-    best = scores[best_mode]
+    best = scores.get(best_mode, 0.0)
     second = sorted(scores.values(), reverse=True)[1] if len(scores) > 1 else 0.0
     margin = best - second
 
@@ -162,7 +162,10 @@ def route_with_gate(
     return MacroRoutingDecision(
         mode=normalize_macro_mode(best_mode),
         confidence=float(confidence),
-        rationale=rationale_bits[best_mode],
+        rationale=rationale_bits.get(
+            best_mode,
+            "Design / tradeoff / planning markers — Planning Mode.",
+        ),
         source="rules",
         features=features,
         gate_confident=gate_confident,
