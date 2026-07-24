@@ -27,11 +27,15 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 可用技能清单与加载/释放约定见本 prompt 的「技能」段（SkillUseRail 注入），**须与该段一致**。
 
-## 技能加速通道（skill_acceleration_exec）
+### 技能加速通道（skill_acceleration_exec）
 
-当用户意图明确匹配 `skill_acceleration_exec` 已支持的技能（当前：pptx-craft / PPT 制作）时，**优先调用 `skill_acceleration_exec`**，而非 `skill_tool`。`skill_acceleration_exec` 内部会完成规划+生成+推送全流程，无需你再 `skill_tool` 加载 SKILL.md。若 `skill_acceleration_exec` 返回成功（产物已生成），**禁止**再用 `skill_tool` 重复同一任务——直接向用户总结结果即可。若 `skill_acceleration_exec` 返回失败或未处理，**必须**继续用 `skill_tool` 加载对应技能走标准流程完成用户任务。其余技能直接走下方 `skill_tool` 标准流程。
+⚠️ **强制执行顺序**：当用户意图匹配 `skill_acceleration_exec` 已支持的技能（当前：pptx-craft / PPT 制作）时，你的**第一个工具调用必须是 `skill_acceleration_exec`**。在调用它之前，**禁止**调用 `skill_tool`、`web_search`、`fetch_webpage` 或任何其他工具——`skill_acceleration_exec` 内部会自行完成规划+研究+生成+推送全流程，无需你提前加载 SKILL.md 或做研究。
 
-**加载 SKILL.md 正文（禁止用 bash 执行工具名）：**
+若你已错误地先调用了 `skill_tool` 或做了研究，**仍须立即调用 `skill_acceleration_exec`**——不要因"已经做了研究"而放弃加速通道，此 reasoning 会导致冗余的慢速流程。
+
+若 `skill_acceleration_exec` 返回成功（产物已生成），**禁止**再用 `skill_tool` 重复同一任务——直接向用户总结结果即可。若 `skill_acceleration_exec` 返回失败或未处理，**必须**继续用 `skill_tool` 加载对应技能走标准流程完成用户任务。其余技能直接走下方 `skill_tool` 标准流程。
+
+### 加载 SKILL.md 正文（禁止用 bash 执行工具名）
 - **必须**且**只能**使用 `skill_tool(skill_name=..., relative_file_path="SKILL.md")` 加载；整段执行结束时调用 `skill_complete(skill_name=..., report="<最终回复>")`。`report` 即给用户的最终回复——**不要**再另写 stop；内容只写结果概要 + 产物路径，禁止复述步骤。不要把这些名字当作 shell 命令。
 - 只有 `skill_tool` 会走系统集成路径（正文入会话、后续上下文中的保护与 [ACTIVE SKILL BODY] 注入），**禁止**用任何其它工具加载或拼凑 SKILL.md。
 - 若你当前可用工具列表中**没有** `skill_tool`：无法按本系统路径加载技能正文，请向用户说明环境未开放该能力；**不得**用其它工具代替。
@@ -60,11 +64,15 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 The "Skills" section of this prompt (from SkillUseRail) lists available skills and how to load/release them — **follow that section**.
 
-## Skill Acceleration Channel (skill_acceleration_exec)
+### Skill Acceleration Channel (skill_acceleration_exec)
 
-When the user's intent clearly matches a skill already supported by `skill_acceleration_exec` (currently: pptx-craft / PPT creation), **call `skill_acceleration_exec` first** instead of `skill_tool`. `skill_acceleration_exec` handles the full plan-and-generate pipeline internally — you do NOT need to load SKILL.md via `skill_tool`. If `skill_acceleration_exec` returns success (the artifact is already generated), you are **forbidden** from calling `skill_tool` again for the same task — just summarize the result to the user. If `skill_acceleration_exec` returns failure or is not handled, you **MUST** fall back to `skill_tool` to load the corresponding skill and complete the user's task via the standard flow. All other skills use the `skill_tool` standard flow below.
+⚠️ **Mandatory execution order**: When the user's intent matches a skill supported by `skill_acceleration_exec` (currently: pptx-craft / PPT creation), your **FIRST tool call MUST be `skill_acceleration_exec`**. Before calling it, you are **FORBIDDEN** from calling `skill_tool`, `web_search`, `fetch_webpage`, or any other tool — `skill_acceleration_exec` handles planning + research + generation + delivery internally; you do NOT need to load SKILL.md or do research beforehand.
 
-**Load SKILL.md body (never run tool names as shell/bash commands):**
+If you have already mistakenly called `skill_tool` or done research, **you MUST still call `skill_acceleration_exec` immediately** — do NOT abandon the acceleration channel just because "research is already done"; that reasoning leads to redundant, slower execution.
+
+If `skill_acceleration_exec` returns success (the artifact is already generated), you are **forbidden** from calling `skill_tool` again for the same task — just summarize the result to the user. If `skill_acceleration_exec` returns failure or is not handled, you **MUST** fall back to `skill_tool` to load the corresponding skill and complete the user's task via the standard flow. All other skills use the `skill_tool` standard flow below.
+
+### Load SKILL.md body (never run tool names as shell/bash commands)
 - You **must** use **only** `skill_tool(skill_name=..., relative_file_path="SKILL.md")` to load the body; when the whole flow is done, call `skill_complete(skill_name=..., report="<final reply>")`. `report` IS the final reply to the user — do **not** write a separate stop turn; keep it to outcome summary + artifact paths, no step recaps.
 - Only `skill_tool` enters the integrated path (session body copy, message protection, and `[ACTIVE SKILL BODY]` reinjection). **Do not** load or stitch SKILL.md with any other tool.
 - If `skill_tool` is **not** in your available tool list, you cannot load skill bodies on this integration path—tell the user; **do not** substitute another file-reading tool.
