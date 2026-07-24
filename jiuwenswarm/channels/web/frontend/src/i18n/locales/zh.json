@@ -1595,7 +1595,7 @@
     "evolution": {
       "closeAria": "关闭技能经验弹窗",
       "title": "技能经验：{{name}}",
-      "subtitle": "可编辑经验内容（change.content），并支持删除条目后保存。",
+      "subtitle": "可编辑或删除经验，保存后生效。",
       "empty": "暂无经验条目",
       "deleteConfirm": "确认删除该条经验吗？",
       "actions": {
@@ -1604,12 +1604,29 @@
       "fields": {
         "id": "ID",
         "source": "来源",
-        "section": "Section",
-        "target": "Target",
+        "section": "类型",
+        "target": "改进对象",
         "applied": "已应用",
-        "timestamp": "时间",
+        "timestamp": "生成时间",
         "context": "上下文",
         "content": "经验内容"
+      },
+      "values": {
+        "section": {
+          "instructions": "使用说明",
+          "examples": "使用示例",
+          "troubleshooting": "问题排查",
+          "workflow": "工作流程",
+          "constraints": "约束条件",
+          "roles": "角色定义",
+          "collaboration": "协作方式",
+          "scripts": "脚本"
+        },
+        "target": {
+          "description": "技能简介",
+          "body": "技能正文",
+          "script": "技能脚本"
+        }
       },
       "messages": {
         "saved": "保存成功"

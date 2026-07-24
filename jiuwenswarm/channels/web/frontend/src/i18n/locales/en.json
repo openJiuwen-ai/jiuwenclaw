@@ -1594,7 +1594,7 @@
     "evolution": {
       "closeAria": "Close skill experience dialog",
       "title": "Skill Experience: {{name}}",
-      "subtitle": "You can edit experience content (change.content), delete entries, and save.",
+      "subtitle": "Edit or delete experiences, then save to apply your changes.",
       "empty": "No experience entries",
       "deleteConfirm": "Delete this experience entry?",
       "actions": {
@@ -1603,12 +1603,29 @@
       "fields": {
         "id": "ID",
         "source": "Source",
-        "section": "Section",
-        "target": "Target",
+        "section": "Type",
+        "target": "Improvement target",
         "applied": "Applied",
-        "timestamp": "Timestamp",
+        "timestamp": "Created at",
         "context": "Context",
         "content": "Experience Content"
+      },
+      "values": {
+        "section": {
+          "instructions": "Usage instructions",
+          "examples": "Examples",
+          "troubleshooting": "Troubleshooting",
+          "workflow": "Workflow",
+          "constraints": "Constraints",
+          "roles": "Roles",
+          "collaboration": "Collaboration",
+          "scripts": "Scripts"
+        },
+        "target": {
+          "description": "Skill description",
+          "body": "Skill body",
+          "script": "Skill scripts"
+        }
       },
       "messages": {
         "saved": "Saved successfully"
