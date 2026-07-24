@@ -1048,6 +1048,12 @@
       "noResults": "未找到相关模板，可换个关键词再试。",
       "noResultsJobs": "未找到相关任务，可换个关键词再试。"
     },
+    "pagination": {
+      "pageSize": "每页显示",
+      "rangeInfo": "{{start}}-{{end}} / 共 {{total}} 条",
+      "prev": "上一页",
+      "next": "下一页"
+    },
     "table": {
       "name": "名称",
       "project": "项目",

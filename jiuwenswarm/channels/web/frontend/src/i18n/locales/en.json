@@ -1048,6 +1048,12 @@
       "noResults": "No matching templates found. Try a different keyword.",
       "noResultsJobs": "No matching tasks found. Try a different keyword."
     },
+    "pagination": {
+      "pageSize": "Rows per page",
+      "rangeInfo": "{{start}}-{{end}} of {{total}}",
+      "prev": "Previous page",
+      "next": "Next page"
+    },
     "table": {
       "name": "Name",
       "project": "Project",

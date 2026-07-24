@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, Search, TrendingUp, Newspaper, Briefcase } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Search, TrendingUp, Newspaper, Briefcase } from 'lucide-react';
 import { webRequest, webClient } from '../../services/webClient';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useCronStore } from '../../stores';
@@ -14,7 +14,109 @@ import StatusBadge, { BoldRingIcon, RunningIcon } from './StatusBadge';
 import ConfirmDialog from './ConfirmDialog';
 import CronTaskDrawer, { jobToForm, templateToForm, type CronTaskFormValue } from './CronTaskDrawer';
 import { useClickOutside } from './useClickOutside';
+import SimpleSelect from './SimpleSelect';
 import emptyIllustration from '../../assets/cron-empty.svg';
+
+// 任务列表分页：每页条数可选项（默认 20），纯前端本地分页——后端 cron.job.list 目前
+// 一次性返回全部任务、不支持 offset/limit，见 bug002 progress.md 的方案说明
+const PAGE_SIZE_OPTIONS = [10, 20, 50];
+const DEFAULT_PAGE_SIZE = 20;
+
+// 页码按钮列表：页数不多时全部展示，页数较多时只展示首页/尾页/当前页前后一页，其余用省略号折叠，
+// 避免页数很多时（比如上百页）把一整行按钮撑爆
+function buildPageList(current: number, total: number): (number | 'ellipsis')[] {
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, i) => i + 1);
+  }
+  const pages: (number | 'ellipsis')[] = [1];
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+  if (start > 2) pages.push('ellipsis');
+  for (let p = start; p <= end; p++) pages.push(p);
+  if (end < total - 1) pages.push('ellipsis');
+  pages.push(total);
+  return pages;
+}
+
+interface PaginationBarProps {
+  currentPage: number;
+  totalPages: number;
+  pageSize: number;
+  totalCount: number;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (size: number) => void;
+}
+
+// 任务列表下方的分页条：每页条数下拉（10/20/50） + 当前范围提示 + 页码翻页。
+// 下拉的弹出方向朝上（menuPlacement="up"）——分页条紧贴表格下方、离页面底部很近，向下弹出
+// 经常需要用户再往下滚一屏才能看到选项，向上弹出正好贴着分页条本身展开，不用滚动。
+// "每页显示"下拉始终展示（哪怕当前只有一页），因为它是用户对"每页看几条"的持久偏好，任务数
+// 从多变少（比如筛出结果变少、任务被删除）不应该让这个控件也跟着消失，否则用户切到 50
+// 条/页后任务数又降回一页以内，就再也切不回 20 条了；只有"上一页/页码/下一页"这组纯粹为翻页
+// 服务的控件，在只有一页（或没有数据）时才没有意义，按 totalPages > 1 单独控制显示。
+function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageChange, onPageSizeChange }: PaginationBarProps) {
+  const { t } = useTranslation();
+  const pageSizeOptions = useMemo(() => PAGE_SIZE_OPTIONS.map((n) => ({ value: String(n), label: String(n) })), []);
+  const pages = useMemo(() => buildPageList(currentPage, totalPages), [currentPage, totalPages]);
+  const rangeStart = totalCount === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const rangeEnd = Math.min(currentPage * pageSize, totalCount);
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-text-muted" data-testid="cron-pagination">
+      <div className="flex items-center gap-2">
+        <span>{t('cron.pagination.pageSize')}</span>
+        <SimpleSelect
+          value={String(pageSize)}
+          onChange={(v) => onPageSizeChange(Number(v))}
+          options={pageSizeOptions}
+          className="w-20"
+          menuPlacement="up"
+        />
+        <span>{t('cron.pagination.rangeInfo', { start: rangeStart, end: rangeEnd, total: totalCount })}</span>
+      </div>
+      {totalPages > 1 && (
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={currentPage <= 1}
+            onClick={() => onPageChange(currentPage - 1)}
+            aria-label={t('cron.pagination.prev') ?? undefined}
+            className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <ChevronLeft size={14} />
+          </button>
+          {pages.map((p, idx) =>
+            p === 'ellipsis' ? (
+              <span key={`ellipsis-${idx}`} className="px-1.5 text-text-muted">
+                …
+              </span>
+            ) : (
+              <button
+                key={p}
+                type="button"
+                onClick={() => onPageChange(p)}
+                className={`flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-sm ${
+                  p === currentPage ? 'bg-cron-action font-bold text-cron-action-foreground' : 'text-text hover:bg-bg-hover'
+                }`}
+              >
+                {p}
+              </button>
+            ),
+          )}
+          <button
+            type="button"
+            disabled={currentPage >= totalPages}
+            onClick={() => onPageChange(currentPage + 1)}
+            aria-label={t('cron.pagination.next') ?? undefined}
+            className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <ChevronRight size={14} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // 主动推荐自动维护的 job id（与后端 proactive_cron_sync.PROACTIVE_JOB_ID 一致）。
 // 该 job 的整体开关由 config 的 proactive_recommendation.enabled 驱动（关则删除，不在列表里）；
@@ -108,6 +210,11 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
 
   const [activeTab, setActiveTab] = useState<TabKey>('list');
   const [search, setSearch] = useState('');
+
+  // 任务列表分页状态：纯前端本地分页（见文件顶部 PAGE_SIZE_OPTIONS 注释）
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [currentPage, setCurrentPage] = useState(1);
+  const tableWrapperRef = useRef<HTMLDivElement>(null);
 
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const createMenuRef = useRef<HTMLDivElement>(null);
@@ -293,6 +400,35 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     () => jobs.filter((j) => j.name.toLowerCase().includes(search.trim().toLowerCase())),
     [jobs, search],
   );
+
+  // 搜索内容变化时重置回第 1 页，避免搜索结果变少后停留在一个已经越界的页码上看到空白
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredJobs.length / pageSize)), [filteredJobs.length, pageSize]);
+
+  // 任务被删除/停止等操作导致 filteredJobs 变短时，当前页码也可能越界，钳制回合法范围
+  useEffect(() => {
+    setCurrentPage((p) => (p > totalPages ? totalPages : p));
+  }, [totalPages]);
+
+  const paginatedJobs = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredJobs.slice(start, start + pageSize);
+  }, [filteredJobs, currentPage, pageSize]);
+
+  // 翻页后把表格滚动回可视区域顶部，避免用户翻页后还停留在上次的滚动位置看不到新一页内容
+  const goToPage = useCallback((page: number) => {
+    setCurrentPage(page);
+    tableWrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
+  const changePageSize = useCallback((size: number) => {
+    setPageSize(size);
+    setCurrentPage(1);
+  }, []);
+
   const filteredTemplates = useMemo(
     () => CRON_TEMPLATES.filter((tpl) => t(tpl.titleKey).toLowerCase().includes(search.trim().toLowerCase())),
     [search, t],
@@ -323,6 +459,9 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       setDrawer(null);
       setActiveTab('list');
       await loadJobs(projects);
+      // 新任务按 updated_at 倒序会排到列表最前面（见 gateway/cron/store.py:179 的排序规则），
+      // 跳回第 1 页并滚到表格顶部，让用户直接看到刚创建的任务，不用自己翻页去找
+      goToPage(1);
       void reloadCronStore();
     } catch (createError) {
       const message = createError instanceof Error ? createError.message : t('cron.errors.createFailed');
@@ -356,6 +495,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       setSuccess(t('cron.success.updated'));
       setDrawer(null);
       await loadJobs(projects);
+      // 编辑保存同样会刷新 updated_at、把任务顶到列表最前面，跳回第 1 页保持跟"新建"一致的体验
+      goToPage(1);
       void reloadCronStore();
     } catch (updateError) {
       const message = updateError instanceof Error ? updateError.message : t('cron.errors.updateFailed');
@@ -370,6 +511,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       await webRequest<{ job: CronJobDTO }>('cron.job.toggle', { id: confirmState.job.id, enabled: false });
       setSuccess(t('cron.success.statusUpdated'));
       await loadJobs(projects);
+      // 停止也会经 store.update_job 刷新 updated_at、把任务顶到列表最前面，同"新建/编辑"一样跳回第 1 页
+      goToPage(1);
       void reloadCronStore();
     } catch (toggleError) {
       const message = toggleError instanceof Error ? toggleError.message : t('cron.errors.toggleFailed');
@@ -386,6 +529,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       await webRequest<{ job: CronJobDTO }>('cron.job.toggle', { id: job.id, enabled: true });
       setSuccess(t('cron.success.statusUpdated'));
       await loadJobs(projects);
+      // 同上：启动也会把任务顶到列表最前面，跳回第 1 页
+      goToPage(1);
       void reloadCronStore();
     } catch (toggleError) {
       const message = toggleError instanceof Error ? toggleError.message : t('cron.errors.toggleFailed');
@@ -656,7 +801,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
           </div>
         )}
         {activeTab === 'list' && !loading && jobs.length > 0 && filteredJobs.length > 0 && (
-          <div className="overflow-visible rounded-lg border border-border">
+          <>
+          <div ref={tableWrapperRef} className="overflow-visible rounded-lg border border-border">
             <table className="w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-border bg-bg-muted text-left text-text">
@@ -670,7 +816,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                 </tr>
               </thead>
               <tbody>
-                {filteredJobs.map((job) => {
+                {paginatedJobs.map((job) => {
                   const isProactive = job.id === PROACTIVE_AUTO_JOB_ID;
                   return (
                     <tr key={job.id} className="border-b border-border last:border-0">
@@ -866,6 +1012,15 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
               </tbody>
             </table>
           </div>
+          <PaginationBar
+            currentPage={currentPage}
+            totalPages={totalPages}
+            pageSize={pageSize}
+            totalCount={filteredJobs.length}
+            onPageChange={goToPage}
+            onPageSizeChange={changePageSize}
+          />
+          </>
         )}
 
         {/* tab: 任务模板 */}
