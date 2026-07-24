@@ -91,6 +91,17 @@ from openjiuwen.core.runner.callback import AbortError as _SkillTurboAbortError
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.signal import SignalDetector
 try:
+    from openjiuwen.agent_evolving.skill_self_evolution import resolve_skill_evolution_action
+except ImportError:
+    def resolve_skill_evolution_action(  # type: ignore[misc]
+        skill_name: str,
+        *,
+        default_auto_save: bool = True,
+        **_kwargs: Any,
+    ) -> str:
+        """Fallback when agent-core lacks skill_self_evolution."""
+        return "auto" if default_auto_save else "suggest"
+try:
     from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
     from openjiuwen.harness.rails.evolution.commands import build_rebuild_command_prompt
 except ImportError:
@@ -1339,6 +1350,8 @@ class JiuWenClawDeepAdapter:
         self._pending_evolution_summary_by_session: dict[str, str] = {}
         # Skills that auto_save evolution just persisted; drained for auto rebuild.
         self._pending_auto_rebuild_skills: list[str] = []
+        # Fire-and-forget: wait for rail evolution then rebuild / stash footnote.
+        self._pending_evolution_followup_tasks: set[asyncio.Task[Any]] = set()
         self._pending_reload: tuple[
             dict[str, Any] | None, dict[str, Any] | None, bool
         ] | None = None
@@ -6930,7 +6943,8 @@ class JiuWenClawDeepAdapter:
             return {
                 "output": (
                     "`/evolve_rebuild` 已移除。\n"
-                    "开启 `evolution.auto_save` 后，在线自动演进落盘经验时会自动生成新版本。"
+                    "在 `.office-claw/capabilities.json` 中将 Skill 的 `selfEvolution` 设为 "
+                    "`auto` 后，在线演进落盘经验时会自动融合为新版本。"
                 ),
                 "result_type": "answer",
             }
@@ -8281,18 +8295,9 @@ class JiuWenClawDeepAdapter:
                             suppress_stream_after_hitl = True
                             continue
 
-            evolution_summary_text = self._collect_evolution_run_summary_text(rid)
-
-            evolution_merged_into_final = False
-            if evolution_summary_text and accumulated_text and not hitl_pending_stream:
-                accumulated_text += evolution_summary_text
-                evolution_merged_into_final = True
-                logger.info(
-                    "[JiuWenClawDeepAdapter] merged evolution footnote into chat.final: request_id=%s",
-                    rid,
-                    extra={"user_visible": "progress"},
-                )
-
+            # Evolution runs as SkillEvolutionRail background task from after_invoke.
+            # Do not await it on this stream — schedule a detached follow-up for
+            # summary stash + auto rebuild so the user turn can complete immediately.
             if not accumulated_text and not hitl_pending_stream and not has_streamed_content:
                 accumulated_text = "处理完成，但未生成回复内容。请尝试重新发送消息。"
                 logger.warning(
@@ -8325,8 +8330,8 @@ class JiuWenClawDeepAdapter:
                     is_complete=False,
                 )
 
-            # after_invoke 在流关闭后触发，其中缓存的审批事件无法通过
-            # session.write_stream 传递，需手动注入到 stream 输出
+            # Drain only approval events already ready (usually empty while evolution
+            # is still running). Late summary / rebuild happen in a background task.
             if self._skill_evolution_rail is not None:
                 for evt in self._skill_evolution_rail.drain_pending_approval_events():
                     payload = evt.payload or {}
@@ -8370,48 +8375,19 @@ class JiuWenClawDeepAdapter:
                             is_complete=False,
                         )
 
-                if evolution_summary_text and not evolution_merged_into_final:
-                    if hitl_pending_stream:
-                        self._stash_pending_evolution_summary(
-                            session_id,
-                            evolution_summary_text,
-                            rid,
-                        )
-                    else:
-                        logger.info(
-                            "[JiuWenClawDeepAdapter] emitting evolution UI footnote via chat.delta: "
-                            "request_id=%s chars=%d preview=%r",
-                            rid,
-                            len(evolution_summary_text),
-                            evolution_summary_text[:200],
-                            extra={"user_visible": "progress"},
-                        )
-                        yield AgentResponseChunk(
-                            request_id=rid,
-                            channel_id=cid,
-                            payload={"event_type": "chat.delta", "content": evolution_summary_text},
-                            is_complete=False,
-                        )
-                elif not evolution_summary_text:
-                    logger.info(
-                        "[JiuWenClawDeepAdapter] no evolution UI footnote to emit: request_id=%s",
-                        rid,
-                        extra={"user_visible": "progress"},
-                    )
+                # Always schedule followup so evolution summary is stashed for the
+                # next turn (including HITL pause). Auto rebuild runs only when the
+                # turn fully completed (not HITL-pending).
+                self._schedule_background_evolution_followup(
+                    request_id=rid,
+                    session_id=session_id,
+                    hitl_pending=hitl_pending_stream,
+                )
 
                 logger.info(
                     f"[JiuWenClawDeepAdapter] Agent执行成功: request_id={request.request_id}",
                     extra={'user_visible': 'critical'}
                 )
-
-                async for rebuild_chunk in self._iter_auto_rebuild_followups(
-                    base_inputs=inputs,
-                    stream_request_id=rid,
-                    channel_id=cid,
-                    session_id=session_id,
-                    hitl_pending=hitl_pending_stream,
-                ):
-                    yield rebuild_chunk
 
             # Finalize is owned by generate_evolution_merge_version (RPC / auto-rebuild).
             # /evolve_rebuild no longer yields run_rebuild_followup slash results.
@@ -8524,8 +8500,205 @@ class JiuWenClawDeepAdapter:
                 is_complete=True,
             )
 
+    def _schedule_background_evolution_followup(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        hitl_pending: bool = False,
+    ) -> None:
+        """Fire-and-forget: wait for rail evolution, then stash footnote + auto rebuild.
+
+        Must not be awaited from the chat stream — keeps the user turn non-blocking.
+        When ``hitl_pending`` is True, still collect/stash the evolution summary but
+        skip auto rebuild (same policy as the former in-stream path).
+        """
+        rail = self._skill_evolution_rail
+        if rail is None:
+            return
+        if not bool(getattr(rail, "has_pending_evolution", False)):
+            # Evolution may have already finished between after_invoke and here;
+            # still try to drain summary / rebuild once in the background.
+            logger.info(
+                "[JiuWenClawDeepAdapter] schedule evolution followup with no pending task yet: "
+                "request_id=%s hitl_pending=%s",
+                request_id,
+                hitl_pending,
+                extra={"user_visible": "progress"},
+            )
+
+        task = asyncio.create_task(
+            self._background_evolution_followup(
+                request_id=request_id,
+                session_id=session_id,
+                hitl_pending=hitl_pending,
+            ),
+            name=f"evolution_followup_{request_id}",
+        )
+        self._pending_evolution_followup_tasks.add(task)
+
+        def _on_done(done: asyncio.Task[Any]) -> None:
+            self._pending_evolution_followup_tasks.discard(done)
+            if done.cancelled():
+                logger.info(
+                    "[JiuWenClawDeepAdapter] evolution followup cancelled: request_id=%s",
+                    request_id,
+                    extra={"user_visible": "progress"},
+                )
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] evolution followup failed: request_id=%s error=%s",
+                    request_id,
+                    exc,
+                    exc_info=exc,
+                    extra={"user_visible": "progress"},
+                )
+            else:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] evolution followup completed: request_id=%s",
+                    request_id,
+                    extra={"user_visible": "progress"},
+                )
+
+        task.add_done_callback(_on_done)
+        logger.info(
+            "[JiuWenClawDeepAdapter] scheduled background evolution followup: "
+            "request_id=%s hitl_pending=%s pending_followups=%d",
+            request_id,
+            hitl_pending,
+            len(self._pending_evolution_followup_tasks),
+            extra={"user_visible": "progress"},
+        )
+
+    async def _background_evolution_followup(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        hitl_pending: bool = False,
+        timeout: float | None = 300.0,
+    ) -> None:
+        """Detached worker: join rail evolution, stash UI summary, run auto rebuild."""
+        await self._await_pending_skill_evolution(request_id, timeout=timeout)
+        summary_text = self._collect_evolution_run_summary_text(request_id)
+        if summary_text:
+            self._stash_pending_evolution_summary(session_id, summary_text, request_id)
+            logger.info(
+                "[JiuWenClawDeepAdapter] stashed evolution footnote for next turn: "
+                "request_id=%s session_id=%s chars=%d",
+                request_id,
+                session_id,
+                len(summary_text),
+                extra={"user_visible": "progress"},
+            )
+
+        # Late approval events (e.g. skill_creator_follow_up) after evolution —
+        # cannot yield on the closed stream; log for ops visibility.
+        rail = self._skill_evolution_rail
+        if rail is not None:
+            late_events = rail.drain_pending_approval_events()
+            if late_events:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] dropping %d late evolution approval event(s) "
+                    "after stream closed: request_id=%s types=%s",
+                    len(late_events),
+                    request_id,
+                    [getattr(evt, "type", None) for evt in late_events],
+                    extra={"user_visible": "progress"},
+                )
+
+        if hitl_pending:
+            # Mirror _iter_auto_rebuild_followups: do not rebuild while waiting on HITL.
+            self._pending_auto_rebuild_skills = []
+            logger.info(
+                "[JiuWenClawDeepAdapter] skip auto rebuild while HITL pending: request_id=%s",
+                request_id,
+                extra={"user_visible": "progress"},
+            )
+            return
+
+        await self._run_auto_rebuild_skills_detached(request_id=request_id)
+
+    async def _await_pending_skill_evolution(
+        self,
+        request_id: str,
+        *,
+        timeout: float | None = 300.0,
+    ) -> None:
+        """Wait for SkillEvolutionRail background evolution (background followup only)."""
+        rail = self._skill_evolution_rail
+        if rail is None:
+            return
+        wait = getattr(rail, "wait_for_pending_evolution", None)
+        if not callable(wait):
+            logger.info(
+                "[JiuWenClawDeepAdapter] skip evolution wait: request_id=%s "
+                "reason=wait_for_pending_evolution_missing",
+                request_id,
+                extra={"user_visible": "progress"},
+            )
+            return
+        # Brief poll: after_invoke may schedule the task a tick after chat.final.
+        if not bool(getattr(rail, "has_pending_evolution", False)):
+            await asyncio.sleep(0)
+        if not bool(getattr(rail, "has_pending_evolution", False)):
+            logger.info(
+                "[JiuWenClawDeepAdapter] skip evolution wait: request_id=%s reason=no_pending_task",
+                request_id,
+                extra={"user_visible": "progress"},
+            )
+            return
+        logger.info(
+            "[JiuWenClawDeepAdapter] background followup waiting for skill evolution: "
+            "request_id=%s timeout=%s",
+            request_id,
+            timeout,
+            extra={"user_visible": "progress"},
+        )
+        try:
+            await wait(timeout=timeout)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] evolution wait failed: request_id=%s error=%s",
+                request_id,
+                exc,
+                exc_info=True,
+                extra={"user_visible": "progress"},
+            )
+            return
+        still_pending = bool(getattr(rail, "has_pending_evolution", False))
+        logger.info(
+            "[JiuWenClawDeepAdapter] background followup evolution wait done: "
+            "request_id=%s still_pending=%s",
+            request_id,
+            still_pending,
+            extra={"user_visible": "progress"},
+        )
+
+    def _should_auto_merge_evolved_skill(self, skill_name: str) -> bool:
+        """Return True when per-skill selfEvolution resolves to ``auto``.
+
+        Unlisted skills use ``default_auto_save=False`` → ``suggest`` (no auto merge).
+        """
+        name = (skill_name or "").strip()
+        if not name:
+            return False
+        action = resolve_skill_evolution_action(
+            name,
+            default_auto_save=False,
+            skills_dirs=self._registered_skill_dirs_for_rail(),
+        )
+        return action == "auto"
+
     def _collect_evolution_run_summary_text(self, request_id: str) -> str:
-        """Drain and format evolution summary for UI footnote; log skip/drain outcomes."""
+        """Drain and format evolution summary; also fills ``_pending_auto_rebuild_skills``.
+
+        Intended for the detached evolution followup after rail evolution finishes.
+        Only skills whose ``resolve_skill_evolution_action`` is ``auto`` are queued
+        for version merge; ``off`` / ``suggest`` are skipped.
+        """
         self._pending_auto_rebuild_skills = []
         if self._skill_evolution_rail is None:
             logger.info(
@@ -8537,16 +8710,17 @@ class JiuWenClawDeepAdapter:
         try:
             evolution_summary = self._skill_evolution_rail.take_run_summary()
             evolution_summary_text = self._format_evolution_summary_markdown(evolution_summary)
-            if (
-                isinstance(evolution_summary, dict)
-                and getattr(self._skill_evolution_rail, "auto_save", False)
-            ):
+            if isinstance(evolution_summary, dict):
                 names: list[str] = []
                 for item in self._iter_evolution_summary_items(evolution_summary.get("skills")):
                     if not isinstance(item, dict):
                         continue
                     skill_name = str(item.get("skill_name") or "").strip()
-                    if skill_name and skill_name not in names:
+                    if (
+                        skill_name
+                        and skill_name not in names
+                        and self._should_auto_merge_evolved_skill(skill_name)
+                    ):
                         names.append(skill_name)
                 self._pending_auto_rebuild_skills = names
         except Exception as exc:
@@ -8575,6 +8749,72 @@ class JiuWenClawDeepAdapter:
         self._pending_auto_rebuild_skills = []
         return skills
 
+    async def _run_auto_rebuild_skills_detached(
+        self,
+        *,
+        request_id: str,
+    ) -> None:
+        """Rebuild skills off the chat stream (no chunk yields)."""
+        if self._skill_evolution_rail is None:
+            self._pending_auto_rebuild_skills = []
+            return
+
+        skill_names = self._take_pending_auto_rebuild_skills()
+        if not skill_names:
+            return
+
+        for skill_name in skill_names:
+            if not self._should_auto_merge_evolved_skill(skill_name):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] background auto rebuild skipped: "
+                    "request_id=%s skill=%s reason=selfEvolution_not_auto",
+                    request_id,
+                    skill_name,
+                    extra={"user_visible": "progress"},
+                )
+                continue
+            logger.info(
+                "[JiuWenClawDeepAdapter] background auto rebuild start: "
+                "request_id=%s skill=%s",
+                request_id,
+                skill_name,
+                extra={"user_visible": "progress"},
+            )
+            try:
+                result = await self.generate_evolution_merge_version(
+                    skill_name=skill_name,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] background auto rebuild failed: "
+                    "request_id=%s skill=%s error=%s",
+                    request_id,
+                    skill_name,
+                    exc,
+                    exc_info=True,
+                    extra={"user_visible": "progress"},
+                )
+                continue
+
+            if result.get("ok"):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] background auto rebuild ok: "
+                    "request_id=%s skill=%s new_version=%s",
+                    request_id,
+                    skill_name,
+                    result.get("new_version"),
+                    extra={"user_visible": "progress"},
+                )
+            else:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] background auto rebuild skipped/failed: "
+                    "request_id=%s skill=%s reason=%s",
+                    request_id,
+                    skill_name,
+                    result.get("error") or "unknown",
+                    extra={"user_visible": "progress"},
+                )
+
     async def _iter_auto_rebuild_followups(
         self,
         *,
@@ -8584,7 +8824,11 @@ class JiuWenClawDeepAdapter:
         session_id: str,
         hitl_pending: bool,
     ) -> AsyncIterator[AgentResponseChunk]:
-        """Serially rebuild skills that online auto_save evolution just persisted."""
+        """Serially rebuild skills with stream progress (tests / legacy callers).
+
+        Online chat path uses ``_run_auto_rebuild_skills_detached`` instead so the
+        user turn is not blocked.
+        """
         if hitl_pending:
             self._pending_auto_rebuild_skills = []
             logger.info(
@@ -8594,8 +8838,7 @@ class JiuWenClawDeepAdapter:
             )
             return
 
-        rail = self._skill_evolution_rail
-        if rail is None or not getattr(rail, "auto_save", False):
+        if self._skill_evolution_rail is None:
             self._pending_auto_rebuild_skills = []
             return
 
@@ -8604,6 +8847,13 @@ class JiuWenClawDeepAdapter:
             return
 
         for skill_name in skill_names:
+            if not self._should_auto_merge_evolved_skill(skill_name):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] skip auto rebuild: skill=%s reason=selfEvolution_not_auto",
+                    skill_name,
+                    extra={"user_visible": "progress"},
+                )
+                continue
             yield AgentResponseChunk(
                 request_id=stream_request_id,
                 channel_id=channel_id,

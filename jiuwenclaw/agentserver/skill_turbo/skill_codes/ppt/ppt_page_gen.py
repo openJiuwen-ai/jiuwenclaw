@@ -487,7 +487,18 @@ def _is_valid_html(text: str) -> bool:
     if not text or len(text) < 200:
         return False
     lower = text.lower()
-    return ("<html" in lower or "<!doctype html" in lower) and "ppt-slide" in lower
+    if "<html" not in lower and "<!doctype html" not in lower:
+        return False
+    if "ppt-slide" not in lower:
+        return False
+    # 检测内容安全过滤截断：LLM 输出被安全过滤器中断时会嵌入审查消息
+    if "sensitive information" in lower or "try a new topic" in lower:
+        return False
+    # 检测 HTML 结构完整性：完整文档必须包含 body 和 html 闭合标签，
+    # 缺失说明输出被截断（如 max_tokens 截断、内容安全过滤中断等）
+    if "</body>" not in lower or "</html>" not in lower:
+        return False
+    return True
 
 
 # 匹配含 ppt-slide 的 div 开始标签
