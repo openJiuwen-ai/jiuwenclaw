@@ -14,6 +14,7 @@ from jiuwenclaw.agentserver.sync_agents_configs import (
     SYNC_ENV_SCHEMA,
     build_agent_spec,
     materialize_sync_env,
+    synthesize_config,
     validate_sync_payload,
 )
 from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
@@ -772,6 +773,88 @@ def test_build_agent_spec_hash_stable():
         revision="r1",
     )
     assert a.content_hash == b.content_hash
+
+
+class TestSynthesizeConfigEnvAuthority:
+    @staticmethod
+    def test_skill_envs_only_applies_env_memory_and_evolution():
+        result = synthesize_config(
+            {"react": {"skill_envs": {"hwocr": {"HWOCR_AK": ""}}}},
+            _full_env(MEMORY_ENGINE="none", EVOLUTION_ENABLED="true"),
+        )
+        assert result["memory"]["engine"] == "none"
+        assert result["react"]["evolution"]["enabled"] is True
+        assert result["react"]["evolution"]["auto_scan"] is False
+        assert "hwocr" in result["react"]["skill_envs"]
+
+    @staticmethod
+    def test_env_overlays_mis_sent_config_blocks():
+        result = synthesize_config(
+            {
+                "memory": {"engine": "builtin"},
+                "react": {"evolution": {"enabled": False, "auto_scan": True}},
+            },
+            _full_env(MEMORY_ENGINE="none", EVOLUTION_ENABLED="true"),
+        )
+        assert result["memory"]["engine"] == "none"
+        assert result["react"]["evolution"]["enabled"] is True
+        assert result["react"]["evolution"]["auto_scan"] is True
+
+    @staticmethod
+    def test_blank_env_falls_back_to_defaults():
+        result = synthesize_config(
+            {"react": {"skill_envs": {}}},
+            _full_env(MEMORY_ENGINE="", EVOLUTION_ENABLED=""),
+        )
+        assert result["memory"]["engine"] == "builtin"
+        assert result["react"]["evolution"]["enabled"] is False
+
+    @staticmethod
+    def test_invalid_env_engine_falls_back_to_default():
+        result = synthesize_config(
+            {"react": {"skill_envs": {}}},
+            _full_env(MEMORY_ENGINE="invalid"),
+        )
+        assert result["memory"]["engine"] == "builtin"
+
+    @staticmethod
+    def test_invalid_env_engine_keeps_inbound_engine():
+        with patch("jiuwenclaw.agentserver.sync_agents_configs.logger.warning") as warn:
+            result = synthesize_config(
+                {"memory": {"engine": "none"}},
+                _full_env(MEMORY_ENGINE="invalid"),
+            )
+        assert result["memory"]["engine"] == "none"
+        assert warn.called
+        assert "invalid MEMORY_ENGINE" in warn.call_args[0][0]
+
+    @staticmethod
+    def test_dual_path_evolution_prefers_react_and_warns():
+        with patch("jiuwenclaw.agentserver.sync_agents_configs.logger.warning") as warn:
+            result = synthesize_config(
+                {
+                    "react": {"evolution": {"enabled": True}},
+                    "evolution": {"enabled": False, "auto_scan": True},
+                },
+            )
+        assert "evolution" not in result
+        assert result["react"]["evolution"]["enabled"] is True
+        assert result["react"]["evolution"]["auto_scan"] is False
+        assert warn.called
+        assert "discarding top-level evolution" in warn.call_args[0][0]
+
+    @staticmethod
+    def test_build_agent_spec_uses_env_authority():
+        spec = build_agent_spec(
+            service_id="default",
+            agent_id="assistant",
+            config={"react": {"skill_envs": {}}},
+            env=_full_env(MEMORY_ENGINE="none", EVOLUTION_ENABLED="false"),
+            runtime={},
+            revision="r1",
+        )
+        assert spec.config["memory"]["engine"] == "none"
+        assert spec.config["react"]["evolution"]["enabled"] is False
 
 
 # ---------------------------------------------------------------------------

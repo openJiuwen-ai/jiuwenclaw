@@ -39,11 +39,16 @@ SPAWN_ENV_KEYS: frozenset[str] = frozenset(
         "JIUWENCLAW_AGENT_ROOT",
         "PYTHONUNBUFFERED",
         "WEB_HOST",
+        # Align with relay-claw launchEnv / sync_agents_configs shared_env (short names).
         "OFFICE_CLAW_MCP_SERVER_PATH",
+        "OFFICE_CLAW_MCP_COMMAND",
+        "OFFICE_CLAW_MCP_ARGS_JSON",
+        "OFFICE_CLAW_MCP_CWD",
+        "OFFICE_CLAW_MCP_EXCLUDED_TOOLS",
+        # Legacy aliases (pre-alignment SPAWN table); accept so old shared_env is not ignored.
         "OFFICE_CLAW_MCP_SERVER_COMMAND",
         "OFFICE_CLAW_MCP_SERVER_ARGS_JSON",
         "OFFICE_CLAW_MCP_SERVER_CWD",
-        "OFFICE_CLAW_MCP_EXCLUDED_TOOLS",
         "OTEL_ENABLED",
         "OTEL_TRACES_EXPORTER",
         "OTEL_METRICS_EXPORTER",
