@@ -1,17 +1,15 @@
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
-
-interface AutofixPrResponse {
-  prompt?: string;
-  error?: string;
-}
+import { buildAutofixPrPrompt } from "./autofix-pr.prompts.js";
 
 /**
  * /autofix-pr - Drive the current branch's open PR to green.
  *
- * Fetches the autofix prompt from the server (single source of truth, same as
- * /simplify) and forwards it to the agent, which reads the failing checks and
- * review comments via `gh`, fixes the root cause, and pushes to the PR branch.
+ * The prompt is built in the TUI (like /init) and sent straight to the agent,
+ * which reads the failing checks and review comments (via `gh` on GitHub, REST
+ * on GitCode), fixes the root cause, and pushes to the PR branch. This command
+ * is inherently local — it needs the checkout, git and `gh` — so it lives
+ * entirely TUI-side rather than round-tripping a prompt through the server.
  * Requires code mode (file editing + git).
  */
 export function createAutofixPrCommand(): SlashCommand {
@@ -24,7 +22,7 @@ export function createAutofixPrCommand(): SlashCommand {
     argGuide: "[optional: PR number or URL; omit to infer from current branch]",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
-    action: async (ctx, args) => {
+    action: (ctx, args) => {
       if (!ctx.mode.startsWith("code.")) {
         ctx.addItem(
           addError(
@@ -38,63 +36,37 @@ export function createAutofixPrCommand(): SlashCommand {
       }
 
       const prArg = args.trim();
+      const prompt = buildAutofixPrPrompt({ prArg });
 
-      ctx.setRunningCommand?.("autofix-pr");
-      try {
-        const payload = await ctx.request<AutofixPrResponse>(
-          "command.autofix_pr",
-          { pr_arg: prArg },
-          30000,
-        );
-
-        if (payload?.error) {
-          ctx.addItem(addError(ctx.sessionId, `autofix-pr failed: ${payload.error}`));
-          return;
-        }
-
-        const prompt = payload?.prompt;
-        if (!prompt || !prompt.trim()) {
-          ctx.addItem(
-            addError(ctx.sessionId, "autofix-pr failed: empty prompt from server"),
-          );
-          return;
-        }
-
-        const requestId = ctx.sendMessage(prompt, undefined, ctx.mode, {
-          logAsUser: false,
-        });
-        if (!requestId) {
-          ctx.addItem(
-            addInfo(
-              ctx.sessionId,
-              ctx.preferredLanguage === "zh"
-                ? "当前离线，/autofix-pr 请求未发送；网络恢复后请重试。"
-                : "Offline; /autofix-pr request not sent. Please retry after reconnecting.",
-              "p",
-            ),
-          );
-          return;
-        }
-
+      const requestId = ctx.sendMessage(prompt, undefined, ctx.mode, {
+        logAsUser: false,
+      });
+      if (!requestId) {
         ctx.addItem(
           addInfo(
             ctx.sessionId,
             ctx.preferredLanguage === "zh"
-              ? prArg
-                ? `正在修复 PR ${prArg}…`
-                : "正在修复当前分支的 PR…"
-              : prArg
-                ? `Fixing PR ${prArg}…`
-                : "Fixing the PR for the current branch…",
-            "i",
+              ? "当前离线，/autofix-pr 请求未发送；网络恢复后请重试。"
+              : "Offline; /autofix-pr request not sent. Please retry after reconnecting.",
+            "p",
           ),
         );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.addItem(addError(ctx.sessionId, `autofix-pr failed: ${message}`));
-      } finally {
-        ctx.setRunningCommand?.(null);
+        return;
       }
+
+      ctx.addItem(
+        addInfo(
+          ctx.sessionId,
+          ctx.preferredLanguage === "zh"
+            ? prArg
+              ? `正在修复 PR ${prArg}…`
+              : "正在修复当前分支的 PR…"
+            : prArg
+              ? `Fixing PR ${prArg}…`
+              : "Fixing the PR for the current branch…",
+          "i",
+        ),
+      );
     },
   };
 }
