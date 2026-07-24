@@ -57,6 +57,8 @@ class _CreatedArtifact:
 
 _REPORT_OUTPUT_LOCKS: dict[Path, _KeyedLock] = {}
 _REPORT_OUTPUT_LOCKS_GUARD = threading.Lock()
+_OUTLINE_TITLE_CACHES: dict[tuple[str, str, str], dict[str, dict[str, str]]] = {}
+_OUTLINE_TITLE_CACHES_GUARD = threading.Lock()
 
 # 使用 contextvars
 _deepresearch_route_ctx: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
@@ -118,12 +120,34 @@ def _route_scope():
 
 
 def _outline_title_cache(route: dict[str, object]) -> dict[str, dict[str, str]]:
-    cache = route.get("_deepresearch_outline_titles")
-    if isinstance(cache, dict):
-        return cache
-    cache = {}
-    route["_deepresearch_outline_titles"] = cache
-    return cache
+    key = (
+        str(route.get("service_id") or "default"),
+        str(route.get("agent_id") or "default"),
+        str(route.get("session_id") or ""),
+    )
+    with _OUTLINE_TITLE_CACHES_GUARD:
+        return _OUTLINE_TITLE_CACHES.setdefault(key, {})
+
+
+def _clear_outline_title_cache(
+    route: dict[str, object],
+    conversation_id: object,
+) -> None:
+    cid = str(conversation_id or "").strip()
+    if not cid:
+        return
+    key = (
+        str(route.get("service_id") or "default"),
+        str(route.get("agent_id") or "default"),
+        str(route.get("session_id") or ""),
+    )
+    with _OUTLINE_TITLE_CACHES_GUARD:
+        cache = _OUTLINE_TITLE_CACHES.get(key)
+        if cache is None:
+            return
+        cache.pop(cid, None)
+        if not cache:
+            _OUTLINE_TITLE_CACHES.pop(key, None)
 
 
 def _normalize_citation_artifacts(value: object) -> dict[str, str]:
@@ -1437,6 +1461,10 @@ async def _iter_ndjson_lines(stream, read_size: int = 64 * 1024):
         "进度经 chat 通道(chat.reasoning/task.start/task.complete/"
         "processing_status)实时推送到前端。执行到人机交互节点时返回 interrupted outcome,"
         "由 agent 调 ask_user_question 处理后,再以 action=resume 调本工具恢复。"
+        "若 node=outline_interaction，必须静默以 accepted 恢复，禁止向用户发送确认大纲消息；"
+        "若 feedback_handler 的 ask_user_question 返回 skipped，必须用"
+        ' feedback={"feedback":"","interaction_status":"skipped"} 恢复，'
+        "不得默认选择任何选项或改写为自然语言反馈。"
         "不返回中间 chunk,只返回 outcome,避免污染 agent context。"
         "⚠不适用场景:PPT制作辅助研究、单点数据查询、快速搜索"
     ),
@@ -1640,6 +1668,8 @@ async def deepresearch_stream(
                            "node_id": node_id,
                            "marker": marker,
                            "prompt": build_interrupt_prompt(node_id, state, marker, query)}
+                if node_id == "outline_interaction":
+                    outcome["interaction_policy"] = "silent_auto_accept"
                 # The runner emits this marker before its async cleanup persists the
                 # graph checkpoint. Keep consuming to EOF so it can exit naturally;
                 # breaking here makes finally terminate the resumable subprocess.
@@ -1766,6 +1796,8 @@ async def deepresearch_stream(
         except OSError:
             pass
 
+    if outcome.get("status") in {"completed", "error", "cancelled"}:
+        _clear_outline_title_cache(route, outcome.get("conversation_id", outcome_cid))
     return json.dumps(outcome, ensure_ascii=False)
 
 

@@ -2501,6 +2501,7 @@ async def test_outline_marker_replaces_sdk_status_placeholder_with_accumulated_o
 
     out = json.loads(result)
     assert out["marker"]["outline"] == "# 第一章\n累积大纲正文"
+    assert out["interaction_policy"] == "silent_auto_accept"
     assert "累积大纲正文" in out["prompt"]
     assert "Round 1: waiting for user feedback." not in out["prompt"]
 
@@ -2543,7 +2544,7 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume(tmp_path
     report_path.write_text("done", encoding="utf-8")
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
-         patch.object(dt, "_get_route", return_value=route), \
+         patch.object(dt, "_get_route", side_effect=[dict(route), dict(route)]), \
          patch.object(dt, "_write_report_markdown", return_value=str(report_path)), \
          patch("asyncio.create_subprocess_exec", new=spawn), \
          patch(
