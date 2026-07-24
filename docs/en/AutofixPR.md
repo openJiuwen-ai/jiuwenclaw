@@ -59,14 +59,9 @@ Switch to code mode, then run it:
 <!-- Screenshot: running /autofix-pr in the TUI -->
 ![Running /autofix-pr](../zh/assets/autofix-pr-start.png)
 
-The Agent first detects the forge and identifies the PR, then starts reading the failing checks.
+The Agent detects the forge, identifies the PR, reads the failing checks, locates the root cause, makes a minimal fix, then commits and pushes back to the PR branch. It reports the diagnosis only after the run completes — the "Root cause / Fix" lines at the end of the screenshot below are the failure evidence it read and the fix it applied.
 
-<!-- Screenshot: the Agent reading CI failures and locating the root cause -->
-![Locating the failure](../zh/assets/autofix-pr-diagnose.png)
-
-Once it has the root cause, it makes a minimal fix, commits, and pushes back to the PR branch.
-
-<!-- Screenshot: fix committed and pushed -->
+<!-- Screenshot: fix committed and pushed, incl. the closing Root cause / Fix summary -->
 ![Fixed and pushed](../zh/assets/autofix-pr-result.png)
 
 ---

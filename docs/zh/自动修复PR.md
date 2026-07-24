@@ -59,14 +59,9 @@ PR 提交后检查未通过时，常规流程是这样的：
 <!-- 截图位：TUI 中输入 /autofix-pr 后的界面 -->
 ![运行 /autofix-pr](assets/autofix-pr-start.png)
 
-Agent 会先自检平台与 PR，然后开始读取失败的检查项。
+Agent 会先自检平台与 PR，读取失败的检查项、定位根因、做最小化修复，然后提交并 push 回 PR 分支。整个诊断与修复过程结束后，它会给出根因说明与修改内容——下图末尾的 “Root cause / Fix” 即是它读取到的失败证据与对应修复。
 
-<!-- 截图位：Agent 读取 CI 失败信息、定位根因的过程 -->
-![定位失败原因](assets/autofix-pr-diagnose.png)
-
-定位到根因后做最小化修复，提交并 push 回 PR 分支。
-
-<!-- 截图位：修复完成、提交并 push 的结果 -->
+<!-- 截图位：修复完成，含末尾的根因(Root cause)与修改(Fix)说明 -->
 ![修复并推送](assets/autofix-pr-result.png)
 
 ---
