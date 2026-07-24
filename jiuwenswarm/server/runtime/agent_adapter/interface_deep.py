@@ -117,8 +117,13 @@ from jiuwenswarm.integrations.ai4research_subscription.consumer_policy import (
     require_codex_consumer,
     require_codex_model_consumer,
 )
+from jiuwenswarm.integrations.ai4research_subscription.claude_consumer_policy import (
+    is_claude_provider,
+)
 from jiuwenswarm.integrations.ai4research_subscription.errors import (
+    ClaudeProviderError,
     CodexProviderError,
+    claude_provider_error_payload,
     provider_error_payload,
 )
 from jiuwenswarm.server.runtime.agent_adapter.stream_lifecycle import (
@@ -756,6 +761,54 @@ class _CallBoundCodexModel:
                 raise
             finally:
                 self._turn_owner.release_model_call(task, error)
+
+
+class _ClaudeErrorReceiptModel:
+    """Request-local Claude model proxy retaining one terminal typed failure.
+
+    OpenJiuwen converts model-call exceptions into generic stream error chunks.
+    Keeping the original ``ClaudeProviderError`` on this exact request's model
+    proxy lets the adapter restore its safe code/provider receipt without a
+    process-global "last error", callback-registry mutation, or cross-request
+    lookup.
+    """
+
+    def __init__(self, delegate: Model) -> None:
+        self._delegate = delegate
+        self._provider_failure: ClaudeProviderError | None = None
+        self.model_config = delegate.model_config
+        self.model_client_config = delegate.model_client_config
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+    @property
+    def provider_failure(self) -> ClaudeProviderError | None:
+        return self._provider_failure
+
+    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        self._provider_failure = None
+        try:
+            return await self._delegate.invoke(*args, **kwargs)
+        except ClaudeProviderError as exc:
+            self._provider_failure = exc
+            raise
+
+    async def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        self._provider_failure = None
+        stream = self._delegate.stream(*args, **kwargs)
+        try:
+            async for chunk in stream:
+                yield chunk
+        except ClaudeProviderError as exc:
+            self._provider_failure = exc
+            raise
+        finally:
+            try:
+                await close_owned_async_iterator(stream)
+            except ClaudeProviderError as exc:
+                self._provider_failure = exc
+                raise
 
 
 _CODEX_MODEL_CALL_ARM_CAPABILITIES: WeakKeyDictionary[
@@ -3649,7 +3702,10 @@ class JiuWenSwarmDeepAdapter:
                 current_model = self._resolve_model_for_request(request)
                 expected_model = (
                     resolved_model._delegate
-                    if isinstance(resolved_model, _CallBoundCodexModel)
+                    if isinstance(
+                        resolved_model,
+                        (_CallBoundCodexModel, _ClaudeErrorReceiptModel),
+                    )
                     else resolved_model
                 )
                 if current_model is not expected_model:
@@ -3846,8 +3902,8 @@ class JiuWenSwarmDeepAdapter:
         *,
         session_id: str,
         request_id: str,
-    ) -> Model | _CallBoundCodexModel:
-        """Return an exact-call-authorized proxy only for an admitted Codex turn."""
+    ) -> Model | _CallBoundCodexModel | _ClaudeErrorReceiptModel:
+        """Return the request-local model proxy required by the selected provider."""
 
         if consumer is CodexConsumer.DIRECT_AGENT_FAST:
             sid = self._resolve_interrupt_session_id(session_id)
@@ -3865,6 +3921,11 @@ class JiuWenSwarmDeepAdapter:
                 self._remove_codex_turn_owner,
             )
             return _CallBoundCodexModel(model, consumer, owner)
+        model_client_config = getattr(model, "model_client_config", None)
+        if is_claude_provider(
+            getattr(model_client_config, "client_provider", None)
+        ):
+            return _ClaudeErrorReceiptModel(model)
         return model
 
     def _register_codex_turn_owner(self, owner: _CodexTurnOwner) -> None:
@@ -9136,8 +9197,9 @@ class JiuWenSwarmDeepAdapter:
                 if _debug_logger is not None:
                     _debug_logger.feed(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
-                    parsed = self._with_codex_error_receipts(
-                        self._parse_stream_chunk(chunk)
+                    parsed = self._with_model_error_receipts(
+                        self._parse_stream_chunk(chunk),
+                        turn_model=turn_model,
                     )
                     parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
@@ -9261,8 +9323,9 @@ class JiuWenSwarmDeepAdapter:
                         )
                         accumulated_reasoning = ""
                     if has_streamed_content:
-                        parsed = self._with_codex_error_receipts(
-                            self._parse_stream_chunk(chunk, _has_streamed_content=True)
+                        parsed = self._with_model_error_receipts(
+                            self._parse_stream_chunk(chunk, _has_streamed_content=True),
+                            turn_model=turn_model,
                         )
                         parsed = self._adapt_goal_intermediate_final(parsed)
                         if parsed is not None:
@@ -9275,8 +9338,9 @@ class JiuWenSwarmDeepAdapter:
                                 is_complete=False,
                             )
                         continue
-                    parsed = self._with_codex_error_receipts(
-                        self._parse_stream_chunk(chunk)
+                    parsed = self._with_model_error_receipts(
+                        self._parse_stream_chunk(chunk),
+                        turn_model=turn_model,
                     )
                     parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
@@ -9306,8 +9370,9 @@ class JiuWenSwarmDeepAdapter:
                         is_complete=False,
                     )
                     accumulated_reasoning = ""
-                parsed = self._with_codex_error_receipts(
-                    self._parse_stream_chunk(chunk)
+                parsed = self._with_model_error_receipts(
+                    self._parse_stream_chunk(chunk),
+                    turn_model=turn_model,
                 )
                 parsed = self._adapt_goal_intermediate_final(parsed)
                 if parsed is not None:
@@ -9520,6 +9585,26 @@ class JiuWenSwarmDeepAdapter:
                     **provider_error_payload(failure, consumer=owner.consumer_value),
                 }
         return parsed
+
+    def _with_model_error_receipts(
+        self,
+        parsed: dict | None,
+        *,
+        turn_model: Model | _CallBoundCodexModel | _ClaudeErrorReceiptModel,
+    ) -> dict | None:
+        """Restore typed provider receipts from the exact request-local model."""
+
+        if isinstance(turn_model, _ClaudeErrorReceiptModel):
+            if not isinstance(parsed, dict) or parsed.get("event_type") != "chat.error":
+                return parsed
+            failure = turn_model.provider_failure
+            if failure is not None:
+                return {
+                    "event_type": "chat.error",
+                    **claude_provider_error_payload(failure),
+                }
+            return parsed
+        return self._with_codex_error_receipts(parsed)
 
     @staticmethod
     def _parse_stream_chunk(

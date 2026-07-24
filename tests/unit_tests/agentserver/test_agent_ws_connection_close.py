@@ -23,6 +23,16 @@ from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.integrations.ai4research_subscription.codex_process import (
     CodexProcessRunner,
 )
+from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+    CLAUDE_MODEL_ALIAS,
+    CLAUDE_PROVIDER_NAME,
+)
+from jiuwenswarm.integrations.ai4research_subscription.claude_model_client import (
+    ClaudeSubscriptionModelClient,
+)
+from jiuwenswarm.integrations.ai4research_subscription.claude_process import (
+    ClaudeProcessRunner,
+)
 from jiuwenswarm.integrations.ai4research_subscription.constants import (
     CODEX_MODEL_ALIAS,
     CODEX_PROVIDER_NAME,
@@ -931,6 +941,191 @@ time.sleep(60)
     assert typed[0].get("consumer") == "direct_agent_fast"
     assert not any('"chat.final"' in frame for frame in encoded_frames)
     assert adapter._codex_turn_owners == {}
+
+
+@pytest.mark.asyncio
+async def test_claude_login_error_reaches_wire_with_typed_provider_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OpenJiuwen stringifies a model exception before yielding chat.error.
+
+    The request-local Claude model proxy must retain the original typed error so
+    the production AgentServer stream emits its stable code/provider receipt.
+    """
+    workspace = tmp_path / "instance"
+    workspace.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "jiuwenswarm.integrations.ai4research_subscription.claude_process.get_user_workspace_dir",
+        lambda: workspace,
+    )
+    binary = tmp_path / "claude"
+    binary.write_text(
+        textwrap.dedent(
+            r'''#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if args == ["--version"]:
+ print("2.1.218 (Claude Code)"); raise SystemExit(0)
+if args == ["auth", "status", "--json"]:
+ print(json.dumps({"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"})); raise SystemExit(1)
+raise SystemExit(99)
+'''
+        ),
+        encoding="utf-8",
+    )
+    binary.chmod(0o700)
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_id="claude-login-receipt-probe",
+            client_provider=CLAUDE_PROVIDER_NAME,
+            api_key="",
+            api_base="",
+            timeout=5,
+            max_retries=0,
+        ),
+        model_config=ModelRequestConfig(
+            model_name=CLAUDE_MODEL_ALIAS,
+            temperature=0,
+        ),
+    )
+    assert isinstance(model._client, ClaudeSubscriptionModelClient)
+    model._client._runner = ClaudeProcessRunner(binary_path=binary)
+    deep_agent = interface_deep_module.create_deep_agent(
+        model=model,
+        card=AgentCard(
+            id="claude-login-receipt-probe",
+            name="claude-login-receipt-probe",
+        ),
+        tools=[],
+        rails=[],
+        max_iterations=3,
+        parallel_tool_calls=False,
+        enable_llm_retry_rail=False,
+        enable_read_image_multimodal=False,
+        enable_task_loop=False,
+        add_general_purpose_agent=False,
+        auto_create_workspace=False,
+    )
+    await deep_agent.ensure_initialized()
+
+    adapter = interface_deep_module.JiuWenSwarmDeepAdapter()
+    adapter._instance = deep_agent
+    adapter._is_session_scoped_adapter = True
+    adapter._model = model
+    adapter._model_request_config = model.model_config
+    adapter._model_client_config = model.model_client_config
+    adapter._model_cache = {CLAUDE_MODEL_ALIAS: model}
+    adapter._model_canonical_key_by_object_id = {id(model): CLAUDE_MODEL_ALIAS}
+    adapter._config_cache = {}
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _name: True)
+    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: model)
+
+    async def no_slash(*_args, **_kwargs):
+        return None
+
+    async def no_async_side_effect(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(adapter, "_handle_slash_command", no_slash)
+    monkeypatch.setattr(adapter, "_update_runtime_config", no_async_side_effect)
+    monkeypatch.setattr(
+        adapter, "_sync_prompt_attachments_for_request", no_async_side_effect
+    )
+    await adapter.start_interaction("claude-login-sess")
+
+    facade = JiuWenSwarm()
+    facade._adapter = adapter
+    facade._sdk_name = "deep"
+
+    def build_inputs(request):
+        query = request.params.get("query")
+        return (
+            {"query": query, "conversation_id": "claude-login-sess"},
+            "local",
+            query,
+        )
+
+    monkeypatch.setattr(facade, "_build_inputs", build_inputs)
+    monkeypatch.setattr(facade, "_cancel_team_work_for_session", no_async_side_effect)
+
+    class Manager:
+        def get_agent_nowait(self, *_args, **_kwargs):
+            return facade
+
+        async def get_agent(self, **_kwargs):
+            return facade
+
+    class ProductionChainServer(_AgentWsTestHarness):
+        async def _trigger_before_chat_request_hook(self, _request):
+            return None
+
+        async def _prepare_code_mode_chat_turn(self, _request, _channel_id):
+            return "agent", "fast", facade
+
+        async def _ensure_code_mode_state(self, *_args, **_kwargs):
+            return False
+
+        async def _check_post_process_plan_exit(self, *_args, **_kwargs):
+            return None
+
+    server = ProductionChainServer.__new__(ProductionChainServer)
+    server._agent_manager = Manager()
+    server._session_stream_tasks = {}
+    server._cancel_cleanup_tasks = set()
+    ws = FakeWebSocket()
+    chat = e2a_from_agent_fields(
+        request_id="claude-login-turn-1",
+        channel_id="tui",
+        session_id="claude-login-sess",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "query": "This must fail before inference.",
+            "mode": "agent.fast",
+            "model_name": CLAUDE_MODEL_ALIAS,
+        },
+        is_stream=True,
+        timestamp=0.0,
+    )
+    try:
+        await asyncio.wait_for(
+            server.handle_message_for_test(
+                ws,
+                json.dumps(chat.to_dict(), ensure_ascii=False),
+                send_lock=asyncio.Lock(),
+            ),
+            timeout=30,
+        )
+    finally:
+        processors = list(facade._session_manager._session_processors.values())
+        for processor in processors:
+            processor.cancel()
+        await asyncio.gather(*processors, return_exceptions=True)
+        await adapter.stop_interaction()
+        await deep_agent.react_agent.clear_session("claude-login-sess")
+
+    encoded_frames = [json.dumps(frame) for frame in ws.sent]
+    error_payloads = [
+        candidate
+        for frame in ws.sent
+        if '"chat.error"' in json.dumps(frame)
+        for candidate in (
+            frame.get("payload"),
+            (frame.get("body") or {}).get("delta")
+            if isinstance(frame.get("body"), dict)
+            else None,
+        )
+        if isinstance(candidate, dict)
+    ]
+    typed = [
+        payload
+        for payload in error_payloads
+        if payload.get("code") == "auth_login_required"
+    ]
+    assert typed, f"chat.error lacked typed Claude login code: {error_payloads}"
+    assert typed[0].get("provider") == CLAUDE_PROVIDER_NAME
+    assert not any('"chat.final"' in frame for frame in encoded_frames)
+    assert not any('"chat.tool_' in frame for frame in encoded_frames)
 
 
 async def _handle_cancel_cleanup_case(env) -> list[tuple[str, str]]:

@@ -62,7 +62,8 @@ turn fails closed at the preflight (`auth_login_required` / `auth_wrong_method` 
 ## Provider status (read-only)
 
 The provider exposes a cheap, read-only status probe (no inference) that surfaces
-one of five states so operators can see why the provider is or is not usable:
+one of six operational states so operators can see why the provider is or is not
+usable:
 
 | State | Meaning |
 |---|---|
@@ -70,6 +71,7 @@ one of five states so operators can see why the provider is or is not usable:
 | `wrong_version` | the installed CLI is not the pinned supported version |
 | `login_required` | the CLI is present but not logged in - run the official Claude login command on the server, then refresh/test again |
 | `wrong_auth_method` | logged in, but not with a Claude.ai subscription (API key or cloud billing) |
+| `auth_status_unverifiable` | the CLI status could not be verified safely; the provider fails closed |
 | `subscription_ready` | a verified Claude.ai subscription; the provider is usable |
 
 ## Administrator kill switch (defaults to enabled)

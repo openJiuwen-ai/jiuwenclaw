@@ -3327,14 +3327,13 @@ class AgentWebSocketServer:
         request: AgentRequest,
         send_lock: asyncio.Lock,
     ) -> None:
-        """Run one credential-free Claude model probe inside AgentServer.
+        """Run one subscription-verified Claude model probe inside AgentServer.
 
         The Gateway forwards Claude validation here (parallel to Codex) because
-        the Claude provider is registered only in AgentServer, so building the
-        client locally in the Gateway fails. Unlike Codex there is no call permit:
-        Claude routes as an ordinary keyed provider. The provider is disabled by
-        default (experimental, subscription-login-only), so an operator who has
-        not opted in gets a clear ``provider_disabled`` result here.
+        the Claude provider is registered only in AgentServer. Jiuwen does not
+        accept Claude API credentials or perform login: the runner verifies an
+        operator's existing official-CLI subscription login and otherwise
+        returns a typed fail-closed authentication error.
         """
         from openjiuwen.core.foundation.llm import Model
         from openjiuwen.core.foundation.llm.schema.config import (
