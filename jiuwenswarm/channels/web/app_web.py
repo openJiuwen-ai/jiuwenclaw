@@ -916,19 +916,33 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self.end_headers()
 
             if self.command != "HEAD":
-                with open(file_path, "rb") as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
+                # 单块写超时30s：写不动/连接断时抛 socket.timeout 等，不再傻等
+                self.connection.settimeout(30)
+                last_progress = time.time()
+                try:
+                    with open(file_path, "rb") as f:
+                        while True:
+                            chunk = f.read(65536)
+                            if not chunk:
+                                break
+                            try:
+                                self.wfile.write(chunk)
+                                last_progress = time.time()
+                            except (socket.timeout, TimeoutError, BrokenPipeError,
+                                    ConnectionResetError, ConnectionError) as werr:
+                                self.log_error("file download write failed/timeout: %s", werr)
+                                break
+                            if time.time() - last_progress > 120:
+                                self.log_error("file download stalled over 120s, aborting: %s", file_path)
+                                break
+                finally:
+                    try:
+                        self.connection.settimeout(None)
+                    except Exception:
+                        pass
         except Exception as exc:
+            # 头已发出，不再回 JSON（原 _write_json 在 Content-Length 已发后必失败且可能踩坏连接）
             self.log_error("file download error: %s", exc)
-            try:
-                self._write_json(500, {"error": "download_failed", "detail": str(exc)})
-            except Exception:
-                # Connection may already be closed or broken; nothing more we can do.
-                self.log_error("failed to send download error response")
 
     def _handle_file_api_post(self, parsed) -> None:
         if parsed.path == "/file-api/rebuild-agent-data":
