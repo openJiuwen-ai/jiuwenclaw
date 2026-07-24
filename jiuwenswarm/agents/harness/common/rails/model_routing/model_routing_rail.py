@@ -10,7 +10,7 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.common.utils import logger
 from .capability import ModelCapability, build_capability_table_from_config, _capability_rank
-from .classifier import LLMClassifier, _task_score
+from .classifier import task_score
 from .stats import _ModelUsageStats, get_stats_store, reset_stats_store_for_test
 from .privacy import _check_privacy
 from .routing import _decide_and_select
@@ -25,7 +25,8 @@ class ModelRoutingRail(DeepAgentRail):
         self,
         capability_table: Optional[list[ModelCapability]] = None,
         *,
-        classifier: Optional[Classifier] = None,
+        classifier: Optional[Any] = None,
+        mapper: Optional[dict] = None,
         stats: Optional[_ModelUsageStats] = None,
         stats_path: Optional[str] = None,
         apply_routing: bool = False,
@@ -33,7 +34,8 @@ class ModelRoutingRail(DeepAgentRail):
     ) -> None:
         super().__init__()
         self._capability_table: list[ModelCapability] = capability_table or []
-        self._classifier: Classifier = classifier or LLMClassifier()
+        self._classifier = classifier
+        self._mapper: dict = mapper or {}
         self._call_history: list[PriorModelCall] = []
         self._token_counter = TiktokenCounter()
         self._stats: _ModelUsageStats = stats or get_stats_store(stats_path)
@@ -102,7 +104,7 @@ class ModelRoutingRail(DeepAgentRail):
                     difficulty="skipped",
                     input_tokens=input_tokens,
                     agent_info=agent_info,
-                    reason="single model available, routing skipped" + privacy_note,
+                    reasoning="single model available, routing skipped" + privacy_note,
                     privacy_hit=False,
                 )
                 logger.info(
@@ -150,16 +152,22 @@ class ModelRoutingRail(DeepAgentRail):
                 return
 
             # --- 正常路由（含图请求会在 _decide_and_select 里限到 model_type=="vision" 候选）---
-            category, difficulty, cls_reasoning = await self._classifier(prompt_text, ctx)
-            target = _task_score(category, difficulty)
+            if self._classifier is not None:
+                raw_score, category, difficulty = await self._classifier(prompt_text)
+                cls_reasoning = f"classifier score={raw_score}"
+            else:
+                raw_score, category, difficulty = 50, "unknown", "hard"
+                cls_reasoning = "no classifier, fallback"
+            target = task_score(category, difficulty, self._mapper)
             recommended_cap, reason = _decide_and_select(
-                category, difficulty, self._capability_table, ctx
+                target, self._capability_table, ctx
             )
             self._emit_decision(
                 ctx,
                 recommended_cap=recommended_cap,
                 category=category,
                 difficulty=difficulty,
+                target_score=target,
                 input_tokens=input_tokens,
                 agent_info=agent_info,
                 reasoning=f"{cls_reasoning}; {reason}",
@@ -171,12 +179,11 @@ class ModelRoutingRail(DeepAgentRail):
                 else None
             )
             logger.info(
-                "[ModelRouting] classifier: [%s,%s] score=%d in_tok=%d privacy=%s -> recommend=%s",
+                "[ModelRouting] classifier: [%s,%s] score=%d in_tok=%d privacy=False -> recommend=%s",
                 category,
                 difficulty,
                 target,
                 input_tokens,
-                privacy_hit,
                 rec_id,
             )
         except Exception as exc:
@@ -227,6 +234,7 @@ class ModelRoutingRail(DeepAgentRail):
         recommended_cap: Optional[ModelCapability],
         category: str,
         difficulty: str,
+        target_score: int = 0,
         input_tokens: int,
         agent_info: dict[str, Any],
         reasoning: str,
@@ -281,6 +289,7 @@ class ModelRoutingRail(DeepAgentRail):
             analysis=TaskAnalysis(
                 category=category,
                 difficulty=difficulty,
+                target_score=target_score,
                 predicted_input_tokens=input_tokens,
                 agent_info=agent_info,
             ),

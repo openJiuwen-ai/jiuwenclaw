@@ -183,5 +183,5 @@ def reset_stats_store_for_test(path: Optional[str] = None) -> _ModelUsageStats:
 # --------------------------------------------------------------------------- #
 # 分类器（dev：大模型 prompt 代替 1.5B）
 # --------------------------------------------------------------------------- #
-Classifier = Callable[[str, AgentCallbackContext], Any]
+Classifier = Callable[[str], Any]
 
