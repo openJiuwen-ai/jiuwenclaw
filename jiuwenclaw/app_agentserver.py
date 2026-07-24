@@ -166,6 +166,10 @@ async def _ensure_jiuwenbox_internal() -> None:
         return
 
     if (endpoint.get("startup_mode") or "internal") != "internal":
+        logger.info(
+            "[AgentServer][sandbox] startup_mode=external, skip jiuwenbox spawn "
+            "(box-server 由外部托管)"
+        )
         return  # external: jiuwenbox-server 由外部托管, 不 spawn
 
     try:
@@ -174,6 +178,10 @@ async def _ensure_jiuwenbox_internal() -> None:
         logger.warning("[AgentServer] read sandbox runtime failed, skip jiuwenbox spawn: %s", exc)
         return
     if not bool(runtime.get("enabled")):
+        logger.info(
+            "[AgentServer][sandbox] startup_mode=internal but sandbox not enabled "
+            "(JIUWENCLAW_SANDBOX_ENABLED!=1), skip jiuwenbox spawn"
+        )
         return  # sandbox 未启用, 不白拉 jiuwenbox-server
 
     # 解析 host:port (缺省 127.0.0.1:8321); url 为空也用缺省。
@@ -196,6 +204,11 @@ async def _ensure_jiuwenbox_internal() -> None:
     # 找不到 (None) 让 jiuwenbox-server 自身回落内置默认。
     policy_filename = "windows-policy.yaml" if sys.platform == "win32" else "default-policy.yaml"
     policy_path = JiuwenBoxRunner.resolve_policy_path(policy_filename)
+    logger.info(
+        "[AgentServer][sandbox] platform=%s, spawn box-server at %s:%d, policy=%s (%s)",
+        sys.platform, host, preferred_port, policy_filename,
+        policy_path or "<内置默认, 未在仓库/site-packages 找到>",
+    )
 
     # 注入动态路径 env 给 box-server 子进程 (runner 用 dict(os.environ) 作子进程 env,
     # 故设 os.environ 即透传). docs §4.3:
@@ -214,11 +227,19 @@ async def _ensure_jiuwenbox_internal() -> None:
         bundled_python = resolve_base_python()
         # resolve_base_python 返回 python.exe; 授权其所在目录 (allow_read 整目录)
         os.environ["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
+        logger.info(
+            "[AgentServer][sandbox] injected env: JIUWENBOX_VENV_DIR=%s, "
+            "JIUWENBOX_BUNDLED_PYTHON=%s",
+            venv_dir, bundled_python.parent,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[AgentServer] inject JIUWENBOX_BUNDLED_PYTHON/VENV_DIR failed: %s", exc,
         )
 
+    logger.info(
+        "[AgentServer][sandbox] spawning box-server (startup_mode=internal)..."
+    )
     runner = JiuwenBoxRunner.instance()
     ok = await runner.ensure_running(
         host=host,
@@ -230,7 +251,7 @@ async def _ensure_jiuwenbox_internal() -> None:
         tail = runner.get_stderr_tail(20)
         hint = "\n--- jiuwenbox stderr (tail) ---\n" + tail if tail else ""
         logger.warning(
-            "[AgentServer] jiuwenbox internal spawn failed (%s:%d)%s",
+            "[AgentServer][sandbox] jiuwenbox internal spawn failed (%s:%d)%s",
             host, preferred_port, hint,
         )
         return
@@ -239,7 +260,11 @@ async def _ensure_jiuwenbox_internal() -> None:
     actual_url = runner.base_url
     if actual_url and actual_url != url:
         set_local_config("JIUWENCLAW_SANDBOX_URL", actual_url)
-        logger.info("[AgentServer] jiuwenbox internal ready, sandbox url=%s", actual_url)
+    logger.info(
+        "[AgentServer][sandbox] box-server ready at %s (url %s config), "
+        "sandbox_id 按需 lazy 创建",
+        actual_url, "回写" if actual_url != url else "沿用",
+    )
 
 
 async def _run(host: str, port: int) -> None:
@@ -335,7 +360,9 @@ async def _run(host: str, port: int) -> None:
                 shutdown_jiuwenbox_sandboxes,
             )
 
-            await asyncio.to_thread(shutdown_jiuwenbox_sandboxes)
+            logger.info("[AgentServer][sandbox] step 1: DELETE 远端沙箱 (box-server 活着)")
+            released = await asyncio.to_thread(shutdown_jiuwenbox_sandboxes)
+            logger.info("[AgentServer][sandbox] step 1 done: released=%s", released)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[AgentServer] jiuwenbox sandbox cleanup failed: %s", exc,
@@ -349,7 +376,14 @@ async def _run(host: str, port: int) -> None:
         try:
             from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
 
-            await JiuwenBoxRunner.instance().stop()
+            runner = JiuwenBoxRunner.instance()
+            owned = runner.get_owned_endpoint()
+            logger.info(
+                "[AgentServer][sandbox] step 2: stop box-server 子进程 (owned=%s)",
+                owned,
+            )
+            await runner.stop()
+            logger.info("[AgentServer][sandbox] step 2 done")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AgentServer] jiuwenbox runner stop failed: %s", exc)
         # 落盘 session_history 缓冲层剩余数据（atexit 兜底的显式调用，确保 SIGTERM 退出前 flush）

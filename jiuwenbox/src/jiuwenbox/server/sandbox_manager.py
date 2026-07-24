@@ -748,6 +748,11 @@ class SandboxManager:
         exec_env = request.env
         if sys.platform == "win32":
             exec_env = _build_windows_exec_env(request.env)
+            logger.debug(
+                "[SandboxWin] exec sandbox=%s cmd=%s workdir=%s PATH=%s",
+                sandbox_id, request.command, request.workdir,
+                exec_env.get("PATH", ""),
+            )
         runtime_request = RuntimeExecRequest(
             command=request.command,
             workdir=request.workdir,

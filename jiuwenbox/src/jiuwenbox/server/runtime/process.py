@@ -2815,6 +2815,15 @@ class ProcessRuntime(RuntimeAdapter):
             deny_read=policy.windows.filesystem.deny_read,
         )
         self._win_acl_paths[sandbox_id] = acl_paths or [workspace]
+        logger.info(
+            "[SandboxWin] %s ACL applied: workspace=%s, allow_read=%s, allow_write=%s "
+            "(bundled_python=%s, venv=%s)",
+            sandbox_id, workspace,
+            policy.windows.filesystem.allow_read or [],
+            allow_write_paths,
+            bundled_python or "<未注入>",
+            venv_dir or "<未注入>",
+        )
 
         # 2. 两跳启动 runner (CREATE_SUSPENDED, review MAJOR #1).
         user = const.SANDBOX_USER_NAME
@@ -2836,6 +2845,11 @@ class ProcessRuntime(RuntimeAdapter):
                 proxy_port_end=proxy_end,
                 env=env,
             )
+        )
+        logger.info(
+            "[SandboxWin] %s runner spawned (two-hop): pid=%s, workspace=%s, "
+            "proxy_port=%s-%s, state=SUSPENDED",
+            sandbox_id, runner_pid, workspace, proxy_start, proxy_end,
         )
         # 把 pipe HANDLE 转成 fd 并打开持久化文件对象: 每个 sandbox
         # 一次 open_osfhandle, 后续所有 exec/file-op roundtrip 复用同一对
