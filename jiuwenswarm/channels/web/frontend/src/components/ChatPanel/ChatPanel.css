@@ -174,13 +174,6 @@ overflow: hidden;
   border-color: var(--color-feedback-danger) !important;
 }
 
-.chat-input-container--dragging {
-  border-color: var(--color-action-primary);
-  box-shadow:
-    var(--effect-chat-composer-shadow),
-    0 0 0 2px rgba(var(--color-action-primary-rgb), 0.22);
-}
-
 .chat-input-frame {
   position: relative;
   width: 100%;
@@ -1398,10 +1391,74 @@ overflow: hidden;
   color: var(--color-text-strong);
 }
 
+.chat-mode-select__option:disabled {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
+}
+
+.chat-mode-select__option:disabled:hover,
+.chat-mode-select__option:disabled:focus-visible {
+  background: transparent;
+  color: var(--color-text-placeholder);
+}
+
+.chat-mode-select__option:disabled .chat-mode-select__icon {
+  color: var(--color-text-placeholder);
+}
+
 /* Trigger turns red when full_access is selected */
 .chat-mode-select__trigger--danger,
 .chat-mode-select__trigger--danger .chat-mode-select__icon {
   color: var(--color-feedback-danger);
+}
+
+/* "+" 附件菜单的定位锚点，纯占位，不需要额外视觉样式 */
+.chat-input-attach-menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+/* 工具栏"目标"标签：目标存续期间常驻，× 只在 hover 时出现，不占布局空间；
+   hover 时标签本体腾出右侧内边距，让 × 紧跟在文字后面居中出现，而不是悬浮在右上角 */
+.chat-goal-tag {
+  position: relative;
+  display: inline-flex;
+}
+
+.chat-goal-tag .chat-mode-select__trigger {
+  transition: padding-right 0.15s;
+}
+
+.chat-goal-tag:hover .chat-mode-select__trigger {
+  padding-right: 28px;
+}
+
+.chat-goal-tag__close {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+}
+
+.chat-goal-tag:hover .chat-goal-tag__close {
+  opacity: 1;
+}
+
+.chat-goal-tag__close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-surface-hover);
 }
 
 .chat-work-context-row {
@@ -1669,25 +1726,6 @@ overflow: hidden;
   display: none;
   align-items: center;
   overflow: visible;
-}
-
-.chat-work-select__clear-label {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  transform: translateX(-50%);
-  width: 92px;
-  height: 40px;
-  border-radius: 8px;
-  background: var(--color-surface-popover);
-  color: var(--color-text-primary);
-  font-size: 12px;
-  line-height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: var(--effect-chat-tooltip-shadow);
-  pointer-events: none;
 }
 
 .chat-work-select__clear {

@@ -48,6 +48,7 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
     _CRON_TOOL_CHANNEL_ID,
     _agent_def_to_subagent_config,
+    _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
@@ -510,6 +511,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
             enable_read_image_multimodal=False,
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             auto_create_workspace=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
@@ -548,6 +550,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         initial_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
+        self._ensure_project_gitignore_agent_history(initial_workspace)
         self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
 
         setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")

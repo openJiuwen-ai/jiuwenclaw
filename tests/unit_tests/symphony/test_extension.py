@@ -51,11 +51,13 @@ def test_extension_registers_rpc_handlers():
 
     SymphonyExtension().register(registry)
 
-    assert SYMPHONY_SCORE_STATUS in registry.handlers
-    assert SYMPHONY_BUILD_SCORE in registry.handlers
-    assert SYMPHONY_PAUSE_BUILD in registry.handlers
-    assert SYMPHONY_GRAPH in registry.handlers
-    assert SYMPHONY_PLAN in registry.handlers
+    assert set(registry.handlers) == {
+        SYMPHONY_SCORE_STATUS,
+        SYMPHONY_BUILD_SCORE,
+        SYMPHONY_PAUSE_BUILD,
+        SYMPHONY_GRAPH,
+        SYMPHONY_PLAN,
+    }
 
 
 def test_symphony_skill_metadata():
@@ -182,6 +184,7 @@ def test_plan_uses_llm_plan_from_score(monkeypatch, tmp_path):
     assert seen["llm_config"] is llm_config
     assert "orchestration_config" in seen["kwargs"]
     assert seen["kwargs"]["language"] == "cn"
+    assert seen["kwargs"]["dynamic_graph_enabled"] is False
 
 
 def test_plan_ignores_internal_language_parameter(monkeypatch, tmp_path):
@@ -265,6 +268,47 @@ def test_plan_resolves_language_from_runtime_config(monkeypatch, tmp_path):
 
     assert result["language"] == "en"
     assert seen["language"] == "en"
+
+
+def test_plan_passes_enabled_dynamic_graph_switch(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    seen = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {
+                "paths": {"score_dir": str(configured_score_dir)},
+                "evolution": {"enabled": True},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    async def fake_plan_from_score(score_dir, query, received_llm_config, **kwargs):
+        del score_dir, query, received_llm_config
+        seen.update(kwargs)
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
+
+    result = asyncio.run(SymphonyExtension().plan({"query": "do work"}))
+
+    assert result["success"] is True
+    assert seen["dynamic_graph_enabled"] is True
 
 
 def test_plan_uses_requested_fast_mode(monkeypatch, tmp_path):
@@ -397,7 +441,10 @@ def test_graph_filters_disabled_skills_from_visual_payload(monkeypatch, tmp_path
     monkeypatch.setattr(
         "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
         lambda: symphony_config_from_dict(
-            {"paths": {"score_dir": str(configured_score_dir)}}
+            {
+                "paths": {"score_dir": str(configured_score_dir)},
+                "evolution": {"enabled": True},
+            }
         ),
     )
     monkeypatch.setattr(
@@ -407,6 +454,14 @@ def test_graph_filters_disabled_skills_from_visual_payload(monkeypatch, tmp_path
     monkeypatch.setattr(
         "jiuwenswarm.extensions.symphony.extension.load_execution_disabled_skills",
         lambda: ["Beta Skill"],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_dynamic_overlay",
+        lambda score_dir: {
+            "edges": {
+                "skill-a->skill-c:can_feed": {"runtime_weight": 1.15},
+            }
+        },
     )
 
     result = asyncio.run(SymphonyExtension().graph({}))
@@ -418,7 +473,11 @@ def test_graph_filters_disabled_skills_from_visual_payload(monkeypatch, tmp_path
         "skill:skill-c",
     ]
     assert result["graph"]["edges"] == [
-        {"source": "skill:skill-a", "target": "skill:skill-c"}
+        {
+            "source": "skill:skill-a",
+            "target": "skill:skill-c",
+            "runtime_weight": 1.15,
+        }
     ]
     assert result["score_lookup"] == {
         "by_output": {"draft": ["skill-a"]},

@@ -11,7 +11,6 @@ import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
-import { HeartbeatPanel } from './components/HeartbeatPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
@@ -24,9 +23,9 @@ import {
   exportShareImageNode,
   type ShareImageSnapshot,
 } from './features/shareImageExport';
+import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
-import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
 import {
   beginHistoryRestore,
   fetchHistoryPage,
@@ -39,7 +38,7 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
-import { useWebSocket } from './hooks';
+import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
@@ -48,6 +47,7 @@ import {
   useSessionStore,
   useChatStore,
   useTodoStore,
+  useGoalStore,
   useHarnessStore,
   useWorkspaceStore,
   useCronStore,
@@ -79,7 +79,13 @@ import {
 import type { DesktopSaveApiResult } from './utils/desktopSave';
 import './App.css';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+const TEAM_SESSION_MODES = new Set(['team', 'team.plan', 'code.team']);
+
+function isTeamMode(mode: string): boolean {
+  return TEAM_SESSION_MODES.has(mode);
+}
+
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -228,11 +234,6 @@ function downloadDataUrl(dataUrl: string, filename: string): void {
   document.body.removeChild(link);
 }
 
-// 判断 session_id 是否为可恢复/可展示的会话（web 渠道 sess_ 与 cron 触发的 cron_ 前缀均需支持）
-function isRestorableSessionId(sessionId: string): boolean {
-  return sessionId.startsWith('sess_') || sessionId.startsWith('cron_');
-}
-
 async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
   const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
   if (pywebviewApi?.save_data_url) {
@@ -270,13 +271,10 @@ function AppContent() {
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
   const [a2uiRefreshPending, setA2uiRefreshPending] = useState(false);
-  const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
-  const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
   const [saveToastVisible, setSaveToastVisible] = useState(false);
   const [configChangedConfirmOpen, setConfigChangedConfirmOpen] = useState(false);
   const [proactiveToastVisible, setProactiveToastVisible] = useState(false);
   const [proactiveToastMessage, setProactiveToastMessage] = useState('');
-  const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
@@ -326,11 +324,9 @@ function AppContent() {
   }, []);
 
   const restartAutoCloseTimerRef = useRef<number | null>(null);
-  const heartbeatToastTimerRef = useRef<number | null>(null);
   const saveToastTimerRef = useRef<number | null>(null);
   const proactiveToastTimerRef = useRef<number | null>(null);
   const hasChangesRef = useRef(false);
-  const lastHeartbeatToastKeyRef = useRef<string | null>(null);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyPrepending, setHistoryPrepending] = useState(false);
   /** 仅用于强制重跑「首屏 history」effect：从会话列表恢复时若 sessionId 未变，也要重新拉 history 并恢复 historyPagerMeta */
@@ -349,6 +345,10 @@ function AppContent() {
   const shareExportTokenRef = useRef(0);
   const preserveSelectedProjectOnChatNewRef = useRef(false);
   const newConversationProjectRef = useRef<Pick<Session, 'project_id' | 'project_dir'> | null>(null);
+  const newConversationPreviousSessionRef = useRef<{
+    sessionId: string;
+    mode: AgentMode;
+  } | null>(null);
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
@@ -402,7 +402,7 @@ function AppContent() {
     void loadProjects();
   }, [initialDataLoaded, loadProjects]);
 
-  const { setCurrentSession, setAvailableModels, setMode, heartbeatMessage, heartbeatUpdatedAt, setTeamLeaderMemberIds } = useSessionStore();
+  const { setCurrentSession, setAvailableModels, setMode, setTeamLeaderMemberIds } = useSessionStore();
   const sessions = useSessionStore((s) => s.sessions);
   const currentSession = useSessionStore((s) => s.currentSession);
   const routeSessionId = route.kind === 'chat-session' ? route.sessionId : null;
@@ -436,6 +436,11 @@ function AppContent() {
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
   const teamMembers = useSessionStore((s) => s.runtimes[sessionId]?.teamMembers ?? []);
   const [chatPanelWidthPct, setChatPanelWidthPct] = useState(33.33);
+  const [codeReviewTarget, setCodeReviewTarget] = useState<CodeReviewTarget | null>(null);
+
+  useEffect(() => {
+    setCodeReviewTarget(null);
+  }, [sessionId]);
 
   const handleToggleDetailPanel = useCallback((expanded: boolean) => {
     if (expanded && mode !== 'team' && teamAreaActiveTab === 'team') {
@@ -444,7 +449,8 @@ function AppContent() {
     setTeamAreaExpanded(expanded);
   }, [mode, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
 
-  const handleOpenCodeReview = useCallback(() => {
+  const handleOpenCodeReview = useCallback((target: CodeReviewTarget) => {
+    setCodeReviewTarget(target);
     setTeamAreaActiveTab('review');
     setTeamAreaExpanded(true);
   }, [setTeamAreaActiveTab, setTeamAreaExpanded]);
@@ -491,7 +497,7 @@ function AppContent() {
   const messages = useChatStore((s) => s.runtimes[sessionId]?.messages ?? []);
   const isLoadingHistory = useChatStore((s) => s.runtimes[sessionId]?.isLoadingHistory ?? false);
   const replaceHistoryMessages = useChatStore((s) => s.replaceHistoryMessages);
-  const isRestoringHistorySession = isRestorableSessionId(sessionId) && isLoadingHistory && !historyPagerMeta && messages.length === 0;
+  const isRestoringHistorySession = isLoadingHistory && !historyPagerMeta && messages.length === 0;
   const isRestoringTeamHistory = mode === 'team' && isRestoringHistorySession;
 
   useEffect(() => {
@@ -577,6 +583,12 @@ function AppContent() {
     cancel,
     supplement,
     sendUserAnswer,
+    setGoalObjective,
+    pauseGoal,
+    resumeGoal,
+    clearGoal,
+    refreshGoal,
+    drainTaskQueueIfIdle,
   } = useWebSocket({
     activeSessionId: sessionId,
     onConnect: () => console.log('Connected'),
@@ -785,7 +797,6 @@ function AppContent() {
   }, []);
 
   const loadSessionMetadata = useCallback(async (targetSessionId: string): Promise<Session | null> => {
-    if (!isRestorableSessionId(targetSessionId)) return null;
     try {
       const session = await request<Session>('session.get_metadata', {
         session_id: targetSessionId,
@@ -861,13 +872,6 @@ function AppContent() {
     setAppliedWithoutRestart(false);
     setA2uiRefreshPending(false);
   }, [clearRestartAutoCloseTimer]);
-
-  const clearHeartbeatToastTimer = useCallback(() => {
-    if (heartbeatToastTimerRef.current != null) {
-      window.clearTimeout(heartbeatToastTimerRef.current);
-      heartbeatToastTimerRef.current = null;
-    }
-  }, []);
 
   const clearSaveToastTimer = useCallback(() => {
     if (saveToastTimerRef.current != null) {
@@ -1159,33 +1163,10 @@ function AppContent() {
   useEffect(() => {
     return () => {
       clearRestartAutoCloseTimer();
-      clearHeartbeatToastTimer();
       clearSaveToastTimer();
       clearProactiveToastTimer();
     };
-  }, [clearHeartbeatToastTimer, clearProactiveToastTimer, clearRestartAutoCloseTimer, clearSaveToastTimer]);
-
-  useEffect(() => {
-    const normalized = heartbeatMessage?.trim();
-    if (!normalized) {
-      return;
-    }
-    if (normalized.toUpperCase() === 'HEARTBEAT_OK') {
-      return;
-    }
-    const toastKey = `${heartbeatUpdatedAt ?? ''}::${normalized}`;
-    if (lastHeartbeatToastKeyRef.current === toastKey) {
-      return;
-    }
-    lastHeartbeatToastKeyRef.current = toastKey;
-    setHeartbeatToastMessage(normalized);
-    setHeartbeatToastVisible(true);
-    clearHeartbeatToastTimer();
-    heartbeatToastTimerRef.current = window.setTimeout(() => {
-      setHeartbeatToastVisible(false);
-      heartbeatToastTimerRef.current = null;
-    }, 15000);
-  }, [clearHeartbeatToastTimer, heartbeatMessage, heartbeatUpdatedAt]);
+  }, [clearProactiveToastTimer, clearRestartAutoCloseTimer, clearSaveToastTimer]);
 
   useEffect(() => {
     const message = proactiveNotificationMessage?.trim();
@@ -1257,9 +1238,6 @@ function AppContent() {
   useEffect(() => {
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
     
-    // 仅处理以 sess_ 开头的会话 ID
-    if (!isRestorableSessionId(sessionId)) return;
-
     if (promotedFromNewSessionIdsRef.current.has(sessionId)) {
       setHistoryPagerMeta(sessionId, null);
       setHistoryLoadingMore(false);
@@ -1300,7 +1278,15 @@ function AppContent() {
       sessionId: sessionId,
       onReady: (messages, totalPages) => {
         historyRestoreFromPanelHintRef.current = false;
-        replaceHistoryMessages(sessionId, messages);
+        // "目标完成"回显消息纯前端合成，从未写进后端 session 历史，history.get 拉回来的
+        // messages 里不会有它——按时间戳把本地持久化的记录补回去，见
+        // hooks/useWebSocket.ts 的 applyIncomingGoal/mergePersistedGoalCompletionMessages。
+        // 同时给命中"曾经设置过目标"的 user 消息回填 isGoalObjectiveMessage 徽章标记，
+        // 见 stampGoalObjectiveMessages。
+        replaceHistoryMessages(
+          sessionId,
+          stampGoalObjectiveMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, messages))
+        );
         const restoredTotalPages = totalPages ?? 1;
         setHistoryPagerMeta(sessionId, {
           loadedPages: 1,
@@ -1315,7 +1301,7 @@ function AppContent() {
         });
       },
       onEmpty: (emptyTotalPages) => {
-        replaceHistoryMessages(sessionId, []);
+        replaceHistoryMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, []));
         const restoredTotalPages = emptyTotalPages ?? 1;
         setHistoryPagerMeta(sessionId, {
           loadedPages: 1,
@@ -1465,6 +1451,28 @@ function AppContent() {
     startBackgroundHistoryPrefetch,
   ]);
 
+  // 会话切换/页面加载时主动拉一次当前 Goal 状态（协议文档 v2 §11 推荐流程）——不然刷新页面
+  // 后 GoalBar 要等下一次 goal.updated 推送才会重新出现，目标 paused/静默期时甚至会一直缺失
+  // （2026-07-21 真机联调发现，见 backend-requests.md #1 末尾）。新会话（promoted from 'new'）
+  // 同样可能已经有 Goal（欢迎页 armed 流程可以直接创建），不跳过。
+  // get 完如果 status 是 active，按 §11 第4步再补发一次流式 resume——不是"目标被暂停了要恢复"，
+  // 是"重新抢一次输出听筒"：切会话/刷新导致之前监听后端输出的那条连接断了，目标可能还在后台跑，
+  // 这时候没人在听它的实时输出（chat.delta/chat.reasoning 等）。resume 对一个本来就 active 的
+  // 目标发是幂等的（状态不会变），抢到听筒就能继续收到实时输出，抢不到收 runtime.accepted，
+  // 都不算错误。
+  useEffect(() => {
+    if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
+    void (async () => {
+      await refreshGoal(sessionId);
+      // 等 get 落地这段时间里用户可能已经切到别的会话，避免对着旧会话发 resume。
+      if (sessionIdRef.current !== sessionId) return;
+      const goal = useGoalStore.getState().runtimes[sessionId]?.goal;
+      if (goal?.status === 'active') {
+        void resumeGoal(sessionId);
+      }
+    })();
+  }, [isConnected, sessionId, refreshGoal, resumeGoal]);
+
   const requestComposerFocus = useCallback(() => {
     setComposerFocusNonce((nonce) => nonce + 1);
   }, []);
@@ -1472,6 +1480,13 @@ function AppContent() {
   const enterNewConversation = useCallback((targetMode: AgentMode = mode, options: NewConversationOptions = {}) => {
     const currentSessionId = sessionIdRef.current;
     const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
+    newConversationPreviousSessionRef.current =
+      currentSessionId && currentSessionId !== NEW_CONVERSATION_ID
+        ? {
+          sessionId: currentSessionId,
+          mode: currentRuntime?.mode ?? mode,
+        }
+        : null;
     // 新建会话固定使用配置的默认模型，不继承当前会话手动切换过的模型；
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
     const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
@@ -1532,7 +1547,7 @@ function AppContent() {
       const newRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
       const runtimeSettings = {
         mode: newRuntime?.mode ?? mode,
-        selectedModelName: newRuntime?.selectedModelName ?? null,
+        selectedModelName: useSessionStore.getState().getEffectiveModelName(NEW_CONVERSATION_ID),
         projectDir: newRuntime?.projectDirectory ?? null,
       };
       const baseWorkContext = getWorkContextForSession(NEW_CONVERSATION_ID);
@@ -1549,6 +1564,11 @@ function AppContent() {
           title: createConversationTitle(content).slice(0, 100),
           work_mode: workContext.work_mode,
         };
+        const previousSession = newConversationPreviousSessionRef.current;
+        if (previousSession) {
+          createParams.previous_session_id = previousSession.sessionId;
+          createParams.previous_mode = previousSession.mode;
+        }
         if (runtimeSettings.selectedModelName) {
           createParams.model = runtimeSettings.selectedModelName;
         }
@@ -1582,11 +1602,27 @@ function AppContent() {
         sessionIdRef.current = newSid;
         setSessionId(newSid);
         navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
-        const sent = await sendMessage(content, newSid, mediaItems);
-        newConversationProjectRef.current = null;
-        if (!sent) {
-          useChatStore.getState().setInputValue(newSid, content);
+        const goalArmedOnNew = useGoalStore.getState().runtimes[NEW_CONVERSATION_ID]?.armed ?? false;
+        useGoalStore.getState().setArmed(NEW_CONVERSATION_ID, false);
+        if (goalArmedOnNew) {
+          // 欢迎页 "+" 选了「目标」：这条内容不走普通 chat.send，
+          // 本地落一条 user 消息（供徽章匹配）后改调 command.goal（见 InputArea.tsx 的同款分流逻辑）
+          useChatStore.getState().addMessage(newSid, {
+            id: `user-${Date.now()}`,
+            role: 'user',
+            content,
+            timestamp: new Date().toISOString(),
+            isGoalObjectiveMessage: true,
+          });
+          setGoalObjective(newSid, content);
+        } else {
+          const sent = await sendMessage(content, newSid, mediaItems);
+          if (!sent) {
+            useChatStore.getState().setInputValue(newSid, content);
+          }
         }
+        newConversationProjectRef.current = null;
+        newConversationPreviousSessionRef.current = null;
       } catch (error) {
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         useChatStore.getState().setThinking(NEW_CONVERSATION_ID, false);
@@ -1610,7 +1646,7 @@ function AppContent() {
     } else {
       useChatStore.getState().setInputValue(currentSessionId, content);
     }
-  }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, t]);
+  }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, setGoalObjective, t]);
 
   const handlePersistMedia = useCallback((content: string, mediaItems: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
@@ -1642,8 +1678,12 @@ function AppContent() {
   const handleCancel = useCallback(() => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) return;
+    // 目标是否 active 决定停止按钮要不要顺带把目标转为 paused——约定行为：其它状态
+    // （paused/blocked/completed/无目标）下，停止只结束会话，不碰目标本身。
+    const isGoalActive = useGoalStore.getState().runtimes[currentSessionId]?.goal?.status === 'active';
     if (mode === 'team') {
       void pause(currentSessionId);
+      if (isGoalActive) void pauseGoal(currentSessionId);
       return;
     }
     // agent 模式下有队列任务时，暂停队列自动发送
@@ -1654,7 +1694,28 @@ function AppContent() {
       }
     }
     void cancel(currentSessionId);
-  }, [cancel, mode, pause]);
+    if (isGoalActive) void pauseGoal(currentSessionId);
+  }, [cancel, mode, pause, pauseGoal]);
+
+  /**
+   * 删除目标：active 时除了清目标，还要顺带结束当前会话输出——复用停止按钮同一套中断调用
+   * （team 走 pause、其余走 cancel）。先清目标再补发中断，避免目标还没清掉那个空档被
+   * "ACTIVE 目标保持交互打开"的后端逻辑又续上一轮。非 active 状态下只清目标，不打断当前
+   * 会话（如果还有一轮在自然跑完，让它继续）。
+   */
+  const handleClearGoal = useCallback(
+    (sessionId: string) => {
+      const isGoalActive = useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
+      void clearGoal(sessionId);
+      if (!isGoalActive) return;
+      if (mode === 'team') {
+        void pause(sessionId);
+      } else {
+        void cancel(sessionId);
+      }
+    },
+    [cancel, clearGoal, mode, pause]
+  );
 
   const handleUserAnswer = useCallback((requestId: string, answers: UserAnswer[], source?: string) => {
     const currentSessionId = sessionIdRef.current;
@@ -1663,7 +1724,7 @@ function AppContent() {
   }, [sendUserAnswer]);
 
   const handleLoadMoreHistory = useCallback(async () => {
-    if (!isRestorableSessionId(sessionId) || !historyPagerMeta) return;
+    if (!historyPagerMeta) return;
     if (historyLoadingSessionsRef.current.has(sessionId) || historyPagerMeta.loadedPages >= historyPagerMeta.totalPages) return;
 
     const sid = sessionId;
@@ -1708,11 +1769,28 @@ function AppContent() {
   ]);
 
   const handleRestoreSession = useCallback(
-    async (targetSessionId: string, targetMode?: string, targetSession?: Session) => {
-      if (!isRestorableSessionId(targetSessionId)) return;
-
+    async (targetSessionId: string, targetMode?: string, targetSession?: Session, options?: { skipHistoryLoad?: boolean }) => {
       const resolvedMode = targetMode ?? targetSession?.mode ?? mode;
       disposeInFlightHistoryHandles(targetSessionId);
+      if (sessionId && sessionId !== targetSessionId) {
+        try {
+          await request('session.switch', {
+            session_id: targetSessionId,
+            previous_session_id: sessionId,
+            previous_mode: mode,
+            mode: resolvedMode,
+          });
+        } catch (error) {
+          if (isTeamMode(resolvedMode)) {
+            console.error('Failed to switch team session:', error);
+            window.alert(t('sessions.errors.switchSession'));
+            return;
+          }
+          console.warn('Session switch lifecycle hook failed; continuing restore:', error);
+        }
+      }
+
+      setHistoryPagerMeta(targetSessionId, null);
       setHistoryLoadingMore(false);
       const existingRuntime = useChatStore.getState().getRuntime(targetSessionId);
       if (!existingRuntime) {
@@ -1742,7 +1820,9 @@ function AppContent() {
       }
       setActiveNav('chat');
       navigate({ kind: 'chat-session', sessionId: targetSessionId });
-      setHistoryBootstrapKey((k) => k + 1);
+      if (!options?.skipHistoryLoad) {
+        setHistoryBootstrapKey((k) => k + 1);
+      }
       requestComposerFocus();
       if (!targetSession) {
         void loadSessionMetadata(targetSessionId);
@@ -1756,16 +1836,20 @@ function AppContent() {
       mode,
       navigate,
       loadSessionMetadata,
+      request,
       requestComposerFocus,
       resetHarnessStore,
       setActiveNav,
       setCurrentSession,
       setHistoryLoadingMore,
+      setHistoryPagerMeta,
       setMode,
       setPaused,
       setProcessing,
       setSessionId,
       setThinking,
+      sessionId,
+      t,
       upsertSessionMetadata,
     ]
   );
@@ -1774,6 +1858,38 @@ function AppContent() {
     if (target === 'new') { enterNewConversation(mode, options); return; }
     void handleRestoreSession(target.session_id, target.mode, target);
   }, [enterNewConversation, handleRestoreSession, mode]);
+
+  const handleTeamSessionsDeleted = useCallback(async (sessionIds: string[]) => {
+    const deletedSessionIds = new Set(sessionIds);
+    const sessionState = useSessionStore.getState();
+
+    for (const deletedSessionId of deletedSessionIds) {
+      forgetCreatedConversation(deletedSessionId);
+      sessionState.removeSession(deletedSessionId);
+      sessionState.removeRuntime(deletedSessionId);
+      useChatStore.getState().removeRuntime(deletedSessionId);
+      useTodoStore.getState().removeRuntime(deletedSessionId);
+      useHarnessStore.getState().removeRuntime(deletedSessionId);
+      useGoalStore.getState().removeRuntime(deletedSessionId);
+    }
+
+    if (routeSessionId && deletedSessionIds.has(routeSessionId)) {
+      setMissingSessionId(routeSessionId);
+    }
+
+    const workspaceState = useWorkspaceStore.getState();
+    const loadedProjectIds = Object.keys(workspaceState.projectSessions);
+    await workspaceState.loadProjects();
+    await Promise.all(loadedProjectIds.map((projectId) => workspaceState.loadProjectSessions(projectId)));
+
+    const cronStore = useCronStore.getState();
+    for (const [jobId, sessions] of Object.entries(cronStore.cronSessions)) {
+      if (sessions.some((session) => deletedSessionIds.has(session.session_id))) {
+        const job = cronStore.jobs.find((item) => item.id === jobId);
+        void cronStore.loadCronSessions(job?.project_id || 'default', jobId);
+      }
+    }
+  }, [routeSessionId]);
 
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
@@ -1789,6 +1905,7 @@ function AppContent() {
       useChatStore.getState().removeRuntime(deleteTarget.session_id);
       useTodoStore.getState().removeRuntime(deleteTarget.session_id);
       useHarnessStore.getState().removeRuntime(deleteTarget.session_id);
+      useGoalStore.getState().removeRuntime(deleteTarget.session_id);
       const deletingCurrent = sessionIdRef.current === deleteTarget.session_id;
       setDeleteTarget(null);
       await useWorkspaceStore.getState().refreshSessionWorkspace(deletedSession);
@@ -1892,10 +2009,6 @@ function AppContent() {
     })();
   }, [shareExportSnapshot, showSaveToast, t]);
 
-  const heartbeatToastPreviewRaw = heartbeatToastMessage.replace(/\s+/g, ' ').trim();
-  const heartbeatToastPreview = heartbeatToastPreviewRaw.length > 120
-    ? `${heartbeatToastPreviewRaw.slice(0, 120)}...`
-    : heartbeatToastPreviewRaw;
   const routeSessionMissing = routeSessionId !== null
     && initialDataLoaded
     && missingSessionId === routeSessionId
@@ -1987,6 +2100,11 @@ function AppContent() {
                       onSavePermission={savePermissionSilent}
                       historyPager={chatHistoryPager}
                       isHistoryRestoring={isRestoringHistorySession}
+                      onSetGoal={setGoalObjective}
+                      onPauseGoal={pauseGoal}
+                      onResumeGoal={resumeGoal}
+                      onClearGoal={handleClearGoal}
+                      onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
                     />
                   </div>
                 </div>
@@ -2009,10 +2127,12 @@ function AppContent() {
                     teamAreaActiveTab={teamAreaActiveTab}
                     teamAreaActiveDetailTab={teamAreaActiveDetailTab}
                     teamAreaSelectedMemberId={teamAreaSelectedMemberId}
+                    codeReviewTarget={codeReviewTarget}
                     setTeamAreaExpanded={setTeamAreaExpanded}
                     setTeamAreaActiveTab={setTeamAreaActiveTab}
                     setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
                     setTeamAreaSelectedMemberId={setTeamAreaSelectedMemberId}
+                    setCodeReviewTarget={setCodeReviewTarget}
                   />
                 )}
               </div>
@@ -2026,7 +2146,7 @@ function AppContent() {
         )}
         {activeNav === 'teams' && (
           <div className="app-section">
-            <TeamPanel />
+            <TeamPanel onSessionsDeleted={handleTeamSessionsDeleted} />
           </div>
         )}
         {activeNav === 'sessions' && (
@@ -2037,11 +2157,6 @@ function AppContent() {
               isProcessing={isProcessing}
               onRestoreSession={handleRestoreSession}
             />
-          </div>
-        )}
-        {activeNav === 'heartbeat' && (
-          <div className="app-section">
-            <HeartbeatPanel />
           </div>
         )}
         {activeNav === 'cron' && (
@@ -2066,6 +2181,8 @@ function AppContent() {
                     // 构造最小 Session 占位对象，让 upsertSessionMetadata 直接加入会话列表，
                     // 避免 loadSessionMetadata 立即失败导致"对话不存在或已删除"。
                     // 后续 cron 广播到达时会刷新会话列表补全完整元数据。
+                    // 跳过初始历史加载：session 是全新的，空响应的 replaceHistoryMessages
+                    // 会覆盖后续到达的广播消息。
                     void handleRestoreSession(session, undefined, {
                       session_id: session,
                       title: '',
@@ -2076,7 +2193,7 @@ function AppContent() {
                       message_count: 0,
                       created_at: new Date().toISOString(),
                       updated_at: new Date().toISOString(),
-                    });
+                    }, { skipHistoryLoad: true });
                     return;
                   }
                   requestSessionNavigation(session);
@@ -2165,47 +2282,6 @@ function AppContent() {
         </div>
       )}
 
-      {/* 全局心跳消息提示 */}
-      {heartbeatToastVisible && (
-        <div className="app-toast-wrapper app-toast-wrapper--top">
-          <div className="app-heartbeat-toast animate-rise">
-            <div className="app-heartbeat-toast__header">
-              <div className="app-heartbeat-toast__title">
-                <span className="app-heartbeat-toast__dot animate-pulse" />
-                <span className="text-xs font-medium text-text">{t('app.heartbeatTitle')}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setHeartbeatToastVisible(false);
-                  clearHeartbeatToastTimer();
-                }}
-                className="app-heartbeat-toast__close"
-                aria-label={t('app.heartbeatClose')}
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setHeartbeatModalOpen(true);
-                setHeartbeatToastVisible(false);
-                clearHeartbeatToastTimer();
-              }}
-              className="app-heartbeat-toast__content text-sm"
-              title={t('app.heartbeatViewFull')}
-            >
-              <span className="app-heartbeat-toast__preview">
-                {heartbeatToastPreview}
-              </span>
-            </button>
-          </div>
-        </div>
-      )}
-
       {proactiveToastVisible && proactiveToastMessage && (
         <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="proactive-notification-toast">
           <div className="bg-warn-subtle text-warn px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
@@ -2217,9 +2293,9 @@ function AppContent() {
       {/* 安全警告提示 */}
       {securityAlertVisible && (
         <div className="app-toast-wrapper app-toast-wrapper--top">
-          <div className="app-heartbeat-toast animate-rise">
-            <div className="app-heartbeat-toast__header">
-              <div className="app-heartbeat-toast__title">
+          <div className="app-security-alert animate-rise">
+            <div className="app-security-alert__header">
+              <div className="app-security-alert__title">
                 <span>⚠️</span>
                 <span className="text-xs font-medium text-text">{t('app.securityAlertTitle')}</span>
               </div>
@@ -2232,14 +2308,14 @@ function AppContent() {
                     securityAlertTimerRef.current = null;
                   }
                 }}
-                className="app-heartbeat-toast__close"
+                className="app-security-alert__close"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
-            <div className="app-heartbeat-toast__content text-sm">
+            <div className="app-security-alert__content text-sm">
               {securityAlertContent}
             </div>
           </div>
@@ -2323,12 +2399,6 @@ function AppContent() {
           </div>
         </div>
       )}
-
-      <HeartbeatMessageModal
-        open={heartbeatModalOpen}
-        message={heartbeatToastMessage}
-        onClose={() => setHeartbeatModalOpen(false)}
-      />
 
       <div className="share-image-stage" aria-hidden="true">
         <ShareImageDocument ref={shareExportRef} snapshot={shareExportSnapshot} />

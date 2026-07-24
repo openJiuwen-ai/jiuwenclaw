@@ -33,6 +33,7 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     get_model_names,
     update_preferred_language_in_config,
+    update_swarmflow_enabled_in_config,
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -213,6 +214,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "chat.interrupt",
         "chat.resume",
         "chat.user_answer",
+        "chat.swarmflow_reply",
         "history.get",
         "browser.start",
         "skills.marketplace.list",
@@ -267,6 +269,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "extensions.import",
         "extensions.delete",
         "extensions.toggle",
+        "session.switch",
         "session.fork",
         # Agent configuration
         "agents.list",
@@ -366,6 +369,7 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "extensions.import",
         "extensions.delete",
         "extensions.toggle",
+        "session.switch",
         "session.fork",
         # Agent configuration
         "agents.list",
@@ -472,6 +476,7 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "permissions_enabled": update_permissions_enabled_in_config,
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
     "preferred_language": update_preferred_language_in_config,
+    "enable_swarmflow": update_swarmflow_enabled_in_config,
     # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
     # 用户名同时设置 git.user_name, fork_owner, gitcode.username（三者合一）
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
@@ -733,6 +738,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["auto_recap_enabled"] = (
                 "true" if auto_recap_cfg.get("enabled", True) else "false"
             )
+            # swarmflow toggle lives at modes.team.jiuwen_team.enable_swarmflow
+            _team_cfg = (raw.get("modes") or {}).get("team") or {}
+            _jiuwen_team_cfg = _team_cfg.get("jiuwen_team") or {}
+            _swarmflow_enabled = bool(_jiuwen_team_cfg.get("enable_swarmflow", False))
+            payload["enable_swarmflow"] = "true" if _swarmflow_enabled else "false"
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -1089,17 +1099,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         if env_updates or yaml_updated:
             if on_config_saved:
-                try:
-                    config_payload = get_config()
-                    callback_result = on_config_saved(
-                        set(env_updates.keys()) | set(yaml_updated),
-                        env_updates=dict(env_updates),
-                        config_payload=config_payload,
-                    )
-                    if inspect.isawaitable(callback_result):
-                        await callback_result
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[cli config.set] on_config_saved failed: %s", e)
+                # on_config_saved 内部会 await agent.reload_config（app_gateway._on_config_saved），
+                # reload 在 AgentServer 端要重建全部 agent + session adapter（全量并发下可达 25~34s）。
+                # 若同步 await 会阻塞当前 WebSocket 连接的 `async for raw in ws` 串行循环，
+                # 导致后续 config.get 等本地帧排队等满，前端 30s 超时报 request timeout: config.get。
+                # 故丢后台 fire-and-forget，与上面 _config_set_reload_background 对齐。
+                # 写盘已完成且已回包，reload 仅用于 AgentServer 内存热更新，本就尽力而为。
+                async def _config_set_on_saved_background() -> None:
+                    try:
+                        config_payload = get_config()
+                        callback_result = on_config_saved(
+                            set(env_updates.keys()) | set(yaml_updated),
+                            env_updates=dict(env_updates),
+                            config_payload=config_payload,
+                        )
+                        if inspect.isawaitable(callback_result):
+                            await callback_result
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[cli config.set] on_config_saved failed: %s", e)
+
+                asyncio.create_task(_config_set_on_saved_background())
 
     async def _config_validate_model(ws, req_id, params, session_id):
         if not isinstance(params, dict):
@@ -1382,7 +1401,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     async def _session_create(ws, req_id, params, session_id):
         from jiuwenswarm.common.utils import get_agent_sessions_dir
-        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            init_session_metadata,
+        )
 
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1442,6 +1464,85 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         mh = bind.message_handler
         if mh:
             mh.trigger_session_start_hook(target, source="tui")
+        # TUI /new and /clear switch away from the previous product session
+        # through this local handler. Prefer the canonical AgentServer owner
+        # dispatch so Plan and Team follow the same lifecycle as Web.
+        previous_session_id = str(params.get("previous_session_id") or "").strip()
+        lifecycle_forwarded = False
+        real_client = (
+            agent_client.get("value")
+            if isinstance(agent_client, dict)
+            else agent_client
+        )
+        if real_client is not None:
+            try:
+                from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+                from jiuwenswarm.common.schema.message import ReqMethod
+
+                lifecycle_params = dict(params)
+                lifecycle_params["session_id"] = target
+                env = e2a_from_agent_fields(
+                    request_id=req_id,
+                    channel_id="tui",
+                    session_id=target,
+                    req_method=ReqMethod.SESSION_SWITCH,
+                    params=lifecycle_params,
+                    is_stream=False,
+                    timestamp=time.time(),
+                )
+                response = await real_client.send_request(env)
+                lifecycle_forwarded = bool(response.ok)
+                if not response.ok:
+                    logger.warning(
+                        "[cli session.create] session.switch lifecycle forward rejected; "
+                        "falling back locally: target_session_id=%s previous_session_id=%s",
+                        target,
+                        previous_session_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[cli session.create] session.switch lifecycle forward failed; "
+                    "falling back locally: target_session_id=%s error=%s",
+                    target,
+                    exc,
+                )
+
+        previous_session_changed = (
+            bool(previous_session_id)
+            and previous_session_id not in {"new", target}
+        )
+        if not lifecycle_forwarded and previous_session_changed:
+            from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+                dispatch_offload_session_kv_cache,
+                is_kv_cache_affinity_enabled,
+            )
+
+            try:
+                affinity_enabled = is_kv_cache_affinity_enabled()
+            except Exception as exc:
+                affinity_enabled = False
+                logger.warning(
+                    "[cli session.create] affinity gate failed; KVC hook skipped: "
+                    "previous_session_id=%s error=%s",
+                    previous_session_id,
+                    exc,
+                )
+            if affinity_enabled:
+                try:
+                    previous_metadata = get_session_metadata(previous_session_id)
+                    previous_mode = str(previous_metadata.get("mode") or "").strip().lower()
+                    if previous_mode not in {"team", "team.plan", "code.team"}:
+                        dispatch_offload_session_kv_cache(
+                            session_id=previous_session_id,
+                            parent_session_id=previous_session_id,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[cli session.create] Plan KVC hook failed; continuing: "
+                        "previous_session_id=%s error=%s",
+                        previous_session_id,
+                        exc,
+                    )
         # 响应带最终归属(设计文档 §4.1.6):未绑定真实项目时归 default_code
         await channel.send_response(ws, req_id, ok=True, payload={
             "session_id": target,
@@ -1532,6 +1633,23 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+
+        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+            evict_session_kv_cache,
+        )
+
+        try:
+            await evict_session_kv_cache(
+                session_id=target,
+                parent_session_id=target,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[cli session.delete] KV cache evict hook failed during local fallback; "
+                "continuing: session_id=%s error=%s",
+                target,
+                exc,
+            )
         shutil.rmtree(session_dir)
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
 
@@ -2110,6 +2228,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if isinstance(request_id, str) and request_id:
             payload["request_id"] = request_id
         await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _chat_swarmflow_reply(ws, req_id, params, session_id):
+        # Empty-ack shell — standard 3-layer routing forwards the reply to the
+        # agent adapter, which builds HumanAgentMessage and calls team_manager.
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"accepted": True, "session_id": session_id}
+        )
 
     async def _history_get(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
@@ -2820,6 +2945,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.interrupt", _chat_interrupt)
     channel.register_local_handler(path, "tui.disconnect", _tui_disconnect_request)
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
+    channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
     channel.register_local_handler(path, "command.model", _command_model)
 

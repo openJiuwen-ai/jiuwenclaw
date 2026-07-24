@@ -15,13 +15,19 @@
     "modify": "Modify",
     "delete": "Delete"
   },
+  "a2ui": {
+    "generating": "Generating A2UI interface...",
+    "unavailable": "The interface cannot be displayed right now. Please try again or regenerate the result.",
+    "unavailableTitle": "The interface cannot be displayed right now",
+    "retry": "Please try again later or regenerate the result",
+    "unsupportedProtocol": "Unsupported A2UI protocol version: {{version}}"
+  },
   "nav": {
     "chat": "Chat",
     "work": "Work",
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
-    "heartbeat": "Heartbeat",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
     "channels": "Channels",
@@ -266,6 +272,7 @@
     "stop": "Stop",
     "modelSelector": {
       "tooltip": "Switch the model used for chat",
+      "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
@@ -415,6 +422,38 @@
     "pending": "Pending",
     "completed": "Completed"
   },
+  "goal": {
+    "formSubmit": "Confirm",
+    "formCancel": "Cancel",
+    "editTitle": "Edit goal",
+    "toolbarTag": "Goal",
+    "toolbarUnavailable": "A goal is already in progress. Finish or clear it first.",
+    "closeTag": "Cancel goal",
+    "badge": "Goal",
+    "status": {
+      "active": "Active",
+      "paused": "Paused",
+      "completed": "Completed",
+      "blocked": "Blocked",
+      "disconnected": "Disconnected",
+      "unknown": "Status unknown"
+    },
+    "action": {
+      "editTooltip": "Edit goal",
+      "pauseTooltip": "Pause goal",
+      "resumeTooltip": "Resume goal",
+      "deleteTooltip": "Delete goal"
+    },
+    "completedCardTitle": "Goal completed",
+    "completedMessageFallback": "Goal completed.",
+    "editStaleWarning": "The goal was completed while you were editing it, so this change wasn't saved. Use \"+\" to set a new goal if needed.",
+    "detail": {
+      "attempts": "Attempts",
+      "tokens": "Total tokens",
+      "lastAssessment": "Last assessment",
+      "lastStopReason": "Last stop reason"
+    }
+  },
   "sessions": {
     "title": "Session Management",
     "subtitle": "Browse and manage sessions and files",
@@ -457,7 +496,8 @@
       "loadSessions": "Failed to load sessions",
       "loadFiles": "Failed to load session files",
       "deleteSession": "Failed to delete session: {{sessionId}}",
-      "restoreFailed": "Failed to restore session: {{sessionId}}"
+      "restoreFailed": "Failed to restore session: {{sessionId}}",
+      "switchSession": "Failed to switch session. Please try again."
     }
   },
   "sessionSidebar": {
@@ -466,52 +506,6 @@
     "version": "Version",
     "language": "Language",
     "moreSettings": "More Settings"
-  },
-  "heartbeat": {
-    "title": "Heartbeat Management",
-    "subtitle": "Maintain heartbeat settings and instruction files",
-    "configTitle": "Heartbeat Settings",
-    "configSubtitle": "Configure heartbeat interval, target channel, and active hours",
-    "loadingConfig": "Loading heartbeat settings...",
-    "saved": "Heartbeat settings saved",
-    "badges": {
-      "ok": "Recent heartbeat is healthy",
-      "alert": "Recent heartbeat is alerting",
-      "unknown": "No heartbeat result yet"
-    },
-    "everyLabel": "Interval (seconds)",
-    "targetLabel": "Target channel (channel_id)",
-    "enableActiveHours": "Enable active hours",
-    "startTime": "Start time",
-    "endTime": "End time",
-    "recentMessages": "Recent 20 heartbeat messages",
-    "noHistory": "No heartbeat history",
-    "statusOk": "OK",
-    "statusUnknown": "UNKNOWN",
-    "latestTime": "Latest heartbeat time",
-    "latestContent": "Latest heartbeat content",
-    "none": "None",
-    "channels": {
-      "web": "Web (web)",
-      "feishu": "Lark (feishu)",
-      "wechat": "WeChat (wechat)",
-      "xiaoyi": "Xiaoyi (xiaoyi)",
-      "dingtalk": "DingTalk (dingtalk)"
-    },
-    "errors": {
-      "loadConfig": "Failed to load heartbeat settings",
-      "saveConfig": "Failed to save heartbeat settings",
-      "invalidEvery": "Heartbeat interval must be greater than 0",
-      "invalidActiveHours": "active_hours must use HH:MM format (for example 08:00)",
-      "invalidRange": "End time must be later than start time",
-      "feishuNoTarget": "Feishu bot has not had any conversation yet. Heartbeat cannot be sent. Please chat with the bot in Feishu first."
-    }
-  },
-  "heartbeatModal": {
-    "closeAria": "Close heartbeat details dialog",
-    "title": "Heartbeat message",
-    "subtitle": "Message details",
-    "empty": "No detailed content"
   },
   "offloadFiles": {
     "title": "Offload Files",
@@ -537,8 +531,8 @@
   "sourceManager": {
     "closeAria": "Close source manager dialog",
     "title": "Source Manager",
-    "subtitle": "Select online search source and configure",
-    "selectSource": "Select Online Search Source",
+    "subtitle": "Configure online sources",
+    "selectSource": "Configure online sources",
     "skillnetDesc": "Open source skill library",
     "clawhubDesc": "Enterprise skill library",
     "skillnetInfo": "SkillNet Online Search",
@@ -752,6 +746,8 @@
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
       "swarmflowEnabled": "Enable SwarmFlow",
+      "kvCacheReleaseEnabled": "Legacy path (KV release)",
+      "kvCacheAffinityEnabled": "New path (Ascend affinity)",
       "skillRetrievalBuildRootCategoriesPlaceholder": "Edit the YAML/JSON root taxonomy directly",
       "agentSkillsPlaceholder": "Click to select skills",
       "agentSkillsEmpty": "No installed skills",
@@ -774,6 +770,7 @@
       "teamMemberPromptHint": "Prompt Hint",
       "teamMemberAgentKey": "Agent Key",
       "symphonyEnabled": "Enable skill orchestration",
+      "symphonyDynamicGraphEnabled": "Enable dynamic graph",
       "skillRetrievalEnabled": "Enable skill retrieval",
       "skillRetrievalBuildBranchingFactor": "Split threshold base",
       "skillRetrievalBuildMaxDepth": "Max tree depth",
@@ -802,6 +799,7 @@
     },
     "keyHelp": {
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
+      "symphonyDynamicGraphEnabled": "When disabled, planning uses only the static graph. Existing runtime data is retained.",
       "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path."
     },
     "hideValue": "Hide value",
@@ -932,6 +930,7 @@
       "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only, Team required" },
       "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
+      "kvCacheAffinity": { "label": "Compute Affinity", "hint": "Control Ascend KV Cache affinity" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
       "swarmflow": { "label": "SwarmFlow", "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode." },
@@ -948,7 +947,9 @@
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
-      "kvCacheAffinity": "Compute affinity (KV cache release)"
+      "dynamicGraph": "Enable dynamic graph",
+      "kvCacheRelease": "Legacy path (KV release)",
+      "kvCacheAffinity": "New path (Ascend affinity)"
     },
     "permissionsTools": {
       "title": "Tool Guardrail (permissions.tools)",
@@ -1120,6 +1121,7 @@
       "every": "Every",
       "everyHoursPlaceholder": "Hours",
       "everyMinutesPlaceholder": "Minutes",
+      "integerOnlyHint": "Interval must be an integer of at least 1",
       "hoursUnit": "hours",
       "minutesUnit": "minutes",
       "intervalUnit": {
@@ -1352,7 +1354,18 @@
       "searchPlaceholder": "Enter keywords to search SwarmSkills"
     },
     "onlineSearch": {
-      "title": "Skills Online Search"
+      "title": "Skills Online Search",
+      "searchPlaceholder": "Search multiple online skill sources",
+      "searchFailed": "Online skill search failed. Please try again later.",
+      "partialFailure": "Some online sources are unavailable. Results from available sources are shown.",
+      "noResults": "No matching online skills found.",
+      "installFailed": "Failed to install the skill.",
+      "installed": "Installed skill {{name}}",
+      "sourceStatus": {
+        "success": "Available ({{count}})",
+        "error": "Unavailable",
+        "skipped": "Not configured"
+      }
     },
     "actions": {
       "install": "Install",
@@ -1987,9 +2000,6 @@
     "configErrorHint": "Please start the backend first (e.g.",
     "configErrorDefault": ", default port 19000). If backend is remote, set",
     "configErrorEnv": "in",
-    "heartbeatTitle": "Heartbeat message",
-    "heartbeatClose": "Close",
-    "heartbeatViewFull": "Click to view full message",
     "securityAlertTitle": "Security Alert",
     "noContent": "No details",
     "restarting": "Restarting service",
@@ -2164,7 +2174,8 @@
     "nextStep": "Next",
     "confirm": "Confirm",
     "customOption": "Custom",
-    "customPlaceholder": "No suitable option? Type your answer..."
+    "customPlaceholder": "No suitable option? Type your answer...",
+    "skippedSummary": "Skipped"
   },
   "qaSummary": {
     "title": "Clarifications"

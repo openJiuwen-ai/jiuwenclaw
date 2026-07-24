@@ -10,6 +10,7 @@ import {
 } from '../types';
 import { getWsBase } from '../utils/env';
 import i18n from '../i18n';
+import { GoalRecord } from '../types/goal';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -259,6 +260,7 @@ class WebClient {
       id,
       method,
       params: params ?? {},
+      ...(options.isStream ? { is_stream: true } : {}),
     };
 
     return new Promise<T>((resolve, reject) => {
@@ -297,6 +299,41 @@ class WebClient {
       });
       this.ws?.send(JSON.stringify(message));
     });
+  }
+
+  /**
+   * 发出去就不等了——给那些正常路径上压根不会有 res 的 is_stream 请求用（目前是 command.goal
+   * 的 set/resume，见 backend-requests.md #4：process_stream/_chunk_to_message 对每个 chunk
+   * 无条件 type="event"，没有能产出 res 的分支，连"需要用户确认"这类失败也是走
+   * goal.confirm_required 事件）。跟 request() 共用同一套就绪检查（没连上照样立刻抛错，这个
+   * 检查本身不依赖等 res），区别只是不注册 pending/不设超时——没有 res 要等，也就没有"超时"
+   * 这回事，真实状态全靠调用方自己订阅事件拿。
+   */
+  async sendFireAndForget(
+    method: string,
+    params?: Record<string, unknown>,
+    options: { isStream?: boolean } = {}
+  ): Promise<void> {
+    await this.ensureReady();
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw this.createWebError(i18n.t('network.connectionUnavailable'), 'WS_NOT_READY', undefined, true);
+    }
+
+    const message: WsRequest = {
+      type: 'req',
+      id: this.generateRequestId(),
+      method,
+      params: params ?? {},
+      ...(options.isStream ? { is_stream: true } : {}),
+    };
+
+    logDevWsTraffic({
+      direction: 'outgoing',
+      messageType: 'req',
+      data: message,
+    });
+    this.ws.send(JSON.stringify(message));
   }
 
   private async ensureReady(): Promise<void> {
@@ -521,6 +558,68 @@ export async function webRequest<T = unknown>(
   options?: WebRequestOptions
 ): Promise<T> {
   return webClient.request<T>(method, params, options);
+}
+
+interface GoalCommandResponsePayload {
+  action?: string;
+  message?: string;
+  goal?: GoalRecord | null;
+  record?: GoalRecord | null;
+  cleared_goal?: GoalRecord | null;
+  existing_goal?: GoalRecord | null;
+  requested_objective?: string | null;
+  code?: string | null;
+}
+
+/**
+ * Goal（持续目标）控制里"有真正 res"的三个一次性动作：get/pause/clear。这三个走的是非流式
+ * 一次性响应（interface.py 的 process_message()），正常应该秒回，用默认超时兜底——这里超时
+ * 是真的有问题，不是误判。见 cjh/goal/Goal持续目标Web前端对接.md §4。
+ * clear 成功后 goal 应视为已清空，不用 cleared_goal 兜底出一个"已清除的目标"。
+ */
+export async function requestGoalAction(params: {
+  sessionId: string;
+  action: 'get' | 'pause' | 'clear';
+  /** 当前会话模式（如 'agent'），协议文档 v2 §2.1 要求带上，不要写死 'code.normal' */
+  mode?: string;
+}): Promise<GoalRecord | null> {
+  const { sessionId, action, mode } = params;
+  const payload = await webRequest<GoalCommandResponsePayload>('command.goal', {
+    session_id: sessionId,
+    action,
+    mode: mode ?? 'agent',
+  });
+  if (action === 'clear') {
+    return null;
+  }
+  return payload?.goal ?? payload?.record ?? null;
+}
+
+/**
+ * set/resume：is_stream:true，抢到监听席位后正常路径上永远不会有 res——`process_stream`/
+ * `_chunk_to_message`（gateway/message_handler/message_handler.py）对每个 chunk 无条件
+ * `type="event"`，没有能产出 res 的分支；连"目标已存在，需要 overwrite_confirmed 确认"这类
+ * 失败，协议里对应的也是 `goal.confirm_required` 事件，不是 res（见 backend-requests.md #4）。
+ * 所以这两个动作干脆不等 res：发出去就返回，真实状态全靠 goal.snapshot/goal.updated 事件驱动
+ * （`useWebSocket.ts` 的 `applyGoalSnapshot`），不再需要一个"等不到就超时"的 Promise。
+ */
+export async function sendGoalStreamCommand(params: {
+  sessionId: string;
+  action: 'set' | 'resume';
+  objective?: string;
+  mode?: string;
+}): Promise<void> {
+  const { sessionId, action, objective, mode } = params;
+  await webClient.sendFireAndForget(
+    'command.goal',
+    {
+      session_id: sessionId,
+      action,
+      mode: mode ?? 'agent',
+      ...(action === 'set' ? { objective, overwrite_confirmed: true } : {}),
+    },
+    { isStream: true }
+  );
 }
 
 // Expose webClient to window for debugging in development

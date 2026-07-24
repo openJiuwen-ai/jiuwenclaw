@@ -58,6 +58,38 @@ jiuwenswarm-start
 
 当看到类似上述提示时，表示服务已启动，在浏览器中访问 `http://localhost:5173` 即可使用。
 
+### 端口冲突自动处理
+
+JiuWenSwarm 默认使用一组固定端口（`18092 / 19000 / 19001 / 5173`）。若启动时检测到某端口已被占用（例如上一次未完全停止、或被其他应用占用），系统会**自动向上扫描相邻索引寻找可用的端口组**并使用，而不会直接退出：
+
+```
+[start_services] ⚠️  Original ports conflict. Falling back to alternative port group (index 1):
+[start_services] Using ports:
+  agent_server: 19092
+  web: 20000
+  gateway: 20001
+  frontend: 6173
+[start_services] TUI/CLI connect with:
+  jiuwenswarm-tui --url ws://127.0.0.1:20001/tui
+  jiuwenswarm chat   (auto-reads GATEWAY_PORT)
+```
+
+选中的新端口会被**持久化**，下次启动和 TUI/CLI 都会自动读到，无需手动记忆。若整段扫描范围内仍无可用端口组，会打印占用排查命令并退出。
+
+如需**强制使用特定端口**，有两种方式：
+
+1. **停掉占用进程**：`jiuwenswarm-start --stop default`（Linux/Mac 可 `lsof -i :19001`，Windows 可 `netstat -ano | findstr :19001` 后 `taskkill /PID <pid> /F`）。
+2. **用环境变量覆盖 base 端口**（适合 Docker / 容器化部署）：
+
+   ```bash
+   # 覆盖 base 端口（index 0 的起始端口，命名实例在其上 +index×1000）
+   export JIUWENSWARM_GATEWAY_PORT=29001
+   export JIUWENSWARM_AGENT_SERVER_PORT=28092
+   export JIUWENSWARM_FRONTEND_PORT=15173
+   export JIUWENSWARM_WEB_PORT=29000
+   jiuwenswarm-start
+   ```
+
 ### 终端 CLI
 
 也可以直接在终端中与 JiuwenSwarm 对话：

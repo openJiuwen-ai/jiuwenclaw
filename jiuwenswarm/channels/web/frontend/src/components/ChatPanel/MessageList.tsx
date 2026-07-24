@@ -4,7 +4,7 @@
  * 消息列表显示：将普通消息与工具执行按时间线交错渲染。
  */
 
-import { useMemo } from 'react';
+import { Fragment, useMemo, type ReactNode } from 'react';
 import { Message, ToolExecution } from '../../types';
 import { MessageItem, getMessageActor } from './MessageItem';
 import { ToolGroupDisplay, collectViewedSkillIds } from './ToolGroupDisplay';
@@ -30,6 +30,7 @@ function getMessageRenderKey(message: Message): string {
 
 interface MessageListProps {
   messages: Message[];
+  renderAfterMessage?: (message: Message) => ReactNode;
 }
 
 interface ChatTimelineListProps {
@@ -37,6 +38,7 @@ interface ChatTimelineListProps {
   executions?: ToolExecution[];
   mode?: string;
   disableA2UIInteraction?: boolean;
+  renderAfterMessage?: (message: Message) => ReactNode;
 }
 
 type TimelineItem =
@@ -335,6 +337,7 @@ export function ChatTimelineList({
   executions = [],
   mode = 'default',
   disableA2UIInteraction = false,
+  renderAfterMessage,
 }: ChatTimelineListProps) {
   const isTeamMode = mode === 'team';
   const renderItems = useMemo(
@@ -351,12 +354,14 @@ export function ChatTimelineList({
       {renderItems.map((item) => {
         if (item.type === 'message') {
           return (
-            <MessageItem
-              key={item.key}
-              message={item.message}
-              showAvatar={item.showAvatar}
-              disableA2UIInteraction={disableA2UIInteraction}
-            />
+            <Fragment key={item.key}>
+              <MessageItem
+                message={item.message}
+                showAvatar={item.showAvatar}
+                disableA2UIInteraction={disableA2UIInteraction}
+              />
+              {renderAfterMessage?.(item.message)}
+            </Fragment>
           );
         }
         return (
@@ -375,7 +380,7 @@ export function ChatTimelineList({
   );
 }
 
-export function MessageList({ messages }: MessageListProps) {
+export function MessageList({ messages, renderAfterMessage }: MessageListProps) {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const toolExecutions = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutions ?? new Map());
   const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
@@ -387,5 +392,12 @@ export function MessageList({ messages }: MessageListProps) {
     [toolExecutions, toolExecutionOrder]
   );
 
-  return <ChatTimelineList messages={messages} executions={executions} mode={mode} />;
+  return (
+    <ChatTimelineList
+      messages={messages}
+      executions={executions}
+      mode={mode}
+      renderAfterMessage={renderAfterMessage}
+    />
+  );
 }

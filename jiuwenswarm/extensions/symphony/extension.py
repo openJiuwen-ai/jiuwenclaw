@@ -17,6 +17,8 @@ from jiuwenswarm.symphony.llm import LLMConfig
 from jiuwenswarm.symphony.config import load_symphony_config, symphony_config_from_dict
 from jiuwenswarm.symphony.build import build_score as service_build_score
 from jiuwenswarm.symphony.build import score_status
+from jiuwenswarm.symphony.evolution.models import edge_key, skill_id
+from jiuwenswarm.symphony.evolution.service import load_dynamic_overlay
 from jiuwenswarm.symphony.orchestration import load_score_artifacts
 from jiuwenswarm.symphony.orchestration.artifacts import filter_disabled_score_artifacts
 from jiuwenswarm.symphony.orchestration.execution_graph import select_primary_plan
@@ -166,7 +168,12 @@ class SymphonyExtension(BaseExtension):
                     orchestration_min_edge_confidence
                 ),
                 "skills": artifacts.skills,
-                "graph": artifacts.graph,
+                "graph": _graph_with_runtime_weights(
+                    artifacts.graph,
+                    load_dynamic_overlay(artifacts.score_dir)
+                    if config.evolution.enabled
+                    else None,
+                ),
                 "score_lookup": artifacts.lookup,
             }
             payload.update(_build_log_payload(score_dir))
@@ -238,6 +245,7 @@ class SymphonyExtension(BaseExtension):
             query,
             LLMConfig.from_default_model(),
             orchestration_config=orchestration_config,
+            dynamic_graph_enabled=config.evolution.enabled,
             candidate_skill_ids=candidate_skill_ids,
             disabled_skill_names=load_execution_disabled_skills(),
             progress_callback=progress_callback,
@@ -376,6 +384,28 @@ def _missing_artifacts_payload(
         "detail": "技能总谱不存在或不完整，请先构建总谱。",
         "error": str(exc),
     }
+
+
+def _graph_with_runtime_weights(
+    graph: dict[str, Any],
+    overlay: dict[str, Any] | None,
+) -> dict[str, Any]:
+    runtime_edges = overlay.get("edges") if isinstance(overlay, dict) else None
+    if not isinstance(runtime_edges, dict) or not runtime_edges:
+        return graph
+    output_edges = []
+    for edge in graph.get("edges", []):
+        item = dict(edge)
+        current_key = edge_key(
+            skill_id(item.get("source")),
+            skill_id(item.get("target")),
+            str(item.get("type") or "can_feed"),
+        )
+        stats = runtime_edges.get(current_key)
+        if isinstance(stats, dict):
+            item["runtime_weight"] = float(stats.get("runtime_weight") or 1.0)
+        output_edges.append(item)
+    return {**graph, "edges": output_edges}
 
 
 def _param_bool(value: Any, default: bool = False) -> bool:

@@ -11,6 +11,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.config import (
 )
 from jiuwenswarm.extensions.agentos.agentos_router.registry_client import RegistryClient
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
+from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import YuanrongSshRelay
 from jiuwenswarm.extensions.agentos.agentos_router.third_agent import AgentOSThirdAgent
 from jiuwenswarm.extensions.sdk.agent_server_client import (
     AgentServerClientExtension,
@@ -41,10 +42,15 @@ class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
             creating_timeout_seconds=config.creating_timeout_seconds,
             key_fields=config.agent_key_fields,
         )
+        self._ssh_relay = YuanrongSshRelay(
+            config.ssh,
+            frontend_endpoint=config.frontend_endpoint,
+        )
         self._router_client = AgentOSRouterClient(
             self._yuanrong_client,
             self._registry_client,
             self._agent_manager,
+            ssh_relay=self._ssh_relay,
         )
         self._third_agent = AgentOSThirdAgent(self._router_client)
         self._closed = False

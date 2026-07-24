@@ -15,6 +15,12 @@ import {
   ContextCompressionSummary,
   TeamMemberContextCompressionState,
 } from '../types';
+import {
+  createTaskProgressBaseline,
+  mergeTaskProgressBaseline,
+  registerConfirmedTaskCreation,
+  type TaskProgressBaseline,
+} from '../features/teamTaskProgressBaseline';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
@@ -108,14 +114,6 @@ interface ConnectionStats {
   state: WebConnectionState;
   inflight: number;
   lastError: string | null;
-}
-
-type HeartbeatState = 'unknown' | 'ok' | 'alert';
-
-interface HeartbeatHistoryItem {
-  message: string;
-  updatedAt: string;
-  status: HeartbeatState;
 }
 
 interface MemoryUsage {
@@ -231,6 +229,7 @@ export interface SessionRuntime {
   contextCompressionAfter: number | null;
   teamTaskEvents: TeamTaskEvent[];
   teamTasks: TeamTask[];
+  teamTaskProgressBaseline: TaskProgressBaseline;
   teamMembers: TeamMember[];
   teamLeaderMemberIds: string[];
   teamHumanShareCommands: HumanShareCommand[];
@@ -254,6 +253,7 @@ function createEmptyRuntime(): SessionRuntime {
     contextCompressionAfter: null,
     teamTaskEvents: [],
     teamTasks: [],
+    teamTaskProgressBaseline: createTaskProgressBaseline(),
     teamMembers: [],
     teamLeaderMemberIds: [],
     teamHumanShareCommands: [],
@@ -272,10 +272,6 @@ interface SessionState {
   availableTools: string[];
   connectionStats: ConnectionStats;
   memoryUsage: MemoryUsage;
-  heartbeatState: HeartbeatState;
-  heartbeatMessage: string | null;
-  heartbeatUpdatedAt: string | null;
-  heartbeatHistory: HeartbeatHistoryItem[];
   availableModels: ModelEntry[];
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
   chatAvailableModels: ModelEntry[];
@@ -288,6 +284,7 @@ interface SessionState {
   // Runtime 管理方法
   ensureRuntime: (sessionId: string) => SessionRuntime;
   getRuntime: (sessionId: string | null) => SessionRuntime | undefined;
+  getEffectiveModelName: (sessionId: string | null) => string | null;
   removeRuntime: (sessionId: string) => void;
 
   // A 类 actions（不加 sessionId）
@@ -301,11 +298,6 @@ interface SessionState {
   setConnectionStats: (stats: Partial<ConnectionStats>) => void;
   setContextCompressionStats: (sessionId: string, stats: Partial<ContextCompressionStats> | null) => void;
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
-  setHeartbeatStatus: (
-    status: HeartbeatState,
-    message?: string | null,
-    updatedAt?: string | null
-  ) => void;
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
   setSelectedModelName: (sessionId: string, name: string) => void;
 
@@ -315,6 +307,8 @@ interface SessionState {
   setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
   setTeamTasks: (sessionId: string, tasks: TeamTask[]) => void;
+  registerConfirmedTeamTaskCreation: (sessionId: string, taskId: string) => void;
+  mergeTeamTaskProgressBaseline: (sessionId: string, baseline: TaskProgressBaseline) => void;
   upsertTeamTask: (sessionId: string, task: TeamTaskUpsert) => void;
   updateTeamTask: (sessionId: string, taskId: string, patch: Partial<TeamTask>) => void;
   setTeamMembers: (sessionId: string, members: TeamMember[]) => void;
@@ -363,10 +357,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     rssMb: null,
     usedPercent: null,
   },
-  heartbeatState: 'unknown',
-  heartbeatMessage: null,
-  heartbeatUpdatedAt: null,
-  heartbeatHistory: [],
   availableModels: [],
   chatAvailableModels: [],
   defaultModelName: null,
@@ -385,6 +375,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   getRuntime: (sessionId) => {
     if (!sessionId) return undefined;
     return get().runtimes[sessionId];
+  },
+
+  getEffectiveModelName: (sessionId) => {
+    if (!sessionId) return null;
+    const state = get();
+    const runtime = state.runtimes[sessionId];
+    if (!runtime) return null;
+    return runtime.mode === 'team'
+      ? state.defaultModelName
+      : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {
@@ -562,26 +562,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
   },
 
-  setHeartbeatStatus: (status, message = null, updatedAt) => {
-    set((state) => {
-      const resolvedUpdatedAt = updatedAt === undefined ? new Date().toISOString() : updatedAt;
-      const shouldClearHistory = message == null && updatedAt === null;
-      const nextHistory = shouldClearHistory
-        ? []
-        : (message
-          ? [{ message, updatedAt: resolvedUpdatedAt ?? new Date().toISOString(), status }, ...state.heartbeatHistory]
-              .slice(0, 20)
-          : state.heartbeatHistory);
-
-      return {
-        heartbeatState: status,
-        heartbeatMessage: message,
-        heartbeatUpdatedAt: resolvedUpdatedAt,
-        heartbeatHistory: nextHistory,
-      };
-    });
-  },
-
   setTeamTaskEvents: (sessionId, events) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -631,7 +611,51 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, teamTasks: tasks },
+          [sessionId]: {
+            ...runtime,
+            teamTasks: tasks,
+            teamTaskProgressBaseline: tasks.length === 0
+              ? createTaskProgressBaseline()
+              : runtime.teamTaskProgressBaseline,
+          },
+        },
+      };
+    });
+  },
+
+  registerConfirmedTeamTaskCreation: (sessionId, taskId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const baseline = registerConfirmedTaskCreation(
+        runtime.teamTasks,
+        runtime.teamTaskProgressBaseline,
+        taskId
+      );
+      if (baseline === runtime.teamTaskProgressBaseline) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTaskProgressBaseline: baseline },
+        },
+      };
+    });
+  },
+
+  mergeTeamTaskProgressBaseline: (sessionId, restoredBaseline) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamTaskProgressBaseline: mergeTaskProgressBaseline(
+              runtime.teamTaskProgressBaseline,
+              restoredBaseline
+            ),
+          },
         },
       };
     });

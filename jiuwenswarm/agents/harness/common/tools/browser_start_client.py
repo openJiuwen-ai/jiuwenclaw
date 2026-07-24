@@ -27,11 +27,15 @@ import logging
 import os
 import platform
 import shutil
+import socket
 import subprocess
-import sys
+import threading
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+import psutil
 import yaml
 from openjiuwen.harness.tools.browser_move.playwright_runtime.profiles import (
     BrowserProfile,
@@ -218,6 +222,180 @@ def _creation_flags_for_windows() -> int:
     return flags
 
 
+@dataclass
+class _BrowserProcessHandle:
+    proc: "subprocess.Popen"
+    chrome_exec: str
+    host: str
+    port: int
+    user_data_dir: str
+    reaping: threading.Event = field(default_factory=threading.Event)
+
+
+_BROWSER_PROCESS_REGISTRY: dict[int, _BrowserProcessHandle] = {}
+_BROWSER_REGISTRY_LOCK = threading.Lock()
+
+
+def _register_browser_process(handle: _BrowserProcessHandle) -> None:
+    with _BROWSER_REGISTRY_LOCK:
+        previous = _BROWSER_PROCESS_REGISTRY.pop(handle.proc.pid, None)
+        if previous is not None and previous is not handle:
+            logger.info(
+                "Replacing previous browser process handle in registry "
+                f"pid={previous.proc.pid}"
+            )
+        _BROWSER_PROCESS_REGISTRY[handle.proc.pid] = handle
+
+
+def _unregister_browser_process(pid: int) -> Optional[_BrowserProcessHandle]:
+    with _BROWSER_REGISTRY_LOCK:
+        return _BROWSER_PROCESS_REGISTRY.pop(pid, None)
+
+
+def _reap_browser_on_exit(handle: _BrowserProcessHandle) -> None:
+    pid = handle.proc.pid
+    try:
+        try:
+            handle.proc.wait()
+        except Exception as exc:
+            logger.warning(f"Browser reap watcher wait() failed pid={pid}: {exc}")
+            return
+        handle.reaping.set()
+        logger.info(
+            f"Browser main process exited pid={pid}, reaping child processes "
+            f"host={handle.host}, port={handle.port}"
+        )
+        try:
+            _stop_existing_browser_service(
+                chrome_exec=handle.chrome_exec,
+                host=handle.host,
+                port=handle.port,
+                user_data_dir=handle.user_data_dir,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Browser reap watcher could not fully clean child processes pid={pid}: {exc}"
+            )
+    finally:
+        _unregister_browser_process(pid)
+        handle.reaping.clear()
+
+
+def _normalized_path(value: str) -> str:
+    expanded = os.path.expandvars(os.path.expanduser((value or "").strip().strip('"')))
+    return os.path.normcase(os.path.normpath(os.path.abspath(expanded)))
+
+
+def _cmdline_option(args: list[str], option: str) -> str:
+    prefix = f"{option}="
+    for index, arg in enumerate(args):
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+        if arg == option and index + 1 < len(args):
+            return args[index + 1]
+    return ""
+
+
+def _find_existing_browser_processes(
+    *, chrome_exec: str, port: int, user_data_dir: str
+) -> list[Any]:
+    """Find only Chrome processes belonging to this browser service."""
+    expected_executable = _normalized_path(chrome_exec)
+    expected_user_data_dir = _normalized_path(user_data_dir)
+    matches: list[Any] = []
+    for process in psutil.process_iter(["pid", "ppid", "exe", "cmdline"]):
+        try:
+            executable = str(process.info.get("exe") or "")
+            args = [str(arg) for arg in (process.info.get("cmdline") or [])]
+            if not executable:
+                continue
+            if _normalized_path(executable) != expected_executable:
+                continue
+            if _cmdline_option(args, "--remote-debugging-port") != str(port):
+                continue
+
+            actual_user_data_dir = _cmdline_option(args, "--user-data-dir")
+            if not actual_user_data_dir:
+                continue
+            if _normalized_path(actual_user_data_dir) != expected_user_data_dir:
+                continue
+
+            matches.append(process)
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            continue
+    return matches
+
+
+def _port_is_open(host: str, port: int, *, timeout_s: float = 0.2) -> bool:
+    connect_host = "127.0.0.1" if host in {"", "0.0.0.0", "::"} else host
+    try:
+        with socket.create_connection((connect_host, port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+def _stop_existing_browser_service(
+    *,
+    chrome_exec: str,
+    host: str,
+    port: int,
+    user_data_dir: str,
+    timeout_s: float = 5.0,
+) -> list[int]:
+    matches = _find_existing_browser_processes(
+        chrome_exec=chrome_exec,
+        port=port,
+        user_data_dir=user_data_dir,
+    )
+    if not matches:
+        return []
+
+    matched_pids = {process.pid for process in matches}
+    roots = [
+        process
+        for process in matches
+        if int(process.info.get("ppid") or 0) not in matched_pids
+    ] or matches
+    targets: dict[int, Any] = {process.pid: process for process in matches}
+    for root in roots:
+        try:
+            targets.update({child.pid: child for child in root.children(recursive=True)})
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            pass
+
+    processes = list(targets.values())
+    for process in processes:
+        try:
+            process.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(processes, timeout=timeout_s)
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            pass
+    if alive:
+        _, alive = psutil.wait_procs(alive, timeout=2.0)
+    if alive:
+        remaining = ", ".join(str(process.pid) for process in alive)
+        raise RuntimeError(f"Could not stop existing browser service processes: {remaining}")
+
+    deadline = time.monotonic() + timeout_s
+    while _port_is_open(host, port) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if _port_is_open(host, port):
+        raise RuntimeError(f"Browser service port {host}:{port} did not close after restart")
+
+    stopped_pids = sorted(targets)
+    logger.info(
+        "Stopped existing browser service before restart: "
+        f"pids={stopped_pids}, host={host}, port={port}"
+    )
+    return stopped_pids
+
+
 def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
     browser_cfg = _load_browser_config(config_file)
     os_name = _os_key()
@@ -286,12 +464,39 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
         logger.info(" ".join(args))
         return 0
 
+    _stop_existing_browser_service(
+        chrome_exec=chrome_exec,
+        host=host,
+        port=port,
+        user_data_dir=user_data_dir,
+    )
+    if _port_is_open(host, port):
+        raise RuntimeError(
+            f"Browser service port {host}:{port} is occupied by an unrecognized process. "
+            "Stop that process or choose another remote_debugging_port."
+        )
+
     logger.info(
         "Launching browser process with remote debugging enabled: "
         f"command={args}"
     )
     proc = subprocess.Popen(args, **kwargs)
     logger.info(f"Browser process launched successfully: pid={proc.pid}")
+    handle = _BrowserProcessHandle(
+        proc=proc,
+        chrome_exec=chrome_exec,
+        host=host,
+        port=port,
+        user_data_dir=user_data_dir,
+    )
+    _register_browser_process(handle)
+    watcher = threading.Thread(
+        target=_reap_browser_on_exit,
+        args=(handle,),
+        name=f"browser-reap-{proc.pid}",
+        daemon=True,
+    )
+    watcher.start()
     _persist_browser_profile(
         host=host,
         port=port,
@@ -321,7 +526,7 @@ def main() -> int:
     try:
         return start_browser(dry_run=args.dry_run, config_file=args.config)
     except Exception as exc:
-        logger.info(f"Failed to start Chrome: {exc}", file=sys.stderr)
+        logger.error("Failed to start Chrome: %s", exc)
         return 1
 
 

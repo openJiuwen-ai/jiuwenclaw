@@ -528,7 +528,8 @@ print(resp.json())
 | `env` | object | 否 | 额外环境变量 |
 | `stdin` | string | 否 | 标准输入文本 |
 | `timeout_seconds` | int | 否 | 预留字段 |
-| `capture_output` | bool | 否 | 默认 `true`；为 `true` 时将 stdout/stderr 写入沙箱内 `/tmp/.jiuwenbox-bg/{job_id}.out\|.err`，由 daemon 在 `bg-get` 时经 IPC 读回 |
+
+后台任务**不捕获** stdout/stderr（始终丢弃）；需要输出时请使用同步 `exec`。
 
 错误码：`job_id` 格式非法 → **400**；同 sandbox 内 `job_id` 已占用 → **409**；沙箱非 ready → **409**。
 
@@ -544,7 +545,6 @@ resp = requests.post(
         "job_id": "http-srv",
         "command": ["python3", "-m", "http.server", "18080"],
         "workdir": "/tmp",
-        "capture_output": True,
     },
     timeout=30,
 )
@@ -562,12 +562,11 @@ print(resp.json())
   "command": ["python3", "-m", "http.server", "18080"],
   "running": true,
   "exit_code": null,
-  "error_message": null,
-  "capture_output": true
+  "error_message": null
 }
 ```
 
-轮询 `GET .../background/{job_id}` 直至 `running=false` 后，可得到最终状态与输出（示例：`python3 --version` 结束后）：
+轮询 `GET .../background/{job_id}` 直至 `running=false` 后，可得到最终状态（示例：`python3 --version` 结束后）：
 
 ```json
 {
@@ -579,8 +578,7 @@ print(resp.json())
   "exit_code": 0,
   "started_at": "2026-06-16T10:00:01.000000",
   "finished_at": "2026-06-16T10:00:01.050000",
-  "capture_output": true,
-  "stdout": "Python 3.12.3\n",
+  "stdout": "",
   "stderr": "",
   "workdir": null
 }
@@ -590,9 +588,9 @@ print(resp.json())
 
 接口：`GET /api/v1/sandboxes/{sandbox_id}/background/{job_id}`
 
-用途：查询单个后台任务状态，并返回**全量** stdout/stderr 快照（无 offset 参数）。
+用途：查询单个后台任务状态。stdout/stderr 恒为空（后台任务不记录输出）。
 
-响应体（`BackgroundJobStatus`）含：`job_id`、`sandbox_id`、`command`、`pid`、`running`、`exit_code`、`started_at`、`finished_at`、`capture_output`、`stdout`、`stderr`、`workdir`。
+响应体（`BackgroundJobStatus`）含：`job_id`、`sandbox_id`、`command`、`pid`、`running`、`exit_code`、`started_at`、`finished_at`、`stdout`、`stderr`、`workdir`。
 
 沙箱或 job 不存在 → **404**。
 

@@ -158,18 +158,33 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     [t],
   );
 
-  const loadJobs = useCallback(async (projectList: ProjectInfo[]) => {
-    setLoading(true);
-    setError(null);
+  // silent=true 用于轮询/可见性刷新等后台静默拉取：不切 loading 态、失败时不清空现有列表、
+  // 不弹错误提示，避免偶发网络抖动打断用户正在看的内容（见 bug007/bug008/bug009 progress.md）
+  const loadJobs = useCallback(async (projectList: ProjectInfo[], options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const payload = await webRequest<{ jobs: CronJobDTO[] }>('cron.job.list');
-      setJobs((payload.jobs || []).map((j) => cronJobToUI(j, projectList)));
+      // 展示所有渠道的定时任务（含飞书/钉钉等非 web 渠道创建的），不再按 targets 过滤隐藏；
+      // 来源渠道由列表"渠道"列的 channelLabel 用 badge 形式标明，让用户一眼区分任务归属哪个渠道
+      // （见 bug007/bug008/bug009 progress.md：此前 isWebChannelJob 过滤把非 web 任务藏掉，
+      // 导致飞书建的任务在 web 列表永不出现，轮询再勤也无济于事）
+      const allJobs = payload.jobs || [];
+      setJobs(allJobs.map((j) => cronJobToUI(j, projectList)));
     } catch (loadError) {
+      if (silent) {
+        return;
+      }
       const message = loadError instanceof Error ? loadError.message : t('cron.errors.loadJobs');
       setError(message);
       setJobs([]);
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [t]);
 
@@ -216,6 +231,35 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       await loadChannels();
     })();
   }, [loadChannels, loadJobs, loadProjects]);
+
+  // 供轮询/可见性刷新的静默重拉使用：始终指向最新的 projects，避免定时器闭包拿到挂载时
+  // 的旧值（projects 是异步加载的，轮询早于它变化时也不该被锁死在空数组上）
+  const projectsRef = useRef<ProjectInfo[]>(projects);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+
+  // 定时任务列表除了"挂载时拉一次"、"本页面自己发起的创建/编辑/启停/删除"、"同一 web 会话内
+  // cron_ 前缀工具调用完成"这三种触发方式外，没有别的刷新入口——跨渠道（飞书/钉钉等）创建的
+  // 任务，以及纯粹随时间推移产生的"过期"状态变化，都覆盖不到，只能等用户手动切页重新挂载
+  // 才会看到最新数据（见 bug007/bug008/bug009 的根因分析，progress.md）。这里加一个 5 秒
+  // 轮询兜底 + 页面重新可见时立即刷新一次，两者都走 silent 静默拉取，不影响 loading/error 展示。
+  useEffect(() => {
+    const silentReload = () => {
+      void loadJobs(projectsRef.current, { silent: true });
+    };
+    const intervalId = window.setInterval(silentReload, 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        silentReload();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [loadJobs]);
 
   // 监听 Agent 工具调用结果：cron_ 前缀的工具（比如通过聊天创建/改动定时任务）执行完后
   // 自动刷新任务列表，不用用户手动刷新页面（复用的是 upstream 同款监听逻辑，见 progress.md）
@@ -353,13 +397,13 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     if (!confirmState || confirmBusy) return;
     setConfirmBusy(true);
     try {
-      // 不带 target_session_id：两种触发（自然到点 / 立即执行）统一走后端"最活跃会话"
-      // 选取。后端返回的 session_id 是调度占位 id（cron_*），不可用于跳转，故不再
-      // onSelectSession——避免跳到不存在的会话弹出"对话不存在或已删除"。推荐内容
-      // 异步经 chat.final（source=proactive_recommendation）推到最活跃会话气泡。
-      await webRequest<{ accepted: boolean; run_id: string }>('cron.job.run_now', {
+      const result = await webRequest<{ accepted: boolean; run_id: string; session_id?: string }>('cron.job.run_now', {
         id: confirmState.job.id,
       });
+      if (result.session_id) {
+        useCronStore.getState().setLastRunSessionId(confirmState.job.id, result.session_id);
+        onSelectSession(result.session_id);
+      }
       setSuccess(t('cron.success.runNow'));
       // 刷新左侧栏该定时任务下展开的 session 列表（project.get_cron_sessions）
       const { id: cronId, projectId } = confirmState.job;

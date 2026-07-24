@@ -60,8 +60,10 @@ class CachedOntologyMatcher:
         resolved_by_index: dict[int, list[LLMMatch]] = {}
         diagnostics: list[Any] = []
         if misses:
-            for chunk in _chunked(misses, _matcher_batch_size(self.matcher)):
-                miss_candidates = [candidate for _, candidate in chunk]
+            # Preserve the wrapped matcher's worker-level concurrency while
+            # retaining cache flush boundaries for resumable graph builds.
+            for window in _chunked(misses, _matcher_window_size(self.matcher)):
+                miss_candidates = [candidate for _, candidate in window]
                 resolved_matches = list(
                     await self.matcher.match(registry, miss_candidates)
                 )
@@ -69,7 +71,7 @@ class CachedOntologyMatcher:
                     miss_candidates,
                     resolved_matches,
                 )
-                for index, candidate in chunk:
+                for index, candidate in window:
                     matches = resolved_by_candidate.get(candidate.key, [])
                     resolved_by_index[index] = matches
                     self.cache.store(candidate, matches)
@@ -231,6 +233,17 @@ def _matcher_batch_size(matcher: Any) -> int:
         return max(1, int(getattr(matcher, "batch_size", 0) or 0))
     except (TypeError, ValueError):
         return 1
+
+
+def _matcher_max_workers(matcher: Any) -> int:
+    try:
+        return max(1, int(getattr(matcher, "max_workers", 0) or 0))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _matcher_window_size(matcher: Any) -> int:
+    return _matcher_batch_size(matcher) * _matcher_max_workers(matcher)
 
 
 def _chunked(values: list[Any], size: int) -> list[list[Any]]:

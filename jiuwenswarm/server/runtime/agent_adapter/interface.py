@@ -63,6 +63,22 @@ class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
 
 
+def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> None:
+    """Submit session-based Symphony learning without delaying the response."""
+
+    try:
+        from jiuwenswarm.symphony.evolution.session_consumer import (
+            schedule_session_evolution_consume,
+        )
+
+        schedule_session_evolution_consume(session_id, request_id)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).debug(
+            "Failed to schedule Symphony session feedback: %s",
+            exc,
+        )
+
+
 def _history_user_content(params: Any, query: Any) -> Any:
     """返回写入历史记录的用户消息内容.
 
@@ -413,6 +429,7 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_MARKETPLACE_ADD: "handle_skills_marketplace_add",
     ReqMethod.SKILLS_MARKETPLACE_REMOVE: "handle_skills_marketplace_remove",
     ReqMethod.SKILLS_MARKETPLACE_TOGGLE: "handle_skills_marketplace_toggle",
+    ReqMethod.SKILLS_ONLINE_SEARCH: "handle_skills_online_search",
     ReqMethod.SKILLS_SKILLNET_SEARCH: "handle_skills_skillnet_search",
     ReqMethod.SKILLS_SKILLNET_INSTALL: "handle_skills_skillnet_install",
     ReqMethod.SKILLS_SKILLNET_INSTALL_STATUS: "handle_skills_skillnet_install_status",
@@ -1742,6 +1759,10 @@ class JiuWenSwarm:
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
             return await adapter.handle_user_answer(request)
 
+        if request.req_method == ReqMethod.CHAT_SWARMFLOW_REPLY:
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+            return await adapter.handle_swarmflow_reply(request)
+
         # Non-stream goal command (GET, PAUSE, CLEAR)
         if request.req_method == ReqMethod.COMMAND_GOAL:
             try:
@@ -1759,22 +1780,44 @@ class JiuWenSwarm:
                 if goal_result is not None:
                     result_type = goal_result.get("result_type")
                     ok = result_type not in {"goal_error", "goal_confirm_required"}
+                    # Only set writes user history (objective as the user turn).
+                    # pause / resume / clear / get stay control-only.
+                    if ok and str(action or "").strip().lower() == "set":
+                        objective = str(params.get("objective") or "").strip()
+                        if objective:
+                            append_history_record(
+                                session_id=session_id,
+                                request_id=request.request_id,
+                                channel_id=request.channel_id,
+                                role="user",
+                                content=objective,
+                                timestamp=time.time(),
+                                channel_metadata=request.metadata,
+                                mode=params.get("mode", "unknown"),
+                            )
+                    # Keep message for callers that read payload.message; also
+                    # mirror into error on failure so Gateway top-level error
+                    # forwarding and older clients stay consistent.
+                    human_text = goal_result.get("output", goal_result.get("error", ""))
+                    payload = {
+                        "action": goal_result.get("action", action),
+                        "message": human_text,
+                        "goal": goal_result.get("goal"),
+                        # Keep this field for the existing TUI command
+                        # surface; it is a copy of the authoritative goal.
+                        "record": goal_result.get("goal"),
+                        "cleared_goal": goal_result.get("cleared_goal"),
+                        "existing_goal": goal_result.get("existing_goal"),
+                        "requested_objective": goal_result.get("requested_objective"),
+                        "code": goal_result.get("error_code"),
+                    }
+                    if not ok and human_text:
+                        payload["error"] = human_text
                     return AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
                         ok=ok,
-                        payload={
-                            "action": goal_result.get("action", action),
-                            "message": goal_result.get("output", goal_result.get("error", "")),
-                            "goal": goal_result.get("goal"),
-                            # Keep this field for the existing TUI command
-                            # surface; it is a copy of the authoritative goal.
-                            "record": goal_result.get("goal"),
-                            "cleared_goal": goal_result.get("cleared_goal"),
-                            "existing_goal": goal_result.get("existing_goal"),
-                            "requested_objective": goal_result.get("requested_objective"),
-                            "code": goal_result.get("error_code"),
-                        },
+                        payload=payload,
                         metadata=request.metadata,
                     )
                 return AgentResponse(
@@ -1924,6 +1967,7 @@ class JiuWenSwarm:
             if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
+        _schedule_symphony_session_feedback(session_id, request.request_id)
         return result
 
     async def process_message_stream(
@@ -2061,21 +2105,23 @@ class JiuWenSwarm:
 
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
-        # Streaming command.goal set/resume is control traffic, not a user utterance.
+        # command.goal set history is written only after a successful set inside
+        # the DeepAdapter stream path (same success gate as unary process_message).
+        params_for_history = request.params if isinstance(request.params, dict) else {}
         if (
             request.req_method != ReqMethod.COMMAND_GOAL
-            and _should_record_user_history(request.params)
+            and _should_record_user_history(params_for_history)
         ):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 role="user",
-                content=_history_user_content(request.params, query),
+                content=_history_user_content(params_for_history, query),
                 timestamp=time.time(),
-                extra=_history_user_extra(request.params),
+                extra=_history_user_extra(params_for_history),
                 channel_metadata=request.metadata,
-                mode=request.params.get("mode", "unknown"),
+                mode=params_for_history.get("mode", "unknown"),
             )
 
         logger.info(
@@ -2594,6 +2640,7 @@ class JiuWenSwarm:
         if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
+        _schedule_symphony_session_feedback(session_id, rid)
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=cid,

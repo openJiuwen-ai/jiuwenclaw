@@ -8,6 +8,7 @@ import difflib
 import copy
 import json
 import logging
+import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -20,11 +21,21 @@ from jiuwenswarm.server.runtime.session.session_history import load_history_reco
 
 logger = logging.getLogger(__name__)
 
+INTERNAL_UNTRACKED_DIRS = {".agent_history"}
+
 
 MAX_FILES = 50
 MAX_DIFF_SIZE_BYTES = 1_000_000
 MAX_LINES_PER_FILE = 400
 MAX_FILES_FOR_DETAILS = 500
+HISTORY_PRIORITY_PROJECT_ROOT = 0
+HISTORY_PRIORITY_SHARED_WORKSPACE = 10
+HISTORY_PRIORITY_EXTRA_ROOT = 20
+HISTORY_PRIORITY_UNKNOWN = 50
+WORKTREE_HISTORY_CONTAINERS: tuple[tuple[str, ...], ...] = (
+    (".worktrees",),
+    (".jiuwen", "worktrees"),
+)
 
 # change_sets.json 写入锁:保证同一进程内多线程惰性回填时不互相覆盖。
 _CHANGE_SET_LOCK = threading.Lock()
@@ -45,6 +56,7 @@ class DiffService:
         session_id: str,
         project_dir: str | None = None,
         repo_context: dict[str, Any] | None = None,
+        extra_history_roots: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """获取 session 的所有 turn diff（完整信息）.
 
@@ -55,7 +67,7 @@ class DiffService:
         Returns:
             turn diff 列表，按时间倒序排列（most recent first）
         """
-        turns = self._compute_turn_diffs(session_id, project_dir)
+        turns = self._compute_turn_diffs(session_id, project_dir, extra_history_roots=extra_history_roots)
         self._enrich_with_change_sets(session_id, turns, repo_context=repo_context)
         return list(reversed(turns))
 
@@ -64,6 +76,7 @@ class DiffService:
         session_id: str,
         project_dir: str | None = None,
         repo_context: dict[str, Any] | None = None,
+        extra_history_roots: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """获取 session 的历史 turn diff 摘要，包含已持久化快照。
 
@@ -71,7 +84,7 @@ class DiffService:
         但仍存在于 change_sets/snapshot 中的历史轮次也返回出来（例如已撤销
         的 turn）。
         """
-        turns = self._compute_turn_diffs(session_id, project_dir)
+        turns = self._compute_turn_diffs(session_id, project_dir, extra_history_roots=extra_history_roots)
         self._enrich_with_change_sets(session_id, turns, repo_context=repo_context)
         by_turn = {int(t.get("turnIndex", 0) or 0): t for t in turns}
         for entry in self._load_change_sets(session_id):
@@ -99,6 +112,7 @@ class DiffService:
         change_set_id: str | None = None,
         project_dir: str | None = None,
         repo_context: dict[str, Any] | None = None,
+        extra_history_roots: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """获取指定轮次的 turn diff。
 
@@ -132,14 +146,24 @@ class DiffService:
             snapshot = self._load_turn_snapshot(session_id, change_set_id)
             if snapshot is not None:
                 return snapshot
-            turns = self.get_turn_diffs(session_id, project_dir, repo_context=repo_context)
+            turns = self.get_turn_diffs(
+                session_id,
+                project_dir,
+                repo_context=repo_context,
+                extra_history_roots=extra_history_roots,
+            )
             for turn in turns:
                 if turn.get("change_set_id") == change_set_id:
                     return turn
             raise DiffHistoryExpiredError(
                 f"diff history expired for change_set_id={change_set_id}"
             )
-        turns = self.get_turn_diffs(session_id, project_dir, repo_context=repo_context)
+        turns = self.get_turn_diffs(
+            session_id,
+            project_dir,
+            repo_context=repo_context,
+            extra_history_roots=extra_history_roots,
+        )
         for turn in turns:
             if int(turn.get("turnIndex", 0) or 0) == turn_index:
                 return turn
@@ -156,14 +180,24 @@ class DiffService:
                     )
         return None
 
-    def _compute_turn_diffs(self, session_id: str, project_dir: str | None = None) -> list[dict[str, Any]]:
+    def _compute_turn_diffs(
+        self,
+        session_id: str,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """计算 turn-based diffs."""
         history = self._read_history(session_id)
 
         if not history:
             return []
 
-        agent_history = self._read_agent_history(session_id, project_dir)
+        agent_history = self._read_agent_history(
+            session_id,
+            project_dir,
+            extra_history_roots=extra_history_roots,
+        )
 
         turns: list[dict[str, Any]] = []
 
@@ -416,13 +450,19 @@ class DiffService:
         }
 
     def mark_turn_discarded(
-        self, session_id: str, turn_index: int, project_dir: str | None = None
+        self,
+        session_id: str,
+        turn_index: int,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
     ) -> str | None:
         """将指定 turn 的 change_set 状态标记为 discarded。"""
         if turn_index <= 0:
             return None
         target = self.get_turn_diff(
             session_id, turn_index=turn_index, project_dir=project_dir,
+            extra_history_roots=extra_history_roots,
         )
         change_set_id = str((target or {}).get("change_set_id") or "")
         if not change_set_id:
@@ -569,32 +609,195 @@ class DiffService:
             logger.debug("Failed to read metadata file %s: %s", metadata_file, e)
         return None
 
+    @staticmethod
     def _is_valid_file_ops_file(
-        self, name: str, session_id: str | None, require_session: bool = False
+        name: str, session_id: str | None, require_session: bool = False
     ) -> bool:
-        """检查文件名是否是有效的 file_ops 文件."""
-        if not name.startswith(f"file_ops_{self._agent_id}_"):
+        """检查文件名是否是有效的 file_ops 文件.
+
+        文件名约定: ``file_ops_{agent_id}_{session_id}.json``,其中 session_id
+        始终是 ``.json`` 前的最后一段。使用 ``_{session_id}.json`` 后缀匹配替代
+        子串匹配,避免短 session_id 误匹配其他 agent 的 file_ops 文件。
+        """
+        if not name.startswith("file_ops_"):
             return False
         if not name.endswith(".json"):
             return False
-        if require_session:
-            return session_id is not None and session_id in name
-        return session_id is None or session_id in name
+        if not session_id:
+            return not require_session
+        return name.endswith(f"_{session_id}.json")
 
-    def _read_agent_history(self, session_id: str | None = None, project_dir: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _agent_history_dirs_for_roots(
+        history_roots: list[str],
+        *,
+        include_child_workspaces: bool = False,
+    ) -> list[Path]:
+        """Return .agent_history dirs for roots and optional immediate workspaces."""
+        result: list[Path] = []
+        seen_history_dirs: set[Path] = set()
+
+        def add_history_dir(hist_dir: Path) -> None:
+            try:
+                key = hist_dir.resolve()
+            except Exception:
+                key = hist_dir
+            if key in seen_history_dirs:
+                return
+            seen_history_dirs.add(key)
+            result.append(hist_dir)
+
+        for history_root in history_roots:
+            root = Path(history_root)
+            add_history_dir(root / ".agent_history")
+            if not include_child_workspaces:
+                continue
+            if not root.is_dir():
+                continue
+            try:
+                children = list(root.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                if child.is_dir():
+                    add_history_dir(child / ".agent_history")
+        return result
+
+    @staticmethod
+    def _default_worktree_history_roots(project_dir: str | None) -> list[str]:
+        """Return known local worktree container dirs under the project root."""
+        if not project_dir:
+            return []
+        root = Path(project_dir)
+        return [str(root.joinpath(*parts)) for parts in WORKTREE_HISTORY_CONTAINERS]
+
+    @classmethod
+    def _history_roots_with_worktree_containers(
+        cls,
+        project_dir: str | None,
+        extra_history_roots: list[str] | None = None,
+    ) -> list[str]:
+        """Return explicit roots plus known worktree containers below each root."""
+        roots: list[str] = []
+        seen: set[str] = set()
+
+        def add_root(value: str | None) -> None:
+            raw = str(value or "").strip()
+            if not raw:
+                return
+            try:
+                key = os.path.normcase(str(Path(raw).expanduser().resolve()))
+            except Exception:
+                key = os.path.normcase(raw)
+            if key in seen:
+                return
+            seen.add(key)
+            roots.append(raw)
+
+        for root in cls._default_worktree_history_roots(project_dir):
+            add_root(root)
+        for root in extra_history_roots or []:
+            if not isinstance(root, str):
+                continue
+            raw = root.strip()
+            if not raw:
+                continue
+            add_root(raw)
+            for child_root in cls._default_worktree_history_roots(raw):
+                add_root(child_root)
+        return roots
+
+    @staticmethod
+    def _get_git_common_worktree_root(worktree_root: Path) -> Path | None:
+        """Return the canonical repo root for a linked git worktree, if known."""
+        if not worktree_root.is_dir():
+            return None
+        common_dir = DiffService._run_git_command(
+            str(worktree_root),
+            ["rev-parse", "--git-common-dir"],
+        )
+        if not common_dir or not common_dir.strip():
+            return None
+        common_path = Path(common_dir.strip())
+        if not common_path.is_absolute():
+            common_path = worktree_root / common_path
+        try:
+            common_path = common_path.resolve()
+        except OSError:
+            pass
+        if common_path.name != ".git":
+            return None
+        canonical_root = common_path.parent
+        try:
+            worktree_resolved = worktree_root.resolve()
+            canonical_resolved = canonical_root.resolve()
+        except OSError:
+            return None
+        if worktree_resolved == canonical_resolved:
+            return None
+        return canonical_resolved
+
+    @staticmethod
+    def _map_worktree_file_path(
+        file_path: str,
+        *,
+        source_root: Path,
+        target_root: Path | None,
+    ) -> str:
+        """Map a file-op path from a linked worktree back to the canonical repo."""
+        if target_root is None:
+            return file_path
+        try:
+            path = Path(file_path).expanduser().resolve()
+            source = source_root.expanduser().resolve()
+            rel = path.relative_to(source)
+        except Exception:
+            return file_path
+        return str(target_root / rel)
+
+    @staticmethod
+    def _is_internal_team_workspace_file(file_path: str) -> bool:
+        """Return whether an edited file is an internal team workspace artifact."""
+        parts = str(file_path or "").replace("\\", "/").lower().split("/")
+        return ".agent_teams" in parts
+
+    def _read_agent_history(
+        self,
+        session_id: str | None = None,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> dict[str, Any]:
         """读取 .agent_history（同时读取全局与 session-specific 文件并合并）.
 
         Args:
             session_id: 若提供，额外扫描匹配该 session 的 file_ops 文件。
             project_dir: 项目目录路径，若提供则也从项目目录读取 .agent_history。
+            extra_history_roots: 额外写入根目录，例如 team/member workspace。
         """
         result: dict[str, Any] = {}
+        history_file_priorities: dict[str, int] = {}
+
+        def path_key(path: Path) -> str:
+            try:
+                return os.path.normcase(str(path.resolve()))
+            except OSError:
+                return os.path.normcase(str(path))
+
+        def add_history_file(path: Path, priority: int) -> None:
+            paths.append(path)
+            history_file_priorities.setdefault(path_key(path), priority)
 
         # 1. 从 Agent Workspace 和 User Workspace 读取（公共位置）
-        paths = [
+        paths: list[Path] = []
+        add_history_file(
             get_agent_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
+            HISTORY_PRIORITY_SHARED_WORKSPACE,
+        )
+        add_history_file(
             get_user_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
-        ]
+            HISTORY_PRIORITY_SHARED_WORKSPACE,
+        )
 
         # 2. session-specific file_ops（如 file_ops_jiuwenswarm_tui_xxx.json）
         if session_id:
@@ -605,7 +808,7 @@ class DiffService:
                 for f in hist_dir.iterdir():
                     name = f.name
                     if self._is_valid_file_ops_file(name, session_id, require_session=True):
-                        paths.append(f)
+                        add_history_file(f, HISTORY_PRIORITY_SHARED_WORKSPACE)
 
         # 3. 从项目目录读取（实际写入位置）
         # 如果未传入 project_dir，尝试从 session metadata 获取
@@ -614,15 +817,48 @@ class DiffService:
         if project_dir:
             project_hist_dir = Path(project_dir) / ".agent_history"
             if project_hist_dir.is_dir():
+                for f in project_hist_dir.iterdir():
+                    name = f.name
+                    if self._is_valid_file_ops_file(name, session_id):
+                        add_history_file(f, HISTORY_PRIORITY_PROJECT_ROOT)
+                global_file = project_hist_dir / f"file_ops_{self._agent_id}.json"
+                if global_file.exists():
+                    add_history_file(global_file, HISTORY_PRIORITY_PROJECT_ROOT)
+        extra_roots = self._history_roots_with_worktree_containers(
+            project_dir,
+            extra_history_roots,
+        )
+
+        for project_hist_dir in self._agent_history_dirs_for_roots(
+            extra_roots,
+            include_child_workspaces=True,
+        ):
+            if project_hist_dir.is_dir():
                 # 读取 session-specific file_ops 文件
                 for f in project_hist_dir.iterdir():
                     name = f.name
                     if self._is_valid_file_ops_file(name, session_id):
-                        paths.append(f)
+                        add_history_file(f, HISTORY_PRIORITY_EXTRA_ROOT)
                 # 也读取全局 file_ops 文件（不带 session_id 后缀的）
                 global_file = project_hist_dir / f"file_ops_{self._agent_id}.json"
                 if global_file.exists():
-                    paths.append(global_file)
+                    add_history_file(global_file, HISTORY_PRIORITY_EXTRA_ROOT)
+
+        worktree_root_cache: dict[Path, Path | None] = {}
+
+        def mapped_file_path_for_history(file_path: str, history_file: Path) -> str:
+            source_root = history_file.parent.parent
+            try:
+                source_key = source_root.resolve()
+            except OSError:
+                source_key = source_root
+            if source_key not in worktree_root_cache:
+                worktree_root_cache[source_key] = self._get_git_common_worktree_root(source_root)
+            return self._map_worktree_file_path(
+                file_path,
+                source_root=source_root,
+                target_root=worktree_root_cache[source_key],
+            )
 
         # 用于规范化路径，避免大小写差异导致的重复
         def normalize_path(p: str) -> str:
@@ -630,42 +866,77 @@ class DiffService:
             # 使用 pathlib.Path 规范化路径
             try:
                 return str(Path(p).resolve())
-            except Exception:
+            except OSError:
                 return p.replace("\\", "/").lower()
+
+        def comparable_path_key(p: str) -> str:
+            return p.lower()
+
+        result_entry_priorities: dict[str, list[int]] = {}
+        result_path_by_comparable_key: dict[str, str] = {}
 
         for history_file in paths:
             if history_file.exists():
                 try:
                     data = json.loads(history_file.read_text(encoding="utf-8"))
+                    history_priority = history_file_priorities.get(
+                        path_key(history_file),
+                        HISTORY_PRIORITY_UNKNOWN,
+                    )
                     for file_path, entries in data.items():
+                        mapped_file_path = mapped_file_path_for_history(file_path, history_file)
+                        if self._is_internal_team_workspace_file(mapped_file_path):
+                            continue
                         # 规范化路径，避免大小写差异导致的重复
-                        normalized_path = normalize_path(file_path)
+                        normalized_path = normalize_path(mapped_file_path)
+                        comparable_key = comparable_path_key(normalized_path)
+                        normalized_path = result_path_by_comparable_key.setdefault(
+                            comparable_key,
+                            normalized_path,
+                        )
                         if normalized_path not in result:
                             result[normalized_path] = []
+                            result_entry_priorities[normalized_path] = []
                         # 合并条目，避免时间戳相近的重复记录
                         for entry in entries:
                             # 检查是否已存在相同时间戳（±1秒）的相同操作
                             ts = entry.get("timestamp", "")
                             action = entry.get("action", "")
                             is_duplicate = False
-                            for existing in result[normalized_path]:
+                            duplicate_index: int | None = None
+                            for idx, existing in enumerate(result[normalized_path]):
                                 existing_ts = existing.get("timestamp", "")
                                 existing_action = existing.get("action", "")
-                                if action == existing_action:
+                                same_content = (
+                                    entry.get("old_content") == existing.get("old_content")
+                                    and entry.get("new_content") == existing.get("new_content")
+                                )
+                                if action == existing_action and same_content:
                                     # 比较时间戳是否相近（同一秒内）
                                     try:
                                         t1 = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                                         t2 = datetime.fromisoformat(existing_ts.replace("Z", "+00:00"))
                                         if abs((t1 - t2).total_seconds()) < 2:
                                             is_duplicate = True
+                                            duplicate_index = idx
                                             break
                                     except (ValueError, TypeError):
                                         # 时间戳格式无效，无法比较，跳过此条目比较
                                         continue
-                            if not is_duplicate:
+                            if is_duplicate:
+                                priorities = result_entry_priorities[normalized_path]
+                                if (
+                                    duplicate_index is not None
+                                    and duplicate_index < len(priorities)
+                                    and history_priority < priorities[duplicate_index]
+                                ):
+                                    result[normalized_path][duplicate_index] = entry
+                                    priorities[duplicate_index] = history_priority
+                            else:
                                 result[normalized_path].append(entry)
-                except Exception as e:
-                    logger.warning(f"Failed to read agent history file {history_file}: {e}")
+                                result_entry_priorities[normalized_path].append(history_priority)
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Failed to read agent history file %s: %s", history_file, e)
 
         return result
 
@@ -1327,6 +1598,8 @@ class DiffService:
             if not rel_path:
                 continue
             rel_path = DiffService._unquote_git_path(rel_path)
+            if self._is_internal_untracked_path(rel_path):
+                continue
             abs_path = str(Path(project_dir) / rel_path)
 
             entry: dict[str, Any] = {
@@ -1388,6 +1661,11 @@ class DiffService:
             files[abs_path] = entry
 
         return files
+
+    @staticmethod
+    def _is_internal_untracked_path(rel_path: str) -> bool:
+        parts = Path(rel_path).parts
+        return any(part in INTERNAL_UNTRACKED_DIRS for part in parts)
 
     def get_git_diff(self, project_dir: str | None) -> dict[str, Any] | None:
         """获取工作区相对于 HEAD 的 git diff，含未跟踪文件行数.
@@ -1519,7 +1797,12 @@ class DiffService:
         )
 
     def get_files_to_restore(
-        self, session_id: str, turn_index: int, project_dir: str | None = None
+        self,
+        session_id: str,
+        turn_index: int,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """返回需要恢复的文件及其目标内容.
 
@@ -1554,7 +1837,11 @@ class DiffService:
             return {}
 
         # 2. 读取 file_ops 日志
-        agent_history = self._read_agent_history(session_id, project_dir)
+        agent_history = self._read_agent_history(
+            session_id,
+            project_dir,
+            extra_history_roots=extra_history_roots,
+        )
 
         # 3. 对于每个文件，找到第一条 timestamp >= target_timestamp 的 entry
         #    该 entry 的 old_content 即为目标 turn 开始前的文件状态
@@ -1585,6 +1872,8 @@ class DiffService:
         session_id: str,
         cutoff_ts: float,
         project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
     ) -> None:
         """截断 file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
 
@@ -1621,10 +1910,24 @@ class DiffService:
                 if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
                     file_ops_paths.append(f)
 
-        # 也从项目目录扫描(显式传入优先,否则从 metadata 推断)
+        # 也从项目目录/额外写入根扫描(显式传入优先,否则从 metadata 推断)
         resolved_project_dir = project_dir or self._get_project_dir_from_metadata(session_id)
         if resolved_project_dir:
             project_hist_dir = Path(resolved_project_dir) / ".agent_history"
+            if project_hist_dir.is_dir():
+                for f in project_hist_dir.iterdir():
+                    if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
+                        if f not in file_ops_paths:
+                            file_ops_paths.append(f)
+        extra_roots = self._history_roots_with_worktree_containers(
+            resolved_project_dir,
+            extra_history_roots,
+        )
+
+        for project_hist_dir in self._agent_history_dirs_for_roots(
+            extra_roots,
+            include_child_workspaces=True,
+        ):
             if project_hist_dir.is_dir():
                 for f in project_hist_dir.iterdir():
                     if self._is_valid_file_ops_file(f.name, session_id, require_session=True):

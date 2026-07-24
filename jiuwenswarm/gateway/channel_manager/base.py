@@ -30,6 +30,7 @@ class ChannelType(str, Enum):
     WHATSAPP = "whatsapp"
     WECOM = "wecom"
     WECHAT = "wechat"
+    SSH = "ssh"
     CLI = "tui"
 
 

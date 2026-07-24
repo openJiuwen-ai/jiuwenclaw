@@ -305,6 +305,19 @@ wheels = [
 ]
 
 [[package]]
+name = "asyncssh"
+version = "2.23.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a4/95/212d3d394f2a6ccb3f95056d3b9a7ce13c2f58503cbd6a38d037ef48cb13/asyncssh-2.23.1.tar.gz", hash = "sha256:d9dc3bc0206f3e4b5d80d1c0e6a24af2b4ad4beb556884c41fb2ad1c7ca3f44f", size = 542883, upload-time = "2026-06-07T14:15:18.832Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/94/9aa81bde40627af70388d634152e7c53e7533788e662b8093047501a1473/asyncssh-2.23.1-py3-none-any.whl", hash = "sha256:f68e55476d41253d785bcac9a90834ae5fdea0f417bd6d7182608bda248de88e", size = 376054, upload-time = "2026-06-07T14:15:17.375Z" },
+]
+
+[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1840,8 +1853,12 @@ harmony = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "wecom-aibot-sdk" },
 ]
+ssh = [
+    { name = "asyncssh" },
+]
 test = [
     { name = "a2a-sdk", extra = ["http-server"] },
+    { name = "asyncssh" },
     { name = "coverage" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1857,6 +1874,7 @@ tui = [
 [package.dev-dependencies]
 dev = [
     { name = "a2a-sdk", extra = ["http-server"] },
+    { name = "asyncssh" },
     { name = "codespell" },
     { name = "coverage" },
     { name = "httpx", extra = ["socks"] },
@@ -1879,6 +1897,7 @@ lint = [
 ]
 test = [
     { name = "a2a-sdk", extra = ["http-server"] },
+    { name = "asyncssh" },
     { name = "coverage" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1896,6 +1915,8 @@ requires-dist = [
     { name = "a2ui-agent-sdk", marker = "extra == 'harmony'", specifier = "==0.2.1" },
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "aiosqlite", marker = "extra == 'harmony'", specifier = ">=0.22.1" },
+    { name = "asyncssh", marker = "extra == 'ssh'", specifier = ">=2.14.0,<2.24" },
+    { name = "asyncssh", marker = "extra == 'test'", specifier = ">=2.14.0,<2.24" },
     { name = "chromadb", specifier = ">=1.5.0" },
     { name = "coverage", marker = "extra == 'test'", specifier = ">=7.7.1" },
     { name = "croniter", specifier = ">=2.0.0" },
@@ -1972,11 +1993,12 @@ requires-dist = [
     { name = "wecom-aibot-sdk", specifier = ">=1.0.5" },
     { name = "wecom-aibot-sdk", marker = "extra == 'harmony'", specifier = ">=1.0.5" },
 ]
-provides-extras = ["harmony", "a2a", "desktop", "dev", "tui", "distribute", "shell-ast", "test"]
+provides-extras = ["harmony", "a2a", "ssh", "desktop", "dev", "tui", "distribute", "shell-ast", "test"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "a2a-sdk", extras = ["http-server"], specifier = "==1.0.0" },
+    { name = "asyncssh", specifier = ">=2.14.0,<2.24" },
     { name = "codespell", specifier = ">=2.2.4" },
     { name = "coverage", specifier = ">=7.7.1" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.28.1" },
@@ -1999,6 +2021,7 @@ lint = [
 ]
 test = [
     { name = "a2a-sdk", extras = ["http-server"], specifier = "==1.0.0" },
+    { name = "asyncssh", specifier = ">=2.14.0,<2.24" },
     { name = "coverage", specifier = ">=7.7.1" },
     { name = "pytest", specifier = ">=8.3.5" },
     { name = "pytest-asyncio", specifier = ">=1.0.0" },
@@ -2830,7 +2853,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.16"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#1bf14832bc4e89a29ed0c090c96650c18b83b1b9" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#63380f17e8516c641435192efeeb8af5e286705f" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },

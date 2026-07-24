@@ -612,6 +612,13 @@ export function ConversationSidebar({
   const addMenuRef = useRef<HTMLDivElement>(null);
   const workModeMenuRef = useRef<HTMLDivElement>(null);
   const previousProcessing = useRef<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (!pathDialogError || pathDialogOpen) return;
+    const timeoutId = window.setTimeout(() => setPathDialogError(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [pathDialogError, pathDialogOpen]);
+
   const {
     workMode,
     projects,
@@ -664,6 +671,8 @@ export function ConversationSidebar({
   const cronSessions = useCronStore((s) => s.cronSessions);
   const cronSessionsLoading = useCronStore((s) => s.cronSessionsLoading);
   const loadCronSessions = useCronStore((s) => s.loadCronSessions);
+  const unreadCronJobs = useCronStore((s) => s.unreadCronJobs);
+  const clearCronJobUnread = useCronStore((s) => s.clearCronJobUnread);
 
   useEffect(() => {
     void loadCronJobs();
@@ -922,12 +931,14 @@ export function ConversationSidebar({
     const cronExpanded = expandedCronGroups[cronGroupId] ?? false;
     const triggerSessions = cronSessions[job.id] || [];
     const isCronSessionsLoading = cronSessionsLoading[job.id] ?? false;
+    const isCronUnread = Boolean(unreadCronJobs[job.id]);
     return (
       <div key={`cron-wrapper-${job.id}`} className={`conversation-sidebar__session-wrapper${nested ? ' conversation-sidebar__session-wrapper--nested' : ''}`}>
         <div
           className={`conversation-sidebar__cron-row${cronExpanded ? ' is-expanded' : ''}`}
           onClick={() => {
             toggleCronGroup(cronGroupId);
+            if (isCronUnread) clearCronJobUnread(job.id);
             if (!cronExpanded) {
               void loadCronSessions(projectId, job.id);
             }
@@ -936,6 +947,7 @@ export function ConversationSidebar({
         >
           <CronIcon className="conversation-sidebar__cron-row-icon" aria-hidden />
           <span className="conversation-sidebar__cron-row-name">{job.name}</span>
+          {isCronUnread && <span className="conversation-list-item__status-dot" aria-hidden="true" />}
           {cronExpanded ? <CollapseIcon className="conversation-sidebar__cron-row-chevron" aria-hidden /> : <ArrowRightIcon className="conversation-sidebar__cron-row-chevron" aria-hidden />}
         </div>
         {cronExpanded ? (
@@ -952,7 +964,10 @@ export function ConversationSidebar({
                   nested={false}
                   unread={unreadSessions.has(ts.session_id)}
                   now={relativeTimeNow}
-                  onSelect={() => onSelect(ts)}
+                  onSelect={() => {
+                    clearCronJobUnread(job.id);
+                    onSelect(ts);
+                  }}
                   onDelete={() => onDelete(ts)}
                   onPin={() => void handlePinSession(ts)}
                   menuItems={getConversationMenuItems(Boolean(ts.pinned), t)}
@@ -1144,8 +1159,10 @@ export function ConversationSidebar({
           </div>
         ) : null}
         {pathDialogError && !pathDialogOpen ? (
-          <div className="conversation-sidebar__error" role="alert">
-            {pathDialogError}
+          <div className="app-toast-wrapper app-toast-wrapper--top-center">
+            <div className="app-session-toast" role="status" aria-live="polite">
+              {pathDialogError}
+            </div>
           </div>
         ) : null}
         <div className="conversation-sidebar__group conversation-sidebar__project-add" ref={addMenuRef}>

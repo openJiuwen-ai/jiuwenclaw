@@ -224,6 +224,7 @@ class BuildManifest:
             "enable_backward_search": True,
         }
     )
+    candidate_generation: Dict[str, Any] = field(default_factory=dict)
     llm: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -235,6 +236,7 @@ class BuildManifest:
             "artifacts": self.artifacts,
             "thresholds": self.thresholds,
             "planning_defaults": self.planning_defaults,
+            "candidate_generation": self.candidate_generation,
             "llm": self.llm,
             "created_at": self.created_at,
         }

@@ -1241,7 +1241,7 @@ select {
   }
 
   .tool-group-frame--team {
-    width: min(95%, 920px);
+    width: min(100%, 920px);
     margin: 12px auto;
     display: grid;
     grid-template-columns: 36px minmax(0, 1fr);

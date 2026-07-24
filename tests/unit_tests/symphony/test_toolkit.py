@@ -182,6 +182,46 @@ def test_plan_returns_compact_plan_and_beam_graph():
     assert "result" not in result
 
 
+def test_plan_preserves_dynamic_graph_metadata():
+    registry = _registry()
+
+    async def handler(params, request=None):
+        del params, request
+        return {
+            "success": True,
+            "plan_id": "plan-session-1",
+            "dynamic_graph_enabled": True,
+            "result": {"recommended_plans": []},
+        }
+
+    registry.register_rpc_handler("symphony.plan", handler)
+
+    result = asyncio.run(SymphonyToolkit().plan("compose"))
+
+    assert result["plan_id"] == "plan-session-1"
+    assert result["dynamic_graph_enabled"] is True
+
+
+def test_toolkit_compacts_inferred_edge_provenance():
+    edge = SymphonyToolkit._compact_can_feed_edge(
+        {
+            "source_id": "skill-a",
+            "target_id": "skill-b",
+            "confidence": None,
+            "method": "fast_llm_inferred",
+            "reason": "LLM connected retrieved candidates.",
+            "port_mappings": [],
+        }
+    )
+
+    assert edge == {
+        "source_id": "skill-a",
+        "target_id": "skill-b",
+        "method": "fast_llm_inferred",
+        "reason": "LLM connected retrieved candidates.",
+    }
+
+
 def test_plan_reports_missing_rpc_handler():
     _registry()
 

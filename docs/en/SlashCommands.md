@@ -54,7 +54,7 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/mode` | Mode switching (supports first-level entry and direct syntax) |
 | `/switch` | Switch second-level mode within current mode family |
 | `/skills` | Skills management (list, install, uninstall, marketplace, ClawHub, SkillNet) (see below) |
-| `/model` | Model view, add, switch (see below) |
+| `/model` | Model view, add, edit, delete, switch (see below) |
 | `/mcp` | MCP server management (see below) |
 | `/diff` | Interactive change review: per-turn diffs + uncommitted working tree changes (see below) |
 | `/compact` | Compress current context (see below) |
@@ -154,17 +154,36 @@ Behavior:
 - **Branch recording & filtering (`Ctrl+B`)**: a session's git branch is recorded (per its `project_dir`) on the first message (`HEAD` for non-git/detached). When the filter is on, sessions are matched by branch **name** strictly; legacy sessions without a recorded branch and `HEAD` sessions are filtered out. Note the match is by name only and not repo-aware — with "all projects + branch filter" enabled, same-named branches in different directories are shown together.
 - **Restore scope**: resume only restores the **conversation context** (history, session ID, accent color, workflow snapshot, window title); it does **not** switch the workspace / current working directory.
 
-### `/model` (View / Add / Switch Model)
+### `/model` (View / Add / Edit / Delete / Switch Model)
 
-- Usage:
-  - `/model` or `/model list`: List switchable models (with current model marker);
-  - `/model <name>`: Switch to specified model;
-  - `/model add <name> key=value ...`: Add model config (e.g., `model=...`, `provider=...`, `api_base=...`, `api_key=...`).
-- Limitation: `video` / `audio` / `vision` cannot be set as default chat model via `/model <name>`, use `/config edit` or `/config set` instead.
-- Config write behavior:
-  - Adding model writes to `config.yaml` `models.defaults` (compatible with old structure), triggers Agent config reload;
+Manages model configs defined under `models.defaults` in `config.yaml`. Supports both text subcommands and an **interactive list**; delete/edit are done primarily through the interactive list.
+
+- **Text usage**:
+  - `/model` or `/model list`: Open the **interactive model list** (with current model marker); switch / add / edit / delete can all be done inside the list;
+  - `/model <name>`: Switch directly to the model by name;
+  - `/model add <name> key=value ...`: Add a model config via text form (e.g., `model_name=...`, `provider=...`, `api_base=...`, `api_key=...`, `reasoning_level=...`).
+- **Interactive list hotkeys** (after opening the list via `/model` or `/model list`):
+
+  | Key | Action |
+  | --- | --- |
+  | `↑` / `↓` | Select model up/down |
+  | `Enter` | Switch to the selected model |
+  | `a` | Open the form to **add** a model |
+  | `e` | Open the form to **edit** the selected model |
+  | `d` | Enter **delete confirmation** for the selected model |
+  | `Esc` | Close list / cancel current action |
+
+- **Delete flow** (`d` → confirm): After entering the `Delete model: <name>` confirmation page—
+  - `Enter`: confirm deletion; the backend locates the entry by its **original index** (`index`, i.e. the position in `models.defaults` before filtering out multimodal keys like video/audio/vision), removes it, writes back to `config.yaml`, then triggers an Agent config reload (`AGENT_RELOAD_CONFIG`). Success response: `{type: "model_deleted", name, current}`.
+  - `Esc`: cancel, return to the list.
+- **Edit flow** (`e`): reuses the add form, but leaving `api_key` empty means **keep the original key unchanged**; only changed fields are submitted.
+- **Limitations & validation**:
+  - `video` / `audio` / `vision` are multimodal-only keys and cannot be set as the default chat model via `/model <name>`; use `/config edit` or `/config set` instead;
+  - Deleting the **last** remaining model is rejected (`Cannot delete the last model`); an out-of-range index returns `model index not found`;
+- **Config write behavior**:
+  - Add / edit / delete mutate `models.defaults` in `config.yaml` (compatible with the old structure) and trigger an Agent config reload;
   - Switching model validates config and environment variable placeholders, updates `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`, writes back to `.env`.
-- Secure display: Sensitive fields like `api_key`, `token` are masked.
+- **Secure display**: sensitive fields like `api_key`, `token` are masked in the list; only when models share **the same name AND identical provider+api_base** (genuinely indistinguishable) does the list append the key's last 4 characters `[…xxxx]`.
 
 ### `/diff` (Interactive Change Review)
 

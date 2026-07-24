@@ -15,13 +15,19 @@
     "modify": "修改",
     "delete": "删除"
   },
+  "a2ui": {
+    "generating": "A2UI 界面生成中...",
+    "unavailable": "界面内容暂时无法显示，请稍后重试或重新生成结果。",
+    "unavailableTitle": "界面内容暂时无法显示",
+    "retry": "请稍后重试或重新生成结果",
+    "unsupportedProtocol": "不支持的 A2UI 协议版本：{{version}}"
+  },
   "nav": {
     "chat": "对话",
     "work": "工作",
     "agent": "智能体",
     "teams": "团队",
     "sessions": "会话",
-    "heartbeat": "心跳",
     "cron": "定时任务",
     "skills": "技能",
     "channels": "频道",
@@ -267,6 +273,7 @@
     "stop": "停止",
     "modelSelector": {
       "tooltip": "切换对话使用的模型",
+      "clusterLockedTooltip": "集群模式使用配置的默认模型，不支持修改",
       "configured": "已配置模型",
       "addModel": "添加自定义模型",
       "placeholder": "选择模型"
@@ -416,6 +423,38 @@
     "pending": "待处理",
     "completed": "已完成"
   },
+  "goal": {
+    "formSubmit": "确定",
+    "formCancel": "取消",
+    "editTitle": "编辑目标",
+    "toolbarTag": "目标",
+    "toolbarUnavailable": "当前已有进行中的目标，请先完成或清除",
+    "closeTag": "取消目标",
+    "badge": "目标",
+    "status": {
+      "active": "进行中",
+      "paused": "已暂停",
+      "completed": "已完成",
+      "blocked": "已阻塞",
+      "disconnected": "连接已断开",
+      "unknown": "状态未知"
+    },
+    "action": {
+      "editTooltip": "编辑目标",
+      "pauseTooltip": "暂停目标",
+      "resumeTooltip": "恢复目标",
+      "deleteTooltip": "删除目标"
+    },
+    "completedCardTitle": "目标已完成",
+    "completedMessageFallback": "目标已完成。",
+    "editStaleWarning": "目标在编辑期间已经完成，这次修改未保存。如需设置新目标，请重新通过「+」创建。",
+    "detail": {
+      "attempts": "已执行次数",
+      "tokens": "累计 Token",
+      "lastAssessment": "最近评估",
+      "lastStopReason": "最近停止原因"
+    }
+  },
   "sessions": {
     "title": "会话管理",
     "subtitle": "浏览并管理会话与文件",
@@ -458,7 +497,8 @@
       "loadSessions": "会话列表加载失败",
       "loadFiles": "会话文件列表加载失败",
       "deleteSession": "删除会话失败：{{sessionId}}",
-      "restoreFailed": "恢复会话失败：{{sessionId}}"
+      "restoreFailed": "恢复会话失败：{{sessionId}}",
+      "switchSession": "切换会话失败，请重试。"
     }
   },
   "sessionSidebar": {
@@ -467,52 +507,6 @@
     "version": "版本",
     "language": "语言",
     "moreSettings": "更多设置"
-  },
-  "heartbeat": {
-    "title": "心跳管理",
-    "subtitle": "维护心跳参数与指令文件",
-    "configTitle": "心跳参数配置",
-    "configSubtitle": "配置心跳间隔、目标频道与生效时间",
-    "loadingConfig": "正在加载心跳配置...",
-    "saved": "心跳参数已保存",
-    "badges": {
-      "ok": "最近心跳正常",
-      "alert": "最近心跳告警",
-      "unknown": "尚无心跳结果"
-    },
-    "everyLabel": "间隔时间 (秒)",
-    "targetLabel": "目标频道 (channel_id)",
-    "enableActiveHours": "启用生效时间",
-    "startTime": "开始时间",
-    "endTime": "结束时间",
-    "recentMessages": "最近 20 条心跳消息",
-    "noHistory": "暂无历史心跳消息",
-    "statusOk": "OK",
-    "statusUnknown": "UNKNOWN",
-    "latestTime": "最近心跳时间",
-    "latestContent": "最近心跳内容",
-    "none": "暂无",
-    "channels": {
-      "web": "网页 (web)",
-      "feishu": "飞书 (feishu)",
-      "wechat": "微信 (wechat)",
-      "xiaoyi": "小艺 (xiaoyi)",
-      "dingtalk": "钉钉 (dingtalk)"
-    },
-    "errors": {
-      "loadConfig": "加载心跳配置失败",
-      "saveConfig": "保存心跳配置失败",
-      "invalidEvery": "心跳间隔必须是大于 0 的正数",
-      "invalidActiveHours": "active_hours 需使用 HH:MM 格式（例如 08:00）",
-      "invalidRange": "结束时间必须大于开始时间",
-      "feishuNoTarget": "飞书机器人尚未与用户对话，无法推送心跳。请先在飞书中与机器人对话一次。"
-    }
-  },
-  "heartbeatModal": {
-    "closeAria": "关闭心跳详情弹窗",
-    "title": "心跳消息",
-    "subtitle": "消息内容详情",
-    "empty": "无详细内容"
   },
   "offloadFiles": {
     "title": "离线文件",
@@ -538,8 +532,8 @@
   "sourceManager": {
     "closeAria": "关闭源管理弹窗",
     "title": "源管理",
-    "subtitle": "选择在线搜索源并配置",
-    "selectSource": "选择在线搜索源",
+    "subtitle": "配置在线源",
+    "selectSource": "配置在线源",
     "skillnetDesc": "开源技能库",
     "clawhubDesc": "企业技能库",
     "skillnetInfo": "SkillNet 在线搜索",
@@ -752,6 +746,8 @@
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
       "swarmflowEnabled": "启用 SwarmFlow",
+      "kvCacheReleaseEnabled": "旧链路（KV 释放）",
+      "kvCacheAffinityEnabled": "新链路（Ascend 亲和）",
       "skillRetrievalBuildRootCategoriesPlaceholder": "直接编辑 YAML/JSON 树根分层配置",
       "agentSkillsPlaceholder": "点击选择技能",
       "agentSkillsEmpty": "暂无已安装技能",
@@ -774,6 +770,7 @@
       "teamMemberPromptHint": "提示词",
       "teamMemberAgentKey": "Agent Key",
       "symphonyEnabled": "启用技能编排",
+      "symphonyDynamicGraphEnabled": "启用动态图谱",
       "skillRetrievalEnabled": "启用技能检索",
       "skillRetrievalBuildBranchingFactor": "拆分阈值基数",
       "skillRetrievalBuildMaxDepth": "最大树深",
@@ -802,6 +799,7 @@
     },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
+      "symphonyDynamicGraphEnabled": "关闭后仅使用静态图谱，已有运行时数据会保留。",
       "skillRetrievalBuildRootCategories": "直接编辑包含 tree_root_categories 或 root_categories 的 YAML/JSON；页面会展示默认分层供参考。保存后会写入配置内容本身，而不是外部文件路径。"
     },
     "hideValue": "隐藏明文",
@@ -932,6 +930,7 @@
       "agents": { "label": "多Agent配置", "hint": "仅供集群模式使用，且必须添加Team" },
       "team": { "label": "Team配置", "hint": "多智能体团队配置" },
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
+      "kvCacheAffinity": { "label": "算力亲和", "hint": "控制 Ascend KV Cache 亲和能力" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
       "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
       "swarmflow": { "label": "SwarmFlow", "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控" },
@@ -948,7 +947,9 @@
       "freeSearchDdg": "启用 DuckDuckGo（含 DDG via Jina）",
       "freeSearchBing": "启用 Bing",
       "enabled": "启用",
-      "kvCacheAffinity": "算力亲和（KV 释放）"
+      "dynamicGraph": "启用动态图谱",
+      "kvCacheRelease": "旧链路（KV 释放）",
+      "kvCacheAffinity": "新链路（Ascend 亲和）"
     },
     "permissionsTools": {
       "title": "工具防护（permissions.tools）",
@@ -1121,6 +1122,7 @@
       "every": "每",
       "everyHoursPlaceholder": "小时数",
       "everyMinutesPlaceholder": "分钟数",
+      "integerOnlyHint": "间隔必须为大于等于 1 的整数",
       "hoursUnit": "小时",
       "minutesUnit": "分钟",
       "intervalUnit": {
@@ -1353,7 +1355,18 @@
       "searchPlaceholder": "输入关键词搜索SwarmSkills"
     },
     "onlineSearch": {
-      "title": "Skills在线搜索"
+      "title": "Skills在线搜索",
+      "searchPlaceholder": "输入关键词同时搜索多个在线技能源",
+      "searchFailed": "在线技能搜索失败，请稍后重试。",
+      "partialFailure": "部分在线源暂不可用，已展示其余来源的结果。",
+      "noResults": "未找到匹配的在线技能。",
+      "installFailed": "安装技能失败。",
+      "installed": "已安装技能 {{name}}",
+      "sourceStatus": {
+        "success": "可用（{{count}}）",
+        "error": "不可用",
+        "skipped": "未配置"
+      }
     },
     "actions": {
       "install": "安装",
@@ -1988,9 +2001,6 @@
     "configErrorHint": "请先启动 E2E 后端（如",
     "configErrorDefault": "，默认监听 19000）。若后端不在本机或端口不同，可在",
     "configErrorEnv": "设置",
-    "heartbeatTitle": "心跳消息",
-    "heartbeatClose": "关闭",
-    "heartbeatViewFull": "点击查看完整心跳消息",
     "securityAlertTitle": "安全警告",
     "noContent": "无详细内容",
     "restarting": "正在重启服务",
@@ -2168,7 +2178,8 @@
     "nextStep": "下一步",
     "confirm": "确定",
     "customOption": "自定义",
-    "customPlaceholder": "没有合适的选项？输入您的答案..."
+    "customPlaceholder": "没有合适的选项？输入您的答案...",
+    "skippedSummary": "已跳过"
   },
   "qaSummary": {
     "title": "问题澄清"

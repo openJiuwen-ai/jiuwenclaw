@@ -129,6 +129,13 @@ class SymphonyToolkit:
         if isinstance(beam_search, dict):
             compact["beam_search"] = cls._compact_beam_search(beam_search)
 
+        for key in ("plan_id", "dynamic_graph_enabled"):
+            value = planning_payload.get(key)
+            if value in (None, ""):
+                value = payload.get(key)
+            if value not in (None, ""):
+                compact[key] = value
+
         plan = cls._compact_plan(cls._primary_plan(planning_payload))
         if plan:
             compact["plan"] = plan

@@ -173,6 +173,41 @@ async def test_web_channel_preserves_symphony_status_payload():
 
 
 @pytest.mark.asyncio
+async def test_web_channel_preserves_client_is_stream_on_command_goal():
+    """Web must not drop top-level is_stream (needed for streaming command.goal set)."""
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    client = _FakeClient()
+    seen = {}
+
+    async def capture(msg):
+        seen["is_stream"] = bool(msg.is_stream)
+        seen["method"] = getattr(msg.req_method, "value", msg.req_method)
+        return True
+
+    channel.on_message(capture)
+    raw = json.dumps(
+        {
+            "type": "req",
+            "id": "req-goal-set",
+            "method": "command.goal",
+            "is_stream": True,
+            "params": {
+                "session_id": "sess-goal",
+                "action": "set",
+                "objective": "keep going",
+                "overwrite_confirmed": True,
+                "mode": "agent",
+            },
+        }
+    )
+    await channel._handle_raw_message(client, raw, {})
+    await channel.unregister_ws(client)
+
+    assert seen["method"] == "command.goal"
+    assert seen["is_stream"] is True
+
+
+@pytest.mark.asyncio
 async def test_web_channel_chat_send_ack_before_forward_callback_finishes():
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
     client = _FakeClient()
@@ -217,6 +252,53 @@ async def test_web_channel_chat_send_ack_before_forward_callback_finishes():
     finally:
         release_callback.set()
         await task
+        await channel.unregister_ws(client)
+
+
+@pytest.mark.asyncio
+async def test_web_channel_failure_res_uses_payload_message_as_top_level_error():
+    """Unary failures that only set payload.message still surface top-level error."""
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    client = _FakeClient()
+    routing_key = RoutingKey(
+        channel_id="web",
+        app_id="default",
+        user_id="test_user",
+        session_id="sess-goal",
+        agent_ref=None,
+    )
+    await channel.register_ws(client, routing_key)
+    try:
+        msg = Message(
+            id="req-goal-pause",
+            type="res",
+            channel_id="web",
+            session_id="sess-goal",
+            params={},
+            timestamp=0.0,
+            ok=False,
+            payload={
+                "action": "pause",
+                "message": "目标不存在，无法暂停",
+                "code": "goal_error",
+                "goal": None,
+            },
+            metadata={"ws_id": getattr(client, "_jiuwen_ws_id", "")},
+        )
+        await channel.send(msg)
+        for _ in range(20):
+            if client.frames:
+                break
+            await asyncio.sleep(0.005)
+
+        assert len(client.frames) == 1
+        frame = client.frames[0]
+        assert frame["type"] == "res"
+        assert frame["ok"] is False
+        assert frame["error"] == "目标不存在，无法暂停"
+        assert frame["code"] == "goal_error"
+        assert frame["payload"]["message"] == "目标不存在，无法暂停"
+    finally:
         await channel.unregister_ws(client)
 
 

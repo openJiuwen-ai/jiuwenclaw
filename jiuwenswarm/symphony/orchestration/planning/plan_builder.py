@@ -131,7 +131,7 @@ def plan_stages(
 def edge_plan_item(edge: dict[str, Any]) -> dict[str, Any]:
     evidence = edge.get("evidence") or {}
     supporting_fields = evidence.get("supporting_fields") or {}
-    return {
+    item = {
         "source_id": skill_id(edge.get("source")),
         "target_id": skill_id(edge.get("target")),
         "confidence": edge.get("confidence"),
@@ -141,3 +141,13 @@ def edge_plan_item(edge: dict[str, Any]) -> dict[str, Any]:
         "target_inputs": supporting_fields.get("target_inputs", [])[:3],
         "reasons": evidence.get("reasons", [])[:3],
     }
+    runtime_evidence = edge.get("runtime_evidence")
+    if isinstance(runtime_evidence, dict):
+        item.update(
+            {
+                "effective_score": edge.get("effective_score"),
+                "runtime_weight": edge.get("runtime_weight"),
+                "runtime_evidence": runtime_evidence,
+            }
+        )
+    return item

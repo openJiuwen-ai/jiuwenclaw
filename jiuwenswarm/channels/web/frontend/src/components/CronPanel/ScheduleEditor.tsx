@@ -52,6 +52,14 @@ function intervalNumberTextOf(schedule: CronSchedule): string {
   return n !== undefined ? String(n) : '';
 }
 
+// 去掉纯数字字符串的前导零，只保留数值本身的字符串形式：""→""，"0"→"0"，"00"→"0"，
+// "01"→"1"，"010"→"10"。用 Number(...) 往返一次即可，不用手写正则去处理"全 0"这种边界
+// （见 2026-07-23 bugfix 追加需求，bug002：用户先敲 0 再敲其它数字时，输入框不应该停留在
+// "01"这种带前导零的形式上）。
+function normalizeIntegerDigits(digitsOnly: string): string {
+  return digitsOnly === '' ? '' : String(Number(digitsOnly));
+}
+
 function WeekdayPicker({ selected, onToggle }: { selected: number[]; onToggle: (day: number) => void }) {
   const { t } = useTranslation();
   return (
@@ -356,46 +364,84 @@ export default function ScheduleEditor({ value, onChange, timezone }: ScheduleEd
       )}
 
       {topMode === 'interval' && schedule.kind === 'interval' && (
-        <div className="flex flex-nowrap items-center gap-2">
-          <span className="shrink-0 text-sm text-text-muted">{t('cron.schedule.every')}</span>
-          <input
-            type="text"
-            inputMode="numeric"
-            value={intervalNumberText}
-            onChange={(e) => {
-              // 小时/分钟步长在 croniter 里都只支持正整数，从输入源头过滤掉非数字字符
-              // （而不是允许打小数、事后校验失败再把确定按钮悄悄置灰，见 2026-07-16 bugfix）
-              const raw = e.target.value.replace(/\D/g, '');
-              setIntervalNumberText(raw);
-              const isMinutes = schedule.intervalUnit === 'minutes';
-              if (raw === '') {
-                updateSchedule(isMinutes ? { ...schedule, everyMinutes: undefined } : { ...schedule, everyHours: undefined });
-                return;
-              }
-              const n = Number(raw);
-              updateSchedule(isMinutes ? { ...schedule, everyMinutes: n } : { ...schedule, everyHours: n });
-            }}
-            placeholder={t(schedule.intervalUnit === 'minutes' ? 'cron.schedule.everyMinutesPlaceholder' : 'cron.schedule.everyHoursPlaceholder') ?? undefined}
-            className="w-16 shrink-0 rounded-md border border-border bg-card px-2 py-1.5 text-sm text-text outline-none focus:border-accent"
-          />
-          <div className="inline-flex w-fit shrink-0 rounded-md bg-bg-muted p-0.5">
-            {(['hours', 'minutes'] as const).map((unit) => {
-              const active = (schedule.intervalUnit ?? 'hours') === unit;
-              return (
-                <button
-                  key={unit}
-                  type="button"
-                  onClick={() => setIntervalUnit(unit)}
-                  className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
-                    active ? 'bg-card font-bold text-text-strong shadow-sm' : 'text-text-muted hover:text-text'
-                  }`}
-                >
-                  {t(`cron.schedule.intervalUnit.${unit}`)}
-                </button>
-              );
-            })}
+        <div className="flex flex-col gap-1">
+          <div className="flex flex-nowrap items-center gap-2">
+            <span className="shrink-0 text-sm text-text-muted">{t('cron.schedule.every')}</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={intervalNumberText}
+              title={t('cron.schedule.integerOnlyHint') ?? undefined}
+              onKeyDown={(e) => {
+                // 小时/分钟步长在 croniter 里都只支持正整数：在按键这一刻就挡掉非数字字符，
+                // 而不是等 onChange 里再"事后清洗"——之前的实现允许小数点先短暂插入、再被
+                // 静默过滤掉，用户敲"0.1"会在无任何提示的情况下被拼接成一个和输入无关的整数
+                // （比如"0.1"变成"01"=1，"1.5"变成"15"），完全没有反馈，见 2026-07-23 bugfix（bug002）。
+                // 放行：数字键、编辑/导航类控制键、以及 Ctrl/Cmd 组合的编辑快捷键（全选/复制/粘贴/剪切/撤销）。
+                if (e.ctrlKey || e.metaKey || e.altKey) return;
+                const allowedControlKeys = ['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Tab', 'Home', 'End', 'Enter', 'Escape'];
+                if (allowedControlKeys.includes(e.key)) return;
+                if (!/^\d$/.test(e.key)) e.preventDefault();
+              }}
+              onPaste={(e) => {
+                // 粘贴走的是单独的剪贴板事件，不经过 onKeyDown；同样只保留数字字符，
+                // 避免粘贴"0.1"这类字符串被 onChange 静默拼接成无关的整数（见上）。
+                e.preventDefault();
+                const digitsOnly = e.clipboardData.getData('text').replace(/\D/g, '');
+                if (!digitsOnly) return;
+                const pasted = normalizeIntegerDigits(digitsOnly);
+                setIntervalNumberText(pasted);
+                const isMinutes = schedule.intervalUnit === 'minutes';
+                const n = Number(pasted);
+                updateSchedule(isMinutes ? { ...schedule, everyMinutes: n } : { ...schedule, everyHours: n });
+              }}
+              onChange={(e) => {
+                // onKeyDown/onPaste 已经在源头挡掉了非数字输入，这里的过滤是兜底
+                // （比如浏览器自动填充、IME 等不经过 onKeyDown 的输入路径）。
+                const digitsOnly = e.target.value.replace(/\D/g, '');
+                // 去掉前导零，只保留数值本身的字符串形式（"00"→"0"，"01"→"1"，"010"→"10"）：
+                // 用户先敲 "0" 再敲其它数字时（包括之前"敲 0 再敲被拦截的小数点再敲 1"这类路径），
+                // 框里不应该一直停留在"01"这种带前导零的形式（见 2026-07-23 bugfix 追加需求，bug002）。
+                const raw = normalizeIntegerDigits(digitsOnly);
+                setIntervalNumberText(raw);
+                const isMinutes = schedule.intervalUnit === 'minutes';
+                if (raw === '') {
+                  updateSchedule(isMinutes ? { ...schedule, everyMinutes: undefined } : { ...schedule, everyHours: undefined });
+                  return;
+                }
+                const n = Number(raw);
+                updateSchedule(isMinutes ? { ...schedule, everyMinutes: n } : { ...schedule, everyHours: n });
+              }}
+              placeholder={t(schedule.intervalUnit === 'minutes' ? 'cron.schedule.everyMinutesPlaceholder' : 'cron.schedule.everyHoursPlaceholder') ?? undefined}
+              className="w-16 shrink-0 rounded-md border border-border bg-card px-2 py-1.5 text-sm text-text outline-none focus:border-accent"
+            />
+            <div className="inline-flex w-fit shrink-0 rounded-md bg-bg-muted p-0.5">
+              {(['hours', 'minutes'] as const).map((unit) => {
+                const active = (schedule.intervalUnit ?? 'hours') === unit;
+                return (
+                  <button
+                    key={unit}
+                    type="button"
+                    onClick={() => setIntervalUnit(unit)}
+                    className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
+                      active ? 'bg-card font-bold text-text-strong shadow-sm' : 'text-text-muted hover:text-text'
+                    }`}
+                  >
+                    {t(`cron.schedule.intervalUnit.${unit}`)}
+                  </button>
+                );
+              })}
+            </div>
+            <WeekdayPicker selected={schedule.weekdays ?? []} onToggle={toggleWeekday} />
           </div>
-          <WeekdayPicker selected={schedule.weekdays ?? []} onToggle={toggleWeekday} />
+          {/* 间隔数字缺失或 < 1（含用户想输小数被约束成整数后落在 0 的情况）时，直接在输入框下面
+              给出常驻提示，不用等用户去悬停确定按钮才知道哪里有问题（见 2026-07-23 bugfix，bug002）。 */}
+          {(() => {
+            const n = schedule.intervalUnit === 'minutes' ? schedule.everyMinutes : schedule.everyHours;
+            return n === undefined || n < 1;
+          })() && (
+            <p className="text-xs text-danger">{t('cron.schedule.integerOnlyHint')}</p>
+          )}
         </div>
       )}
 

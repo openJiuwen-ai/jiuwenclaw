@@ -49,11 +49,15 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
             f"- Team workspace absolute root: `{self._root_dir}`\n"
             f"- Internal mount path: `{mount}`\n"
             "- Use the internal mount path only for tool read/write operations.\n"
-            "- When telling the user where an artifact was saved, report the real absolute filesystem path under "
-            "the team workspace absolute root, not the `.team/...` mount path.\n"
+            "- For every final deliverable file, call `send_file_to_user` with its real absolute filesystem path "
+            "before marking the task complete or sending the completion message.\n"
+            "- A file name or path in `send_message`, the final response, or a task-completion summary does not "
+            "deliver the file and must not replace `send_file_to_user`.\n"
+            "- After `send_file_to_user` succeeds, report the real absolute filesystem path under the team "
+            "workspace absolute root, not the `.team/...` mount path.\n"
             "- If a generated artifact path contains `.team/<team>/team-workspace/`, remove that mount prefix and "
-            "join the remaining file name under the team workspace absolute root before reporting it.\n"
-            f"- Example saved location to report: `{sample}`\n"
+            "join the remaining file name under the team workspace absolute root before sending and reporting it.\n"
+            f"- Example absolute path to pass to `send_file_to_user`: `{sample}`\n"
         )
         self.system_prompt_builder.add_section(
             PromptSection(

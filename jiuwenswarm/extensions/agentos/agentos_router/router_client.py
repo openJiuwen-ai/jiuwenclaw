@@ -4,20 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from pathlib import Path
+from typing import Any, Mapping
 
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentCreatingTimeout,
+    AgentDeleted,
     AgentManager,
     AgentRuntime,
     SUPPORTED_AGENT_TYPES,
 )
-from jiuwenswarm.extensions.agentos.agentos_router.models import AgentInfo, AgentStatus
+from jiuwenswarm.extensions.agentos.agentos_router.models import (
+    AgentInfo,
+    AgentStatus,
+    ImageInfo,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.registry_client import RegistryClient
+from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import YuanrongSshRelay
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
+    AgentRuntimeSpec,
     YuanrongFrontendAgentClient,
 )
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
@@ -25,9 +35,49 @@ from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 
 logger = logging.getLogger(__name__)
 
+_WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
 
 class UnsupportedAgentType(ValueError):
     pass
+
+
+def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
+    """Take registry ``metadata.runtime_spec`` (YuanRong ``RuntimeSpec`` shape)."""
+    meta = image_info.metadata if isinstance(image_info.metadata, dict) else {}
+    raw_spec = meta.get("runtime_spec")
+    if not isinstance(raw_spec, Mapping) or not raw_spec:
+        raise ValueError(
+            f"runtime_spec is required from registry for agent_type={image_info.image_name}"
+        )
+    return dict(raw_spec)  # type: ignore[return-value]
+
+
+def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) -> str:
+    """Resolve host workspace bind path for one agent user.
+
+    Default: ``/home/<user_id>``. Optional ``workspace_root`` overrides the
+    parent directory (``{workspace_root}/<user_id>``).
+
+    Best-effort ``mkdir``: permission errors are ignored so callers (and unit
+    tests) can still pass the path to YuanRong create; the host/deploy side
+    remains responsible for a writable mount source.
+    """
+    safe_user = _WORKSPACE_NAME_RE.sub("_", str(user_id or "").strip()) or "default"
+    if workspace_root:
+        root = Path(workspace_root).expanduser()
+        workspace = (root / safe_user).resolve()
+    else:
+        workspace = Path("/home") / safe_user
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "[AgentOSRouter] workspace mkdir skipped: path=%s error=%s",
+            workspace,
+            exc,
+        )
+    return str(workspace)
 
 
 class AgentOSRouterClient(AgentServerClient):
@@ -38,13 +88,22 @@ class AgentOSRouterClient(AgentServerClient):
         yuanrong: YuanrongFrontendAgentClient,
         registry: RegistryClient,
         agent_manager: AgentManager,
+        ssh_relay: YuanrongSshRelay | None = None,
     ) -> None:
         self._yuanrong = yuanrong
         self._registry = registry
         self._agent_manager = agent_manager
+        self._ssh_relay = ssh_relay
         self._server_ready = False
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._closed = False
+        # 用户当前 agent_type（3rdagent.switch 成功后更新）；SSH 接入跟随此值。
+        self._current_agent_types: dict[str, str] = {}
+
+    def get_current_agent_type(self, user_id: str) -> str:
+        """Return the user's current agent_type (default ``jiuwenswarm``)."""
+        uid = str(user_id or "").strip()
+        return self._current_agent_types.get(uid) or "jiuwenswarm"
 
     @property
     def server_ready(self) -> bool:
@@ -85,6 +144,8 @@ class AgentOSRouterClient(AgentServerClient):
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         # 3rdagent.list / 3rdagent.switch are handled by Gateway ThirdAgent
         # (TUI local_handler), not via E2A send_request.
+        if self._is_ssh_relay_request(envelope):
+            return await self._handle_ssh_relay(envelope)
         try:
             runtime = await self._resolve_agent(envelope)
         except (ValueError, AgentCreatingTimeout) as exc:
@@ -134,7 +195,10 @@ class AgentOSRouterClient(AgentServerClient):
                     "metadata": dict(image.metadata or {}),
                 }
             )
-        current = str(current_agent_type or "").strip() or "jiuwenswarm"
+        current = (
+            str(current_agent_type or "").strip()
+            or self.get_current_agent_type(uid)
+        )
         return {
             "ok": True,
             "payload": {
@@ -182,6 +246,8 @@ class AgentOSRouterClient(AgentServerClient):
             }
         info = runtime.info
         status = info.status.value if hasattr(info.status, "value") else str(info.status)
+        # 记录用户当前 agent_type，后续 SSH 接入默认跟随
+        self._current_agent_types[uid] = normalized
         return {
             "ok": True,
             "payload": {
@@ -194,6 +260,107 @@ class AgentOSRouterClient(AgentServerClient):
 
     async def shutdown(self) -> None:
         await self.disconnect()
+
+    # ---------- SSH relay (northbound SshChannel -> YuanRong instance) ----------
+
+    @staticmethod
+    def _is_ssh_relay_request(envelope: E2AEnvelope) -> bool:
+        return str(envelope.method or "") == ReqMethod.SSH_RELAY.value
+
+    async def _handle_ssh_relay(self, envelope: E2AEnvelope) -> AgentResponse:
+        """Start the southbound SSH relay for an ``ssh.relay`` request.
+
+        Agent resolution (YuanRong instance creation) and the PTY relay run
+        in a background task so the gateway forward loop is not blocked for
+        the whole SSH session; the northbound channel waits on the relay
+        session ``done`` event instead of this response.
+        """
+        session_id = str(envelope.session_id or "")
+        params = envelope.params if isinstance(envelope.params, dict) else {}
+        # Live SshRelaySession handed over in-process by the northbound
+        # SshChannel; pop it so it never leaks into serialization/logging.
+        relay_session = params.pop("relay_session", None)
+        if relay_session is None:
+            return self._routing_error_response(
+                envelope, f"ssh relay session not found in params: {session_id}"
+            )
+        if self._ssh_relay is None:
+            msg = "ssh relay is not configured for AgentOS router"
+            relay_session.exit_code = 1
+            relay_session.done.set()
+            return self._routing_error_response(envelope, msg)
+
+        task = asyncio.create_task(
+            self._run_ssh_relay(envelope, relay_session),
+            name=f"agentos-ssh-relay-{session_id[:24]}",
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return AgentResponse(
+            request_id=str(envelope.request_id or ""),
+            channel_id=str(envelope.channel or ""),
+            ok=True,
+            payload={"method": ReqMethod.SSH_RELAY.value, "status": "relay_started"},
+        )
+
+    async def _run_ssh_relay(self, envelope: E2AEnvelope, relay_session: Any) -> None:
+        ssh_relay = self._ssh_relay
+        if ssh_relay is None:
+            # _handle_ssh_relay already guards this; keep a safe fallback.
+            relay_session.exit_code = 1
+            relay_session.done.set()
+            return
+        self._apply_current_agent_type_for_ssh(envelope)
+        try:
+            runtime = await self._resolve_agent(envelope)
+        except (ValueError, AgentCreatingTimeout, AgentDeleted) as exc:
+            ssh_relay.fail_session(
+                relay_session, f"agent resolve failed: {exc}"
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - creation errors must release the client
+            logger.exception(
+                "[AgentOSRouter] ssh relay agent creation failed: session=%s",
+                relay_session.session_id,
+            )
+            ssh_relay.fail_session(
+                relay_session, f"agent creation failed: {exc}"
+            )
+            return
+
+        instance_id = str(runtime.info.sandbox_id or "").strip()
+        if not instance_id:
+            ssh_relay.fail_session(
+                relay_session,
+                f"agent has no yuanrong instance_id: user={runtime.info.user_id}",
+            )
+            return
+
+        runtime.attach_to_envelope(envelope)
+        logger.info(
+            "[AgentOSRouter] ssh relay start: session=%s user=%s instance=%s",
+            relay_session.session_id,
+            runtime.info.user_id,
+            instance_id,
+        )
+        await ssh_relay.run(relay_session, instance_id)
+
+    def _apply_current_agent_type_for_ssh(self, envelope: E2AEnvelope) -> None:
+        """SSH 接入跟随用户当前 agent_type（由 3rdagent.switch 记录）。"""
+        params = envelope.params if isinstance(envelope.params, dict) else {}
+        if str(params.get("agent_type") or "").strip():
+            return
+        user_id = str(envelope.user_id or "").strip()
+        current = self.get_current_agent_type(user_id)
+        params = dict(params)
+        params["agent_type"] = current
+        envelope.params = params
+        logger.info(
+            "[AgentOSRouter] ssh relay follows user current agent_type: "
+            "user=%s agent_type=%s",
+            user_id,
+            current,
+        )
 
     async def _drain_background_tasks(self) -> None:
         if self._background_tasks:
@@ -218,26 +385,28 @@ class AgentOSRouterClient(AgentServerClient):
             )
 
         image_info = await self._registry.get_image_info(agent_info.agent_type)
-        urn = str(
-            image_info.image_uri
-            or image_info.metadata.get("urn")
-            or self._yuanrong.function_version_urn
-        ).strip()
-        if not urn:
-            raise ValueError(
-                f"function urn is required to create sandbox for agent_type={agent_info.agent_type}"
-            )
+        runtime_spec = build_inline_runtime_spec(image_info)
+        workspace = resolve_agent_workspace(agent_info.user_id)
+        env_raw = image_info.metadata.get("env_vars")
+        env_vars = (
+            {str(k): str(v) for k, v in dict(env_raw).items()}
+            if isinstance(env_raw, dict) and env_raw
+            else None
+        )
         sandbox = await self._yuanrong.create_sandbox(
             namespace=self._yuanrong.agent_namespace,
             name=f"{agent_info.user_id}+{agent_info.agent_type}",
-            urn=urn,
+            workspace=workspace,
+            runtime_spec=runtime_spec,
+            env_vars=env_vars,
         )
         instance_id = sandbox.sandbox_id
         agent_info.sandbox_id = instance_id
         agent_info.metadata.update(
             {
                 "instance_id": instance_id,
-                "urn": urn,
+                "workspace": workspace,
+                "runtime_spec": dict(runtime_spec),
                 "image_info": dict(image_info.metadata),
                 "sandbox": dict(sandbox.metadata),
             }
