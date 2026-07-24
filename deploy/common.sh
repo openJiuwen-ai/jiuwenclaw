@@ -45,3 +45,16 @@ urlencode() {
     done
     echo "${encoded}"
 }
+
+# 生成 uuid4 格式实例 ID（小写，带连字符）；失败时返回非零，由调用方在主 shell 中处理
+gen_uuid4() {
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuidgen | tr '[:upper:]' '[:lower:]'
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import uuid; print(uuid.uuid4())'
+        return 0
+    fi
+    return 1
+}

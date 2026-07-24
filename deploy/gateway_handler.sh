@@ -119,8 +119,30 @@ gen_gateway_file() {
     success "Gateway file generation completed: ${file}"
 }
 
+# 配置 JIUWENCLAW_ID，则生成 uuid4（供 Gateway 启动使用）
+ensure_jiuwenclaw_id() {
+    if [ "${DEPLOY_VARS["AUTO_JIUWENCLAW_ID"]}" != "true" ]; then
+        info "AUTO_JIUWENCLAW_ID=false, skip JIUWENCLAW_ID auto-generation"
+        return 0
+    fi
+
+    if [ -n "${DEPLOY_VARS["JIUWENCLAW_ID"]:-}" ]; then
+        info "JIUWENCLAW_ID already set, skip auto-generation"
+        return 0
+    fi
+
+    local new_id="$(gen_uuid4)" || true
+    new_id="${new_id//[[:space:]]/}"
+    if [ -z "${new_id}" ]; then
+        error "Cannot generate JIUWENCLAW_ID: uuidgen or python3 is required"
+    fi
+    DEPLOY_VARS["JIUWENCLAW_ID"]="${new_id}"
+    success "Auto-generated JIUWENCLAW_ID=${new_id}"
+}
+
+
 render_gateway_files() {
-    ensure_jiuwenclaw_id_in_custom_env
+    ensure_jiuwenclaw_id
 
     local pvc_template_file="${CONFIG["CLAW_PVC_TEMPLATE_FILE"]}"
     local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
