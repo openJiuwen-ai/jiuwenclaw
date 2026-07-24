@@ -100,6 +100,20 @@ def get_xiaoyi_channel() -> Optional["XiaoyiChannel"]:
     return _xiaoyi_channel_instance
 
 
+def _is_invalid_id(value: Any) -> bool:
+    """判断一个 id/task_id 是否"无效"（用于空 message/stream 帧拦截 guard）.
+
+    无效 = None / 空串 / 纯空白 / 占位符字面量 "taskId"。端侧授权完成等事件帧
+    的顶层 id 与 params.id 缺失时，下游会 fallback 成占位符字面量 "taskId"，这种既非
+    真实请求 id、又非用户对话的帧应被 guard 拦截，不当 user 消息路由。真实请求
+    id 形如 "67b958ef-..." 或 "...&45&2de0&0"，本函数返回 False（有效，不拦）。
+    """
+    if value is None:
+        return True
+    text = str(value).strip()
+    return text == "" or text == "taskId"
+
+
 @dataclass
 class DataEvent:
     """Data-only 事件数据结构（工具执行结果）."""
@@ -1270,6 +1284,30 @@ class XiaoyiChannel(BaseChannel):
             )
         except OSError:
             logger.warning("XiaoyiChannel failed to update .xiaoyiruntime", exc_info=True)
+
+        raw_msg_id = message.get("id")
+        # ── 空 message/stream 帧拦截 ───────────────────────────────────
+        # 端侧在授权完成等事件点会通过同一条 WS 推一些 method=message/stream 但
+        # msg_type=None 的事件帧：它们没有真实用户文本/文件，顶层 id 与 params.id
+        # （task_id）缺失或被下游 fallback 成占位符字面量 "taskId"。若不拦截，这条
+        # 空内容、假 id 的帧会被当成空 user 消息路由进对话流，凭空起新 session 让
+        # 模型对空 input 回无关寒暄（如"晚上好又见面了"）。判定：无文本且无文件
+        # 附件，且 id 与 task_id 均"无效"（为空 / None / 占位符 "taskId"）—— 直接
+        # return，不构造 Message、不路由。正常用户消息必有真实 id（如 67b958ef-...）
+        # 且有 text 或 file，不会被误拦。
+        if not text and not file_attachments and not media_files and \
+                _is_invalid_id(raw_msg_id) and _is_invalid_id(task_id):
+            logger.info(
+                "[XiaoyiChannel] 跳过空 message/stream 事件帧（无文本/文件且 id/task_id 无效）"
+                " session_id=%s method=message/stream msg_type=%s task_id=%r raw_msg_id=%r",
+                str(message.get("sessionId") or ""),
+                str(message.get("msgType")),
+                task_id,
+                raw_msg_id,
+            )
+            return
+        # ────────────────────────────────────────────────────────────────
+
         # Add media payload to metadata
         params = {"query": text, "task_id": task_id}
         if media_payload:
@@ -2057,6 +2095,113 @@ class XiaoyiChannel(BaseChannel):
                 message_id,
                 sent,
             )
+        return sent
+
+    async def send_login_token_artifact(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        message_id: str,
+        client_id: str,
+        skill_name: str,
+        final: bool = False,
+    ) -> bool:
+        """下发 getLoginToken artifact 给端侧小艺 App（huawei_id_tool 方案1 wire）.
+
+        1:1 复刻 xy_channel login-token-tool.ts 第 53-90 行：artifact-update 的
+        parts 为单个自定义 part {kind: "getLoginToken", clientId, skillName}，
+        append=False / lastChunk=True / final=False。端侧 App 收到该 part 后弹
+        授权 UI，授权完成经 LoginTokenEvent.ClawAutoLogin 回写
+        /home/sandbox/.openclaw/.xiaoyitoken.json（由 login-token-handler.ts 写入），
+        工具侧轮询该文件取结果。
+
+        与 send_xiaoyi_phone_tools_command 的差异：后者 parts 为
+        [{kind:"data", data:{commands:[...]}}]（设备指令）；本方法 parts 为
+        自定义 getLoginToken part（授权请求），不走 commands 包装，与 TS 原样一致。
+
+        Args:
+            session_id: 小艺会话 ID
+            task_id: 小艺任务 ID
+            message_id: JSON-RPC id（端侧用它关联授权回调）
+            client_id: 账号服务唯一标识
+            skill_name: skill 名称
+            final: 是否为末帧（默认 False，授权请求不是末帧）
+
+        Returns:
+            是否至少成功发送到一个活跃连接
+        """
+        logger.info(
+            "[SEND_LOGIN_TOKEN_ARTIFACT_ENTER] 方法被调用 client_id=%s skill=%s "
+            "session=%s task=%s msg_id=%s",
+            client_id, skill_name, session_id, task_id, message_id,
+        )
+        response = {
+            "jsonrpc": "2.0",
+            "id": message_id,
+            "result": {
+                "taskId": task_id,
+                "kind": "artifact-update",
+                "append": False,
+                "lastChunk": True,
+                "final": final,
+                "artifact": {
+                    "artifactId": str(uuid.uuid4()),
+                    "parts": [
+                        {
+                            "kind": "getLoginToken",
+                            "clientId": client_id,
+                            "skillName": skill_name,
+                        }
+                    ],
+                },
+            },
+        }
+        wrapper = {
+            "msgType": "agent_response",
+            "agentId": self.config.agent_id,
+            "sessionId": session_id,
+            "taskId": task_id,
+            "msgDetail": json.dumps(response, ensure_ascii=False),
+        }
+        logger.info(
+            "[LOGIN_TOKEN] phase=CHANNEL_ARTIFACT_SEND_BEGIN "
+            "session_id=%s task_id=%s message_id=%s client_id=%s skill_name=%s "
+            "connection_count=%s",
+            session_id,
+            task_id,
+            message_id,
+            client_id,
+            skill_name,
+            sum(bool(ws) for ws in self._ws_connections.values()),
+        )
+        sent = False
+        for url_key, ws in self._ws_connections.items():
+            if ws:
+                try:
+                    await self._safe_ws_send(url_key, wrapper)
+                    logger.info(
+                        "[LOGIN_TOKEN] phase=CHANNEL_ARTIFACT_SEND_DONE "
+                        "session_id=%s connection=%s success=true",
+                        session_id,
+                        url_key,
+                    )
+                    sent = True
+                except Exception as exc:
+                    logger.warning(
+                        "[LOGIN_TOKEN] phase=CHANNEL_ARTIFACT_SEND_DONE "
+                        "session_id=%s connection=%s success=false error_type=%s",
+                        session_id,
+                        url_key,
+                        type(exc).__name__,
+                    )
+        logger.info(
+            "[LOGIN_TOKEN] phase=CHANNEL_ARTIFACT_SEND_EXIT "
+            "session_id=%s message_id=%s sent=%s",
+            session_id,
+            message_id,
+            sent,
+        )
         return sent
 
     async def execute_phone_tool_command(
