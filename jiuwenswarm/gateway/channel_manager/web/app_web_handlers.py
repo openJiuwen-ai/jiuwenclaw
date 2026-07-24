@@ -1405,6 +1405,51 @@ def _project_info_payload(
     }
 
 
+def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """从热更新后的配置中查找对应模型的 ``model_config_obj``。
+
+    按 ``model_name`` 或 ``alias`` 匹配 ``models.defaults`` 中的条目，
+    返回该条目的 ``model_config_obj``；找不到或读取失败时 fallback 到
+    空字典（让模型使用自身默认参数，避免 ``temperature=0`` 对部分
+    模型不兼容）。前端传入的 ``reasoning_level`` 可覆盖配置值。
+    """
+    model_config_obj: dict[str, Any] = {}
+    try:
+        _cfg = get_config()
+        _models = get_default_models(_cfg)
+        for entry in _models:
+            if not isinstance(entry, dict):
+                continue
+            mcc = entry.get("model_client_config") or {}
+            entry_model_name = str(mcc.get("model_name", "")).strip()
+            entry_alias = str(entry.get("alias", "")).strip()
+            if entry_model_name == model_name or entry_alias == model_name:
+                obj = entry.get("model_config_obj")
+                if isinstance(obj, dict):
+                    model_config_obj = dict(obj)
+                logger.info(
+                    "[config.validate_model] loaded model_config_obj for '%s' "
+                    "(matched_by=%s): %s",
+                    model_name,
+                    "model_name" if entry_model_name == model_name else "alias",
+                    model_config_obj,
+                )
+                break
+        else:
+            logger.info(
+                "[config.validate_model] no model_config_obj found for '%s', using empty default",
+                model_name,
+            )
+    except Exception as exc:
+        logger.warning(
+            "[config.validate_model] failed to read model_config_obj from config, using default. %s",
+            exc,
+        )
+    if "reasoning_level" in params:
+        model_config_obj["reasoning_level"] = params.get("reasoning_level")
+    return model_config_obj
+
+
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     """注册 Web 前端需要的 method 与 on_connect。
     on_config_saved: 可选，config.set 写回后调用的回调；
@@ -1960,9 +2005,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         verify_ssl = bool(params.get("verify_ssl", False))
 
-        model_config_obj = {"temperature": 0}
-        if "reasoning_level" in params:
-            model_config_obj["reasoning_level"] = params.get("reasoning_level")
+        model_config_obj = _resolve_model_config_obj_for_validate(model, params)
+
         reasoning_mcc = {
             "client_provider": model_provider,
             "api_base": api_base,
@@ -1973,6 +2017,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 model_config_obj=model_config_obj,
                 model_name=model,
             )
+        )
+        logger.info(
+            "[config.validate_model] final model_request_config for '%s': %s",
+            model,
+            model_request_config.model_dump(),
         )
         model_client_config = ModelClientConfig(
             client_id="config-validate",
@@ -1989,7 +2038,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return await llm.invoke(
                 [{"role": "user", "content": "Hi"}],
                 max_tokens=max_tokens,
-                temperature=0,
             )
 
         try:
