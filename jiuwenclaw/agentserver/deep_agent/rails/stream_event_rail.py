@@ -394,6 +394,11 @@ class JiuClawStreamEventRail(DeepAgentRail):
                 _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
                 ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
             )
+            # HITL 提前返回前仍 flush 进度（ask 等待时列表应保持 in_progress）
+            if isinstance(ctx.inputs, ToolCallInputs) and ctx.session is not None:
+                await self._flush_skill_turbo_task_progress(
+                    ctx.session, tool_name or "skill_turbo_tool", ctx,
+                )
             return  # 跳过 _emit_tool_result，由 harness __interaction__ 取代
 
         session = ctx.session
@@ -430,12 +435,69 @@ class JiuClawStreamEventRail(DeepAgentRail):
                 (time.perf_counter() - t_todo) * 1000,
             )
 
+        # F2：skill_turbo_tool 返回后 flush 全量 task.update（出站硬保证）
+        # 必须用 ctx.session：get_subagent_parent_session 已在本方法开头清空。
+        await self._flush_skill_turbo_task_progress(session, tool_name, ctx)
+
         logger.debug(
             "[StreamEventRail] after_tool_call done session_id=%s tool=%s total_elapsed_ms=%.1f",
             session_id,
             tool_name,
             (time.perf_counter() - diag_start) * 1000,
         )
+
+    async def _flush_skill_turbo_task_progress(
+        self,
+        session: Any,
+        tool_name: str,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        """O2b/F2：在 after_tool_call 窗口 flush online task_progress。"""
+        is_turbo = tool_name == "skill_turbo_tool"
+        if not is_turbo and tool_name == "invoke_tool":
+            tool_args = getattr(ctx.inputs, "tool_arguments", None)
+            if not isinstance(tool_args, dict):
+                # 部分实现把参数挂在 tool_call.arguments
+                tc = getattr(ctx.inputs, "tool_call", None)
+                raw = getattr(tc, "arguments", None) if tc is not None else None
+                if isinstance(raw, dict):
+                    tool_args = raw
+                elif isinstance(raw, str):
+                    try:
+                        import json
+                        tool_args = json.loads(raw)
+                    except Exception:
+                        tool_args = {}
+                else:
+                    tool_args = {}
+            is_turbo = tool_args.get("tool_name") == "skill_turbo_tool"
+        if not is_turbo or session is None:
+            return
+
+        try:
+            from jiuwenclaw.agentserver.skill_turbo.online import context_store, task_progress
+
+            turbo_ctx = await context_store.load_online_context(session)
+            if turbo_ctx is not None and (turbo_ctx.task_progress or {}):
+                ok = await task_progress.flush_task_update_to_session(session, turbo_ctx)
+                logger.info(
+                    "[StreamEventRail] turbo_task_flush tasks=%d after tool=%s ok=%s",
+                    len(turbo_ctx.task_progress),
+                    tool_name,
+                    ok,
+                )
+            if context_store.consume_pending_clear_online_context():
+                await context_store.clear_online_context(session, skip_post_run=True)
+                logger.info(
+                    "[StreamEventRail] turbo_ctx cleared after flush tool=%s",
+                    tool_name,
+                )
+        except Exception:
+            logger.warning(
+                "[StreamEventRail] turbo_task_flush failed tool=%s",
+                tool_name,
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # on_model_exception: attempt context repair + clear context
