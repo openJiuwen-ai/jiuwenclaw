@@ -119,6 +119,7 @@ SWARM_BROWSER_AGENT = _code_subagents.SWARM_BROWSER_AGENT
 RESPONSE_PROMPT = _builtin_rails.RESPONSE_PROMPT
 STREAM_EVENT = _builtin_rails.STREAM_EVENT
 AVATAR_PROMPT = _builtin_rails.AVATAR_PROMPT
+CONTEXT_OVERFLOW_RECOVERY = _builtin_rails.CONTEXT_OVERFLOW_RECOVERY
 
 # Generic rails provided + registered by openjiuwen (referenced by bare name).
 SYS_OPERATION = _OJ_SYS_OPERATION
@@ -219,6 +220,7 @@ __all__ = [
     "RESPONSE_PROMPT",
     "SYS_OPERATION",
     "STREAM_EVENT",
+    "CONTEXT_OVERFLOW_RECOVERY",
     "TASK_PLANNING",
     "SECURITY",
     "HEARTBEAT",

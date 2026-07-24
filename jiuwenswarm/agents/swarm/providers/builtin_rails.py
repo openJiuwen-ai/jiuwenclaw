@@ -26,6 +26,9 @@ from openjiuwen.agent_teams.harness.manifest import (
 )
 
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
+from jiuwenswarm.agents.harness.common.rails.context_overflow_recovery_rail import (
+    ContextOverflowRecoveryRail,
+)
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import (
     ResponsePromptRail,
 )
@@ -37,6 +40,7 @@ from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
 RESPONSE_PROMPT = "swarm.response_prompt"
 STREAM_EVENT = "swarm.stream_event"
 AVATAR_PROMPT = "swarm.avatar_prompt"
+CONTEXT_OVERFLOW_RECOVERY = "swarm.context_overflow_recovery"
 
 
 class ResponsePromptInput(ConstructionInput):
@@ -76,9 +80,19 @@ harness_element(
     description="Injects per-request digital-avatar prompt sections.",
     builder=AvatarPromptRail,
 )
+harness_element(
+    kind=ElementKind.RAIL,
+    name=CONTEXT_OVERFLOW_RECOVERY,
+    description=(
+        "Reactive context-overflow recovery (413/keyword) plus proactive "
+        "FullCompact deferred-overflow bridge."
+    ),
+    builder=ContextOverflowRecoveryRail,
+)
 
 __all__ = [
     "RESPONSE_PROMPT",
     "STREAM_EVENT",
     "AVATAR_PROMPT",
+    "CONTEXT_OVERFLOW_RECOVERY",
 ]
