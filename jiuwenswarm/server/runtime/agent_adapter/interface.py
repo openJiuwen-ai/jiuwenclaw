@@ -1328,7 +1328,13 @@ class JiuWenSwarm:
                 "persist_allow": False,
                 "feedback": "",
             }
-        elif value in ("always_allow", "永久记住", "Always Allow"):
+        elif value in (
+            "always_allow",
+            "allow_always",
+            "永久记住",
+            "总是允许",
+            "Always Allow",
+        ):
             confirm_payload = {
                 "approved": True,
                 "auto_confirm": True,

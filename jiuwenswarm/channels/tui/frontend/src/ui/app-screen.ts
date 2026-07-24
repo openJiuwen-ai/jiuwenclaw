@@ -1662,7 +1662,8 @@ export class AppScreen implements Component, Focusable {
     this.startupPromptList.onSelect = (item) => {
       if (item.value === "yes") {
         addTrustedDir(cwd);
-        // Sync to server so the dir lands in permissions.external_directory
+        // Sync to server so the dir lands in permissions.file_guard.paths
+        // (read/write allow, exec ask; Legacy readers may still see external_directory)
         // allow-list (persist_cli_trusted_directory), otherwise external_dir
         // checks would still intercept paths under this trusted directory.
         // Mirrors /workspace add (workspace-dir.ts).
