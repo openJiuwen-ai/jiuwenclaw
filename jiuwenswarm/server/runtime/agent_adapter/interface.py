@@ -2105,25 +2105,13 @@ class JiuWenSwarm:
 
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
-        # command.goal: only set records the objective as a user turn; resume/
-        # pause/clear/get remain control traffic.
+        # command.goal set history is written only after a successful set inside
+        # the DeepAdapter stream path (same success gate as unary process_message).
         params_for_history = request.params if isinstance(request.params, dict) else {}
-        if request.req_method == ReqMethod.COMMAND_GOAL:
-            goal_action = str(params_for_history.get("action", "") or "").strip().lower()
-            if goal_action == "set":
-                objective = str(params_for_history.get("objective") or "").strip()
-                if objective:
-                    append_history_record(
-                        session_id=session_id,
-                        request_id=request.request_id,
-                        channel_id=request.channel_id,
-                        role="user",
-                        content=objective,
-                        timestamp=time.time(),
-                        channel_metadata=request.metadata,
-                        mode=params_for_history.get("mode", "unknown"),
-                    )
-        elif _should_record_user_history(params_for_history):
+        if (
+            request.req_method != ReqMethod.COMMAND_GOAL
+            and _should_record_user_history(params_for_history)
+        ):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,

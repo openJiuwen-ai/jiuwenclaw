@@ -1,5 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -130,3 +131,74 @@ def test_start_browser_refuses_unrecognized_port_owner(
 
     with pytest.raises(RuntimeError, match="occupied by an unrecognized process"):
         browser_start_client.start_browser(config_file="config.yaml")
+
+
+def test_reap_watcher_invokes_stop_after_main_process_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    chrome = str(tmp_path / "chrome.exe")
+    profile = str(tmp_path / "profile")
+    release = threading.Event()
+    reap_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        browser_start_client,
+        "_load_browser_config",
+        lambda _path: {
+            "chrome_path": chrome,
+            "remote_debugging_address": "127.0.0.1",
+            "remote_debugging_port": 9222,
+            "user_data_dir": profile,
+            "profile_directory": "Default",
+            "headless": False,
+        },
+    )
+    monkeypatch.setattr(browser_start_client, "_os_key", lambda: "windows")
+    monkeypatch.setattr(browser_start_client, "_normalize_chrome_executable", lambda *_: chrome)
+    monkeypatch.setattr(browser_start_client, "_parse_cdp_from_env", lambda host, port: (host, port))
+    monkeypatch.setattr(browser_start_client, "_port_is_open", lambda *_, **__: False)
+    monkeypatch.setattr(browser_start_client, "_persist_browser_profile", lambda **_: None)
+
+    def _fake_stop(**kwargs):
+        reap_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        browser_start_client,
+        "_stop_existing_browser_service",
+        _fake_stop,
+    )
+
+    class _FakePopen:
+        def __init__(self) -> None:
+            self.pid = 789
+
+        def wait(self) -> int:
+            release.wait(timeout=5.0)
+            return 0
+
+    fake_proc = _FakePopen()
+    monkeypatch.setattr(browser_start_client.subprocess, "Popen", lambda *a, **k: fake_proc)
+
+    assert browser_start_client.start_browser(config_file="config.yaml") == 0
+    with browser_start_client._BROWSER_REGISTRY_LOCK:
+        assert 789 in browser_start_client._BROWSER_PROCESS_REGISTRY
+
+    release.set()
+
+    import time as _time
+
+    deadline = _time.monotonic() + 5.0
+    while _time.monotonic() < deadline:
+        with browser_start_client._BROWSER_REGISTRY_LOCK:
+            reaped = 789 not in browser_start_client._BROWSER_PROCESS_REGISTRY
+        if reaped and reap_calls:
+            break
+        _time.sleep(0.02)
+
+    assert reap_calls, "reap watcher did not invoke _stop_existing_browser_service"
+    assert reap_calls[-1]["chrome_exec"] == chrome
+    assert reap_calls[-1]["port"] == 9222
+    with browser_start_client._BROWSER_REGISTRY_LOCK:
+        assert 789 not in browser_start_client._BROWSER_PROCESS_REGISTRY

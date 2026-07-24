@@ -1121,6 +1121,7 @@
       "every": "Every",
       "everyHoursPlaceholder": "Hours",
       "everyMinutesPlaceholder": "Minutes",
+      "integerOnlyHint": "Interval must be an integer of at least 1",
       "hoursUnit": "hours",
       "minutesUnit": "minutes",
       "intervalUnit": {
@@ -2173,7 +2174,8 @@
     "nextStep": "Next",
     "confirm": "Confirm",
     "customOption": "Custom",
-    "customPlaceholder": "No suitable option? Type your answer..."
+    "customPlaceholder": "No suitable option? Type your answer...",
+    "skippedSummary": "Skipped"
   },
   "qaSummary": {
     "title": "Clarifications"

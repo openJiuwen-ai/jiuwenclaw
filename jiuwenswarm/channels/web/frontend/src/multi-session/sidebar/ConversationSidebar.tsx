@@ -612,6 +612,13 @@ export function ConversationSidebar({
   const addMenuRef = useRef<HTMLDivElement>(null);
   const workModeMenuRef = useRef<HTMLDivElement>(null);
   const previousProcessing = useRef<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (!pathDialogError || pathDialogOpen) return;
+    const timeoutId = window.setTimeout(() => setPathDialogError(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [pathDialogError, pathDialogOpen]);
+
   const {
     workMode,
     projects,
@@ -1152,8 +1159,10 @@ export function ConversationSidebar({
           </div>
         ) : null}
         {pathDialogError && !pathDialogOpen ? (
-          <div className="conversation-sidebar__error" role="alert">
-            {pathDialogError}
+          <div className="app-toast-wrapper app-toast-wrapper--top-center">
+            <div className="app-session-toast" role="status" aria-live="polite">
+              {pathDialogError}
+            </div>
           </div>
         ) : null}
         <div className="conversation-sidebar__group conversation-sidebar__project-add" ref={addMenuRef}>

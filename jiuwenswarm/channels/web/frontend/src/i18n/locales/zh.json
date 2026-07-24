@@ -1122,6 +1122,7 @@
       "every": "每",
       "everyHoursPlaceholder": "小时数",
       "everyMinutesPlaceholder": "分钟数",
+      "integerOnlyHint": "间隔必须为大于等于 1 的整数",
       "hoursUnit": "小时",
       "minutesUnit": "分钟",
       "intervalUnit": {
@@ -2177,7 +2178,8 @@
     "nextStep": "下一步",
     "confirm": "确定",
     "customOption": "自定义",
-    "customPlaceholder": "没有合适的选项？输入您的答案..."
+    "customPlaceholder": "没有合适的选项？输入您的答案...",
+    "skippedSummary": "已跳过"
   },
   "qaSummary": {
     "title": "问题澄清"
