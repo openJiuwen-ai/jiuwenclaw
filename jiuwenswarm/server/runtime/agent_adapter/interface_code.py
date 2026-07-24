@@ -977,6 +977,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         resolved_language = self._resolve_runtime_language()
         workspace = self._workspace_dir or "./"
         subagents: list[Any] = []
+        self._sync_browser_runtime_environment(config_base)
 
         # ── 固定挂载：explore_agent（Code 模式核心子代理，始终启用）──
         if not self._subagent_list_has_name(subagents, "explore_agent"):
@@ -1035,30 +1036,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             # browser_agent
             browser_agent_cfg = subagents_cfg.get("browser_agent")
 
-            # Headless setup is unconditional: swarm members also spawn @playwright/mcp
-            # subprocesses and ManagedBrowserDriver both read BROWSER_MANAGED_ARGS.
-            # This must run regardless of whether the main-agent browser subagent is enabled.
-            headless = self._resolve_headless_from_config()
-            _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
-            _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
-            _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
-            if headless:
-                _mcp_args_list.append("--headless")
-                os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] browser headless=True → "
-                    "BROWSER_MANAGED_ARGS=--headless=new, PLAYWRIGHT_MCP_ARGS=%s",
-                    " ".join(_mcp_args_list),
-                )
-            else:
-                os.environ.pop("BROWSER_MANAGED_ARGS", None)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] browser headless=False → "
-                    "headed mode (BROWSER_MANAGED_ARGS cleared)",
-                )
-            os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
-            self._browser_headless_setting = headless
-
             browser_enabled = self._browser_runtime_enabled()
             if browser_enabled:
                 if not str(os.getenv("BROWSER_DRIVER") or "").strip():
@@ -1067,14 +1044,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                         "[JiuwenSwarmCodeAdapter] browser subagent enabled without BROWSER_DRIVER; "
                         "defaulting to managed mode"
                     )
-                if not str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip():
-                    chrome_path = self._resolve_managed_browser_binary_from_config()
-                    if chrome_path:
-                        os.environ["BROWSER_MANAGED_BINARY"] = chrome_path
-                        logger.info(
-                            "[JiuwenSwarmCodeAdapter] using browser.chrome_path for managed browser: %s",
-                            chrome_path,
-                        )
                 browser_spec = build_browser_agent_config(
                     model,
                     workspace=workspace,

@@ -56,7 +56,6 @@ class ReqMethod(Enum):
     PATH_GET = "path.get"
     PATH_SET = "path.set"
 
-    BROWSER_START = "browser.start"
     BROWSER_RUNTIME_RESTART = "browser.runtime_restart"
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"

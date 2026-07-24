@@ -561,7 +561,6 @@ _FORWARD_REQ_METHODS = frozenset({
     "chat.resume",
     "chat.user_answer",
     "history.get",
-    "browser.start",
     # "tts.synthesize",
     "skills.marketplace.list",
     "skills.list",
@@ -648,7 +647,6 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "acp.tool_response",
     "team.delete",
     "command.goal",
-    "browser.start",
     "team.snapshot",
     "team.history.get",
     "skills.marketplace.list",
@@ -1092,6 +1090,25 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
             get_config()
     except Exception:  # noqa: BLE001
         pass
+
+
+async def _restart_agent_browser_runtime(agent_client=None) -> None:
+    """Stop active agent-side browser runtimes so the next task uses new config."""
+    if agent_client is None:
+        return
+
+    from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+    from jiuwenswarm.common.schema.message import ReqMethod
+
+    env = e2a_from_agent_fields(
+        request_id=f"browser-restart-{uuid.uuid4().hex[:8]}",
+        channel_id="",
+        req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+    )
+    response = await agent_client.send_request(env)
+    if not response.ok:
+        error = response.payload.get("error", "browser runtime restart failed")
+        raise RuntimeError(str(error))
 
 
 def _make_session_id() -> str:
@@ -4108,26 +4125,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         try:
             update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
-            await _clear_agent_config_cache(_resolve(agent_client))
+            resolved_agent_client = _resolve(agent_client)
+            await _clear_agent_config_cache(resolved_agent_client)
         except Exception as e:  # noqa: BLE001
             logger.warning("[path.set] 写回 config.yaml 失败: %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
             return
 
-        # When switching to headless, purge any persisted headed-Chrome profile so the
-        # managed driver doesn't reuse an existing visible window on the next browser task.
-        if headless:
-            try:
-                from pathlib import Path as _Path
-                _profile_store = _Path(
-                    os.getenv("BROWSER_PROFILE_STORE_PATH", "").strip()
-                    or str(get_user_workspace_dir() / ".browser" / "profiles.json")
-                ).expanduser()
-                if _profile_store.exists():
-                    _profile_store.unlink()
-                    logger.info("[path.set] Cleared browser profile store for headless mode: %s", _profile_store)
-            except Exception as _e:
-                logger.debug("[path.set] Could not clear browser profile store: %s", _e)
+        try:
+            await _restart_agent_browser_runtime(resolved_agent_client)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[path.set] browser config saved but active runtime reset failed: %s",
+                e,
+            )
 
         await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
 

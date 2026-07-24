@@ -1329,9 +1329,6 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.COMMAND_STATUS:
                 await self._handle_command_status(ws, request, send_lock)
                 return
-            if request.req_method == ReqMethod.BROWSER_START:
-                await self._handle_browser_start(ws, request, send_lock)
-                return
             if request.req_method == ReqMethod.BROWSER_RUNTIME_RESTART:
                 await self._handle_browser_runtime_restart(ws, request, send_lock)
                 return
@@ -5394,42 +5391,23 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _handle_browser_start(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """启动浏览器并返回执行结果（returncode）。"""
-        try:
-            from jiuwenswarm.agents.harness.common.tools.browser_start_client import start_browser
-
-            config_path = str(get_config_file())
-            returncode = start_browser(dry_run=False, config_file=config_path)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload={"returncode": returncode},
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("[AgentWebSocketServer] browser.start failed: %s", e)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"error": str(e)},
-            )
-
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
-
     async def _handle_browser_runtime_restart(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
-            from openjiuwen.harness.tools.browser_move import restart_local_browser_runtime_server
+            from openjiuwen.harness.tools.browser_move import (
+                reset_active_browser_runtimes,
+                restart_local_browser_runtime_server,
+            )
 
+            reset_runtimes = await reset_active_browser_runtimes()
             result = restart_local_browser_runtime_server()
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=True,
-                payload={"result": result},
+                payload={
+                    "result": result,
+                    "reset_runtimes": reset_runtimes,
+                },
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] browser.runtime_restart failed: %s", e)

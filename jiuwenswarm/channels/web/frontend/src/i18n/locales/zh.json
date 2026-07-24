@@ -38,7 +38,7 @@
     "more": "更多",
     "settings": "设置",
     "config": "配置信息",
-    "browser": "浏览器服务",
+    "browser": "浏览器",
     "logs": "日志",
     "update": "更新"
   },
@@ -1318,32 +1318,20 @@
     }
   },
   "browser": {
-    "title": "浏览器服务",
-    "subtitle": "配置浏览器路径，启动浏览器服务。",
+    "title": "浏览器",
+    "subtitle": "配置浏览器 Agent 使用的 Chrome 路径和显示模式。",
     "refreshPath": "刷新路径",
     "savePath": "保存路径",
-    "startService": "启动浏览器服务",
-    "starting": "启动中...",
     "pathConfigHelp": "CHROME 路径配置（Chrome地址栏输入：chrome://version查看，复制可执行文件路径）",
     "examplePath": "例如：/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "success": {
-      "pathSaved": "Chrome 路径已保存",
-      "started": "浏览器服务启动成功"
-    },
-    "tooltips": {
-      "fillPath": "请先填写 Chrome 路径",
-      "savePath": "请先保存 Chrome 路径"
+      "pathSaved": "Chrome 路径已保存"
     },
     "showBrowser": "显示浏览器",
     "showBrowserDesc": "执行浏览器任务时打开可见的浏览器窗口。",
     "errors": {
       "loadPath": "加载 Chrome 路径失败",
-      "savePath": "保存 Chrome 路径失败",
-      "pathRequired": "Chrome 路径不能为空",
-      "saveBeforeStart": "请先保存 Chrome 路径后再启动浏览器服务",
-      "startFailed": "启动浏览器服务失败",
-      "startFailedWithCode": "浏览器服务启动失败，返回码 {{code}}",
-      "startFailedWithMessage": "浏览器服务启动失败：{{message}}"
+      "savePath": "保存 Chrome 路径失败"
     }
   },
   "logsPanel": {

@@ -38,7 +38,7 @@
     "more": "More",
     "settings": "Settings",
     "config": "Configuration",
-    "browser": "Browser Service",
+    "browser": "Browser",
     "logs": "Logs",
     "update": "Updates"
   },
@@ -1317,32 +1317,20 @@
     }
   },
   "browser": {
-    "title": "Browser Service",
-    "subtitle": "Configure the browser path and start the browser service.",
+    "title": "Browser",
+    "subtitle": "Configure the Chrome path and display mode used by browser agents.",
     "refreshPath": "Refresh Path",
     "savePath": "Save Path",
-    "startService": "Start Browser Service",
-    "starting": "Starting...",
     "pathConfigHelp": "Chrome path configuration (open chrome://version in Chrome and copy the executable path)",
     "examplePath": "Example: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "success": {
-      "pathSaved": "Chrome path saved",
-      "started": "Browser service started successfully"
-    },
-    "tooltips": {
-      "fillPath": "Enter a Chrome path first",
-      "savePath": "Save the Chrome path first"
+      "pathSaved": "Chrome path saved"
     },
     "showBrowser": "Show Browser",
     "showBrowserDesc": "Open a visible browser window when running browser tasks.",
     "errors": {
       "loadPath": "Failed to load Chrome path",
-      "savePath": "Failed to save Chrome path",
-      "pathRequired": "Chrome path cannot be empty",
-      "saveBeforeStart": "Save the Chrome path before starting the browser service",
-      "startFailed": "Failed to start browser service",
-      "startFailedWithCode": "Browser service failed to start, return code {{code}}",
-      "startFailedWithMessage": "Browser service failed to start: {{message}}"
+      "savePath": "Failed to save Chrome path"
     }
   },
   "logsPanel": {
