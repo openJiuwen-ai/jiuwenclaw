@@ -3511,10 +3511,12 @@ class MessageHandler(ABC):
                         )
 
                     elif intent == "cancel":
-                        # 使用 await 模式，若cancel过长时间可能导致session残余
-                        # 导致后续 session.create 等请求在队列中等待超时
+                        # fire_and_forget：避免慢 cancel 阻塞 _forward_loop，
+                        # 导致后续 session.create 等请求在队列中等待、前端超时。
                         await self._cancel_agent_work_for_session(
-                            msg, msg.session_id
+                            msg,
+                            msg.session_id,
+                            agent_notify="fire_and_forget",
                         )
 
                     elif intent in ("pause", "resume"):

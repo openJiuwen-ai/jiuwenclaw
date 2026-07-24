@@ -63,6 +63,7 @@ import {
   registerCreatedConversation,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
+import { createConversationSession } from './multi-session/state/createConversationSession';
 import { useTranslation } from 'react-i18next';
 import {
   normalizeA2UIEnabled,
@@ -1578,18 +1579,16 @@ function AppContent() {
         if (workContext.project_dir) {
           createParams.project_dir = workContext.project_dir;
         }
-        const payload = await request<{ session_id?: string; sessionId?: string }>('session.create', createParams);
-        const createdSessionId = payload.session_id ?? payload.sessionId;
-        if (createdSessionId !== newSid) throw new Error('session.create returned an unexpected session id');
+        const created = await createConversationSession(request, createParams, newSid);
         const createdSession = registerCreatedConversation(
-          newSid,
+          created.session_id,
           runtimeSettings,
           Date.now(),
           content,
           {
-            project_id: workContext.project_id,
-            project_dir: workContext.project_dir,
-            work_mode: workContext.work_mode,
+            project_id: created.project_id || workContext.project_id,
+            project_dir: created.project_dir || workContext.project_dir,
+            work_mode: created.work_mode || workContext.work_mode,
           },
         );
         // 迁移 'new' 会话的已选技能到新会话

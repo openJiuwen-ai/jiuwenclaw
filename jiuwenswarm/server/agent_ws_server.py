@@ -117,6 +117,9 @@ logger = logging.getLogger(__name__)
 # task 完成后自动从集合移除(Python 官方推荐模式)。
 _background_permission_reload_tasks: set[asyncio.Task] = set()
 
+# session.create 在 team prepare 完成后回包；可选 KVC 信号异步执行，避免拖慢超时窗口。
+_background_session_create_kvc_tasks: set[asyncio.Task] = set()
+
 
 def _log_permission_reload_failure(task: asyncio.Task) -> None:
     """后台权限重载任务完成回调: 仅在异常时记 debug(与原同步 try/except 语义一致)。"""
@@ -124,6 +127,19 @@ def _log_permission_reload_failure(task: asyncio.Task) -> None:
     if exc is not None:
         logger.debug(
             "[AgentWebSocketServer] post-permissions reload failed (non-critical)",
+            exc_info=exc,
+        )
+
+
+def _log_session_create_kvc_failure(task: asyncio.Task) -> None:
+    """session.create 异步 KVC 失败时记 warning，不影响已成功回包的会话。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "[AgentWebSocketServer] session.create KVC failed after ack: %s",
+            exc,
             exc_info=exc,
         )
 
@@ -2335,7 +2351,7 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _apply_session_switch_lifecycle(
+    async def _prepare_session_switch_owner(
         self,
         *,
         channel_id: str,
@@ -2343,8 +2359,13 @@ class AgentWebSocketServer:
         previous_session_id: str,
         params: dict[str, Any],
         reason: str,
-    ) -> tuple[bool, str]:
-        """Keep the product runtime owner independent from optional KVC signals."""
+    ) -> tuple[bool, str, Any, Any, Any]:
+        """Resolve switch context and run product-owner prepare (team switch).
+
+        Returns:
+            ``(target_is_team, resolved_mode, context, team_manager, dispatch_signals)``.
+            ``dispatch_signals`` may be ``None`` when KVC hooks are unavailable.
+        """
         target_is_team = is_team_params(params)
         _, _, resolved_mode = resolve_agent_request_mode(
             params.get("mode", "agent.plan")
@@ -2386,17 +2407,64 @@ class AgentWebSocketServer:
                 ),
                 reason=reason,
             )
+        return target_is_team, resolved_mode, context, team_manager, dispatch_signals
 
-        if context is not None and dispatch_signals is not None:
-            await dispatch_signals(
-                context=context,
-                agent_manager=self._agent_manager,
-                channel_id=channel_id,
-                team_manager=team_manager,
-                target_session_id=target_session_id,
-                previous_session_id=previous_session_id,
-                reason=reason,
-            )
+    async def _dispatch_session_switch_kvc(
+        self,
+        *,
+        channel_id: str,
+        target_session_id: str,
+        previous_session_id: str,
+        reason: str,
+        context: Any,
+        team_manager: Any,
+        dispatch_signals: Any,
+    ) -> None:
+        """Optional KVC signals after the product owner has prepared the switch."""
+        if context is None or dispatch_signals is None:
+            return
+        await dispatch_signals(
+            context=context,
+            agent_manager=self._agent_manager,
+            channel_id=channel_id,
+            team_manager=team_manager,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            reason=reason,
+        )
+
+    async def _apply_session_switch_lifecycle(
+        self,
+        *,
+        channel_id: str,
+        target_session_id: str,
+        previous_session_id: str,
+        params: dict[str, Any],
+        reason: str,
+    ) -> tuple[bool, str]:
+        """Keep the product runtime owner independent from optional KVC signals."""
+        (
+            target_is_team,
+            resolved_mode,
+            context,
+            team_manager,
+            dispatch_signals,
+        ) = await self._prepare_session_switch_owner(
+            channel_id=channel_id,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            params=params,
+            reason=reason,
+        )
+        await self._dispatch_session_switch_kvc(
+            channel_id=channel_id,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            reason=reason,
+            context=context,
+            team_manager=team_manager,
+            dispatch_signals=dispatch_signals,
+        )
         return target_is_team, resolved_mode
 
     async def _handle_session_switch(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
@@ -6513,9 +6581,17 @@ class AgentWebSocketServer:
                 work_mode=final_work_mode,
             )
 
+            # team prepare 必须在 ack 前完成，避免首条 chat.send 与分布式切换竞态；
+            # 可选 KVC 信号放到回包后异步，避免拖慢 create RPC。
             lifecycle_params = dict(params)
             lifecycle_params["mode"] = mode
-            await self._apply_session_switch_lifecycle(
+            (
+                _target_is_team,
+                _resolved_mode,
+                switch_context,
+                team_manager,
+                dispatch_signals,
+            ) = await self._prepare_session_switch_owner(
                 channel_id=channel_id,
                 target_session_id=session_id,
                 previous_session_id=previous_session_id,
@@ -6539,6 +6615,23 @@ class AgentWebSocketServer:
                 await send_wire_payload(ws, wire)
 
             logger.info("[AgentServer] session.create completed: session_id=%s", session_id)
+
+            if switch_context is not None and dispatch_signals is not None:
+                kvc_task = asyncio.create_task(
+                    self._dispatch_session_switch_kvc(
+                        channel_id=channel_id,
+                        target_session_id=session_id,
+                        previous_session_id=previous_session_id,
+                        reason="session.create switch: ",
+                        context=switch_context,
+                        team_manager=team_manager,
+                        dispatch_signals=dispatch_signals,
+                    ),
+                    name=f"session-create-kvc-{session_id}",
+                )
+                _background_session_create_kvc_tasks.add(kvc_task)
+                kvc_task.add_done_callback(_background_session_create_kvc_tasks.discard)
+                kvc_task.add_done_callback(_log_session_create_kvc_failure)
 
         except Exception as e:
             logger.exception("[AgentServer] session.create failed: %s", e)
