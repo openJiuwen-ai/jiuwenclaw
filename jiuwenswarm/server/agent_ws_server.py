@@ -1281,6 +1281,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.TEAM_SNAPSHOT:
                 await self._handle_team_snapshot(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.TEAM_MQ_PUBLISH:
+                await self._handle_team_mq_publish(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.PROACTIVE_TICK:
                 await self._handle_proactive_tick(ws, request, send_lock)
                 return
@@ -3169,6 +3172,38 @@ class AgentWebSocketServer:
             channel_id=channel_id,
             ok=True,
             payload=payload,
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_team_mq_publish(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Relay one external team event into the active core team runtime."""
+        from jiuwenswarm.agents.harness.team import get_team_manager
+
+        session_id = request.session_id or ""
+        channel_id = request.channel_id or "web"
+        payload = request.params.get("payload")
+
+        if not session_id:
+            success, reason = False, "session_id is required"
+        elif payload is None:
+            success, reason = False, "payload is required"
+        elif not isinstance(payload, dict) or payload.get("type") != "team.external_event":
+            success, reason = False, "invalid_external_event"
+        else:
+            success, reason = await get_team_manager(channel_id).interact(session_id, payload)
+
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=channel_id,
+            ok=success,
+            payload={"published": True} if success else {"error": reason},
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
