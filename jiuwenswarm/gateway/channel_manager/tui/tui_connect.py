@@ -191,6 +191,7 @@ def _update_auto_harness_gitcode_access_token(value: str) -> None:
     config["gitcode"]["access_token"] = value
     _save_auto_harness_config(config)
 
+
 #3rd agent
 def extract_token(ws) -> str:
     """从 WebSocket 对象中提取 token"""

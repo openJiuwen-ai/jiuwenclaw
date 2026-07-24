@@ -24,6 +24,7 @@ from jiuwenswarm.gateway.auth.credential_authenticator import (
     SSHCertificate
 )
 
+
 class PassthroughAuthenticator(TokenAuthenticator, SSHAuthenticator):
 
     def __init__(self, ca_private_key_pem: bytes | None = None):

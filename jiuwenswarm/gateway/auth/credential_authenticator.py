@@ -107,7 +107,6 @@ class SSHAuthenticator(ABC):
 #         """计算API-KEY的HMAC值，用于存储验证"""
 #         raise UnsupportedOperationError("compute_api_key_hmac not supported")
 
-
 # ── 凭证管理接口 ──
 class CredentialManager(ABC):
     """凭证管理器"""

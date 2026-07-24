@@ -1126,8 +1126,6 @@ class WebChannel(BaseWsChannel):
             return str(remote)
         return ""
 
-        # TODO
-
     async def _handle_connect(self, ws: Any, path) -> bool:
         try:
             context = AuthContext(
