@@ -26,6 +26,7 @@ except ImportError:
     # Fallback for environments where interface_deep dependencies are not available.
     # The module will be imported lazily when needed in _run().
     pass
+from jiuwenclaw.infrastructure.tiktoken_warmup import warmup_tiktoken
 from jiuwenclaw.jiuwen_core_patch import (
     apply_openai_model_client_patch,
     configure_openjiuwen_logging_under_jiuwenclaw,
@@ -109,6 +110,9 @@ async def _run(host: str, port: int) -> None:
     from jiuwenclaw.telemetry import init_telemetry
 
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
+
+    # ready 前同步预热，避免首请求在事件循环上同步 get_encoding
+    warmup_tiktoken()
 
     from jiuwenclaw.agentserver.session_metadata import remove_team_mode_session_dirs_at_startup
 
