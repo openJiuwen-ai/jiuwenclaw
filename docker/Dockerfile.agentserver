@@ -22,6 +22,13 @@ RUN pip install -e . \
 RUN mkdir -p /home/app/.jiuwenclaw && printf 'yes\nzh\n' | jiuwenclaw-init
 RUN chown -R app:app /home/app/.jiuwenclaw
 
+# Prefetch tiktoken BPE at build time (avoids sync download on first request).
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache
+RUN mkdir -p /opt/tiktoken-cache \
+    && python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" \
+    && chown -R app:app /opt/tiktoken-cache \
+    && chmod -R u+rwX,go+rX /opt/tiktoken-cache
+
 USER app
 ENV PATH=$PATH:/home/app/.local/bin
 
