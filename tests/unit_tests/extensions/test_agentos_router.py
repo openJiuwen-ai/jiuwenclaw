@@ -165,7 +165,8 @@ def _envelope(*, agent_type: str | None = None) -> E2AEnvelope:
 
 
 @pytest.mark.asyncio
-async def test_swarm_request_creates_mapping_then_forwards() -> None:
+async def test_swarm_request_forwards_direct_yuanrong_without_create() -> None:
+    """jiuwenswarm uses URN invoke like agent_client.type=yuanrong."""
     yuanrong = FakeYuanRongClient()
     registry = FakeRegistryClient()
     agent_manager = AgentManager()
@@ -176,29 +177,18 @@ async def test_swarm_request_creates_mapping_then_forwards() -> None:
     await client.shutdown()
 
     assert response.ok
-    assert registry.image_lookups == 1
-    assert yuanrong.create_calls == 1
+    assert registry.image_lookups == 0
+    assert yuanrong.create_calls == 0
     assert yuanrong.send_calls == 1
-    create_payload = yuanrong.create_payloads[0]
-    assert "urn" not in create_payload
-    assert create_payload["runtime_spec"]["runtime"] == "python3.11"
-    assert create_payload["runtime_spec"]["sandbox_type"] == "docker"
-    assert create_payload["runtime_spec"]["rootfs"]["imageurl"].endswith(
-        "jiuwenswarm:latest"
-    )
-    assert create_payload["workspace"] == "/home/u1"
-    agents = await agent_manager.list_user_agents("u1")
-    assert len(agents) == 1
-    assert agents[0].info.status is AgentStatus.READY
-    assert agents[0].info.sandbox_id == "sbx-1"
-    assert envelope.channel_context["agent_id"] == agents[0].info.agent_id
+    assert registry.registered == []
+    assert await agent_manager.list_user_agents("u1") == []
     assert envelope.channel_context["agent_type"] == "jiuwenswarm"
-    assert envelope.channel_context["sandbox_id"] == "sbx-1"
-    assert [item.agent_id for item in registry.registered] == [agents[0].info.agent_id]
+    assert "agent_id" not in envelope.channel_context
+    assert "sandbox_id" not in envelope.channel_context
 
 
 @pytest.mark.asyncio
-async def test_existing_swarm_agent_is_reused() -> None:
+async def test_swarm_request_repeated_stays_direct() -> None:
     yuanrong = FakeYuanRongClient()
     registry = FakeRegistryClient()
     client = AgentOSRouterClient(yuanrong, registry, AgentManager())
@@ -207,8 +197,8 @@ async def test_existing_swarm_agent_is_reused() -> None:
     await client.send_request(_envelope())
     await client.shutdown()
 
-    assert registry.image_lookups == 1
-    assert yuanrong.create_calls == 1
+    assert registry.image_lookups == 0
+    assert yuanrong.create_calls == 0
     assert yuanrong.send_calls == 2
 
 
@@ -325,16 +315,38 @@ async def test_chat_after_switch_reuses_agent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_switch_to_jiuwenswarm_is_direct_without_create() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="jiuwenswarm",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is True
+    assert yuanrong.create_calls == 0
+    assert yuanrong.send_calls == 0
+    assert response["payload"]["agent_type"] == "jiuwenswarm"
+    assert response["payload"]["sandbox_id"] == ""
+    assert client.get_current_agent_type("u1") == "jiuwenswarm"
+    assert await agent_manager.list_user_agents("u1") == []
+
+
+@pytest.mark.asyncio
 async def test_delete_agent_releases_yuanrong_sandbox() -> None:
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
     client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
 
-    await client.send_request(_envelope())
+    await client.send_request(_envelope(agent_type="opencode"))
     agents = await agent_manager.list_user_agents("u1")
     assert agents[0].info.sandbox_id == "sbx-1"
 
-    await client.delete_agent("u1", "jiuwenswarm")
+    await client.delete_agent("u1", "opencode")
 
     assert yuanrong.delete_calls == ["sbx-1"]
     assert await agent_manager.list_user_agents("u1") == []

@@ -13,11 +13,12 @@ from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
+    BUILTIN_AGENT_TYPE,
     AgentCreatingTimeout,
     AgentDeleted,
     AgentManager,
     AgentRuntime,
-    SUPPORTED_AGENT_TYPES,
+    THIRD_PARTY_AGENT_TYPES,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.models import (
     AgentInfo,
@@ -103,7 +104,12 @@ class AgentOSRouterClient(AgentServerClient):
     def get_current_agent_type(self, user_id: str) -> str:
         """Return the user's current agent_type (default ``jiuwenswarm``)."""
         uid = str(user_id or "").strip()
-        return self._current_agent_types.get(uid) or "jiuwenswarm"
+        return self._current_agent_types.get(uid) or BUILTIN_AGENT_TYPE
+
+    @staticmethod
+    def _uses_direct_yuanrong(agent_type: str) -> bool:
+        """Builtin swarm uses URN invoke (same as ``agent_client.type=yuanrong``)."""
+        return str(agent_type or "").strip().lower() == BUILTIN_AGENT_TYPE
 
     @property
     def server_ready(self) -> bool:
@@ -147,6 +153,10 @@ class AgentOSRouterClient(AgentServerClient):
         if self._is_ssh_relay_request(envelope):
             return await self._handle_ssh_relay(envelope)
         try:
+            agent_type = self._extract_agent_type(envelope)
+            if self._uses_direct_yuanrong(agent_type):
+                envelope.channel_context["agent_type"] = agent_type
+                return await self._yuanrong.send_request(envelope)
             runtime = await self._resolve_agent(envelope)
         except (ValueError, AgentCreatingTimeout) as exc:
             return self._routing_error_response(envelope, str(exc))
@@ -157,6 +167,12 @@ class AgentOSRouterClient(AgentServerClient):
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
         try:
+            agent_type = self._extract_agent_type(envelope)
+            if self._uses_direct_yuanrong(agent_type):
+                envelope.channel_context["agent_type"] = agent_type
+                async for chunk in self._yuanrong.send_request_stream(envelope):
+                    yield chunk
+                return
             runtime = await self._resolve_agent(envelope)
         except (ValueError, AgentCreatingTimeout) as exc:
             yield self._routing_error_chunk(envelope, str(exc))
@@ -229,6 +245,18 @@ class AgentOSRouterClient(AgentServerClient):
                 "ok": False,
                 "error": str(exc),
                 "code": "UNSUPPORTED_AGENT_TYPE",
+            }
+        # Builtin swarm: no registry / create_sandbox; mark current type only.
+        if self._uses_direct_yuanrong(normalized):
+            self._current_agent_types[uid] = normalized
+            return {
+                "ok": True,
+                "payload": {
+                    "agent_id": "",
+                    "agent_type": normalized,
+                    "sandbox_id": "",
+                    "status": AgentStatus.READY.value,
+                },
             }
         try:
             runtime = await self._agent_manager.get_or_create_agent(
@@ -312,6 +340,14 @@ class AgentOSRouterClient(AgentServerClient):
             return
         self._apply_current_agent_type_for_ssh(envelope)
         try:
+            agent_type = self._extract_agent_type(envelope)
+            if self._uses_direct_yuanrong(agent_type):
+                ssh_relay.fail_session(
+                    relay_session,
+                    "jiuwenswarm uses YuanRong URN invoke and has no AgentOS "
+                    "sandbox for SSH; switch to a third-party agent_type first",
+                )
+                return
             runtime = await self._resolve_agent(envelope)
         except (ValueError, AgentCreatingTimeout, AgentDeleted) as exc:
             ssh_relay.fail_session(
@@ -379,9 +415,10 @@ class AgentOSRouterClient(AgentServerClient):
         )
 
     async def _create_agent(self, agent_info: AgentInfo) -> AgentInfo:
-        if agent_info.agent_type not in SUPPORTED_AGENT_TYPES:
+        if agent_info.agent_type not in THIRD_PARTY_AGENT_TYPES:
             raise UnsupportedAgentType(
-                f"unsupported agent_type: {agent_info.agent_type}"
+                f"sandbox create is only supported for third-party "
+                f"agent_type, got: {agent_info.agent_type}"
             )
 
         image_info = await self._registry.get_image_info(agent_info.agent_type)

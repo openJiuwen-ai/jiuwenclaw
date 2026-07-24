@@ -14,7 +14,13 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import AgentInfo, Agen
 
 AgentCreator = Callable[[AgentInfo], Awaitable[AgentInfo | None]]
 AgentKey = tuple[str, ...]
-SUPPORTED_AGENT_TYPES = frozenset({"jiuwenswarm", "opencode", "claude"})
+BUILTIN_AGENT_TYPE = "jiuwenswarm"
+SUPPORTED_AGENT_TYPES = frozenset({BUILTIN_AGENT_TYPE, "opencode", "claude"})
+# Third-party types are provisioned via registry launch-spec + YuanRong create_sandbox.
+# ``jiuwenswarm`` uses the same URN invoke path as ``agent_client.type=yuanrong``.
+THIRD_PARTY_AGENT_TYPES = frozenset(
+    t for t in SUPPORTED_AGENT_TYPES if t != BUILTIN_AGENT_TYPE
+)
 SUPPORTED_AGENT_KEY_FIELDS = frozenset({"user_id", "agent_type", "session_id"})
 DEFAULT_AGENT_KEY_FIELDS = ("user_id", "agent_type")
 
@@ -137,7 +143,7 @@ class AgentRuntime:
 
     @staticmethod
     def normalize_agent_type(raw: Any) -> str:
-        agent_type = str(raw or "jiuwenswarm").strip().lower()
+        agent_type = str(raw or BUILTIN_AGENT_TYPE).strip().lower()
         if agent_type not in SUPPORTED_AGENT_TYPES:
             raise ValueError(f"unsupported agent_type: {agent_type}")
         return agent_type
