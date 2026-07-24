@@ -8,6 +8,7 @@ from jiuwenswarm.symphony.llm import (
     extract_message_content,
     get_llm_token_usage_summary,
     reset_llm_token_usage,
+    thinking_disabled_request_overrides,
     _record_usage_from_response,
 )
 
@@ -19,6 +20,24 @@ class _FakeInvokeModel:
     async def invoke(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(content='{"ok": true}')
+
+
+def test_thinking_disabled_request_overrides_returns_isolated_compatibility_fields():
+    first = thinking_disabled_request_overrides()
+    second = thinking_disabled_request_overrides()
+
+    assert first == {
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    }
+    first["extra_body"]["thinking"]["type"] = "enabled"
+    first["extra_body"]["chat_template_kwargs"]["enable_thinking"] = True
+
+    assert second["extra_body"]["thinking"]["type"] == "disabled"
+    assert second["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
 
 
 def test_extract_message_content_supports_openjiuwen_response_shape():

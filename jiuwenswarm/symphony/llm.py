@@ -218,6 +218,17 @@ def create_llm_client(config: LLMConfig) -> "JiuwenSwarmChatClient":
     return JiuwenSwarmChatClient(config)
 
 
+def thinking_disabled_request_overrides() -> Dict[str, Any]:
+    """Return isolated provider-compatible controls that disable thinking."""
+    return {
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    }
+
+
 class JiuwenSwarmChatClient:
     """Adapter over openjiuwen's async model invocation."""
 

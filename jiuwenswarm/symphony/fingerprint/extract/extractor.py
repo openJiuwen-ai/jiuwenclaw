@@ -9,6 +9,7 @@ from jiuwenswarm.symphony.llm import (
     LLMConfig,
     create_llm_client,
     llm_usage_context,
+    thinking_disabled_request_overrides,
 )
 from jiuwenswarm.symphony.fingerprint.models import (
     ArtifactSpec,
@@ -18,9 +19,6 @@ from jiuwenswarm.symphony.fingerprint.models import (
 )
 from jiuwenswarm.symphony.shared.llm_payload import compact_json, prune_empty
 
-_LOW_REASONING_REQUEST_OVERRIDES = {
-    "extra_body": {"thinking": {"type": "disabled"}},
-}
 SCHEMA_EXTRACTION_PROTOCOL_VERSION = "symphony-schema-extraction-v2"
 _MAX_WARNING_COUNT = 3
 _MAX_REASON_LENGTH = 160
@@ -50,7 +48,7 @@ class LLMSchemaExtractor:
                     _build_llm_context(manifest, body_limit=self.body_limit)
                 ),
                 error_context="LLM schema extraction",
-                request_overrides=_LOW_REASONING_REQUEST_OVERRIDES,
+                request_overrides=thinking_disabled_request_overrides(),
             )
         try:
             payload = json.loads(content)
@@ -80,7 +78,7 @@ class LLMSchemaExtractor:
                     for manifest in manifests
                 ],
                 error_context="LLM schema extraction batch",
-                request_overrides=_LOW_REASONING_REQUEST_OVERRIDES,
+                request_overrides=thinking_disabled_request_overrides(),
             )
         schemas: List[ExtractedSkillSchema] = []
         for index, content in enumerate(contents, start=1):
@@ -135,7 +133,7 @@ class LLMSchemaExtractor:
                 system_prompt=_SCHEMA_EXTRACTION_BATCH_PROMPT,
                 user_content=compact_json({"skills": contexts}),
                 error_context="LLM schema extraction prompt batch",
-                request_overrides=_LOW_REASONING_REQUEST_OVERRIDES,
+                request_overrides=thinking_disabled_request_overrides(),
             )
         try:
             payload = json.loads(content)

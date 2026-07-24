@@ -15,11 +15,12 @@ from jiuwenswarm.symphony.graph.matcher.prompt import (
 )
 from jiuwenswarm.symphony.graph.matcher.validation import validate_llm_matches
 from jiuwenswarm.symphony.graph.models import GraphDiagnostic, LLMMatch, RelationCandidate, SkillRegistry
-from jiuwenswarm.symphony.llm import LLMConfig, create_llm_client, llm_usage_context
-
-_LOW_REASONING_REQUEST_OVERRIDES = {
-    "extra_body": {"thinking": {"type": "disabled"}},
-}
+from jiuwenswarm.symphony.llm import (
+    LLMConfig,
+    create_llm_client,
+    llm_usage_context,
+    thinking_disabled_request_overrides,
+)
 
 
 class OntologyMatcher(Protocol):
@@ -220,7 +221,7 @@ class OpenAICompatibleOntologyMatcher:
                 ),
                 timeout=200,
                 error_context="LLM graph matching",
-                request_overrides=_LOW_REASONING_REQUEST_OVERRIDES,
+                request_overrides=thinking_disabled_request_overrides(),
             )
         try:
             raw_payload = json.loads(content)

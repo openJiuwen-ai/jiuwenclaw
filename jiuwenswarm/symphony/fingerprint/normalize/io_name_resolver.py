@@ -15,6 +15,7 @@ from jiuwenswarm.symphony.llm import (
     LLMConfig,
     create_llm_client,
     llm_usage_context,
+    thinking_disabled_request_overrides,
 )
 from jiuwenswarm.symphony.shared.llm_payload import compact_json, prune_empty
 
@@ -93,9 +94,7 @@ class LLMIONameResolver:
                 user_content=compact_json(context),
                 timeout=200,
                 error_context="IO name vocabulary prompt batch LLM",
-                request_overrides={
-                    "extra_body": {"thinking": {"type": "disabled"}},
-                },
+                request_overrides=thinking_disabled_request_overrides(),
             )
         try:
             payload = json.loads(content)

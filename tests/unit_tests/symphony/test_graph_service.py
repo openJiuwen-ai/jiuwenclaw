@@ -406,12 +406,16 @@ def _raw_manifest(tmp_path, folder_name):
 
 def _expected_thinking_disabled_overrides():
     return {
-        "extra_body": {"thinking": {"type": "disabled"}},
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
     }
 
 
 @pytest.mark.asyncio
-async def test_schema_extractor_uses_low_reasoning_for_single_extract(monkeypatch, tmp_path):
+async def test_schema_extractor_disables_thinking_for_single_extract(monkeypatch, tmp_path):
     client = _CaptureSchemaClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.fingerprint.extract.extractor.create_llm_client",
@@ -436,7 +440,7 @@ async def test_schema_extractor_uses_low_reasoning_for_single_extract(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_schema_extractor_uses_low_reasoning_for_many_paths(monkeypatch, tmp_path):
+async def test_schema_extractor_disables_thinking_for_many_paths(monkeypatch, tmp_path):
     client = _CaptureSchemaClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.fingerprint.extract.extractor.create_llm_client",
@@ -469,7 +473,7 @@ async def test_schema_extractor_uses_low_reasoning_for_many_paths(monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypatch):
+async def test_graph_matcher_disables_thinking_for_forward_and_reverse(monkeypatch):
     client = _CaptureMatchClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.graph.matcher.openai.create_llm_client",
@@ -1575,7 +1579,7 @@ async def test_normalizer_can_exclude_candidate_from_io_name_vocab(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_llm_io_name_resolver_uses_low_reasoning_and_compact_vocab(monkeypatch):
+async def test_llm_io_name_resolver_disables_thinking_and_uses_compact_vocab(monkeypatch):
     client = _CaptureJSONClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.fingerprint.normalize.io_name_resolver.create_llm_client",
@@ -1620,9 +1624,7 @@ async def test_llm_io_name_resolver_uses_low_reasoning_and_compact_vocab(monkeyp
 
     assert result["text"].normalized_value == "content"
     call = client.calls[0]
-    assert call["request_overrides"] == {
-        "extra_body": {"thinking": {"type": "disabled"}},
-    }
+    assert call["request_overrides"] == _expected_thinking_disabled_overrides()
     payload = json.loads(call["user_content"])
     assert "rules" not in payload
     assert payload["vocabulary"] == [
