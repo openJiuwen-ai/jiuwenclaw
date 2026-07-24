@@ -393,7 +393,15 @@ class AgentWebSocketServer:
 
         try:
             async for raw in ws:
-                task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
+                async def _run(raw=raw):
+                    try:
+                        await self._handle_message(ws, raw, send_lock)
+                    except websockets.exceptions.ConnectionClosed as e:
+                        logger.info("[AgentWebSocketServer] 连接已关闭: %s", e)
+                    except Exception:
+                        logger.exception("[AgentWebSocketServer] 处理消息失败")
+
+                task = asyncio.create_task(_run())
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
         except websockets.exceptions.ConnectionClosed:
@@ -591,39 +599,54 @@ class AgentWebSocketServer:
             else:
                 await self._handle_unary(ws, request, send_lock)
         except Exception as e:
+            import websockets
+
+            if isinstance(e, websockets.exceptions.ConnectionClosed):
+                logger.info(
+                    "[AgentWebSocketServer] 连接已关闭: request_id=%s: %s",
+                    request.request_id,
+                    e,
+                )
+                return
             logger.exception(
                 "[AgentWebSocketServer] 处理请求失败: request_id=%s: %s",
                 request.request_id,
                 e,
             )
-            error_text = str(e)
-            async with send_lock:
-                if request.is_stream:
-                    err_chunk = AgentResponseChunk(
-                        request_id=request.request_id,
-                        channel_id=request.channel_id,
-                        payload={
-                            "event_type": "chat.error",
-                            "error": error_text,
-                        },
-                        is_complete=True,
-                    )
-                    wire = encode_agent_chunk_for_wire(
-                        err_chunk,
-                        response_id=request.request_id,
-                        sequence=0,
-                    )
-                else:
-                    error_resp = AgentResponse(
-                        request_id=request.request_id,
-                        channel_id=request.channel_id,
-                        ok=False,
-                        payload={"error": error_text},
-                    )
-                    wire = encode_agent_response_for_wire(
-                        error_resp, response_id=request.request_id
-                    )
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+            try:
+                async with send_lock:
+                    if request.is_stream:
+                        err_chunk = AgentResponseChunk(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            payload={
+                                "event_type": "chat.error",
+                                "error": str(e),
+                            },
+                            is_complete=True,
+                        )
+                        wire = encode_agent_chunk_for_wire(
+                            err_chunk,
+                            response_id=request.request_id,
+                            sequence=0,
+                        )
+                    else:
+                        error_resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": str(e)},
+                        )
+                        wire = encode_agent_response_for_wire(
+                            error_resp, response_id=request.request_id
+                        )
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+            except Exception as send_err:
+                logger.warning(
+                    "[AgentWebSocketServer] 错误回写失败: request_id=%s: %s",
+                    request.request_id,
+                    send_err,
+                )
         finally:
             _tp_reset(_ext_token)
 
