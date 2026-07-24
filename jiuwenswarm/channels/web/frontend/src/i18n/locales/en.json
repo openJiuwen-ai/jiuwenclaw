@@ -1048,6 +1048,9 @@
       "noResults": "No matching templates found. Try a different keyword.",
       "noResultsJobs": "No matching tasks found. Try a different keyword."
     },
+    "filter": {
+      "reset": "Reset"
+    },
     "table": {
       "name": "Name",
       "project": "Project",
