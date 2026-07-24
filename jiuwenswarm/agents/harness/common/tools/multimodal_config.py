@@ -10,6 +10,92 @@
 import os
 from typing import Any
 
+from jiuwenswarm.common.config import resolve_env_vars
+
+# Full env reload snapshots from clients include main LLM credentials.
+_FULL_ENV_SNAPSHOT_MARKERS = ("API_KEY", "MODEL_NAME")
+
+# Anchor key per multimodal group; omission in a full snapshot means the group was removed.
+MULTIMODAL_ENV_ANCHOR_KEYS: dict[str, str] = {
+    "image_gen": "IMAGE_GEN_API_KEY",
+    "vision": "VISION_API_KEY",
+    "audio": "AUDIO_API_KEY",
+    "video": "VIDEO_API_KEY",
+}
+
+MULTIMODAL_ENV_GROUP_KEYS: dict[str, tuple[str, ...]] = {
+    "image_gen": (
+        "IMAGE_GEN_API_KEY",
+        "IMAGE_GEN_API_BASE",
+        "IMAGE_GEN_MODEL_NAME",
+        "IMAGE_GEN_PROVIDER",
+    ),
+    "vision": (
+        "VISION_API_KEY",
+        "VISION_API_BASE",
+        "VISION_MODEL_NAME",
+        "VISION_PROVIDER",
+    ),
+    "audio": (
+        "AUDIO_API_KEY",
+        "AUDIO_API_BASE",
+        "AUDIO_MODEL_NAME",
+        "AUDIO_PROVIDER",
+    ),
+    "video": (
+        "VIDEO_API_KEY",
+        "VIDEO_API_BASE",
+        "VIDEO_MODEL_NAME",
+        "VIDEO_PROVIDER",
+    ),
+}
+
+
+def is_full_env_reload_snapshot(env: dict[str, Any] | None) -> bool:
+    """True when env looks like a full credential snapshot (not a partial patch)."""
+    if not isinstance(env, dict) or not env:
+        return False
+    return all(marker in env for marker in _FULL_ENV_SNAPSHOT_MARKERS)
+
+
+def _multimodal_anchor_was_active(
+    anchor: str,
+    previous_env: dict[str, Any] | None,
+    active_env: dict[str, Any] | None,
+) -> bool:
+    if isinstance(previous_env, dict):
+        prev = previous_env.get(anchor)
+        if prev is not None and str(prev).strip():
+            return True
+    if isinstance(active_env, dict):
+        current = active_env.get(anchor)
+        if current is not None and str(current).strip():
+            return True
+    return False
+
+
+def infer_multimodal_env_removals(
+    previous_env: dict[str, Any] | None,
+    new_env: dict[str, Any] | None,
+    *,
+    active_env: dict[str, Any] | None = None,
+) -> dict[str, None]:
+    """Infer multimodal env keys to clear when frontend omits them from a full reload."""
+    if not is_full_env_reload_snapshot(new_env):
+        return {}
+    if not isinstance(new_env, dict):
+        return {}
+    removals: dict[str, None] = {}
+    for _group, keys in MULTIMODAL_ENV_GROUP_KEYS.items():
+        anchor = keys[0]
+        if anchor in new_env:
+            continue
+        if not _multimodal_anchor_was_active(anchor, previous_env, active_env):
+            continue
+        for key in keys:
+            removals[key] = None
+    return removals
+
 
 def _parse_bool(val: Any, default: bool = False) -> bool:
     if val is None:
@@ -84,7 +170,8 @@ def dedicated_multimodal_model_configured(
     if not isinstance(config_base, dict):
         return False
     mc = _get_model_config(config_base, model_type)
-    api_key = str(mc.get("api_key") or "").strip()
+    raw_api_key = mc.get("api_key")
+    api_key = str(resolve_env_vars(raw_api_key) if raw_api_key is not None else "").strip()
     return bool(api_key)
 
 

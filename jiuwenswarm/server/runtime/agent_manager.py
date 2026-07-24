@@ -480,7 +480,26 @@ class AgentManager:
         /new_session 才恢复.
         """
         async with self._reload_lock:
-            self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
+            previous_env = dict(self._latest_env_overrides) if self._latest_env_overrides else None
+            new_env = dict(env) if isinstance(env, dict) else {}
+            try:
+                from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
+                    infer_multimodal_env_removals,
+                )
+
+                omission_removals = infer_multimodal_env_removals(
+                    previous_env,
+                    new_env,
+                    active_env=dict(os.environ),
+                )
+                for env_key in omission_removals:
+                    os.environ.pop(str(env_key), None)
+            except Exception as exc:
+                logger.debug(
+                    "[AgentManager] multimodal env omission reconcile skipped: %s",
+                    exc,
+                )
+            self._latest_env_overrides = new_env
             for env_key, env_value in self._latest_env_overrides.items():
                 key = str(env_key)
                 if env_value is None:
