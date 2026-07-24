@@ -1309,22 +1309,33 @@ def _persist_team_file_monitor_roots(session_id: str, team_spec: Any) -> None:
 
         metadata = _read_metadata(session_id, cache_bust=True)
         if not metadata:
-            # metadata.json 尚未初始化: 此时无法持久化 team_file_monitor_roots。
-            # 读取侧 get_session_extra_history_roots 会基于 team_name 兜底推断标准
-            # 布局路径,功能不丢失,但记录 warning 便于排查 metadata 初始化时序问题。
-            logger.warning(
-                "[TeamHelpers] cannot persist team_file_monitor_roots: "
-                "metadata not initialized, session=%s",
-                session_id,
-            )
-            return
+            for _ in range(3):
+                time.sleep(0.05)
+                metadata = _read_metadata(session_id, cache_bust=True)
+                if metadata:
+                    break
+            if not metadata:
+                # metadata.json 尚未初始化: 此时无法持久化 team_file_monitor_roots。
+                # 读取侧 get_session_extra_history_roots 会基于 team_name 兜底推断标准
+                # 布局路径,功能不丢失,但记录 warning 便于排查 metadata 初始化时序问题。
+                logger.warning(
+                    "[TeamHelpers] cannot persist team_file_monitor_roots: "
+                    "metadata not initialized, session=%s",
+                    session_id,
+                )
+                return
         existing = metadata.get("team_file_monitor_roots")
         # 直接替换而非合并: team_spec 是当前 team 组成的权威来源,
         # 合并旧 root 会导致已移除成员的 workspace 路径累积无法清理。
         if roots == existing:
             return
         metadata["team_file_monitor_roots"] = roots
-        _enqueue_write(session_id, metadata, preserve_pin_fields=True)
+        _enqueue_write(
+            session_id,
+            metadata,
+            preserve_pin_fields=True,
+            sync_write=True,
+        )
     except Exception as exc:  # noqa: BLE001
         # 写盘失败会影响 last_turn 文件追踪(读取侧只能靠 team_name 兜底推断,
         # 无法覆盖 independent_member_workspace 等非标准布局),升级为 warning

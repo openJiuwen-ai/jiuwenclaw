@@ -3941,6 +3941,7 @@ def test_workflow_updated_to_team_events_first_sight_terminal_spawns_then_status
 def test_persist_team_file_monitor_roots_replaces_stale_roots(monkeypatch: pytest.MonkeyPatch) -> None:
     """_persist_team_file_monitor_roots 应替换旧 root,而非累积合并。"""
     written: list[dict[str, Any]] = []
+    write_kwargs: list[dict[str, Any]] = []
 
     def _fake_read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
         return {
@@ -3952,6 +3953,7 @@ def test_persist_team_file_monitor_roots_replaces_stale_roots(monkeypatch: pytes
         session_id: str, metadata: dict[str, Any], **kwargs: Any
     ) -> None:
         written.append(metadata)
+        write_kwargs.append(kwargs)
 
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata._read_metadata",
@@ -3997,6 +3999,8 @@ def test_persist_team_file_monitor_roots_replaces_stale_roots(monkeypatch: pytes
     assert str(home / "workspaces" / "worker_workspace") in persisted_roots
     # 漏洞4修复: independent_member_workspace 路径也应被收集
     assert str(home / "worker_workspace") in persisted_roots
+    assert write_kwargs[0]["sync_write"] is True
+    assert write_kwargs[0]["preserve_pin_fields"] is True
 
 
 def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
