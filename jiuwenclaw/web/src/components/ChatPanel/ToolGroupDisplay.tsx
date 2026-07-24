@@ -34,6 +34,7 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
   const { toolCall, result, status } = execution;
   const isTimeout = status === 'timeout';
   const isError = status === 'error';
+  const isCancelled = status === 'cancelled';
   const isSuccess = status === 'completed' && !(result && result.result && result.result.includes('success=False'));
 
   
@@ -75,7 +76,7 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
           <div className="flex items-center gap-4">
             <span className={clsx(
               'tool-pair-icon',
-              isSuccess ? 'success' : isError ? 'error' : isTimeout ? 'warning' : 'pending'
+              isSuccess ? 'success' : isError ? 'error' : isTimeout || isCancelled ? 'warning' : 'pending'
             )}
             style={{ width: '32px', height: '32px' }}
             >
@@ -85,7 +86,7 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                 </svg>
               ) : isError ? (
                 '❌'
-              ) : isTimeout ? (
+              ) : isTimeout || isCancelled ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M12 3C7.029 3 3 7.029 3 12s4.029 9 9 9 9-4.029 9-9-4.029-9-9-9z" />
                 </svg>
@@ -239,8 +240,21 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
             </div>
           )}
 
+          {!result && isCancelled && (
+            <div
+              className="flex items-center gap-3 p-4 rounded-lg"
+              style={{
+                backgroundColor: 'var(--warn-subtle)',
+                border: '1px solid var(--warn)',
+                color: 'var(--warn)',
+              }}
+            >
+              <span className="font-medium">{t('chatUi.toolResult.cancelled')}</span>
+            </div>
+          )}
+
           {/* 等待状态 */}
-          {!result && !isTimeout && (
+          {!result && !isTimeout && !isCancelled && (
             <div
               className="flex items-center gap-3 p-4 rounded-lg"
               style={{
@@ -269,6 +283,7 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
   const hasResult = !!result;
   const isTimeout = status === 'timeout';
   const isError = status === 'error';
+  const isCancelled = status === 'cancelled';
   const isSuccess = status === 'completed' && !(result && result.result && result.result.includes('success=False'));
   const resultSummary = result
     ? (result.summary || (isSuccess ? t('chatUi.toolResult.success') : '❌'))
@@ -285,7 +300,7 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
         <div className="tool-pair-header" onClick={() => setShowModal(true)}>
           <span className={clsx(
             'tool-pair-icon',
-            isSuccess ? 'success' : isError ? 'error' : isTimeout ? 'warning' : 'pending'
+            isSuccess ? 'success' : isError ? 'error' : isTimeout || isCancelled ? 'warning' : 'pending'
           )}>
             {isSuccess ? (
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -295,7 +310,7 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
-            ) : isTimeout ? (
+            ) : isTimeout || isCancelled ? (
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M12 3C7.029 3 3 7.029 3 12s4.029 9 9 9 9-4.029 9-9-4.029-9-9-9z" />
               </svg>
@@ -343,6 +358,11 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
           {!hasResult && isTimeout && (
             <span className="tool-pair-result-badge warning">
               {t('chatUi.toolResult.timeout')}
+            </span>
+          )}
+          {!hasResult && isCancelled && (
+            <span className="tool-pair-result-badge warning">
+              {t('chatUi.toolResult.cancelled')}
             </span>
           )}
           <span className="tool-pair-toggle">▶</span>

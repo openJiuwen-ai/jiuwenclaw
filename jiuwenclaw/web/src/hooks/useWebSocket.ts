@@ -166,6 +166,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     addToolCall,
     addToolResult,
     markTimedOutExecutions,
+    markPendingExecutionsCancelled,
     updateSubtask,
     clearSubtasks,
     clearMessages,
@@ -1040,6 +1041,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           setProcessing(false);
           setThinking(false);
           activeRequestIdRef.current = null;
+          if (resultPayload.success) {
+            markPendingExecutionsCancelled();
+            clearSubtasks();
+            stopStreaming();
+          }
         } else if (resultPayload.intent === 'supplement') {
           setPaused(false);
         }
@@ -1237,6 +1243,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     clearSubtasks,
     handleConnectionAck,
     handleTtsPlayback,
+    markPendingExecutionsCancelled,
     setMode,
     setPaused,
     setPendingQuestion,

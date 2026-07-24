@@ -825,6 +825,7 @@
       "success": "完成",
       "failed": "失败",
       "timeout": "执行超时",
+      "cancelled": "已停止",
       "running": "执行中...",
       "arguments": "参数",
       "result": "结果",

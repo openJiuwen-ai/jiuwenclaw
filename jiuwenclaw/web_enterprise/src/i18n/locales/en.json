@@ -825,6 +825,7 @@
       "success": "done",
       "failed": "failed",
       "timeout": "Execution timed out",
+      "cancelled": "Stopped",
       "running": "Running...",
       "arguments": "Arguments",
       "result": "Result",

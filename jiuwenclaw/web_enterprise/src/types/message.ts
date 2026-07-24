@@ -56,7 +56,7 @@ export interface ToolResult {
   summary?: string;  // 结果摘要
 }
 
-export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error';
+export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error' | 'cancelled';
 
 export interface ToolExecution {
   toolCallId: string;
@@ -67,6 +67,7 @@ export interface ToolExecution {
   updatedAt: string;
   timeoutAt: string;
   timedOutAt?: string;
+  cancelledAt?: string;
   resultArrivedAfterTimeout?: boolean;
 }
 

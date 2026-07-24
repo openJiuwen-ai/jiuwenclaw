@@ -152,6 +152,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     addToolCall,
     addToolResult,
     markTimedOutExecutions,
+    markPendingExecutionsCancelled,
     updateSubtask,
     clearSubtasks,
     clearMessages,
@@ -958,6 +959,11 @@ webClient.on('chat.tool_call', ({ payload }) => {
           setPaused(false);
           setProcessing(false);
           setThinking(false);
+          if (resultPayload.success) {
+            markPendingExecutionsCancelled();
+            clearSubtasks();
+            stopStreaming();
+          }
         } else if (resultPayload.intent === 'supplement') {
           setPaused(false);
         }
@@ -1372,6 +1378,7 @@ webClient.on('harness.session_finished', ({ payload }) => {
     clearSubtasks,
     handleConnectionAck,
     handleTtsPlayback,
+    markPendingExecutionsCancelled,
     setMode,
     setPaused,
     setPendingQuestion,

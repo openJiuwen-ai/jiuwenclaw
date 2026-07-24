@@ -85,6 +85,7 @@ interface ChatState {
   addToolCall: (toolCall: ToolCall, options?: { startedAt?: string }) => void;
   addToolResult: (toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: () => void;
+  markPendingExecutionsCancelled: () => void;
   updateSubtask: (payload: SubtaskUpdatePayload) => void;
   clearSubtasks: () => void;
   clearMessages: () => void;
@@ -395,6 +396,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ...state,
         toolExecutions: nextExecutions,
       };
+    });
+  },
+
+  markPendingExecutionsCancelled: () => {
+    const cancelledAt = new Date().toISOString();
+    set((state) => {
+      let changed = false;
+      const nextExecutions = new Map(state.toolExecutions);
+      for (const [toolCallId, execution] of nextExecutions) {
+        if (execution.status !== 'pending') {
+          continue;
+        }
+        changed = true;
+        nextExecutions.set(toolCallId, {
+          ...execution,
+          status: 'cancelled',
+          cancelledAt,
+          updatedAt: cancelledAt,
+        });
+      }
+      return changed ? { toolExecutions: nextExecutions } : state;
     });
   },
 
