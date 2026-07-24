@@ -470,7 +470,14 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       goToPage(1);
       void reloadCronStore();
     } catch (createError) {
-      const message = createError instanceof Error ? createError.message : t('cron.errors.createFailed');
+      // 前端 cronExprValidation.ts 是逐字段本地校验，理论上仍可能漏判后端 croniter 实际支持/
+      // 不支持的某种写法（见 bugfix 2026072401/bug010 第2轮分析：两边校验规则天然可能不同步）。
+      // 这里把后端 cron.job.create 失败时返回的具体原因（webClient 已经把 WS 响应里的
+      // error 字段原样放进 Error.message，见 services/webClient.ts resolvePending）拼进提示里，
+      // 而不是只显示一句笼统的"创建任务失败"，这样即使前端校验漏放行了一条非法表达式，用户在
+      // 提交时也能看到后端到底为什么拒绝，而不是无从下手。
+      const reason = createError instanceof Error ? createError.message.trim() : '';
+      const message = reason ? t('cron.errors.createFailedWithReason', { reason }) : t('cron.errors.createFailed');
       setError(message);
     }
   }
@@ -505,7 +512,10 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       goToPage(1);
       void reloadCronStore();
     } catch (updateError) {
-      const message = updateError instanceof Error ? updateError.message : t('cron.errors.updateFailed');
+      // 同 handleCreateSubmit：把后端 cron.job.update 失败时的具体原因透出，而不是只显示笼统的
+      // "更新任务失败"（见 bugfix 2026072401/bug010 第2轮分析）。
+      const reason = updateError instanceof Error ? updateError.message.trim() : '';
+      const message = reason ? t('cron.errors.updateFailedWithReason', { reason }) : t('cron.errors.updateFailed');
       setError(message);
     }
   }

@@ -1,6 +1,8 @@
 // 7段式 cron 表达式校验（croniter 语法，second_at_beginning=True），原样搬自旧 CronPanel/index.tsx，
 // i18n.errors.cron* key 沿用；周字段范围已按 croniter 实测结果修正（见下方说明）。
 
+import { normalizeWeekAlphas } from './cronWeekAlpha';
+
 function isValidCronField(value: string, min: number, max: number, stepDivisor: number | null, allowQuestion: boolean = false, allowLast: boolean = false): { valid: boolean; error?: string } {
   if (value === '*') return { valid: true };
   if (allowQuestion && value === '?') return { valid: true };
@@ -50,12 +52,21 @@ function isValidCronRange(range: string, min: number, max: number): boolean {
   return true;
 }
 
+// 周字段英文缩写（SUN/MON/TUE/WED/THU/FRI/SAT，大小写不敏感）的归一化逻辑抽到了
+// ./cronWeekAlpha.ts，跟 scheduleConvert.ts（cron 表达式 <-> 可视化表单双向解析）共用一套映射
+// 规则，避免两处各写一份、后续又漏改其中一处。
+
 // 周字段专用校验：在普通 isValidCronField 的基础上，额外接受"每月第几周星期几"用到的
-// `{dow}#{1-5}`（第几周）和 `L{dow}`（最后一周）形状（见 scheduleConvert.ts / plan.md §2.3.8）。
-// 这两种形状是"整段"匹配（不像普通数字/区间/步长那样可以被通用逻辑复用），所以单独判断。
+// `{dow}#{1-5}`（第几周）和 `L{dow}`（最后一周）形状（见 scheduleConvert.ts / plan.md §2.3.8），
+// 以及 croniter 原生支持的英文缩写（SUN/MON/TUE/WED/THU/FRI/SAT，大小写不敏感，见上方
+// normalizeWeekAlphas；bugfix 2026072401/bug010：此前只认数字，遗漏了这条合法语法，导致对话
+// 方式创建的周期任务能用缩写、手动表单却拒绝同样的表达式）。
+// `{dow}#{1-5}`/`L{dow}` 这两种形状是"整段"匹配（不像普通数字/区间/步长那样可以被通用逻辑复
+// 用），所以单独判断。
 function isValidWeekField(value: string): { valid: boolean; error?: string } {
   if (value === '*' || value === '?') return { valid: true };
-  const parts = value.split(',');
+  const normalized = normalizeWeekAlphas(value);
+  const parts = normalized.split(',');
   for (const part of parts) {
     // 含 # 或以 L 开头的段必须严格匹配"第几周"/"最后一周"形状，不能落到下面的通用数字解析——
     // 否则像 "1#9"（n 超出 1-5 合法范围）会被 parseInt 只认前面的 "1" 而误判成合法
