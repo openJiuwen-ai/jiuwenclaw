@@ -637,7 +637,7 @@ react:
       - reload_original_context_messages
       - load_qa_index                 # 展开指定 QA 块内「概览+逐 round 目录」；非 Selector 选块
       - deepresearch_run_task
-      - skill_acceleration_exec
+      - skill_turbo_tool
     subagents:
       enabled: true
       inherit_parent_eager_tools: true
@@ -654,6 +654,8 @@ react:
   skill_turbo:
     # 开启后 agent 模式请求会先尝试 SkillTurbo，未命中/失败自动回落现有 DeepAgent。
     enabled: true
+    # online=逐节点 skill_turbo_tool（默认）；batch=整图 skill_acceleration_exec
+    skill_turbo_execution_mode: online
     # [TEMP-EXTERNAL-SKILL] PPT skill 的外部目录名（与原版 pptx-craft 区分）。
     # 测试在 skill_root 下放入该名称的 skill 子目录即可。
     skill_name: pptx-craft
@@ -948,6 +950,7 @@ permissions:
     cron_toggle_job: allow
     cron_preview_job: allow
     skill_acceleration_exec: ask
+    skill_turbo_tool: ask
 
   rules:
     - id: shell_allow_dir
