@@ -42,7 +42,7 @@ import {
   useWorkspaceStore,
   useCronStore,
 } from '../stores';
-import type { TeamTask, TeamTaskStatus, TeamTaskUpsert } from '../stores/sessionStore';
+import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
 import {
   fetchTtsAudio,
@@ -343,25 +343,6 @@ function getConnectSignature(options: WebConnectOptions): string {
   });
 }
 
-const TEAM_TASK_STATUS_SET = new Set<TeamTaskStatus>([
-  'pending',
-  'blocked',
-  'planning',
-  'in_progress',
-  'in_review',
-  'completed',
-  'cancelled',
-]);
-
-function normalizeTeamTaskStatus(
-  status: unknown,
-  fallback: TeamTaskStatus = 'pending'
-): TeamTaskStatus {
-  return typeof status === 'string' && TEAM_TASK_STATUS_SET.has(status as TeamTaskStatus)
-    ? status as TeamTaskStatus
-    : fallback;
-}
-
 function pickString(...values: unknown[]) {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) {
@@ -423,69 +404,6 @@ function getPayloadRequestId(payload: Record<string, unknown>): string | undefin
   return undefined;
 }
 
-function normalizeStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const normalized = value.filter(
-    (item): item is string => typeof item === 'string' && item.trim().length > 0
-  );
-  return normalized.length ? normalized : undefined;
-}
-
-function normalizeTaskEvent(value: unknown): TeamTaskUpsert | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const raw = value as Record<string, unknown>;
-  const taskId = pickString(raw.task_id, raw.id);
-  if (!taskId) {
-    return null;
-  }
-  // Status is resolved server-side (swarm layer) and read directly here — the
-  // frontend no longer derives it from the event type. An absent status means
-  // "no change"; the store preserves the task's existing status.
-  const rawStatus = pickString(raw.status);
-  return {
-    task_id: taskId,
-    title: pickString(raw.title, raw.name, raw.description),
-    content: pickString(raw.content),
-    status: rawStatus ? normalizeTeamTaskStatus(rawStatus) : undefined,
-    assignee: pickString(raw.assignee, raw.member_id, raw.claimed_by, raw.claimedBy, raw.from_member),
-    team_id: pickString(raw.team_id),
-    timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
-    skills: normalizeStringArray(raw.skills),
-    files: normalizeStringArray(raw.files),
-  };
-}
-
-function normalizeTaskRecord(
-  value: unknown,
-  fallbackStatus: TeamTaskStatus = 'pending'
-): TeamTask | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const raw = value as Record<string, unknown>;
-  const taskId = pickString(raw.task_id, raw.id);
-  if (!taskId) {
-    return null;
-  }
-  const title = pickString(raw.title, raw.name, raw.description);
-  const content = pickString(raw.content);
-  return {
-    task_id: taskId,
-    title,
-    content,
-    status: normalizeTeamTaskStatus(raw.status, fallbackStatus),
-    assignee: pickString(raw.assignee, raw.member_id, raw.claimed_by, raw.claimedBy, raw.from_member),
-    team_id: pickString(raw.team_id),
-    timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
-    skills: normalizeStringArray(raw.skills),
-    files: normalizeStringArray(raw.files),
-  };
-}
-
 function parseShutdownMemberName(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -512,38 +430,16 @@ function getShutdownMemberFromToolResult(toolResult: ToolResult): string | undef
   return parseShutdownMemberName(toolResult.result) || parseShutdownMemberName(toolResult.summary);
 }
 
-function upsertTaskRecords(sessionId: string, values: unknown, fallbackStatus: TeamTaskStatus = 'pending') {
-  if (!Array.isArray(values)) {
-    const task = normalizeTaskRecord(values, fallbackStatus);
-    if (task) {
-      useSessionStore.getState().upsertTeamTask(sessionId, task);
-    }
-    return;
-  }
-  values.forEach((item) => {
-    const task = normalizeTaskRecord(item, fallbackStatus);
-    if (task) {
-      useSessionStore.getState().upsertTeamTask(sessionId, task);
-    }
-  });
-}
-
-function applyTeamTaskToolCall(sessionId: string, toolCall: ToolCall) {
-  if (toolCall.name === 'create_task') {
-    upsertTaskRecords(sessionId, Array.isArray(toolCall.arguments.tasks) ? toolCall.arguments.tasks : toolCall.arguments);
-    return;
-  }
-  if (toolCall.name === 'update_task') {
-    const taskId = pickString(toolCall.arguments.task_id, toolCall.arguments.id);
-    const existingStatus = taskId
-      ? useSessionStore.getState().getRuntime(sessionId)?.teamTasks.find((task) => task.task_id === taskId)?.status
-      : undefined;
-    upsertTaskRecords(sessionId, toolCall.arguments, existingStatus || 'pending');
-    return;
-  }
-  if (toolCall.name === 'claim_task') {
-    return;
-  }
+// The task card's title/content are now sourced solely from the backend
+// `team.task` events (which carry the DB task_id + body) and the `team.snapshot`
+// fallback — never from tool_call arguments. Building an optimistic card from
+// the tool_call `id` produced a duplicate card because the LLM's `id` differs
+// from the DB task_id AgentCore falls back to (see OpenSpec change
+// `fix-team-task-card-duplicate`, D5). So `create_task` / `update_task` no
+// longer pre-create cards; `claim_task` was already a no-op. This handler is
+// kept as an explicit early return so the call site stays intentional.
+function applyTeamTaskToolCall(_sessionId: string, _toolCall: ToolCall) {
+  return;
 }
 
 interface UseWebSocketOptions {

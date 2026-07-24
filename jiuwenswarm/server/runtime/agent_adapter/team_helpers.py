@@ -969,6 +969,12 @@ async def _broadcast_team_state_snapshot(
                     "task_id": t["task_id"],
                     "status": t["status"],
                     "assignee": t.get("assignee"),
+                    "title": t.get("title"),
+                    "content": t.get("content"),
+                    "title_truncated": t.get("title_truncated"),
+                    "title_original_size": t.get("title_original_size"),
+                    "content_truncated": t.get("content_truncated"),
+                    "content_original_size": t.get("content_original_size"),
                 },
             }
             _persist_team_history_event(channel_id, session_id, event)
