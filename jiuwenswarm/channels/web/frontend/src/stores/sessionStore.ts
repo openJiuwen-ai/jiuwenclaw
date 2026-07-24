@@ -21,6 +21,7 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
+import type { MacroLaneMode } from '../utils/agentMode';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
@@ -47,15 +48,28 @@ function saveModeToStorage(mode: AgentMode) {
   }
 }
 
-const DEFAULT_MODE: AgentMode = 'agent';
+const DEFAULT_MODE: AgentMode = 'agent.plan';
 
 function normalizeAgentMode(mode: unknown): AgentMode {
   if (typeof mode !== 'string') return DEFAULT_MODE;
   const normalized = mode.trim().toLowerCase();
   if (normalized === 'team') return 'team';
   if (normalized === 'auto_harness') return 'auto_harness';
-  // plan / fast 已合并为单一 agent（历史 agent.plan / agent.fast 归一）。
-  return 'agent';
+  if (normalized === 'auto' || normalized === 'agent.auto' || normalized === 'macro.auto') {
+    return 'auto';
+  }
+  if (normalized === 'agent.fast' || normalized === 'fast' || normalized === 'performance') {
+    return 'agent.fast';
+  }
+  if (
+    normalized === 'agent.plan' ||
+    normalized === 'plan' ||
+    normalized === 'planning' ||
+    normalized === 'agent'
+  ) {
+    return 'agent.plan';
+  }
+  return DEFAULT_MODE;
 }
 
 function normalizeSession(session: Session): Session {
@@ -267,6 +281,8 @@ export interface TeamMemberExecutionEvent {
  */
 export interface SessionRuntime {
   mode: AgentMode;
+  /** Concrete MACRO lane chosen when UI mode is Auto (null until first route). */
+  lastMacroRoutedMode: MacroLaneMode | null;
   selectedModelName: string | null;
   projectDirectory: string | null;
   contextCompressionRate: number;
@@ -288,6 +304,7 @@ export interface SessionRuntime {
 function createEmptyRuntime(): SessionRuntime {
   return {
     mode: loadModeFromStorage(),
+    lastMacroRoutedMode: null,
     selectedModelName: (() => {
       if (typeof localStorage === 'undefined') return null;
       try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch { return null; }
@@ -348,6 +365,7 @@ interface SessionState {
 
   // B 类 actions（加 sessionId）
   setMode: (sessionId: string, mode: AgentMode) => void;
+  setLastMacroRoutedMode: (sessionId: string, mode: MacroLaneMode | null) => void;
   setProjectDirectory: (sessionId: string, directory: string | null) => void;
   setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
@@ -427,7 +445,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const state = get();
     const runtime = state.runtimes[sessionId];
     if (!runtime) return null;
-    if (runtime.mode === 'team') return state.defaultModelName;
+    const effectiveMode =
+      runtime.mode === 'auto' && runtime.lastMacroRoutedMode
+        ? runtime.lastMacroRoutedMode
+        : runtime.mode;
+    if (effectiveMode === 'team') return state.defaultModelName;
     // 不再原样吐出 runtime.selectedModelName（可能是模型改名后失配的陈旧字符串），
     // 而是走与 UI 显示（ModelSelector）相同的解析逻辑，确保发给后端的 model_name
     // 参数与界面上显示的模型永远一致（bug003）。
@@ -513,7 +535,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, mode: normalizedMode },
+          [sessionId]: {
+            ...runtime,
+            mode: normalizedMode,
+            // Clear stale Auto route when the user picks a concrete (or new Auto) mode.
+            lastMacroRoutedMode: null,
+          },
+        },
+      };
+    });
+  },
+
+  setLastMacroRoutedMode: (sessionId, mode) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, lastMacroRoutedMode: mode },
         },
       };
     });

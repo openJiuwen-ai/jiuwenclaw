@@ -8614,6 +8614,61 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] 标记 todo cancelled 失败: %s", exc)
             return None
 
+    async def _resolve_macro_mode_for_request(
+        self,
+        request: AgentRequest,
+        *,
+        query: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Resolve Auto MACRO mode into a concrete lane; leave forced modes alone.
+
+        Returns:
+            (resolved_mode, routing_payload_or_none). Payload is set when Auto ran.
+        """
+        from jiuwenswarm.agents.harness.macro_routing import (
+            is_auto_mode,
+            macro_mode_label,
+            route_macro_mode,
+        )
+        from jiuwenswarm.common.config import get_config
+
+        params = request.params if isinstance(request.params, dict) else {}
+        requested = str(params.get("mode") or "agent.plan").strip()
+        if not is_auto_mode(requested):
+            return requested or "agent.plan", None
+
+        decision = await route_macro_mode(
+            query,
+            requested_mode=requested,
+            config_base=get_config(),
+        )
+        resolved = decision.mode
+        label = macro_mode_label(resolved)
+        # Mutate request params so downstream team/agent branching sees the concrete mode.
+        params = dict(params)
+        params["mode"] = resolved
+        params["macro_mode_requested"] = "auto"
+        params["macro_routing"] = decision.to_dict()
+        request.params = params
+        if isinstance(request.metadata, dict):
+            request.metadata = dict(request.metadata)
+            request.metadata["macro_routing"] = decision.to_dict()
+            request.metadata["mode"] = resolved
+        print(
+            f"[MacroRouter] Selected: {label} "
+            f"(source={decision.source}, confidence={decision.confidence:.2f})",
+            flush=True,
+        )
+        logger.info(
+            "[MacroRouter] Selected: %s (%s) conf=%.2f source=%s rationale=%s",
+            label,
+            resolved,
+            decision.confidence,
+            decision.source,
+            decision.rationale,
+        )
+        return resolved, decision.to_dict()
+
     async def process_message_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AgentResponse:
@@ -8648,7 +8703,8 @@ class JiuWenSwarmDeepAdapter:
 
         session_id = request.session_id or "default"
         query = request.params.get("query", "")
-        mode = request.params.get("mode", "agent")
+        mode, _macro = await self._resolve_macro_mode_for_request(request, query=query)
+        mode = request.params.get("mode", mode)
 
         slash_result = await self._handle_slash_command(
             query,
@@ -8964,7 +9020,22 @@ class JiuWenSwarmDeepAdapter:
         rid = request.request_id
         cid = request.channel_id
         query = request.params.get("query", "")
-        mode = request.params.get("mode", "agent")
+        mode, macro_routing = await self._resolve_macro_mode_for_request(request, query=query)
+        mode = request.params.get("mode", mode)
+
+        if macro_routing:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "macro.routing",
+                    "routing": macro_routing,
+                    "mode": mode,
+                    "session_id": session_id,
+                    "request_id": rid,
+                },
+                is_complete=False,
+            )
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):

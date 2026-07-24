@@ -474,7 +474,12 @@ function AppContent() {
       || Boolean(project.project_dir && project.project_dir === session.project_dir)
     )) ?? null;
   }, [currentSession, projects, sessions, sessionId]);
-  const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent');
+  const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent.plan');
+  const lastMacroRoutedMode = useSessionStore(
+    (s) => s.runtimes[sessionId]?.lastMacroRoutedMode ?? null,
+  );
+  const effectiveMode =
+    mode === 'auto' && lastMacroRoutedMode ? lastMacroRoutedMode : mode;
   const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
   const teamMembers = useSessionStore((s) => s.runtimes[sessionId]?.teamMembers ?? []);
@@ -487,11 +492,11 @@ function AppContent() {
   }, [sessionId]);
 
   const handleToggleDetailPanel = useCallback((expanded: boolean) => {
-    if (expanded && mode !== 'team' && teamAreaActiveTab === 'team') {
+    if (expanded && effectiveMode !== 'team' && teamAreaActiveTab === 'team') {
       setTeamAreaActiveTab('planning');
     }
     setTeamAreaExpanded(expanded);
-  }, [mode, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
+  }, [effectiveMode, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
 
   const handleOpenCodeReview = useCallback((target: CodeReviewTarget) => {
     setCodeReviewTarget(target);
@@ -565,7 +570,7 @@ function AppContent() {
   const replaceHistoryMessages = useChatStore((s) => s.replaceHistoryMessages);
   const restoreReasoningSegments = useChatStore((s) => s.restoreReasoningSegments);
   const isRestoringHistorySession = isLoadingHistory && !historyPagerMeta && messages.length === 0;
-  const isRestoringTeamHistory = mode === 'team' && isRestoringHistorySession;
+  const isRestoringTeamHistory = effectiveMode === 'team' && isRestoringHistorySession;
 
   useEffect(() => {
     if (!serverConfig) {
@@ -1818,13 +1823,17 @@ function AppContent() {
     // 目标是否 active 决定停止按钮要不要顺带把目标转为 paused——约定行为：其它状态
     // （paused/blocked/completed/无目标）下，停止只结束会话，不碰目标本身。
     const isGoalActive = useGoalStore.getState().runtimes[currentSessionId]?.goal?.status === 'active';
-    if (mode === 'team') {
+    if (effectiveMode === 'team') {
       void pause(currentSessionId);
       if (isGoalActive) void pauseGoal(currentSessionId);
       return;
     }
-    // agent 模式下有队列任务时，暂停队列自动发送
-    if (mode === 'agent') {
+    // 单 Agent（Planning / Performance）模式下有队列任务时，暂停队列自动发送
+    if (
+      effectiveMode === 'agent' ||
+      effectiveMode === 'agent.plan' ||
+      effectiveMode === 'agent.fast'
+    ) {
       const runtime = useChatStore.getState().getRuntime(currentSessionId);
       if (runtime && runtime.taskQueue.length > 0) {
         useChatStore.getState().setQueuePaused(currentSessionId, true);
@@ -1832,7 +1841,7 @@ function AppContent() {
     }
     void cancel(currentSessionId);
     if (isGoalActive) void pauseGoal(currentSessionId);
-  }, [cancel, mode, pause, pauseGoal]);
+  }, [cancel, effectiveMode, pause, pauseGoal]);
 
   /**
    * 删除目标：active 时除了清目标，还要顺带结束当前会话输出——复用停止按钮同一套中断调用
@@ -1845,13 +1854,13 @@ function AppContent() {
       const isGoalActive = useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
       void clearGoal(sessionId);
       if (!isGoalActive) return;
-      if (mode === 'team') {
+      if (effectiveMode === 'team') {
         void pause(sessionId);
       } else {
         void cancel(sessionId);
       }
     },
-    [cancel, clearGoal, mode, pause]
+    [cancel, clearGoal, effectiveMode, pause]
   );
 
   const handleUserAnswer = useCallback((requestId: string, answers: UserAnswer[], source?: string) => {

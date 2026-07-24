@@ -21,6 +21,7 @@ import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLi
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
 import { projectCreateErrorKey } from '../../multi-session/sidebar/projectCreateErrors';
 import { AGENT_MODE_OPTIONS, PERMISSION_OPTIONS } from '../../config/chatConfig';
+import { isSingleAgentMode } from '../../utils/agentMode';
 import clsx from 'clsx';
 import { PermissionWarningDialog } from './PermissionWarningDialog';
 import { ModelProviderIcon } from '../ModelProviderIcon';
@@ -430,7 +431,10 @@ export function InputArea({
   const isLoadingHistory = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isLoadingHistory ?? false);
   const inputValue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.inputValue ?? '');
   const evolutionStatus = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.evolutionStatus ?? null);
-  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const lastMacroRoutedMode = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.lastMacroRoutedMode ?? null,
+  );
   const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []) as InputAreaTeamMember[];
   const currentSession = useSessionStore((s) => s.currentSession);
   const activeSession = useSessionStore((s) => {
@@ -457,8 +461,8 @@ export function InputArea({
   // 未完成目标：active/paused/blocked 都算，只有 completed（或没有目标）才能再设新目标
   const hasUnfinishedGoal = currentGoal != null && currentGoal.status !== 'completed';
   const isInterruptible = isProcessing || isPaused || isGoalActive;
-  const isAgentMode = mode === 'agent';
-  const isTeamMode = mode === 'team';
+  const isAgentMode = isSingleAgentMode(mode);
+  const isTeamMode = mode === 'team' || (mode === 'auto' && lastMacroRoutedMode === 'team');
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
@@ -1933,7 +1937,7 @@ export function InputArea({
                   : { position: 'fixed', top: modeMenuAnchor.bottom + 10, left: modeMenuAnchor.left, zIndex: 9999 }
                 }
               >
-                {AGENT_MODE_OPTIONS.map((m) => (
+                {AGENT_MODE_OPTIONS.filter((m) => !m.hidden).map((m) => (
                   <button
                     type="button"
                     key={m.value}

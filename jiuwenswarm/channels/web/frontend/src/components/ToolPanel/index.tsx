@@ -212,7 +212,12 @@ export function ToolPanel({
   const contextCompressionRate = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRate ?? 0);
   const contextCompressionBefore = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionBefore ?? null);
   const contextCompressionAfter = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionAfter ?? null);
-  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const lastMacroRoutedMode = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.lastMacroRoutedMode ?? null,
+  );
+  const effectiveMode =
+    mode === 'auto' && lastMacroRoutedMode ? lastMacroRoutedMode : mode;
   const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
   const teamHistoryMessages = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHistoryMessages ?? []);
   const setTeamMembers = useSessionStore((s) => s.setTeamMembers);
@@ -501,7 +506,7 @@ export function ToolPanel({
               <HarnessExtensionTree />
             </div>
           </div>
-        ) : mode === 'team' ? (
+        ) : effectiveMode === 'team' ? (
           /* 团队任务概览和成员列表 */
           <div className="flex-1 overflow-hidden mb-3">
             <div className="overflow-hidden h-full flex flex-col">

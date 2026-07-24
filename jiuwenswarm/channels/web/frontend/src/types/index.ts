@@ -41,7 +41,13 @@ export interface Session {
   last_user_message_at?: number; // 最后一条用户消息时间(Unix时间戳)
 }
 
-export type AgentMode = 'agent' | 'team' | 'auto_harness';
+export type AgentMode =
+  | 'agent'
+  | 'agent.plan'
+  | 'agent.fast'
+  | 'team'
+  | 'auto'
+  | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
 export type Permission = 'default' | 'full_access';
 

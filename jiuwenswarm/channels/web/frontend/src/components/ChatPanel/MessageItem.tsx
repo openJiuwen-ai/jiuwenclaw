@@ -41,6 +41,7 @@ import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
+import { MacroRoutingCard } from './MacroRoutingCard';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -399,6 +400,26 @@ export const MessageItem = memo(function MessageItem({
 
   // 系统消息
   if (role === 'system') {
+	     if (content && content.startsWith('macro.routing:')) {
+	       const [, jsonStr] = content.split('macro.routing:');
+	       try {
+	         const routing = JSON.parse(jsonStr) as {
+	           mode?: string;
+	           confidence?: number;
+	           rationale?: string;
+	           source?: string;
+	           gate_confident?: boolean;
+	         };
+	         return (
+	           <div className="flex justify-center animate-fade-in">
+	             <MacroRoutingCard routing={routing} />
+	           </div>
+	         );
+	       } catch {
+	         // fall through to default system rendering
+	       }
+	     }
+
  	     // 检查是否为 chat.session_result 事件
  	     if (content && content.startsWith('chat.session_result:')) {
  	       console.log('chat.session_result event:', content);

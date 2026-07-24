@@ -46,6 +46,7 @@ import {
 import { isPlanWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
 import { flushPendingGoalObjectiveBubble } from '../features/goalPendingObjectiveBubble';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
+import { isSingleAgentMode, normalizeMacroLaneMode } from '../utils/agentMode';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
 import {
@@ -667,11 +668,25 @@ interface PendingContextCompressionStart {
 }
 
 function normalizeAgentMode(rawMode: unknown): AgentMode {
-  if (typeof rawMode !== 'string') return 'agent';
+  if (typeof rawMode !== 'string') return 'agent.plan';
   const normalized = rawMode.trim().toLowerCase();
   if (normalized === 'team') return 'team';
   if (normalized === 'auto_harness') return 'auto_harness';
-  return 'agent';
+  if (normalized === 'auto' || normalized === 'agent.auto' || normalized === 'macro.auto') {
+    return 'auto';
+  }
+  if (normalized === 'agent.fast' || normalized === 'fast' || normalized === 'performance') {
+    return 'agent.fast';
+  }
+  if (
+    normalized === 'agent.plan' ||
+    normalized === 'plan' ||
+    normalized === 'planning' ||
+    normalized === 'agent'
+  ) {
+    return 'agent.plan';
+  }
+  return 'agent.plan';
 }
 
 function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): string | null {
@@ -681,7 +696,13 @@ function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): stri
     trimmed.startsWith('/evolve ') ||
     trimmed === '/evolve_simplify' ||
     trimmed.startsWith('/evolve_simplify ');
-  if (!isEvolutionCommand || mode === 'agent' || mode === 'team') {
+  if (
+    !isEvolutionCommand ||
+    mode === 'agent' ||
+    mode === 'agent.plan' ||
+    mode === 'agent.fast' ||
+    mode === 'team'
+  ) {
     return null;
   }
   return `${mode} 模式下演进功能不可用。`;
@@ -2973,6 +2994,28 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('goal.updated', payload)) return;
         applyGoalSnapshot(payload);
       }),
+      webClient.on('macro.routing', ({ payload }) => {
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
+        if (shouldDropDuplicatedEvent('macro.routing', payload)) return;
+        const routing = payload.routing;
+        if (!routing || typeof routing !== 'object') return;
+        const requestId =
+          typeof payload.request_id === 'string' && payload.request_id.trim()
+            ? payload.request_id.trim()
+            : `${Date.now()}`;
+        const routedMode = normalizeMacroLaneMode((routing as { mode?: string }).mode);
+        if (routedMode) {
+          useSessionStore.getState().setLastMacroRoutedMode(sessionId, routedMode);
+        }
+        useChatStore.getState().addMessage(sessionId, {
+          id: `macro-routing-${requestId}`,
+          role: 'system',
+          content: `macro.routing:${JSON.stringify(routing)}`,
+          timestamp: new Date().toISOString(),
+          isHarnessMessage: true,
+        });
+      }),
       webClient.on('runtime.accepted', () => {
         // Goal 的 loading 结束统一以 goal.snapshot 为准（文档 §4 中 set/resume 均先于
         // runtime.accepted 下发 goal.snapshot）；这里仅作为通用 ACK 占位，不做任何状态变更，
@@ -3106,7 +3149,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           if (
             !skipAutoDrain &&
-            currentMode === 'agent' &&
+            isSingleAgentMode(currentMode) &&
             !resumeAlreadyCompleted &&
             !queuePaused &&
             taskQueue.length > 0
@@ -3349,7 +3392,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               const runtime = useChatStore.getState().getRuntime(sessionId);
               const taskQueue = runtime?.taskQueue ?? [];
               const queuePaused = runtime?.queuePaused ?? false;
-              if (currentMode === 'agent' && !queuePaused && taskQueue.length > 0) {
+              if (isSingleAgentMode(currentMode) && !queuePaused && taskQueue.length > 0) {
                 const nextTask = taskQueue[0];
                 if (nextTask && sendMessageRef.current) {
                   useChatStore.getState().removeFromTaskQueue(sessionId, nextTask.id);

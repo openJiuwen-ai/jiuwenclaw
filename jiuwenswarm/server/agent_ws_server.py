@@ -601,31 +601,41 @@ def resolve_agent_request_mode(
 ) -> tuple[str, str | None, str]:
     """Resolve request params.mode into manager mode, sub_mode, and canonical value.
 
-    plan / fast 已合并为单一 ``agent`` 模式：任何 ``agent`` / ``agent.plan`` /
-    ``agent.fast`` 请求都归一到 ``agent``（sub_mode=None）。历史裸 ``plan`` /
-    ``fast``（无 ``agent.`` 前缀，如旧 cron job 存量数据）同样归一到 ``agent``，
-    与 CLI ``MODE_ALIASES``、记忆配置 ``_resolve_mode_memory`` 的裸 token 处理保持一致。
+    Rails for plan/fast remain unified under the agent profile, but canonical
+    MACRO lanes (``agent.plan`` / ``agent.fast`` / ``team`` / ``auto``) are kept
+    in ``params.mode`` so Auto routing and the UI can distinguish them.
     """
     raw_value = getattr(raw_mode, "value", raw_mode)
     mode_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
     if not mode_text:
-        mode_text = "agent"
+        mode_text = "agent.plan"
     normalized_work_mode = (
         work_mode.strip().lower() if isinstance(work_mode, str) else ""
     )
 
-    if mode_text in ("plan", "fast"):
+    # MACRO Auto: keep canonical "auto" so the adapter can run the scheduler
+    # before picking plan/fast/team. AgentManager still uses mode "agent".
+    if mode_text in {"auto", "agent.auto", "macro.auto"}:
+        return "auto", None, "auto"
+
+    # Explicit MACRO lanes (and legacy bare tokens) → agent instance, lane label.
+    # work_mode=code still maps into code.normal (develop behavior).
+    if mode_text in {"plan", "planning", "agent.plan"}:
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
-        return "agent", None, "agent"
+        return "agent", None, "agent.plan"
+    if mode_text in {"fast", "performance", "agent.fast"}:
+        if normalized_work_mode == "code":
+            return "code", "normal", "code.normal"
+        return "agent", None, "agent.fast"
+    if mode_text == "agent":
+        # Bare "agent" (pre-MACRO UI) maps to Planning, the product default.
+        if normalized_work_mode == "code":
+            return "code", "normal", "code.normal"
+        return "agent", None, "agent.plan"
 
     parts = mode_text.split(".")
     mode = parts[0] or "agent"
-    if mode == "agent":
-        # 合并模式：忽略历史子模式（plan / fast），统一 canonical "agent"。
-        if normalized_work_mode == "code":
-            return "code", "normal", "code.normal"
-        return "agent", None, "agent"
     if mode == "team":
         sub_mode = parts[1] if len(parts) > 1 and parts[1] else None
         if sub_mode not in {None, "plan"}:
@@ -662,6 +672,13 @@ def resolve_request_runtime_mode(
         resolve_agent_request_mode,
         work_mode=work_mode,
     )
+
+
+def _agent_manager_mode_for_request(mode: str) -> str:
+    """Map request modes that still need the agent-profile instance."""
+    if mode in {"auto", "auto_harness"}:
+        return "agent"
+    return mode
 
 
 def _apply_resolved_mode_to_request(
@@ -1902,7 +1919,7 @@ class AgentWebSocketServer:
         mode_param = request.params.get("mode", "")
         if mode_param:
             mode, sub_mode, _canonical = resolve_agent_request_mode(mode_param)
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
             agent = self._agent_manager.get_agent_nowait(
                 channel_id,
                 mode=agent_mode,
@@ -1946,7 +1963,7 @@ class AgentWebSocketServer:
                 channel_id,
             )
             mode, sub_mode = _apply_resolved_mode_to_request(request)
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
                 mode=agent_mode,
@@ -2226,10 +2243,11 @@ class AgentWebSocketServer:
             request,
             work_mode=runtime_work_mode,
         )
-        agent_mode = "agent" if mode == "auto_harness" else mode
+        agent_mode = _agent_manager_mode_for_request(mode)
+
         requested_project_dir = resolve_request_project_dir(request)
         # [改动] 写盘用 canonical mode（request.params["mode"]，已被规范化为
-        # "agent.plan"/"team" 等），而非一级 mode（"agent"），使磁盘出现你期望的两类值。
+        # "agent.plan"/"team"/"auto" 等），而非一级 mode（"agent"）。
         canonical_mode = (
             request.params.get("mode") if isinstance(request.params, dict) else None
         )
@@ -4895,7 +4913,7 @@ class AgentWebSocketServer:
 
             channel_id = request.channel_id or "default"
             mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
                 mode=agent_mode,
@@ -4994,7 +5012,7 @@ class AgentWebSocketServer:
 
             channel_id = request.channel_id or "default"
             mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
                 mode=agent_mode,
@@ -5041,7 +5059,7 @@ class AgentWebSocketServer:
 
             channel_id = request.channel_id or "default"
             mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
                 mode=agent_mode,
@@ -5079,7 +5097,7 @@ class AgentWebSocketServer:
             params = request.params or {}
             channel_id = request.channel_id or "default"
             mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
 
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
@@ -5148,7 +5166,7 @@ class AgentWebSocketServer:
                 return
 
             mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
 
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
@@ -8317,7 +8335,7 @@ class AgentWebSocketServer:
         try:
             # Get or create the agent instance (auto-create if not exists)
             mode, sub_mode = _apply_resolved_mode_to_request(request)
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
             channel_id = request.channel_id or "web"
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
@@ -8390,7 +8408,7 @@ class AgentWebSocketServer:
             # Get or create the agent instance (auto-create if not exists)
             channel_id = request.channel_id or "web"
             mode, sub_mode = _apply_resolved_mode_to_request(request)
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
                 project_dir=resolve_request_project_dir(request),
@@ -8467,7 +8485,7 @@ class AgentWebSocketServer:
 
         try:
             mode, sub_mode = _apply_resolved_mode_to_request(request)
-            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent_mode = _agent_manager_mode_for_request(mode)
             agent = await self._agent_manager.get_agent(
                 channel_id=request.channel_id,
                 project_dir=resolve_request_project_dir(request),
@@ -8602,7 +8620,7 @@ class AgentWebSocketServer:
             needs_agent = action in ("create", "run", "cancel", "delete", "issue_watch_once")
             if needs_agent:
                 mode, sub_mode = _apply_resolved_mode_to_request(request)
-                agent_mode = "agent" if mode == "auto_harness" else mode
+                agent_mode = _agent_manager_mode_for_request(mode)
                 agent = await self._agent_manager.get_agent(
                     channel_id=request.channel_id or "tui",
                     mode=agent_mode,
