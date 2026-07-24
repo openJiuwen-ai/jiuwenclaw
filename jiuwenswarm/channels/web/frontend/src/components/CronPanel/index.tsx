@@ -437,6 +437,9 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   }
 
   function openTemplateDrawer(tpl: CronTemplateUI) {
+    // 抽屉打开瞬间主动重拉一次项目列表：CronPanel 的 projects 只在挂载时拉取一次，
+    // 停留页面期间新建的项目不会自动同步进来（bug003），这里保证每次打开抽屉都是最新数据
+    void loadProjects();
     setDrawer({ mode: 'template', initial: templateToForm(tpl, t(tpl.titleKey), t(tpl.descriptionKey)) });
   }
 
@@ -524,6 +527,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                 <button
                   onClick={() => {
                     setCreateMenuOpen(false);
+                    // 同 openTemplateDrawer：打开抽屉瞬间重拉一次项目列表，避免拿到挂载时的旧快照
+                    void loadProjects();
                     setDrawer({ mode: 'create' });
                   }}
                   className="block w-full px-3 py-2 text-left text-sm font-semibold text-text hover:bg-bg-hover"
@@ -608,7 +613,14 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             {/* 创建定时任务模块保持在可视区域垂直居中 */}
             <div className="flex flex-1 flex-col items-center justify-center gap-4">
               <img src={emptyIllustration} alt="" className="h-20 w-20" />
-              <button onClick={() => setDrawer({ mode: 'create' })} className="btn !px-4 !py-2">
+              <button
+                onClick={() => {
+                  // 同上：打开抽屉瞬间重拉一次项目列表
+                  void loadProjects();
+                  setDrawer({ mode: 'create' });
+                }}
+                className="btn !px-4 !py-2"
+              >
                 {t('cron.empty.createButton')}
               </button>
             </div>
