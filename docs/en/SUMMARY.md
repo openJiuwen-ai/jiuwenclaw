@@ -20,6 +20,7 @@
   - [Modes](Modes.md)
   - [CLI commands](CLI.md)
   - [Slash Commands Reference](SlashCommands.md)
+  - [Auto-fix PR](AutofixPR.md)
   - [Slash Command Architecture](SlashCommandArchitecture.md)
   - [Tool Permissions & Security](ToolPermissionsSecurity.md)
   - [Heartbeat](Heartbeat.md)

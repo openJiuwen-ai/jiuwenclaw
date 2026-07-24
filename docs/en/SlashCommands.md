@@ -34,7 +34,7 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/evolve_rebuild` | Rebuild `SKILL.md` from archives and evolution records (see below) |
 | `/hooks` | Browse configured hooks (read-only, see below) |
 | `/simplify` | Code simplify review: checks reuse, quality, efficiency and auto-fixes (`code.*` only, see below) |
-| `/autofix-pr` | Fix the current branch's open PR until checks pass and review comments are addressed; auto-detects the forge (GitHub via `gh`, GitCode via REST) (`code.*` only) |
+| `/autofix-pr` | Fix the current branch's open PR until checks pass and review comments are addressed; auto-detects the forge (GitHub via `gh`, GitCode via REST) (`code.*` only, see [Auto-fix PR](AutofixPR.md)) |
 | `/sandbox` | Set sandbox mode (see below) |
 | `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
 | `/auto-harness` | Auto-Harness task management (`run`/`schedule`/`issue`, see below) |

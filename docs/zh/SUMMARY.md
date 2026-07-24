@@ -22,6 +22,7 @@
   - [模式系统](模式系统.md)
   - [命令行指令](命令行指令.md)
   - [Slash 命令速查表](Slash命令表.md)
+  - [自动修复 PR](自动修复PR.md)
   - [Slash 命令体系设计](SLASH_COMMAND_ARCHITECTURE.md)
   - [工具权限与安全防护](工具权限与安全防护.md)
   - [心跳](心跳.md)

@@ -34,7 +34,7 @@
 | `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
 | `/hooks` | 浏览已配置的 hooks（只读，见下文） |
 | `/simplify` | 代码精简审查：检查复用性、质量、效率并自动修复（仅 `code.*`，见下文） |
-| `/autofix-pr` | 修复当前分支的开放 PR，直到检查通过并处理完评审意见；自动识别平台（GitHub 走 `gh`，GitCode 走 REST）（仅 `code.*`） |
+| `/autofix-pr` | 修复当前分支的开放 PR，直到检查通过并处理完评审意见；自动识别平台（GitHub 走 `gh`，GitCode 走 REST）（仅 `code.*`，详见[自动修复 PR](自动修复PR.md)） |
 | `/sandbox` | 设置沙箱模式（见下文） |
 | `/agents` | 管理 Agent 配置（list, get, create, update, enable, disable, delete，见下文） |
 | `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`/`issue`，见下文） |
