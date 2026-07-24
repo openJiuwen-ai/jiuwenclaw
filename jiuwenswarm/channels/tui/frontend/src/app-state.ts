@@ -451,6 +451,14 @@ export class CliPiAppState {
   private reauthPort: ReauthenticationPort | null = null;
   /** UiLifecyclePort；统一顶层关闭路径。 */
   private uiLifecycle: UiLifecyclePort | null = null;
+  /**
+   * Remote 模式：--url 指向远端服务器时为 true。
+   * 本地 PC 路径不可被远端沙箱访问，故请求时不发送本地 project_dir/cwd/trusted_dirs，
+   * 改用 {@link remoteProjectDir}（服务器侧 /home/<user-id>）作为 workspace。
+   */
+  private isRemote = false;
+  /** Remote 模式下的服务器侧 project_dir：/home/<user-id>；非 remote 时为空串。 */
+  private remoteProjectDir = "";
   /** interrupt_result 事件订阅器；等待型取消按 requestId 关联。 */
   private interruptResultListeners = new Set<
     (requestId: string, sessionId: string, success: boolean, message?: string) => void
@@ -618,6 +626,8 @@ export class CliPiAppState {
       taskLifecycle?: TaskLifecyclePort | null;
       reauthPort?: ReauthenticationPort | null;
       uiLifecycle?: UiLifecyclePort | null;
+      isRemote?: boolean;
+      remoteProjectDir?: string;
     },
   ) {
     this.sessionId = cliSession || generateSessionId();
@@ -631,6 +641,8 @@ export class CliPiAppState {
     this.taskLifecycle = supervision?.taskLifecycle ?? null;
     this.reauthPort = supervision?.reauthPort ?? null;
     this.uiLifecycle = supervision?.uiLifecycle ?? null;
+    this.isRemote = supervision?.isRemote ?? false;
+    this.remoteProjectDir = supervision?.remoteProjectDir ?? "";
   }
 
   start(): void {
@@ -1361,15 +1373,32 @@ export class CliPiAppState {
     return this.reauthPort;
   }
 
+  /**
+   * 计算随请求发送的本地上下文路径（project_dir/cwd/trusted_dirs）。
+   * Remote 模式下本地 PC 路径不可被远端沙箱访问，故只发送服务器侧 /home/<user-id>
+   * 作为 project_dir/cwd，不发送 trusted_dirs；非 remote 时沿用本地 trusted_dirs/cwd。
+   */
+  private resolveRequestPaths(): {
+    projectDir: string;
+    cwd: string;
+    trustedDirs: string[];
+  } {
+    if (this.isRemote && this.remoteProjectDir) {
+      return { projectDir: this.remoteProjectDir, cwd: this.remoteProjectDir, trustedDirs: [] };
+    }
+    const trustedDirs = getTrustedDirs();
+    const projectDir = getCurrentProjectDir() || process.cwd();
+    const cwd = getCurrentCwd() || projectDir;
+    return { projectDir, cwd, trustedDirs };
+  }
+
   readonly sendEventOnly = (
     method: string,
     params: Record<string, unknown>,
     isStream = false,
   ): string => {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
-    const trustedDirs = getTrustedDirs();
-    const projectDir = getCurrentProjectDir() || process.cwd();
-    const cwd = getCurrentCwd() || projectDir;
+    const { projectDir, cwd, trustedDirs } = this.resolveRequestPaths();
     this.wsClient.send({
       type: "req",
       id,
@@ -1394,9 +1423,7 @@ export class CliPiAppState {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     // 记录当前命令请求 ID，以便 Ctrl+C 时能立即取消 WS 请求
     this.activeCommandRequestId = id;
-    const trustedDirs = getTrustedDirs();
-    const projectDir = getCurrentProjectDir() || process.cwd();
-    const cwd = getCurrentCwd() || projectDir;
+    const { projectDir, cwd, trustedDirs } = this.resolveRequestPaths();
     try {
       const response = await this.wsClient.request(
         id,
@@ -3102,7 +3129,7 @@ export class CliPiAppState {
   private buildStatusLineJsonInput(): Record<string, unknown> {
     const snapshot = this.getSnapshot();
     const usage = this.getUsageSummary();
-    const cwd = getCurrentCwd() || process.cwd();
+    const { cwd, trustedDirs } = this.resolveRequestPaths();
     return {
       session_id: snapshot.sessionId,
       session_name: snapshot.sessionTitle,
@@ -3126,7 +3153,7 @@ export class CliPiAppState {
       evolution_status: snapshot.evolutionStatus,
       active_subtask_count: snapshot.activeSubtasks.length,
       todo_count: snapshot.todos.length,
-      trusted_dirs: getTrustedDirs(),
+      trusted_dirs: trustedDirs,
       usage: {
         total_input_tokens: usage.total_input_tokens,
         total_output_tokens: usage.total_output_tokens,

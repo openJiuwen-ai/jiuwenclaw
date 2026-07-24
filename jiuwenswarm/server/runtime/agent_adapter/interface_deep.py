@@ -4666,8 +4666,11 @@ class JiuWenSwarmDeepAdapter:
             return
         if self._prompt_attachment_loader is None:
             self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
-            self._prompt_attachment_loader.ensure_layout()
         try:
+            # ensure_layout 失败（如沙箱只读根）不得阻断用户请求：attachment 热加载
+            # 本就标注 non-fatal，且原异常会被上层 finally 的 UnboundLocalError
+            # 掩盖真因。此处吞掉仅告警，让 Runner 流程继续。
+            self._prompt_attachment_loader.ensure_layout()
             await self._prompt_attachment_loader.sync_to_agent(
                 self._instance,
                 session_id=session_id,
@@ -4676,9 +4679,12 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] prompt attachment sync skipped: %s", exc)
 
     def _prompt_attachment_root(self) -> Path:
-        if self._workspace_dir == str(get_agent_workspace_dir()):
-            return get_prompt_attachment_dir()
-        return Path(self._workspace_dir) / "prompt_attachment"
+        # prompt attachment 是 agent 自有运行时状态，应始终落在可写的 agent
+        # 私有工作区（~/.jiuwenswarm/agent/workspace/prompt_attachment），与请求
+        # 的 project_dir/workspace_dir 解耦。后者在沙箱里可能是只读 bind
+        # （如用户工程目录），若在此用作写入根，ensure_layout 的 mkdir 会撞
+        # Errno 30 Read-only file system。详见 [[agentos-sandbox-config-path]]。
+        return get_prompt_attachment_dir()
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
@@ -7377,6 +7383,14 @@ class JiuWenSwarmDeepAdapter:
         collected_content: list[str] = []
         interaction_stream = None
         interaction_stream_abort = True
+        # 提前 import 观测 span 工具：原 import 在 try 内 _sync_prompt_attachments
+        # 之后，若该处抛异常，finally 的 close_agent_run_span 会因名字未绑定
+        # 抛 UnboundLocalError，掩盖真因。提前到函数顶部规避（见 traceback 8111）。
+        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
+            close_agent_run_span,
+            open_agent_run_span,
+            sync_agent_observability,
+        )
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -7416,11 +7430,6 @@ class JiuWenSwarmDeepAdapter:
             # Sync single-agent / coding-agent observability with current
             # config before running, and open a root span so OtelCallbackHandler
             # has a parent for LLM/tool spans (see streaming path for details).
-            from jiuwenswarm.agents.harness.agent_observability import (
-                close_agent_run_span,
-                open_agent_run_span,
-                sync_agent_observability,
-            )
             sync_agent_observability()
             _run_span = open_agent_run_span(session_id=session_id, mode=mode)
             attach_goal = self._wants_attach_goal(request.params)
@@ -7809,6 +7818,14 @@ class JiuWenSwarmDeepAdapter:
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
         interaction_stream_abort = True
+        # 提前 import 观测 span 工具（同 7382 处理由）：原 import 在 try 内
+        # _sync_prompt_attachments 之后，该处异常会让 finally 的
+        # close_agent_run_span 因名字未绑定抛 UnboundLocalError，掩盖真因。
+        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
+            close_agent_run_span,
+            open_agent_run_span,
+            sync_agent_observability,
+        )
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -7869,11 +7886,6 @@ class JiuWenSwarmDeepAdapter:
             )
             # Sync single-agent / coding-agent observability with current config
             # before running.
-            from jiuwenswarm.agents.harness.agent_observability import (
-                close_agent_run_span,
-                open_agent_run_span,
-                sync_agent_observability,
-            )
             sync_agent_observability(force=_dbg_settings.otel_enabled)
             _run_span = open_agent_run_span(session_id=session_id, mode=mode)
             _otel_trace_id = ""

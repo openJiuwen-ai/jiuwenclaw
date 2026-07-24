@@ -44,7 +44,28 @@ if (!process.env.JIUWENSWARM_TUI_HEADLESS && (!process.stdin.isTTY || !process.s
   process.exit(1);
 }
 
-const wsClient = new WsClient(values.url ?? "ws://127.0.0.1:19001/tui", values.token ?? "", values["user-id"] ?? "");
+const wsUrl = values.url ?? "ws://127.0.0.1:19001/tui";
+const wsUserId = values["user-id"] ?? "";
+
+/**
+ * Remote 模式：--url 指向非本机（非 127.0.0.1/localhost）的服务器时启用。
+ * 本地 PC 无法被远端 agentserver（沙箱）访问，故不发送本地 project_dir/cwd/trusted_dirs，
+ * 改用服务器侧 /home/<user-id> 作为 workspace（沙箱里可写）。
+ */
+function isRemoteUrl(url: string): boolean {
+  try {
+    const host = new URL(url).host.toLowerCase();
+    return host !== "127.0.0.1" && host !== "localhost" && !host.startsWith("127.0.0.1:");
+  } catch {
+    return false;
+  }
+}
+
+const isRemote = isRemoteUrl(wsUrl);
+// remote 模式下的服务器侧 workspace/project_dir：/home/<user-id>。
+const remoteProjectDir = isRemote && wsUserId ? `/home/${wsUserId}` : "";
+
+const wsClient = new WsClient(wsUrl, values.token ?? "", wsUserId);
 
 // 读取 launcher 注入的监督协议快照（非托管启动时 supervised=false）。
 const supervisionEnv = readSupervisionEnv();
@@ -92,6 +113,8 @@ const appState = new CliPiAppState(wsClient, values.session, {
   taskLifecycle: null,
   reauthPort: null,
   uiLifecycle,
+  isRemote,
+  remoteProjectDir,
 });
 
 // AppState 已构造完成，现在构造依赖 AppState 的端口并回填。
