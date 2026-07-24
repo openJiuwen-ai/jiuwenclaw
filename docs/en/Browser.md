@@ -46,7 +46,7 @@ Where:
 
    ![Browser panel](../assets/images/browser1.png)
 
-2. Go to **Settings** → **Browser service**.
+2. Click **Settings** at the bottom of the left sidebar, then select **Browser service**.
 3. Find the Chrome path field.
 
    ![Chrome path](../assets/images/browser2.png)
@@ -88,6 +88,18 @@ After completing authorization, you can ask the agent to perform browser tasks i
 
 When the task requires a browser, the agent will control this already authorized Chrome, not create a completely stateless browser again.
 
+### 2.7 Troubleshooting
+
+If the browser service fails to start, follow these steps to troubleshoot:
+
+| Issue | Possible Cause | Solution |
+|-------|---------------|----------|
+| No response after clicking "Start browser service" | Incorrect Chrome path configuration | Check if `CHROME_PATH` is correct, ensure the path points to the actual `chrome.exe` |
+| Chrome starts and immediately closes | Port is occupied | Check if port `9222` is occupied by other processes, or modify `remote_debugging_port` in `config.yaml` |
+| Chrome not installed | Chrome not installed or path error | Install Chrome browser and update `CHROME_PATH` configuration |
+| Frontend shows connection failed | Browser service not started properly | Check backend service logs, confirm `browser_start_client.py` executed successfully |
+| Cannot open specific webpage | Network or permission issues | Check network connectivity, ensure the target website is accessible, test manually in the popped-up Chrome if necessary |
+
 ## 3. Usage Tips
 
 To make the browser tools more stable, follow these recommendations:
@@ -123,7 +135,7 @@ To make the browser tools more stable, follow these recommendations:
 5. The browser will automatically fill in recipient, subject, content, and upload the attachment
 6. After sending is complete, the agent will notify the user that the email has been sent
 
-> **Note**: Operation screenshots will be added after future frontend updates. Each case will display 1-2 images, mainly showing the key execution process and final results.
+> **Note**: Operation screenshots for cases are pending frontend updates. Complete textual step descriptions are provided and can be followed for operations. Each case will display 1-2 images in the future, mainly showing the key execution process and final results.
 
 ## 5. Backend Configuration
 
@@ -133,7 +145,7 @@ The browser tool configuration involves several core files that work together to
 
 - **`config/config.yaml`**: Mainly configures Chrome startup parameters, such as Chrome executable path, remote debugging address and port. These configurations are the foundation for browser startup.
 - **`.env`**: Configures browser runtime, MCP connection, Playwright parameters, timeout settings and other environment variables that affect the browser's runtime behavior.
-- **`.env.template`**: Environment variable template file containing all available environment variables and their default values, which can be used as a configuration reference.
+- **`.env.template`**: Environment variable template file containing all available environment variables and their default values, which can be used as a configuration reference. This file is located in the source package at `jiuwenswarm/resources/.env.template` and will be synchronized to the user configuration directory after installation.
 
 The relationship between these three files is: `config/config.yaml` provides the basic parameters for browser startup, and `.env` provides the runtime environment configuration. Together, they ensure the browser tools work properly.
 
@@ -160,9 +172,11 @@ browser:
   profile_directory: "Default"
 ```
 
-### 5.2 Browser Configuration in .env
+> **Note**: Replace `YOUR_USER` with your actual Windows username (e.g., `Administrator`), which can be found on the `chrome://version` page.
 
-#### 5.2.1 Browser MCP Wrapper Configuration
+### 5.3 Browser Configuration in .env
+
+#### 5.3.1 Browser MCP Wrapper Configuration
 
 | Environment Variable | Default Value | Description |
 |----------------------|---------------|-------------|
@@ -179,7 +193,7 @@ browser:
 | `BROWSER_RUNTIME_MCP_ARGS` | - | Wrapper startup arguments override, usually left empty |
 | `BROWSER_RUNTIME_MCP_AUTO_SSE_FALLBACK` | 1 | Whether to allow SSE fallback in certain modes |
 
-#### 5.2.2 Official Playwright MCP Configuration
+#### 5.3.2 Official Playwright MCP Configuration
 
 | Environment Variable | Default Value | Description |
 |----------------------|---------------|-------------|
@@ -187,7 +201,7 @@ browser:
 | `PLAYWRIGHT_MCP_ARGS` | -y @playwright/mcp@latest | Arguments to start official Playwright MCP |
 | `PLAYWRIGHT_CDP_URL` | http://127.0.0.1:9222 | CDP address to connect to the started Chrome, should match debugging address and port in config.yaml |
 
-#### 5.2.3 Timeout and Execution Strategy Configuration
+#### 5.3.3 Timeout and Execution Strategy Configuration
 
 | Environment Variable | Default Value | Description |
 |----------------------|---------------|-------------|
@@ -195,7 +209,7 @@ browser:
 | `BROWSER_TIMEOUT_S` | 300 | Default long timeout for browser tasks; if the model passes a smaller timeout_s, it will be clamped to at least this value |
 | `BROWSER_ALLOW_SHORT_TIMEOUT_OVERRIDE` | 0 | Whether to allow the model to shorten task timeouts, recommended to keep as 0 |
 
-### 5.3 Recommended Minimal Configuration
+### 5.4 Recommended Minimal Configuration
 
 To use the browser tools properly, ensure at least the following fields are correct:
 
@@ -240,7 +254,7 @@ In simple terms:
 - `jiuwenswarm/channels/web/frontend/src/components/BrowserPanel/index.tsx` — path, save, start service.
 
 ### Backend
-- `app.py` — `path.get`, `path.set`, `browser.start`, etc.
+- `jiuwenswarm/gateway/channel_manager/web/app_web_handlers.py` — `path.get`, `path.set`, `browser.start`, etc.
 - `jiuwenswarm/agents/harness/common/tools/browser_start_client.py` — Chrome launch from `config.yaml`.
 - `jiuwenswarm/agents/harness/common/tools/browser_tools.py` — MCP client, auto-start wrapper.
 - `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime_mcp_server.py` — MCP server.
@@ -260,13 +274,13 @@ Specific file descriptions:
 | Module | File Path | Function Description |
 |--------|-----------|----------------------|
 | Frontend Browser Service Panel | `jiuwenswarm/channels/web/frontend/src/components/BrowserPanel/index.tsx` | Responsible for reading path, saving path, triggering "Start browser service" |
-| Backend Application Entry | `app.py` | Provides frontend call entries like `path.get`, `path.set`, `browser.start` |
-| Chrome Startup Script | `tools/browser_start_client.py` | Reads `browser.*` configuration from `config/config.yaml`, starts Chrome with remote debugging capabilities |
-| Browser MCP Access | `tools/browser_tools.py` | Browser MCP wrapper access, automatic startup, client patch, configuration building |
-| Browser Runtime MCP Server | `tools/browser-move/src/playwright_runtime_mcp_server.py` | Browser runtime MCP server entry |
-| Browser Runtime Orchestration Layer | `tools/browser-move/src/playwright_runtime/runtime.py` | Browser runtime orchestration layer |
-| Browser Task Execution | `tools/browser-move/src/playwright_runtime/service.py` | Browser task execution, session reuse, timeout guardrails |
-| Browser Runtime Configuration | `tools/browser-move/src/playwright_runtime/config.py` | Playwright MCP and browser runtime configuration parsing |
+| Backend Web RPC Entry | `jiuwenswarm/gateway/channel_manager/web/app_web_handlers.py` | Provides frontend call entries like `path.get`, `path.set`, `browser.start` |
+| Chrome Startup Script | `jiuwenswarm/agents/harness/common/tools/browser_start_client.py` | Reads `browser.*` configuration from `config/config.yaml`, starts Chrome with remote debugging capabilities |
+| Browser MCP Access | `jiuwenswarm/agents/harness/common/tools/browser_tools.py` | Browser MCP wrapper access, automatic startup, client patch, configuration building |
+| Browser Runtime MCP Server | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime_mcp_server.py` | Browser runtime MCP server entry |
+| Browser Runtime Orchestration Layer | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/runtime.py` | Browser runtime orchestration layer |
+| Browser Task Execution | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/service.py` | Browser task execution, session reuse, timeout guardrails |
+| Browser Runtime Configuration | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/config.py` | Playwright MCP and browser runtime configuration parsing |
 
 ## 7. Summary
 
