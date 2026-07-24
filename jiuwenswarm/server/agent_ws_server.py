@@ -2039,6 +2039,21 @@ class AgentWebSocketServer:
             )
         )
 
+    @staticmethod
+    def _is_readonly_goal_get_request(request: AgentRequest) -> bool:
+        """``command.goal`` + ``action=get``：只读查询，不得兜底新建 session metadata.
+
+        与 skills.list 同类问题：走 ``_prepare_code_mode_chat_turn`` 会触发
+        ``sync_session_request_metadata`` 在无 metadata 时写出
+        ``metadata.json``。get 仍需要真实 agent（可能从 checkpointer 读已有
+        Goal），故不能整段塞进 ``_is_stateless_method_request``。
+        """
+        if request.req_method != ReqMethod.COMMAND_GOAL:
+            return False
+        params = request.params if isinstance(request.params, dict) else {}
+        action = str(params.get("action") or "get").strip().lower()
+        return action == "get"
+
     async def _get_stateless_agent(self, channel_id: str) -> Any:
         """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
 
@@ -2064,6 +2079,8 @@ class AgentWebSocketServer:
         self,
         request: AgentRequest,
         channel_id: str,
+        *,
+        sync_metadata: bool = True,
     ) -> tuple[str, str | None, Any]:
         """Mode resolution and correct agent instance selection."""
         # [新增] 在 _apply_resolved_mode_to_request 把 canonical mode 写回 params 之前，
@@ -2084,12 +2101,30 @@ class AgentWebSocketServer:
         canonical_mode = (
             request.params.get("mode") if isinstance(request.params, dict) else None
         )
-        project_dir = _sync_chat_request_metadata(
-            request,
-            requested_project_dir,
-            canonical_mode if canonical_mode else mode,
-            explicit_mode_provided=explicit_mode_provided,
-        )
+        if sync_metadata:
+            project_dir = _sync_chat_request_metadata(
+                request,
+                requested_project_dir,
+                canonical_mode if canonical_mode else mode,
+                explicit_mode_provided=explicit_mode_provided,
+            )
+        else:
+            # Read-only path (e.g. command.goal get): never create/update
+            # metadata.json. Prefer request project_dir, else locked disk value.
+            project_dir = requested_project_dir
+            if not (isinstance(project_dir, str) and project_dir.strip()):
+                sid = str(request.session_id or "").strip()
+                if sid:
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+
+                    meta = get_session_metadata(
+                        sid, cache_bust=True, enable_writeback=False
+                    )
+                    locked = meta.get("project_dir") if isinstance(meta, dict) else None
+                    if isinstance(locked, str) and locked.strip():
+                        project_dir = locked.strip()
         if isinstance(project_dir, str) and project_dir.strip():
             project_dir = project_dir.strip()
             request.params["project_dir"] = project_dir
@@ -2255,20 +2290,27 @@ class AgentWebSocketServer:
             )
             return
 
+        readonly_goal_get = self._is_readonly_goal_get_request(request)
         mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-            request, channel_id
+            request,
+            channel_id,
+            sync_metadata=not readonly_goal_get,
         )
 
-        restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
-        if restored_plan:
-            await self._push_plan_mode_exited(request)
+        if not readonly_goal_get:
+            restored_plan = await self._ensure_code_mode_state(
+                request, mode, sub_mode, agent
+            )
+            if restored_plan:
+                await self._push_plan_mode_exited(request)
 
         resp = None
         try:
             resp = await agent.process_message(request)
         finally:
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
-            await self._check_post_process_plan_exit(request, agent)
+            if not readonly_goal_get:
+                await self._check_post_process_plan_exit(request, agent)
 
         # V2: 非流式响应回带请求侧 agent_ref，供 gateway 3 元组路由（设计 §6.3）。
         # is None 守卫：保留 agent 层显式设置的 agent_ref（如 team 模式由事件派生）。
@@ -2296,16 +2338,22 @@ class AgentWebSocketServer:
         # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
         # 不触发 adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
+        readonly_goal_get = self._is_readonly_goal_get_request(request)
         if self._is_stateless_method_request(request):
             agent = await self._get_stateless_agent(channel_id)
         else:
             mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-                request, channel_id
+                request,
+                channel_id,
+                sync_metadata=not readonly_goal_get,
             )
 
-            restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
-            if restored_plan:
-                await self._push_plan_mode_exited(request)
+            if not readonly_goal_get:
+                restored_plan = await self._ensure_code_mode_state(
+                    request, mode, sub_mode, agent
+                )
+                if restored_plan:
+                    await self._push_plan_mode_exited(request)
 
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
@@ -2425,7 +2473,8 @@ class AgentWebSocketServer:
                         self._session_stream_tasks.pop(session_id, None)
 
                 # Push plan.mode_exited if exit_plan_mode restored mode during processing
-                await self._check_post_process_plan_exit(request, agent)
+                if not readonly_goal_get:
+                    await self._check_post_process_plan_exit(request, agent)
 
         logger.info(
             "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
@@ -3592,42 +3641,92 @@ class AgentWebSocketServer:
 
     async def _handle_team_snapshot(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.agents.harness.team import get_team_manager
+        from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import (
+            TeamMonitorHandler,
+        )
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
-        session_id = request.session_id or ""
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(params.get("session_id") or request.session_id or "").strip()
         channel_id = request.channel_id or "web"
+        empty_payload = {"members": [], "tasks": [], "team_id": None}
 
         team_manager = get_team_manager(channel_id)
-        monitor_handler = team_manager.get_monitor_handler(session_id)
+        monitor_handler = team_manager.get_monitor_handler(session_id) if session_id else None
 
-        if monitor_handler is None or not monitor_handler.is_running:
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload={"members": [], "tasks": [], "team_id": None},
-            )
-            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await send_wire_payload(ws, wire)
-            return
+        snapshot: dict[str, Any] | None = None
+        source = "empty"
+        if monitor_handler is not None and monitor_handler.is_running:
+            try:
+                snapshot = await monitor_handler.get_team_snapshot()
+                if snapshot is not None:
+                    source = "live"
+            except Exception as e:
+                logger.warning("[AgentWebSocketServer] team.snapshot (live) failed: %s", e)
 
-        try:
-            snapshot = await monitor_handler.get_team_snapshot()
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload=snapshot or {"members": [], "tasks": [], "team_id": None},
-            )
-        except Exception as e:
-            logger.warning("[AgentWebSocketServer] team.snapshot failed: %s", e)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload={"members": [], "tasks": [], "team_id": None},
-            )
+        def _snapshot_tasks(payload: dict[str, Any] | None) -> list[Any]:
+            if not isinstance(payload, dict):
+                return []
+            tasks = payload.get("tasks")
+            return tasks if isinstance(tasks, list) else []
 
+        # History restore often hits this RPC after the monitor has stopped, OR
+        # while a live handler is still registered but already returns a truthy
+        # empty board ({tasks: [], members: [], team_id: ...}). `if not snapshot`
+        # alone would skip DB in that case and leave the frontend with no
+        # title/content. Fall back whenever live has no tasks.
+        needs_db = snapshot is None or not _snapshot_tasks(snapshot)
+        if needs_db and session_id:
+            team_name = str(params.get("team_name") or "").strip()
+            if not team_name:
+                team_name = str(
+                    team_manager.get_active_team_name(session_id) or ""
+                ).strip()
+            if not team_name:
+                team_name = str(
+                    (get_session_metadata(session_id) or {}).get("team_name") or ""
+                ).strip()
+            if team_name:
+                try:
+                    db_snapshot = await TeamMonitorHandler.get_team_snapshot_from_db(
+                        session_id, team_name
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[AgentWebSocketServer] team.snapshot (db) failed: "
+                        "session_id=%s team_name=%s error=%s",
+                        session_id,
+                        team_name,
+                        e,
+                    )
+                    db_snapshot = None
+                # Prefer DB when it has tasks, or when live was missing entirely.
+                # If both boards have empty tasks, keep live so in-memory
+                # members (if any) are not wiped by an empty DB read.
+                if db_snapshot is not None and (
+                    snapshot is None or _snapshot_tasks(db_snapshot)
+                ):
+                    snapshot = db_snapshot
+                    source = "db"
+
+        payload = snapshot or empty_payload
+        members = payload.get("members") if isinstance(payload, dict) else []
+        tasks = _snapshot_tasks(payload if isinstance(payload, dict) else None)
+        logger.info(
+            "[AgentWebSocketServer] team.snapshot session_id=%s source=%s "
+            "tasks_count=%s members_count=%s",
+            session_id or "-",
+            source if snapshot is not None else "empty",
+            len(tasks),
+            len(members) if isinstance(members, list) else 0,
+        )
+
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=channel_id,
+            ok=True,
+            payload=payload,
+        )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)

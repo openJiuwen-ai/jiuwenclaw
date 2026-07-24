@@ -387,7 +387,10 @@ time.sleep(60)
         async def _trigger_before_chat_request_hook(self, _request):
             return None
 
-        async def _prepare_code_mode_chat_turn(self, _request, _channel_id):
+        async def _prepare_code_mode_chat_turn(
+            self, _request, _channel_id, *, sync_metadata: bool = True
+        ):
+            assert sync_metadata is True
             return "agent", "fast", facade
 
         async def _ensure_code_mode_state(self, *_args, **_kwargs):
@@ -641,7 +644,10 @@ for event in (
         async def _trigger_before_chat_request_hook(self, _request):
             return None
 
-        async def _prepare_code_mode_chat_turn(self, _request, _channel_id):
+        async def _prepare_code_mode_chat_turn(
+            self, _request, _channel_id, *, sync_metadata: bool = True
+        ):
+            assert sync_metadata is True
             return "agent", "fast", facade
 
         async def _ensure_code_mode_state(self, *_args, **_kwargs):
@@ -865,7 +871,10 @@ time.sleep(60)
         async def _trigger_before_chat_request_hook(self, _request):
             return None
 
-        async def _prepare_code_mode_chat_turn(self, _request, _channel_id):
+        async def _prepare_code_mode_chat_turn(
+            self, _request, _channel_id, *, sync_metadata: bool = True
+        ):
+            assert sync_metadata is True
             return "agent", "fast", facade
 
         async def _ensure_code_mode_state(self, *_args, **_kwargs):
@@ -1060,7 +1069,10 @@ raise SystemExit(99)
         async def _trigger_before_chat_request_hook(self, _request):
             return None
 
-        async def _prepare_code_mode_chat_turn(self, _request, _channel_id):
+        async def _prepare_code_mode_chat_turn(
+            self, _request, _channel_id, *, sync_metadata: bool = True
+        ):
+            assert sync_metadata is True
             return "agent", "fast", facade
 
         async def _ensure_code_mode_state(self, *_args, **_kwargs):

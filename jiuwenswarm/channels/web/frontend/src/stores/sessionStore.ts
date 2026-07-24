@@ -116,14 +116,6 @@ interface ConnectionStats {
   lastError: string | null;
 }
 
-type HeartbeatState = 'unknown' | 'ok' | 'alert';
-
-interface HeartbeatHistoryItem {
-  message: string;
-  updatedAt: string;
-  status: HeartbeatState;
-}
-
 interface MemoryUsage {
   rssMb: number | null;
   usedPercent: number | null;
@@ -147,6 +139,14 @@ export interface TeamTaskEvent {
   team_name?: string;
   title?: string;
   content?: string;
+  // Truncation observability flags — backend may set these on team.task.created/
+  // updated events when the title/content exceeded the wire limit. Purely
+  // passthrough: the store does not render a badge; the inline marker
+  // `…(truncated, total N chars)` already surfaces truncation to the user.
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
   updated_at?: number | string | null;
 }
 
@@ -169,6 +169,15 @@ export interface TeamTask {
   timestamp?: number;
   skills?: string[];
   files?: string[];
+  // Truncation observability flags — set by the backend on team.task.created/
+  // updated events when title/content exceeded the wire limit. Carried through
+  // the normalize/upsert pipeline; a status-only event MUST NOT reset these
+  // (upsertTeamTask uses `?? existing`). Not rendered as a badge — the inline
+  // marker `…(truncated, total N chars)` already shows truncation.
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
 }
 
 // Upsert input: a task event may omit status (e.g. a content-only update).
@@ -280,10 +289,6 @@ interface SessionState {
   availableTools: string[];
   connectionStats: ConnectionStats;
   memoryUsage: MemoryUsage;
-  heartbeatState: HeartbeatState;
-  heartbeatMessage: string | null;
-  heartbeatUpdatedAt: string | null;
-  heartbeatHistory: HeartbeatHistoryItem[];
   availableModels: ModelEntry[];
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
   chatAvailableModels: ModelEntry[];
@@ -296,6 +301,7 @@ interface SessionState {
   // Runtime 管理方法
   ensureRuntime: (sessionId: string) => SessionRuntime;
   getRuntime: (sessionId: string | null) => SessionRuntime | undefined;
+  getEffectiveModelName: (sessionId: string | null) => string | null;
   removeRuntime: (sessionId: string) => void;
 
   // A 类 actions（不加 sessionId）
@@ -309,11 +315,6 @@ interface SessionState {
   setConnectionStats: (stats: Partial<ConnectionStats>) => void;
   setContextCompressionStats: (sessionId: string, stats: Partial<ContextCompressionStats> | null) => void;
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
-  setHeartbeatStatus: (
-    status: HeartbeatState,
-    message?: string | null,
-    updatedAt?: string | null
-  ) => void;
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
   setSelectedModelName: (sessionId: string, name: string) => void;
 
@@ -373,10 +374,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     rssMb: null,
     usedPercent: null,
   },
-  heartbeatState: 'unknown',
-  heartbeatMessage: null,
-  heartbeatUpdatedAt: null,
-  heartbeatHistory: [],
   availableModels: [],
   chatAvailableModels: [],
   defaultModelName: null,
@@ -395,6 +392,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   getRuntime: (sessionId) => {
     if (!sessionId) return undefined;
     return get().runtimes[sessionId];
+  },
+
+  getEffectiveModelName: (sessionId) => {
+    if (!sessionId) return null;
+    const state = get();
+    const runtime = state.runtimes[sessionId];
+    if (!runtime) return null;
+    return runtime.mode === 'team'
+      ? state.defaultModelName
+      : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {
@@ -572,26 +579,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
   },
 
-  setHeartbeatStatus: (status, message = null, updatedAt) => {
-    set((state) => {
-      const resolvedUpdatedAt = updatedAt === undefined ? new Date().toISOString() : updatedAt;
-      const shouldClearHistory = message == null && updatedAt === null;
-      const nextHistory = shouldClearHistory
-        ? []
-        : (message
-          ? [{ message, updatedAt: resolvedUpdatedAt ?? new Date().toISOString(), status }, ...state.heartbeatHistory]
-              .slice(0, 20)
-          : state.heartbeatHistory);
-
-      return {
-        heartbeatState: status,
-        heartbeatMessage: message,
-        heartbeatUpdatedAt: resolvedUpdatedAt,
-        heartbeatHistory: nextHistory,
-      };
-    });
-  },
-
   setTeamTaskEvents: (sessionId, events) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -713,6 +700,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           team_id: task.team_id ?? existing.team_id,
           skills: task.skills ?? existing.skills,
           files: task.files ?? existing.files,
+          // Truncation flags: a status-only event carries none, so `?? existing`
+          // preserves whatever a prior created/updated event set. NEVER reset
+          // these to false/undefined on a status-only upsert.
+          title_truncated: task.title_truncated ?? existing.title_truncated,
+          title_original_size: task.title_original_size ?? existing.title_original_size,
+          content_truncated: task.content_truncated ?? existing.content_truncated,
+          content_original_size: task.content_original_size ?? existing.content_original_size,
         };
         return {
           runtimes: {
@@ -721,10 +715,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           },
         };
       }
+      // New card: a status-only event may arrive before the created event,
+      // leaving an empty title. Fall back to a placeholder built from the
+      // task_id tail so the card is not rendered with a bare empty title
+      // (matches the precedent in features/teamHistoryPanelRestore.ts upsertTask).
       return {
        runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, teamTasks: [{ ...task, status: task.status ?? 'pending' }, ...runtime.teamTasks],
+          [sessionId]: { ...runtime, teamTasks: [{
+            ...task,
+            status: task.status ?? 'pending',
+            title: task.title ?? `任务 ${String(task.task_id || '').slice(-6)}`,
+          }, ...runtime.teamTasks],
       },
         },
       };

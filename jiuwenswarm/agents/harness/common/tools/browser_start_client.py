@@ -29,9 +29,11 @@ import platform
 import shutil
 import socket
 import subprocess
+import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import psutil
 import yaml
@@ -218,6 +220,62 @@ def _creation_flags_for_windows() -> int:
     flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
     flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     return flags
+
+
+@dataclass
+class _BrowserProcessHandle:
+    proc: "subprocess.Popen"
+    chrome_exec: str
+    host: str
+    port: int
+    user_data_dir: str
+
+
+_BROWSER_PROCESS_REGISTRY: dict[int, _BrowserProcessHandle] = {}
+_BROWSER_REGISTRY_LOCK = threading.Lock()
+
+
+def _register_browser_process(handle: _BrowserProcessHandle) -> None:
+    with _BROWSER_REGISTRY_LOCK:
+        previous = _BROWSER_PROCESS_REGISTRY.pop(handle.proc.pid, None)
+        if previous is not None and previous is not handle:
+            logger.info(
+                "Replacing previous browser process handle in registry "
+                f"pid={previous.proc.pid}"
+            )
+        _BROWSER_PROCESS_REGISTRY[handle.proc.pid] = handle
+
+
+def _unregister_browser_process(pid: int) -> Optional[_BrowserProcessHandle]:
+    with _BROWSER_REGISTRY_LOCK:
+        return _BROWSER_PROCESS_REGISTRY.pop(pid, None)
+
+
+def _reap_browser_on_exit(handle: _BrowserProcessHandle) -> None:
+    pid = handle.proc.pid
+    try:
+        try:
+            handle.proc.wait()
+        except Exception as exc:
+            logger.warning(f"Browser reap watcher wait() failed pid={pid}: {exc}")
+            return
+        logger.info(
+            f"Browser main process exited pid={pid}, reaping child processes "
+            f"host={handle.host}, port={handle.port}"
+        )
+        try:
+            _stop_existing_browser_service(
+                chrome_exec=handle.chrome_exec,
+                host=handle.host,
+                port=handle.port,
+                user_data_dir=handle.user_data_dir,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Browser reap watcher could not fully clean child processes pid={pid}: {exc}"
+            )
+    finally:
+        _unregister_browser_process(pid)
 
 
 def _normalized_path(value: str) -> str:
@@ -421,6 +479,21 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
     )
     proc = subprocess.Popen(args, **kwargs)
     logger.info(f"Browser process launched successfully: pid={proc.pid}")
+    handle = _BrowserProcessHandle(
+        proc=proc,
+        chrome_exec=chrome_exec,
+        host=host,
+        port=port,
+        user_data_dir=user_data_dir,
+    )
+    _register_browser_process(handle)
+    watcher = threading.Thread(
+        target=_reap_browser_on_exit,
+        args=(handle,),
+        name=f"browser-reap-{proc.pid}",
+        daemon=True,
+    )
+    watcher.start()
     _persist_browser_profile(
         host=host,
         port=port,

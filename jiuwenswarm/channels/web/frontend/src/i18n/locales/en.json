@@ -28,7 +28,6 @@
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
-    "heartbeat": "Heartbeat",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
     "channels": "Channels",
@@ -273,6 +272,7 @@
     "stop": "Stop",
     "modelSelector": {
       "tooltip": "Switch the model used for chat",
+      "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
@@ -506,52 +506,6 @@
     "version": "Version",
     "language": "Language",
     "moreSettings": "More Settings"
-  },
-  "heartbeat": {
-    "title": "Heartbeat Management",
-    "subtitle": "Maintain heartbeat settings and instruction files",
-    "configTitle": "Heartbeat Settings",
-    "configSubtitle": "Configure heartbeat interval, target channel, and active hours",
-    "loadingConfig": "Loading heartbeat settings...",
-    "saved": "Heartbeat settings saved",
-    "badges": {
-      "ok": "Recent heartbeat is healthy",
-      "alert": "Recent heartbeat is alerting",
-      "unknown": "No heartbeat result yet"
-    },
-    "everyLabel": "Interval (seconds)",
-    "targetLabel": "Target channel (channel_id)",
-    "enableActiveHours": "Enable active hours",
-    "startTime": "Start time",
-    "endTime": "End time",
-    "recentMessages": "Recent 20 heartbeat messages",
-    "noHistory": "No heartbeat history",
-    "statusOk": "OK",
-    "statusUnknown": "UNKNOWN",
-    "latestTime": "Latest heartbeat time",
-    "latestContent": "Latest heartbeat content",
-    "none": "None",
-    "channels": {
-      "web": "Web (web)",
-      "feishu": "Lark (feishu)",
-      "wechat": "WeChat (wechat)",
-      "xiaoyi": "Xiaoyi (xiaoyi)",
-      "dingtalk": "DingTalk (dingtalk)"
-    },
-    "errors": {
-      "loadConfig": "Failed to load heartbeat settings",
-      "saveConfig": "Failed to save heartbeat settings",
-      "invalidEvery": "Heartbeat interval must be greater than 0",
-      "invalidActiveHours": "active_hours must use HH:MM format (for example 08:00)",
-      "invalidRange": "End time must be later than start time",
-      "feishuNoTarget": "Feishu bot has not had any conversation yet. Heartbeat cannot be sent. Please chat with the bot in Feishu first."
-    }
-  },
-  "heartbeatModal": {
-    "closeAria": "Close heartbeat details dialog",
-    "title": "Heartbeat message",
-    "subtitle": "Message details",
-    "empty": "No detailed content"
   },
   "offloadFiles": {
     "title": "Offload Files",
@@ -1094,6 +1048,9 @@
       "noResults": "No matching templates found. Try a different keyword.",
       "noResultsJobs": "No matching tasks found. Try a different keyword."
     },
+    "filter": {
+      "reset": "Reset"
+    },
     "table": {
       "name": "Name",
       "project": "Project",
@@ -1167,6 +1124,7 @@
       "every": "Every",
       "everyHoursPlaceholder": "Hours",
       "everyMinutesPlaceholder": "Minutes",
+      "integerOnlyHint": "Interval must be an integer of at least 1",
       "hoursUnit": "hours",
       "minutesUnit": "minutes",
       "intervalUnit": {
@@ -1312,9 +1270,7 @@
       "cronRequired": "Cron expression is required",
       "cronFormat": "Invalid cron format (must be 7 fields: second minute hour day month dow year)",
       "cronSecondOrMinute": "Invalid second/minute field (0-59, supports * / - ,)",
-      "cronSecondOrMinuteStep": "Second/minute step must divide 60",
       "cronHour": "Invalid hour field (0-23, supports * / - ,)",
-      "cronHourStep": "Hour step must divide 24",
       "cronDay": "Invalid day field (1-31, supports * ? - ,)",
       "cronMonth": "Invalid month field (1-12, supports * - ,)",
       "cronWeek": "Invalid dow field (0-6, supports * ? - ,, 0=Sun, 1=Mon...6=Sat)",
@@ -2045,9 +2001,6 @@
     "configErrorHint": "Please start the backend first (e.g.",
     "configErrorDefault": ", default port 19000). If backend is remote, set",
     "configErrorEnv": "in",
-    "heartbeatTitle": "Heartbeat message",
-    "heartbeatClose": "Close",
-    "heartbeatViewFull": "Click to view full message",
     "securityAlertTitle": "Security Alert",
     "noContent": "No details",
     "restarting": "Restarting service",
@@ -2124,7 +2077,7 @@
     "workDescription": "Office, collaboration, and general tasks",
     "codeDescription": "Inspect and modify code in a project directory",
     "environment": "Environment",
-    "changes": "Changes",
+    "changes": "Current Turn Changes",
     "review": "Review"
   },
   "multiSession": {
@@ -2222,7 +2175,8 @@
     "nextStep": "Next",
     "confirm": "Confirm",
     "customOption": "Custom",
-    "customPlaceholder": "No suitable option? Type your answer..."
+    "customPlaceholder": "No suitable option? Type your answer...",
+    "skippedSummary": "Skipped"
   },
   "qaSummary": {
     "title": "Clarifications"

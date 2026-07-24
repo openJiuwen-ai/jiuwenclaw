@@ -11,7 +11,6 @@ import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
-import { HeartbeatPanel } from './components/HeartbeatPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
@@ -27,7 +26,6 @@ import {
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
-import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
 import {
   beginHistoryRestore,
   fetchHistoryPage,
@@ -87,7 +85,7 @@ function isTeamMode(mode: string): boolean {
   return TEAM_SESSION_MODES.has(mode);
 }
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -274,13 +272,10 @@ function AppContent() {
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
   const [a2uiRefreshPending, setA2uiRefreshPending] = useState(false);
-  const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
-  const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
   const [saveToastVisible, setSaveToastVisible] = useState(false);
   const [configChangedConfirmOpen, setConfigChangedConfirmOpen] = useState(false);
   const [proactiveToastVisible, setProactiveToastVisible] = useState(false);
   const [proactiveToastMessage, setProactiveToastMessage] = useState('');
-  const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
@@ -330,11 +325,9 @@ function AppContent() {
   }, []);
 
   const restartAutoCloseTimerRef = useRef<number | null>(null);
-  const heartbeatToastTimerRef = useRef<number | null>(null);
   const saveToastTimerRef = useRef<number | null>(null);
   const proactiveToastTimerRef = useRef<number | null>(null);
   const hasChangesRef = useRef(false);
-  const lastHeartbeatToastKeyRef = useRef<string | null>(null);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyPrepending, setHistoryPrepending] = useState(false);
   /** 仅用于强制重跑「首屏 history」effect：从会话列表恢复时若 sessionId 未变，也要重新拉 history 并恢复 historyPagerMeta */
@@ -410,7 +403,7 @@ function AppContent() {
     void loadProjects();
   }, [initialDataLoaded, loadProjects]);
 
-  const { setCurrentSession, setAvailableModels, setMode, heartbeatMessage, heartbeatUpdatedAt, setTeamLeaderMemberIds } = useSessionStore();
+  const { setCurrentSession, setAvailableModels, setMode, setTeamLeaderMemberIds } = useSessionStore();
   const sessions = useSessionStore((s) => s.sessions);
   const currentSession = useSessionStore((s) => s.currentSession);
   const routeSessionId = route.kind === 'chat-session' ? route.sessionId : null;
@@ -881,13 +874,6 @@ function AppContent() {
     setA2uiRefreshPending(false);
   }, [clearRestartAutoCloseTimer]);
 
-  const clearHeartbeatToastTimer = useCallback(() => {
-    if (heartbeatToastTimerRef.current != null) {
-      window.clearTimeout(heartbeatToastTimerRef.current);
-      heartbeatToastTimerRef.current = null;
-    }
-  }, []);
-
   const clearSaveToastTimer = useCallback(() => {
     if (saveToastTimerRef.current != null) {
       window.clearTimeout(saveToastTimerRef.current);
@@ -1221,33 +1207,10 @@ function AppContent() {
   useEffect(() => {
     return () => {
       clearRestartAutoCloseTimer();
-      clearHeartbeatToastTimer();
       clearSaveToastTimer();
       clearProactiveToastTimer();
     };
-  }, [clearHeartbeatToastTimer, clearProactiveToastTimer, clearRestartAutoCloseTimer, clearSaveToastTimer]);
-
-  useEffect(() => {
-    const normalized = heartbeatMessage?.trim();
-    if (!normalized) {
-      return;
-    }
-    if (normalized.toUpperCase() === 'HEARTBEAT_OK') {
-      return;
-    }
-    const toastKey = `${heartbeatUpdatedAt ?? ''}::${normalized}`;
-    if (lastHeartbeatToastKeyRef.current === toastKey) {
-      return;
-    }
-    lastHeartbeatToastKeyRef.current = toastKey;
-    setHeartbeatToastMessage(normalized);
-    setHeartbeatToastVisible(true);
-    clearHeartbeatToastTimer();
-    heartbeatToastTimerRef.current = window.setTimeout(() => {
-      setHeartbeatToastVisible(false);
-      heartbeatToastTimerRef.current = null;
-    }, 15000);
-  }, [clearHeartbeatToastTimer, heartbeatMessage, heartbeatUpdatedAt]);
+  }, [clearProactiveToastTimer, clearRestartAutoCloseTimer, clearSaveToastTimer]);
 
   useEffect(() => {
     const message = proactiveNotificationMessage?.trim();
@@ -1628,7 +1591,7 @@ function AppContent() {
       const newRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
       const runtimeSettings = {
         mode: newRuntime?.mode ?? mode,
-        selectedModelName: newRuntime?.selectedModelName ?? null,
+        selectedModelName: useSessionStore.getState().getEffectiveModelName(NEW_CONVERSATION_ID),
         projectDir: newRuntime?.projectDirectory ?? null,
       };
       const baseWorkContext = getWorkContextForSession(NEW_CONVERSATION_ID);
@@ -2090,10 +2053,6 @@ function AppContent() {
     })();
   }, [shareExportSnapshot, showSaveToast, t]);
 
-  const heartbeatToastPreviewRaw = heartbeatToastMessage.replace(/\s+/g, ' ').trim();
-  const heartbeatToastPreview = heartbeatToastPreviewRaw.length > 120
-    ? `${heartbeatToastPreviewRaw.slice(0, 120)}...`
-    : heartbeatToastPreviewRaw;
   const routeSessionMissing = routeSessionId !== null
     && initialDataLoaded
     && missingSessionId === routeSessionId
@@ -2244,11 +2203,6 @@ function AppContent() {
             />
           </div>
         )}
-        {activeNav === 'heartbeat' && (
-          <div className="app-section">
-            <HeartbeatPanel />
-          </div>
-        )}
         {activeNav === 'cron' && (
           <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
             <ConversationSidebar
@@ -2378,47 +2332,6 @@ function AppContent() {
         </div>
       )}
 
-      {/* 全局心跳消息提示 */}
-      {heartbeatToastVisible && (
-        <div className="app-toast-wrapper app-toast-wrapper--top">
-          <div className="app-heartbeat-toast animate-rise">
-            <div className="app-heartbeat-toast__header">
-              <div className="app-heartbeat-toast__title">
-                <span className="app-heartbeat-toast__dot animate-pulse" />
-                <span className="text-xs font-medium text-text">{t('app.heartbeatTitle')}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setHeartbeatToastVisible(false);
-                  clearHeartbeatToastTimer();
-                }}
-                className="app-heartbeat-toast__close"
-                aria-label={t('app.heartbeatClose')}
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setHeartbeatModalOpen(true);
-                setHeartbeatToastVisible(false);
-                clearHeartbeatToastTimer();
-              }}
-              className="app-heartbeat-toast__content text-sm"
-              title={t('app.heartbeatViewFull')}
-            >
-              <span className="app-heartbeat-toast__preview">
-                {heartbeatToastPreview}
-              </span>
-            </button>
-          </div>
-        </div>
-      )}
-
       {proactiveToastVisible && proactiveToastMessage && (
         <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="proactive-notification-toast">
           <div className="bg-warn-subtle text-warn px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
@@ -2430,9 +2343,9 @@ function AppContent() {
       {/* 安全警告提示 */}
       {securityAlertVisible && (
         <div className="app-toast-wrapper app-toast-wrapper--top">
-          <div className="app-heartbeat-toast animate-rise">
-            <div className="app-heartbeat-toast__header">
-              <div className="app-heartbeat-toast__title">
+          <div className="app-security-alert animate-rise">
+            <div className="app-security-alert__header">
+              <div className="app-security-alert__title">
                 <span>⚠️</span>
                 <span className="text-xs font-medium text-text">{t('app.securityAlertTitle')}</span>
               </div>
@@ -2445,14 +2358,14 @@ function AppContent() {
                     securityAlertTimerRef.current = null;
                   }
                 }}
-                className="app-heartbeat-toast__close"
+                className="app-security-alert__close"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
-            <div className="app-heartbeat-toast__content text-sm">
+            <div className="app-security-alert__content text-sm">
               {securityAlertContent}
             </div>
           </div>
@@ -2536,12 +2449,6 @@ function AppContent() {
           </div>
         </div>
       )}
-
-      <HeartbeatMessageModal
-        open={heartbeatModalOpen}
-        message={heartbeatToastMessage}
-        onClose={() => setHeartbeatModalOpen(false)}
-      />
 
       <div className="share-image-stage" aria-hidden="true">
         <ShareImageDocument ref={shareExportRef} snapshot={shareExportSnapshot} />

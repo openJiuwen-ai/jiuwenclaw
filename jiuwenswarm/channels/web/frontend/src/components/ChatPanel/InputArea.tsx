@@ -1,4 +1,4 @@
-﻿﻿﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
+﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { AtSign, CircleX, FileImage, Loader2, Plus, Square, Target, X } from 'lucide-react';
@@ -267,6 +267,13 @@ export function InputArea({
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectDirError || workDialogOpen) return;
+    const timeoutId = window.setTimeout(() => setProjectDirError(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [projectDirError, workDialogOpen]);
+
   const [composerSuggestion, setComposerSuggestion] = useState<ComposerSuggestionState | null>(null);
   const [composerSuggestionIndex, setComposerSuggestionIndex] = useState(0);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
@@ -1824,7 +1831,10 @@ export function InputArea({
             </button>
           )} */}
 
-          <ModelSelector disabled={hasHistory || isProcessing} />
+          <ModelSelector
+            disabled={isTeamMode || hasHistory || isProcessing}
+            lockedToDefault={isTeamMode}
+          />
 
           <button
             type="button"
@@ -1946,7 +1956,11 @@ export function InputArea({
             <CodeBranchSelector project={displayedProject} disabled={isProcessing} compact />
           ) : null}
           {projectDirError && !workDialogOpen ? (
-            <div className="chat-work-select__error" role="alert">{projectDirError}</div>
+            <div className="app-toast-wrapper app-toast-wrapper--top-center">
+              <div className="app-session-toast" role="status" aria-live="polite">
+                {projectDirError}
+              </div>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -2100,10 +2114,17 @@ function ComposerSuggestionMenu({
   );
 }
 
-function ModelSelector({ disabled = false }: { disabled?: boolean }) {
+function ModelSelector({
+  disabled = false,
+  lockedToDefault = false,
+}: {
+  disabled?: boolean;
+  lockedToDefault?: boolean;
+}) {
   const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectedModelName = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.selectedModelName ?? null);
+  const defaultModelName = useSessionStore((s) => s.defaultModelName);
   const setSelectedModelName = useSessionStore((s) => s.setSelectedModelName);
   const { t } = useTranslation();
 
@@ -2127,8 +2148,9 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
 
   if (chatAvailableModels.length === 0) return null;
 
+  const displayedModelName = lockedToDefault ? defaultModelName : selectedModelName;
   const selectedModel =
-    chatAvailableModels.find((m) => (m.alias || m.model_name) === selectedModelName) ??
+    chatAvailableModels.find((m) => (m.alias || m.model_name) === displayedModelName) ??
     chatAvailableModels[0];
 
   const handleSelect = (modelKey: string) => {
@@ -2149,7 +2171,7 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
       <button
         type="button"
         className="chat-mode-select__trigger"
-        title={t('chat.modelSelector.tooltip')}
+        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
         onClick={() => {
           if (disabled) return;
           if (!isOpen && menuRef.current) {
@@ -2160,6 +2182,7 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
           setIsOpen((v) => !v);
         }}
         style={disabled ? { cursor: 'default' } : undefined}
+        aria-disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={isOpen}
         data-testid="chat-model-selector"

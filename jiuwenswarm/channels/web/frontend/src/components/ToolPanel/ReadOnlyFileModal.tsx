@@ -168,7 +168,7 @@ export function ReadOnlyFileModal({ open, filePath, fileName, onClose }: ReadOnl
         type="button"
         className="absolute inset-0 bg-black/60"
         onClick={onClose}
-        aria-label={t('heartbeatModal.closeAria')}
+        aria-label={t('common.close')}
       />
       <div className="relative w-full max-w-5xl max-h-[85vh] overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-rise">
         <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border bg-panel">

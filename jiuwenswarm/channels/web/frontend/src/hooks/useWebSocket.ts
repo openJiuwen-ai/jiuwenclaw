@@ -42,7 +42,7 @@ import {
   useWorkspaceStore,
   useCronStore,
 } from '../stores';
-import type { TeamTask, TeamTaskStatus, TeamTaskUpsert } from '../stores/sessionStore';
+import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
 import {
   fetchTtsAudio,
@@ -343,25 +343,6 @@ function getConnectSignature(options: WebConnectOptions): string {
   });
 }
 
-const TEAM_TASK_STATUS_SET = new Set<TeamTaskStatus>([
-  'pending',
-  'blocked',
-  'planning',
-  'in_progress',
-  'in_review',
-  'completed',
-  'cancelled',
-]);
-
-function normalizeTeamTaskStatus(
-  status: unknown,
-  fallback: TeamTaskStatus = 'pending'
-): TeamTaskStatus {
-  return typeof status === 'string' && TEAM_TASK_STATUS_SET.has(status as TeamTaskStatus)
-    ? status as TeamTaskStatus
-    : fallback;
-}
-
 function pickString(...values: unknown[]) {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) {
@@ -423,69 +404,6 @@ function getPayloadRequestId(payload: Record<string, unknown>): string | undefin
   return undefined;
 }
 
-function normalizeStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const normalized = value.filter(
-    (item): item is string => typeof item === 'string' && item.trim().length > 0
-  );
-  return normalized.length ? normalized : undefined;
-}
-
-function normalizeTaskEvent(value: unknown): TeamTaskUpsert | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const raw = value as Record<string, unknown>;
-  const taskId = pickString(raw.task_id, raw.id);
-  if (!taskId) {
-    return null;
-  }
-  // Status is resolved server-side (swarm layer) and read directly here — the
-  // frontend no longer derives it from the event type. An absent status means
-  // "no change"; the store preserves the task's existing status.
-  const rawStatus = pickString(raw.status);
-  return {
-    task_id: taskId,
-    title: pickString(raw.title, raw.name, raw.description),
-    content: pickString(raw.content),
-    status: rawStatus ? normalizeTeamTaskStatus(rawStatus) : undefined,
-    assignee: pickString(raw.assignee, raw.member_id, raw.claimed_by, raw.claimedBy, raw.from_member),
-    team_id: pickString(raw.team_id),
-    timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
-    skills: normalizeStringArray(raw.skills),
-    files: normalizeStringArray(raw.files),
-  };
-}
-
-function normalizeTaskRecord(
-  value: unknown,
-  fallbackStatus: TeamTaskStatus = 'pending'
-): TeamTask | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const raw = value as Record<string, unknown>;
-  const taskId = pickString(raw.task_id, raw.id);
-  if (!taskId) {
-    return null;
-  }
-  const title = pickString(raw.title, raw.name, raw.description);
-  const content = pickString(raw.content);
-  return {
-    task_id: taskId,
-    title,
-    content,
-    status: normalizeTeamTaskStatus(raw.status, fallbackStatus),
-    assignee: pickString(raw.assignee, raw.member_id, raw.claimed_by, raw.claimedBy, raw.from_member),
-    team_id: pickString(raw.team_id),
-    timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
-    skills: normalizeStringArray(raw.skills),
-    files: normalizeStringArray(raw.files),
-  };
-}
-
 function parseShutdownMemberName(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -512,38 +430,16 @@ function getShutdownMemberFromToolResult(toolResult: ToolResult): string | undef
   return parseShutdownMemberName(toolResult.result) || parseShutdownMemberName(toolResult.summary);
 }
 
-function upsertTaskRecords(sessionId: string, values: unknown, fallbackStatus: TeamTaskStatus = 'pending') {
-  if (!Array.isArray(values)) {
-    const task = normalizeTaskRecord(values, fallbackStatus);
-    if (task) {
-      useSessionStore.getState().upsertTeamTask(sessionId, task);
-    }
-    return;
-  }
-  values.forEach((item) => {
-    const task = normalizeTaskRecord(item, fallbackStatus);
-    if (task) {
-      useSessionStore.getState().upsertTeamTask(sessionId, task);
-    }
-  });
-}
-
-function applyTeamTaskToolCall(sessionId: string, toolCall: ToolCall) {
-  if (toolCall.name === 'create_task') {
-    upsertTaskRecords(sessionId, Array.isArray(toolCall.arguments.tasks) ? toolCall.arguments.tasks : toolCall.arguments);
-    return;
-  }
-  if (toolCall.name === 'update_task') {
-    const taskId = pickString(toolCall.arguments.task_id, toolCall.arguments.id);
-    const existingStatus = taskId
-      ? useSessionStore.getState().getRuntime(sessionId)?.teamTasks.find((task) => task.task_id === taskId)?.status
-      : undefined;
-    upsertTaskRecords(sessionId, toolCall.arguments, existingStatus || 'pending');
-    return;
-  }
-  if (toolCall.name === 'claim_task') {
-    return;
-  }
+// The task card's title/content are now sourced solely from the backend
+// `team.task` events (which carry the DB task_id + body) and the `team.snapshot`
+// fallback — never from tool_call arguments. Building an optimistic card from
+// the tool_call `id` produced a duplicate card because the LLM's `id` differs
+// from the DB task_id AgentCore falls back to (see OpenSpec change
+// `fix-team-task-card-duplicate`, D5). So `create_task` / `update_task` no
+// longer pre-create cards; `claim_task` was already a no-op. This handler is
+// kept as an explicit early return so the call site stays intentional.
+function applyTeamTaskToolCall(_sessionId: string, _toolCall: ToolCall) {
+  return;
 }
 
 interface UseWebSocketOptions {
@@ -893,7 +789,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setConnectionStats,
     updateSession,
     setContextCompressionStats,
-    setHeartbeatStatus,
     setTeamMemberContextCompressionStatus,
     clearTeamMemberContextCompressionStatus,
     clearAllTeamMemberContextCompressionStatus,
@@ -1403,7 +1298,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       localSendPendingRef.current.add(sessionId);
 
       // 正常调用接口
-      const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
+      const selectedModel = useSessionStore.getState().getEffectiveModelName(sessionId);
       const workContext = getSessionWorkContext(sessionId);
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset(sessionId);
@@ -1483,7 +1378,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const currentSessionState = useSessionStore.getState();
       const workContext = getSessionWorkContext(sessionId);
       const currentMode = currentSessionState.getRuntime(sessionId)?.mode;
-      const selectedModel = currentSessionState.getRuntime(sessionId)?.selectedModelName;
+      const selectedModel = currentSessionState.getEffectiveModelName(sessionId);
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset(sessionId);
       }
@@ -1579,7 +1474,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         if (intent === 'supplement') {
           params.new_input = newInput ?? '';
-          const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
+          const selectedModel = useSessionStore.getState().getEffectiveModelName(sessionId);
           if (selectedModel) params.model_name = selectedModel;
         }
         await request('chat.interrupt', params);
@@ -2627,16 +2522,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           handleContextCompressionState(sessionId, payload);
         }
       ),
-      webClient.on('heartbeat.relay', ({ payload }) => {
-        const heartbeatText =
-          typeof payload.heartbeat === 'string' ? payload.heartbeat : '';
-        // 只要成功收到 relay 即表示已成功发到前端，始终为 ok，不存在 alert
-        setHeartbeatStatus(
-          'ok',
-          heartbeatText || null,
-          new Date().toISOString()
-        );
-      }),
       webClient.on('session.updated', ({ payload }) => {
         const sessionId =
           typeof payload.session_id === 'string' ? payload.session_id : '';
@@ -3440,7 +3325,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     handleTtsPlayback,
     revealPendingContextUsage,
     setContextCompressionStats,
-    setHeartbeatStatus,
     clearThinkingForVisibleOutput,
     findActiveTeamLeaderMessage,
     updateSession,
@@ -3499,14 +3383,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setConnected(false);
       // 不再重置上下文压缩信息，保持本地存储的状态
       // setContextCompressionStats(null);
-      setHeartbeatStatus('unknown', null, null);
       setConnectionStats({ state: 'closed', inflight: 0 });
     };
   }, [
     setContextCompressionStats,
     setConnectionStats,
     setConnected,
-    setHeartbeatStatus,
   ]);
 
   useEffect(() => {
