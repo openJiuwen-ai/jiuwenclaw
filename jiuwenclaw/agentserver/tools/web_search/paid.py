@@ -5,13 +5,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
 
 from jiuwenclaw.agentserver.tools.web_search.http_client import http_request
 from jiuwenclaw.config import get_config
-from jiuwenclaw.local_env_config import read_default_headers, read_env
+from jiuwenclaw.local_env_config import read_env
+
+logger = logging.getLogger(__name__)
 
 _PETAL_MAX_TITLE_LEN = 2000
 _PETAL_MAX_URL_LEN = 2048
@@ -21,25 +24,18 @@ _TAVILY_MAX_CONTENT_LEN = 4000
 
 
 def _resolve_petal_search_url() -> str:
-    api_base = (
-        read_env("API_BASE")
-        or read_env("OPENAI_BASE_URL")
-        or read_env("OPENAI_API_BASE")
-        or ""
-    ).strip()
-    if not api_base:
-        raise ValueError("API_BASE is not set")
-    trimmed = api_base.rstrip("/")
-    if trimmed.lower().endswith("/v2"):
-        trimmed = trimmed[:-3]
-    trimmed = trimmed.rstrip("/")
-    return f"{trimmed}/v1/ai-tools/web-search"
+    petal_url = read_env("PETAL_SEARCH_URL", "").strip()
+    if not petal_url:
+        raise ValueError("PETAL_SEARCH_URL is not set")
+    return petal_url
 
 
 def _load_llm_default_headers() -> dict[str, str]:
-    header_map = read_default_headers()
+    from jiuwenclaw.local_env_config import parse_default_headers
+    raw = read_env("PETAL_SEARCH_HEADERS", "")
+    header_map = parse_default_headers(raw)
     if not header_map:
-        raise ValueError("default_headers is not set")
+        raise ValueError("PETAL_SEARCH_HEADERS is not set")
     return header_map
 
 

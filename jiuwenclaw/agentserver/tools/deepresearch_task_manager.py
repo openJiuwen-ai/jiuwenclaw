@@ -257,53 +257,38 @@ class DeepResearchTaskManager:
 
     @staticmethod
     def _resolve_petal_search_url() -> str:
-        """Build Petal Search URL from LLM API_BASE: strip trailing /v2, append /v1/ai-tools/web-search."""
-        api_base = (
-            get_local_config("API_BASE")
-            or get_local_config("OPENAI_BASE_URL")
-            or get_local_config("OPENAI_API_BASE")
-            or ""
-        )
-        if isinstance(api_base, str):
-            api_base = api_base.strip()
-        else:
-            api_base = str(api_base or "").strip()
-        if not api_base:
-            return ""
-        trimmed = api_base.rstrip("/")
-        if trimmed.lower().endswith("/v2"):
-            trimmed = trimmed[:-3]
-        trimmed = trimmed.rstrip("/")
-        return f"{trimmed}/v1/ai-tools/web-search"
+        """Read Petal Search URL from dedicated env var."""
+        return str(get_local_config("PETAL_SEARCH_URL", "") or "").strip()
 
     @staticmethod
     def _detect_configured_search_engines() -> Dict[str, str]:
         """自动识别环境变量中已配置的检索引擎.
 
         返回：
-            Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"jina": "sk-xxx", "bocha": "sk-yyy"}
+            Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"bocha": "sk-xxx", "petal": "url"}
         """
         configured_engines = {}
 
-        # SerpAPI 搜索引擎
         serper_api_key = str(get_local_config("SERPER_API_KEY", "") or "").strip()
         if serper_api_key:
             configured_engines[SearchEngine.SERPER.value] = serper_api_key
 
-        # JINA 搜索引擎
         jina_api_key = str(get_local_config("JINA_API_KEY", "") or "").strip()
         if jina_api_key:
             configured_engines[SearchEngine.JINA.value] = jina_api_key
 
-        # 博查搜索引擎
         bocha_api_key = str(get_local_config("BOCHA_API_KEY", "") or "").strip()
         if bocha_api_key:
             configured_engines[SearchEngine.BOCHA.value] = bocha_api_key
 
-        # Perplexity 搜索引擎
         perplexity_api_key = str(get_local_config("PERPLEXITY_API_KEY", "") or "").strip()
         if perplexity_api_key:
             configured_engines[SearchEngine.PERPLEXITY.value] = perplexity_api_key
+
+        petal_url = str(get_local_config("PETAL_SEARCH_URL", "") or "").strip()
+        petal_headers = str(get_local_config("PETAL_SEARCH_HEADERS", "") or "").strip()
+        if petal_url and petal_headers:
+            configured_engines[SearchEngine.PETAL.value] = petal_url
 
         return configured_engines
 
