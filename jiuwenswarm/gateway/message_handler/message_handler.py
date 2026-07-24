@@ -74,6 +74,7 @@ _KNOWN_JIUWENSWARM_SESSION_PREFIXES = (
     "wecom_",
     "telegram_",
     "discord_",
+    "slack_",
     "whatsapp_",
 )
 _INTERRUPT_RESUME_SOURCES = frozenset({
@@ -427,6 +428,8 @@ class MessageHandler(ABC):
             _ch,
             chat_id=getattr(msg, "chat_id", None) or "",
             ws_id=_ws_id if _kind == "ws" else "",
+            thread_ts=(msg.metadata or {}).get("slack_thread_ts", ""),
+            chat_type=(msg.metadata or {}).get("slack_channel_type", "group"),
         )
         await self._session_sharing.register(msg.session_id, SubRole.GODVIEW, rk, dt)
         logger.info(

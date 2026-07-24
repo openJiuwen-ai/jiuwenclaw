@@ -488,6 +488,7 @@
       "wecom": "WeCom",
       "wechat": "WeChat",
       "discord": "Discord",
+      "slack": "Slack",
       "heartbeat": "Heartbeat",
       "tui": "TUI",
       "unknown": "Unknown"
@@ -568,6 +569,7 @@
       "dingtalk": "DingTalk",
       "telegram": "Telegram",
       "discord": "Discord",
+      "slack": "Slack",
       "whatsapp": "WhatsApp",
       "wecom": "WeCom",
       "wechat": "WeChat"
@@ -592,6 +594,9 @@
       "discordTitle": "Discord Channel Configuration",
       "discordSubtitle": "Configure Discord bot service settings",
       "discordHint": "Discord Bot messaging is supported. Enable Message Content Intent in Developer Portal and optionally set the target channel, the block_dm toggle can be used to block direct message.",
+      "slackTitle": "Slack Channel Configuration",
+      "slackSubtitle": "Configure Slack Socket Mode bot settings",
+      "slackHint": "Create a Slack app with Socket Mode enabled, an xoxb bot token, and an xapp app token. Subscribe to app_mention and message.im events.",
       "telegramTitle": "Telegram Channel Configuration",
       "telegramSubtitle": "Configure Telegram Bot service settings",
       "whatsappTitle": "WhatsApp Channel Configuration",
@@ -607,6 +612,7 @@
       "feishu": "Loading Lark settings...",
       "telegram": "Loading Telegram settings...",
       "discord": "Loading Discord settings...",
+      "slack": "Loading Slack settings...",
       "whatsapp": "Loading WhatsApp settings...",
       "wecom": "Loading WeCom settings...",
       "wechat": "Loading WeChat settings..."
@@ -625,6 +631,11 @@
       "wecomDefaultChatIdHint": "Target for heartbeat/scheduled push. Leave empty to use last chatid",
       "discordGuildId": "Enter the Discord server ID (direct message still works without this)",
       "discordChannelId": "Enter the Discord server's channel ID (direct message still works without this)",
+      "slackBotToken": "Enter the xoxb bot token",
+      "slackAppToken": "Enter the xapp app token",
+      "slackChannelId": "Enter the fallback Slack channel ID",
+      "slackUserIds": "One Slack user ID per line (empty allows all users)",
+      "slackChannelIds": "One Slack channel ID per line (empty allows all channels)",
       "allowFrom": "One chatid/userid per line (comma-separated is also supported)"
     },
     "saved": {
@@ -633,6 +644,7 @@
       "dingtalk": "DingTalk settings saved",
       "telegram": "Telegram settings saved",
       "discord": "Discord settings saved",
+      "slack": "Slack settings saved",
       "whatsapp": "WhatsApp settings saved",
       "wecom": "WeCom settings saved",
       "wechat": "WeChat settings saved"
@@ -668,6 +680,7 @@
       "loadDingtalk": "Failed to load DingTalk settings",
       "loadTelegram": "Failed to load Telegram settings",
       "loadDiscord": "Failed to load Discord settings",
+      "loadSlack": "Failed to load Slack settings",
       "loadWhatsApp": "Failed to load WhatsApp settings",
       "loadWecom": "Failed to load WeCom settings",
       "loadWechat": "Failed to load WeChat settings",

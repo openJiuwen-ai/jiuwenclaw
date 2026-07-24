@@ -1401,6 +1401,8 @@ async def _run(
         TelegramChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.discord.discord_connect import DiscordChannel, \
         DiscordChannelConfig
+    from jiuwenswarm.gateway.channel_manager.im_platforms.slack.slack_connect import SlackChannel, \
+        SlackChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
     from jiuwenswarm.common.config import get_config
@@ -1825,6 +1827,8 @@ async def _run(
     telegram_task = None
     discord_channel = None
     discord_task = None
+    slack_channel = None
+    slack_task = None
     whatsapp_channel = None
     whatsapp_task = None
     wecom_channel = None
@@ -1902,6 +1906,7 @@ async def _run(
         nonlocal feishu_channel, feishu_task, xiaoyi_channel, xiaoyi_task
         nonlocal dingtalk_channel, dingtalk_task, telegram_channel, telegram_task
         nonlocal discord_channel, discord_task
+        nonlocal slack_channel, slack_task
         nonlocal whatsapp_channel, whatsapp_task
         nonlocal wecom_channel, wecom_task
         nonlocal wechat_channel, wechat_task
@@ -1929,6 +1934,7 @@ async def _run(
             "telegram",
             "whatsapp",
             "discord",
+            "slack",
             "wecom",
             "wechat",
             "ssh",
@@ -2221,6 +2227,38 @@ async def _run(
             else:
                 logger.info("[App] channels.discord missing or invalid, DiscordChannel disabled")
 
+        if "slack" in changed_channels:
+            slack_conf = conf.get("slack") if isinstance(conf, dict) else None
+            await _stop_channel(slack_channel, slack_task, "slack")
+            slack_channel, slack_task = None, None
+
+            if isinstance(slack_conf, dict):
+                enabled, reason = _is_channel_enabled(slack_conf, ["bot_token", "app_token"])
+                if not enabled:
+                    logger.info("[App] channels.slack.%s, SlackChannel disabled", reason)
+                else:
+                    reply_in_thread_raw = slack_conf.get("reply_in_thread", True)
+                    reply_in_thread = (
+                        str(reply_in_thread_raw).strip().lower() in ("true", "1", "yes", "on")
+                        if isinstance(reply_in_thread_raw, str)
+                        else bool(reply_in_thread_raw)
+                    )
+                    slack_config = SlackChannelConfig(
+                        enabled=True,
+                        bot_token=str(slack_conf.get("bot_token") or "").strip(),
+                        app_token=str(slack_conf.get("app_token") or "").strip(),
+                        allow_from=slack_conf.get("allow_from") or [],
+                        allowed_channel_ids=slack_conf.get("allowed_channel_ids") or [],
+                        default_channel_id=str(slack_conf.get("default_channel_id") or "").strip(),
+                        reply_in_thread=reply_in_thread,
+                    )
+                    slack_channel = SlackChannel(slack_config, _DummyBus())
+                    channel_manager.register_channel(slack_channel)
+                    slack_task = asyncio.create_task(slack_channel.start(), name="slack")
+                    logger.info("[App] SlackChannel registered from config.yaml.channels.slack")
+            else:
+                logger.info("[App] channels.slack missing or invalid, SlackChannel disabled")
+
         if "whatsapp" in changed_channels:
             whatsapp_conf = conf.get("whatsapp") if isinstance(conf, dict) else None
             await _stop_channel(whatsapp_channel, whatsapp_task, "whatsapp")
@@ -2511,6 +2549,13 @@ async def _run(
             except asyncio.CancelledError:
                 pass
             await discord_channel.stop()
+        if slack_channel is not None and slack_task is not None:
+            slack_task.cancel()
+            try:
+                await slack_task
+            except asyncio.CancelledError:
+                pass
+            await slack_channel.stop()
         if whatsapp_channel is not None and whatsapp_task is not None:
             whatsapp_task.cancel()
             try:

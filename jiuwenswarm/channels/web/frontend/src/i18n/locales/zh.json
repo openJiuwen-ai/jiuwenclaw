@@ -489,6 +489,7 @@
       "wecom": "企业微信",
       "wechat": "微信",
       "discord": "Discord",
+      "slack": "Slack",
       "heartbeat": "心跳",
       "tui": "TUI",
       "unknown": "未知"
@@ -568,6 +569,7 @@
       "dingtalk": "钉钉",
       "telegram": "Telegram",
       "discord": "Discord",
+      "slack": "Slack",
       "whatsapp": "WhatsApp",
       "wecom": "企业微信",
       "wechat": "微信"
@@ -592,6 +594,9 @@
       "discordTitle": "Discord 频道参数配置",
       "discordSubtitle": "配置 Discord Bot 服务相关参数",
       "discordHint": "支持 Discord Bot 消息收发，请确保已在开发者后台开启 Message Content Intent 并配置目标频道，可使用block_dm开关屏蔽私信。",
+      "slackTitle": "Slack 频道参数配置",
+      "slackSubtitle": "配置 Slack Socket Mode 机器人服务参数",
+      "slackHint": "请创建并启用 Socket Mode 的 Slack App，配置 xoxb Bot Token 和 xapp App Token，并订阅 app_mention 与 message.im 事件。",
       "telegramTitle": "Telegram 频道参数配置",
       "telegramSubtitle": "配置 Telegram Bot 服务相关参数",
       "whatsappTitle": "WhatsApp 频道参数配置",
@@ -607,6 +612,7 @@
       "feishu": "正在加载飞书配置...",
       "telegram": "正在加载 Telegram 配置...",
       "discord": "正在加载 Discord 配置...",
+      "slack": "正在加载 Slack 配置...",
       "whatsapp": "正在加载 WhatsApp 配置...",
       "wecom": "正在加载企业微信配置...",
       "wechat": "正在加载微信配置..."
@@ -625,6 +631,11 @@
       "wecomDefaultChatIdHint": "心跳/定时推送目标。不填则自动使用最近一次聊天的 chatid",
       "discordGuildId": "请填入Discord的服务器ID（留空则仅接收私信）",
       "discordChannelId": "请填入Discord服务器的频道ID（留空则仅接收私信）",
+      "slackBotToken": "请输入 xoxb Bot Token",
+      "slackAppToken": "请输入 xapp App Token",
+      "slackChannelId": "请输入备用 Slack 频道 ID",
+      "slackUserIds": "每行一个 Slack 用户 ID（留空允许所有用户）",
+      "slackChannelIds": "每行一个 Slack 频道 ID（留空允许所有频道）",
       "allowFrom": "每行一个 chatid/userid（也支持逗号分隔）"
     },
     "saved": {
@@ -633,6 +644,7 @@
       "dingtalk": "钉钉配置已保存",
       "telegram": "Telegram 配置已保存",
       "discord": "Discord 配置已保存",
+      "slack": "Slack 配置已保存",
       "whatsapp": "WhatsApp 配置已保存",
       "wecom": "企业微信配置已保存",
       "wechat": "微信配置已保存"
@@ -668,6 +680,7 @@
       "loadDingtalk": "获取钉钉配置失败",
       "loadTelegram": "获取 Telegram 配置失败",
       "loadDiscord": "获取 Discord 配置失败",
+      "loadSlack": "获取 Slack 配置失败",
       "loadWhatsApp": "获取 WhatsApp 配置失败",
       "loadWecom": "获取企业微信配置失败",
       "loadWechat": "获取微信配置失败",
