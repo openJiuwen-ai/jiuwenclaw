@@ -4678,7 +4678,8 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] prompt attachment sync skipped: %s", exc)
 
-    def _prompt_attachment_root(self) -> Path:
+    @staticmethod
+    def _prompt_attachment_root() -> Path:
         # prompt attachment 是 agent 自有运行时状态，应始终落在可写的 agent
         # 私有工作区（~/.jiuwenswarm/agent/workspace/prompt_attachment），与请求
         # 的 project_dir/workspace_dir 解耦。后者在沙箱里可能是只读 bind
