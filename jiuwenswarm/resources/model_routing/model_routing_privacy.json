@@ -1,0 +1,28 @@
+{
+  "patterns": [
+    {
+      "label": "credentials_keywords",
+      "regex": "(?i)\\b(password|passwd|pwd|secret|api[_-]?key|access[_-]?token|private[_-]?key|credential|bearer)\\b"
+    },
+    {
+      "label": "chinese_privacy_keywords",
+      "regex": "(密码|身份证|手机号|电话号码|银行卡|社保号|私钥|密钥|验证码|隐私)"
+    },
+    {
+      "label": "id_number_cn",
+      "regex": "\\b\\d{15}\\b|\\b\\d{17}[\\dXx]\\b"
+    },
+    {
+      "label": "phone_number_cn",
+      "regex": "\\b1[3-9]\\d{9}\\b"
+    },
+    {
+      "label": "bearer_token",
+      "regex": "(?i)Bearer\\s+[A-Za-z0-9._-]+"
+    },
+    {
+      "label": "email_address",
+      "regex": "\\b[\\w.+-]+@[\\w-]+\\.[\\w.-]+\\b"
+    }
+  ]
+}

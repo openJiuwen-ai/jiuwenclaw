@@ -1093,6 +1093,18 @@ def prepare_workspace(
         ):
             shutil.copy2(env_template_src, env_dest)
 
+    # ----- model_routing JSON templates → config/routing_state/ -----
+    routing_state_dir = config_dest_dir / "routing_state"
+    routing_state_dir.mkdir(parents=True, exist_ok=True)
+    model_routing_src_dir = resources_dir / "model_routing"
+    if model_routing_src_dir.is_dir():
+        for mr_filename in ("classifier_mapper.json", "model_routing_privacy.json", "model_capability_map.json"):
+            mr_src = model_routing_src_dir / mr_filename
+            if mr_src.is_file():
+                mr_dst = routing_state_dir / mr_filename
+                if overwrite or not mr_dst.exists():
+                    shutil.copy2(mr_src, mr_dst)
+
     # ----- copy runtime dirs (new layout) -----
     agent_root = workspace_dir / "agent"
     agent_sessions = agent_root / "sessions"
