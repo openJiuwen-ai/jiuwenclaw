@@ -25,19 +25,14 @@ def quote_path(path: str) -> str:
     return f'"{normalized}"'
 
 
-_PPT_DIR = Path(__file__).resolve().parent.parent
-
-
-def cli_path(subcommand: str, pptx_root: str | None = None) -> str:
+def cli_path(subcommand: str, pptx_root: str) -> str:
     """构建 cli.js 子命令路径。
 
     prod 版 cli.js 位于 {pptx_root}/packages/cli/dist/cli.js。
-    pptx_root 为 None 时 fallback 到内置 _PPT_DIR/packages/cli/dist/（仅兼容旧调用）。
     """
-    if pptx_root:
-        cli_dir = Path(pptx_root) / "packages" / "cli" / "dist"
-    else:
-        cli_dir = _PPT_DIR / "packages" / "cli" / "dist"
+    if not str(pptx_root or "").strip():
+        raise BashExecError("缺少 pptx_root，无法定位新版 pptx-craft CLI")
+    cli_dir = Path(pptx_root) / "packages" / "cli" / "dist"
     cli = cli_dir / "cli.js"
     if not cli.is_file():
         raise BashExecError(f"cli.js 不存在: {cli}")

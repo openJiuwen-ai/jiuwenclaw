@@ -6,7 +6,6 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError, PlanNode
@@ -19,8 +18,6 @@ from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.utils.bash_utils import 
     run_bash,
 )
 
-_PPT_DIR = str(Path(__file__).resolve().parent)
-
 logger = logging.getLogger(__name__)
 
 
@@ -28,7 +25,7 @@ _CHART_CANDIDATE_TYPES = {"data", "comparison", "technology", "trend"}
 
 
 def _extract_designer_section(text: str) -> str:
-    """从 designer/SKILL.md 原文提取布局约束、视觉规范等关键章节。
+    """从 references/designer.md 原文提取布局约束、视觉规范等关键章节。
 
     文件 IO 由 PrepareNode 通过 read_file 工具完成后传入 text，
     skill_code 中禁止直接做文件 IO（校验器禁止 open/read_text 等）。
@@ -50,6 +47,19 @@ def _extract_designer_section(text: str) -> str:
             end = len(text)
         return text[start:end]
 
+    def _extract_bounded_section(header: str, end_markers: tuple[str, ...]) -> str:
+        """提取指定标题到最近结束标记之间的内容，避免把无关长章节一并注入。"""
+        start = text.find(header)
+        if start == -1:
+            return ""
+        candidates = [
+            pos
+            for marker in end_markers
+            if (pos := text.find(marker, start + len(header))) != -1
+        ]
+        end = min(candidates) if candidates else len(text)
+        return text[start:end].rstrip()
+
     # 1. 防溢出硬性约束（全局 CSS 约束、图表容器约束等）
     css_section = _extract_section("### 防溢出硬性约束")
     if css_section:
@@ -63,7 +73,29 @@ def _extract_designer_section(text: str) -> str:
     if flex_section:
         sections.append("\n\n### 弹性布局约束（完整）\n" + flex_section)
 
-    # 3. 固定尺寸约束
+    # 3. 纵向留白与逐列验收契约
+    # 放在通用 Flex 规则之后，明确 flex-1 只是实现手段，不能用空容器冒充语义占用。
+    vertical_contract = _extract_bounded_section(
+        "### 内容页纵向留白分布契约（强制）",
+        ("\n### PAGE_CONTENT 纵向布局约束", "\n---"),
+    )
+    page_content_contract = _extract_bounded_section(
+        "### PAGE_CONTENT 纵向布局约束",
+        ("\n- **四项同级默认范式**", "\n**内容密度检查", "\n---"),
+    )
+    if vertical_contract or page_content_contract:
+        sections.append(
+            "\n\n### 内容页纵向占用与逐列验收（designer 原文）\n"
+            "兼容说明：以下规范中的 Grid 示例在本链路必须用等价 Flex 权重实现；"
+            "不得违反本提示词的 CSS Grid 禁令，但纵向占用率、逐列验收和真实语义内容要求保持不变。\n"
+            + "\n\n".join(
+                section
+                for section in (vertical_contract, page_content_contract)
+                if section
+            )
+        )
+
+    # 4. 固定尺寸约束
     size_section = _extract_section(
         "### 二、固定尺寸约束",
         "固定尺寸约束",
@@ -71,7 +103,7 @@ def _extract_designer_section(text: str) -> str:
     if size_section:
         sections.append("\n\n### 固定尺寸约束\n" + size_section)
 
-    # 4. 文本重叠避免 + 元素遮挡避免
+    # 5. 文本重叠避免 + 元素遮挡避免
     overlap_section = _extract_section("### 三、文本重叠避免")
     if overlap_section:
         sections.append("\n\n### 文本重叠避免\n" + overlap_section)
@@ -80,17 +112,17 @@ def _extract_designer_section(text: str) -> str:
     if occlusion_section:
         sections.append("\n\n### 元素遮挡避免\n" + occlusion_section)
 
-    # 5. 色彩系统
+    # 6. 色彩系统
     color_section = _extract_section("### 色彩系统")
     if color_section:
         sections.append("\n\n### 色彩系统\n" + color_section)
 
-    # 6. 字体系统
+    # 7. 字体系统
     font_section = _extract_section("### 字体系统")
     if font_section:
         sections.append("\n\n### 字体系统\n" + font_section)
 
-    # 7. 语义区域划分指南
+    # 8. 语义区域划分指南
     search_end = text.find("### 防溢出硬性约束") if "### 防溢出硬性约束" in text else len(text)
     sem_start = text.find("✅ 正确示例 - 单一主视觉页面可只有一个语义区域", 0, search_end)
     if sem_start == -1:
@@ -160,6 +192,7 @@ _DESIGN_RULES_DIGEST = (
     "### 视觉与布局硬约束（精选 22 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
+    "安全区高度固定为 660px，禁止在 `content-safe` 上添加 `h-full`、`h-[720px]` 或 `height:100%`；"
     "子元素禁止额外加 padding，否则导致双重边距\n"
     "3. 字号：严格使用风格规范文件中定义的字号值（如 business-classic.md 定义主标题 37px、正文 19px 等），"
     "不自行调整字号范围（除非用户在原始 query 中明确指定了字号，此时以用户指定值为准）；"
@@ -176,7 +209,10 @@ _DESIGN_RULES_DIGEST = (
     "4.3 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色表，禁止使用相近色；"
     "坐标轴标签用深色，分割线用浅色\n"
     "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止数据标签重叠\n"
-    "4.5 图例防叠字：图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`，避免水平挤排叠字\n"
+    "4.5 图例防叠字：图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`；"
+    "横向图例还必须检查文字长度：任一中文标签超过 6 个字或全部标签合计超过 12 个字时，"
+    "优先在不改变含义的前提下缩短标签，或改为纵向图例；若仍横排，`itemGap` 至少 24，"
+    "并增大 `grid.top` 为图例预留空间\n"
     "4.6 图表分割线：`splitLine` 建议使用浅色虚线，避免实线在 PPTX 中过于突兀；颜色由风格文件决定\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
     "6. 关键数字必须有放大数字卡片，结论必须有摘要高亮；"
@@ -198,9 +234,11 @@ _DESIGN_RULES_DIGEST = (
     "8.1 禁止使用 CSS Grid：html-to-pptx 转换器不支持 `display:grid`（Grid 仅检测不转换，视为非文本容器），"
     "所有布局必须用 Flexbox（`flex`、`flex-col`、`flex-[N]`）替代 `grid grid-cols-*`；"
     "左右分栏用 `flex` + `flex-[3]` / `flex-[2]` 比例分配，不用 `grid grid-cols-[3fr_2fr]`\n"
-    "9. flex 子元素：必须 `flex-1 min-h-0 min-w-0`（水平布局）或 `flex-1 min-h-0`（垂直布局）；"
+    "9. 需要填满父容器剩余空间的主内容区、图表区可使用 `flex-1 min-h-0 min-w-0`（水平布局）"
+    "或 `flex-1 min-h-0`（垂直布局）；内容较少的纯文字卡片不强制使用 `flex-1`；"
     "禁止使用 `overflow-hidden` 隐藏核心内容\n"
-    "10. flex-col 子元素：必须 `flex-1 min-h-0`；禁止使用 `overflow-hidden` 隐藏核心内容；"
+    "10. flex-col 中需要填满剩余高度的主区域使用 `flex-1 min-h-0`；"
+    "header、footer 和内容较少的纯文字卡片使用 `flex-shrink-0`；禁止使用 `overflow-hidden` 隐藏核心内容；"
     "注意：`overflow-hidden` 在浏览器中裁剪溢出内容，但 PPTX 导出时不被尊重——"
     "超出容器边界的内容会直接溢出；因此卡片内容必须通过控制行数和行高确保不超出容器高度\n"
     "10.1 内容预算：flex-col 中有多个子元素时，禁止把大块内容（如完整表格）设 `flex-shrink-0`，"
@@ -208,7 +246,9 @@ _DESIGN_RULES_DIGEST = (
     "10.2 多栏等高卡片防空白：当使用 `grid-rows-N` + `flex-1` 布局多卡片时，"
     "每个卡片内容（文字行+图标+数据）必须填充容器高度的 60% 以上；"
     "若内容不足，改用 `flex-shrink-0` 让卡片按内容自适应高度，"
-    "或将 `grid-rows-N` 改为 `grid-rows-[auto]` 让容器收缩包裹内容，剩余空间分配给其他区域\n"
+    "或将 `grid-rows-N` 改为 `grid-rows-[auto]` 让容器收缩包裹内容；"
+    "仅含标题和不超过 3 行正文的纯文字卡片，其卡片组和卡片本身均不得使用 `flex-1`，"
+    "剩余高度优先分配给同栏的图表、图片或表格区域\n"
     "10.3 多栏卡片防溢出与行高禁令："
     "① 卡片内正文禁止使用 `leading-loose`（line-height:2），该类使文字高度翻倍，"
     "在 PPTX 导出时极易导致内容超出卡片边界；正文统一使用 `leading-snug`（1.25）或 `leading-normal`（1.5）\n"
@@ -219,15 +259,17 @@ _DESIGN_RULES_DIGEST = (
     "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体"
     "（除非用户在原始 query 中明确指定了字体或配色，此时以用户指定值为准）；"
     "所有页面 `<body>` 背景色必须统一，从风格规范中取一致的背景色，禁止部分页面用浅灰/灰色背景而其他页用白色；"
+    "同组、同层级卡片通常保持协调的表面色与强调色；若风格允许深浅区域交替，可继续灵活使用深色卡片，"
+    "但深浅变化应服务于清晰的叙事强调或分组关系，并保持字体、强调色和边界处理一致，避免无缘由的随机跳色；"
     "**字体强制声明**：风格规范文件 frontmatter 中的 `font-family` 字段声明了字体栈（如 `WenYuan Sans SC, Arial, Noto Sans SC, sans-serif`），"
     "每个页面的 `<style>` 块中必须在 `body` 选择器或 `.ppt-slide` 选择器上声明该完整字体栈，例如："
     "`body { font-family: 'WenYuan Sans SC', 'Arial', 'Noto Sans SC', sans-serif; }`；"
     "禁止仅在 CSS 中声明而漏掉 HTML 元素上的字体继承——所有文本元素必须继承 `body` 的 `font-family`，不得单独使用其他字体\n"
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚；"
     "禁止页脚出现纯数字页码编号（除非用户在原始 query 中明确要求页码，此时应在用户指定位置添加页码，格式如 3/12）\n"
-    "13. 布局实现：所有区域用 `flex-1 min-h-0` 自动分配高度，禁止手动计算 px 值；"
-    "子元素用 `flex-1 min-h-0` 弹性填充，禁止使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表/数据卡片等），"
-    "信任 flex 自动布局\n"
+    "13. 布局实现：仅 main、图表或图片等需要承接剩余空间的区域使用 `flex-1 min-h-0`；"
+    "纯文字卡片按内容自适应高度，禁止为了等高而制造大片空白；"
+    "禁止使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表/数据卡片等）\n"
     "13.1 表格禁用 CSS Grid：html-to-pptx 引擎不支持 `display:grid` 渲染表格，grid 表格会被转为低质量截图；"
     "数据表格必须用 `<table><tr><td>` 原生标签或 `flex` 布局替代 `grid grid-cols-N`\n"
     "14. 全局禁止 `rounded-*` 类，所有元素 border-radius:0（饼图/环形图的圆形不受此限制）\n"
@@ -253,7 +295,7 @@ _HTML_SKELETON = (
     "### 标准 HTML 骨架（所有页面必须遵循，禁止改动结构）\n"
     "```html\n"
     '<div class="ppt-slide" type="content" data-page-role="content">\n'
-    '  <div class="content-safe flex flex-col h-full">\n'
+    '  <div class="content-safe flex flex-col">\n'
     '    <header class="flex-shrink-0">标题区</header>\n'
     '    <main class="flex-1 min-h-0 flex gap-3">\n'
     '      <section class="flex-1 min-h-0 min-w-0">左侧内容</section>\n'
@@ -265,7 +307,7 @@ _HTML_SKELETON = (
     "```\n"
     "规则：\n"
     "- 根节点必须同时携带 `class=\"ppt-slide\"`、`type=\"content\"`、`data-page-role=\"content\"`\n"
-    "- `content-safe` 用 `flex flex-col` 纵向排列 header/main/footer 三段\n"
+    "- `content-safe` 用 `flex flex-col` 纵向排列 header/main/footer 三段；高度由安全区固定为 660px，禁止添加 `h-full`\n"
     "- `main` 用 `flex` 左右分列（禁止使用 `grid grid-cols-*`，html-to-pptx 转换器不支持 CSS Grid），恰好 2 个 `<section>` 直接子元素\n"
     "- 禁止把 header/footer 放进 main 内部；禁止 main 只有 1 个子元素\n"
     "- 禁止在子元素上使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表标签/数据卡片等）；overflow-hidden 仅允许用于 `.ppt-slide` 画布边界\n"
@@ -275,7 +317,8 @@ _HTML_SKELETON = (
 _STRUCTURAL_DESIGN_RULES = (
     "### 视觉与布局硬约束（结构页精选 8 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
-    "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`\n"
+    "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`；"
+    "高度固定为 660px，禁止在 `content-safe` 上添加 `h-full`、`h-[720px]` 或 `height:100%`\n"
     "3. 字号：封面标题 48-64px / 副标题 24-28px / 日期 18px；"
     "结束页标题 42-48px / 正文 22px"
     "（除非用户在原始 query 中明确指定了字号，此时以用户指定值为准）\n"
@@ -304,7 +347,7 @@ _STRUCTURAL_HTML_SKELETON = (
     ".ppt-slide { width: 1280px; height: 720px; overflow: hidden; box-sizing: border-box; }\n"
     "</style>\n"
     '<div class="ppt-slide">\n'
-    '  <div class="content-safe flex flex-col items-center justify-center h-full">\n'
+    '  <div class="content-safe flex flex-col items-center justify-center">\n'
     "    <h1 class=\"text-center\">标题</h1>\n"
     "    <p class=\"text-center mt-4\">副标题</p>\n"
     "  </div>\n"
@@ -322,7 +365,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "data": (
         "### 参考布局（data 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <header class="flex-shrink-0">4-6 个关键数字卡片，flex</header>\n'
         '  <main class="flex-1 min-h-0 flex gap-3">\n'
         '    <section class="flex-[3] min-h-0 min-w-0">6 个核心论点卡片，flex flex-col</section>\n'
@@ -336,11 +379,14 @@ _PAGE_LAYOUT_TEMPLATES = {
     "trend": (
         "### 参考布局（trend 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
         '  <main class="flex-1 min-h-0 flex gap-3">\n'
         '    <section class="flex-1 min-h-0 min-w-0">ECharts 折线图（趋势数据）</section>\n'
-        '    <section class="w-[40%] min-h-0 min-w-0">4-6 个核心论点卡片，flex-col</section>\n'
+        '    <section class="w-[40%] min-h-0 min-w-0 flex flex-col gap-2">\n'
+        '      <div class="flex-1 min-h-0">对比表格或迷你图表，承接剩余高度</div>\n'
+        '      <div class="flex-shrink-0">2-4 个紧凑洞察卡片；纯文字卡片不得使用 flex-1</div>\n'
+        '    </section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
@@ -350,7 +396,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "comparison": (
         "### 参考布局（comparison 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <main class="flex-1 min-h-0 flex flex-col">\n'
         '    <div class="flex flex-1 min-h-0 gap-3">\n'
         '      <section class="flex-1 min-h-0 min-w-0">对比对象 A 的卡片（flex flex-col）</section>\n'
@@ -366,7 +412,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "case": (
         "### 参考布局（case 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
         '  <main class="flex-1 min-h-0 flex gap-3">\n'
         '    <section class="flex-[2] min-h-0 min-w-0">6 个核心论点卡片，flex-col</section>\n'
@@ -379,7 +425,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "technology": (
         "### 参考布局（technology 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <header class="flex-shrink-0">4 个关键数字卡片</header>\n'
         '  <main class="flex-1 min-h-0 flex flex-col gap-3">\n'
         '    <section class="flex-1 min-h-0 min-w-0">ECharts 图表 + 对比表格</section>\n'
@@ -397,7 +443,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "cover": (
         "### 推荐布局（cover 类型，封面页）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col items-center justify-center h-full">\n'
+        '<div class="content-safe flex flex-col items-center justify-center">\n'
         '  <h1 class="text-[48px] font-bold text-center">演示标题</h1>\n'
         '  <p class="text-[24px] text-center mt-4">副标题</p>\n'
         '  <p class="text-[18px] text-center mt-2">日期</p>\n'
@@ -408,7 +454,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "ending": (
         "### 推荐布局（ending 类型，结束页）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col items-center justify-center h-full">\n'
+        '<div class="content-safe flex flex-col items-center justify-center">\n'
         '  <h2 class="text-[42px] font-bold text-center">感谢聆听</h2>\n'
         '  <p class="text-[22px] text-center mt-4">联系方式（可选）</p>\n'
         '</div>\n'
@@ -443,7 +489,10 @@ _DENSITY_CHECKLIST_DIGEST = (
     "3. 装饰图标：≥3 个 FontAwesome 图标（class 含 `fa-`）\n"
     "4. 留白质量：留白是否服务于层级、聚焦或阅读节奏；"
     "检查 flex-1 或 grid-rows-N 容器内的每个卡片/子元素，"
-    "若内容（文字行+图表+图标）填充不足容器高度的 50%，判定为'局部空白失衡'\n"
+    "若内容（文字行+图表+图标）填充不足容器高度的 50%，判定为'局部空白失衡'；"
+    "若纯文字卡片仅含标题和不超过 3 行正文却使用 `flex-1`，无需估算高度，直接判定为'局部空白失衡'；"
+    "纯文字 `ul/ol` 或卡片组只有 1-5 个短条目、没有图表/图片/表格却使用 `flex-1` 拉满高区域时，"
+    "也直接判定为'局部空白失衡'，不得把空容器、背景或装饰计作内容占用\n"
     "5. 数据来源：页脚有标注（机构名 / 资料名）\n"
     "6. 无大段文字：无连续 > 100 字段落\n"
     "7. 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
@@ -460,7 +509,9 @@ _DENSITY_CHECKLIST_DIGEST = (
     "13. 字号一致性：同级别卡片/模块必须使用相同字号，字号值来自风格文件\n"
     "14. 图表颜色：数据系列颜色来自风格文件图表配色表，坐标轴标签用深色，分割线用浅色\n"
     "15. 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}`；"
-    "图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`\n"
+    "图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`；"
+    "横向图例任一中文标签超过 6 个字或总长度超过 12 个字时，若未缩短标签、改为纵向布局，"
+    "或仍使用小于 24 的 `itemGap`，判定为'图例与轴标题重叠'\n"
     "16. 溢出风险：检查所有 `flex-col` 或 `flex-1` 容器内的卡片，"
     "若存在 `leading-loose`（line-height:2）或 `mt-auto` 底部子元素（色块标签/badge 行），"
     "且卡片内容总行数可能超过容器可容纳行数，判定为'内容溢出'；"
@@ -710,6 +761,52 @@ def _check_font_size_consistency(html: str) -> bool:
     return False
 
 
+_LIST_BLOCK_RE = re.compile(
+    r"<(?P<tag>ul|ol)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_CLASS_ATTR_RE = re.compile(
+    r"\bclass\s*=\s*(?P<quote>[\"'])(?P<classes>.*?)(?P=quote)",
+    re.IGNORECASE | re.DOTALL,
+)
+_LIST_ITEM_RE = re.compile(r"<li\b[^>]*>(.*?)</li\s*>", re.IGNORECASE | re.DOTALL)
+_NON_TEXT_VISUAL_RE = re.compile(
+    r"<(?:img|picture|table|svg|canvas)\b|echarts(?:-static-svg|\.init)",
+    re.IGNORECASE,
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
+
+
+def _has_sparse_flex_text_list(html: str) -> bool:
+    """检测高置信度的稀疏 flex-1 文字列表，避免把正常长列表误判为空白风险。"""
+    for match in _LIST_BLOCK_RE.finditer(html):
+        class_match = _CLASS_ATTR_RE.search(match.group("attrs"))
+        if not class_match:
+            continue
+        classes = set(class_match.group("classes").split())
+        if "flex-1" not in classes:
+            continue
+
+        body = match.group("body")
+        if _NON_TEXT_VISUAL_RE.search(body):
+            continue
+        items = _LIST_ITEM_RE.findall(body)
+        if not 1 <= len(items) <= 5:
+            continue
+
+        visible_items = [
+            re.sub(r"\s+", "", _HTML_TAG_RE.sub(" ", item)).replace("&nbsp;", "")
+            for item in items
+        ]
+        if (
+            all(visible_items)
+            and max(map(len, visible_items)) <= 80
+            and sum(map(len, visible_items)) <= 240
+        ):
+            return True
+    return False
+
+
 def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -> list[str]:
     """程序化后置校验：对 LLM 判定的'缺数据可视化'做二次确认，移除误判。"""
     if "缺数据可视化" not in failed_items:
@@ -724,7 +821,7 @@ def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -
 
 
 def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
-    """程序化后置校验：检测 Grid 布局、overflow-hidden、字号不一致、溢出风险等布局问题。
+    """程序化后置校验：检测 Grid、裁切、字号、稀疏列表和溢出风险等布局问题。
 
     leading-loose（line-height:2）使文字高度翻倍，在 PPTX 导出时极易导致内容超出卡片边界。
     PPTX 不尊重 overflow-hidden，超出边界的内容会直接溢出。
@@ -738,6 +835,10 @@ def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
     # 检测字号不一致
     if _check_font_size_consistency(html) and "字号不一致" not in failed_items:
         failed_items.append("字号不一致")
+    # 只检测高置信度场景：1-5 个短条目的纯文字列表自身使用 flex-1 拉满高度。
+    # 该结果进入现有重试/low_density 兜底，不新增硬阻断。
+    if _has_sparse_flex_text_list(html) and "局部空白失衡" not in failed_items:
+        failed_items.append("局部空白失衡")
     # 检测溢出风险：leading-loose 使文字高度翻倍
     if "内容溢出" not in failed_items and "leading-loose" in html:
         failed_items.append("内容溢出")
@@ -776,9 +877,11 @@ _REWRITE_ACTIONS = {
     "缺装饰图标": "为每个核心要点/卡片添加相关 FontAwesome 图标（class 含 fa-）",
     "空白率过高": "添加总结框（1-2 句概括性陈述），其次添加分隔线、引用块、背景装饰",
     "局部空白失衡": (
-        "优先调整布局（第一选择）：将空白卡片的容器从 flex-1 改为 flex-shrink-0"
-        "（按内容自适应高度），或将 grid-rows-N 改为更少的行数，"
-        "缩小该区域占比并放大其他区域以消化多余空间\n"
+        "优先重排已有语义内容（第一选择）：同时移除短文字卡片组及卡片本身不必要的 flex-1，"
+        "改为 flex-shrink-0 按内容自适应高度；1-5 个短条目可改为 2×2/分组布局，"
+        "或用明确 Flex 权重、justify-between 合理分布真实条目；"
+        "同栏已有图表、图片或表格时，将剩余高度分配给这些主区域，或减少等高行数、缩小该区域占比；"
+        "禁止插入空 spacer、空容器或纯装饰元素冒充内容占用\n"
         "若必须补充内容（第二选择）：在卡片内追加 1-2 行精简描述即可，"
         "但禁止使用 leading-loose（line-height:2 会翻倍高度导致溢出），"
         "禁止添加 mt-auto 底部子元素（色块标签/badge 行等，会增加总高度），"
@@ -797,7 +900,11 @@ _REWRITE_ACTIONS = {
         "仅保留 `.ppt-slide` 画布边界上的 overflow-hidden"
     ),
     "字号不一致": "统一同级别卡片/模块的字号，使用风格文件定义的字号值，确保同级元素字号一致",
-    "图例与轴标题重叠": "图例项过多时设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`，避免与坐标轴标题重叠",
+    "图例与轴标题重叠": (
+        "同时按图例项数量和文字长度处理：任一中文标签超过 6 个字或总长度超过 12 个字时，"
+        "优先在不改变含义的前提下缩短标签，或改为 `legend:{orient:'vertical'}`；"
+        "若仍横排，将 `itemGap` 调到至少 24，并增大 `grid.top` 为图例预留空间"
+    ),
     "内容溢出": (
         "移除 `leading-loose`（改为 `leading-snug` 或 `leading-normal`），"
         "移除 `mt-auto` 底部子元素（色块标签/badge 行等），"
@@ -1207,8 +1314,8 @@ class PageGenContext:
     outline_is_full: bool
     research_is_full: bool
     image_map_page: str  # 本页图片素材描述（空串=无图）
-    designer_md_text: str  # designer/SKILL.md 原文（由 PrepareNode 通过 read_file 读取）
-    charts_md_text: str  # designer/charts.md 原文（由 PrepareNode 通过 read_file 读取）
+    designer_md_text: str  # references/designer.md 原文（由 PrepareNode 通过 read_file 读取）
+    charts_md_text: str  # references/designer-charts.md 原文（由 PrepareNode 通过 read_file 读取）
     user_query: str = ""  # 用户原始 query（由 collect_user_text 提取）
 
 
@@ -1311,9 +1418,9 @@ class PrepareNode(PlanNode):
                     logger.warning("[P8.0] image_map.json 解析失败: %s", e)
 
         # 读取 skill designer 规范文件（通过 read_file 工具，skill_code 禁止直接 IO）
-        pptx_root = str(inputs.get("pptx_root") or _PPT_DIR)
-        designer_md_text = await self._read_file(f"{pptx_root}/designer/SKILL.md")
-        charts_md_text = await self._read_file(f"{pptx_root}/designer/charts.md")
+        pptx_root = str(inputs.get("pptx_root") or "").strip()
+        designer_md_text = await self._read_file(f"{pptx_root}/references/designer.md")
+        charts_md_text = await self._read_file(f"{pptx_root}/references/designer-charts.md")
 
         logger.info(
             "[P8.0] 预处理完成 outline_pages=%d research_pages=%d image_map_pages=%d",
@@ -1957,7 +2064,8 @@ class QAFixNode(PlanNode):
 
         fix_report = ""
         try:
-            pptx_root = str(inputs.get("pptx_root") or _PPT_DIR)
+            pptx_root = str(inputs.get("pptx_root") or "").strip()
+            style_file_path = str(inputs.get("style_file_path") or "").strip()
             # 按页并发 fix（1.1.19a+ 支持 --pages 参数）
             page_nums = [int(f.replace("page-", "").replace(".pptx.html", ""))
                          for f in page_files if f.startswith("page-") and f.endswith(".pptx.html")]
@@ -1967,7 +2075,15 @@ class QAFixNode(PlanNode):
 
                 async def _fix_one(pn: int) -> tuple[int, bool, str]:
                     async with sem:
-                        cmd = f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} --fix --pages {pn}"
+                        style_arg = (
+                            f" --style {quote_path(style_file_path)}"
+                            if style_file_path
+                            else ""
+                        )
+                        cmd = (
+                            f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} "
+                            f"--fix --pages {pn}{style_arg}"
+                        )
                         r = await run_bash(self, cmd, timeout_seconds=300, required=False, workdir=pptx_root)
                         out = combined_output(r)[:500]
                         ok = r.exit_code == 0
@@ -2379,7 +2495,7 @@ class PPTPageGenNode(PlanNode):
         pack_dir = str(inputs.get("pack_dir") or "").strip()
         output_dir = str(inputs.get("output_dir") or "").strip()
         pages_dir = str(inputs.get("pages_dir") or "").strip()
-        pptx_root = str(inputs.get("pptx_root") or _PPT_DIR).strip()
+        pptx_root = str(inputs.get("pptx_root") or "").strip()
 
         if not pack_dir or not pages_dir:
             logger.error("[P8-TP] pack_dir 或 pages_dir 为空")

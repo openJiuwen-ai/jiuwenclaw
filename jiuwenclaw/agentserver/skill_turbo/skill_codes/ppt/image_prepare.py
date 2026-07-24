@@ -544,7 +544,7 @@ class ImagePrepareNode(PlanNode):
     async def _step_d_finalize(
         self, output_dir: str, pptx_root: str, total_pages: int,
     ) -> bool:
-        script = Path(pptx_root) / "image-insert" / "stepD-finalize.js"
+        script = Path(pptx_root) / "image-insert" / "scripts" / "stepD-finalize.js"
         if not script.is_file():
             logger.warning("[P6.5] stepD-finalize.js 不存在: %s", script)
             return False

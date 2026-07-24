@@ -4,7 +4,6 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError, PlanNode
@@ -14,11 +13,6 @@ from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.utils.bash_utils import 
     quote_path,
     run_bash,
 )
-
-# fill_js_path 已废除，旧 fill.js 子命令改为 cli_path 子命令
-fill_js_path = None
-
-_PPT_DIR = Path(__file__).resolve().parent
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +120,7 @@ class PPTExportNode(PlanNode):
         pptx_filename = f"{sanitized}.pptx"
         pptx_path = f"{output_dir}/{pptx_filename}"
 
-        pptx_root = str(inputs.get("pptx_root") or str(_PPT_DIR))
+        pptx_root = str(inputs.get("pptx_root") or "").strip()
 
         # 模板画布分支：style_mode == template_canvas 时走模板终检导出流程
         style_mode = str(inputs.get("style_mode") or "").strip()

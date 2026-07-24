@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 _PRESET_STYLES = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
-_PRESET_STYLES_DIR = Path(__file__).resolve().parent / "styles"
 
 
 class StylePrepareNode(PlanNode):
@@ -161,7 +160,6 @@ class StylePrepareNode(PlanNode):
         candidates: list[Path] = []
         if pptx_root:
             candidates.append(Path(pptx_root) / "references" / "styles" / style_id / "style.md")
-        candidates.append(_PRESET_STYLES_DIR / f"{style_id}.md")
 
         if not self.has_tool("read_file"):
             logger.warning("[P7] read_file 工具不可用，无法加载预设风格")
