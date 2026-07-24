@@ -634,6 +634,24 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
                 break
 
         if target_tool_card is None:
+            agent = self._resolve_runtime_agent()
+            ability_manager = getattr(agent, "ability_manager", None)
+            if ability_manager is not None:
+                try:
+                    await ability_manager.list_tool_info()
+                except Exception as exc:
+                    logger.warning(
+                        "%s invoke fallback list_tool_info failed: %s",
+                        _LOG_PREFIX,
+                        exc,
+                    )
+            await self._refresh_deferred_tool_cache()
+            for tool in self._cached_deferred_tool_infos:
+                if str(getattr(tool, "name", "") or "") == tool_name:
+                    target_tool_card = tool
+                    break
+
+        if target_tool_card is None:
             return {
                 "success": False,
                 "error": f"工具 '{tool_name}' 未注册或不在按需可见工具列表中。",
