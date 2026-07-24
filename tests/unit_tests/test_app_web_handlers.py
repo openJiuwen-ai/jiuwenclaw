@@ -144,6 +144,11 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     }
 
 
+class FakeUpdaterService:
+    def get_runtime_config(self):
+        return {"release_api_type": "gitcode", "release_api_url": ""}
+
+
 @pytest.fixture
 def cleared_openai_account_login_jobs():
     with app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
@@ -233,6 +238,25 @@ async def test_openai_account_models_list_returns_refreshed_auth_status(
             "base_url": "https://chatgpt.com/backend-api/codex",
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_updater_reset_source_registered_and_restores_defaults(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_update_updater_in_config(updates):
+        captured.update(updates)
+
+    monkeypatch.setattr(app_web_handlers, "update_updater_in_config", fake_update_updater_in_config)
+
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, updater_service=FakeUpdaterService()))
+
+    await channel.methods["updater.reset_source"](object(), "req-reset", {}, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"] == {"release_api_type": "gitcode", "release_api_url": ""}
+    assert captured == app_web_handlers.DEFAULT_SOURCE_CONFIG
 
 
 @pytest.mark.asyncio

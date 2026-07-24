@@ -83,7 +83,7 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     validate_a2ui_config_update,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
-from jiuwenswarm.common.updater import UpdaterService
+from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
     get_env_file,
@@ -2423,6 +2423,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _updater_get_conf(ws, req_id, params, session_id):
+        service = updater_service or UpdaterService()
+        await channel.send_response(ws, req_id, ok=True, payload=service.get_runtime_config())
+
+    async def _updater_reset_source(ws, req_id, params, session_id):
+        try:
+            update_updater_in_config(dict(DEFAULT_SOURCE_CONFIG))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[updater.reset_source] 写回 config.yaml 失败: %s", exc)
+            await channel.send_response(ws, req_id, ok=False,
+                                        error=str(exc), code="INTERNAL_ERROR")
+            return
+
         service = updater_service or UpdaterService()
         await channel.send_response(ws, req_id, ok=True, payload=service.get_runtime_config())
 
@@ -5355,6 +5367,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.download", _updater_download)
     channel.register_method("updater.upgrade", _updater_upgrade)
     channel.register_method("updater.get_conf", _updater_get_conf)
+    channel.register_method("updater.reset_source", _updater_reset_source)
     channel.register_method("updater.set_conf", _updater_set_conf)
     channel.register_method("heartbeat.get_conf", _heartbeat_get_conf)
     channel.register_method("heartbeat.set_conf", _heartbeat_set_conf)
