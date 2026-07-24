@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import pytest
+from unittest.mock import AsyncMock, Mock, patch
 
 from jiuwenclaw.agentserver.tools.ask_user_question_tool import (
     _OTHER_FALLBACK_LABEL,
     _coerce_raw_options,
     _normalize_questions,
+    _ask_user_question_impl,
 )
 
 
@@ -115,3 +117,39 @@ def test_single_option_normal_pads_with_other():
     assert result[0]["label"] == "方案A"
     assert result[1]["label"] == _OTHER_FALLBACK_LABEL
     assert result[1]["description"] == "请在下一句补充说明你的选择"
+
+
+@pytest.mark.asyncio
+async def test_explicit_skipped_answer_is_not_reported_as_answered():
+    registry = Mock()
+    registry.wait_for_answer = AsyncMock(
+        return_value={"status": "skipped", "answers": []},
+    )
+    server = Mock()
+    server.send_push = AsyncMock()
+
+    with patch(
+        "jiuwenclaw.agentserver.tools.ask_user_question_tool.get_ask_request_context",
+        return_value=(True, "session-1", "stream-1", "web"),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.ask_user_question_tool.get_ask_runtime_scope",
+        return_value=Mock(),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.ask_user_question_tool.AskUserQuestionRegistry.get_instance",
+        return_value=registry,
+    ), patch(
+        "jiuwenclaw.agentserver.tools.ask_user_question_tool.AgentWebSocketServer.get_instance",
+        return_value=server,
+    ):
+        result = await _ask_user_question_impl([
+            {
+                "question": "是否补充范围？",
+                "options": [{"label": "是"}, {"label": "否"}],
+            },
+        ])
+
+    assert result == {
+        "status": "skipped",
+        "message": "用户未提供额外反馈，继续执行原始请求。",
+        "answers": [],
+    }

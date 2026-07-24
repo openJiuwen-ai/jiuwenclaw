@@ -125,7 +125,7 @@ class AskUserQuestionRegistry:
     _instance: ClassVar["AskUserQuestionRegistry | None"] = None
 
     def __init__(self) -> None:
-        self._pending: dict[_AskKey, asyncio.Future[list[Any]]] = {}
+        self._pending: dict[_AskKey, asyncio.Future[Any]] = {}
         self._pending_sessions: dict[_AskKey, str] = {}
         self._stream_interactive_ask: dict[_TenantSessionKey, bool] = {}
         self._session_interactive_ask: dict[_TenantSessionKey, bool] = {}
@@ -177,16 +177,37 @@ class AskUserQuestionRegistry:
         sid = str(session_id or "").strip()
         return bool(sid) and bool(self._session_interactive_ask.get(self._tenant_key(scope, sid)))
 
-    def resolve(self, scope: RuntimeScopeKey, request_id: str, answers: Any) -> bool:
+    def resolve(
+        self,
+        scope: RuntimeScopeKey,
+        request_id: str,
+        answers: Any,
+        *,
+        status: str = "answered",
+    ) -> bool:
         key = self._ask_key(scope, request_id)
         if not key[2]:
+            return False
+        norm: list[Any] = answers if isinstance(answers, list) else []
+        normalized_status = str(status or "answered").strip().lower()
+        if normalized_status not in {"answered", "skipped"}:
+            normalized_status = "answered"
+        if normalized_status == "skipped" and norm:
+            logger.warning(
+                "[AskUserQuestionRegistry] rejected skipped request with non-empty answers request_id=%s",
+                key[2],
+            )
             return False
         fut = self._pending.pop(key, None)
         self._pending_sessions.pop(key, None)
         if fut is None or fut.done():
             return False
-        norm: list[Any] = answers if isinstance(answers, list) else []
-        fut.set_result(norm)
+        result: Any = (
+            {"status": "skipped", "answers": []}
+            if normalized_status == "skipped"
+            else norm
+        )
+        fut.set_result(result)
         logger.info(
             "[AskUserQuestionRegistry] resolved request_id=%s tenant=(%s,%s)",
             key[2],
@@ -195,12 +216,12 @@ class AskUserQuestionRegistry:
         )
         return True
 
-    def register(self, scope: RuntimeScopeKey, request_id: str) -> asyncio.Future[list[Any]]:
+    def register(self, scope: RuntimeScopeKey, request_id: str) -> asyncio.Future[Any]:
         key = self._ask_key(scope, request_id)
         if not key[2]:
             raise ValueError("request_id 不能为空")
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future[list[Any]] = loop.create_future()
+        fut: asyncio.Future[Any] = loop.create_future()
         self._pending[key] = fut
         self._pending_sessions[key] = str(scope.session_id or "")
         return fut
@@ -241,7 +262,7 @@ class AskUserQuestionRegistry:
             )
         self._session_interactive_ask.pop(self._tenant_key(scope, sid), None)
 
-    async def wait_for_answer(self, request_id: str) -> list[Any]:
+    async def wait_for_answer(self, request_id: str) -> Any:
         scope = get_ask_runtime_scope()
         fut = self.register(scope, request_id)
         try:

@@ -5595,6 +5595,7 @@ class JiuWenClawDeepAdapter:
         request_id = params.get("request_id", "")
         answers = params.get("answers", [])
         source = params.get("source", "")
+        interaction_status = params.get("status", "answered")
         resolved = False
         if source == "skill_evolve":
             resolved = await self._handle_evolution_approval(request_id, answers)
@@ -5607,6 +5608,7 @@ class JiuWenClawDeepAdapter:
                 RuntimeScopeKey.from_adapter(self, session_id=str(request.session_id or "")),
                 request_id,
                 answers,
+                status=interaction_status,
             )
         else:
             # Backward compatibility: keep request_id-prefix routing for old channels/frontends.
@@ -5621,6 +5623,7 @@ class JiuWenClawDeepAdapter:
                     RuntimeScopeKey.from_adapter(self, session_id=str(request.session_id or "")),
                     request_id,
                     answers,
+                    status=interaction_status,
                 )
 
         return AgentResponse(
