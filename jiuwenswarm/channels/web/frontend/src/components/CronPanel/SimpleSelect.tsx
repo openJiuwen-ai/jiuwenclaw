@@ -30,6 +30,10 @@ export default function SimpleSelect({ value, onChange, options, placeholder = '
   const rootRef = useRef<HTMLDivElement>(null);
   useClickOutside(rootRef, open && !disabled, () => setOpen(false));
   const selected = options.find((o) => o.value === value) ?? null;
+  // value 为空串统一视为"未选中任何有效项"（即便调用方显式提供了一条 value:'' 的占位选项，
+  // 例如 CronTaskDrawer 项目下拉框里代表"未选项目"的"-"），展示上仍走灰色的 muted 样式，
+  // 不因为它"命中了一条真实 option"就变成跟真实选中项一样的正常文字颜色。
+  const isEmptySelection = value === '';
 
   return (
     <div className={`relative ${className}`} ref={rootRef}>
@@ -39,7 +43,7 @@ export default function SimpleSelect({ value, onChange, options, placeholder = '
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center justify-between rounded-md border border-border bg-card px-3 py-1.5 text-sm outline-none hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border"
       >
-        <span className={selected ? 'text-text' : 'text-text-muted'}>{selected ? selected.label : placeholder}</span>
+        <span className={selected && !isEmptySelection ? 'text-text' : 'text-text-muted'}>{selected ? selected.label : placeholder}</span>
         <ChevronDown size={14} className={`text-text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && !disabled && (

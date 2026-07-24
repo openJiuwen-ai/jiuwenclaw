@@ -96,23 +96,21 @@ interface CronTaskDrawerProps {
 const fieldClass = 'w-full rounded-md border border-border bg-card px-3 py-1.5 text-sm text-text outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50';
 
 // 后端存在两条"默认项目"记录（project_id 分别为 'default'/'default_code'，对应普通/代码工作模式），
-// 二者 project_dir 均为空串，展示名也都被 getProjectDisplayName 统一成"默认项目"（见 workspaceStore.ts）。
-// 项目下拉框按原始 projects 直接 map 会把这两条都列出来，造成"默认项目"重复出现两次（bug005）。
-// 这里只保留第一条命中的默认类项目，其余同类项目过滤掉——跟 ConversationSidebar.tsx 里对默认项目的
-// 收敛处理是同一思路，但收敛范围只限于这个下拉框的可选项，不改 CronPanel 里传入的 projects 原始列表
-// （cronJobToUI 还要用完整列表按 project_id 精确匹配任务归属的项目名，见 index.tsx）。
-function isDefaultLikeProject(p: ProjectInfo): boolean {
+// 二者 project_dir 均为空串，与"未选项目"状态的 value（也是空串）完全相同，SimpleSelect 无法区分
+// "选中了默认项目"和"没选任何项目"，总会显示"默认项目"，与任务列表里未选项目显示"-"不一致（bug009）。
+// 这里索性把所有默认类项目都从下拉框选项里过滤掉——下拉框只保留 project_dir 为非空绝对路径的真实项目，
+// 不选时 SimpleSelect 找不到匹配项，走 placeholder 显示"-"，与列表里的"未选项目"语义保持一致。
+// 判断口径跟 ChatPanel/projectSelection.ts 的 isDefaultInputProject、ConversationSidebar.tsx 等处一致
+// （is_default 或 project_id 命中 'default'/'default_code' 都算默认项目）。这个函数导出给
+// index.tsx 的 cronJobToUI 复用：会话本身锁定在默认项目下时，cron job 的 project_id 会原样
+// 存成 'default'/'default_code'（而不是空串），任务列表也要按同样口径把它当"未选项目"处理，
+// 不能只看 project_id 是否非空，否则会显示成"默认项目"而不是"-"（bug009 第 5 轮修复）。
+export function isDefaultLikeProject(p: ProjectInfo): boolean {
   return p.is_default || p.project_id === 'default' || p.project_id === 'default_code';
 }
 
-function dedupeDefaultProjects(projects: ProjectInfo[]): ProjectInfo[] {
-  let seenDefault = false;
-  return projects.filter((p) => {
-    if (!isDefaultLikeProject(p)) return true;
-    if (seenDefault) return false;
-    seenDefault = true;
-    return true;
-  });
+function filterNonDefaultProjects(projects: ProjectInfo[]): ProjectInfo[] {
+  return projects.filter((p) => !isDefaultLikeProject(p));
 }
 
 export default function CronTaskDrawer({ mode, initial, projects, targetOptions, proactiveLocked = false, onClose, onSubmit, onSwitchToManual, onSwitchToTemplate }: CronTaskDrawerProps) {
@@ -120,7 +118,15 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
   const [form, setForm] = useState<CronTaskFormValue>(initial ?? emptyForm());
 
   const title = mode === 'edit' ? t('cron.drawer.titleEdit') : mode === 'template' ? t('cron.drawer.titleTemplate') : t('cron.drawer.titleCreate');
-  const projectOptions = dedupeDefaultProjects(projects).map((p) => ({ value: p.project_dir, label: getProjectDisplayName(p) }));
+  // 显式加一条 value 为空串的"-"选项，代表"未选项目"，放在真实项目列表最后面（列表顺序：
+  // 真实项目在前，"-"清空项在最后）。SimpleSelect 按 value 严格匹配，真实项目的 project_dir
+  // 都是非空绝对路径，不会跟这条空串选项冲突；选中它后 onChange('') -> setForm({ ...form,
+  // projectDir: '' || null }) 归一成 null，与"未选"语义一致。这样用户选了真实项目后，
+  // 还能通过下拉框自己改回"未选"状态，不用关闭重开抽屉。
+  const projectOptions = [
+    ...filterNonDefaultProjects(projects).map((p) => ({ value: p.project_dir, label: getProjectDisplayName(p) })),
+    { value: '', label: t('cron.drawer.placeholderProject') ?? '-' },
+  ];
   const timezoneOptions = TIMEZONE_OPTIONS.map((tz) => ({ value: tz, label: tz }));
   // 必填项缺失时，收集清单用来在"确定"按钮旁给出具体提示（而不是只让按钮变灰、不说原因）
   const missingFieldLabels: string[] = [];
@@ -208,7 +214,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
                 value={form.projectDir ?? ''}
                 onChange={(v) => setForm({ ...form, projectDir: v || null })}
                 options={projectOptions}
-                placeholder={t('cron.drawer.placeholderSelect') ?? undefined}
+                placeholder={t('cron.drawer.placeholderProject') ?? undefined}
               />
             </div>
           )}

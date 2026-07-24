@@ -12,7 +12,7 @@ import { CRON_TEMPLATES } from './constants';
 import { cronExprToSchedule, summarizeSchedule } from './scheduleConvert';
 import StatusBadge, { BoldRingIcon, RunningIcon } from './StatusBadge';
 import ConfirmDialog from './ConfirmDialog';
-import CronTaskDrawer, { jobToForm, templateToForm, type CronTaskFormValue } from './CronTaskDrawer';
+import CronTaskDrawer, { jobToForm, templateToForm, isDefaultLikeProject, type CronTaskFormValue } from './CronTaskDrawer';
 import { useClickOutside } from './useClickOutside';
 import SimpleSelect from './SimpleSelect';
 import emptyIllustration from '../../assets/cron-empty.svg';
@@ -176,12 +176,18 @@ function Th({ children, first }: { children: React.ReactNode; first?: boolean })
 }
 
 function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
+  // 会话本身锁定在默认项目下时，后端 resolve_cron_project_binding 会把 job.project_id 原样存成
+  // 'default'/'default_code'（不是空串），这里如果只判断"非空"就会在 projects 里查到那条
+  // "默认项目"记录并显示出来，跟下拉框/其他地方"未选=用 -"的口径不一致（bug009 第 5 轮）。
+  // 用跟 CronTaskDrawer/ConversationSidebar/projectSelection 一致的 isDefaultLikeProject 口径，
+  // 把默认类项目也当"未选项目"处理，统一显示"-"。
   const project = job.project_id ? projects.find((p) => p.project_id === job.project_id) ?? null : null;
+  const projectName = project && !isDefaultLikeProject(project) ? project.name : null;
   return {
     id: job.id,
     name: job.name,
     projectId: job.project_id,
-    projectName: project ? project.name : null,
+    projectName,
     description: job.description,
     modelName: job.model_name ?? null,
     cronExpr: job.cron_expr,
