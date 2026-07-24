@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from threading import RLock
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from jiuwenswarm.symphony.fingerprint.normalize.io_name_vocab import (
     IONameCandidate,
@@ -16,6 +16,7 @@ from jiuwenswarm.symphony.llm import (
     create_llm_client,
     llm_usage_context,
 )
+from jiuwenswarm.symphony.shared.llm_payload import compact_json, prune_empty
 
 _ACTION_ALIAS_EXISTING = "alias_existing"
 _ACTION_CREATE_NEW = "create_new"
@@ -29,6 +30,8 @@ _ALLOWED_ACTIONS = frozenset(
         _ACTION_EXCLUDE_FROM_VOCAB,
     }
 )
+_MAX_CONTEXT_DESCRIPTION_LENGTH = 160
+_MAX_REASON_LENGTH = 160
 
 
 class LLMIONameResolver:
@@ -53,11 +56,10 @@ class LLMIONameResolver:
         candidates_by_skill: List[List[IONameCandidate]],
         vocabulary: IONameVocabulary,
     ) -> Dict[str, IONameResolution]:
-        candidate_groups: List[Tuple[str, List[IONameCandidate]]] = []
+        pending_candidates: List[IONameCandidate] = []
         resolutions: Dict[str, IONameResolution] = {}
         seen: Set[str] = set()
-        for index, candidates in enumerate(candidates_by_skill):
-            unique_candidates: List[IONameCandidate] = []
+        for candidates in candidates_by_skill:
             for candidate in candidates:
                 if not candidate.token or candidate.token in seen:
                     continue
@@ -67,36 +69,28 @@ class LLMIONameResolver:
                 if cached is not None:
                     resolutions[candidate.token] = cached
                     continue
-                unique_candidates.append(candidate)
-            if unique_candidates:
-                candidate_groups.append(
-                    (_candidate_group_ref(index, unique_candidates), unique_candidates)
-                )
+                pending_candidates.append(candidate)
 
-        if not candidate_groups:
+        if not pending_candidates:
             return resolutions
 
+        candidates_by_id = {
+            f"i{index}": candidate
+            for index, candidate in enumerate(pending_candidates, start=1)
+        }
         context = {
-            "skills": [
-                {
-                    "skill_ref": skill_ref,
-                    "candidates": [
-                        _candidate_prompt_payload(candidate)
-                        for candidate in candidates
-                    ],
-                }
-                for skill_ref, candidates in candidate_groups
+            "candidates": [
+                _candidate_prompt_payload(candidate_id, candidate)
+                for candidate_id, candidate in candidates_by_id.items()
             ],
             "vocabulary": _compact_vocabulary_context(vocabulary),
-            "allowed_actions": sorted(_ALLOWED_ACTIONS),
         }
-        for _, candidates in candidate_groups:
-            for candidate in candidates:
-                self._emit_progress("start", candidate, None)
+        for candidate in pending_candidates:
+            self._emit_progress("start", candidate, None)
         with llm_usage_context("fingerprint_extraction", "io_name_resolution_prompt_batch"):
             content = await self.client.complete_json_async(
                 system_prompt=_IO_NAME_PROMPT_BATCH_RESOLVER_PROMPT,
-                user_content=json.dumps(context, ensure_ascii=False, indent=2),
+                user_content=compact_json(context),
                 timeout=200,
                 error_context="IO name vocabulary prompt batch LLM",
                 request_overrides={
@@ -111,55 +105,40 @@ class LLMIONameResolver:
                 f"content_prefix={content[:1000]!r}"
             ) from exc
 
-        payload_skills = payload.get("skills", [])
-        if not isinstance(payload_skills, list):
+        payload_items = payload.get("resolutions", [])
+        if not isinstance(payload_items, list):
             raise RuntimeError(
-                "IO name vocabulary prompt batch LLM response must contain skills array."
+                "IO name vocabulary prompt batch LLM response must contain "
+                "resolutions array."
             )
 
-        candidates_by_ref = {
-            skill_ref: {candidate.token: candidate for candidate in candidates}
-            for skill_ref, candidates in candidate_groups
-        }
-        remaining_tokens = {
-            skill_ref: set(candidates)
-            for skill_ref, candidates in candidates_by_ref.items()
-        }
-        for skill_payload in payload_skills:
-            if not isinstance(skill_payload, dict):
+        remaining_ids = set(candidates_by_id)
+        for item in payload_items:
+            if not isinstance(item, dict):
                 continue
-            skill_ref = str(skill_payload.get("skill_ref") or "").strip()
-            if skill_ref not in candidates_by_ref:
-                continue
-            payload_items = skill_payload.get("resolutions", [])
-            if not isinstance(payload_items, list):
-                continue
-            for item in payload_items:
-                if not isinstance(item, dict):
-                    continue
-                token = str(item.get("token") or "").strip()
-                if token not in remaining_tokens[skill_ref]:
-                    continue
-                resolution = _resolution_from_payload(item, vocabulary)
-                resolutions[token] = resolution
-                with self._cache_lock:
-                    self._cache[token] = resolution
-                remaining_tokens[skill_ref].remove(token)
-                self._emit_progress(
-                    "done",
-                    candidates_by_ref[skill_ref][token],
-                    resolution,
+            candidate_id = str(item.get("id") or "").strip()
+            if candidate_id not in candidates_by_id:
+                raise RuntimeError(
+                    "IO name vocabulary prompt batch LLM response returned "
+                    f"unknown candidate id: {candidate_id!r}."
                 )
+            if candidate_id not in remaining_ids:
+                raise RuntimeError(
+                    "IO name vocabulary prompt batch LLM response returned "
+                    f"duplicate candidate id: {candidate_id!r}."
+                )
+            candidate = candidates_by_id[candidate_id]
+            resolution = _resolution_from_payload(item, vocabulary)
+            resolutions[candidate.token] = resolution
+            with self._cache_lock:
+                self._cache[candidate.token] = resolution
+            remaining_ids.remove(candidate_id)
+            self._emit_progress("done", candidate, resolution)
 
-        missing = {
-            skill_ref: sorted(tokens)
-            for skill_ref, tokens in remaining_tokens.items()
-            if tokens
-        }
-        if missing:
+        if remaining_ids:
             raise RuntimeError(
                 "IO name vocabulary prompt batch LLM response omitted resolutions: "
-                + json.dumps(missing, ensure_ascii=False, sort_keys=True)
+                + json.dumps(sorted(remaining_ids), ensure_ascii=False)
             )
         return resolutions
 
@@ -173,46 +152,37 @@ class LLMIONameResolver:
             self.progress(stage, candidate, resolution)
 
 
-def _candidate_group_ref(index: int, candidates: List[IONameCandidate]) -> str:
-    if not candidates:
-        return str(index)
-    first = candidates[0]
-    return f"{index}:{first.token}"
-
-
-def _candidate_prompt_payload(candidate: IONameCandidate) -> Dict[str, str]:
-    return {
-        "raw_value": candidate.raw_value,
+def _candidate_prompt_payload(
+    candidate_id: str,
+    candidate: IONameCandidate,
+) -> Dict[str, str]:
+    return prune_empty({
+        "id": candidate_id,
         "token": candidate.token,
-        "description": candidate.description,
+        "description": candidate.description[:_MAX_CONTEXT_DESCRIPTION_LENGTH],
         "direction": candidate.direction,
         "type": candidate.data_type,
-    }
+    })
 
 
-def _compact_vocabulary_context(vocabulary: IONameVocabulary) -> Dict[str, Any]:
+def _compact_vocabulary_context(vocabulary: IONameVocabulary) -> List[Dict[str, Any]]:
     context = vocabulary.resolver_context()
     terms = []
     for item in context.get("terms", []):
         if not isinstance(item, dict):
             continue
-        terms.append(
-            {
+        terms.append(prune_empty({
                 "name": str(item.get("name") or ""),
-                "definition": str(item.get("definition") or ""),
-                "aliases": [
+                "definition": str(item.get("definition") or "")[
+                    :_MAX_CONTEXT_DESCRIPTION_LENGTH
+                ],
+                "aliases": sorted({
                     str(alias)
                     for alias in item.get("aliases", [])
                     if str(alias).strip()
-                ],
-            }
-        )
-    return {
-        "version": context.get("version"),
-        "max_vocab_size": context.get("max_vocab_size"),
-        "is_full": context.get("is_full"),
-        "terms": terms,
-    }
+                }),
+            }))
+    return terms
 
 
 def _resolution_from_payload(
@@ -221,7 +191,7 @@ def _resolution_from_payload(
 ) -> IONameResolution:
     action = str(payload.get("action") or _ACTION_MERGE_EXISTING)
     if action not in _ALLOWED_ACTIONS:
-        action = _ACTION_MERGE_EXISTING
+        raise RuntimeError(f"Unsupported IO name resolution action: {action!r}.")
 
     target = (
         payload.get("target")
@@ -241,7 +211,7 @@ def _resolution_from_payload(
         action=action,
         normalized_value=normalized_value,
         confidence=_coerce_confidence(payload.get("confidence")),
-        reason=str(payload.get("reason") or ""),
+        reason=str(payload.get("reason") or "").strip()[:_MAX_REASON_LENGTH],
         forced_merge=bool(payload.get("forced_merge")) or action == _ACTION_MERGE_EXISTING,
         definition=definition,
     )
@@ -255,46 +225,18 @@ def _coerce_confidence(value: Any) -> float:
     return max(0.0, min(1.0, number))
 
 
-_IO_NAME_PROMPT_BATCH_RESOLVER_PROMPT = """Resolve Skill input/output names against io_name_vocab.
+_IO_NAME_PROMPT_BATCH_RESOLVER_PROMPT = """Resolve each candidate Skill I/O name against the supplied canonical vocabulary.
 
-Return only a valid JSON object. Do not include markdown fences, explanations,
-analysis, or reasoning text.
+Return JSON only:
+{"resolutions":[{"id":"i1","action":"alias_existing|create_new|merge_existing|exclude_from_vocab","target":"term","confidence":0.0,"definition":"optional","reason":"optional short reason"}]}
 
-Required JSON shape:
-{
-  "skills": [
-    {
-      "skill_ref": "the exact skill_ref from the input",
-      "resolutions": [
-        {
-          "token": "candidate_token",
-          "action": "alias_existing|create_new|merge_existing|exclude_from_vocab",
-          "target": "existing_or_new_vocab_term_or_null",
-          "confidence": 0.0,
-          "reason": "short explanation",
-          "definition": "semantic definition or enrichment suggestion"
-        }
-      ]
-    }
-  ]
-}
+Return exactly one resolution for each candidate id.
+- alias_existing: synonymous with an existing term.
+- merge_existing: should use the closest existing semantic role.
+- create_new: a distinct runtime semantic role.
+- exclude_from_vocab: bookkeeping, telemetry or internal-copy data.
 
-Return exactly one resolution for every input candidate token. Preserve
-skill_ref exactly. skill_ref is only an opaque correlation id.
-
-Allowed actions:
-- alias_existing: candidate is synonymous with an existing vocabulary term.
-- create_new: candidate is a genuinely new runtime semantic role.
-- merge_existing: candidate should be merged into the closest existing term.
-- exclude_from_vocab: candidate is bookkeeping-only telemetry, analytics,
-  tracking, or original-copy data.
-
-The type field is only the data format or carrier, not the semantic role.
-Existing terms have definitions in the vocabulary context - use them to judge
-semantic equivalence.
-
-Prefer recall for graph linking. Singular/plural forms, input/output variants,
-and compound variants such as text/content/body or path/output_path often share
-one semantic role. Directional qualifiers should block merging only when feeding
-would be clearly wrong, such as source_language vs target_language or api_key vs query.
+Judge semantic role independently of data carrier type. Prefer merging harmless
+lexical variants, but preserve directional differences such as source_language
+and target_language. Keep reason to one short sentence when needed.
 """

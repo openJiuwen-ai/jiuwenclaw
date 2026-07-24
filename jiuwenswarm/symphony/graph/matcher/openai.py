@@ -8,7 +8,11 @@ from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 from jiuwenswarm.symphony.graph.matcher.constants import DEFAULT_THRESHOLDS
 from jiuwenswarm.symphony.graph.matcher.consensus import consensus_matches
-from jiuwenswarm.symphony.graph.matcher.prompt import SYSTEM_PROMPT, build_llm_context
+from jiuwenswarm.symphony.graph.matcher.prompt import (
+    SYSTEM_PROMPT,
+    build_llm_context,
+    expand_compact_llm_response,
+)
 from jiuwenswarm.symphony.graph.matcher.validation import validate_llm_matches
 from jiuwenswarm.symphony.graph.models import GraphDiagnostic, LLMMatch, RelationCandidate, SkillRegistry
 from jiuwenswarm.symphony.llm import LLMConfig, create_llm_client, llm_usage_context
@@ -46,7 +50,7 @@ class OpenAICompatibleOntologyMatcher:
         batch_size: int = 12,
         max_workers: int = 1,
         require_consensus: bool = True,
-        prompt_version: str = "Orchestration-graph-match-v1",
+        prompt_version: str = "Orchestration-graph-match-v2",
         thresholds: Optional[Dict[str, float]] = None,
         progress: Optional[MatchProgress] = None,
     ) -> None:
@@ -156,14 +160,12 @@ class OpenAICompatibleOntologyMatcher:
         batch_index: int,
         total_batches: int,
     ) -> tuple[int, List[LLMMatch], List[GraphDiagnostic]]:
-        payload = build_llm_context(registry, batch)
         self._emit_progress(
             "batch_start",
             batch_index,
             total_batches,
             {
                 "candidate_count": len(batch),
-                "input_sha256": payload["input_sha256"],
                 "candidate_ids": [candidate.key for candidate in batch],
                 "consensus_runs": 2 if self.require_consensus else 1,
             },
@@ -214,7 +216,7 @@ class OpenAICompatibleOntologyMatcher:
                 user_content=json.dumps(
                     payload,
                     ensure_ascii=False,
-                    indent=2,
+                    separators=(",", ":"),
                 ),
                 timeout=200,
                 error_context="LLM graph matching",
@@ -227,13 +229,17 @@ class OpenAICompatibleOntologyMatcher:
                 "LLM graph matching response is not valid JSON. "
                 f"content_prefix={content[:1000]!r}"
             ) from exc
-        batch_matches, batch_diagnostics = validate_llm_matches(
+        expanded_payload, protocol_diagnostics = expand_compact_llm_response(
             raw_payload,
+            batch,
+        )
+        batch_matches, batch_diagnostics = validate_llm_matches(
+            expanded_payload,
             registry,
             batch,
             thresholds=self.thresholds,
         )
-        return batch_matches, batch_diagnostics
+        return batch_matches, protocol_diagnostics + batch_diagnostics
 
     def _emit_progress(
         self,
