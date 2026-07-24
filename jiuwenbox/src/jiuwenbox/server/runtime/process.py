@@ -2790,11 +2790,28 @@ class ProcessRuntime(RuntimeAdapter):
         # 1. 施加文件 ACL (含读控制 deny-then-allow + workspace 默认 Allow Read,
         # review MAJOR #4). 返回施加过 ACE 的顶层路径清单, 存供 stop 时撤销
         # (review MAJOR #6: 旧版 revoke 只扫 workspace, 漏系统路径 ACE).
+        #
+        # 动态路径注入 (docs §4.3): 打包 python 目录 + venv 目录是每台机器 /
+        # 每个用户不同的运行时路径, 不能写死在 policy yaml 里, 由 agent-server
+        # 拉起本进程时经 env 注入:
+        #   JIUWENBOX_BUNDLED_PYTHON = officeAce 打包 embeddable python 目录
+        #                               (tools/python/), 授 allow_read (含 Execute);
+        #   JIUWENBOX_VENV_DIR       = 宿主机 isolation_venv 目录, 授 allow_write
+        #                               (pip 写 site-packages). 未注入则跳过。
+        # shell 目录 (System32 / Git) 已在 read_acl_preinstall 预装, 此处不重复。
+        allow_read_paths = list(policy.windows.filesystem.allow_read or [])
+        allow_write_paths = list(policy.windows.filesystem.allow_write or [])
+        bundled_python = (os.environ.get("JIUWENBOX_BUNDLED_PYTHON") or "").strip()
+        if bundled_python:
+            allow_read_paths.append(bundled_python)
+        venv_dir = (os.environ.get("JIUWENBOX_VENV_DIR") or "").strip()
+        if venv_dir:
+            allow_write_paths.append(venv_dir)
         acl_paths = win_acl.apply_sandbox_acl(
             workspace,
-            policy.windows.filesystem.allow_write,
+            allow_write_paths,
             policy.windows.filesystem.deny_write,
-            allow_read=policy.windows.filesystem.allow_read,
+            allow_read=allow_read_paths,
             deny_read=policy.windows.filesystem.deny_read,
         )
         self._win_acl_paths[sandbox_id] = acl_paths or [workspace]

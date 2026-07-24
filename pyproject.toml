@@ -89,15 +89,27 @@ jiuwenclaw-start = "jiuwenclaw.start_services:main"
 jiuwenclaw-init = "jiuwenclaw.init_workspace:main"
 jiuwenclaw-desktop = "jiuwenclaw.desktop_app:main"
 jiuwenclaw-cli = "jiuwenclaw.app_cli:main"
+# jiuwenbox 子项目入口（随 jiuwenclaw wheel 一起安装，见
+# docs/windows_sandbox_officeace_integration_design.md §8.1 Q1）。
+# jiuwenbox-server 由 jiuwenclaw agent-server 通过 JiuwenBoxRunner 内部
+# spawn（python -m uvicorn jiuwenbox.server.app:app），此 console script 供
+# 外部/调试场景手动起 jiuwenbox-server 用。
+jiuwenbox = "jiuwenbox.cli.jiuwenbox:main"
+jiuwenbox-server = "jiuwenbox.server.launcher:main"
 
 [tool.setuptools]
 # 入口脚本现在是 jiuwenclaw 包内的一部分，不需要 py-modules
 py-modules = []
 include-package-data = true
+# 把 jiuwenbox 顶包重映射到它的 src-layout 路径（jiuwenbox 是 src-layout，
+# 包根在 jiuwenbox/src/jiuwenbox/，不在仓库根）。配合下方 packages.find 的
+# where=[".","jiuwenbox/src"] + include=["jiuwenclaw*","jiuwenbox*"]，让
+# jiuwenbox 全部子包随 jiuwenclaw wheel 一起打出去、装进 site-packages/jiuwenbox/。
+package-dir = {"jiuwenbox" = "jiuwenbox/src/jiuwenbox"}
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["jiuwenclaw*"]
+where = [".", "jiuwenbox/src"]
+include = ["jiuwenclaw*", "jiuwenbox*"]
 exclude = ["jiuwenclaw.cli*", "jiuwenclaw.web*"]
 namespaces = false
 
@@ -116,6 +128,12 @@ jiuwenclaw = [
     # vendor 嵌入依赖（通过 --vendor 构建）
     "vendor/**/*",
     "vendor/*",
+]
+# jiuwenbox 的 policy/configs yaml 必须随 wheel 带出（运行时 JiuwenBoxRunner
+# 通过 JIUWENBOX_POLICY_PATH 引用，launcher/policy_engine 也读 configs）。
+jiuwenbox = [
+    "configs/**/*",
+    "configs/*",
 ]
 
 [tool.setuptools.exclude-package-data]

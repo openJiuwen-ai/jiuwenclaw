@@ -14,6 +14,7 @@ import binascii
 import json
 import logging
 import os
+import sys
 import textwrap
 import time
 from collections.abc import Mapping
@@ -54,6 +55,44 @@ def _is_daemon_ipc_file_op_failure(result: RuntimeFileOpResult) -> bool:
     if result.ok:
         return False
     return result.error in ("daemon_unavailable", "transport_failure")
+
+
+def _build_windows_exec_env(env: dict[str, str] | None) -> dict[str, str]:
+    """为 Windows 沙箱子进程补 PATH, 使裸名 ``bash``/``python``/``cmd`` 可解析.
+
+    docs §4.0: jbx-sandbox 子进程的 PATH 默认空 (LOGON_WITH_PROFILE 加载的
+    profile 无 PATH), agent-core 送的 ``command[0]`` 是裸名 (``bash``/``python``
+    /``cmd``), 靠子进程 PATH 解析。本函数把等价 PATH 塞进 env:
+      <venv>\\Scripts        # python/pip 裸名解析到 venv (G3 落点, 见 docs §4.3)
+      %ProgramFiles%\\Git\\bin  # bash 裸名解析 (装了 Git 时)
+      %SystemRoot%\\System32    # cmd/powershell + 系统 dll 裸名解析
+      <打包 python 目录>        # python 裸名兜底
+
+    venv 目录与打包 python 目录由 agent-server 经 env 注入
+    (``JIUWENBOX_VENV_DIR`` / ``JIUWENBOX_BUNDLED_PYTHON``, 见 docs §4.3),
+    缺失则跳过对应段。PATH 放最前, 覆盖 profile 任何残留。
+    """
+    base = dict(env) if env else {}
+    parts: list[str] = []
+    venv_dir = (os.environ.get("JIUWENBOX_VENV_DIR") or "").strip()
+    if venv_dir:
+        parts.append(f"{venv_dir}\\Scripts")
+    program_files = (os.environ.get("ProgramFiles") or "").strip()
+    if program_files:
+        parts.append(f"{program_files}\\Git\\bin")
+    system_root = (os.environ.get("SystemRoot") or "").strip()
+    if system_root:
+        parts.append(f"{system_root}\\System32")
+        parts.append(f"{system_root}\\WindowsPowerShell\\v1.0")
+    bundled_python = (os.environ.get("JIUWENBOX_BUNDLED_PYTHON") or "").strip()
+    if bundled_python:
+        parts.append(bundled_python)
+    existing_path = base.get("PATH") or os.environ.get("PATH") or ""
+    if existing_path:
+        parts.append(existing_path)
+    if parts:
+        base["PATH"] = os.pathsep.join(parts)
+    return base
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.common import AuditEventType
@@ -703,10 +742,16 @@ class SandboxManager:
         # pre-call ``EXEC_COMMAND`` was dropped: it doubled the JSONL
         # volume without adding any information not already present here.
         start = time.monotonic()
+        # Windows: 给子进程 env 补 PATH, 使裸名 bash/python/cmd 可解析 (docs §4.0)。
+        # python/pip 裸名靠 PATH 前置 venv\Scripts 解析到 venv python (G3 落点,
+        # 见 docs §4.3)。Linux 不动 (R5)。
+        exec_env = request.env
+        if sys.platform == "win32":
+            exec_env = _build_windows_exec_env(request.env)
         runtime_request = RuntimeExecRequest(
             command=request.command,
             workdir=request.workdir,
-            env=request.env,
+            env=exec_env,
             stdin_data=request.stdin_data,
             timeout=request.timeout,
         )

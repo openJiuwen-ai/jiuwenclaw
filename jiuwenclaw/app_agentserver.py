@@ -16,6 +16,7 @@ import atexit
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -100,6 +101,147 @@ class _NopCronScheduler:
         return False
 
 
+def _allocate_jiuwenbox_port(host: str, preferred: int) -> int:
+    """为 box-server 分配端口: preferred 空闲用它, 否则让 OS 分配随机空闲端口。
+
+    docs §4.2/§5: runner.ensure_running 把 port 原样传给 uvicorn --port, 端口被占
+    uvicorn 启动失败; runner 自身不做端口分配 (develop 那套 _allocate_internal_
+    jiuwenbox_port 在 agent_ws_server, 未移植)。本函数在调用点补上: 用 socket
+    bind 探测, preferred 占用则 bind(0) 让 OS 选随机端口。存在 TOCTOU race
+    (测完到 uvicorn 起之间被占), 但 best-effort —— 真撞上 runner 内部 uvicorn
+    会失败, 已有 warning 兜底。
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, preferred))
+        return preferred  # preferred 空闲
+    except OSError:
+        # preferred 被占, 让 OS 选一个: 复用同一 socket bind(0)
+        try:
+            sock.close()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind((host, 0))
+            allocated = sock.getsockname()[1]
+            logger.info(
+                "[AgentServer] jiuwenbox port %d busy, allocated random %d",
+                preferred, allocated,
+            )
+            return allocated
+        except OSError as exc:
+            logger.warning(
+                "[AgentServer] allocate random jiuwenbox port failed: %s", exc,
+            )
+            return preferred  # 兜底用 preferred, 让 uvicorn 自己失败报错
+    finally:
+        sock.close()
+
+
+async def _ensure_jiuwenbox_internal() -> None:
+    """``startup_mode=internal`` 时拉起本地 jiuwenbox-server 子进程.
+
+    由 :func:`_run` 在 agent-server 启动链调用 (server.start 之后)。读
+    :func:`get_sandbox_endpoint` / :func:`get_sandbox_runtime`: 仅当
+    ``startup_mode == "internal"`` 且 sandbox ``enabled`` 时才 spawn, 避免未
+    启用沙箱时白拉一个 jiuwenbox-server。spawn 后把 runner 实际监听的
+    ``base_url`` 经 :func:`set_local_config` 回写 ``JIUWENCLAW_SANDBOX_URL``,
+    让后续 :func:`get_sandbox_endpoint` 与 agent-core provider 拿到真实 url
+    (端口被占时 runner 会换随机端口)。失败只记 warning, 不阻断 agent-server
+    启动 —— 沙箱任务真正发起时 provider 会连不上而报错, 主进程照常跑。
+
+    关停由 :func:`_run` 的 ``finally`` 段调 ``JiuwenBoxRunner.instance().stop()``。
+    设计见 ``docs/windows_sandbox_officeace_integration_design.md`` §4.2。
+    """
+    from urllib.parse import urlparse
+
+    from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
+    from jiuwenclaw.config import get_sandbox_endpoint, get_sandbox_runtime
+    from jiuwenclaw.local_env_config import set_local_config
+
+    try:
+        endpoint = get_sandbox_endpoint()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AgentServer] read sandbox endpoint failed, skip jiuwenbox spawn: %s", exc)
+        return
+
+    if (endpoint.get("startup_mode") or "internal") != "internal":
+        return  # external: jiuwenbox-server 由外部托管, 不 spawn
+
+    try:
+        runtime = get_sandbox_runtime()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AgentServer] read sandbox runtime failed, skip jiuwenbox spawn: %s", exc)
+        return
+    if not bool(runtime.get("enabled")):
+        return  # sandbox 未启用, 不白拉 jiuwenbox-server
+
+    # 解析 host:port (缺省 127.0.0.1:8321); url 为空也用缺省。
+    host = "127.0.0.1"
+    preferred_port = 8321
+    url = (endpoint.get("url") or "").strip()
+    if url:
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname or host
+            if parsed.port:
+                preferred_port = parsed.port
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentServer] parse sandbox url %r failed, use default %s:%d: %s", url, host, preferred_port, exc)
+
+    # 端口分配: preferred (8321 或 url 里的) 被占则换随机空闲 (docs §4.2/§5)。
+    preferred_port = _allocate_jiuwenbox_port(host, preferred_port)
+
+    # policy: Windows 用 windows-policy.yaml, Linux 用 default-policy.yaml;
+    # 找不到 (None) 让 jiuwenbox-server 自身回落内置默认。
+    policy_filename = "windows-policy.yaml" if sys.platform == "win32" else "default-policy.yaml"
+    policy_path = JiuwenBoxRunner.resolve_policy_path(policy_filename)
+
+    # 注入动态路径 env 给 box-server 子进程 (runner 用 dict(os.environ) 作子进程 env,
+    # 故设 os.environ 即透传). docs §4.3:
+    #   JIUWENBOX_BUNDLED_PYTHON = 打包 embeddable python 目录 (tools/python/),
+    #                              _create_windows 对其授 allow_read (含 Execute);
+    #   JIUWENBOX_VENV_DIR       = 宿主机 isolation_venv 目录,
+    #                              _create_windows 对其授 allow_write (pip 写 site-packages).
+    # 未设则 _create_windows 跳过对应 ACL (沙箱内 python/pip 任务会失败, 但不阻断启动)。
+    try:
+        from jiuwenclaw.runtime.pip_env import (
+            ensure_runtime_venv, resolve_base_python,
+        )
+
+        venv_dir = ensure_runtime_venv()  # 首次创建后跨任务复用 (检 pyvenv.cfg 跳过)
+        os.environ["JIUWENBOX_VENV_DIR"] = str(venv_dir)
+        bundled_python = resolve_base_python()
+        # resolve_base_python 返回 python.exe; 授权其所在目录 (allow_read 整目录)
+        os.environ["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[AgentServer] inject JIUWENBOX_BUNDLED_PYTHON/VENV_DIR failed: %s", exc,
+        )
+
+    runner = JiuwenBoxRunner.instance()
+    ok = await runner.ensure_running(
+        host=host,
+        port=preferred_port,
+        startup_mode="internal",
+        policy_path=policy_path,
+    )
+    if not ok:
+        tail = runner.get_stderr_tail(20)
+        hint = "\n--- jiuwenbox stderr (tail) ---\n" + tail if tail else ""
+        logger.warning(
+            "[AgentServer] jiuwenbox internal spawn failed (%s:%d)%s",
+            host, preferred_port, hint,
+        )
+        return
+
+    # 回写真实 url (端口可能被占而换过)
+    actual_url = runner.base_url
+    if actual_url and actual_url != url:
+        set_local_config("JIUWENCLAW_SANDBOX_URL", actual_url)
+        logger.info("[AgentServer] jiuwenbox internal ready, sandbox url=%s", actual_url)
+
+
 async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner
     from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
@@ -145,6 +287,10 @@ async def _run(host: str, port: int) -> None:
     )
     await server.start()
 
+    # startup_mode=internal 且 sandbox enabled 时拉起本地 jiuwenbox-server 子进程
+    # (失败不阻断 agent-server 启动)。关停在下方 finally 段。
+    await _ensure_jiuwenbox_internal()
+
     logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
 
     stop_event = asyncio.Event()
@@ -176,9 +322,12 @@ async def _run(host: str, port: int) -> None:
             "request summary flush",
             lambda: flush_request_summary_writer(timeout=5.0),
         )
-        # jiuwenbox 服务端没有 idle TTL, 本进程退出后已创建的 sandbox 会在 jiuwenbox
-        # 一侧持续占用直到 jiuwenbox 自己重启。在此处主动 DELETE 掉本进程缓存里的
-        # sandbox 列表; 走线程是因为底层 httpx 是同步 API, 不能直接堵 event loop。
+        # jiuwenbox 关停顺序: 先 DELETE 远端沙箱, 再停 box-server 子进程。
+        # shutdown_jiuwenbox_sandboxes 是 HTTP DELETE 给 box-server (清本进程 provider
+        # 缓存里的 sandbox_id), 必须 box-server 还活着才能响应; 故它在 runner.stop()
+        # 之前。runner.stop() 再停 box-server 子进程 (external 模式下 no-op)。若反过来
+        # 先停子进程, DELETE 会全失败 (被 warning 吞不崩, 但沙箱没正常清理)。
+        # 走线程是因为底层 httpx 是同步 API, 不能直接堵 event loop。
         # cleanup 自身已经吞了所有异常并永不抛, 外层 try/except 只是再加一道防线,
         # 兜住 import 阶段 (例如 venv 损坏) 这种极端情况。
         try:
@@ -191,6 +340,18 @@ async def _run(host: str, port: int) -> None:
             logger.warning(
                 "[AgentServer] jiuwenbox sandbox cleanup failed: %s", exc,
             )
+        # 停 internal 模式下由本 agent-server 拉起的 box-server 子进程。box-server
+        # 进程退出时其 FastAPI lifespan shutdown 会兜底调 shutdown_all_sandboxes
+        # (清上面 DELETE 漏网的沙箱)。失败不阻断后续 session_history flush。
+        # Windows 上 proc.terminate()=TerminateProcess 是即时强杀, 不给 uvicorn 跑
+        # lifespan shutdown 的机会 (Linux terminate()=SIGTERM 才 graceful) —— 有活
+        # sandbox 时可能成孤儿, 留 Windows 实测时定 (docs §8.1 Q4 / 实测收窄)。
+        try:
+            from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
+
+            await JiuwenBoxRunner.instance().stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentServer] jiuwenbox runner stop failed: %s", exc)
         # 落盘 session_history 缓冲层剩余数据（atexit 兜底的显式调用，确保 SIGTERM 退出前 flush）
         try:
             from jiuwenclaw.agentserver import session_history

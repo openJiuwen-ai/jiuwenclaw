@@ -1139,7 +1139,11 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
 #   TYPE                          (str, sandbox provider 名; 缺省/空回落到
 #                                   ``jiuwenbox`` —— 这是项目里唯一注册的
 #                                   provider, 显式覆盖只有自定义 provider 时才用)
-#   STARTUP_MODE                  (str, 仅接受 ``external``; 非法抛 ValueError)
+#   STARTUP_MODE                  (str, 接受 ``internal`` / ``external``;
+#                                   缺省/空回落 ``internal``。``internal`` =
+#                                   agent-server 自动 spawn jiuwenbox-server
+#                                   子进程; ``external`` = 外部独立托管, 仅健康
+#                                   检查 + HTTP 调用)
 #   PRESERVE_FILE_SHARING_MODE    (str, 仅接受 ``mount``; 缺省回落 ``mount``)
 #   EXCLUDED_COMMANDS             (str: JSON 数组 ``["ls", "cat"]`` 或
 #                                   :func:`os.pathsep` (linux ``:``) 分隔
@@ -1154,10 +1158,12 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
 #                                   jiuwenbox 服务端用自身默认值)
 #
 # 注意:
-#   - ``startup_mode`` 仅接受 ``external``，``internal`` 之类抛 ``ValueError``。
-#     ``external`` 表示 “使用 ``URL`` 端点连接由外部启动的 jiuwenbox”
-#     (claw2b 不负责拉起 jiuwenbox; 在 K8s / 企业部署里 jiuwenbox-server 由
-#     Deployment / sidecar 等独立托管)。
+#   - ``startup_mode`` 接受 ``internal`` 与 ``external``, 默认 ``internal``。
+#     ``internal``: agent-server 启动时自动 spawn ``jiuwenbox-server`` 子进程
+#     (由 ``jiuwenclaw/agentserver/jiuwenbox_runner.py`` 的 ``JiuwenBoxRunner``
+#     管理), 适合桌面 / 单机部署; ``external``: jiuwenbox-server 由 K8s /
+#     企业部署的 Deployment / sidecar 等独立托管, agent-server 只健康检查 +
+#     HTTP 调用 (运维显式设 ``STARTUP_MODE=external``)。
 #   - 不引入 ``policy_file`` 字段 (jiuwenbox 自管 policy)。
 #   - 不引入任何 ``update_sandbox_*`` 写回函数 (无 ``/sandbox`` 命令调用方)。
 #   - ``IDLE_TTL_SECONDS`` / ``IDLE_CHECK_INTERVAL`` 经
@@ -1168,8 +1174,8 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
 
 _SANDBOX_ENV_PREFIX: str = "JIUWENCLAW_SANDBOX_"
 
-_VALID_SANDBOX_STARTUP_MODES: tuple[str, ...] = ("external",)
-_DEFAULT_SANDBOX_STARTUP_MODE: str = "external"
+_VALID_SANDBOX_STARTUP_MODES: tuple[str, ...] = ("external", "internal")
+_DEFAULT_SANDBOX_STARTUP_MODE: str = "internal"
 
 _VALID_PRESERVE_FILE_SHARING_MODES: tuple[str, ...] = ("mount",)
 _DEFAULT_PRESERVE_FILE_SHARING_MODE: str = "mount"
@@ -1302,15 +1308,17 @@ def _parse_list_env(raw: str | None, *, env_name: str) -> list[Any]:
 def _normalize_sandbox_startup_mode(value: Any) -> str:
     """归一化 ``sandbox.startup_mode``.
 
-    - ``None`` / 空字符串 → 返回默认 ``external``；
-    - ``"external"`` (大小写不敏感, 前后空格) → 返回 ``"external"``；
-    - 其它任何取值 (含 ``internal``) → 抛 ``ValueError``。
+    - ``None`` / 空字符串 → 返回默认 ``internal``；
+    - ``"internal"`` / ``"external"`` (大小写不敏感, 前后空格) → 原样返回；
+    - 其它任何取值 → 抛 ``ValueError``。
 
-    显式拒绝 ``internal``: claw2b 在 K8s / 企业部署中, jiuwenbox-server 由
-    Deployment / sidecar 等外部进程独立托管, agent-server 完全不 spawn 它,
-    只通过 ``JIUWENCLAW_SANDBOX_URL`` 健康检查 + HTTP 调用。 这就是 jiuwenbox
-    README 中 ``external`` 的定义; ``internal`` (agent-server 自动拉起
-    jiuwenbox 子进程) 在本工程内不实现, 留下名字徒增歧义, 故 schema 收窄。
+    ``internal``: agent-server 启动时自动 spawn ``jiuwenbox-server`` 子进程
+    (由 ``jiuwenclaw/agentserver/jiuwenbox_runner.py`` 的 ``JiuwenBoxRunner``
+    管理), 适合桌面 / 单机部署 —— 用户无感, 无需手动起 jiuwenbox-server。
+    ``external``: jiuwenbox-server 由 Deployment / sidecar 等外部进程独立
+    托管, agent-server 只通过 ``JIUWENCLAW_SANDBOX_URL`` 健康检查 + HTTP 调用,
+    适合 K8s / 企业部署 (运维显式设 ``JIUWENCLAW_SANDBOX_STARTUP_MODE=external``)。
+    默认 ``internal`` 与 develop (jiuwenswarm) 一致。
     """
     if value is None:
         return _DEFAULT_SANDBOX_STARTUP_MODE
