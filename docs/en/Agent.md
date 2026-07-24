@@ -12,7 +12,7 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 
 **Core definition:**
 
-**Agent = identity + tools + skills + memory + workspace**
+**Agent = identity + tools + skills + memory + workspace (includes todos and config)**
 
 **How it differs from plain LLM chat:**
 
@@ -50,7 +50,7 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 4. **Memory** — user profile, history, and decisions across sessions  
 5. **Workspace** — the agent’s “desk” for tasks, config, and sessions  
 
-> This section is conceptual only. Later sections go into each part in more detail.
+> This section is conceptual only. Later sections go into each part in more detail. See also: [Configuration](Configuration.md), [Memory](Memory.md), [Skill Self-Evolution](SkillSelfEvolution.md).
 
 ---
 
@@ -58,7 +58,7 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 
 ### What an agent is made of
 
-An agent has six main areas. You can focus on the ones you care about.
+An agent has seven main areas. You can focus on the ones you care about.
 
 **Overview:**
 
@@ -82,7 +82,7 @@ Defines who the agent is and how it talks to you:
 - Personality (concise vs. thorough)  
 - Principles (e.g. try first, then ask; respect trust)  
 
-**Files:** `IDENTITY.md`, `SOUL.md`
+**Files:** `agent/workspace/IDENTITY_ZH.md`, `agent/workspace/SOUL_ZH.md` (Chinese); `agent/workspace/IDENTITY_EN.md`, `agent/workspace/SOUL_EN.md` (English)
 
 #### 2. Workspace
 
@@ -113,8 +113,10 @@ Loadable modules. Each skill typically defines goals, steps, tool usage, and out
 
 **Examples:**
 
-- `gitcode-pr` — open a Pull Request on GitCode  
-- `gitcode-pr-review-fix` — address PR review comments and update code  
+- `skill-creator` — skill creation assistant, helps generate new skills  
+- `swarmskill-creator` — Swarm skill creator, supports multi-agent collaboration skills  
+- `gitcode-api` — GitCode platform API operations  
+- `project-maintainer` — project maintenance assistant, supports code review and version management  
 
 **Location:** `skills/` directory
 
@@ -141,6 +143,24 @@ Controls runtime behavior:
 
 > You do not need to edit everything by hand. In practice, focus on **identity** and **skills**; the rest is largely managed by the system.
 
+#### 7. Multi-Agent Collaboration
+
+JiuwenSwarm supports multi-agent collaboration through team-based workflows to handle complex tasks.
+
+**Collaboration modes:**
+- **Team mode**: A leader agent breaks down tasks, while multiple teammate agents execute subtasks  
+- **Swarm mode**: Multiple agents work in parallel, with task distribution and result aggregation through skill orchestration  
+
+**Features:**
+- Automatic task decomposition: Complex tasks are split into executable subtasks by the leader  
+- Parallel execution: Multiple agents work simultaneously for efficiency  
+- Result aggregation: The leader collects and integrates results from teammates  
+- Dynamic adjustment: Task assignments adapt based on execution progress  
+
+**Configuration:** Team settings are configured in the `team` section of `config/config.yaml`
+
+> See team collaboration documentation for more details on multi-agent workflows.
+
 ---
 
 ## Directory layout
@@ -159,18 +179,18 @@ C:\Users\<username>\.jiuwenswarm\
 │   └── builtin_rules.yaml           # Built-in rules
 │
 ├── agent/                           # Agent-related data
-│   └── <service_id>/                # Service instance
-│       └── <agent_id>/              # Agent instance
-│           ├── agent/               # Agent workspace
-│           │   ├── AGENT.md         # Agent bootstrap config
-│           │   ├── IDENTITY.md      # Identity
-│           │   ├── SOUL.md          # Values and persona
-│           │   ├── HEARTBEAT.md     # Heartbeat tasks
-│           │   └── sessions/        # Session data
-│           ├── config/              # Per-agent config overrides (optional)
-│           ├── memory/              # Agent memory store
-│           ├── skills/              # Skills
-│           └── todo/                # Todos
+│   └── workspace/                   # Agent workspace
+│       ├── AGENT_ZH.md              # Agent bootstrap config (Chinese)
+│       ├── AGENT_EN.md              # Agent bootstrap config (English)
+│       ├── IDENTITY_ZH.md           # Identity (Chinese)
+│       ├── IDENTITY_EN.md           # Identity (English)
+│       ├── SOUL_ZH.md               # Values and persona (Chinese)
+│       ├── SOUL_EN.md               # Values and persona (English)
+│       ├── HEARTBEAT_ZH.md          # Heartbeat tasks (Chinese)
+│       ├── HEARTBEAT_EN.md          # Heartbeat tasks (English)
+│       ├── USER.md                  # User-related information
+│       ├── memory/                  # Agent memory store
+│       └── skills/                  # Skills
 │
 ├── gateway/                         # Gateway data
 ├── logs/                            # Log files
@@ -185,13 +205,12 @@ C:\Users\<username>\.jiuwenswarm\
 |------|---------|-------|------------------|
 | `config/config.yaml` | Models, channels, permissions, memory | Advanced users, carefully | Affects models, channels, security; restart required |
 | `config/builtin_rules.yaml` | Built-in rules | Not recommended | Changes default system behavior |
-| `agent/<id>/agent/AGENT.md` | Bootstrap config | Yes, when needed | Affects startup behavior |
-| `agent/<id>/agent/IDENTITY.md` | Identity | Customizable | Affects how the agent sees its role |
-| `agent/<id>/agent/SOUL.md` | Values and persona | Customizable | Affects tone and style |
-| `agent/<id>/agent/HEARTBEAT.md` | Heartbeat tasks | Adjustable | Affects scheduled / proactive behavior |
-| `agent/<id>/skills/` | Skills | Add skills | Extends capabilities |
-| `agent/<id>/memory/` | Memory store | Do not edit by hand | Risk of corrupting memory data |
-| `agent/<id>/todo/` | Todos | System-managed | Affects task tracking |
+| `agent/workspace/AGENT_ZH.md` | Bootstrap config (Chinese) | Yes, when needed | Affects startup behavior |
+| `agent/workspace/IDENTITY_ZH.md` | Identity (Chinese) | Customizable | Affects how the agent sees its role |
+| `agent/workspace/SOUL_ZH.md` | Values and persona (Chinese) | Customizable | Affects tone and style |
+| `agent/workspace/HEARTBEAT_ZH.md` | Heartbeat tasks (Chinese) | Adjustable | Affects scheduled / proactive behavior |
+| `agent/workspace/skills/` | Skills | Add skills | Extends capabilities |
+| `agent/workspace/memory/` | Memory store | Do not edit by hand | Risk of corrupting memory data |
 | `logs/` | Logs | View only | Used for troubleshooting |
 
 **Example (Windows):**
@@ -199,14 +218,18 @@ C:\Users\<username>\.jiuwenswarm\
 ```text
 C:\Users\Administrator\.jiuwenswarm\
 ├── config\config.yaml
-├── service_default_service_id\
-│   └── agent_default_agent_id\
-│       └── agent\
-│           ├── AGENT.md
-│           ├── IDENTITY.md
-│           ├── SOUL.md
-│           ├── skills\
-│           └── sessions\
+├── agent\workspace\
+│   ├── AGENT_ZH.md
+│   ├── AGENT_EN.md
+│   ├── IDENTITY_ZH.md
+│   ├── IDENTITY_EN.md
+│   ├── SOUL_ZH.md
+│   ├── SOUL_EN.md
+│   ├── HEARTBEAT_ZH.md
+│   ├── HEARTBEAT_EN.md
+│   ├── USER.md
+│   ├── memory\
+│   └── skills\
 ```
 
 > **Notes:**  
@@ -257,8 +280,8 @@ C:\Users\<username>\.jiuwenswarm\config\config.yaml
 
 | Key | Meaning | Effect | Suggestion |
 |-----|---------|--------|------------|
-| `models.default.model_name` | Default model | Quality and speed | Confirm the model works first |
-| `models.default.temperature` | Temperature | Creativity vs. stability | Often 0.7–1.0 |
+| `models.defaults[0].model_client_config.model_name` | Default model | Quality and speed | Confirm the model works first |
+| `models.defaults[0].model_config_obj.temperature` | Temperature | Creativity vs. stability | Often 0.7–1.0 |
 | `heartbeat.active_hours` | Active window | When proactive runs fire | Match your schedule |
 | `permissions.tools.*` | Tool permissions | Safety | Understand risk before changing |
 
@@ -266,7 +289,7 @@ C:\Users\<username>\.jiuwenswarm\config\config.yaml
 
 | Key | Meaning | Risk | Suggestion |
 |-----|---------|------|------------|
-| `models.default.api_key` | API key | Leakage | Prefer environment variables |
+| `models.defaults[0].model_client_config.api_key` | API key | Leakage | Prefer environment variables |
 | `memory.external.*` | External memory engine | Memory may break | Keep defaults |
 | `gateway.*` | Gateway settings | Connectivity | Change only when deploying |
 | `permissions.rules.*` | Security rules | Security holes | Keep defaults |
@@ -275,16 +298,24 @@ C:\Users\<username>\.jiuwenswarm\config\config.yaml
 
 **Restart is required for changes to take effect.**
 
+Restart commands vary by installation method:
+
 ```bash
-# Windows (depends on how you installed)
-# If running as a service:
+# Method 1: Windows service (installed via installer)
 net stop jiuwenswarm
 net start jiuwenswarm
 
-# If running from the command line:
-# Stop the current process, then:
+# Method 2: Command line (manual startup)
+# Stop the current terminal process, then:
 jiuwenswarm-start
-# or: python -m jiuwenswarm.app
+
+# Method 3: Python module (development)
+# Stop the current process, then:
+python -m jiuwenswarm.app
+
+# Method 4: Container deployment (Docker/Kubernetes)
+# Restart according to your container orchestration config:
+docker restart jiuwenswarm-container
 ```
 
 #### Common scenarios
@@ -294,9 +325,15 @@ jiuwenswarm-start
 ```yaml
 # In config.yaml
 models:
-  default:
-    model_client_config:
-      model_name: "your-model-name"  # e.g. deepseek-chat, gpt-4o
+  defaults:
+    - model_client_config:
+        api_base: https://api.example.com/v1
+        api_key: your-api-key
+        model_name: "your-model-name"  # e.g. deepseek-chat, gpt-4o
+        client_provider: OpenAI
+      model_config_obj:
+        temperature: 0.95
+      is_default: true
 ```
 
 Restart the service.
@@ -305,10 +342,16 @@ Restart the service.
 
 ```yaml
 models:
-  default:
-    model_config_obj:
-      temperature: 0.8   # more creative
-      # temperature: 0.3  # more stable
+  defaults:
+    - model_client_config:
+        api_base: https://api.example.com/v1
+        api_key: your-api-key
+        model_name: your-model-name
+        client_provider: OpenAI
+      model_config_obj:
+        temperature: 0.8   # more creative
+        # temperature: 0.3  # more stable
+      is_default: true
 ```
 
 **Scenario 3: Enable or disable a channel**
