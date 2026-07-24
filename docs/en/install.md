@@ -145,7 +145,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+git clone https://github.com/openJiuwen-ai/jiuwenswarm.git
 
 # Enter project directory
 cd jiuwenswarm
@@ -275,7 +275,7 @@ conda activate jiuwenswarm
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+git clone https://github.com/openJiuwen-ai/jiuwenswarm.git
 
 # Enter project directory
 cd jiuwenswarm

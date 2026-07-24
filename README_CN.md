@@ -19,14 +19,14 @@
   ·
   <a href="https://openjiuwen.com">官网</a>
   ·
-  <a href="https://gitcode.com/openJiuwen/jiuwenswarm">GitCode</a>
+  <a href="https://github.com/openJiuwen-ai/jiuwenswarm">GitHub</a>
 </p>
 
 <p align="center">
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License" />
   </a>
-  <a href="https://gitcode.com/openJiuwen/jiuwenswarm/releases">
+  <a href="https://github.com/openJiuwen-ai/jiuwenswarm/releases">
     <img src="https://img.shields.io/pypi/v/jiuwenswarm.svg" alt="Release" />
   </a>
   <img src="https://img.shields.io/badge/python-%E2%89%A53.11-blue.svg" alt="Python Version" />
@@ -194,8 +194,8 @@ JiuwenSwarm 支持三种执行模式，按需切换：
 
 欢迎开发者参与 JiuwenSwarm 的建设。你可以通过以下方式贡献：
 
-- 提交 Bug、功能建议或使用问题：[Issues](https://gitcode.com/openJiuwen/jiuwenswarm/issues)
-- 提交代码、文档或示例：[Pull Requests](https://gitcode.com/openJiuwen/jiuwenswarm/pulls)
+- 提交 Bug、功能建议或使用问题：[Issues](https://github.com/openJiuwen-ai/jiuwenswarm/issues)
+- 提交代码、文档或示例：[Pull Requests](https://github.com/openJiuwen-ai/jiuwenswarm/pulls)
 - 分享 Skill：[Swarm Skills Hub](https://swarmskills.openjiuwen.com/)
 
 贡献前请阅读 [贡献指南](docs/zh/贡献指南.md)，了解调试流程、代码风格和提交规范。贡献路径地图见 [openJiuwen 贡献页面](https://openjiuwen.com/contribute)。
