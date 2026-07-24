@@ -8,6 +8,7 @@ import {
   getPlanApprovalListLayout,
   getPlanRejectFeedbackHint,
   isPlanApprovalRequest,
+  shouldCaptureTerminalMouse,
   shouldAppendPlanRejectFeedback,
   shouldCollectPlanRejectFeedback,
 } from "../dist/ui/app-screen.js";
@@ -74,6 +75,12 @@ assert.equal(
   "[ use \x1b[7m \x1b[0mpytest ]",
 );
 assert.deepEqual(getPlanApprovalListLayout(), { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 });
+
+// A long/scrollable transcript must not capture drag events: users should be
+// able to select and copy completed responses with the terminal's native UI.
+assert.equal(shouldCaptureTerminalMouse(false, false), false);
+assert.equal(shouldCaptureTerminalMouse(true, false), true);
+assert.equal(shouldCaptureTerminalMouse(false, true), true);
 
 const slashCommands = AppScreen.prototype.buildSlashCommands.call({
   commands: {
