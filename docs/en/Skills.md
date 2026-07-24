@@ -167,8 +167,10 @@ Best for:
    Copy skill folder into:
 
    ```text
-   C:\Users\<username>\.jiuwenswarm\service_default\agent_default\jiuwenswarm_workspace\skills\
+   ~/.jiuwenswarm/agent/workspace/skills/
    ```
+
+   > **Path note**: `~` represents the user home directory. On Windows, the actual path is `C:\Users\<username>\.jiuwenswarm\agent\workspace\skills\`; on Linux/macOS, it's `/home/<username>/.jiuwenswarm/agent/workspace/skills/`. In container deployment mode, the path may vary depending on mount configuration.
 
 4. **Verify**
 
@@ -259,10 +261,12 @@ The agent lists installed skill names, sources, versions, and related info.
 **Method 3: File path**
 
 ```text
-C:\Users\<username>\.jiuwenswarm\service_default\agent_default\jiuwenswarm_workspace\skills\
+~/.jiuwenswarm/agent/workspace/skills/
 ```
 
 Each subfolder is one skill.
+
+> **Path note**: `~` represents the user home directory. On Windows, the actual path is `C:\Users\<username>\.jiuwenswarm\agent\workspace\skills\`; on Linux/macOS, it's `/home/<username>/.jiuwenswarm/agent/workspace/skills/`. In container deployment mode, the path may vary depending on mount configuration.
 
 #### View skill details
 
