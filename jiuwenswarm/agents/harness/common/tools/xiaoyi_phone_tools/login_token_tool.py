@@ -145,8 +145,20 @@ def _parse_expire_time(expire_raw: str) -> float | None:
         return None
 
 
-def _match_valid_token(env: dict[str, str], client_id: str) -> str | None:
-    """从 .xiaoyienv 匹配 <clientId>_login_token 且未过期，返回 token 值或 None."""
+def _match_valid_token(
+    env: dict[str, str],
+    client_id: str,
+    baseline_expire: float | None = None,
+) -> str | None:
+    """从 .xiaoyienv 匹配 <clientId>_login_token 且未过期，返回 token 值或 None.
+
+    baseline_expire: 下发授权前该 clientId 旧 token 的 expire_time(epoch 秒)。
+    轮询时只接受 expire_time **严格大于** baseline 的新 token —— 否则 .xiaoyienv
+    里残留的旧 token（即使尚未到 expire 字面过期时间，但东方财富服务端早已作废）
+    会被误判为"授权成功"提前返回，导致 skill 拿旧 token 去请求得到
+    "loginToken 无效或已过期"。baseline 为 None（首次授权、无旧 token）时
+    退化为只查"非空且未过期"。
+    """
     token_key = f"{client_id}_login_token"
     token_value = env.get(token_key, "").strip()
     if not token_value:
@@ -160,6 +172,14 @@ def _match_valid_token(env: dict[str, str], client_id: str) -> str | None:
                 client_id, env.get(expire_key),
             )
             return None
+        if baseline_expire is not None and expire_epoch <= baseline_expire:
+            # 文件里的 token 还是下发前那份旧 token（expire 没更新），继续等端侧回写新 token。
+            logger.info(
+                "[LOGIN_TOKEN] 仍是旧 token（expire 未更新）clientId=%s "
+                "expire=%s baseline=%s，继续轮询等新 token",
+                client_id, env.get(expire_key), baseline_expire,
+            )
+            return None
     return token_value
 
 
@@ -170,13 +190,16 @@ def _token_result_text(token_value: str | None) -> str:
     return "获取用户授权失败"
 
 
-async def _poll_for_token(client_id: str) -> str:
+async def _poll_for_token(client_id: str, baseline_expire: float | None = None) -> str:
     """每 5s 轮询 .xiaoyienv 的 <clientId>_login_token 字段，1 分钟超时.
 
     端侧小艺 App 授权完成后把 token 回写到 .xiaoyienv 的
     <clientId>_login_token + <clientId>_login_token_expire_time，工具轮询该文件
     取结果（对齐 login-token-tool.ts 第 92-153 行的节奏：先等 5s，再每 5s 轮询，
     1 分钟超时）。
+
+    baseline_expire: 下发授权前旧 token 的 expire_time。只接受 expire 更新的新 token，
+    避免把残留旧 token（未到字面过期但服务端已作废）误判为成功。
     """
     start_ms = time.time() * 1000
 
@@ -193,7 +216,7 @@ async def _poll_for_token(client_id: str) -> str:
             return "获取用户授权失败"
 
         env = _read_xiaoyienv()
-        token_value = _match_valid_token(env, client_id)
+        token_value = _match_valid_token(env, client_id, baseline_expire)
         if token_value is not None:
             logger.info(
                 "[LOGIN_TOKEN] 拿到授权 clientId=%s token_len=%d expire=%s",
@@ -212,7 +235,7 @@ async def _poll_for_token(client_id: str) -> str:
     description=(
         "获取用户授权信息。当skill需要用户鉴权时调用此工具，工具会通过当前小艺对话渠道向你的设备"
         "下发授权请求（弹授权卡片），等待你完成授权后返回结果。请勿重复调用此工具。"
-        "参数 clientId：账号服务唯一标识，在执行具体skill的过程中会提供；"
+        "参数 clientId：账号服务唯一标识，在执行具体skill过程中会提供；"
         "参数 skillName：具体skill的名称。"
     ),
 )
@@ -249,11 +272,21 @@ async def huawei_id_tool(clientId: str, skillName: str) -> Dict[str, Any]:
         "client_id": client_id,
         "skill_name": skill_name,
     }
+
+    # 下发前先读当前 .xiaoyienv 里该 clientId 的旧 token expire_time 作 baseline。
+    # 轮询时只接受 expire_time 严格大于 baseline 的新 token —— 否则 .xiaoyienv 里
+    # 残留的旧 token（expire 字面时间可能还没到，但东方财富服务端早已作废）会被
+    # _match_valid_token 误判为"授权成功"提前返回，skill 拿旧 token 去请求得到
+    # "loginToken 无效或已过期"。
+    pre_env = _read_xiaoyienv()
+    baseline_expire = _parse_expire_time(
+        pre_env.get(f"{client_id}_login_token_expire_time", "")
+    )
     logger.info(
         "[LOGIN_TOKEN] 下发授权请求（走桥）clientId=%s skillName=%s intent=%s "
-        "channel_id=%s session=%s",
+        "channel_id=%s session=%s baseline_expire=%s",
         client_id, skill_name, LOGIN_TOKEN_INTENT,
-        context.channel_id, context.jiuwen_session_id,
+        context.channel_id, context.jiuwen_session_id, baseline_expire,
     )
 
     try:
@@ -271,7 +304,7 @@ async def huawei_id_tool(clientId: str, skillName: str) -> Dict[str, Any]:
         raise RuntimeError(f"下发授权请求失败: {exc}") from exc
 
     logger.info("[LOGIN_TOKEN] 授权请求已下发，开始轮询 token 文件")
-    result_text = await _poll_for_token(client_id)
+    result_text = await _poll_for_token(client_id, baseline_expire)
     return {
         "content": [
             {
