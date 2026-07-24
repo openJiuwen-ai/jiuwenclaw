@@ -48,6 +48,24 @@ _AskKey = tuple[str, str, str]
 _TenantSessionKey = tuple[str, str, str]
 
 
+def _answer_item_has_user_input(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return True
+    selected = item.get("selected_options")
+    if isinstance(selected, list):
+        if any(
+            not isinstance(option, str) or bool(option.strip())
+            for option in selected
+        ):
+            return True
+    elif selected is not None:
+        return True
+    custom_input = item.get("custom_input")
+    if custom_input is None:
+        return False
+    return not isinstance(custom_input, str) or bool(custom_input.strip())
+
+
 @contextlib.asynccontextmanager
 async def ask_user_question_request_scope(
     *,
@@ -192,7 +210,9 @@ class AskUserQuestionRegistry:
         normalized_status = str(status or "answered").strip().lower()
         if normalized_status not in {"answered", "skipped"}:
             normalized_status = "answered"
-        if normalized_status == "skipped" and norm:
+        if normalized_status == "skipped" and any(
+            _answer_item_has_user_input(item) for item in norm
+        ):
             logger.warning(
                 "[AskUserQuestionRegistry] rejected skipped request with non-empty answers request_id=%s",
                 key[2],
