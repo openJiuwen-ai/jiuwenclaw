@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,6 +94,7 @@ async def test_browser_runtime_restart_resets_active_agent_runtimes(
         browser_move,
         "reset_active_browser_runtimes",
         fake_reset_active_browser_runtimes,
+        raising=False,
     )
     monkeypatch.setattr(
         browser_move,
@@ -121,6 +123,17 @@ async def test_browser_runtime_restart_resets_active_agent_runtimes(
             "ok": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_browser_runtime_restart_supports_sdk_without_runtime_reset():
+    reset_runtimes = (
+        await agent_ws_server_module._reset_active_browser_runtimes_if_available(
+            SimpleNamespace()
+        )
+    )
+
+    assert reset_runtimes == 0
 
 
 @pytest.mark.asyncio

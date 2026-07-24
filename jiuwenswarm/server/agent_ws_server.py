@@ -118,6 +118,23 @@ logger = logging.getLogger(__name__)
 _background_permission_reload_tasks: set[asyncio.Task] = set()
 
 
+async def _reset_active_browser_runtimes_if_available(browser_move: Any) -> int:
+    """Reset active browser runtimes when supported by the installed SDK."""
+    reset_runtimes = getattr(
+        browser_move,
+        "reset_active_browser_runtimes",
+        None,
+    )
+    if not callable(reset_runtimes):
+        logger.warning(
+            "[AgentWebSocketServer] installed openjiuwen does not support "
+            "reset_active_browser_runtimes; restarting the local browser "
+            "runtime server only"
+        )
+        return 0
+    return await reset_runtimes()
+
+
 def _log_permission_reload_failure(task: asyncio.Task) -> None:
     """后台权限重载任务完成回调: 仅在异常时记 debug(与原同步 try/except 语义一致)。"""
     exc = task.exception()
@@ -5532,13 +5549,12 @@ class AgentWebSocketServer:
 
     async def _handle_browser_runtime_restart(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
-            from openjiuwen.harness.tools.browser_move import (
-                reset_active_browser_runtimes,
-                restart_local_browser_runtime_server,
-            )
+            from openjiuwen.harness.tools import browser_move
 
-            reset_runtimes = await reset_active_browser_runtimes()
-            result = restart_local_browser_runtime_server()
+            reset_runtimes = await _reset_active_browser_runtimes_if_available(
+                browser_move
+            )
+            result = browser_move.restart_local_browser_runtime_server()
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
