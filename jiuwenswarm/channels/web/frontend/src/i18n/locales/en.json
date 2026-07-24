@@ -1224,7 +1224,7 @@
     },
     "placeholders": {
       "name": "Enter task name",
-      "cron": "7 fields (Quartz): second minute hour day month dow year. Ranges: second(0-59), minute(0-59), hour(0-23), day(1-31), month(1-12), dow(1-7 or ?), year(1970-2099 or *). Day and dow cannot both be specific. Examples: daily 9am='0 0 9 * * ? *'; one-shot 2026-04-29 17:30='0 30 17 29 4 ? 2026'",
+      "cron": "7 fields (Quartz): second minute hour day month dow year. Ranges: second(0-59), minute(0-59), hour(0-23), day(1-31), month(1-12), dow(0-6 or ?, 0=Sun, 1=Mon...6=Sat), year(1970-2099 or *). Day and dow can both be specific at once; the job then fires when either matches (e.g. the 15th OR every Monday — an OR, not an AND). Examples: daily 9am='0 0 9 * * ? *'; one-shot 2026-04-29 17:30='0 30 17 29 4 ? 2026'",
       "cronShort": "7 fields (Quartz): second minute hour day month dow year",
       "description": "Enter description",
       "wakeOffset": "Wake offset in seconds"
