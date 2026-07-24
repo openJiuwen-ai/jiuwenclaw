@@ -29,7 +29,6 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
     AgentModeRail,
-    CodingMemoryRail,
     SysOperationRail,
     LspRail
 )
@@ -50,6 +49,9 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _agent_def_to_subagent_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
+)
+from jiuwenswarm.server.runtime.agent_adapter.coding_memory_rail import (
+    CodingMemoryRail,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
 from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
