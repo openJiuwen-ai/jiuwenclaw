@@ -71,7 +71,6 @@ from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
-    resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -272,8 +271,17 @@ def _set_workspace_coding_memory_directory(
     if not callable(set_directory):
         return
 
-    coding_memory_path = resolve_project_coding_memory_workspace_path(
+    # 注册绝对路径（系统工作区 <agent_workspace>/coding_memory/<project>），
+    # 而非相对路径。SDK 的 workspace.get_node_path("coding_memory") 执行
+    # Path(root_path)/path：当 path 为相对路径时会拼到 root_path（项目目录），
+    # 导致 validate_coding_memory_path / MemoryIndexManager(memory.db、向量索引)
+    # 把 .md 文件与 db 写进项目目录，而 ctx.coding_memory_dir（MEMORY.md 索引）
+    # 指向系统目录，二者分裂。注册绝对路径后，Path(root)/绝对路径 返回绝对
+    # 路径本身，使 get_node_path 与 ctx.coding_memory_dir 完全一致，三类产物
+    # (.md 文件、memory.db、MEMORY.md) 统一落在系统工作区。
+    coding_memory_path = _resolve_coding_memory_dir(
         project_dir=project_dir,
+        agent_workspace_dir=agent_workspace_dir,
     )
     set_directory(
         _build_coding_memory_directory_node(
