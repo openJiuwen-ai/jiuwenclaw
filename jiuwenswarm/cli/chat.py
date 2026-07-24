@@ -389,14 +389,13 @@ def _build_request(args: argparse.Namespace, prompt: str) -> dict:
             "agent_ref": {"mode": args.mode, "id": "default"},
         },
     }
-    swarmflow_concurrency = {
-        name: value
-        for name, value in (
-            ("max_workflows", getattr(args, "swarmflow_max_workflows", None)),
-            ("max_agents_total", getattr(args, "swarmflow_max_agents", None)),
-        )
-        if value is not None
-    }
+    swarmflow_concurrency = {}
+    max_workflows = getattr(args, "swarmflow_max_workflows", None)
+    if max_workflows is not None:
+        swarmflow_concurrency["max_workflows"] = max_workflows
+    max_agents = getattr(args, "swarmflow_max_agents", None)
+    if max_agents is not None:
+        swarmflow_concurrency["max_agents_total"] = max_agents
     if swarmflow_concurrency:
         request["params"]["swarmflow_concurrency"] = swarmflow_concurrency
     return request
