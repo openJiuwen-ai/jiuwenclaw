@@ -37,6 +37,11 @@ from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
+try:
+    from jiuwenclaw.utils import build_default_headers
+except ImportError:  # pragma: no cover - browser runtime can still run without repo helpers
+    build_default_headers = None
+
 
 
 class ReActAgentConfig(BaseModel):
@@ -235,12 +240,14 @@ class ReActAgentConfig(BaseModel):
         self.api_key = api_key
         self.api_base = api_base
         self.model_name = model_name
+        custom_headers = build_default_headers("") if build_default_headers else None
 
         self.model_client_config = ModelClientConfig(
             client_provider=provider,
             api_key=api_key,
             api_base=api_base,
-            verify_ssl=verify_ssl
+            verify_ssl=verify_ssl,
+            custom_headers=custom_headers,
         )
         self.model_config_obj = ModelRequestConfig(
             model_name=model_name
