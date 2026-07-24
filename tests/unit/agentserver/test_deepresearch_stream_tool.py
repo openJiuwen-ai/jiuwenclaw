@@ -2355,8 +2355,8 @@ async def test_tool_keeps_current_workflow_stage_in_progress_when_research_fails
 
 
 @pytest.mark.asyncio
-async def test_start_returns_interrupted_outcome_from_marker():
-    # started → outline 内容 → interrupt chunk(带 raw prompt)→ interrupted marker(透传 content)
+async def test_outline_interaction_is_not_returned_to_the_model():
+    # A repeated fake outline interruption exercises the automatic-resume loop guard.
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps({"agent": "outline", "content": "累积的旧大纲"}),
@@ -2379,19 +2379,9 @@ async def test_start_returns_interrupted_outcome_from_marker():
          ):
         result = await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
     out = json.loads(result)
-    assert out["status"] == "interrupted"
+    assert out["status"] == "error"
     assert out["conversation_id"] == "C1"
-    assert out["node_id"] == "outline_interaction"
-    # marker 结构化透传:agent 按通用中断规则读 marker.content。
-    assert out["marker"]["content"] == "第一章 来自marker\n第二章 来自marker"
-    assert out["marker"]["prompt"] == "请审阅大纲"
-    assert out["marker"]["conversation_id"] == "C1"
-    assert "__deepsearch_status__" not in out["marker"]  # 内部标记已剥除
-    # outcome.prompt:marker.content 优先(不退到累积的"累积的旧大纲")
-    assert "来自marker" in out["prompt"]
-    assert "累积的旧大纲" not in out["prompt"]
-    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
-    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 2]
+    assert out["error_code"] == "outline_auto_resume_loop"
 
 
 @pytest.mark.asyncio
@@ -2457,7 +2447,7 @@ async def test_feedback_interrupt_preserves_native_questions():
 
 
 @pytest.mark.asyncio
-async def test_outline_marker_injects_accumulated_outline_when_sdk_omits_it():
+async def test_repeated_outline_interaction_after_auto_accept_returns_error():
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps({"agent": "outline", "content": "第一章 累积大纲"}),
@@ -2476,12 +2466,12 @@ async def test_outline_marker_injects_accumulated_outline_when_sdk_omits_it():
             p.stop()
 
     out = json.loads(result)
-    assert out["marker"]["outline"] == "第一章 累积大纲"
-    assert "第一章 累积大纲" in out["prompt"]
+    assert out["status"] == "error"
+    assert out["error_code"] == "outline_auto_resume_loop"
 
 
 @pytest.mark.asyncio
-async def test_outline_marker_replaces_sdk_status_placeholder_with_accumulated_outline():
+async def test_outline_status_placeholder_does_not_escape_auto_resume_loop():
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps({"agent": "outline", "content": "# 第一章\n累积大纲正文"}),
@@ -2500,10 +2490,65 @@ async def test_outline_marker_replaces_sdk_status_placeholder_with_accumulated_o
             p.stop()
 
     out = json.loads(result)
-    assert out["marker"]["outline"] == "# 第一章\n累积大纲正文"
-    assert out["interaction_policy"] == "silent_auto_accept"
-    assert "累积大纲正文" in out["prompt"]
-    assert "Round 1: waiting for user feedback." not in out["prompt"]
+    assert out["status"] == "error"
+    assert out["error_code"] == "outline_auto_resume_loop"
+
+
+@pytest.mark.asyncio
+async def test_outline_interaction_is_resumed_inside_the_tool_without_returning_control_to_model(
+    tmp_path,
+):
+    outline = json.dumps({
+        "title": "AI Agent 入门",
+        "sections": [{"id": "1", "title": "核心架构"}],
+    }, ensure_ascii=False)
+    start_lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({"agent": "outline", "content": outline}),
+        json.dumps({
+            "__deepsearch_status__": "interrupted",
+            "agent": "outline_interaction",
+            "conversation_id": "C1",
+            "outline": outline,
+        }),
+    ]
+    resume_lines = [
+        json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
+        json.dumps({
+            "__deepsearch_status__": "completed",
+            "conversation_id": "C1",
+            "final_result": {"response_content": "done"},
+        }),
+    ]
+    route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
+    push = AsyncMock()
+    spawn = AsyncMock(side_effect=[_Proc(start_lines), _Proc(resume_lines)])
+    report_path = tmp_path / "r.md"
+    report_path.write_text("done", encoding="utf-8")
+
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", side_effect=[dict(route), dict(route)]), \
+         patch.object(
+             dt,
+             "_write_report_artifacts_stream",
+             new=AsyncMock(return_value={"md": str(report_path)}),
+         ), \
+         patch("asyncio.create_subprocess_exec", new=spawn), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+             return_value=push,
+         ):
+        result = await dt.deepresearch_stream._func(
+            action="start", query="X", file_name="r",
+        )
+
+    assert json.loads(result)["status"] == "completed"
+    assert spawn.await_count == 2
+    resume_argv = spawn.await_args_list[1].args
+    assert resume_argv[1:4] == ("/s", "resume", "--conversation-id")
+    assert resume_argv[4] == "C1"
+    assert '{"interrupt_feedback":"accepted","feedback":""}' in resume_argv
 
 
 @pytest.mark.asyncio
@@ -2545,19 +2590,20 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume(tmp_path
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
          patch.object(dt, "_get_route", side_effect=[dict(route), dict(route)]), \
-         patch.object(dt, "_write_report_markdown", return_value=str(report_path)), \
+         patch.object(
+             dt,
+             "_write_report_artifacts_stream",
+             new=AsyncMock(return_value={"md": str(report_path)}),
+         ), \
          patch("asyncio.create_subprocess_exec", new=spawn), \
          patch(
              "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
              return_value=push,
          ):
-        interrupted = await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
         completed = await dt.deepresearch_stream._func(
-            action="resume", conversation_id="C1", node="outline_interaction",
-            feedback='{"interrupt_feedback":"accepted"}',
+            action="start", query="X", file_name="r",
         )
 
-    assert json.loads(interrupted)["status"] == "interrupted"
     assert json.loads(completed)["status"] == "completed"
     section_payloads = [
         call.args[0]["payload"]

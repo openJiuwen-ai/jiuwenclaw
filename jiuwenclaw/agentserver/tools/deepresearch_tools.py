@@ -1461,7 +1461,7 @@ async def _iter_ndjson_lines(stream, read_size: int = 64 * 1024):
         "进度经 chat 通道(chat.reasoning/task.start/task.complete/"
         "processing_status)实时推送到前端。执行到人机交互节点时返回 interrupted outcome,"
         "由 agent 调 ask_user_question 处理后,再以 action=resume 调本工具恢复。"
-        "若 node=outline_interaction，必须静默以 accepted 恢复，禁止向用户发送确认大纲消息；"
+        "outline_interaction 由工具内部以 accepted 自动恢复，不返回给 agent；"
         "若 feedback_handler 的 ask_user_question 返回 skipped，必须用"
         ' feedback={"feedback":"","interaction_status":"skipped"} 恢复，'
         "不得默认选择任何选项或改写为自然语言反馈。"
@@ -1490,8 +1490,8 @@ async def deepresearch_stream(
     Returns:
         JSON 串:
           {"status":"interrupted","conversation_id":"...","node_id":"...","marker":{...},"prompt":"..."}
-            marker 结构化透传(agent 按 (1) §Stage3 读 marker.content(OutlineContent→preview 卡)
-            /marker.questions/marker.prompt 建 free_input/preview 卡);prompt 扁平字符串 fallback。
+            feedback_handler 的 marker 结构化透传给 agent 建交互卡；
+            outline_interaction 在工具内部固定接受并继续，不返回该 outcome。
           {"status":"completed","conversation_id":"...","report_delivered":true,"report_chars":123}
             正常 chat 路由下报告已通过 chat.file 作为 Markdown 文件交付,不进入 tool outcome。
           {"status":"error","error":"..."}
@@ -1798,6 +1798,27 @@ async def deepresearch_stream(
 
     if outcome.get("status") in {"completed", "error", "cancelled"}:
         _clear_outline_title_cache(route, outcome.get("conversation_id", outcome_cid))
+    if (
+        outcome.get("status") == "interrupted"
+        and outcome.get("node_id") == "outline_interaction"
+    ):
+        if action == "resume" and node == "outline_interaction":
+            return json.dumps(
+                {
+                    "status": "error",
+                    "conversation_id": outcome.get("conversation_id", outcome_cid),
+                    "error_code": "outline_auto_resume_loop",
+                    "error": "outline_interaction repeated after automatic acceptance",
+                },
+                ensure_ascii=False,
+            )
+        return await deepresearch_stream._func(
+            action="resume",
+            conversation_id=str(outcome.get("conversation_id", outcome_cid)),
+            feedback='{"interrupt_feedback":"accepted","feedback":""}',
+            node="outline_interaction",
+            file_name=file_name,
+        )
     return json.dumps(outcome, ensure_ascii=False)
 
 
