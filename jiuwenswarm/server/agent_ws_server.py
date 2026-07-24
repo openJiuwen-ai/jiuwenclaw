@@ -767,6 +767,8 @@ class AgentWebSocketServer:
         self._default_model: Optional[Any] = None
         # 本地 jiuwenbox 子进程管理器 (lazy 启动, 在 /sandbox enable 时 ensure_running)
         self._jiuwenbox_runner = JiuwenBoxRunner.instance()
+        # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
+        self._checkpointer_warmup_task: Optional[asyncio.Task] = None
         # Proactive recommendation engine (set by app_agentserver for debug trigger)
         self._proactive_engine: Any = None
         get_acp_output_manager().set_send_push_callback(
@@ -835,16 +837,20 @@ class AgentWebSocketServer:
     # ---------- 生命周期 ----------
 
     async def start(self) -> None:
-        """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
+        """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容.
+
+        注: persistent checkpointer 的初始化历史在 ``legacy_serve`` 之前同步 await,
+        首次约耗时 ~14s (sqlite 文件 + openjiuwen 工厂反射), 期间 WS 端口未 listen,
+        是 Gateway connect 重试 (头两次必失败, 白等 ~6s) 的元凶。现改为 ``legacy_serve``
+        之后后台预热 (fire-and-forget), 让端口尽快开放; 首条 chat 请求若赶在预热完成前
+        到达, 走 ``_ensure_persistent_checkpointer_response`` 兜底等待, 不影响握手.
+        """
         if self._server is not None:
             logger.warning("[AgentWebSocketServer] 服务端已在运行")
             return
 
         # Reset harness package state to native on service startup
         reset_harness_packages_state()
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
-
-        await ensure_persistent_checkpointer()
 
         try:
             from websockets.legacy.server import serve as legacy_serve
@@ -870,6 +876,22 @@ class AgentWebSocketServer:
             )
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
+        )
+
+        # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
+        # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
+
+        async def _warmup_checkpointer() -> None:
+            try:
+                await ensure_persistent_checkpointer()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] checkpointer 预热失败 (首请求将兜底重试): %s", exc
+                )
+
+        self._checkpointer_warmup_task = asyncio.create_task(
+            _warmup_checkpointer(), name="checkpointer-warmup"
         )
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
@@ -1070,6 +1092,17 @@ class AgentWebSocketServer:
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
+        # 先取消 checkpointer 预热任务, 避免在 server 关闭后仍在后台跑.
+        warmup = self._checkpointer_warmup_task
+        self._checkpointer_warmup_task = None
+        if warmup is not None and not warmup.done():
+            warmup.cancel()
+            try:
+                await warmup
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
         had_server = self._server is not None
         if had_server:
             self._server.close()
@@ -2031,6 +2064,12 @@ class AgentWebSocketServer:
 
     async def _handle_unary(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """非流式处理：调用 process_message，返回一条 E2AResponse 线 JSON。"""
+        # 兜底确保 checkpointer 就绪: start() 里改为后台预热后, 首条请求可能赶在
+        # 预热完成前到达。ensure_persistent_checkpointer 内部 lock+ready 幂等, 预热
+        # 完成时秒过; 未完成则阻塞至完成 (避免用到未就绪的 checkpointer)。
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
+
+        await ensure_persistent_checkpointer()
         channel_id = request.channel_id or "default"
 
         if request.req_method == ReqMethod.INITIALIZE:
@@ -2104,6 +2143,10 @@ class AgentWebSocketServer:
 
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
+        # 兜底确保 checkpointer 就绪 (见 _handle_unary 同名注释)。
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
+
+        await ensure_persistent_checkpointer()
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
