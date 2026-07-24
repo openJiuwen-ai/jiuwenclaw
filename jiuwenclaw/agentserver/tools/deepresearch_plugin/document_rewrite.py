@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -23,6 +25,9 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.artifact_naming import (
     ArtifactPaths,
     allocate_next_paths,
 )
+
+logger = logging.getLogger(__name__)
+
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.markdown_rewrite_map import (
     MarkdownRewriteMap,
     ProtectedAnchor,
@@ -1227,16 +1232,54 @@ def _cleanup_owned_publication(path: Path, descriptor: int) -> None:
         pass
 
 
+def _open_no_follow(path: Path, flags: int, mode: int = 0o600) -> int:
+    """Open ``path`` refusing to follow a symlink final component.
+
+    Uses ``os.O_NOFOLLOW`` when available. On platforms where it is missing
+    (notably Windows, where ``os.O_NOFOLLOW`` is ``None``), fall back to an
+    ``os.lstat`` symlink check before a regular open. Windows requires
+    administrator/developer-mode to create symlinks, so the TOCTOU window is
+    acceptable there and far better than failing every publication.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is not None:
+        return os.open(path, flags | nofollow, mode)
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and stat.S_ISLNK(existing.st_mode):
+        raise OSError(f"refusing to open symlink at {path}")
+    return os.open(path, flags, mode)
+
+
 def _publish_create(path: Path, payload: bytes) -> int:
     """Create and fsync one immutable path, returning an ownership descriptor."""
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("safe no-follow publication is unavailable")
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
-        0o600,
-    )
+    # O_BINARY is REQUIRED on Windows: os.open defaults to lowio text mode
+    # (unlike the built-in open()), so os.write translates "\n" -> "\r\n".
+    # That would make the on-disk bytes differ from `payload`/the sha256 we
+    # computed over `payload`, breaking content_sha256 integrity (highlights
+    # dropped, prepare_html_export REVISION_CONFLICT) on Windows.
+    publish_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        publish_flags |= os.O_BINARY
+    try:
+        descriptor = _open_no_follow(
+            path,
+            publish_flags,
+            0o600,
+        )
+    except OSError as exc:
+        logger.error(
+            "PROVENANCE_DIAG _publish_create open failed type=%s errno=%s "
+            "msg=%s path=%s nofollow=%s",
+            type(exc).__name__,
+            exc.errno,
+            exc,
+            path,
+            getattr(os, "O_NOFOLLOW", None) is not None,
+        )
+        raise
     try:
         view = memoryview(payload)
         while view:
@@ -1265,6 +1308,13 @@ def _allocate_paths(
         json.JSONDecodeError,
         UnicodeError,
     ) as exc:
+        logger.error(
+            "PROVENANCE_DIAG _allocate_paths failed type=%s code=%s msg=%s parent=%s",
+            type(exc).__name__,
+            getattr(exc, "code", None),
+            exc,
+            parent_path,
+        )
         raise _versioning_error() from exc
 
 
@@ -1276,7 +1326,7 @@ def _publish_child(
     child_markdown: bytes,
     child_provenance: dict,
 ) -> tuple[Path, Path, dict]:
-    for _ in range(MAX_PUBLICATION_ATTEMPTS):
+    for attempt in range(MAX_PUBLICATION_ATTEMPTS):
         paths = _allocate_paths(parent_path, parent_provenance, parent_markdown)
         published_provenance = dict(child_provenance)
         published_provenance.update(
@@ -1291,6 +1341,11 @@ def _publish_child(
                 published_provenance, ensure_ascii=False, indent=2
             ).encode("utf-8")
         except (TypeError, ValueError, UnicodeError) as exc:
+            logger.error(
+                "PROVENANCE_DIAG _publish_child json-encode failed type=%s msg=%s",
+                type(exc).__name__,
+                exc,
+            )
             raise _versioning_error() from exc
 
         try:
@@ -1298,8 +1353,21 @@ def _publish_child(
                 paths.provenance_path, provenance_payload
             )
         except FileExistsError:
+            logger.info(
+                "PROVENANCE_DIAG _publish_child provenance exists attempt=%s path=%s",
+                attempt,
+                paths.provenance_path,
+            )
             continue
         except OSError as exc:
+            logger.error(
+                "PROVENANCE_DIAG _publish_child provenance create failed type=%s "
+                "errno=%s msg=%s path=%s",
+                type(exc).__name__,
+                exc.errno,
+                exc,
+                paths.provenance_path,
+            )
             raise _versioning_error() from exc
         try:
             try:
@@ -1310,10 +1378,23 @@ def _publish_child(
                 _cleanup_owned_publication(
                     paths.provenance_path, provenance_descriptor
                 )
+                logger.info(
+                    "PROVENANCE_DIAG _publish_child markdown exists attempt=%s path=%s",
+                    attempt,
+                    paths.markdown_path,
+                )
                 continue
             except OSError as exc:
                 _cleanup_owned_publication(
                     paths.provenance_path, provenance_descriptor
+                )
+                logger.error(
+                    "PROVENANCE_DIAG _publish_child markdown create failed type=%s "
+                    "errno=%s msg=%s path=%s",
+                    type(exc).__name__,
+                    exc.errno,
+                    exc,
+                    paths.markdown_path,
                 )
                 raise _versioning_error() from exc
             else:
@@ -1325,6 +1406,11 @@ def _publish_child(
                 )
         finally:
             os.close(provenance_descriptor)
+    logger.error(
+        "PROVENANCE_DIAG _publish_child exhausted attempts=%s parent=%s",
+        MAX_PUBLICATION_ATTEMPTS,
+        parent_path,
+    )
     raise _versioning_error()
 
 

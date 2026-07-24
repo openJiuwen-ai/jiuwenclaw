@@ -293,11 +293,13 @@ def _read_file_bytes(path: Path, limit: int, label: str) -> bytes:
         raise _unidentifiable(f"{label} must be a regular file")
     if metadata.st_size > limit:
         raise _unidentifiable(f"{label} exceeds the read limit")
+    # O_NOFOLLOW is unavailable on Windows (os.O_NOFOLLOW is None). The
+    # os.lstat symlink/regular-file guard directly above already refuses
+    # symlink targets, so a plain O_RDONLY open is a safe fallback there.
     nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise _invalid("safe no-follow reads are unavailable")
+    open_flags = os.O_RDONLY | nofollow if nofollow is not None else os.O_RDONLY
     try:
-        descriptor = os.open(path, os.O_RDONLY | nofollow)
+        descriptor = os.open(path, open_flags)
         with os.fdopen(descriptor, "rb") as stream:
             content = stream.read(limit + 1)
     except OSError as exc:
