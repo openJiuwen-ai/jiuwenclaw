@@ -10,16 +10,140 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from jiuwenbox.logging_config import configure_logging
+from jiuwenbox.models.policy import _contains_control_chars, _contains_crlf_or_null
 from jiuwenbox.proxy.inference_privacy_proxy import InferencePrivacyProxyConfig, ProxyRoute, InferencePrivacyProxy
 
 configure_logging()
 logger = logging.getLogger(__name__)
+
+
+def _strip_trailing_newline(value: str) -> str:
+    """Remove a single trailing CR/LF/CRLF; preserve internal spaces and special chars."""
+    if value.endswith("\n"):
+        value = value[:-1]
+    if value.endswith("\r"):
+        value = value[:-1]
+    return value
+
+
+def _resolve_basic_credentials(basic_auth) -> tuple[str, str, str]:
+    """Resolve and validate Basic credentials from a ``ProxyBasicAuth``.
+
+    Performs all structural checks here (rather than in the Pydantic model) so
+    that a rejection raises ``ValueError`` with a generic message that never
+    contains the secret. Returns ``(username, password, password_file)``.
+
+    Checks: non-empty username; exactly one of password / password_file; file
+    exists, is a regular file, and is readable; CR/LF/NUL/control-char
+    injection prevention on username and resolved password.
+    """
+    username = basic_auth.username
+    if not username or not username.strip():
+        raise ValueError("basic_auth.username cannot be empty")
+    if _contains_crlf_or_null(username) or _contains_control_chars(username):
+        raise ValueError("basic_auth.username contains invalid characters")
+
+    password_file = basic_auth.password_file
+    if basic_auth.password and password_file:
+        raise ValueError(
+            "basic_auth.password and basic_auth.password_file are mutually exclusive"
+        )
+    if not basic_auth.password and not password_file:
+        raise ValueError("basic_auth requires one of password or password_file")
+
+    if password_file:
+        path = Path(password_file)
+        if not path.is_file():
+            raise ValueError(
+                f"basic_auth.password_file not found or not a regular file: {password_file}"
+            )
+        if not os.access(path, os.R_OK):
+            raise ValueError(
+                f"basic_auth.password_file is not readable: {password_file}"
+            )
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(
+                f"basic_auth.password_file is not readable: {password_file}"
+            ) from exc
+        password = _strip_trailing_newline(content)
+        # Non-blocking permission warning: do not reject 0640/0644 (K8s/Docker
+        # Secret defaults); only flag group/other access as a hardening nudge.
+        try:
+            mode = path.stat().st_mode & 0o777
+            if mode & 0o077:
+                logger.warning(
+                    "basic_auth.password_file '%s' is group/other accessible "
+                    "(mode=%o); recommend 0600",
+                    password_file,
+                    mode,
+                )
+        except OSError:
+            pass
+    else:
+        password = basic_auth.password
+
+    if _contains_crlf_or_null(password) or _contains_control_chars(password):
+        raise ValueError("basic_auth.password contains invalid characters")
+    return username, password, password_file
+
+
+def build_proxy_route(route_data) -> ProxyRoute:
+    """Build a runtime ``ProxyRoute`` from a ``ProxyRouteEntry``.
+
+    Resolves Basic credentials (reading ``password_file``) so both the YAML
+    startup path (``load_from_policy``) and the REST create/update path share
+    one runtime model. The resolved password lives only in memory. Raises
+    ``ValueError`` (generic, no secret) on auth-scheme conflicts, unreadable
+    file, or invalid content.
+    """
+    if route_data.api_key and route_data.basic_auth is not None:
+        raise ValueError("api_key and basic_auth are mutually exclusive")
+
+    basic_username = ""
+    basic_password = ""
+    basic_password_file = ""
+    if route_data.basic_auth is not None:
+        basic_username, basic_password, basic_password_file = _resolve_basic_credentials(
+            route_data.basic_auth
+        )
+    return ProxyRoute(
+        path_prefix=route_data.path_prefix,
+        target_endpoint=route_data.target_endpoint,
+        api_key=route_data.api_key,
+        skip_cert_verify=route_data.skip_cert_verify,
+        basic_username=basic_username,
+        basic_password=basic_password,
+        basic_password_file=basic_password_file,
+    )
+
+
+def _auth_type(route: ProxyRoute) -> str:
+    if route.basic_username:
+        return "basic"
+    if route.api_key:
+        return "api_key"
+    return "none"
+
+
+def _redact_basic(route: ProxyRoute) -> dict[str, Any] | None:
+    """Return a password-free view of a route's Basic auth config, or None."""
+    if not route.basic_username:
+        return None
+    return {
+        "username": route.basic_username,
+        "password_configured": True,
+        "password_file": route.basic_password_file,
+    }
 
 
 class ProxyState(str, Enum):
@@ -101,6 +225,8 @@ class InferencePrivacyProxyManager:
                         "path_prefix": route.path_prefix,
                         "target_endpoint": route.target_endpoint,
                         "api_key": route.api_key[:10] + "..." if len(route.api_key) > 10 else route.api_key,
+                        "auth_type": _auth_type(route),
+                        "basic_auth": _redact_basic(route),
                     },
                     "created_at": global_instance.created_at.isoformat() if global_instance.created_at else None,
                     "started_at": global_instance.started_at.isoformat() if global_instance.started_at else None,
@@ -132,6 +258,8 @@ class InferencePrivacyProxyManager:
                             "target_host": route.target_host,
                             "target_port": route.target_port,
                             "use_tls": route.use_tls,
+                            "auth_type": _auth_type(route),
+                            "basic_auth": _redact_basic(route),
                         },
                         "created_at": global_instance.created_at.isoformat() if global_instance.created_at else None,
                         "started_at": global_instance.started_at.isoformat() if global_instance.started_at else None,
@@ -356,6 +484,9 @@ class InferencePrivacyProxyManager:
                     target_endpoint=new_route.target_endpoint,
                     api_key=new_route.api_key,
                     skip_cert_verify=new_route.skip_cert_verify,
+                    basic_username=new_route.basic_username,
+                    basic_password=new_route.basic_password,
+                    basic_password_file=new_route.basic_password_file,
                 )
                 global_instance.config.routes[route_idx] = updated_route
                 global_instance.add_log(f"Route updated: {old_path_prefix} -> {updated_route.target_endpoint}")
@@ -449,33 +580,25 @@ class InferencePrivacyProxyManager:
         if not proxies_config or proxies_config.listen_port <= 0:
             return
 
-        routes = [
-            ProxyRoute(
-                path_prefix=route_data.path_prefix,
-                target_endpoint=route_data.target_endpoint,
-                api_key=route_data.api_key,
-                skip_cert_verify=route_data.skip_cert_verify,
-            )
-            for route_data in proxies_config.routes
-        ]
-
-        if not routes:
-            logger.info("No routes configured")
-            return
-
-        config = InferencePrivacyProxyConfig(
-            listen_port=proxies_config.listen_port,
-            listen_host=proxies_config.listen_host or "127.0.0.1",
-            routes=routes,
-        )
-
         try:
+            routes = [build_proxy_route(route_data) for route_data in proxies_config.routes]
+
+            if not routes:
+                logger.info("No routes configured")
+                return
+
+            config = InferencePrivacyProxyConfig(
+                listen_port=proxies_config.listen_port,
+                listen_host=proxies_config.listen_host or "127.0.0.1",
+                routes=routes,
+            )
+
             await self.create_proxy("default", config)
-            
+
             route_names = [r.path_prefix.lstrip("/").replace("/", "-") or "default" for r in routes]
             for route_name in route_names:
                 await self.start_proxy(route_name)
-            
+
             logger.info(
                 "Started global proxy on %s:%d with %d routes: %s",
                 config.listen_host,
@@ -484,6 +607,9 @@ class InferencePrivacyProxyManager:
                 ", ".join(f"{r.path_prefix}->{r.target_endpoint}" for r in routes),
             )
         except Exception as e:
+            # ``build_proxy_route`` raises generic ValueErrors (no secret) on
+            # unreadable password_file or invalid password content; log and keep
+            # the server running without the proxy rather than crashing startup.
             logger.error("Failed to load global proxy: %s", e)
 
 

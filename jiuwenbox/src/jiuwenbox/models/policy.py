@@ -457,10 +457,50 @@ class NetworkRulePolicy(BaseModel):
     blocked_ports: list[int] = Field(default_factory=list)
 
 
+class ProxyBasicAuth(BaseModel):
+    """HTTP Basic credentials for a proxy route.
+
+    ``password`` is inline (dev/test only; like ``api_key`` it is stored in the
+    policy YAML in plaintext). ``password_file`` is the production-recommended
+    source: a server-side readable file (Kubernetes Secret / Docker Secret /
+    Linux restricted file) whose content is read at route-assembly time. The
+    resolved password lives only in the in-memory runtime route and is never
+    serialized back to YAML or returned by any API.
+
+    Fields are intentionally all optional with defaults and no raising
+    validators live here: every structural check (non-empty username, exactly
+    one password source, file existence/readability, CR/LF/NUL injection
+    prevention) is performed at route-assembly time in
+    :func:`build_proxy_route`, which raises ``ValueError`` with a generic
+    message. This keeps the password out of Pydantic ``ValidationError`` reprs
+    (which echo raw input) and therefore out of API 400 responses and startup
+    logs.
+    """
+
+    username: str = ""
+    password: str = ""
+    password_file: str = ""
+
+    @field_validator("password_file", mode="before")
+    @classmethod
+    def expand_password_file_path(cls, value: object) -> object:
+        if isinstance(value, str) and value:
+            return _expand_path(value)
+        return value
+
+    def __repr__(self) -> str:
+        # Never expose the password in reprs / tracebacks.
+        return (
+            f"ProxyBasicAuth(username={self.username!r}, password=***, "
+            f"password_file={self.password_file!r})"
+        )
+
+
 class ProxyRouteEntry(BaseModel):
     path_prefix: str  # Required - no default (must be single-level, non-root)
     target_endpoint: str = "https://api.openai.com"
     api_key: str = ""
+    basic_auth: ProxyBasicAuth | None = None
     skip_cert_verify: bool = False
 
     @field_validator("path_prefix", mode="after")

@@ -946,8 +946,19 @@ print(resp.json())
 | --- | --- | --- | --- |
 | `path_prefix` | string | 是 | 路由前缀，如 `/openai` |
 | `target_endpoint` | string | 是 | 目标服务地址 |
-| `api_key` | string | 否 | 注入到上游的 API Key |
+| `api_key` | string | 否 | 注入到上游的 API Key（Bearer / X-Api-Key）。与 `basic_auth` 互斥 |
+| `basic_auth` | object | 否 | HTTP Basic 凭据。与 `api_key` 互斥。见下 |
 | `skip_cert_verify` | boolean | 否 | 是否跳过证书校验 |
+
+`basic_auth` 对象字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `username` | string | 是 | Basic 认证用户名，禁止 CR/LF/NUL 等控制字符 |
+| `password` | string | 否 | 内联密码，**仅用于开发测试**（明文存储于策略/请求中）。与 `password_file` 二选一 |
+| `password_file` | string | 否 | 服务端可读的密码文件路径（推荐 K8s Secret / Docker Secret / `0600` 文件）。与 `password` 二选一。读取时仅去除结尾换行 |
+
+约束：`api_key` 与 `basic_auth` 互斥；`password` 与 `password_file` 必须二选一；`password_file` 必须存在、为普通文件且当前进程可读（`0640`/`0644` 不阻断，仅告警）。仅支持 HTTP Basic，不支持 Digest/OAuth/Neo4j Bolt。任何接口都不返回明文密码（仅返回 `username` / `password_configured` / `password_file`）。
 
 Python 请求示例：
 
@@ -978,6 +989,20 @@ print(resp.json())
 }
 ```
 
+创建 HTTP Basic 路由示例（Neo4j，密码从 Secret 文件读取）：
+
+```python
+resp = requests.post(
+    "http://127.0.0.1:8321/api/v1/proxies",
+    json={
+        "path_prefix": "/neo4j",
+        "target_endpoint": "http://neo4j.internal:7474",
+        "basic_auth": {"username": "neo4j", "password_file": "/run/secrets/neo4j_password"}
+    },
+    timeout=30,
+)
+```
+
 ### 查询代理列表
 
 接口：`GET /api/v1/proxies`
@@ -1005,7 +1030,28 @@ print(resp.json())
     "route": {
       "path_prefix": "/openai",
       "target_endpoint": "https://api.openai.com",
-      "api_key": "sk-demo..."
+      "api_key": "sk-demo...",
+      "auth_type": "api_key",
+      "basic_auth": null
+    },
+    "created_at": "2026-04-25T11:40:00.000000",
+    "started_at": "2026-04-25T11:41:00.000000",
+    "error_message": null
+  },
+  {
+    "name": "neo4j",
+    "state": "running",
+    "listen_port": 18080,
+    "route": {
+      "path_prefix": "/neo4j",
+      "target_endpoint": "http://neo4j.internal:7474",
+      "api_key": "",
+      "auth_type": "basic",
+      "basic_auth": {
+        "username": "neo4j",
+        "password_configured": true,
+        "password_file": "/run/secrets/neo4j_password"
+      }
     },
     "created_at": "2026-04-25T11:40:00.000000",
     "started_at": "2026-04-25T11:41:00.000000",
@@ -1045,7 +1091,9 @@ print(resp.json())
     "skip_cert_verify": false,
     "target_host": "api.openai.com",
     "target_port": 443,
-    "use_tls": true
+    "use_tls": true,
+    "auth_type": "api_key",
+    "basic_auth": null
   },
   "created_at": "2026-04-25T11:40:00.000000",
   "started_at": "2026-04-25T11:41:00.000000",
