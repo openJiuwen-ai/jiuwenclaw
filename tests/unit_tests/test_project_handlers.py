@@ -15,7 +15,7 @@ import pytest
 # Fixtures
 # ---------------------------------------------------------------------------
 class _FakeWebChannel:
-    channel_id = "test-web"
+    channel_id = "web"
 
     def __init__(self):
         self.methods: dict[str, object] = {}
@@ -89,12 +89,12 @@ def _drain():
     _METADATA_QUEUE.join()
 
 
-def _make_session(sid, *, project_dir="", project_id="", pinned=False, pin_order=0, last_user_message_at=None, model="", cron_id=""):
+def _make_session(sid, *, project_dir="", project_id="", pinned=False, pin_order=0, last_user_message_at=None, model="", cron_id="", channel_id="web"):
     """创建一个会话并写入指定元数据,flush 队列确保落盘。"""
     from jiuwenswarm.server.runtime.session.session_metadata import (
         init_session_metadata, update_session_metadata,
     )
-    init_session_metadata(session_id=sid, project_dir=project_dir, project_id=project_id, model=model, cron_id=cron_id)
+    init_session_metadata(session_id=sid, project_dir=project_dir, project_id=project_id, model=model, cron_id=cron_id, channel_id=channel_id)
     if pinned or pin_order:
         update_session_metadata(session_id=sid, pinned=pinned, pin_order=pin_order)
     if last_user_message_at is not None:
@@ -629,7 +629,7 @@ class TestCompat:
         """不传 project_dir → 归入默认项目,project_dir="" 兜底,行为不变。"""
         resp = await _call(
             registered_channel, "session.create",
-            {"session_id": "sess_compat_1", "title": "兼容", "mode": "code.normal"},
+            {"session_id": "sess_compat_1", "title": "兼容", "mode": "code.normal", "channel_id": "web"},
         )
         assert resp["ok"] is True
         assert resp["payload"]["session_id"] == "sess_compat_1"
@@ -729,7 +729,7 @@ class TestSessionCreateProjectIdValidation:
         proj = _make_project("P", pa)
         resp = await _call(
             registered_channel, "session.create",
-            {"session_id": "s_valid", "project_id": proj.project_id},
+            {"session_id": "s_valid", "project_id": proj.project_id, "channel_id": "web"},
         )
         assert resp["ok"] is True
         # 归属到该项目

@@ -32,11 +32,26 @@ interface CronState {
   cronSessions: Record<string, Session[]>;
   // cron_id → 加载中状态
   cronSessionsLoading: Record<string, boolean>;
+  // job_id → 最近"立即执行"返回的 session_id，用于广播消息路由
+  lastRunSessionId: Record<string, string>;
+  setLastRunSessionId: (jobId: string, sessionId: string) => void;
+  // 定时任务未读状态（is_placeholder=false 的广播到达时标记，点击后清除）
+  unreadCronJobs: Record<string, boolean>;
+  markCronJobUnread: (jobId: string) => void;
+  clearCronJobUnread: (jobId: string) => void;
   loadJobs: () => Promise<void>;
   reload: () => Promise<void>;
   toggleCronGroup: (groupId: string) => void;
   loadCronSessions: (projectId: string, cronId: string) => Promise<void>;
   isCronGroupExpanded: (groupId: string) => boolean;
+}
+
+// 将未读状态持久化到 localStorage，用 queueMicrotask 延迟到当前同步热路径之后执行，
+// 避免阻塞 WebSocket 消息处理；try/catch 防止配额满/隐私模式导致异常影响 store 状态
+function persistCronUnread(state: Record<string, boolean>) {
+  queueMicrotask(() => {
+    try { localStorage.setItem('jiuwenswarm_cron_unread', JSON.stringify(state)); } catch { /* ignore */ }
+  });
 }
 
 export const useCronStore = create<CronState>((set, get) => ({
@@ -45,6 +60,34 @@ export const useCronStore = create<CronState>((set, get) => ({
   expandedCronGroups: {},
   cronSessions: {},
   cronSessionsLoading: {},
+  lastRunSessionId: {},
+  setLastRunSessionId: (jobId, sessionId) =>
+    set((s) => ({ lastRunSessionId: { ...s.lastRunSessionId, [jobId]: sessionId } })),
+  unreadCronJobs: (() => {
+    try {
+      const value = JSON.parse(localStorage.getItem('jiuwenswarm_cron_unread') || '{}');
+      return typeof value === 'object' && value !== null ? value as Record<string, boolean> : {};
+    } catch {
+      return {};
+    }
+  })(),
+  markCronJobUnread: (jobId) => {
+    set((s) => {
+      if (s.unreadCronJobs[jobId]) return s;
+      const next = { ...s.unreadCronJobs, [jobId]: true };
+      persistCronUnread(next);
+      return { unreadCronJobs: next };
+    });
+  },
+  clearCronJobUnread: (jobId) => {
+    set((s) => {
+      if (!s.unreadCronJobs[jobId]) return s;
+      const next = { ...s.unreadCronJobs };
+      delete next[jobId];
+      persistCronUnread(next);
+      return { unreadCronJobs: next };
+    });
+  },
 
   loadJobs: async () => {
     set({ isLoading: true });

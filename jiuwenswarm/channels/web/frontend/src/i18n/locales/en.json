@@ -28,7 +28,6 @@
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
-    "heartbeat": "Heartbeat",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
     "channels": "Channels",
@@ -273,6 +272,7 @@
     "stop": "Stop",
     "modelSelector": {
       "tooltip": "Switch the model used for chat",
+      "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
@@ -427,13 +427,16 @@
     "formCancel": "Cancel",
     "editTitle": "Edit goal",
     "toolbarTag": "Goal",
+    "toolbarUnavailable": "A goal is already in progress. Finish or clear it first.",
     "closeTag": "Cancel goal",
-    "badge": "Set as goal",
+    "badge": "Goal",
     "status": {
       "active": "Active",
       "paused": "Paused",
       "completed": "Completed",
-      "blocked": "Blocked"
+      "blocked": "Blocked",
+      "disconnected": "Disconnected",
+      "unknown": "Status unknown"
     },
     "action": {
       "editTooltip": "Edit goal",
@@ -493,7 +496,8 @@
       "loadSessions": "Failed to load sessions",
       "loadFiles": "Failed to load session files",
       "deleteSession": "Failed to delete session: {{sessionId}}",
-      "restoreFailed": "Failed to restore session: {{sessionId}}"
+      "restoreFailed": "Failed to restore session: {{sessionId}}",
+      "switchSession": "Failed to switch session. Please try again."
     }
   },
   "sessionSidebar": {
@@ -502,52 +506,6 @@
     "version": "Version",
     "language": "Language",
     "moreSettings": "More Settings"
-  },
-  "heartbeat": {
-    "title": "Heartbeat Management",
-    "subtitle": "Maintain heartbeat settings and instruction files",
-    "configTitle": "Heartbeat Settings",
-    "configSubtitle": "Configure heartbeat interval, target channel, and active hours",
-    "loadingConfig": "Loading heartbeat settings...",
-    "saved": "Heartbeat settings saved",
-    "badges": {
-      "ok": "Recent heartbeat is healthy",
-      "alert": "Recent heartbeat is alerting",
-      "unknown": "No heartbeat result yet"
-    },
-    "everyLabel": "Interval (seconds)",
-    "targetLabel": "Target channel (channel_id)",
-    "enableActiveHours": "Enable active hours",
-    "startTime": "Start time",
-    "endTime": "End time",
-    "recentMessages": "Recent 20 heartbeat messages",
-    "noHistory": "No heartbeat history",
-    "statusOk": "OK",
-    "statusUnknown": "UNKNOWN",
-    "latestTime": "Latest heartbeat time",
-    "latestContent": "Latest heartbeat content",
-    "none": "None",
-    "channels": {
-      "web": "Web (web)",
-      "feishu": "Lark (feishu)",
-      "wechat": "WeChat (wechat)",
-      "xiaoyi": "Xiaoyi (xiaoyi)",
-      "dingtalk": "DingTalk (dingtalk)"
-    },
-    "errors": {
-      "loadConfig": "Failed to load heartbeat settings",
-      "saveConfig": "Failed to save heartbeat settings",
-      "invalidEvery": "Heartbeat interval must be greater than 0",
-      "invalidActiveHours": "active_hours must use HH:MM format (for example 08:00)",
-      "invalidRange": "End time must be later than start time",
-      "feishuNoTarget": "Feishu bot has not had any conversation yet. Heartbeat cannot be sent. Please chat with the bot in Feishu first."
-    }
-  },
-  "heartbeatModal": {
-    "closeAria": "Close heartbeat details dialog",
-    "title": "Heartbeat message",
-    "subtitle": "Message details",
-    "empty": "No detailed content"
   },
   "offloadFiles": {
     "title": "Offload Files",
@@ -788,6 +746,8 @@
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
       "swarmflowEnabled": "Enable SwarmFlow",
+      "kvCacheReleaseEnabled": "Legacy path (KV release)",
+      "kvCacheAffinityEnabled": "New path (Ascend affinity)",
       "skillRetrievalBuildRootCategoriesPlaceholder": "Edit the YAML/JSON root taxonomy directly",
       "agentSkillsPlaceholder": "Click to select skills",
       "agentSkillsEmpty": "No installed skills",
@@ -970,6 +930,7 @@
       "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only, Team required" },
       "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
+      "kvCacheAffinity": { "label": "Compute Affinity", "hint": "Control Ascend KV Cache affinity" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
       "swarmflow": { "label": "SwarmFlow", "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode." },
@@ -987,7 +948,8 @@
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
       "dynamicGraph": "Enable dynamic graph",
-      "kvCacheAffinity": "Compute affinity (KV cache release)"
+      "kvCacheRelease": "Legacy path (KV release)",
+      "kvCacheAffinity": "New path (Ascend affinity)"
     },
     "permissionsTools": {
       "title": "Tool Guardrail (permissions.tools)",
@@ -1159,6 +1121,7 @@
       "every": "Every",
       "everyHoursPlaceholder": "Hours",
       "everyMinutesPlaceholder": "Minutes",
+      "integerOnlyHint": "Interval must be an integer of at least 1",
       "hoursUnit": "hours",
       "minutesUnit": "minutes",
       "intervalUnit": {
@@ -2025,9 +1988,6 @@
     "configErrorHint": "Please start the backend first (e.g.",
     "configErrorDefault": ", default port 19000). If backend is remote, set",
     "configErrorEnv": "in",
-    "heartbeatTitle": "Heartbeat message",
-    "heartbeatClose": "Close",
-    "heartbeatViewFull": "Click to view full message",
     "securityAlertTitle": "Security Alert",
     "noContent": "No details",
     "restarting": "Restarting service",
@@ -2202,7 +2162,8 @@
     "nextStep": "Next",
     "confirm": "Confirm",
     "customOption": "Custom",
-    "customPlaceholder": "No suitable option? Type your answer..."
+    "customPlaceholder": "No suitable option? Type your answer...",
+    "skippedSummary": "Skipped"
   },
   "qaSummary": {
     "title": "Clarifications"

@@ -50,6 +50,9 @@ class FakeAgentManager:
     def get_client_capabilities(self, channel_id=""):
         return dict(self.client_capabilities)
 
+    def get_agent_nowait(self, channel_id=""):
+        return None
+
 
 class FakeTeamManager:
     def __init__(self):
@@ -62,7 +65,12 @@ class FakeTeamManager:
         self.pending_session_id = None
         self.pending_team_name = None
 
-    async def prepare_session_switch(self, session_id: str, reason: str = "") -> None:
+    async def prepare_session_switch(
+        self,
+        session_id: str,
+        reason: str = "",
+        previous_session_id: str | None = None,
+    ) -> None:
         self.prepare_session_switch_calls.append(
             {"session_id": session_id, "reason": reason}
         )
@@ -918,10 +926,26 @@ async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkey
 
 
 @pytest.mark.asyncio
-async def test_handle_session_switch_stops_old_team_runtime_for_team_mode(monkeypatch):
+@pytest.mark.parametrize(
+    ("mode", "resolved_mode", "is_team"),
+    [
+        ("team", "team", True),
+        ("agent.plan", "agent.plan", False),
+    ],
+)
+async def test_handle_session_switch_delegates_product_lifecycle(
+    monkeypatch,
+    mode,
+    resolved_mode,
+    is_team,
+):
     server = AgentWebSocketServerHarness()
-    fake_team_manager = FakeTeamManager()
     fake_ws = FakeWebSocket()
+    lifecycle_calls = []
+
+    async def _apply_session_switch(**kwargs):
+        lifecycle_calls.append(kwargs)
+        return is_team, resolved_mode
 
     monkeypatch.setattr(
         agent_ws_server_module,
@@ -929,71 +953,46 @@ async def test_handle_session_switch_stops_old_team_runtime_for_team_mode(monkey
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.get_team_manager",
-        lambda channel_id: fake_team_manager,
+        server,
+        "_apply_session_switch_lifecycle",
+        _apply_session_switch,
     )
 
     request = AgentRequest(
-        request_id="req-session-switch-team",
+        request_id="req-session-switch",
         channel_id="web",
         req_method=ReqMethod.SESSION_SWITCH,
-        params={"mode": "team", "session_id": "team_sess_002"},
+        params={
+            "mode": mode,
+            "session_id": "sess_002",
+            "previous_session_id": "sess_001",
+        },
     )
 
-    await server.handle_session_switch_for_test(fake_ws, request, asyncio.Lock())
+    await server.handle_session_switch_for_test(
+        fake_ws,
+        request,
+        asyncio.Lock(),
+    )
 
-    assert fake_team_manager.prepare_session_switch_calls == [
-        {"session_id": "team_sess_002", "reason": "session.switch: "}
-    ]
-    assert fake_ws.sent == [
+    assert lifecycle_calls == [
         {
-            "response_id": "req-session-switch-team",
-            "payload": {
-                "session_id": "team_sess_002",
-                "mode": "team",
-                "switched": True,
-            },
-            "ok": True,
+            "channel_id": "web",
+            "target_session_id": "sess_002",
+            "previous_session_id": "sess_001",
+            "params": request.params,
+            "reason": "session.switch: ",
         }
     ]
-
-
-@pytest.mark.asyncio
-async def test_handle_session_switch_rejects_non_team_mode(monkeypatch):
-    server = AgentWebSocketServerHarness()
-    fake_team_manager = FakeTeamManager()
-    fake_ws = FakeWebSocket()
-
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        fake_encode_agent_response_for_wire,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.get_team_manager",
-        lambda channel_id: fake_team_manager,
-    )
-
-    request = AgentRequest(
-        request_id="req-session-switch-agent",
-        channel_id="web",
-        req_method=ReqMethod.SESSION_SWITCH,
-        params={"mode": "agent.plan", "session_id": "sess_agent_001"},
-    )
-
-    await server.handle_session_switch_for_test(fake_ws, request, asyncio.Lock())
-
-    assert fake_team_manager.prepare_session_switch_calls == []
-    assert fake_ws.sent == [
-        {
-            "response_id": "req-session-switch-agent",
-            "payload": {
-                "error": "session.switch is only supported for team mode",
-                "code": "UNSUPPORTED_MODE",
-            },
-            "ok": False,
-        }
-    ]
+    assert fake_ws.sent[-1] == {
+        "response_id": "req-session-switch",
+        "payload": {
+            "session_id": "sess_002",
+            "mode": resolved_mode,
+            "switched": True,
+        },
+        "ok": True,
+    }
 
 
 @pytest.mark.asyncio

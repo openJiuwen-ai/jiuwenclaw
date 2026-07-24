@@ -17,10 +17,17 @@ interface GoalRuntime {
    * tag 就该消失——目标存在时的展示/控制已经由 GoalBar 常驻覆盖，不需要工具栏再重复一份。
    */
   armed: boolean;
+  /**
+   * 'unknown'：连续多次 get 都失败（见 useWebSocket.ts performGoalGet）——不代表目标真的没了，
+   * 只是暂时确认不了状态。任何一次成功的 get/goal.snapshot/goal.updated 都会把它收敛回 'ok'
+   * （在 applyIncomingGoal 里统一清）。GoalBar 展示层用它叠加一层"未知"态，跟 goal.status 本身
+   * 是否 completed/active 无关。
+   */
+  queryStatus: 'ok' | 'unknown';
 }
 
 function createEmptyRuntime(): GoalRuntime {
-  return { goal: null, pendingAction: null, armed: false };
+  return { goal: null, pendingAction: null, armed: false, queryStatus: 'ok' };
 }
 
 /**
@@ -130,6 +137,49 @@ function saveCompletedGoalMessagesToStorage(map: Record<string, CompletedGoalMes
   }
 }
 
+/**
+ * session_id -> 该会话历史上所有设置过目标的 objective 原文列表，落 localStorage。
+ *
+ * "设为目标"徽章之前靠实时比对 `message.content === 当前 goal.objective`，目标被清除/替换后
+ * 旧的设置消息就再也匹配不上了——这其实是设计错误："这条消息历史上设置过目标"是不可变事实，
+ * 不该随当前 Goal 状态漂移。`command.goal set` 请求发出的那一刻就把 objective 原文记进这里
+ * （不去重、不因为目标后来被清除/编辑/替换而移除），history.get 重新加载历史后按 content 命中
+ * 这个列表给对应消息回填 `isGoalObjectiveMessage`（见 useWebSocket.ts
+ * stampGoalObjectiveMessages）——不依赖消息 id：本地回显消息和 history.get 返回的同一条消息
+ * id 本来就对不上，而且历史消息也没有任何后端专属字段能天然扛过刷新，见 types/message.ts 里
+ * 这个字段的注释。
+ */
+const OBJECTIVE_MESSAGE_TEXTS_STORAGE_KEY = 'jiuwenswarm.goal.objectiveMessageTexts.v1';
+const OBJECTIVE_MESSAGE_TEXTS_MAX_SESSIONS = 50;
+const OBJECTIVE_MESSAGE_TEXTS_MAX_PER_SESSION = 20;
+
+function loadObjectiveMessageTextsFromStorage(): Record<string, string[]> {
+  try {
+    const raw = window.localStorage.getItem(OBJECTIVE_MESSAGE_TEXTS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed as Record<string, string[]>;
+  } catch {
+    return {};
+  }
+}
+
+function saveObjectiveMessageTextsToStorage(map: Record<string, string[]>): void {
+  try {
+    const entries = Object.entries(map);
+    // Record 的键插入顺序近似写入的时间顺序（sessionId 不是类数组索引字符串，JS 引擎会保留
+    // 插入顺序），超出上限时丢最早写入的 session，避免 localStorage 无限增长。
+    const trimmed =
+      entries.length > OBJECTIVE_MESSAGE_TEXTS_MAX_SESSIONS
+        ? entries.slice(entries.length - OBJECTIVE_MESSAGE_TEXTS_MAX_SESSIONS)
+        : entries;
+    window.localStorage.setItem(OBJECTIVE_MESSAGE_TEXTS_STORAGE_KEY, JSON.stringify(Object.fromEntries(trimmed)));
+  } catch {
+    // localStorage 不可用时静默降级：这次记录的 objective 刷新后徽章可能找不回来，但不影响主流程。
+  }
+}
+
 interface GoalState {
   runtimes: Record<string, GoalRuntime>;
   localCreatedAt: Record<string, string>;
@@ -137,6 +187,7 @@ interface GoalState {
   /** completed 目标的 GoalBar 是否已经隐藏（跟 goal 数据是否还在 store 里是两回事，见上方注释） */
   bannerHiddenGoalIds: Record<string, true>;
   completedGoalMessages: Record<string, CompletedGoalMessageRecord>;
+  objectiveMessageTexts: Record<string, string[]>;
 
   ensureRuntime: (sessionId: string) => GoalRuntime;
   getRuntime: (sessionId: string | null) => GoalRuntime | undefined;
@@ -145,6 +196,7 @@ interface GoalState {
   setGoal: (sessionId: string, goal: GoalRecord | null) => void;
   setPendingAction: (sessionId: string, action: GoalAction | null) => void;
   setArmed: (sessionId: string, armed: boolean) => void;
+  setQueryStatus: (sessionId: string, status: 'ok' | 'unknown') => void;
   /** 只在该 goal_id 还没有记录时才写入，避免编辑目标（同 goal_id 的 set 覆盖）时把计时重置 */
   setLocalCreatedAt: (goalId: string, iso: string) => void;
   /** 目标被清除时调用，避免 localStorage 里堆积再也用不到的 goal_id */
@@ -161,6 +213,10 @@ interface GoalState {
   recordCompletedGoalMessage: (record: CompletedGoalMessageRecord) => void;
   getCompletedGoalMessagesForSession: (sessionId: string) => CompletedGoalMessageRecord[];
   clearCompletedGoalMessage: (goalId: string) => void;
+
+  /** command.goal set 发出的那一刻调用，把 objective 原文记进这个 session 的历史列表 */
+  recordGoalObjectiveText: (sessionId: string, objective: string) => void;
+  getGoalObjectiveTextsForSession: (sessionId: string) => string[];
 }
 
 export const useGoalStore = create<GoalState>((set, get) => ({
@@ -169,6 +225,7 @@ export const useGoalStore = create<GoalState>((set, get) => ({
   goalCompletionPhase: {},
   bannerHiddenGoalIds: {},
   completedGoalMessages: loadCompletedGoalMessagesFromStorage(),
+  objectiveMessageTexts: loadObjectiveMessageTextsFromStorage(),
 
   ensureRuntime: (sessionId) => {
     const existing = get().runtimes[sessionId];
@@ -224,6 +281,19 @@ export const useGoalStore = create<GoalState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, armed },
+        },
+      };
+    });
+  },
+
+  setQueryStatus: (sessionId, status) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      if (runtime.queryStatus === status) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, queryStatus: status },
         },
       };
     });
@@ -315,4 +385,17 @@ export const useGoalStore = create<GoalState>((set, get) => ({
       return { completedGoalMessages: next };
     });
   },
+
+  recordGoalObjectiveText: (sessionId, objective) => {
+    set((state) => {
+      const existing = state.objectiveMessageTexts[sessionId] ?? [];
+      if (existing.includes(objective)) return state;
+      const updated = [...existing, objective].slice(-OBJECTIVE_MESSAGE_TEXTS_MAX_PER_SESSION);
+      const next = { ...state.objectiveMessageTexts, [sessionId]: updated };
+      saveObjectiveMessageTextsToStorage(next);
+      return { objectiveMessageTexts: next };
+    });
+  },
+
+  getGoalObjectiveTextsForSession: (sessionId) => get().objectiveMessageTexts[sessionId] ?? [],
 }));

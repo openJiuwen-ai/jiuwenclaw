@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,55 @@ from jiuwenswarm.server.runtime.session.project_git import GitError, GitOperatio
 from jiuwenswarm.server.utils.diff_service import get_diff_service
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_team_path_segment(value: str, fallback: str = "_") -> str:
+    """Sanitize a value into one path segment for team workspace paths."""
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    normalized = normalized.strip("._-")
+    return normalized[:96] or fallback
+
+
+def _session_team_member_names(session_id: str | None) -> list[str]:
+    """Return member names observed in persisted team events for a session."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    try:
+        from jiuwenswarm.server.runtime.session.session_history import (
+            load_history_records,
+        )
+
+        history = load_history_records(sid)
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(history, list):
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add_name(raw: Any) -> None:
+        if not isinstance(raw, str) or not raw.strip():
+            return
+        name = raw.strip()
+        if name in seen:
+            return
+        seen.add(name)
+        names.append(name)
+
+    for record in history:
+        if not isinstance(record, dict):
+            continue
+        extra = record.get("extra")
+        event = extra.get("event") if isinstance(extra, dict) else None
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") != "team.member.spawned":
+            continue
+        add_name(event.get("name"))
+        add_name(event.get("member_id"))
+    return names
 
 
 @dataclass(slots=True)
@@ -245,6 +295,7 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
     sid = str(session_id or "").strip()
     if not sid:
         return []
+    safe_sid = _safe_team_path_segment(sid)
     try:
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
@@ -285,6 +336,7 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
 
     team_name = str(metadata.get("team_name") or "").strip()
     if team_name:
+        spawned_member_names = _session_team_member_names(sid)
         for raw in raw_root_values:
             if not isinstance(raw, str) or team_name not in raw:
                 continue
@@ -302,14 +354,27 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
                     home = Path(*parts[: idx + 1])
                     add_root(str(home / "team-workspace"))
                     add_root(str(home / "workspaces"))
+                    add_root(str(home / "sessions" / safe_sid / "worktrees"))
+                    for member_name in spawned_member_names:
+                        safe_member = _safe_team_path_segment(member_name)
+                        add_root(str(home / "workspaces" / f"{safe_member}_workspace"))
             except Exception:  # noqa: BLE001
                 continue
         try:
-            from openjiuwen.agent_teams.paths import team_home
+            from openjiuwen.agent_teams.paths import (
+                independent_member_workspace,
+                team_home,
+                team_session_worktrees_dir,
+            )
 
             home = team_home(team_name)
             add_root(str(home / "team-workspace"))
             add_root(str(home / "workspaces"))
+            add_root(str(team_session_worktrees_dir(team_name, sid)))
+            for member_name in spawned_member_names:
+                safe_member = _safe_team_path_segment(member_name)
+                add_root(str(home / "workspaces" / f"{safe_member}_workspace"))
+                add_root(str(independent_member_workspace(member_name)))
         except Exception:  # noqa: BLE001
             pass
     return roots

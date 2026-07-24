@@ -7,13 +7,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
-from openjiuwen.agent_teams.paths import get_agent_teams_home, team_home
+from openjiuwen.agent_teams.paths import (
+    get_agent_teams_home,
+    independent_member_workspace,
+    team_home,
+)
 from openjiuwen.agent_teams.runtime import RunActionKind
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.monitor import TeamStreamLogger
@@ -101,9 +106,15 @@ from jiuwenswarm.server.runtime.debug_trace.directives import (
     DEBUG_PREFIX as _DEBUG_PREFIX,
     strip_slash_directive as _strip_directive,
 )
-_FOLLOWUP_INTERACT_RETRY_TIMEOUT_SEC = 1.0
-_FOLLOWUP_INTERACT_RACE_WAIT_TIMEOUT_SEC = 3.0
+_FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC = 10.0
 _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC = 0.05
+
+
+def _safe_team_path_segment(value: str, fallback: str = "_") -> str:
+    """Sanitize a value into one path segment for team workspace paths."""
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    normalized = normalized.strip("._-")
+    return normalized[:96] or fallback
 
 
 def _team_hide_teammate_enabled() -> bool:
@@ -245,46 +256,46 @@ def _is_followup_delivery_boundary_reason(reason: str | None) -> bool:
     return normalized.startswith("deliver_to_leader_failed:")
 
 
-async def _retry_followup_interact_until_ready(
+@dataclass(slots=True)
+class _FollowupInteractBoundaryResult:
+    """Result of delivering a follow-up across a runtime boundary."""
+
+    success: bool
+    reason: str | None
+    first_request_ready: bool
+
+
+async def _deliver_followup_interact_across_boundary(
     team_manager: Any,
     session_id: str,
     query: Any,
     *,
-    timeout_sec: float = _FOLLOWUP_INTERACT_RETRY_TIMEOUT_SEC,
+    initial_reason: str | None = None,
+    timeout_sec: float = _FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC,
     poll_interval_sec: float = _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC,
-) -> tuple[bool, str | None]:
-    """Retry follow-up interact while the runtime boundary may still settle."""
+) -> _FollowupInteractBoundaryResult:
+    """Deliver a follow-up until interact succeeds or the session becomes first-run ready."""
     deadline = time.monotonic() + max(0.0, timeout_sec)
     sleep_sec = max(0.01, poll_interval_sec)
-    last_reason: str | None = None
+    last_reason = initial_reason
     while time.monotonic() < deadline:
-        await asyncio.sleep(sleep_sec)
-        success, reason = await team_manager.interact(session_id, query)
-        if success:
-            return True, None
-        last_reason = reason
-        if not _is_followup_delivery_boundary_reason(reason):
-            return False, reason
-    return False, last_reason
-
-
-async def _wait_for_team_first_request_condition(
-    team_manager: Any,
-    session_id: str,
-    *,
-    timeout_sec: float = _FOLLOWUP_INTERACT_RACE_WAIT_TIMEOUT_SEC,
-    poll_interval_sec: float = _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC,
-) -> bool:
-    """Wait until the canonical first-request condition becomes true."""
-    if not await _team_session_has_runtime(team_manager, session_id):
-        return True
-    deadline = time.monotonic() + max(0.0, timeout_sec)
-    sleep_sec = max(0.01, poll_interval_sec)
-    while time.monotonic() < deadline:
+        if not await _team_session_has_runtime(team_manager, session_id):
+            return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
         await asyncio.sleep(sleep_sec)
         if not await _team_session_has_runtime(team_manager, session_id):
-            return True
-    return not await _team_session_has_runtime(team_manager, session_id)
+            return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
+        success, reason = await team_manager.interact(session_id, query)
+        if success:
+            return _FollowupInteractBoundaryResult(success=True, reason=None, first_request_ready=False)
+        last_reason = reason
+        if not _is_followup_delivery_boundary_reason(reason):
+            return _FollowupInteractBoundaryResult(success=False, reason=reason, first_request_ready=False)
+    first_request_ready = not await _team_session_has_runtime(team_manager, session_id)
+    return _FollowupInteractBoundaryResult(
+        success=False,
+        reason=last_reason,
+        first_request_ready=first_request_ready,
+    )
 
 
 def _build_team_event_chunk_meta(event: Any) -> tuple[dict | None, dict]:
@@ -1235,7 +1246,7 @@ def _team_spec_skills_dir(team_spec: Any) -> str:
     return str(team_home(team_name) / "team-workspace" / "skills")
 
 
-def _team_spec_monitor_roots(team_spec: Any) -> list[str]:
+def _team_spec_monitor_roots(team_spec: Any, session_id: str | None = None) -> list[str]:
     """Return team/member workspace roots where file-op history may be written."""
     roots: list[str] = []
 
@@ -1256,6 +1267,13 @@ def _team_spec_monitor_roots(team_spec: Any) -> list[str]:
     home = team_home(team_name)
     add_root(root_path or str(home / "team-workspace"))
     add_root(home / "workspaces")
+    if session_id and team_name:
+        # 与读取侧 get_session_extra_history_roots / team_session_worktrees_dir 对齐:
+        # 对 session_id 做 sanitize,避免含特殊字符时持久化"幽灵路径"
+        # (raw sid 未经 sanitize,与实际 worktree 目录不一致)。
+        # 此处用已 import 的 team_home(可被测试 patch)而非 team_session_worktrees_dir
+        # (后者内部调用 openjiuwen 自身的 team_home,无法被 monkeypatch)。
+        add_root(home / "sessions" / _safe_team_path_segment(session_id) / "worktrees")
 
     agents = getattr(team_spec, "agents", None)
     if isinstance(agents, dict):
@@ -1263,12 +1281,24 @@ def _team_spec_monitor_roots(team_spec: Any) -> list[str]:
             member_workspace = getattr(member_spec, "workspace", None)
             add_root(getattr(member_workspace, "root_path", None))
             add_root(home / "workspaces" / f"{member_name}_workspace")
+            # 兜底: member 可能使用 independent_member_workspace(位于 team_home 之外,
+            # get_openjiuwen_home()/{member}_workspace),仅靠上面的 home/workspaces
+            # 无法覆盖,需显式补上,否则该 member 的 file_ops 不会被收集。
+            try:
+                add_root(str(independent_member_workspace(str(member_name))))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[TeamHelpers] failed to resolve independent member workspace: "
+                    "member=%s error=%s",
+                    member_name,
+                    exc,
+                )
 
     return roots
 
 
 def _persist_team_file_monitor_roots(session_id: str, team_spec: Any) -> None:
-    roots = _team_spec_monitor_roots(team_spec)
+    roots = _team_spec_monitor_roots(team_spec, session_id=session_id)
     if not roots:
         return
     try:
@@ -1279,16 +1309,38 @@ def _persist_team_file_monitor_roots(session_id: str, team_spec: Any) -> None:
 
         metadata = _read_metadata(session_id, cache_bust=True)
         if not metadata:
-            return
+            for _ in range(3):
+                time.sleep(0.05)
+                metadata = _read_metadata(session_id, cache_bust=True)
+                if metadata:
+                    break
+            if not metadata:
+                # metadata.json 尚未初始化: 此时无法持久化 team_file_monitor_roots。
+                # 读取侧 get_session_extra_history_roots 会基于 team_name 兜底推断标准
+                # 布局路径,功能不丢失,但记录 warning 便于排查 metadata 初始化时序问题。
+                logger.warning(
+                    "[TeamHelpers] cannot persist team_file_monitor_roots: "
+                    "metadata not initialized, session=%s",
+                    session_id,
+                )
+                return
         existing = metadata.get("team_file_monitor_roots")
         # 直接替换而非合并: team_spec 是当前 team 组成的权威来源,
         # 合并旧 root 会导致已移除成员的 workspace 路径累积无法清理。
         if roots == existing:
             return
         metadata["team_file_monitor_roots"] = roots
-        _enqueue_write(session_id, metadata, preserve_pin_fields=True)
+        _enqueue_write(
+            session_id,
+            metadata,
+            preserve_pin_fields=True,
+            sync_write=True,
+        )
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
+        # 写盘失败会影响 last_turn 文件追踪(读取侧只能靠 team_name 兜底推断,
+        # 无法覆盖 independent_member_workspace 等非标准布局),升级为 warning
+        # 以便在日志中及时发现。
+        logger.warning(
             "[TeamHelpers] failed to persist team file monitor roots: session=%s error=%s",
             session_id,
             exc,
@@ -1563,44 +1615,44 @@ async def process_team_message_stream(
                         reason,
                         _safe_query_preview(query),
                     )
+                    first_request_ready = False
                     if _is_followup_delivery_boundary_reason(reason):
-                        success, reason = await _retry_followup_interact_until_ready(
+                        boundary_result = await _deliver_followup_interact_across_boundary(
                             team_manager,
                             session_id,
                             query,
+                            initial_reason=reason,
                         )
-                    if not success and _is_followup_delivery_boundary_reason(reason):
-                        first_request_ready = await _wait_for_team_first_request_condition(
-                            team_manager,
-                            session_id,
+                        success = boundary_result.success
+                        reason = boundary_result.reason
+                        first_request_ready = boundary_result.first_request_ready
+                    if not success and first_request_ready:
+                        preparation = await _prepare_first_team_request(
+                            team_manager=team_manager,
+                            session_id=session_id,
+                            channel_id=channel_id,
+                            request_id=rid,
+                            query=query,
                         )
-                        if first_request_ready:
-                            preparation = await _prepare_first_team_request(
-                                team_manager=team_manager,
-                                session_id=session_id,
-                                channel_id=channel_id,
-                                request_id=rid,
-                                query=query,
+                        if preparation.error_chunks is not None:
+                            for chunk in preparation.error_chunks:
+                                yield chunk
+                            return
+                        is_first_request = not preparation.recovered_runtime
+                        if is_first_request:
+                            first_request_source = "follow-up fallback"
+                            query = preparation.query
+                            hide_dm = preparation.hide_dm
+                            debug = preparation.debug
+                            logger.info(
+                                "[TeamHelpers] follow-up interact reclassified by first-request condition: "
+                                "channel_id=%s session_id=%s reason=%s",
+                                _resolve_channel_id(channel_id),
+                                session_id,
+                                reason,
                             )
-                            if preparation.error_chunks is not None:
-                                for chunk in preparation.error_chunks:
-                                    yield chunk
-                                return
-                            is_first_request = not preparation.recovered_runtime
-                            if is_first_request:
-                                first_request_source = "follow-up fallback"
-                                query = preparation.query
-                                hide_dm = preparation.hide_dm
-                                debug = preparation.debug
-                                logger.info(
-                                    "[TeamHelpers] follow-up interact reclassified by first-request condition: "
-                                    "channel_id=%s session_id=%s reason=%s",
-                                    _resolve_channel_id(channel_id),
-                                    session_id,
-                                    reason,
-                                )
-                        else:
-                            reason = reason or "gate_closed"
+                    elif not success and _is_followup_delivery_boundary_reason(reason):
+                        reason = reason or "gate_closed"
                     if not success and not is_first_request:
                         final_reason = reason or ""
                         # gate_closed 是 shutdown race（leader stream 正在收尾），静默结束流

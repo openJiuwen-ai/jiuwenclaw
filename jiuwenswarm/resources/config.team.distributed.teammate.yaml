@@ -207,8 +207,10 @@ react:
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
-  context_engine_config:
+  kv_cache_affinity_config:
     enable_kv_cache_release: false
+    enable_kv_cache_affinity: false
+  context_engine_config:
     enable_reload: true
     enabled: true
     message_summary_offloader_config:
