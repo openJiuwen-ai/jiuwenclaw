@@ -7149,6 +7149,12 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
+        from jiuwenswarm.server.runtime.agent_adapter.stale_todo_cleanup_helpers import (
+            prepare_stale_todo_cleanup_for_request,
+        )
+
+        await prepare_stale_todo_cleanup_for_request(self, request)
+
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):
             return AgentResponse(
@@ -7438,6 +7444,12 @@ class JiuWenSwarmDeepAdapter:
 
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
+
+        from jiuwenswarm.server.runtime.agent_adapter.stale_todo_cleanup_helpers import (
+            prepare_stale_todo_cleanup_for_request,
+        )
+
+        await prepare_stale_todo_cleanup_for_request(self, request)
 
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):
