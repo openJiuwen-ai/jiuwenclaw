@@ -494,7 +494,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     )
                 )
             # 只有当 core_code_path 和 core_code_pod_path 都配置时，才添加挂载
-            if claw_code_path and core_code_pod_path:
+            if core_code_path and core_code_pod_path:
                 agent_host_mounts.append(
                     HostPathMount(
                         host_path=core_code_path+"/openjiuwen",
