@@ -1310,6 +1310,53 @@ def test_diff_status_falls_back_to_last_turn_when_git_not_found():
     assert "file_b.py" in result["last_turn"]["files"]
 
 
+def test_diff_status_uses_turn_summaries_for_last_turn_snapshot_fallback():
+    snapshot_turn = {
+        "turnIndex": 3,
+        "timestamp": _ts(1784543000.0),
+        "userPromptPreview": "snapshot only",
+        "stats": {"filesChanged": 1, "linesAdded": 7, "linesRemoved": 2},
+        "files": {
+            "/proj/from_snapshot.py": {
+                "linesAdded": 7,
+                "linesRemoved": 2,
+                "isNewFile": True,
+            },
+        },
+        "change_set_id": "cs-snapshot",
+        "request_id": "req-snapshot",
+        "assistant_message_id": "req-snapshot:assistant",
+        "user_message_id": "req-snapshot:user",
+        "status": "completed",
+    }
+    with (
+        patch.object(DiffService, "get_git_diff", return_value={}),
+        patch.object(DiffService, "get_turn_diffs", return_value=[]) as full_diffs,
+        patch.object(
+            DiffService,
+            "get_turn_diff_summaries",
+            return_value=[snapshot_turn],
+        ) as summaries,
+    ):
+        result = DiffStatusService.get_project_diff_status(
+            project=_PROJECT,
+            session_id="sess-1",
+            include_files=False,
+            include_hunks=False,
+        ).to_dict(include_hunks=False)
+
+    full_diffs.assert_not_called()
+    summaries.assert_called_once()
+    assert result["last_turn"] is not None
+    assert result["last_turn"]["change_set_id"] == "cs-snapshot"
+    assert result["last_turn"]["stats"] == {
+        "files_changed": 1,
+        "lines_added": 7,
+        "lines_removed": 2,
+    }
+    assert result["last_turn"]["files"] == {}
+
+
 def test_turn_diff_list_falls_back_when_not_git_repository():
     ph, pa, pl, ps = _patch_diff_service()
     git_error = GitError("NOT_GIT_REPOSITORY", "not a git repository")

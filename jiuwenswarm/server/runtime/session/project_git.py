@@ -19,6 +19,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.common.git_safe_directory import (
+    is_dubious_ownership_error,
+    safe_directory_hint,
+)
 from jiuwenswarm.server.runtime.session.project_store import Project, save_project
 
 logger = logging.getLogger(__name__)
@@ -308,6 +312,27 @@ def _run_git(
     )
 
 
+def _dubious_ownership_error_if_needed(
+    project: Project,
+    project_dir: str,
+    result: subprocess.CompletedProcess[str],
+) -> GitError | None:
+    """Return a structured error when Git rejects repo ownership."""
+    if not is_dubious_ownership_error(result):
+        return None
+    return _make_repo_error(
+        "GIT_DUBIOUS_OWNERSHIP",
+        "git repository ownership check failed",
+        project,
+        command="git rev-parse --show-toplevel",
+        exit_code=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        hint=safe_directory_hint(project_dir),
+        retryable=False,
+    )
+
+
 def _truncate(s: str) -> str:
     return (s or "")[:_GIT_OUTPUT_TRUNCATE]
 
@@ -468,6 +493,9 @@ def _git_to_repo_status(
             )
         )
     if cp.returncode != 0:
+        dubious_error = _dubious_ownership_error_if_needed(project, project_dir, cp)
+        if dubious_error is not None:
+            return _err_status(dubious_error)
         return _err_status(
             _make_repo_error(
                 "NOT_GIT_REPOSITORY",
@@ -603,6 +631,8 @@ def _persist_git_snapshot(project: Project, status: GitRepoStatus) -> None:
             "branch": status.branch or "",
             "status": _map_status_string(status),
             "error": status.error.message,
+            "error_code": status.error.code,
+            "hint": status.error.hint,
             "is_dirty": status.is_dirty,
         }
     else:
@@ -616,6 +646,8 @@ def _persist_git_snapshot(project: Project, status: GitRepoStatus) -> None:
             "branch": status.branch or "",
             "status": "ready" if not status.transient else "transient",
             "error": "",
+            "error_code": "",
+            "hint": "",
             "is_dirty": status.is_dirty,
         }
     project.git = git_snapshot
@@ -642,6 +674,8 @@ def _persist_probe_result(project: Project, result: GitProbeResult) -> None:
         "branch": result.branch or "",
         "status": result.status,
         "error": result.error.message if result.error else "",
+        "error_code": result.error.code if result.error else "",
+        "hint": result.error.hint if result.error else "",
         # 保留 init() 已持久化的 is_dirty;非 init 路径(未探测 dirty)默认 False
         "is_dirty": project.git.get("is_dirty", False),
     }
@@ -664,6 +698,8 @@ def _map_status_string(status: GitRepoStatus) -> str:
         return "not_git"
     if code == "GIT_NOT_FOUND":
         return "git_missing"
+    if code == "GIT_DUBIOUS_OWNERSHIP":
+        return "dubious_ownership"
     if code == "GIT_COMMAND_TIMEOUT":
         return "error"
     return "error"
@@ -819,6 +855,9 @@ class ProjectGitService:
                 repo_root=cp.stdout.strip(),
                 branch=branch,
             )
+        dubious_error = _dubious_ownership_error_if_needed(project, project_dir, cp)
+        if dubious_error is not None:
+            return GitProbeResult(status="error", error=dubious_error)
         try:
             entries = list(Path(project_dir).iterdir())
         except OSError:
@@ -897,6 +936,9 @@ class ProjectGitService:
             )
             return GitRepoStatus(is_git=False, error=err)
         if cp.returncode != 0:
+            dubious_error = _dubious_ownership_error_if_needed(project, project_dir, cp)
+            if dubious_error is not None:
+                return GitRepoStatus(is_git=False, error=dubious_error)
             if "unknown switch" in cp.stderr or "invalid option" in cp.stderr:
                 # git < 2.28 不支持 ``init -b``,回退到 ``init`` + ``symbolic-ref``。
                 # 用 ``symbolic-ref HEAD refs/heads/<branch>`` 替代 ``checkout -b``:
@@ -935,6 +977,9 @@ class ProjectGitService:
                     )
                     return GitRepoStatus(is_git=False, error=err)
         if cp.returncode != 0:
+            dubious_error = _dubious_ownership_error_if_needed(project, project_dir, cp)
+            if dubious_error is not None:
+                return GitRepoStatus(is_git=False, error=dubious_error)
             err = _make_repo_error(
                 "GIT_COMMAND_FAILED",
                 "git command failed",

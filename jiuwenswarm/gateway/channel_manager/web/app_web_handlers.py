@@ -1358,7 +1358,7 @@ def _project_info_payload(
     """Serialize a project item consistently for project.list/info/create."""
     st = stats or {"session_count": 0, "last_message_at": None, "last_user_message_at": None}
     git = getattr(proj, "git", {}) if proj is not None else {}
-    git_payload = dict(git) if isinstance(git, dict) and git else {
+    git_defaults = {
         "enabled": False,
         "repo_root": "",
         "initialized_by_jiuwenswarm": False,
@@ -1366,8 +1366,11 @@ def _project_info_payload(
         "status": "disabled",
         "branch": "",
         "error": "",
+        "error_code": "",
+        "hint": "",
         "is_dirty": False,
     }
+    git_payload = {**git_defaults, **dict(git)} if isinstance(git, dict) and git else git_defaults
     if default_id is not None:
         work_mode = DEFAULT_TUI_WORK_MODE if default_id == DEFAULT_PROJECT_ID_CODE else DEFAULT_WEB_WORK_MODE
         return {

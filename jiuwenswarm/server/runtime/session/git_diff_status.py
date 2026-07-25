@@ -1,7 +1,7 @@
 """DiffStatusService: 面向 Web 的 diff 状态聚合服务(设计文档 §2.4 / §3.5 / §4.1.16)。
 
 聚合"当前工作区 diff"与"上一轮对话 diff"两路来源,复用
-``DiffService.get_git_diff()`` / ``get_turn_diffs()`` 并转换为 snake_case schema,
+``DiffService.get_git_diff()`` / ``get_turn_diff_summaries()`` 并转换为 snake_case schema,
 合并 ``ProjectGitService`` 的 repo 状态。
 
 第一版能力边界(§2.7):staged/unstaged 分类计数不在范围内。
@@ -496,7 +496,7 @@ def _convert_turn_diff(
     include_files: bool,
     include_hunks: bool,
 ) -> DiffTurnSummary | None:
-    """转换单个 ``get_turn_diffs()`` 返回的 turn → DiffTurnSummary。"""
+    """转换单个 turn diff dict → DiffTurnSummary。"""
     if not turn or not isinstance(turn, dict):
         return None
     stats = _convert_stats(turn.get("stats"))
@@ -535,7 +535,7 @@ def _historical_repo_context(
 def _convert_turn_summary(
     turn: dict[str, Any], *, repo_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """转换单个 ``get_turn_diffs()`` 返回的 turn 为摘要(不含 hunks)。
+    """转换单个 turn diff dict 为摘要(不含 hunks)。
 
     用于 ``project.git.turn_diff_list`` 摘要接口,响应包含文件列表但不含
     hunk,用于刷新后恢复历史编辑卡片。
@@ -712,7 +712,7 @@ class DiffStatusService:
             diff_service = get_diff_service()
             extra_history_roots = get_session_extra_history_roots(session_id)
             try:
-                turns = diff_service.get_turn_diffs(
+                turns = diff_service.get_turn_diff_summaries(
                     session_id,
                     project_dir,
                     repo_context={
@@ -727,7 +727,7 @@ class DiffStatusService:
                 # 订阅状态回滚。否则 source=last_turn 时会静默
                 # 返回空数据,客户端误以为订阅成功但拿不到内容。
                 logger.warning(
-                    "[DiffStatus] get_turn_diffs failed (session=%s): %s",
+                    "[DiffStatus] get_turn_diff_summaries failed (session=%s): %s",
                     session_id, exc,
                 )
                 raise
