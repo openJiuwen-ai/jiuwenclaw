@@ -103,6 +103,26 @@ class SkillToolkit:
 
         return None
 
+    def _check_already_installed(self, identifier: str, source: str) -> dict[str, Any] | None:
+        existing_item = self._find_installed_by_target(identifier, source)
+        if existing_item is None:
+            return None
+        detail = (
+            f"Skill `{existing_item['name']}` is already installed. "
+            "Skipping duplicate installation."
+        )
+        return {
+            "success": True,
+            "source": source,
+            "installed": True,
+            "already_installed": True,
+            "name": existing_item["name"],
+            "description": existing_item["description"],
+            "identifier": existing_item["identifier"],
+            "skill_file": existing_item["skill_file"],
+            "detail": detail,
+        }
+
     def _is_builtin_skill(self, skill_name: str) -> bool:
         """复用原有卸载语义：只有真正运行在 builtin 目录中的技能才视为内置。"""
         return self._manager.is_builtin_skill(skill_name)
@@ -364,42 +384,12 @@ class SkillToolkit:
             wait_timeout = self._safe_int(timeout_sec, 60)
 
             if resolved_source == "skillnet":
-                existing_item = self._find_installed_by_target(target, resolved_source)
-                if existing_item is not None:
-                    detail = (
-                        f"Skill `{existing_item['name']}` is already installed. "
-                        "Skipping duplicate installation."
-                    )
-                    return {
-                        "success": True,
-                        "source": resolved_source,
-                        "installed": True,
-                        "already_installed": True,
-                        "name": existing_item["name"],
-                        "description": existing_item["description"],
-                        "identifier": existing_item["identifier"],
-                        "skill_file": existing_item["skill_file"],
-                        "detail": detail,
-                    }
+                if (r := self._check_already_installed(target, resolved_source)) is not None:
+                    return r
                 payload = await self._install_skillnet_sync_wait(target, wait_timeout)
             elif resolved_source == "teamskillshub":
-                existing_item = self._find_installed_by_target(target, resolved_source)
-                if existing_item is not None:
-                    detail = (
-                        f"Skill `{existing_item['name']}` is already installed. "
-                        "Skipping duplicate installation."
-                    )
-                    return {
-                        "success": True,
-                        "source": resolved_source,
-                        "installed": True,
-                        "already_installed": True,
-                        "name": existing_item["name"],
-                        "description": existing_item["description"],
-                        "identifier": existing_item["identifier"],
-                        "skill_file": existing_item["skill_file"],
-                        "detail": detail,
-                    }
+                if (r := self._check_already_installed(target, resolved_source)) is not None:
+                    return r
                 payload = await self._manager.handle_skills_team_skills_hub_install(
                     {"asset_id": target, "force": False}
                 )
@@ -408,23 +398,8 @@ class SkillToolkit:
                 clawhub_owner = ""
                 if "/" in target:
                     clawhub_owner, _, clawhub_slug = target.partition("/")
-                existing_item = self._find_installed_by_target(clawhub_slug, resolved_source)
-                if existing_item is not None:
-                    detail = (
-                        f"Skill `{existing_item['name']}` is already installed. "
-                        "Skipping duplicate installation."
-                    )
-                    return {
-                        "success": True,
-                        "source": resolved_source,
-                        "installed": True,
-                        "already_installed": True,
-                        "name": existing_item["name"],
-                        "description": existing_item["description"],
-                        "identifier": existing_item["identifier"],
-                        "skill_file": existing_item["skill_file"],
-                        "detail": detail,
-                    }
+                if (r := self._check_already_installed(clawhub_slug, resolved_source)) is not None:
+                    return r
                 payload = await self._manager.handle_skills_clawhub_download(
                     {"slug": clawhub_slug, "owner_handle": clawhub_owner, "force": False}
                 )
