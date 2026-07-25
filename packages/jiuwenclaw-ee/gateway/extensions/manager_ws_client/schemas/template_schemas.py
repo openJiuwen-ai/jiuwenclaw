@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
@@ -13,7 +14,6 @@ from pydantic import (
     Field,
     model_validator,
 )
-import re
 
 from .safe_text import SafeTextMixin
 
