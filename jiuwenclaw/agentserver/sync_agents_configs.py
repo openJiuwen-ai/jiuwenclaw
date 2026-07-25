@@ -176,8 +176,6 @@ def synthesize_config(
             evo_enabled = env_evo
 
     memory["engine"] = engine
-    evolution["enabled"] = evo_enabled
-    evolution.setdefault("auto_scan", False)
 
     return result
 
