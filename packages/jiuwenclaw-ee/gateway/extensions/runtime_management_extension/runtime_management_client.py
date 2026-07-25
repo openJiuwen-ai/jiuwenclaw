@@ -322,7 +322,7 @@ class _SessionRequest(ISessionRequest):
         self._envelope.agent_id = ag or None
 
     @property
-    def session_id(self) -> str:
+    def service_id(self) -> str:
         return self._service_id
 
     @property
@@ -554,11 +554,12 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 )
 
         def _agent_env_vars() -> dict[str, str]:
+            home = agent_server_home or "/root"
             base: dict[str, str] = {
                 "AGENT_SERVER_HOST": "0.0.0.0",
                 "TZ": timezone,
-                "HOME": agent_server_home,
-                "LOG_ROOT_PATH": agent_server_home + "/.logs"
+                "HOME": home,
+                "LOG_ROOT_PATH": home + "/.logs"
             }
 
             for key, value in (
@@ -1256,7 +1257,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
     def abort_request_stream(self, request_id: str) -> None:
         """终止 Access/WSS 层流式 pull，配合 Gateway process_stream task.cancel() 使用。
 
-        openjiuwen_runtime Access 在 ``send_message`` 内用 ``SessionRequestWrapper.cancel``
+        openjiuwen_runtime Access 在 ``send_message`` 内用 ``ScopeRequestWrapper.cancel``
         与 WSS ``await wrapper.cancel`` 联动；须 aclose 生成器才能在用户 cancel 时尽快释放
         服务实例并发，否则 WSS 会一直等到流自然结束。
         """
