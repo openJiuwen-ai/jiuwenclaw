@@ -1054,6 +1054,9 @@
       "prev": "上一页",
       "next": "下一页"
     },
+    "filter": {
+      "reset": "重置"
+    },
     "table": {
       "name": "名称",
       "project": "项目",
@@ -1279,9 +1282,7 @@
       "cronRequired": "Cron 表达式不能为空",
       "cronFormat": "Cron 表达式格式错误（应为7段式：秒 分 时 日 月 周 年）",
       "cronSecondOrMinute": "秒/分字段错误（取值 0-59，支持 * / - ,）",
-      "cronSecondOrMinuteStep": "秒/分步长需能被60整除",
       "cronHour": "小时字段错误（取值 0-23，支持 * / - ,）",
-      "cronHourStep": "小时步长需能被24整除",
       "cronDay": "日字段错误（取值 1-31，支持 * ? - ,）",
       "cronMonth": "月字段错误（取值 1-12，支持 * - ,）",
       "cronWeek": "周字段错误（取值 0-6，支持 * ? - ,，0=周日、1=周一...6=周六；也支持 SUN/MON/TUE/WED/THU/FRI/SAT，不区分大小写）",
@@ -2091,7 +2092,7 @@
     "workDescription": "处理办公、协作和通用任务",
     "codeDescription": "在项目目录中查看并修改代码",
     "environment": "环境信息",
-    "changes": "变更",
+    "changes": "本轮变更",
     "review": "审核"
   },
   "multiSession": {

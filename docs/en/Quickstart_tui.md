@@ -90,9 +90,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
 
 - Install frontend dependencies
 
-  Navigate to the frontend directory `jiuwenswarm/channels/web/frontend` and install dependencies:
+  Enter the frontend directory `channels/web/frontend` to install dependencies:
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -103,14 +103,14 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
   - Static frontend service (suitable for production deployment)
     ```bash
     npm run build
-    cd ../../
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start
     ```
 
   - Dynamic frontend service (suitable for development and debugging)
     ```bash
-    cd ../../
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start dev
     ```
@@ -118,9 +118,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
   After running, you can access the JiuwenSwarm web UI.
 
 - Install TUI dependencies
-  Open one new erminal，navigate to the TUI directory `jiuwenswarm/channels/tui/frontend` and install dependencies:
+  Open one new terminal, navigate to the project root, then enter the TUI directory `channels/tui/frontend` and install dependencies:
   ```bash
-  cd jiuwenswarm/channels/tui/frontend
+  cd channels/tui/frontend
   npm install
   ```
 
@@ -154,9 +154,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
 
 - Install frontend dependencies
 
-  Navigate to the frontend directory `jiuwenswarm/channels/web/frontend` and install dependencies:
+  Navigate to the frontend directory `channels/web/frontend` and install dependencies:
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -167,14 +167,14 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
   - Static frontend service (suitable for production deployment)
     ```bash
     npm run build
-    cd ../../
+    cd ../../../
     jiuwenswarm-init
     jiuwenswarm-start
     ```
 
   - Dynamic frontend service (suitable for development and debugging)
     ```bash
-    cd ../../
+    cd ../../../
     # Start directly (without using uv run)
     jiuwenswarm-init
     jiuwenswarm-start dev
@@ -183,9 +183,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
   After running, you can access the JiuwenSwarm web UI.
 
 - Install TUI dependencies
-  Open one new erminal，navigate to the TUI directory `jiuwenswarm/channels/tui/frontend` and install dependencies:
+  Open one new terminal, navigate to the project root, then enter the TUI directory `channels/tui/frontend` and install dependencies:
   ```bash
-  cd jiuwenswarm/channels/tui/frontend
+  cd channels/tui/frontend
   npm install
   ```
 

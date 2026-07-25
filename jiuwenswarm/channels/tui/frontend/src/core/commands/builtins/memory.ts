@@ -898,9 +898,15 @@ export function createMemoryCommand(): SlashCommand {
     example: "/memory",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
-    action: async (ctx) => {
+    action: async (ctx, args) => {
       // 无参 → 弹出页签选择器（edit/status/toggle/open）；
       // 子命令 /memory <sub> 由各自 subCommand 直达对应页签。
+      // 若跟了不存在的子命令（如已废弃的 list），参考 CC 报错而非触发页签选择器。
+      const firstArg = args.trim().split(/\s+/)[0];
+      if (firstArg && !(MEMORY_TABS as readonly string[]).includes(firstArg)) {
+        ctx.addItem(addError(ctx.sessionId, `Unknown memory subcommand: ${firstArg}`));
+        return;
+      }
       await showMemoryConsole(ctx);
     },
     completion: async () => {

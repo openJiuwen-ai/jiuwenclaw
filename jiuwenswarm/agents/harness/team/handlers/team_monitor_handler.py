@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from openjiuwen.agent_teams.monitor import TeamMonitor
@@ -48,6 +49,88 @@ _TASK_EVENT_STATUS: dict[MonitorEventType, str] = {
     MonitorEventType.TASK_VERIFIED: "completed",
     MonitorEventType.TASK_REVISION_REQUESTED: "in_progress",
 }
+
+# Upper bound (chars) for a task's title/content carried on events / snapshots.
+# Titles are short; content holds the full task description, so this is sized
+# generously to avoid truncating typical task bodies. Over-limit values get an
+# inline marker + structured flags (see ``_truncate_task_text``).
+#
+# Configurable via the ``JIUWENSWARM_TASK_TEXT_LIMIT`` env var (positive int);
+# an unset/blank/invalid/non-positive value falls back to the 4096 default.
+_TASK_TEXT_LIMIT_DEFAULT = 4096
+_TASK_TEXT_LIMIT_ENV = "JIUWENSWARM_TASK_TEXT_LIMIT"
+
+
+def _resolve_task_text_limit() -> int:
+    """Read the truncation limit from the env, defaulting to 4096.
+
+    A missing, blank, non-integer, or non-positive value falls back to
+    ``_TASK_TEXT_LIMIT_DEFAULT`` (with a warning for a malformed value) so a bad
+    override never disables truncation or crashes module import.
+    """
+    raw = os.getenv(_TASK_TEXT_LIMIT_ENV)
+    if raw is None or not raw.strip():
+        return _TASK_TEXT_LIMIT_DEFAULT
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        logger.warning(
+            "[TeamMonitorHandler] 无效的 %s=%r,回退默认 %d",
+            _TASK_TEXT_LIMIT_ENV,
+            raw,
+            _TASK_TEXT_LIMIT_DEFAULT,
+        )
+        return _TASK_TEXT_LIMIT_DEFAULT
+    if value <= 0:
+        logger.warning(
+            "[TeamMonitorHandler] %s=%d 非正数,回退默认 %d",
+            _TASK_TEXT_LIMIT_ENV,
+            value,
+            _TASK_TEXT_LIMIT_DEFAULT,
+        )
+        return _TASK_TEXT_LIMIT_DEFAULT
+    return value
+
+
+_TASK_TEXT_LIMIT = _resolve_task_text_limit()
+_TASK_BODY_EVENT_TYPES = {MonitorEventType.TASK_CREATED, MonitorEventType.TASK_UPDATED}
+
+
+def _truncate_task_text(value: str | None) -> tuple[str | None, bool, int]:
+    """Truncate a task text field to ``_TASK_TEXT_LIMIT`` with an inline marker.
+
+    Args:
+        value: The raw title or content string (may be ``None`` or non-str).
+
+    Returns:
+        ``(truncated_str, was_truncated, original_size)``. When ``value`` is not
+        a str or empty → ``(value, False, 0)``. When ``len <= _TASK_TEXT_LIMIT``
+        → ``(value, False, len)``. Else →
+        ``(value[:_TASK_TEXT_LIMIT] + marker, True, len)``.
+    """
+    if not isinstance(value, str) or not value:
+        return value, False, 0
+    if len(value) <= _TASK_TEXT_LIMIT:
+        return value, False, len(value)
+    truncated = value[:_TASK_TEXT_LIMIT] + f"…(truncated, total {len(value)} chars)"
+    return truncated, True, len(value)
+
+
+def _task_text_field(name: str, value: str | None) -> dict[str, Any]:
+    """Expand a task text field into a dict with optional truncation flags.
+
+    Emits ``{name: truncated_str}`` plus, ONLY when actually truncated, the
+    structured flags ``{name}_truncated: True`` and ``{name}_original_size: int``.
+    When not truncated, only the ``{name}`` key is present — zero redundancy in
+    the common (under-limit) case. Mirrors the
+    ``team_helpers._truncate_team_tool_result_event`` precedent.
+    """
+    truncated_str, was_truncated, original_size = _truncate_task_text(value)
+    field: dict[str, Any] = {name: truncated_str}
+    if was_truncated:
+        field[f"{name}_truncated"] = True
+        field[f"{name}_original_size"] = original_size
+    return field
 
 
 class TeamMonitorHandler(BaseMonitorHandler):
@@ -133,25 +216,69 @@ class TeamMonitorHandler(BaseMonitorHandler):
         })
         return base
 
-    @staticmethod
-    def _handle_task(base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
+    async def _lookup_task_body(self, task_id: str) -> tuple[str, str] | None:
+        """Re-query the task's title/content via the monitor's public API.
+
+        Args:
+            task_id: The DB task id carried by the monitor event.
+
+        Returns:
+            ``(title, content)`` when the task exists, else ``None``. On any
+            exception (monitor None / query error) logs a warning and returns
+            ``None`` so the caller can still emit the event with ``task_id`` +
+            ``status`` (no body) — never blocks the event stream.
+        """
+        if self._monitor is None or not task_id:
+            return None
+        try:
+            task = await self._monitor.get_task(task_id)
+        except Exception as e:
+            logger.warning(
+                "[TeamMonitorHandler] 查 task 体失败: task_id=%s err=%s",
+                task_id,
+                e,
+            )
+            return None
+        if task is None:
+            return None
+        return task.title, task.content
+
+    async def _handle_task(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
         """Converge every task event into the frontend-ready task shape.
 
         The authoritative task status is resolved once here (server-side) so the
         frontend reads ``status`` directly and never re-derives it from the event
         type. The assignee already rides in ``member_id`` set by the caller.
 
+        For ``TASK_CREATED`` / ``TASK_UPDATED`` only, the title/content are
+        re-queried from the DB (via ``_lookup_task_body``) and attached here so
+        these events become the single source of truth for the task body — the
+        frontend's optimistic card (built from the tool_call ``id``) and the
+        event card (built from the DB ``task_id``) can then merge. Body fields
+        are truncated to ``_TASK_TEXT_LIMIT`` chars with an inline marker + structured flags
+        when over the limit. If the lookup fails (monitor None / exception /
+        task not found), the event still carries ``task_id`` + ``status`` (no
+        body) and is emitted.
+
         Args:
             base: Pre-filled event dict (type / team_id / member_id).
             event: Source monitor event.
 
         Returns:
-            The event dict with ``task_id`` and, when known, the resolved ``status``.
+            The event dict with ``task_id`` and, when known, the resolved ``status``
+            and (for CREATED/UPDATED) the ``title`` / ``content`` body.
         """
         base["task_id"] = event.task_id
         resolved = event.status or _TASK_EVENT_STATUS.get(event.event_type)
         if resolved:
             base["status"] = resolved
+        if event.event_type in _TASK_BODY_EVENT_TYPES and event.task_id:
+            body = await self._lookup_task_body(event.task_id)
+            if body is not None:
+                title_field = _task_text_field("title", body[0])
+                content_field = _task_text_field("content", body[1])
+                base.update(title_field)
+                base.update(content_field)
         return base
 
     async def _handle_message(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
@@ -231,7 +358,7 @@ class TeamMonitorHandler(BaseMonitorHandler):
         # authoritative status server-side. Member / message events keep their
         # dedicated handlers because they carry distinct fields.
         if event_category == TeamEventCategory.TASK:
-            event_data = self._handle_task(event_data, event)
+            event_data = await self._handle_task(event_data, event)
         else:
             non_task_handlers = {
                 MonitorEventType.MEMBER_SPAWNED: self._handle_member_spawned,
@@ -293,8 +420,8 @@ class TeamMonitorHandler(BaseMonitorHandler):
                     {
                         "task_id": t.task_id,
                         "team_name": t.team_name,
-                        "title": t.title,
-                        "content": t.content,
+                        **_task_text_field("title", t.title),
+                        **_task_text_field("content", t.content),
                         "status": t.status,
                         "assignee": t.assignee,
                         "updated_at": t.updated_at,
@@ -397,4 +524,93 @@ class TeamMonitorHandler(BaseMonitorHandler):
             for m in members or []
         ]
 
+    @staticmethod
+    async def get_team_snapshot_from_db(
+        session_id: str,
+        team_name: str,
+    ) -> dict[str, Any] | None:
+        """monitor 不在时直查 ``team.db`` 拼出与 ``get_team_snapshot`` 同形的快照.
 
+        历史恢复走 ``team.snapshot`` RPC 时，runtime / monitor 往往已停，但
+        任务行仍在 per-session 动态表 ``team_task_<hash>`` 里。本方法绑定
+        ``session_id`` 上下文后直查 DB，使历史面板在无 monitor 时仍能拿到
+        带 title/content（经统一截断）的真源任务卡。
+
+        Args:
+            session_id: 会话 id，用于解析动态 task 表后缀。
+            team_name: 持久化在 session metadata 中的 team 名。
+
+        Returns:
+            ``{members, tasks, team_id}`` 或 None（参数/路径无效、查询失败）。
+        """
+        from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+        from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
+
+        from jiuwenswarm.agents.harness.team.config_loader import resolve_team_sqlite_db_path
+        from jiuwenswarm.common.config import get_config
+
+        sid = str(session_id or "").strip()
+        tname = str(team_name or "").strip()
+        if not sid or not tname:
+            return None
+        db_path = resolve_team_sqlite_db_path(get_config())
+        if db_path is None:
+            return None
+
+        db = get_shared_db(DatabaseConfig(db_type="sqlite", connection_string=str(db_path)))
+        token = set_session_id(sid)
+        try:
+            await db.initialize()
+            # Ensure the per-session dynamic task table is mapped (checkfirst);
+            # historical sessions already have the table from the live run.
+            await db.create_cur_session_tables()
+
+            team_info = await db.team.get_team(tname)
+            leader_name = (
+                str(getattr(team_info, "leader_member_name", "") or "").strip()
+                if team_info is not None
+                else ""
+            )
+            members = await db.member.get_team_members(tname, status=None) or []
+            if leader_name:
+                members = [m for m in members if m.member_name != leader_name]
+            tasks = await db.task.get_team_tasks(tname) or []
+
+            return {
+                "members": [
+                    {
+                        "member_id": m.member_name,
+                        "name": m.display_name,
+                        "status": m.status,
+                        "execution_status": m.execution_status,
+                        "mode": m.mode,
+                        "role": m.role,
+                    }
+                    for m in members
+                ],
+                "tasks": [
+                    {
+                        "task_id": t.task_id,
+                        "team_name": t.team_name,
+                        **_task_text_field("title", t.title),
+                        **_task_text_field("content", t.content),
+                        "status": t.status,
+                        "assignee": t.assignee,
+                        "updated_at": t.updated_at,
+                    }
+                    for t in tasks
+                ],
+                "team_id": tname,
+            }
+        except Exception as e:
+            logger.warning(
+                "[TeamMonitorHandler] get_team_snapshot_from_db failed: "
+                "session_id=%s team_name=%s error=%s",
+                sid,
+                tname,
+                e,
+            )
+            return None
+        finally:
+            reset_session_id(token)

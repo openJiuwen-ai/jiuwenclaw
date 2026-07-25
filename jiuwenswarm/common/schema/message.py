@@ -182,6 +182,7 @@ class ReqMethod(Enum):
     TEAM_SNAPSHOT = "team.snapshot"
     TEAM_HISTORY_GET = "team.history.get"
     TEAM_MEMBERS_GET = "team.members.get"
+    TEAM_MQ_PUBLISH = "team.mq.publish"
 
     # Harness package management
     HARNESS_PACKAGES_GET = "harness.packages.get"

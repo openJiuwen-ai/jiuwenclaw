@@ -755,12 +755,6 @@ class DiffService:
             return file_path
         return str(target_root / rel)
 
-    @staticmethod
-    def _is_internal_team_workspace_file(file_path: str) -> bool:
-        """Return whether an edited file is an internal team workspace artifact."""
-        parts = str(file_path or "").replace("\\", "/").lower().split("/")
-        return ".agent_teams" in parts
-
     def _read_agent_history(
         self,
         session_id: str | None = None,
@@ -885,8 +879,6 @@ class DiffService:
                     )
                     for file_path, entries in data.items():
                         mapped_file_path = mapped_file_path_for_history(file_path, history_file)
-                        if self._is_internal_team_workspace_file(mapped_file_path):
-                            continue
                         # 规范化路径，避免大小写差异导致的重复
                         normalized_path = normalize_path(mapped_file_path)
                         comparable_key = comparable_path_key(normalized_path)

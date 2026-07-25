@@ -198,6 +198,24 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
   };
 }
 
+type StatusFilterKey = 'running' | 'paused' | 'expired';
+
+// 判断某个 job 属于"运行中/已暂停/过期"哪一态，跟顶部统计 StatPill 的口径保持一致（expired 优先于
+// enabled）；"运行状态"筛选下拉和统计计数共用这一个函数，避免筛选结果跟顶部数字对不上
+function jobStatusKey(job: CronTaskUI): StatusFilterKey {
+  if (job.expired) return 'expired';
+  return job.enabled ? 'running' : 'paused';
+}
+
+// "运行状态"筛选下拉里每个选项要显示的视觉标志，直接复用表格"运行状态"列本来就在用的
+// StatusBadge（同一份图标/颜色），不重新发明一套新样式；enabled/expired 这两个 props 反推自
+// jobStatusKey 的三态定义，跟表格里的展示口径保持一致
+const STATUS_FILTER_BADGE_PROPS: Record<StatusFilterKey, { enabled: boolean; expired: boolean }> = {
+  running: { enabled: true, expired: false },
+  paused: { enabled: false, expired: false },
+  expired: { enabled: false, expired: true },
+};
+
 export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession }: CronPanelProps) {
   const { t } = useTranslation();
   const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent');
@@ -221,6 +239,13 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [currentPage, setCurrentPage] = useState(1);
   const tableWrapperRef = useRef<HTMLDivElement>(null);
+
+  // "运行状态"筛选（下拉多选）：空集合 = 不筛选（显示全部），跟名称搜索是 AND 关系，
+  // 只在任务列表 tab 展示这个筛选器（模板/执行历史没有"运行状态"这个概念）
+  const [selectedStatuses, setSelectedStatuses] = useState<Set<StatusFilterKey>>(new Set());
+  const [statusFilterOpen, setStatusFilterOpen] = useState(false);
+  const statusFilterRef = useRef<HTMLDivElement>(null);
+  useClickOutside(statusFilterRef, statusFilterOpen, () => setStatusFilterOpen(false));
 
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const createMenuRef = useRef<HTMLDivElement>(null);
@@ -403,8 +428,13 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   }, [error]);
 
   const filteredJobs = useMemo(
-    () => jobs.filter((j) => j.name.toLowerCase().includes(search.trim().toLowerCase())),
-    [jobs, search],
+    () =>
+      jobs.filter(
+        (j) =>
+          j.name.toLowerCase().includes(search.trim().toLowerCase()) &&
+          (selectedStatuses.size === 0 || selectedStatuses.has(jobStatusKey(j))),
+      ),
+    [jobs, search, selectedStatuses],
   );
 
   // 搜索内容变化时重置回第 1 页，避免搜索结果变少后停留在一个已经越界的页码上看到空白
@@ -440,12 +470,22 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     [search, t],
   );
 
-  // 任务总数统计行旁边的分类计数：跟 StatusBadge 的判断逻辑保持一致（expired 优先于 enabled）。
-  // 运行中/已暂停/过期是任务本身状态的完整三态，不依赖后端；"运行失败"是执行历史维度的概念
-  // （某一次执行的结果），不属于这里，见 StatusBadge.tsx 顶部注释
-  const runningCount = useMemo(() => jobs.filter((j) => !j.expired && j.enabled).length, [jobs]);
-  const pausedCount = useMemo(() => jobs.filter((j) => !j.expired && !j.enabled).length, [jobs]);
-  const expiredCount = useMemo(() => jobs.filter((j) => j.expired).length, [jobs]);
+  function toggleStatusFilter(key: StatusFilterKey) {
+    setSelectedStatuses((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  // 任务总数统计行旁边的分类计数：跟 StatusBadge 的判断逻辑保持一致（expired 优先于 enabled），
+  // 也是"运行状态"筛选下拉复用的同一套口径（jobStatusKey）。运行中/已暂停/过期是任务本身状态的
+  // 完整三态，不依赖后端；"运行失败"是执行历史维度的概念（某一次执行的结果），不属于这里，见
+  // StatusBadge.tsx 顶部注释
+  const runningCount = useMemo(() => jobs.filter((j) => jobStatusKey(j) === 'running').length, [jobs]);
+  const pausedCount = useMemo(() => jobs.filter((j) => jobStatusKey(j) === 'paused').length, [jobs]);
+  const expiredCount = useMemo(() => jobs.filter((j) => jobStatusKey(j) === 'expired').length, [jobs]);
 
   async function handleCreateSubmit(value: CronTaskFormValue) {
     try {
@@ -748,10 +788,10 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
           </div>
         )}
 
-        {/* 搜索框 */}
+        {/* 搜索框 + 运行状态筛选（筛选下拉只在任务列表 tab 展示，模板/执行历史没有"运行状态"这个概念） */}
         {!(activeTab === 'list' && jobs.length === 0) && activeTab !== 'history' && (
-          <div className="mb-4">
-            <div className="relative w-full">
+          <div className="mb-4 flex items-center gap-2">
+            <div className="relative flex-1">
               <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
               <input
                 value={search}
@@ -760,6 +800,54 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                 className="w-full rounded-md border border-border bg-card py-1.5 pl-9 pr-3 text-sm text-text outline-none focus:border-accent"
               />
             </div>
+            {activeTab === 'list' && (
+              <div className="relative shrink-0" ref={statusFilterRef}>
+                <button
+                  onClick={() => setStatusFilterOpen((v) => !v)}
+                  className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm ${
+                    selectedStatuses.size > 0 ? 'border-accent text-accent' : 'border-border text-text'
+                  } bg-card hover:border-accent`}
+                  data-testid="cron-status-filter-toggle"
+                >
+                  {t('cron.table.status')}
+                  {selectedStatuses.size > 0 && (
+                    <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-text-inverse">
+                      {selectedStatuses.size}
+                    </span>
+                  )}
+                  <ChevronDown size={14} />
+                </button>
+                {statusFilterOpen && (
+                  <div
+                    className="absolute right-0 top-[calc(100%+6px)] z-20 w-40 rounded-lg border border-border bg-card py-1.5 shadow-lg"
+                    data-testid="cron-status-filter-menu"
+                  >
+                    {(['running', 'paused', 'expired'] as const).map((key) => (
+                      <label
+                        key={key}
+                        className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm text-text hover:bg-bg-hover"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedStatuses.has(key)}
+                          onChange={() => toggleStatusFilter(key)}
+                          className="h-3.5 w-3.5 rounded border-border"
+                        />
+                        <StatusBadge enabled={STATUS_FILTER_BADGE_PROPS[key].enabled} expired={STATUS_FILTER_BADGE_PROPS[key].expired} />
+                      </label>
+                    ))}
+                    {selectedStatuses.size > 0 && (
+                      <button
+                        onClick={() => setSelectedStatuses(new Set())}
+                        className="mt-1 block w-full border-t border-border px-3 pt-2 text-left text-xs text-text-muted hover:text-text"
+                      >
+                        {t('cron.filter.reset')}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

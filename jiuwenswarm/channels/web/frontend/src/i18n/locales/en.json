@@ -1054,6 +1054,9 @@
       "prev": "Previous page",
       "next": "Next page"
     },
+    "filter": {
+      "reset": "Reset"
+    },
     "table": {
       "name": "Name",
       "project": "Project",
@@ -1278,9 +1281,7 @@
       "cronRequired": "Cron expression is required",
       "cronFormat": "Invalid cron format (must be 7 fields: second minute hour day month dow year)",
       "cronSecondOrMinute": "Invalid second/minute field (0-59, supports * / - ,)",
-      "cronSecondOrMinuteStep": "Second/minute step must divide 60",
       "cronHour": "Invalid hour field (0-23, supports * / - ,)",
-      "cronHourStep": "Hour step must divide 24",
       "cronDay": "Invalid day field (1-31, supports * ? - ,)",
       "cronMonth": "Invalid month field (1-12, supports * - ,)",
       "cronWeek": "Invalid dow field (0-6, supports * ? - ,, 0=Sun, 1=Mon...6=Sat; also accepts SUN/MON/TUE/WED/THU/FRI/SAT, case-insensitive)",
@@ -2087,7 +2088,7 @@
     "workDescription": "Office, collaboration, and general tasks",
     "codeDescription": "Inspect and modify code in a project directory",
     "environment": "Environment",
-    "changes": "Changes",
+    "changes": "Current Turn Changes",
     "review": "Review"
   },
   "multiSession": {

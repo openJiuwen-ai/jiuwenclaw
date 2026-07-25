@@ -112,6 +112,140 @@ jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
 jiuwenswarm-app
 ```
 
+**Configuration Directory Auto-Creation**:
+After first starting the service, the system automatically creates the configuration directory:
+- **Windows**: `C:\Users\<your-username>\.jiuwenswarm`
+- **Linux/Mac**: `~/.jiuwenswarm/`
+
+Configuration files, memory files, and other data will be stored in this directory.
+
+The following installation methods are suitable for users who want to perform secondary development and adaptation based on JiuwenSwarm.
+
+First, clone the repository and enter the project directory:
+
+```bash
+git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+cd jiuwenswarm
+```
+
+### Install via `uv`
+- Create a new virtual environment using `uv`
+  ```bash
+  # Create virtual environment with uv (supports any of Python 3.11, 3.12, 3.13)
+  uv venv --python=3.11
+  # or uv venv --python=3.12
+  # or uv venv --python=3.13
+  ```
+
+- Run uv sync
+
+  Enter the project root directory `jiuwenswarm/` and run:
+  ```bash
+  uv sync
+  ```
+
+- Install frontend dependencies
+
+  Enter the frontend directory `channels/web/frontend` to install dependencies:
+  ```bash
+  cd channels/web/frontend
+  npm install
+  ```
+
+- Run frontend service
+
+  Two ways to run the frontend service:
+  - Static run (suitable for production deployment)
+    ```bash
+    npm run build
+    # Copy build output into the user workspace
+    # Windows:
+    xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
+    # macOS/Linux:
+    cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
+    cd ../../../
+    uv run jiuwenswarm-init
+    uv run jiuwenswarm-start
+    ```
+
+  - Dynamic run (suitable for development debugging)
+    ```bash
+    cd ../../../
+    uv run jiuwenswarm-init
+    uv run jiuwenswarm-start dev
+    ```
+
+  After running, you can access the JiuwenSwarm service via the web frontend.
+
+### Install via `conda`
+- Create a new virtual environment using `conda`
+  ```bash
+  # Create virtual environment with Anaconda (supports any of Python 3.11, 3.12, 3.13)
+  conda create -n JiuwenSwarm python=3.11
+  # or conda create -n JiuwenSwarm python=3.12
+  # or conda create -n JiuwenSwarm python=3.13
+  ```
+- Activate the conda environment
+  ```bash
+  conda activate JiuwenSwarm
+  ```
+- Install Python dependencies
+
+  Enter the project root directory `jiuwenswarm/` and run:
+  ```bash
+  # Mode 1: Development mode installation (recommended, easier to modify code)
+  pip install -e .
+
+  # Mode 2: Normal installation
+  pip install .
+  ```
+  **Note:** This installation method depends on the project's installable package (`pyproject.toml`), and will also install `jiuwenswarm` itself by default.
+
+- Install frontend dependencies
+
+  Navigate to the frontend directory `channels/web/frontend` and install dependencies:
+  ```bash
+  cd channels/web/frontend
+  npm install
+  ```
+
+- Run frontend service
+
+  Two ways to run the frontend service:
+  - Static run (suitable for production deployment)
+    ```bash
+    npm run build
+    cd ../../../
+    jiuwenswarm-init
+    jiuwenswarm-start
+    ```
+
+  - Dynamic run (suitable for development debugging)
+    ```bash
+    cd ../../../
+    # Start directly (without uv run)
+    jiuwenswarm-init
+    jiuwenswarm-start dev
+    ```
+
+  After running, you can access the JiuwenSwarm service via the web frontend.
+
+---
+
+## Quick Start
+
+### 1️⃣ Conversation Modes
+
+| Method | Description |
+|------|------|
+| **Web Frontend** | After starting the service, visit `http://localhost:5173` to chat directly via browser |
+| **Xiaoyi Channel** | Huawei phone users can directly wake up Xiaoyi to chat with JiuwenSwarm |
+| **Feishu Channel** | After completing channel configuration, chat with JiuwenSwarm in Feishu |
+
+### 2️⃣ Configure Model
+
+See the [Configure Model](#configure-model) section below.
+
 ## Configure Model
 
 In the left sidebar of the Web UI, find "Configuration" and enter the configuration page:
@@ -201,7 +335,9 @@ When you need JiuwenSwarm to forget all conversation history and user informatio
 
 **Steps to Clear Memory:**
 
-Memory files are stored in `{workspace_dir}/memory/` directory:
+Memory files are stored in:
+- **Windows**: `C:\Users\<your-username>\.jiuwenswarm\agent\workspace\memory\`
+- **Linux/Mac**: `~/.jiuwenswarm/agent/workspace/memory/`
 
 **Method 1: Delete via Agent**
 Tell JiuwenSwarm: "Please delete all memory files" or "Clear my memory", Agent will call file tools to delete files in the memory directory.
