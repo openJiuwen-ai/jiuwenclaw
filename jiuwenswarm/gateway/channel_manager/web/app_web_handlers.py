@@ -108,6 +108,9 @@ from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     root_categories_to_text,
 )
 
+from jiuwenswarm.openjiuwen_logging import configure_openjiuwen_logging_under_jiuwenswarm
+
+configure_openjiuwen_logging_under_jiuwenswarm()
 for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.INFO)
 
