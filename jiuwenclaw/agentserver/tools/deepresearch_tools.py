@@ -17,7 +17,7 @@ import tempfile
 import threading
 import uuid
 import zipfile
-from contextlib import AsyncExitStack, ExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -772,7 +772,7 @@ def _verify_created_directories(
             )
 
 
-def _make_quarantine_directory(parent_fd: int, entry_name: str) -> tuple[str, int]:
+def _make_quarantine_directory(parent_fd: int, entry_name: str) -> str:
     for _attempt in range(8):
         quarantine_name = (
             f".{entry_name}.quarantine-{uuid.uuid4().hex}"
@@ -781,23 +781,7 @@ def _make_quarantine_directory(parent_fd: int, entry_name: str) -> tuple[str, in
             os.mkdir(quarantine_name, mode=0o700, dir_fd=parent_fd)
         except FileExistsError:
             continue
-        try:
-            with ExitStack() as open_handles:
-                quarantine_fd = os.open(
-                    quarantine_name,
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    mode=0o600,
-                    dir_fd=parent_fd,
-                )
-                open_handles.callback(os.close, quarantine_fd)
-                open_handles.pop_all()
-                return quarantine_name, quarantine_fd
-        except BaseException:
-            try:
-                os.rmdir(quarantine_name, dir_fd=parent_fd)
-            except OSError:
-                pass
-            raise
+        return quarantine_name
     raise FileExistsError("unable to allocate report cleanup quarantine")
 
 
@@ -891,9 +875,22 @@ def _quarantine_created_artifact(artifact: _CreatedArtifact) -> None:
     quarantine_name = ""
     quarantine_fd = -1
     try:
-        quarantine_name, quarantine_fd = _make_quarantine_directory(
+        quarantine_name = _make_quarantine_directory(
             parent_fd, entry_name
         )
+        try:
+            quarantine_fd = os.open(
+                quarantine_name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                mode=0o600,
+                dir_fd=parent_fd,
+            )
+        except BaseException:
+            try:
+                os.rmdir(quarantine_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
         try:
             os.rename(
                 entry_name,

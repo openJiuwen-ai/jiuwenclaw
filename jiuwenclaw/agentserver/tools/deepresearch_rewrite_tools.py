@@ -151,10 +151,10 @@ def _safe_input_tool(
     *, name: str, description: str, input_params: dict, input_error_code: str
 ):
     def decorator(func):
-        @functools.wraps(func)
         async def wrapped(*args, **kwargs):
             return await func(*args, **kwargs)
 
+        wrapped = functools.wraps(func)(wrapped)
         return _SafeInputLocalFunction(
             card=ToolCard(
                 name=name,
