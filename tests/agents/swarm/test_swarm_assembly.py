@@ -2260,3 +2260,115 @@ def test_team_mode_deep_spec_replaces_shared_browser_agent() -> None:
             shared_entries.append(s)
     assert not shared_entries, "shared playwright_official_stdio entry must be removed"
     assert subagent_factories.count(SWARM_BROWSER_AGENT) == 1
+
+
+# ---------------------------------------------------------------------------
+# add_general_purpose_agent: team leader needs task_tool with general-purpose
+# sub-agent for parallel role dispatch (#1834 — swarm path consistency)
+# ---------------------------------------------------------------------------
+
+
+class TestShouldEnableGeneralPurposeSubagent:
+    """Tests for ``_should_enable_general_purpose_subagent`` in config_specs."""
+
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [
+            ("team", True),
+            ("team.plan", True),
+            ("plan", True),
+            ("code.team", False),
+            ("agent", False),
+            ("", False),
+        ],
+    )
+    def test_enabled_when_general_agent_on_and_mode_matches(
+        self, mode: str, expected: bool
+    ) -> None:
+        config = {"react": {"subagents": {"general_agent": {"enabled": True}}}}
+        from jiuwenswarm.agents.swarm.config_specs import (
+            _should_enable_general_purpose_subagent,
+        )
+
+        assert _should_enable_general_purpose_subagent(config, mode) is expected
+
+    @pytest.mark.parametrize("mode", ["team", "code.team", "agent", ""])
+    def test_disabled_when_general_agent_off(self, mode: str) -> None:
+        config = {"react": {"subagents": {"general_agent": {"enabled": False}}}}
+        from jiuwenswarm.agents.swarm.config_specs import (
+            _should_enable_general_purpose_subagent,
+        )
+
+        assert _should_enable_general_purpose_subagent(config, mode) is False
+
+    @pytest.mark.parametrize("mode", ["team", "code.team"])
+    def test_disabled_when_general_agent_absent(self, mode: str) -> None:
+        config = {"react": {"subagents": {}}}
+        from jiuwenswarm.agents.swarm.config_specs import (
+            _should_enable_general_purpose_subagent,
+        )
+
+        assert _should_enable_general_purpose_subagent(config, mode) is False
+
+    def test_disabled_when_react_section_absent(self) -> None:
+        from jiuwenswarm.agents.swarm.config_specs import (
+            _should_enable_general_purpose_subagent,
+        )
+
+        assert _should_enable_general_purpose_subagent({}, "team") is False
+
+    def test_disabled_when_config_is_none(self) -> None:
+        from jiuwenswarm.agents.swarm.config_specs import (
+            _should_enable_general_purpose_subagent,
+        )
+
+        assert _should_enable_general_purpose_subagent(None, "team") is False
+
+
+class TestAddGeneralPurposeAgentInMemberSpec:
+    """Tests for ``add_general_purpose_agent`` on the resulting DeepAgentSpec."""
+
+    @pytest.mark.parametrize("role", ["leader", "teammate"])
+    def test_team_mode_sets_add_general_purpose_agent_true(self, role: str) -> None:
+        config = {"react": {"subagents": {"general_agent": {"enabled": True}}}}
+        base = DeepAgentSpec()
+
+        spec = build_member_deep_agent_spec(config, "team", role, base)
+
+        assert spec.add_general_purpose_agent is True
+
+    @pytest.mark.parametrize("role", ["leader", "teammate"])
+    def test_team_mode_sets_add_general_purpose_agent_false_when_disabled(
+        self, role: str
+    ) -> None:
+        config = {"react": {"subagents": {"general_agent": {"enabled": False}}}}
+        base = DeepAgentSpec()
+
+        spec = build_member_deep_agent_spec(config, "team", role, base)
+
+        assert spec.add_general_purpose_agent is False
+
+    @pytest.mark.parametrize("mode", ["code.team"])
+    def test_code_mode_keeps_add_general_purpose_agent_default(self, mode: str) -> None:
+        config = {"react": {"subagents": {"general_agent": {"enabled": True}}}}
+        base = DeepAgentSpec()
+
+        spec = build_member_deep_agent_spec(config, mode, "leader", base)
+
+        assert spec.add_general_purpose_agent is False
+
+    def test_team_plan_mode_sets_add_general_purpose_agent_true(self) -> None:
+        config = {"react": {"subagents": {"general_agent": {"enabled": True}}}}
+        base = DeepAgentSpec()
+
+        spec = build_member_deep_agent_spec(config, "team.plan", "leader", base)
+
+        assert spec.add_general_purpose_agent is True
+
+    def test_base_spec_add_general_purpose_agent_is_overridden(self) -> None:
+        config = {"react": {"subagents": {"general_agent": {"enabled": True}}}}
+        base = DeepAgentSpec(add_general_purpose_agent=False)
+
+        spec = build_member_deep_agent_spec(config, "team", "leader", base)
+
+        assert spec.add_general_purpose_agent is True

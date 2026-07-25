@@ -683,6 +683,27 @@ def build_member_subagent_specs(
     return specs
 
 
+def _should_enable_general_purpose_subagent(config: dict[str, Any], mode: str) -> bool:
+    """Decide whether the general-purpose subagent should be injected.
+
+    Enabled when ``react.subagents.general_agent.enabled: true`` AND the
+    current mode warrants it: ``team`` / ``team.plan`` prefixes (team leaders
+    need task_tool for parallel role dispatch), or ``plan`` sub-mode.
+
+    Mirrors ``JiuWenSwarmDeepAdapter._should_enable_general_purpose_subagent``
+    so the swarm path stays consistent with the direct ``create_deep_agent`` path.
+    """
+    react_cfg = (config or {}).get("react", {})
+    react_cfg = react_cfg if isinstance(react_cfg, dict) else {}
+    subagents_cfg = react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
+    general_agent_cfg = subagents_cfg.get("general_agent") if isinstance(subagents_cfg, dict) else None
+    if not _is_subagent_enabled(general_agent_cfg):
+        return False
+    if isinstance(mode, str) and (mode.startswith("team") or mode == "plan"):
+        return True
+    return False
+
+
 def build_member_deep_agent_spec(
     config: dict[str, Any],
     mode: str,
@@ -728,6 +749,7 @@ def build_member_deep_agent_spec(
         "tools": merged_tools,
         "mcps": merged_mcps,
         "kv_cache_affinity_config": _kv_cache_affinity_config(config),
+        "add_general_purpose_agent": _should_enable_general_purpose_subagent(config, mode),
     }
     if not _is_code_mode(mode):
         update["enable_skill_discovery"] = not retrieval_enabled

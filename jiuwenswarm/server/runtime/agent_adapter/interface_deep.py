@@ -1695,6 +1695,26 @@ class JiuWenSwarmDeepAdapter:
             return True  # no config → default enabled
         return subagent_cfg.get("enabled", True) is not False
 
+    @staticmethod
+    def _should_enable_general_purpose_subagent(
+        should_add_general_agent: bool,
+        sub_mode: str | None,
+        mode: str | None,
+    ) -> bool:
+        """Decide whether the general-purpose subagent should be injected.
+
+        Enabled when config ``general_agent.enabled: true`` AND the current
+        mode warrants it: ``plan`` sub_mode, ``agent`` prefix, or ``team``
+        prefix (#1834 — team leaders need task_tool for parallel role dispatch).
+        """
+        if not should_add_general_agent:
+            return False
+        if sub_mode == "plan":
+            return True
+        if isinstance(mode, str) and (mode.startswith("agent") or mode.startswith("team")):
+            return True
+        return False
+
     def _build_configured_subagents(
         self,
         model: Model,
@@ -4516,8 +4536,8 @@ class JiuWenSwarmDeepAdapter:
 
         self._sys_operation = sys_operation
         configured_subagents, should_add_general_agent = self._build_configured_subagents(model, config, config_base)
-        should_enable_general_agent = should_add_general_agent and (
-            sub_mode == "plan" or (isinstance(mode, str) and mode.startswith("agent"))
+        should_enable_general_agent = self._should_enable_general_purpose_subagent(
+            should_add_general_agent, sub_mode, mode
         )
         common_kwargs = dict(
             model=model,
