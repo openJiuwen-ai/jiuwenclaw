@@ -773,6 +773,9 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
+        # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
+        # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
+        self._stateless_fallback_agents: dict[str, Any] = {}
         # session_id → all live stream tasks. This is host lifecycle tracking
         # for interrupt/connection cleanup only; it never decides interaction
         # output ownership.
@@ -1884,22 +1887,29 @@ class AgentWebSocketServer:
         """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
 
         优先用 AgentManager 已缓存的 agent 模式 agent（get_agent_nowait 命中即返回，
-        不命中返回 None，绝不创建）；都没缓存时现场构造一个轻量 JiuWenSwarm()
-        （**不调 create_instance**，_adapter 保持 None）——其 process_message 内部对
-        skills/skilldev/plugins/symphony 的无状态短路会在 _ensure_adapter 之前 return，
-        碰不到 adapter。真正的 adapter 重建留给 chat.send。
+        不命中返回 None，绝不创建）；都没缓存时复用（或首次构造）本 server 上按
+        channel 缓存的轻量 JiuWenSwarm()（**不调 create_instance**，_adapter 保持
+        None）——其 process_message 内部对 skills/skilldev/plugins/symphony 的无状态
+        短路会在 _ensure_adapter 之前 return，碰不到 adapter。真正的 adapter 重建
+        留给 chat.send。
 
         相比 5084467df 原版用 get_agent(mode="agent") 作 fallback（会触发 agent 模式
-        adapter 重建，治标不治本），此处彻底解耦。JiuWenSwarm.__init__ 仅 4 个赋值 +
-        一个只读目录的 SkillManager，现场 new 开销可忽略，无需额外缓存态。
+        adapter 重建，治标不治本），此处彻底解耦。Fallback 必须按 channel 复用，
+        否则每次 cache miss 新建 SkillManager，SkillNet install/install_status 会
+        落到不同实例并误报「安装会话已过期」。
         """
         cached = self._agent_manager.get_agent_nowait(
             channel_id=channel_id, mode="agent"
         )
         if cached is not None:
             return cached
+        agent = self._stateless_fallback_agents.get(channel_id)
+        if agent is not None:
+            return agent
         from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
-        return JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+        agent = JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+        self._stateless_fallback_agents[channel_id] = agent
+        return agent
 
     async def _prepare_code_mode_chat_turn(
         self,
