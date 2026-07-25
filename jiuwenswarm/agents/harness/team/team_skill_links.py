@@ -44,8 +44,10 @@ def _is_windows_reparse_point(path: Path) -> bool:
 
 
 def _is_skill_dir_link(path: Path) -> bool:
-    """Return whether the path entry is a skill directory link."""
-    return path.is_symlink() or _is_windows_reparse_point(path)
+    """Return whether the path entry is a skill directory link or copy."""
+    return path.is_symlink() or _is_windows_reparse_point(path) or (
+        path.is_dir() and is_valid_skill_dir(path)
+    )
 
 
 def ensure_skill_dir_links(source: Path, target: Path) -> None:
@@ -112,12 +114,15 @@ def link_skill_dir(source: Path, target: Path) -> None:
 
 
 def remove_skill_dir_link(target: Path) -> None:
-    """Remove a skill directory link without deleting ordinary directories."""
+    """Remove a skill directory link or copy without deleting ordinary files."""
     if target.is_symlink():
         target.unlink()
         return
     if _is_windows_reparse_point(target):
         os.rmdir(target)
+        return
+    if target.is_dir():
+        shutil.rmtree(target, ignore_errors=True)
 
 
 def _create_directory_link(target_path: Path, link_path: Path) -> None:
@@ -126,19 +131,12 @@ def _create_directory_link(target_path: Path, link_path: Path) -> None:
         os.symlink(str(target_path), str(link_path), target_is_directory=True)
         return
     except OSError as exc:
-        errno = getattr(exc, "errno", None)
-        is_privilege_error = errno in (13, 1)  # EACCES/EPERM
         if sys.platform == "win32" and getattr(exc, "winerror", None) == ERROR_PRIVILEGE_NOT_HELD:
             _create_windows_junction(target_path, link_path)
             return
-        if not is_privilege_error:
-            raise
-        # Sandboxed runtimes (e.g. HarmonyOS app sandbox) forbid symlink(2)
-        # even inside the app's own filesDir. Fall back to a real copy so
-        # team skill directories remain usable without kernel privileges.
         logger.info(
-            "[TeamSkillLinks] symlink not permitted (%s); copying %s -> %s",
-            exc, target_path, link_path,
+            "[TeamSkillLinks] symlink failed (errno=%s); copying %s -> %s",
+            getattr(exc, "errno", None), target_path, link_path,
         )
         _copy_skill_directory(target_path, link_path)
 
@@ -146,6 +144,8 @@ def _create_directory_link(target_path: Path, link_path: Path) -> None:
 def _copy_skill_directory(target_path: Path, link_path: Path) -> None:
     """Copy a skill directory as a fallback when symlinks are unavailable."""
     link_path.parent.mkdir(parents=True, exist_ok=True)
+    if link_path.is_symlink() and not link_path.exists():
+        link_path.unlink()
     if link_path.exists() or os.path.lexists(link_path):
         return
     shutil.copytree(
