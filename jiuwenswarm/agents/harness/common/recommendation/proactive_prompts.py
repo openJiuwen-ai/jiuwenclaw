@@ -35,6 +35,7 @@ c. "need_exploration"：基于当前对话中用户明确表达的兴趣，推�
 
 ⚠️ 约束：
 - decision.type 为 "skill_recommend" 时，target 必须是「候选 Skill」列表里实际存在的 skill 名称。
+- 标注为「未安装·内置技能」或「未安装·直接用技能名安装，无需在线搜索」的 skill，推荐时应在 reason 中提示用户安装方式：直接用技能名安装即可，无需在线搜索。
 - 如当前无合适推荐，decision 返回 null。
 
 输出 JSON 格式：
@@ -55,6 +56,7 @@ DIRECTIVE_PROMPT = """\
 推荐类型：{rec_type}
 推荐内容：{target}
 推荐原因：{reason}
+{install_hint_section}
 
 请基于以上信息，以助手身份自然地向用户发起这条推荐。要求：
 - 2-3句话，口语化，不像广告
@@ -64,5 +66,6 @@ DIRECTIVE_PROMPT = """\
   · task_reminder：关切提醒，像贴心的助手
   · skill_recommend：从用户痛点切入，自然引出工具
   · need_exploration：像同事间的建议，让用户觉得这个方向有意思
+- 若有安装提示，务必在话术中原样传达，让用户知道正确的安装方式
 输出纯文本话术，不要 JSON，不要标题。
 """

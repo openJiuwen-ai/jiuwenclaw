@@ -312,13 +312,24 @@ def _format_skills_for_llm(skills: list[dict[str, Any]]) -> str:
 
     精简渲染——只给 skill 名 + 一句话描述（80 字符）+ 安装状态。
     tags 省略（LLM 不需要标签来选 skill，靠名字+描述即可）。
+    未安装的内置技能附带安装方式提示，避免 LLM 推荐后用户安装时走在线搜索路径找不到。
     """
     lines: list[str] = []
     for s in skills:
         name = s.get("name", "")
         desc = (s.get("description", "") or "")[:80]
-        installed = " [已安装]" if s.get("installed") else ""
-        lines.append(f"- {name} | {desc}{installed}")
+        installed = s.get("installed", False)
+        source = s.get("source", "")
+        install_hint = s.get("install_hint", "")
+        if installed:
+            status = "[已安装]"
+        elif install_hint:
+            status = f"[未安装·{install_hint}]"
+        elif source == "builtin":
+            status = "[未安装·内置技能]"
+        else:
+            status = "[未安装]"
+        lines.append(f"- {name} | {desc} {status}")
     return "\n".join(lines) if lines else "（无候选 skill）"
 
 

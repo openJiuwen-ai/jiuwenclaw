@@ -111,6 +111,7 @@ class RecommendationDecision:
     target: str  # skill name, task description, or exploration direction
     reason: str  # internal reason (for LLM message generation)
     urgency: float = 0.5  # 0.0..1.0
+    install_hint: str = ""  # for builtin skills not yet installed: how to install
 
 
 # ── Skill discovery ─────────────────────────────────────────────
@@ -177,6 +178,8 @@ def _get_all_skills() -> tuple[set[str], list[dict[str, Any]]]:
                 meta.setdefault("source", source)
                 meta.setdefault("description", meta.get("body", ""))
                 meta.pop("body", None)
+                if not is_installed and source == "builtin":
+                    meta["install_hint"] = "直接用技能名安装，无需在线搜索"
                 skills.append(meta)
                 if is_installed:
                     installed_names.add(meta["name"])
@@ -341,11 +344,15 @@ async def _analyze_and_decide(
                     )
                     decision = None
                 else:
+                    matched_skill = next(
+                        (s for s in skills if s.get("name") == dec_target), {}
+                    )
                     decision = RecommendationDecision(
                         type=dec_type,
                         target=dec_target,
                         reason=raw_decision.get("reason", ""),
                         urgency=_safe_urgency(raw_decision.get("urgency", 0.5)),
+                        install_hint=matched_skill.get("install_hint", ""),
                     )
             else:
                 decision = RecommendationDecision(
@@ -408,6 +415,9 @@ async def _trigger_main_agent(
         rec_type=decision.type,
         target=decision.target,
         reason=decision.reason,
+        install_hint_section=(
+            f"安装提示：{decision.install_hint}" if decision.install_hint else ""
+        ),
     )
     try:
         return bool(await trigger_callback(session_id, channel_id, query, decision,

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 _AUTO_SOURCE = "auto"
 _DEFAULT_SOURCE = "skillnet"
-_SUPPORTED_SOURCES = {"skillnet", "clawhub", "teamskillshub"}
+_SUPPORTED_SOURCES = {"skillnet", "clawhub", "teamskillshub", "builtin"}
 # identifier 对模型是统一字段；这里根据其形态推断底层来源。
 _INSTALL_SOURCE_BY_TARGET: tuple[tuple[str, str], ...] = (
     (r"^https?://", "skillnet"),
@@ -349,7 +349,7 @@ class SkillToolkit:
                     "success": False,
                     "source": raw_source,
                     "installed": False,
-                    "detail": "source is required and must be one of: 'skillnet', 'clawhub', 'teamskillshub'",
+                    "detail": "source is required and must be one of: 'skillnet', 'clawhub', 'teamskillshub', 'builtin'",
                 }
             normalized_source = self._normalize_source(raw_source)
             if normalized_source == _AUTO_SOURCE:
@@ -357,7 +357,7 @@ class SkillToolkit:
                     "success": False,
                     "source": normalized_source,
                     "installed": False,
-                    "detail": "source must be explicitly set to 'skillnet', 'clawhub', or 'teamskillshub'",
+                    "detail": "source must be explicitly set to 'skillnet', 'clawhub', 'teamskillshub', or 'builtin'",
                 }
 
             resolved_source = normalized_source
@@ -385,6 +385,10 @@ class SkillToolkit:
             elif resolved_source == "teamskillshub":
                 payload = await self._manager.handle_skills_team_skills_hub_install(
                     {"asset_id": target, "force": False}
+                )
+            elif resolved_source == "builtin":
+                payload = await self._manager.handle_skills_install_builtin(
+                    {"name": target}
                 )
             else:
                 payload = await self._manager.handle_skills_clawhub_download({"slug": target, "force": False})
@@ -555,7 +559,10 @@ class SkillToolkit:
                 description=(
                     "Search installable skills from SkillNet, ClawHub, and TeamSkillsHub. "
                     "Use the returned identifier with install_skill (SkillNet URL, ClawHub slug, "
-                    "or TeamSkillsHub asset_id when source is teamskillshub)."
+                    "or TeamSkillsHub asset_id when source is teamskillshub). "
+                    "NOTE: Builtin skills (shipped with the system but not yet installed) are NOT "
+                    "found via search. For builtin skills, use install_skill directly with "
+                    "source='builtin' and identifier=skill_name — no search needed."
                 ),
                 input_params={
                     "type": "object",
@@ -583,21 +590,24 @@ class SkillToolkit:
             make_tool(
                 name="install_skill",
                 description=(
-                    "Install a skill using the identifier returned by search_skill. "
-                    "Returns the installed skill summary and where to read SKILL.md."
+                    "Install a skill. For skills found via search_skill, pass the identifier "
+                    "and matching source. For builtin skills (not yet installed but available "
+                    "locally), use source='builtin' and identifier=skill_name directly — "
+                    "no prior search needed."
                 ),
                 input_params={
                     "type": "object",
                     "properties": {
                         "identifier": {
                             "type": "string",
-                            "description": "Source-agnostic identifier returned by search_skill.",
+                            "description": "Source-agnostic identifier returned by search_skill, or skill name for builtin skills.",
                         },
                         "source": {
                             "type": "string",
-                            "enum": ["skillnet", "clawhub", "teamskillshub"],
+                            "enum": ["skillnet", "clawhub", "teamskillshub", "builtin"],
                             "description": (
-                                "Explicit source matching search_skill items. "
+                                "Explicit source matching search_skill items, or 'builtin' "
+                                "for locally available skills that don't need online search. "
                                 "Use teamskillshub for Team Skills Hub."
                             ),
                         },
