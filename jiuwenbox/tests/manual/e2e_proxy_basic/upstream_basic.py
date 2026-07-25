@@ -1,24 +1,34 @@
 #!/usr/bin/env python3
-"""Neo4j-HTTP-API-faithful Basic-auth-enforcing upstream for E2E.
+"""Neo4j-HTTP-API-faithful Basic-auth-enforcing upstream for offline E2E.
 
-Real Neo4j could not be pulled on 205 (Docker Hub TLS blocked by the netentsec
-appliance, tarball 403, all configured mirrors broken). This stand-in emulates
-the Neo4j HTTP transaction endpoint shape and Basic auth semantics so the
-JiuwenBox Proxy Basic-injection code path is exercised identically.
+Real Neo4j 2026.06.0 could not be pulled on 205 (Docker Hub TLS blocked by the
+netentsec appliance, dist.neo4j.org tarball 403, all configured mirrors broken)
+and the host lacks Java 21. This stand-in emulates the real Neo4j HTTP
+transactional endpoint so the JiuwenBox Proxy Basic-injection code path is
+exercised identically to the real-Neo4j E2E (run_e2e.py with E2E_UPSTREAM=real).
 
-Endpoint (matches Neo4j 5.x):
-    POST /db/{database}/query/v2
-    body: {"statement": "RETURN 1 AS value"}
-    -> 200 {"keys":["value"],"records":[[1]]} when Basic creds match
-    -> 401 WWW-Authenticate: Basic realm="Neo4j" otherwise
+Interface emulated (verified against real Neo4j 2026.06.0,
+POST /db/{database}/tx/commit):
 
-The password is read from the E2E_UPSTREAM_PASSWORD env var (never argv).
+    request : {"statements":[{"statement":"RETURN 1 AS value"}]}
+    200 ok  : {"results":[{"columns":["value"],
+                            "data":[{"row":[1],"meta":[null]}]}],
+               "notifications":[],"errors":[]}
+    401     : {"errors":[{"code":"Neo.ClientError.Security.Unauthorized",
+                         "message":"Invalid credential."}]}
+               (or "...No authentication header supplied." when absent)
+
+This matches the real tx/commit response shape (results[].columns +
+results[].data[].row), NOT the deprecated Query API v2 shape
+({"data":{"fields":[...],"values":[[1]]}}). The password is read from the
+E2E_UPSTREAM_PASSWORD env var (never argv).
 """
 from __future__ import annotations
 
 import base64
 import json
 import os
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -26,6 +36,9 @@ USERNAME = os.environ.get("E2E_UPSTREAM_USERNAME", "neo4j")
 PASSWORD = os.environ.get("E2E_UPSTREAM_PASSWORD", "")
 LISTEN = ("127.0.0.1", int(os.environ.get("E2E_UPSTREAM_PORT", "17474")))
 EXPECTED = base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
+
+# POST /db/{database}/tx/commit  (also accept the legacy /db/data/transaction/commit)
+TX_COMMIT_RE = re.compile(r"^/db/[^/]+/tx/commit$|^/db/data/transaction/commit$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -40,6 +53,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _auth_error(self) -> tuple[str, str]:
+        auth = self.headers.get("Authorization", "")
+        if not auth:
+            return "No authentication header supplied.", ""
+        return "Invalid credential.", 'Basic realm="Neo4j"'
+
     def _check_auth(self) -> bool:
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Basic "):
@@ -50,24 +69,37 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length) if length else b""
         if not self._check_auth():
-            body = json.dumps({"errors": [{"code": "Neo.ClientError.Security.Unauthorized"}]}).encode()
-            self._send(401, body, {"WWW-Authenticate": 'Basic realm="Neo4j"'})
+            msg, www = self._auth_error()
+            body = json.dumps({"errors": [
+                {"code": "Neo.ClientError.Security.Unauthorized", "message": msg}
+            ]}, separators=(",", ":")).encode()
+            hdrs = {"WWW-Authenticate": www} if www else None
+            self._send(401, body, hdrs)
             return
         try:
             payload = json.loads(raw.decode() or "{}")
         except Exception:
             payload = {}
-        stmt = payload.get("statement", "")
+        # tx/commit body: {"statements":[{"statement":"..."}]}
+        stmts = payload.get("statements", [])
+        stmt = stmts[0].get("statement", "") if stmts else payload.get("statement", "")
         if "RETURN 1 AS value" in stmt:
-            out = {"keys": ["value"], "records": [[1]]}
+            out = {"results": [{"columns": ["value"],
+                                "data": [{"row": [1], "meta": [None]}]}],
+                   "notifications": [], "errors": []}
         else:
-            out = {"keys": [], "records": []}
-        self._send(200, json.dumps(out).encode())
+            out = {"results": [{"columns": [], "data": []}],
+                   "notifications": [], "errors": []}
+        self._send(200, json.dumps(out, separators=(",",":")).encode())
 
     def do_GET(self) -> None:  # noqa: N802
         if not self._check_auth():
-            self._send(401, b'{"errors":[{"code":"Neo.ClientError.Security.Unauthorized"}]}',
-                       {"WWW-Authenticate": 'Basic realm="Neo4j"'})
+            msg, www = self._auth_error()
+            body = json.dumps({"errors": [
+                {"code": "Neo.ClientError.Security.Unauthorized", "message": msg}
+            ]}, separators=(",", ":")).encode()
+            hdrs = {"WWW-Authenticate": www} if www else None
+            self._send(401, body, hdrs)
             return
         self._send(200, b'{"neo4j_version":"e2e-standin","bolt_direct":"bolt://disabled"}')
 
