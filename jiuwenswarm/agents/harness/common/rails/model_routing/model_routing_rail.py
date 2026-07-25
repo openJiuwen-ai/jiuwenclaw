@@ -160,7 +160,8 @@ class ModelRoutingRail(DeepAgentRail):
                 cls_reasoning = "no classifier, fallback"
             target = task_score(category, difficulty, self._mapper)
             recommended_cap, reason = _decide_and_select(
-                target, self._capability_table, ctx
+                target, self._capability_table, ctx,
+                category=category, difficulty=difficulty,
             )
             self._emit_decision(
                 ctx,

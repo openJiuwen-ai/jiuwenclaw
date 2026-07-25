@@ -229,7 +229,7 @@ def load_mapper_config() -> dict:
             classifier_cfg = {}
 
     logger.info(
-        "[ModelRouting] mapper config loaded from %s: categories=%s difficulties=%s scores=%d",
+        "[ModelRouting] mapper config loaded from %s: categories=%s difficulties=%s num_scores=%d",
         config_path, cats, diffs, len(score_table),
     )
     return {

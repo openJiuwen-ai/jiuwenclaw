@@ -44,12 +44,17 @@ def _decide_and_select(
     capability_table: list[ModelCapability],
     ctx: AgentCallbackContext,
     *,
+    category: str = "",
+    difficulty: str = "",
     privacy_trusted_only: bool = False,
 ) -> tuple[Optional[ModelCapability], str]:
     """按目标分数匹配 model_score 最接近的模型。
 
     - target_score: 分类器返回的目标分数（0-100）；50 为兜底。
+    - category / difficulty: 分类器给出的任务类型和难度。
     - privacy_trusted_only：隐私命中时候选限到 is_trusted=True（无 trusted 则保持原表兜底）。
+    - expertise：difficulty=="hard" 时优先选 model_expertise_category 含 category 的模型；
+      无匹配特长模型则保持原表兜底（与 vision 约束同样的 fallback 策略）。
     - vision：含图请求 -> 候选限到 model_type=="vision"；非含图 -> 排除 vision 候选。
     - 在候选里取 |model_score - target| 最小者，等距偏高分。
     """
@@ -61,6 +66,14 @@ def _decide_and_select(
         trusted_caps = [c for c in capability_table if c.is_trusted]
         if trusted_caps:
             capability_table = trusted_caps
+
+    # Hard 难度特长约束：优先选 model_expertise_category 含任务 category 的模型
+    # （如 coding/hard → 只选标了 coding 专长的模型；无特长匹配则全表兜底）
+    expertise_caps: list[ModelCapability] = []
+    if difficulty == "hard" and category:
+        expertise_caps = [c for c in capability_table if category in c.model_expertise_category]
+        if expertise_caps:
+            capability_table = expertise_caps
 
     if _has_image(ctx):
         # 含图请求：候选限到 model_type=="vision"（无则保持原表兜底）
@@ -74,4 +87,7 @@ def _decide_and_select(
             capability_table = non_vision
 
     pick = _pick_closest_score(capability_table, float(target_score))
-    return pick, f"score match: target={target_score} -> {pick.model_name}(score={_model_score(pick):g})"
+    reason_parts = [f"score match: target={target_score} -> {pick.model_name}(score={_model_score(pick):g})"]
+    if difficulty == "hard" and category and expertise_caps:
+        reason_parts.append(f"expertise={category}")
+    return pick, "; ".join(reason_parts)
