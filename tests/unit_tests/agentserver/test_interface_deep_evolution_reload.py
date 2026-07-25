@@ -94,10 +94,10 @@ def adapter() -> _EvolutionRailReloadHarness:
     return _EvolutionRailReloadHarness.for_test()
 
 
-def _evolution_config(*, enabled: bool, auto_scan: bool = False) -> dict[str, Any]:
+def _evolution_config(*, enabled: bool) -> dict[str, Any]:
     """Build a react-scoped config carrying only the evolution toggle."""
     return {
-        "evolution": {"enabled": enabled, "auto_scan": auto_scan},
+        "evolution": {"enabled": enabled},
         "model_name": "gpt-4",
     }
 
@@ -165,14 +165,12 @@ async def test_reload_retains_evolution_rail_when_unchanged_enabled(adapter, mon
     live = MagicMock(name="retained-evolution-rail")
     adapter._skill_evolution_rail = live
 
-    rails = await adapter.get_current_agent_rails(_evolution_config(enabled=True, auto_scan=True))
+    rails = await adapter.get_current_agent_rails(_evolution_config(enabled=True))
 
     # Retain path: the registered instance must be left untouched by core.
     assert live not in rails
     # In-place LLM update applied with the adapter's model + configured model name.
     live.update_llm.assert_called_once_with(adapter._model, "gpt-4")
-    # auto_scan refreshed from config.
-    assert live.auto_scan is True
     # Cached reference unchanged.
     assert adapter._skill_evolution_rail is live
     adapter._build_skill_evolution_rail.assert_not_called()
