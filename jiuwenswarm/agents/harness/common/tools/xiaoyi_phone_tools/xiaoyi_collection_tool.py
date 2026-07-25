@@ -246,7 +246,9 @@ async def delete_collection(
 ● content:必填字段，数据类型为string，功能描述是该字段是用户添加收藏的链接url或
   文本原文。适用于HYPER_LINK和TEXT类型。
 ● uri:必填字段，数据类型为string，功能描述是该字段是图片或文件的端存储地址链接。
-  适用于IMAGE和FILE类型。
+  适用于IMAGE和FILE类型。优先传入本地文件路径，工具会自动上传并换取可公网访问的
+  下载链接；若传入http(s)链接，须为可直接下载到文件本身的可公开访问地址，请勿
+  自行上传到外部站点再传其链接（容易返回非文件内容导致收藏异常）。
 ● sourceAppBundleName:非必填字段，数据类型为string，功能描述是标识该数据的来源
   应用。
 ● dataType:必填字段，数据类型为string，功能描述是标识数据类型。HYPER_LINK标识
