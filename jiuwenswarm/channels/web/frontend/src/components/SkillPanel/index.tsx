@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Loader2, Music2 } from 'lucide-react';
+import NewConversationIcon from '../../assets/new_conversation.svg?react';
 import { webRequest } from "../../services/webClient";
 import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
@@ -614,6 +615,8 @@ export function SkillPanel({
   const [symphonySaveError, setSymphonySaveError] = useState<string | null>(null);
   const [graphActionError, setGraphActionError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
+  const [openMenuSkillName, setOpenMenuSkillName] = useState<string | null>(null);
+  const [pinnedSkillNames, setPinnedSkillNames] = useState<Set<string>>(new Set());
   const [retrievalStatus, setRetrievalStatus] = useState<SkillRetrievalStatus | null>(null);
   const [retrievalTree, setRetrievalTree] = useState("");
   const [retrievalTreeNodes, setRetrievalTreeNodes] = useState<SkillIndexNode[]>([]);
@@ -1103,6 +1106,37 @@ export function SkillPanel({
     setDetailState("idle");
   }, []);
 
+  const handleGoToChat = useCallback((skillName: string) => {
+    window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+      detail: { skillName }
+    }));
+  }, []);
+
+  const handleEditSkill = useCallback((skillName: string) => {
+    window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+      detail: { skillName: 'skill_creator', suffixText: '帮我修改这个技能', secondSkillName: skillName }
+    }));
+  }, []);
+
+  // 通过聊天创建：新建会话，选中 skill_creator 技能并入 chip 后追加创建提示文案
+  const handleCreateViaChat = useCallback(() => {
+    window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+      detail: { skillName: 'skill_creator', suffixText: '请帮我创建一个具备xxx功能的技能/团队技能/多模态技能' }
+    }));
+  }, []);
+
+  const togglePinSkill = useCallback((skillName: string) => {
+    setPinnedSkillNames((prev) => {
+      const next = new Set(prev);
+      if (next.has(skillName)) {
+        next.delete(skillName);
+      } else {
+        next.add(skillName);
+      }
+      return next;
+    });
+  }, []);
+
   const handleOpenEvolution = useCallback((skillName: string) => {
     setEvolutionSkillName(skillName);
     setEvolutionModalOpen(true);
@@ -1417,8 +1451,15 @@ export function SkillPanel({
       default:
         break;
     }
+    if (pinnedSkillNames.size > 0) {
+      filtered = [...filtered].sort((a, b) => {
+        const ap = pinnedSkillNames.has(a.name) ? 0 : 1;
+        const bp = pinnedSkillNames.has(b.name) ? 0 : 1;
+        return ap - bp;
+      });
+    }
     return filtered;
-  }, [visibleSkills, mySkillsSubTab, installedSkillMap]);
+  }, [visibleSkills, mySkillsSubTab, installedSkillMap, pinnedSkillNames]);
 
   const toggleSkillDisabled = async (skillName: string) => {
     const skill = skills.find(s => s.name === skillName);
@@ -2259,6 +2300,28 @@ export function SkillPanel({
 
                     <div className="flex flex-col items-end gap-2">
                       <div className="flex items-center gap-4">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleGoToChat(selectedSkill.name);
+                          }}
+                          data-testid="skill-panel-my-detail-go-chat-btn"
+                          className="px-3 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50"
+                        >
+                          {t('skills.actions.goToChat')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleEditSkill(selectedSkill.name);
+                          }}
+                          data-testid="skill-panel-my-detail-edit-btn"
+                          className="px-3 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50"
+                        >
+                          {t('skills.actions.edit')}
+                        </button>
                         <div data-testid="skill-panel-switch-2" className="flex items-center gap-2">
                           <span data-testid="skill-panel-my-detail-enabled-label" className="text-sm whitespace-nowrap" style={{ color: 'var(--color-text-primary)' }}>{selectedSkill.enabled === false ? t('skills.mySkillsTabs.disabled') : t('skills.mySkillsTabs.enabled')}</span>
                           <Switch
@@ -2354,6 +2417,15 @@ export function SkillPanel({
                   <div data-testid="skill-panel-my-total-count" className="text-xs text-text-muted flex-shrink-0">
                     {t('skills.totalCount', { count: getMySkillsFiltered().length })}
                   </div>
+                  <button
+                    type="button"
+                    onClick={handleCreateViaChat}
+                    data-testid="skill-panel-create-via-chat-btn"
+                    className="flex items-center gap-1.5 h-8 px-3 rounded-[8px] text-sm text-text bg-secondary hover:opacity-80 flex-shrink-0"
+                  >
+                    <NewConversationIcon aria-hidden width="16" height="16" />
+                    {t('skills.actions.createViaChat')}
+                  </button>
                 </div>
 
                 <div data-testid="skill-panel-my-list" data-variant={viewMode} className={`mt-4 flex-1 min-h-0 overflow-y-auto ${viewMode === "grid" ? "flex flex-wrap gap-4 content-start" : "space-y-3"}`}>
@@ -2383,6 +2455,7 @@ export function SkillPanel({
                           key={skill.name}
                           onClick={() => handleOpenSkill(skill.name)}
                           data-testid="skill-panel-my-skill-card" data-variant={viewMode}
+                          data-menu-open={openMenuSkillName === skill.name}
                           className={`text-left border border-border bg-panel hover:bg-card  cursor-pointer ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
                           style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
                         >
@@ -2411,6 +2484,45 @@ export function SkillPanel({
                               </div>
                               <div className="flex flex-col items-end gap-2 flex-shrink-0">
                                 {renderEvolutionButton(skill)}
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      togglePinSkill(skill.name);
+                                      setOpenMenuSkillName(null);
+                                    }}
+                                    data-testid="skill-panel-my-skill-pin-btn"
+                                    className="px-2 py-1 rounded-md text-xs text-text-muted hover:text-text hover:bg-secondary/50"
+                                    title={pinnedSkillNames.has(skill.name) ? t('skills.actions.unpinSkill') : t('skills.actions.pinSkill')}
+                                  >
+                                    {pinnedSkillNames.has(skill.name) ? t('skills.actions.unpinSkill') : t('skills.actions.pinSkill')}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      handleGoToChat(skill.name);
+                                    }}
+                                    data-testid="skill-panel-my-skill-go-chat-btn"
+                                    className="px-2 py-1 rounded-md text-xs text-text-muted hover:text-text hover:bg-secondary/50"
+                                    title={t('skills.actions.goToChat')}
+                                  >
+                                    {t('skills.actions.goToChat')}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      handleEditSkill(skill.name);
+                                    }}
+                                    data-testid="skill-panel-my-skill-edit-btn"
+                                    className="px-2 py-1 rounded-md text-xs text-text-muted hover:text-text hover:bg-secondary/50"
+                                    title={t('skills.actions.edit')}
+                                  >
+                                    {t('skills.actions.edit')}
+                                  </button>
+                                </div>
                                 <div data-testid="skill-panel-switch-3" className="flex items-center gap-2">
                                   <Switch
                                     checked={!isDisabled}

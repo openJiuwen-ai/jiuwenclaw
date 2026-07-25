@@ -1552,7 +1552,7 @@
     }
   },
   "skills": {
-    "title": "技能管理",
+    "title": "技能",
     "subtitle": "管理并安装智能体可用的技能。",
     "tabs": {
       "mySkills": "我的技能",
@@ -1565,7 +1565,29 @@
       "enabled": "启用",
       "disabled": "禁用"
     },
+    "publishFilter": {
+      "all": "全部",
+      "published": "已发布",
+      "unpublished": "未发布"
+    },
+    "skillTypes": {
+      "industry": "行业技能包",
+      "team": "团队技能",
+      "skill": "多模态"
+    },
+    "marketplaceCategories": {
+      "all": "全部",
+      "software-development": "软件开发",
+      "office-productivity": "办公效率",
+      "content-creation": "内容创作",
+      "multimodal-media": "多模态媒体",
+      "data-science-research": "数据与科研",
+      "compliance-legal": "合规与法律",
+      "lifestyle-health": "生活与健康",
+      "finance-wealth": "金融与理财"
+    },
     "enable": "启用",
+    "disable": "禁用",
     "noDisabledSkills": "暂无禁用的技能",
     "noEnabledSkills": "暂无启用的技能",
     "setEnabledError": "设置技能启用状态失败",
@@ -1602,10 +1624,75 @@
       "uninstall": "卸载",
       "importLocal": "导入本地技能",
       "sourceManager": "源管理",
+      "create": "创建",
+      "uploadLocalSkill": "上传技能",
+      "documentToSkill": "知识转技能",
+      "createViaChat": "通过聊天创建",
       "backToList": "返回列表",
       "viewEvolution": "查看技能经验",
+      "evolutionTooltip": "该技能有新技能经验，可合成新版本",
       "enabling": "启用中...",
-      "disabling": "禁用中..."
+      "disabling": "禁用中...",
+      "pinSkill": "置顶技能",
+      "pinSkillPackage": "置顶技能包",
+      "unpinSkill": "取消置顶技能",
+      "unpinSkillPackage": "取消置顶技能包",
+      "edit": "编辑",
+      "refresh": "刷新",
+      "goToChat": "去聊天",
+      "goTry": "去试试",
+      "publish": "发布",
+      "synthesizeNewVersion": "重建技能",
+      "synthesizeTooltip": "将积累的技能经验与原技能合成，生成新的版本"
+    },
+    "publishForm": {
+      "title": "发布技能",
+      "name": "名称",
+      "skillName": "技能名",
+      "version": "版本号",
+      "displayName": "显示名",
+      "description": "描述",
+      "descriptionOptional": "描述（可选）",
+      "tags": "标签",
+      "tagsOptional": "标签（可选）",
+      "skillIcon": "Skill图标",
+      "skillIconOptional": "Skill图标（可选）",
+      "skillIconHint": "PNG文件，不能超过5MB",
+      "sha256": "SHA-256 校验",
+      "versionNote": "版本说明",
+      "versionNoteOptional": "版本说明（Swarm Skill，可选）",
+      "confirm": "确认发布",
+      "cancel": "取消",
+      "publish": "发布",
+      "placeholderSelect": "请选择",
+      "placeholderSha256": "打包完成后显示 64 位小写十六进制",
+      "noticeText": "技能将会被发布到 JiuwenHub。",
+      "noticeView": "去查看",
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+    },
+    "uploadSkillModal": {
+      "title": "上传技能",
+      "pathLabel": "本地技能路径",
+      "pathPlaceholder": "请输入技能文件/目录路径",
+      "notice": "文件夹或者.zip需要包含SKILL.md文件，.md 文件需包含 YAML 格式的技能名称和描述。",
+      "dropHint": "点击或拖动压缩包或文件到此处",
+      "confirm": "导入",
+      "cancel": "取消"
+    },
+    "docToSkillModal": {
+      "title": "知识转技能",
+      "subtitle": "提炼知识，生成技能",
+      "sourceLabel": "来源",
+      "sourceLocal": "本地上传",
+      "sourceLink": "链接",
+      "dropHint": "点击或拖动文档到此处\n上传压缩包",
+      "linkLabel": "链接",
+      "linkTooltip": "支持网页链接、视频链接",
+      "linkPlaceholder": "请输入",
+      "descLabel": "技能描述（可选）",
+      "descPlaceholder": "请输入",
+      "confirm": "确认",
+      "cancel": "取消"
     },
     "builtIn": "内置",
     "status": {
@@ -1641,6 +1728,15 @@
     },
     "detailLoading": "加载详情中...",
     "detailError": "加载详情失败",
+    "detail": {
+      "basicInfo": "基本信息",
+      "versionManage": "版本管理",
+      "tabs": {
+        "contentDetail": "内容详情",
+        "filePreview": "文件预览",
+        "skillExperience": "技能经验"
+      }
+    },
     "retrieval": {
       "title": "本地技能检索",
       "disabled": "检索已关闭",
