@@ -1150,11 +1150,7 @@ web_search:
   max_results: 8
   paid_provider_order:
     - petal
-    - tavily
-    - perplexity
     - bocha
-    - serper
-    - jina
 
 # DeepResearch 工具：默认开启
 enable_deepresearch: true

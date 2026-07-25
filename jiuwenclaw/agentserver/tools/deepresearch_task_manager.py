@@ -259,6 +259,7 @@ class DeepResearchTaskManager:
         return await get_deepresearch_manager(RuntimeScopeKey.from_ids("default", "default"))
 
     @staticmethod
+    @staticmethod
     def _read_config_value(
         name: str,
         default: str = "",
@@ -301,7 +302,7 @@ class DeepResearchTaskManager:
         """自动识别环境变量中已配置的检索引擎.
 
         返回：
-            Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"jina": "sk-xxx", "bocha": "sk-yyy"}
+            Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"bocha": "sk-xxx", "petal": "url"}
         """
         read = lambda name, default="": DeepResearchTaskManager._read_config_value(
             name, default, env
@@ -327,6 +328,11 @@ class DeepResearchTaskManager:
         perplexity_api_key = read("PERPLEXITY_API_KEY").strip()
         if perplexity_api_key:
             configured_engines[SearchEngine.PERPLEXITY.value] = perplexity_api_key
+
+        petal_url = str(get_local_config("PETAL_SEARCH_URL", "") or "").strip()
+        petal_headers = str(get_local_config("PETAL_SEARCH_HEADERS", "") or "").strip()
+        if petal_url and petal_headers:
+            configured_engines[SearchEngine.PETAL.value] = petal_url
 
         return configured_engines
 

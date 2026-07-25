@@ -30,12 +30,57 @@ _HARNESS_STRIP_PARAMS = frozenset({
 })
 
 
+def _configured_providers_summary() -> str:
+    try:
+        from jiuwenclaw.agentserver.tools.web_search.settings import load_web_search_settings
+        order = load_web_search_settings().paid_provider_order
+        if order:
+            return ", ".join(order)
+    except Exception:
+        logger.debug("Failed to load web search settings, using default providers", exc_info=True)
+    return "bocha, petal"
+
+
+def _has_enabled_free_engines() -> bool:
+    try:
+        from jiuwenclaw.agentserver.tools.web_search.free import _free_search_engines
+        return len(_free_search_engines()) > 0
+    except Exception:
+        logger.debug("Failed to check free search engines", exc_info=True)
+        return False
+
+
+def _build_web_search_description() -> str:
+    providers = _configured_providers_summary()
+    has_free = _has_enabled_free_engines()
+    if has_free:
+        return (
+            "网页搜索统一入口。"
+            "search_mode=default（默认）先付费后免费；"
+            "search_mode=paid 仅付费，失败报错；"
+            "search_mode=free 仅免费且不调用付费。"
+            f"search_source 可选，指定付费源名称（如 {providers}），"
+            "配合 search_mode=paid 使用时优先使用指定源，不可用时返回明确错误。"
+            "max_results 可选，限制单个 query 的最大返回条数。"
+        )
+    else:
+        return (
+            "网页搜索统一入口。"
+            "search_mode=default（默认）先付费后免费；"
+            "search_mode=paid 仅付费，失败报错。"
+            f"search_source 可选，指定付费源名称（如 {providers}），"
+            "配合 search_mode=paid 使用时优先使用指定源，不可用时返回明确错误。"
+            "max_results 可选，限制单个 query 的最大返回条数。"
+        )
+
+
 @tool(
     name="web_search",
     description=(
-        "网页搜索统一入口。search_mode=default（默认）先付费后免费；"
-        "search_mode=paid 仅付费，失败报错；search_mode=free 仅免费且不调用付费。"
-        "search_source 可选，指定付费源名称（如 bocha/petal/tavily/perplexity/serper/jina），"
+        "网页搜索统一入口。"
+        "search_mode=default（默认）先付费后免费；"
+        "search_mode=paid 仅付费，失败报错。"
+        "search_source 可选，指定付费源名称，"
         "配合 search_mode=paid 使用时优先使用指定源，不可用时返回明确错误。"
         "max_results 可选，限制单个 query 的最大返回条数。"
     ),
@@ -70,6 +115,9 @@ async def web_search(
 
 
 def _fallback_web_search_input_params(language: str) -> dict[str, Any]:
+    providers = _configured_providers_summary()
+    has_free = _has_enabled_free_engines()
+    search_mode_desc = "default | paid | free" if has_free else "default | paid"
     try:
         from openjiuwen.harness.prompts import resolve_language
         from openjiuwen.harness.prompts.sections.tools.web_tools import _schema_free_search
@@ -81,12 +129,12 @@ def _fallback_web_search_input_params(language: str) -> dict[str, Any]:
             props.pop(key, None)
         props["search_mode"] = {
             "type": "string",
-            "description": "default | paid | free",
+            "description": search_mode_desc,
             "default": "default",
         }
         props["search_source"] = {
             "type": "string",
-            "description": "指定付费源名称：bocha | petal | tavily | perplexity | serper | jina。配合 search_mode=paid 使用。",
+            "description": f"指定付费源名称：{providers}。配合 search_mode=paid 使用。",
             "default": None,
         }
         if "max_results" in props:
@@ -106,9 +154,9 @@ def _fallback_web_search_input_params(language: str) -> dict[str, Any]:
                 "search_mode": {
                     "type": "string",
                     "default": "default",
-                    "description": "default | paid | free",
+                    "description": search_mode_desc,
                 },
-                "search_source": {"type": "string", "description": "指定付费源：bocha | petal | tavily 等"},
+                "search_source": {"type": "string", "description": f"指定付费源：{providers}"},
                 "max_results": {"type": "integer", "description": "Optional."},
             },
             "required": ["query"],
@@ -131,18 +179,9 @@ def ensure_web_search_harness_metadata() -> None:
             return "web_search"
 
         def get_description(self, language: str = "cn") -> str:
-            desc = (web_search.card.description or "").strip()
-            if desc:
-                return desc
-            return {
-                "cn": "网页搜索唯一入口。",
-                "en": "Unified web search entry point.",
-            }.get(language, desc or "Unified web search entry point.")
+            return _build_web_search_description()
 
         def get_input_params(self, language: str = "cn") -> dict[str, Any]:
-            params = web_search.card.input_params
-            if isinstance(params, dict) and params:
-                return dict(params)
             return _fallback_web_search_input_params(language)
 
     register_tool_provider(_WebSearchMetadataProvider())
@@ -156,18 +195,11 @@ def build_web_search_tool_card(
     id_prefix: str = "JiuwenHarnessWebSearch",
 ) -> ToolCard:
     ensure_web_search_harness_metadata()
-    base_card = web_search.card
-    if base_card is None:
-        raise RuntimeError("web_search @tool card is missing")
-
     suffix = (agent_id or "").strip() or uuid.uuid4().hex
-    input_params = base_card.input_params
-    if not isinstance(input_params, dict) or not input_params:
-        input_params = _fallback_web_search_input_params(language)
 
     return ToolCard(
         id=f"{id_prefix}_{suffix}",
         name="web_search",
-        description=(base_card.description or "").strip(),
-        input_params=dict(input_params),
+        description=_build_web_search_description(),
+        input_params=dict(_fallback_web_search_input_params(language)),
     )

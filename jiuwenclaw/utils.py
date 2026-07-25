@@ -104,6 +104,8 @@ def resolve_env_vars(value: Any) -> Any:
             var_name = match.group(1)
             default = match.group(2)
             current = get_local_config(var_name)
+            if current is None or current == "":
+                current = os.environ.get(var_name)
             if default is not None:
                 if current is None or current == "":
                     return default

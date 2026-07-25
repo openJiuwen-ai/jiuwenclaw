@@ -11,6 +11,9 @@ import logging
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from jiuwenclaw.agentserver.memory.external_memory_config import (
+    _VALID_ENGINES as _VALID_MEMORY_ENGINES,
+)
 from jiuwenclaw.agentserver.tenant_catalog_registry import TenantAgentSpec
 from jiuwenclaw.local_env_config import EnvNsIdError, normalize_env_ns_id
 
@@ -61,24 +64,6 @@ def materialize_sync_env(env_dict: dict[str, Any]) -> dict[str, str]:
     return {str(k): str(v) for k, v in env_dict.items() if v is not None}
 
 
-def _config_memory_engine(config: dict[str, Any]) -> str:
-    from jiuwenclaw.agentserver.memory.external_memory_config import get_memory_engine
-
-    return get_memory_engine(config)
-
-
-def _config_evolution_enabled(config: dict[str, Any]) -> bool:
-    react = config.get("react")
-    if isinstance(react, dict):
-        evo = react.get("evolution")
-        if isinstance(evo, dict):
-            return bool(evo.get("enabled", False))
-    evo = config.get("evolution")
-    if isinstance(evo, dict):
-        return bool(evo.get("enabled", False))
-    return False
-
-
 def _env_bool(value: Any) -> bool | None:
     if value is None:
         return None
@@ -90,51 +75,109 @@ def _env_bool(value: Any) -> bool | None:
     return None
 
 
+def _ensure_memory_dict(result: dict[str, Any]) -> dict[str, Any]:
+    memory = result.get("memory")
+    if not isinstance(memory, dict):
+        memory = {}
+        result["memory"] = memory
+    return memory
+
+
+def _ensure_react_evolution_dict(result: dict[str, Any]) -> dict[str, Any]:
+    """Prefer config.react.evolution; migrate bare config.evolution into react when needed."""
+    react = result.get("react")
+    if not isinstance(react, dict):
+        react = {}
+        result["react"] = react
+    evolution = react.get("evolution")
+    if not isinstance(evolution, dict):
+        top = result.pop("evolution", None)
+        evolution = top if isinstance(top, dict) else {}
+        react["evolution"] = evolution
+    else:
+        top = result.pop("evolution", None)
+        if isinstance(top, dict) and top:
+            logger.warning(
+                "sync_agents_configs: discarding top-level evolution=%r; "
+                "react.evolution takes precedence",
+                top,
+            )
+    return evolution
+
+
 def synthesize_config(
     config: Any,
     env: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Ensure memory/evolution authority lives in config; warn on env disagreement."""
+    """Materialize memory/evolution into config; protocol authority is env.
+
+    Writes ``config.memory.engine`` and ``config.react.evolution`` from
+    ``MEMORY_ENGINE`` / ``EVOLUTION_ENABLED``. Mis-sent config blocks are
+    overlaid from env (warn). When env values are blank/absent, falls back to
+    existing config then defaults (``builtin`` / ``enabled=false``).
+    """
     if not isinstance(config, dict):
         raise ValueError("agent config must be an object")
     result = copy.deepcopy(config)
 
-    memory = result.setdefault("memory", {})
-    if not isinstance(memory, dict):
-        memory = {}
-        result["memory"] = memory
-    memory.setdefault("engine", "builtin")
+    inbound_engine: str | None = None
+    mem_in = config.get("memory")
+    if isinstance(mem_in, dict) and mem_in.get("engine") is not None:
+        inbound_engine = str(mem_in.get("engine")).strip().lower()
 
-    react = result.get("react")
-    if isinstance(react, dict):
-        evolution = react.setdefault("evolution", {})
-        if isinstance(evolution, dict):
-            evolution.setdefault("enabled", False)
-    else:
-        evolution_top = result.setdefault("evolution", {})
-        if isinstance(evolution_top, dict):
-            evolution_top.setdefault("enabled", False)
+    inbound_evo: bool | None = None
+    react_in = config.get("react")
+    if isinstance(react_in, dict) and isinstance(react_in.get("evolution"), dict):
+        if "enabled" in react_in["evolution"]:
+            inbound_evo = bool(react_in["evolution"].get("enabled"))
+    elif isinstance(config.get("evolution"), dict) and "enabled" in config["evolution"]:
+        inbound_evo = bool(config["evolution"].get("enabled"))
+
+    memory = _ensure_memory_dict(result)
+    evolution = _ensure_react_evolution_dict(result)
+
+    engine = (
+        inbound_engine
+        if inbound_engine in _VALID_MEMORY_ENGINES
+        else "builtin"
+    )
+    evo_enabled = bool(inbound_evo) if inbound_evo is not None else False
 
     if isinstance(env, dict):
-        cfg_engine = _config_memory_engine(result)
-        env_engine = env.get("MEMORY_ENGINE")
-        if env_engine is not None:
-            env_engine_text = str(env_engine).strip().lower()
-            if env_engine_text and env_engine_text != cfg_engine:
+        env_engine_raw = env.get("MEMORY_ENGINE")
+        if env_engine_raw is not None:
+            env_engine_text = str(env_engine_raw).strip().lower()
+            if env_engine_text in _VALID_MEMORY_ENGINES:
+                if inbound_engine is not None and inbound_engine != env_engine_text:
+                    logger.warning(
+                        "sync_agents_configs: MEMORY_ENGINE env=%r overlays "
+                        "mis-sent config engine=%r",
+                        env_engine_text,
+                        inbound_engine,
+                    )
+                engine = env_engine_text
+            elif env_engine_text:
                 logger.warning(
-                    "sync_agents_configs: MEMORY_ENGINE env=%r disagrees with config engine=%r; keeping config",
+                    "sync_agents_configs: invalid MEMORY_ENGINE env=%r; "
+                    "keeping engine=%r",
                     env_engine_text,
-                    cfg_engine,
+                    engine,
                 )
 
-        cfg_evo = _config_evolution_enabled(result)
         env_evo = _env_bool(env.get("EVOLUTION_ENABLED"))
-        if env_evo is not None and env_evo != cfg_evo:
-            logger.warning(
-                "sync_agents_configs: EVOLUTION_ENABLED env=%r disagrees with config enabled=%r; keeping config",
-                env_evo,
-                cfg_evo,
-            )
+        if env_evo is not None:
+            if inbound_evo is not None and inbound_evo != env_evo:
+                logger.warning(
+                    "sync_agents_configs: EVOLUTION_ENABLED env=%r overlays "
+                    "mis-sent config enabled=%r",
+                    env.get("EVOLUTION_ENABLED"),
+                    inbound_evo,
+                )
+            evo_enabled = env_evo
+
+    memory["engine"] = engine
+    evolution["enabled"] = evo_enabled
+    evolution.setdefault("auto_scan", False)
 
     return result
 

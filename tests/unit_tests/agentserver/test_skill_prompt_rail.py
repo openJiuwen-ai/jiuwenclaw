@@ -95,3 +95,19 @@ def test_skill_protocol_en_requires_cancelled_on_abandon():
     assert "todo_modify" in text
     assert "cancelled" in text
     assert "not to generate the PPT" in text
+
+
+def test_skill_protocol_cn_requires_acceleration_first():
+    """加速通道硬约束：第一个工具调用必须是 skill_acceleration_exec。"""
+    text = _build_skill_protocol_section_text("cn")
+    assert "第一个工具调用必须是" in text
+    assert "禁止" in text and "web_search" in text and "fetch_webpage" in text
+    assert "仍须立即调用" in text
+
+
+def test_skill_protocol_en_requires_acceleration_first():
+    """Acceleration channel hard constraint: FIRST tool call MUST be skill_acceleration_exec."""
+    text = _build_skill_protocol_section_text("en")
+    assert "FIRST tool call MUST be" in text
+    assert "FORBIDDEN" in text and "web_search" in text and "fetch_webpage" in text
+    assert "you MUST still call" in text

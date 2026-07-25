@@ -24,7 +24,7 @@ _USER_AGENT = (
 _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
 
 
-def _env_flag(name: str, *, default: bool = True) -> bool:
+def _env_flag(name: str, *, default: bool = False) -> bool:
     raw = read_env_if_set(name)
     if raw is None or not str(raw).strip():
         return default
