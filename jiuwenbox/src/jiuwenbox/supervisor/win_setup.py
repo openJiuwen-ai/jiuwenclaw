@@ -73,6 +73,18 @@ def _get_netapi32() -> ctypes.WinDLL:
             ctypes.POINTER(ctypes.c_void_p),
         ]
         _netapi32.NetUserGetInfo.restype = wintypes.DWORD
+        # NetUserSetInfo(servername, username, level, buf, parm_err): 重设用户属性 (含密码).
+        _netapi32.NetUserSetInfo.argtypes = [
+            wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
+        ]
+        _netapi32.NetUserSetInfo.restype = wintypes.DWORD
+        # NetUserDel(servername, username): 删用户 (uninstall).
+        _netapi32.NetUserDel.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        _netapi32.NetUserDel.restype = wintypes.DWORD
+        # NetLocalGroupDel(servername, groupname): 删本地组 (uninstall).
+        _netapi32.NetLocalGroupDel.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        _netapi32.NetLocalGroupDel.restype = wintypes.DWORD
         _netapi32.NetApiBufferFree.argtypes = [ctypes.c_void_p]
         _netapi32.NetApiBufferFree.restype = wintypes.DWORD
     return _netapi32
@@ -264,10 +276,13 @@ USER_PRIV_USER = 1
 
 
 def _generate_password() -> str:
-    """生成随机强密码 (字母+数字+符号, 满足复杂度要求)."""
-    import string
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
-    return "".join(secrets.choice(alphabet) for _ in range(const.SANDBOX_USER_PASSWORD_LENGTH))
+    """生成 jbx-sandbox 用户密码.
+
+    调试阶段固定为 ``"000000"``, 方便排查 (随机密码会因 uninstall 不删用户 +
+    create_sandbox_user 已存在不重设密码导致用户密码与注册表不一致, 见 1326).
+    后期改为从配置文件读取 (用户可配).
+    """
+    return "000000"
 
 
 def _create_sandbox_user(password: str) -> None:
@@ -296,10 +311,39 @@ def _create_sandbox_user(password: str) -> None:
     if ret == 0:
         logger.info("创建沙箱用户 %s 成功", const.SANDBOX_USER_NAME)
     elif ret == 2224:
-        logger.info("沙箱用户 %s 已存在, 跳过创建", const.SANDBOX_USER_NAME)
+        # 用户已存在: 重设密码 = 本次生成的密码, 保证用户密码与注册表
+        # DPAPI 密码一致 (否则 CreateProcessWithLogonW 1326 登录失败).
+        logger.info("沙箱用户 %s 已存在, 重设密码", const.SANDBOX_USER_NAME)
+        _set_user_password(const.SANDBOX_USER_NAME, password)
     else:
         raise RuntimeError(
             f"NetUserAdd 失败: ret={ret} err={err.value}"
+        )
+
+
+def _set_user_password(user_name: str, password: str) -> None:
+    """重设已有用户的密码 (NetUserSetInfo level=1).
+
+    install 幂等场景: 用户已存在时把密码重设为本次生成的值, 保证用户密码
+    与注册表 DPAPI 密码一致 (见 1326). 需 admin (install 本身 admin).
+    """
+    netapi32 = _get_netapi32()
+    info = _USER_INFO_1()
+    info.usri1_name = user_name  # LPWSTR 直接赋 str (见 _create_sandbox_user 注释)
+    info.usri1_password = password
+    info.usri1_password_age = 0
+    info.usri1_priv = USER_PRIV_USER
+    info.usri1_home_dir = None
+    info.usri1_comment = "JiuwenBox sandbox user"
+    info.usri1_flags = const.SANDBOX_USER_FLAGS
+    info.usri1_script_path = None
+    err = wintypes.DWORD(0)
+    ret = netapi32.NetUserSetInfo(
+        None, user_name, const.USER_INFO_1_LEVEL, ctypes.byref(info), ctypes.byref(err),
+    )
+    if ret != 0:
+        raise RuntimeError(
+            f"NetUserSetInfo 失败: ret={ret} err={err.value}"
         )
 
 
@@ -699,7 +743,23 @@ def uninstall() -> None:
         win_wfp.uninstall_wfp_filters()
     except Exception:  # noqa: BLE001
         logger.warning("WFP 卸载失败", exc_info=True)
-    # 删用户/组略 (保留账户避免残留密码); 仅清注册表标记.
+    # 删用户 + 组 (best-effort: 不存在则跳过). 原实现注释说"保留账户避免残留密码"
+    # 不删用户, 但这导致 reinstall 时用户密码与注册表密码不一致 (见 1326).
+    # 改为彻底删用户/组, reinstall 干净重建.
+    netapi32 = _get_netapi32()
+    ret = netapi32.NetUserDel(None, const.SANDBOX_USER_NAME)
+    # 0 = 成功; 2201 = NERR_UserNotFound (已不存在, 幂等).
+    if ret not in (0, 2201):
+        logger.warning("NetUserDel 返回 %d (继续)", ret)
+    else:
+        logger.info("删除沙箱用户 %s", const.SANDBOX_USER_NAME)
+    ret = netapi32.NetLocalGroupDel(None, const.SANDBOX_USER_GROUP)
+    # 0 = 成功; 2201 = NERR_GroupNotFound.
+    if ret not in (0, 2201):
+        logger.warning("NetLocalGroupDel 返回 %d (继续)", ret)
+    else:
+        logger.info("删除沙箱组 %s", const.SANDBOX_USER_GROUP)
+    # 仅清注册表标记 (其他值 SANDBOX_USER_SID/PW 等保留也无害, reinstall 会覆盖).
     _reg_set_str(const.REG_VALUE_INSTALLED, "")
     logger.info("Windows 沙箱卸载完成")
 

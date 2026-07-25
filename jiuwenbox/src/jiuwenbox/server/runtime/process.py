@@ -151,6 +151,23 @@ _SANDBOX_DAEMON_BYTES = SANDBOX_DAEMON_SOURCE.read_bytes()
 PYTHON_EXECUTABLE = "python3"
 
 
+def _alloc_loopback_port() -> int:
+    """分配一个空闲 TCP loopback 端口 (OS 自动选, bind 后立即 close).
+
+    给 box-server 与 runner 的 TCP 控制通道用: box-server 分配端口, env 注入给
+    runner, runner bind 同端口做 server, box-server 每次 exec connect.
+    端口在 spawn runner 之间分配, 短暂 close 后 runner resume 时 bind 同端口
+    (TIME_WAIT 风险低, SO_REUSEADDR 兜底). 极小概率端口被抢占, runner bind
+    失败会退出, box-server 检测到 runner 退出报错.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
 def _osfhandle_to_fd(kernel32, handle: int) -> int:
     """把 Windows HANDLE 包装成 C 文件描述符 (供 os.fdopen 使用).
 
@@ -2843,38 +2860,27 @@ class ProcessRuntime(RuntimeAdapter):
             )
         proxy_start = policy.windows.proxy.port_range_start
         proxy_end = policy.windows.proxy.port_range_end
-        runner_pid, stdin_w, stdout_r, proc_handle, thread_handle = (
-            win_exec.two_hop_spawn(
-                sandbox_id,
-                sandbox_user=user,
-                sandbox_password=password,
-                workspace=workspace,
-                proxy_port_start=proxy_start,
-                proxy_port_end=proxy_end,
-                env=env,
-            )
+        # 分配 TCP loopback 控制端口 (OS 自动分配空闲端口), env 注入给 runner,
+        # runner bind 做 server, box-server 每次 exec connect. 对齐 Linux AF_UNIX.
+        control_port = _alloc_loopback_port()
+        runner_pid, proc_handle, thread_handle = win_exec.two_hop_spawn(
+            sandbox_id,
+            sandbox_user=user,
+            sandbox_password=password,
+            workspace=workspace,
+            proxy_port_start=proxy_start,
+            proxy_port_end=proxy_end,
+            control_port=control_port,
+            env=env,
         )
         logger.info(
             "[SandboxWin] %s runner spawned (two-hop): pid=%s, workspace=%s, "
-            "proxy_port=%s-%s, state=SUSPENDED",
-            sandbox_id, runner_pid, workspace, proxy_start, proxy_end,
+            "proxy_port=%s-%s, control_port=%s, state=SUSPENDED",
+            sandbox_id, runner_pid, workspace, proxy_start, proxy_end, control_port,
         )
-        # 把 pipe HANDLE 转成 fd 并打开持久化文件对象: 每个 sandbox
-        # 一次 open_osfhandle, 后续所有 exec/file-op roundtrip 复用同一对
-        # 文件对象 (roundtrip 不 with/close, 销毁时统一 close). 反之每次
-        # roundtrip 都 open_osfhandle 同一 handle 会失败, 沙箱只能 exec 一次.
-        kernel32 = win_exec._get_kernel32()
-        stdin_fd = _osfhandle_to_fd(kernel32, stdin_w)
-        stdout_fd = _osfhandle_to_fd(kernel32, stdout_r)
-        # closefd 默认 True: f.close() 会同时关底层 fd (销毁时一次性清理).
-        stdin_wf = os.fdopen(stdin_fd, "wb")
-        stdout_rf = os.fdopen(stdout_fd, "rb")
         self._win_runners[sandbox_id] = {
             "pid": runner_pid,
-            "stdin_handle": stdin_w,
-            "stdout_handle": stdout_r,
-            "stdin_wf": stdin_wf,
-            "stdout_rf": stdout_rf,
+            "control_port": control_port,  # TCP loopback, 每次 exec connect
             "process_handle": proc_handle,
             "thread_handle": thread_handle,  # Job assign+resume 后 CloseHandle
             "workspace": workspace,
@@ -2970,26 +2976,15 @@ class ProcessRuntime(RuntimeAdapter):
 
     @staticmethod
     def _close_win_pipe_handles(runner: dict) -> None:
-        """关闭 _create_windows 打开的持久化 pipe 文件对象 + fd + HANDLE."""
-        from jiuwenbox.supervisor import win_exec
-        kernel32 = win_exec._get_kernel32()
-        for key in ("stdin_wf", "stdout_rf"):
-            f = runner.get(key)
-            if f is not None:
-                try:
-                    f.close()
-                except Exception:  # noqa: BLE001
-                    pass
-        # 文件对象用 closefd=False 打开, with/f.close 不关底层 fd; 这里显式关.
-        for fd_key in ("stdin_handle", "stdout_handle"):
-            # 这些是原始 HANDLE, 不是 fd; fd 已被文件对象间接持有.
-            # open_osfhandle 产生的 fd 在文件对象关闭后仍需手动 close.
-            handle = runner.get(fd_key)
-            if isinstance(handle, int):
-                try:
-                    kernel32.CloseHandle(wintypes.HANDLE(handle))
-                except Exception:  # noqa: BLE001
-                    pass
+        """关闭 _create_windows 持久化资源.
+
+        改 TCP loopback 后不再有 pipe 文件对象/HANDLE (runner dict 只存
+        control_port/process_handle/thread_handle). 保留方法占位供
+        _stop_windows 调用, 实际无 pipe 要关.
+        """
+        # process_handle/thread_handle 由 _stop_windows 直接调 win_exec._stop_runner
+        # + CloseHandle 处理, 不在此.
+        return
 
     async def _is_running_windows(self, sandbox_id: str) -> bool:
         runner = self._win_runners.get(sandbox_id)
@@ -3150,32 +3145,36 @@ class ProcessRuntime(RuntimeAdapter):
 
     @staticmethod
     def _win_roundtrip_blocking(
-        stdin_wf, stdout_rf,
+        control_port: int,
         request_type: str, payload: dict[str, Any],
         body_bytes: bytes | None,
         want_body: bool,
     ) -> "tuple[dict[str, Any] | None, bytes]":
-        """同步执行一次 runner pipe roundtrip (在 executor 线程调用).
+        """同步执行一次 runner TCP roundtrip (在 executor 线程调用).
 
-        复用 sandbox 创建时打开的持久化文件对象 (stdin_wf/stdout_rf),
-        不在此 open/close fd. 发请求帧 (+可选 body 帧) -> 读响应帧
-        (->可选 body 帧). 不 shutdown pipe (会单向关闭, 破坏后续 roundtrip).
+        每次 exec/file-op 新建一条 TCP 连接: connect 127.0.0.1:control_port
+        -> 发 header 帧 (+可选 body 帧) -> 读响应帧 (->可选 body 帧) -> close.
+        对齐 Linux AF_UNIX 的 _connect_daemon_socket (一连接一请求).
         """
         import json
-        header_blob = encode_request(request_type=request_type, payload=payload)
-        send_frame(stdin_wf, header_blob)
-        stdin_wf.flush()
-        if body_bytes:
-            send_frame(stdin_wf, body_bytes)
-            stdin_wf.flush()
-        blob = recv_frame(stdout_rf, DAEMON_MAX_RESPONSE_BYTES)
-        response = json.loads(blob.decode("utf-8"))
-        body = b""
-        if want_body and response.get("ok"):
-            size = int(response.get("content_size") or 0)
-            if size > 0:
-                body = recv_frame(stdout_rf, MAX_FILE_BYTES)
-        return response, body
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(DAEMON_CONNECT_TIMEOUT_SECONDS)
+        try:
+            sock.connect(("127.0.0.1", control_port))
+            header_blob = encode_request(request_type=request_type, payload=payload)
+            send_frame(sock, header_blob)
+            if body_bytes:
+                send_frame(sock, body_bytes)
+            blob = recv_frame(sock, DAEMON_MAX_RESPONSE_BYTES)
+            response = json.loads(blob.decode("utf-8"))
+            body = b""
+            if want_body and response.get("ok"):
+                size = int(response.get("content_size") or 0)
+                if size > 0:
+                    body = recv_frame(sock, MAX_FILE_BYTES)
+            return response, body
+        finally:
+            sock.close()
 
     async def _win_runner_roundtrip(
         self,
@@ -3197,7 +3196,7 @@ class ProcessRuntime(RuntimeAdapter):
                 response, _ = await loop.run_in_executor(
                     None,
                     self._win_roundtrip_blocking,
-                    runner["stdin_wf"], runner["stdout_rf"],
+                    runner["control_port"],
                     request_type, payload, body_bytes, False,
                 )
                 return response
@@ -3222,7 +3221,7 @@ class ProcessRuntime(RuntimeAdapter):
                 response, content = await loop.run_in_executor(
                     None,
                     self._win_roundtrip_blocking,
-                    runner["stdin_wf"], runner["stdout_rf"],
+                    runner["control_port"],
                     request_type, payload, None, True,
                 )
                 return response, content
@@ -3251,12 +3250,20 @@ class ProcessRuntime(RuntimeAdapter):
 
     @staticmethod
     def _send_runner_shutdown_blocking(runner: dict) -> None:
+        """connect control port 发 shutdown 帧 (改 socket 后不再用 stdin pipe)."""
         try:
-            send_frame(
-                runner["stdin_wf"],
-                encode_request(request_type=REQUEST_TYPE_SHUTDOWN),
-            )
-            runner["stdin_wf"].flush()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(DAEMON_SHUTDOWN_TIMEOUT_SECONDS)
+            try:
+                sock.connect(("127.0.0.1", runner["control_port"]))
+                send_frame(sock, encode_request(request_type=REQUEST_TYPE_SHUTDOWN))
+                # runner 收 shutdown 后会回 {"ok": True} 并退出, 读一下 drain.
+                try:
+                    recv_frame(sock, DAEMON_MAX_RESPONSE_BYTES)
+                except (OSError, ConnectionError, ValueError):
+                    pass
+            finally:
+                sock.close()
         except Exception:  # noqa: BLE001
             logger.debug("runner shutdown 发送异常", exc_info=True)
 

@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 RUNNER_MODULE = "jiuwenbox.supervisor.win_exec"
 RUNNER_SUBCOMMAND = "runner"
 
+# box-server 与 runner 的 TCP loopback 控制端口 (env 注入).
+# box-server 分配空闲端口, env 传给 runner, runner bind 同端口做 server,
+# box-server 每次 exec connect. 对齐 Linux AF_UNIX listener 模型
+# (Windows 不能传 fd, 改传端口号).
+LISTENER_PORT_ENV = "JIUWENBOX_CONTROL_LISTENER_PORT"
+
 
 def _require_windows() -> None:
     if sys.platform != "win32":
@@ -225,15 +231,29 @@ def _clear_inherit(handle: int) -> None:
 # ---------------------------------------------------------------------------
 # broker 侧: 第一跳.
 # ---------------------------------------------------------------------------
+def _build_env_block(env: dict[str, str]) -> ctypes.c_wchar_p:
+    """构造 CreateProcessWithLogonW 的 lpEnvironment (UTF-16 环境块).
+
+    格式: 一串 "KEY=VALUE\\0" 序列, 末尾额外一个 "\\0" (双 null 终止).
+    CreateProcessWithLogonW 要求 UNICODE (UTF-16) 环境块.
+    """
+    parts = [f"{k}={v}" for k, v in env.items()]
+    block = "\0".join(parts) + "\0\0"
+    return ctypes.create_unicode_buffer(block)
+
+
 def _build_runner_command(
     sandbox_id: str,
     workspace: str,
     proxy_port_start: int,
     proxy_port_end: int,
+    control_port: int,
 ) -> str:
     """构造 runner 命令行 (CreateProcessWithLogonW 的 lpCommandLine).
 
     用 ``python -m jiuwenbox.supervisor.win_exec runner --sandbox-id ...``.
+    control_port 经命令行参数传 (而非 env), 避开 CreateProcessWithLogonW
+    传 env 块时 WinError 87 (ctypes 传 c_wchar_Array 给 c_void_p 参数报错).
     """
     py = sys.executable or "python"
     parts = [
@@ -244,6 +264,7 @@ def _build_runner_command(
         "--workspace", workspace,
         "--proxy-port-start", str(proxy_port_start),
         "--proxy-port-end", str(proxy_port_end),
+        "--control-port", str(control_port),
     ]
     # Windows 命令行需要引号包裹含空格的参数.
     quoted = []
@@ -263,8 +284,9 @@ def two_hop_spawn(
     workspace: str,
     proxy_port_start: int,
     proxy_port_end: int,
+    control_port: int,
     env: dict[str, str] | None = None,
-) -> "tuple[int, int, int, int, int]":
+) -> "tuple[int, int, int]":
     """第一跳: 以 jbx-sandbox 身份启动 runner (CREATE_SUSPENDED).
 
     Runner 以挂起状态启动, 调用方在 AssignProcessToJobObject 之后调用
@@ -272,57 +294,25 @@ def two_hop_spawn(
     设计 6.8 要求 SUSPEND→Assign→Resume, 否则 Job 逃逸窗口).
 
     Returns:
-        (runner_pid, stdin_write_handle, stdout_read_handle,
-         runner_process_handle, runner_thread_handle):
-            box-server 通过 stdin_write_handle 向 runner 发请求,
-            从 stdout_read_handle 读响应. runner_process_handle 用于
-            停止/等待 runner. runner_thread_handle 用于 Job assign 后
-            ResumeThread; assign+resume 完成后由调用方 CloseHandle.
+        (runner_pid, runner_process_handle, runner_thread_handle):
+            runner_process_handle 用于停止/等待 runner. runner_thread_handle
+            用于 Job assign 后 ResumeThread; assign+resume 完成后由调用方
+            CloseHandle.
     """
     _require_windows()
     advapi32 = _get_advapi32()
     kernel32 = _get_kernel32()
 
     cmd = _build_runner_command(
-        sandbox_id, workspace, proxy_port_start, proxy_port_end,
+        sandbox_id, workspace, proxy_port_start, proxy_port_end, control_port,
     )
 
-    # 创建一对继承的 pipe: runner stdin (box-server 写) + runner stdout (box-server 读).
-    sa = SECURITY_ATTRIBUTES()
-    sa.nLength = ctypes.sizeof(SECURITY_ATTRIBUTES)
-    sa.bInheritHandle = True
-    sa.lpSecurityDescriptor = None
-
-    child_stdin_read = wintypes.HANDLE()
-    child_stdin_write = wintypes.HANDLE()
-    child_stdout_read = wintypes.HANDLE()
-    child_stdout_write = wintypes.HANDLE()
-
-    if not kernel32.CreatePipe(
-        ctypes.byref(child_stdin_read), ctypes.byref(child_stdin_write),
-        ctypes.byref(sa), 0,
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if not kernel32.CreatePipe(
-        ctypes.byref(child_stdout_read), ctypes.byref(child_stdout_write),
-        ctypes.byref(sa), 0,
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-
-    # box-server 持有的端 (stdin 写端 + stdout 读端) 关闭继承, 确保 runner
-    # 只继承它该用的端 (stdin 读端 + stdout 写端). 否则 runner 之后
-    # CreateProcessAsUserW(bInheritHandle=True) 起 child 时, child 会继承
-    # runner 持有的全部句柄 (含 box-server 这两个端), 造成 pipe 隔离泄露
-    # (对标 Linux daemon 的 close_fds=True).
-    _clear_inherit(int(child_stdin_write.value))
-    _clear_inherit(int(child_stdout_read.value))
-
+    # runner 不再用 stdin/stdout pipe (改 TCP loopback). control_port 走命令行参数
+    # (避 CreateProcessWithLogonW 传 env 块的 WinError 87). STARTUPINFO 用默认,
+    # 不设 STARTF_USESTDHANDLES, runner 的 stdin/stdout 是空/inherited.
     startup = STARTUPINFOW()
     startup.cb = ctypes.sizeof(STARTUPINFOW)
-    startup.dwFlags = 0x00000100  # STARTF_USESTDHANDLES
-    startup.hStdInput = child_stdin_read
-    startup.hStdOutput = child_stdout_write
-    startup.hStdError = child_stdout_write
+    startup.dwFlags = 0
     pi = PROCESS_INFORMATION()
 
     # LOGON_WITH_PROFILE = 0x1, LOGON_NETCREDENTIALS_ONLY = 0x2
@@ -336,39 +326,34 @@ def two_hop_spawn(
         LOGON_WITH_PROFILE,
         None, cmd,
         creation_flags,
-        None, None,
+        None, None,  # env=None 用调用方环境
         ctypes.byref(startup), ctypes.byref(pi),
     )
     if not ok:
         err = ctypes.WinError(ctypes.get_last_error())
-        kernel32.CloseHandle(child_stdin_read)
-        kernel32.CloseHandle(child_stdin_write)
-        kernel32.CloseHandle(child_stdout_read)
-        kernel32.CloseHandle(child_stdout_write)
         raise RuntimeError(
             f"两跳第一跳 CreateProcessWithLogonW 失败 (sandbox_id={sandbox_id}): {err}"
         )
 
-    # 关闭 runner 侧的读/写端副本 (runner 自己有继承的副本).
     # pi.hThread 不在此关闭: 调用方 assign Job 后 resume 主线程, 再 CloseHandle.
-    kernel32.CloseHandle(child_stdin_read)
-    kernel32.CloseHandle(child_stdout_write)
-
     logger.info(
-        "两跳第一跳成功 (suspended): sandbox_id=%s runner_pid=%d",
-        sandbox_id, pi.dwProcessId,
+        "两跳第一跳成功 (suspended): sandbox_id=%s runner_pid=%d control_port=%d",
+        sandbox_id, pi.dwProcessId, control_port,
     )
     return (
         int(pi.dwProcessId),
-        int(child_stdin_write.value),
-        int(child_stdout_read.value),
         int(pi.hProcess),
         int(pi.hThread),
     )
 
 
 def _stop_runner(pid: int, process_handle: int, timeout_ms: int = 5000) -> None:
-    """发送 shutdown 请求 + TerminateProcess 兜底."""
+    """停止 runner: TerminateProcess 兜底.
+
+    改 socket 后不再有 pipe stdin 可发 shutdown 帧, 直接 TerminateProcess
+    (runner accept 循环被强杀, 进程退出). 后续可加 connect control_port 发
+    shutdown 帧的优雅退出, 但 TerminateProcess 够用.
+    """
     _require_windows()
     kernel32 = _get_kernel32()
     try:
@@ -587,57 +572,74 @@ def runner_main(argv: list[str]) -> int:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--proxy-port-start", type=int, default=const.DEFAULT_PROXY_PORT_RANGE_START)
     parser.add_argument("--proxy-port-end", type=int, default=const.DEFAULT_PROXY_PORT_RANGE_END)
+    parser.add_argument("--control-port", type=int, required=True)
     args = parser.parse_args(argv)
 
     _require_windows()
     logger.info(
-        "runner 启动: sandbox_id=%s workspace=%s",
-        args.sandbox_id, args.workspace,
+        "runner 启动: sandbox_id=%s workspace=%s control_port=%s",
+        args.sandbox_id, args.workspace, args.control_port,
     )
 
     restricted_token = _create_restricted_token()
 
-    # 从 stdin 读请求帧, 写 stdout 响应帧. stdin/stdout 是继承自 broker 的 pipe.
-    # Python 的 sys.stdin/sys.stdout 在 Windows 上是 textio, 需要用底层 buffer.
-    stdin = sys.stdin.buffer  # type: ignore[union-attr]
-    stdout = sys.stdout.buffer  # type: ignore[union-attr]
+    # TCP loopback 控制端口 (box-server 分配, 命令行参数传入). runner bind + listen,
+    # box-server 每次 exec connect 一条新连接, 发一帧请求读一帧响应后 close.
+    # 对齐 Linux AF_UNIX 模型 (Windows 不能传 fd, 改传端口号).
+    import socket
+    port = args.control_port
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        listener.bind(("127.0.0.1", port))
+        listener.listen(64)
+    except OSError as exc:
+        logger.error("runner bind 127.0.0.1:%d 失败: %s", port, exc)
+        return 1
+    logger.info("runner 监听 127.0.0.1:%d (sandbox_id=%s)", port, args.sandbox_id)
 
     try:
         while True:
+            conn, _ = listener.accept()
             try:
-                header_frame = recv_frame(stdin, MAX_HEADER_BYTES)
+                header_frame = recv_frame(conn, MAX_HEADER_BYTES)
             except (ConnectionError, OSError, ValueError):
-                # pipe 关闭 (broker 退出), runner 优雅退出.
-                break
+                # client 连上后立刻断开 (探活/异常), 直接关连接等下一个.
+                conn.close()
+                continue
             try:
                 header = json.loads(header_frame.decode("utf-8"))
             except (ValueError, UnicodeDecodeError) as exc:
-                _send_error_response(stdout, f"invalid request header: {exc}")
+                _send_error_response(conn, f"invalid request header: {exc}")
+                conn.close()
                 continue
 
             req_type = header.get("type")
             if req_type == "shutdown":
-                _send_response(stdout, {"ok": True})
+                _send_response(conn, {"ok": True})
+                conn.close()
                 break
             if req_type == "exec":
-                # exec 请求的 stdin body 帧 (紧跟 header).
+                # exec 请求的 stdin body 帧 (紧跟 header), 从同一连接读.
                 stdin_size = int(header.get("stdin_size", 0))
-                stdin_bytes = recv_frame(stdin, MAX_STDIN_BYTES) if stdin_size > 0 else b""
+                stdin_bytes = recv_frame(conn, MAX_STDIN_BYTES) if stdin_size > 0 else b""
                 _handle_exec_request(
-                    stdout, header, restricted_token, args.workspace,
+                    conn, header, restricted_token, args.workspace,
                     stdin_bytes,
                 )
             elif req_type == "write_file":
-                _handle_write_file_request(stdout, header, stdin)
+                _handle_write_file_request(conn, header, conn)
             elif req_type == "read_file":
-                _handle_read_file_request(stdout, header)
+                _handle_read_file_request(conn, header)
             elif req_type == "list_dir":
-                _handle_list_dir_request(stdout, header)
+                _handle_list_dir_request(conn, header)
             else:
-                _send_error_response(stdout, f"unknown request type: {req_type!r}")
+                _send_error_response(conn, f"unknown request type: {req_type!r}")
+            conn.close()
     finally:
         kernel32 = _get_kernel32()
         kernel32.CloseHandle(wintypes.HANDLE(restricted_token))
+        listener.close()
     return 0
 
 
