@@ -8,8 +8,8 @@ The leader LLM calls ``spawn_teammate``. For member names listed under
 deliver a direct bootstrap envelope so a teammate process registered in A2X can
 apply runtime hints (transport topology, leader id, etc.).
 
-Security: payload intentionally avoids DB credentials; it only mirrors
-messager-facing fields already shared for pyzmq coordination.
+Security: payload intentionally avoids DB credentials; it carries only
+messager-facing fields and request trace identifiers.
 """
 
 from __future__ import annotations
@@ -24,6 +24,11 @@ import socket
 import types
 import uuid
 from typing import Any, NamedTuple
+
+from jiuwenswarm.server.request_context import (
+    XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY,
+    get_xiaoyi_model_trace_headers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -578,8 +583,8 @@ def parse_remote_bootstrap_ack_json(content: str) -> dict[str, Any] | None:
     return data
 
 
-def _swarm_assembly_hint(team_agent: Any) -> dict[str, str]:
-    """Extract provider-assembly hints (mode / project_dir) from a leader spec.
+def _swarm_assembly_hint(team_agent: Any) -> dict[str, Any]:
+    """Extract provider-assembly hints and trace headers from a leader spec.
 
     Reads the serializable ``build_context_seed`` the swarm enrichment leaves on
     the spec, falling back to the live ``build_context``. Returns an empty dict
@@ -593,15 +598,20 @@ def _swarm_assembly_hint(team_agent: Any) -> dict[str, str]:
     if isinstance(seed, dict) and seed:
         mode = str(seed.get("mode") or "").strip()
         project_dir = str(seed.get("project_dir") or "").strip()
+        request_metadata = seed.get("request_metadata")
     else:
         build_context = getattr(spec, "build_context", None)
         mode = str(getattr(build_context, "mode", "") or "").strip()
         project_dir = str(getattr(build_context, "project_dir", "") or "").strip()
-    hint: dict[str, str] = {}
+        request_metadata = getattr(build_context, "request_metadata", None)
+    hint: dict[str, Any] = {}
     if mode:
         hint["mode"] = mode
     if project_dir:
         hint["project_dir"] = project_dir
+    trace_headers = get_xiaoyi_model_trace_headers(request_metadata)
+    if trace_headers:
+        hint[XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY] = trace_headers
     return hint
 
 
@@ -2361,6 +2371,7 @@ async def _ensure_dynamic_member_execution_loop(
     card_replaced: bool = False,
     assembly_mode: str = "",
     assembly_project_dir: str = "",
+    assembly_trace_headers: dict[str, str] | None = None,
 ) -> tuple[bool, bool]:
     """Best-effort bootstrap for teammate runtime loop after dynamic member takeover.
 
@@ -2412,10 +2423,16 @@ async def _ensure_dynamic_member_execution_loop(
 
         team_manager = get_team_manager(channel_id)
         request_metadata: dict[str, Any] | None = None
-        if assembly_mode:
-            request_metadata = {"mode": assembly_mode}
+        if assembly_mode or assembly_trace_headers:
+            request_metadata = {}
+            if assembly_mode:
+                request_metadata["mode"] = assembly_mode
             if assembly_project_dir:
                 request_metadata["project_dir"] = assembly_project_dir
+            if assembly_trace_headers:
+                request_metadata[XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY] = dict(
+                    assembly_trace_headers
+                )
         leader_team_agent = await team_manager.get_or_create_team(
             sid,
             deep_agent,
@@ -2663,6 +2680,7 @@ async def apply_bootstrap_envelope_from_control_plane(
     # teammate's auxiliary leader is rebuilt provider-style with the same mode.
     assembly_mode = str(envelope.get("mode", "")).strip()
     assembly_project_dir = str(envelope.get("project_dir", "")).strip()
+    assembly_trace_headers = get_xiaoyi_model_trace_headers(envelope)
 
     logger.info(
         "[RemoteMemberBootstrap] teammate received direct bootstrap team=%s session_id=%s "
@@ -2706,6 +2724,7 @@ async def apply_bootstrap_envelope_from_control_plane(
                 card_replaced=card_replaced,
                 assembly_mode=assembly_mode,
                 assembly_project_dir=assembly_project_dir,
+                assembly_trace_headers=assembly_trace_headers,
             )
             if kicked:
                 logger.info(
