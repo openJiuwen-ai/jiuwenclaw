@@ -42,7 +42,6 @@ kubectl get nodes
 | yq | mikefarah/yq v4+ Go 版本 | 仅部署节点 |运行`yq --version`检查其版本是否符合要求|解析、修改 YAML 配置文件|
 | jq | 无强制版本限制 | 仅部署节点 |执行 `which jq` 命令，校验其是否已安装| 解析并筛选 JSON 数据，提取所需字段|
 
-
 ### 1.3 下载部署工具
 
 在`部署节点`执行以下操作，下载并解压官方部署工具安装包，工具下载地址：
@@ -250,16 +249,12 @@ FEISHU_BOTS="
 
 **参数说明：**
 - `-n`:  指定部署目标命名空间, 从而实现模块多实例隔离部署，不同命名空间的资源不冲突，默认值：`default`。需要注意的是：操作基础依赖模块时，该参数强制失效，固定部署于 `default` 命名空间。
-- `--web-port`: 自定义Web模块对外访问端口，按需适配环境端口规划（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 WEB_NODE_PORT 环境变量，程序将自动选取可用空闲端口。
-- `--manager-web-port`: 自定义 `Manager Web UI` 对外访问端口（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 `MANAGER_WEB_NODE_PORT` 环境变量，程序将自动选取可用空闲端口。
 - `--render-only`：只渲染模板输出文件至 conf 目录，不操作集群、不校验集群资源
-- `--no-auto-jiuwenclaw-id`：部署 gateway 时不自动生成 `JIUWENCLAW_ID`（默认未配置时会自动生成）
 
 **参数使用示例：**
 ```
 ./deploy.sh up -n test-ns                    # 部署核心模块至 test-ns 命名空间
 ./deploy.sh up web -n test-ns                # 部署 Web 模块至 test-ns 命名空间, 自动分配空闲端口
-./deploy.sh up web -n test-ns --web-port 30080  # 部署 Web 模块至 test-ns 命名空间, 使用端口30080
 ./deploy.sh up nfs -n test-ns                # -n 参数无效，NFS 仍部署于 default 空间
 ```
 

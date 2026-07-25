@@ -75,7 +75,6 @@ check_dependency(){
 
     check_cmds
     check_if_root
-    check_cluster_has_enough_nodes
 }
 
 check_if_nfs_up() {

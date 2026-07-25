@@ -119,9 +119,19 @@ gen_gateway_file() {
     success "Gateway file generation completed: ${file}"
 }
 
-render_gateway_files() {
-    ensure_jiuwenclaw_id_in_custom_env
+# 配置 JIUWENCLAW_ID，则生成 uuid4（供 Gateway 启动使用）
+ensure_jiuwenclaw_id() {
+    if [ -n "${DEPLOY_VARS["JIUWENCLAW_ID"]:-}" ]; then
+        info "JIUWENCLAW_ID already set, skip auto-generation"
+        return
+    fi
 
+    DEPLOY_VARS["JIUWENCLAW_ID"]="$(gen_uuid4)"
+    success "Auto-generated JIUWENCLAW_ID=${DEPLOY_VARS["JIUWENCLAW_ID"]}"
+}
+
+
+render_gateway_files() {
     local pvc_template_file="${CONFIG["CLAW_PVC_TEMPLATE_FILE"]}"
     local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
     local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
@@ -135,6 +145,7 @@ render_gateway_files() {
     fi
 
     render_secret_configmap
+    ensure_jiuwenclaw_id
     gen_gateway_env_file
     gen_gateway_config_file
     if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "active-standby" ]; then

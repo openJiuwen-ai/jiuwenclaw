@@ -195,7 +195,6 @@ declare -A DEPLOY_VARS=(
     ["REDIS_PORT"]="6379"
     ["REDIS_MODE"]="standalone"
     ["RENDER_ONLY"]="false"
-    ["AUTO_JIUWENCLAW_ID"]="true"
     ["RUNTIME_CODE_PATH"]=""
     ["RUNTIME_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen_runtime"
     ["SECRET_CM_NAME"]="jiuwenclaw-secret-configmap"
