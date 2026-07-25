@@ -691,11 +691,11 @@ async def test_runtime_prompt_language_output_prefers_rail_language_over_runtime
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "Always respond in Chinese." in prompt
+    assert "Always respond in Chinese (Simplified)" in prompt
     rendered = agent.prompt_attachment_manager.render(
         await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     )
-    assert "Always respond in Chinese." not in rendered
+    assert "Always respond in Chinese (Simplified)" not in rendered
     assert "Always respond in English." not in rendered
     assert "Always respond in English." not in prompt
     assert "当前语言：cn" in rendered

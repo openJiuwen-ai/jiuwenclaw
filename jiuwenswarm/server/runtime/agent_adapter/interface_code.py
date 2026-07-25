@@ -396,21 +396,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     def _resolve_output_language(self) -> str:
         """Resolve user's preferred output language for runtime_state display.
 
-        Distinct from prompt/runtime language, which defaults to "en" in code mode.
-        Returns the normalized language code ("cn"/"en") based on
-        config.yaml preferred_language, so the Language section injected
-        by RuntimePromptRail can instruct the LLM to respond in the
-        user's chosen language.
-        """
-        config_base = get_config()
-        raw = str(config_base.get("preferred_language", "zh")).strip().lower()
-        if raw == "zh":
-            raw = "cn"
-        return resolve_language(raw)
-
-    def _resolve_output_language(self) -> str:
-        """Resolve user's preferred output language for runtime_state display.
-
         Distinct from prompt/runtime language (always "en" in code mode).
         Returns the normalized language code ("cn"/"en") based on
         config.yaml preferred_language, so the Language section injected
@@ -1214,7 +1199,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         resolved_channel = str(runtime_config.channel_id or
                                self._resolve_prompt_channel(runtime_config.session_id) or "web").strip() or "web"
         if self._runtime_prompt_rail:
-            self._runtime_prompt_rail.set_language(resolved_language)
+            # Language section (response language) must follow the user's
+            # preferred language, not the code-mode "en" which only governs
+            # system-prompt scaffolding (time/runtime/env sections).
+            self._runtime_prompt_rail.set_language(self._resolve_output_language())
             self._runtime_prompt_rail.set_force_english(self._force_english_runtime_prompt)
             self._runtime_prompt_rail.set_channel(resolved_channel)
             self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
