@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,20 @@ logger = logging.getLogger(__name__)
 
 MANIFEST_FILENAME = ".skill_whitelist_manifest.json"
 _RESERVED_SKILL_DIR_NAMES = frozenset({MANIFEST_FILENAME, "_marketplace"})
+
+# 同一 skills 物理目录上的白名单 sync 串行，避免多 session 并发下载/落盘
+_SKILLS_DIR_SYNC_LOCKS: dict[str, asyncio.Lock] = {}
+_SKILLS_DIR_SYNC_LOCKS_META = threading.Lock()
+
+
+async def _skills_dir_sync_lock_for(skills_dir: Path) -> asyncio.Lock:
+    key = str(skills_dir.resolve())
+    with _SKILLS_DIR_SYNC_LOCKS_META:
+        lock = _SKILLS_DIR_SYNC_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _SKILLS_DIR_SYNC_LOCKS[key] = lock
+        return lock
 
 
 @dataclass
@@ -264,6 +279,12 @@ class SkillWhitelistSynchronizer:
         return True
 
     async def sync(self, config: AgentSkillWhitelistConfig) -> SkillWhitelistSyncResult:
+        """按 skills 物理目录串行同步：同一落盘目录同时仅一个 sync 在飞."""
+        lock = await _skills_dir_sync_lock_for(self._skills_dir)
+        async with lock:
+            return await self._sync_locked(config)
+
+    async def _sync_locked(self, config: AgentSkillWhitelistConfig) -> SkillWhitelistSyncResult:
         result = SkillWhitelistSyncResult()
         entries = self._load_manifest_entries()
         enabled_dirs: list[str] = []
