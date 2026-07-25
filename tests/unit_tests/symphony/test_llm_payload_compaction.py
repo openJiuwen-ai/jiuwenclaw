@@ -8,11 +8,12 @@ from jiuwenswarm.symphony.fingerprint.extract.extractor import (
     _build_llm_context,
     schema_from_llm_payload,
 )
-from jiuwenswarm.symphony.fingerprint.models import RawSkillManifest, SkillFolder
 from jiuwenswarm.symphony.fingerprint.models import (
     ArtifactSpec,
     Fingerprint,
     ParameterSpec,
+    RawSkillManifest,
+    SkillFolder,
 )
 from jiuwenswarm.symphony.fingerprint.normalize import (
     IONameCandidate,
@@ -208,6 +209,16 @@ def test_io_resolution_reason_is_optional_and_truncated():
 
 
 def _graph_fixture():
+    source_output = ArtifactSpec(
+        name="report",
+        type="markdown",
+        description="Generated report." + ("o" * 200),
+    )
+    target_input = ParameterSpec(
+        name="document",
+        type="markdown",
+        description="Document to review." + ("i" * 200),
+    )
     source = Fingerprint(
         type="skill",
         id="source-with-a-long-id",
@@ -215,13 +226,7 @@ def _graph_fixture():
         description="Produces a report." + ("s" * 300),
         version="1",
         inputs=[],
-        outputs=[
-            ArtifactSpec(
-                name="report",
-                type="markdown",
-                description="Generated report." + ("o" * 200),
-            )
-        ],
+        outputs=[source_output],
     )
     target = Fingerprint(
         type="skill",
@@ -229,13 +234,7 @@ def _graph_fixture():
         name="Target",
         description="Reviews a report." + ("t" * 300),
         version="1",
-        inputs=[
-            ParameterSpec(
-                name="document",
-                type="markdown",
-                description="Document to review." + ("i" * 200),
-            )
-        ],
+        inputs=[target_input],
         outputs=[],
     )
     mapping = {
@@ -255,8 +254,8 @@ def _graph_fixture():
         evidence={
             "directions": {
                 f"{source.id}->{target.id}": {
-                    "source_outputs": [source.outputs[0].to_dict()],
-                    "target_inputs": [target.inputs[0].to_dict()],
+                    "source_outputs": [source_output.to_dict()],
+                    "target_inputs": [target_input.to_dict()],
                     "port_mappings": [mapping],
                     "matched_terms": ["report"],
                 }
@@ -272,52 +271,40 @@ def test_graph_context_only_contains_compact_candidate_evidence():
     context = graph_prompt.build_llm_context(registry, [candidate])
 
     assert set(context) == {"candidates"}
-    assert context["candidates"][0] == {
-        "id": "c1",
-        "source": {
-            "name": "Source",
-            "description": registry.skills[candidate.source_id].description[:240],
-        },
-        "target": {
-            "name": "Target",
-            "description": registry.skills[candidate.target_id].description[:240],
-        },
-        "directions": {
-            "forward": {
-                "outputs": [
-                    {
-                        "name": "report",
-                        "type": "markdown",
-                        "description": (
-                            registry.skills[candidate.source_id]
-                            .outputs[0]
-                            .description[:160]
-                        ),
-                    }
-                ],
-                "inputs": [
-                    {
-                        "name": "document",
-                        "type": "markdown",
-                        "required": True,
-                        "description": (
-                            registry.skills[candidate.target_id]
-                            .inputs[0]
-                            .description[:160]
-                        ),
-                    }
-                ],
-                "ports": [
-                    {
-                        "output": "report",
-                        "output_type": "markdown",
-                        "input": "document",
-                        "input_type": "markdown",
-                    }
-                ],
-            }
-        },
+    item = context["candidates"][0]
+    assert item["id"] == "c1"
+    assert item["source"] == {
+        "name": "Source",
+        "description": registry.skills[candidate.source_id].description[:240],
     }
+    assert item["target"] == {
+        "name": "Target",
+        "description": registry.skills[candidate.target_id].description[:240],
+    }
+    forward = item["directions"]["forward"]
+    assert forward["outputs"] == [{
+        "name": "report",
+        "type": "markdown",
+        "description": registry.skills[candidate.source_id].outputs[0].description[:160],
+    }]
+    assert forward["inputs"] == [{
+        "name": "document",
+        "type": "markdown",
+        "required": True,
+        "description": registry.skills[candidate.target_id].inputs[0].description[:160],
+    }]
+    assert forward["ports"] == [{
+        "output": "report",
+        "output_type": "markdown",
+        "input": "document",
+        "input_type": "markdown",
+    }]
+    assert not {
+        "input_sha256",
+        "allowed_relation_types",
+        "priority",
+        "candidate_methods",
+    } & set(item)
 
 
 def test_graph_compact_response_is_expanded_from_candidate_evidence():
@@ -340,24 +327,21 @@ def test_graph_compact_response_is_expanded_from_candidate_evidence():
     )
 
     assert diagnostics == []
-    assert payload["matches"] == [
-        {
-            "candidate_id": candidate.key,
-            "source_id": candidate.source_id,
-            "target_id": candidate.target_id,
-            "relation_type": "can_feed",
-            "confidence": 0.92,
-            "method": "llm_ontology_match",
-            "reasons": ["r" * 160],
-            "supporting_fields": {
-                "port_mappings": [
-                    {"source_output": "report", "target_input": "document"}
-                ],
-                "source_outputs": ["report"],
-                "target_inputs": ["document"],
-            },
-        }
-    ]
+    match = payload["matches"][0]
+    assert match == {
+        "candidate_id": candidate.key,
+        "source_id": candidate.source_id,
+        "target_id": candidate.target_id,
+        "relation_type": "can_feed",
+        "confidence": 0.92,
+        "method": "llm_ontology_match",
+        "reasons": ["r" * 160],
+        "supporting_fields": {
+            "port_mappings": [{"source_output": "report", "target_input": "document"}],
+            "source_outputs": ["report"],
+            "target_inputs": ["document"],
+        },
+    }
 
 
 def test_graph_compact_response_reports_unknown_and_duplicate_ids():

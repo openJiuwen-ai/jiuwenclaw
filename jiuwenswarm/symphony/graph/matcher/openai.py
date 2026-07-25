@@ -174,6 +174,7 @@ class OpenAICompatibleOntologyMatcher:
                 "consensus_runs": 2 if self.require_consensus else 1,
             },
         )
+
         async def request(
             *,
             reverse_skill_order: bool,

@@ -23,6 +23,30 @@ class _FakeInvokeModel:
         return SimpleNamespace(content='{"ok": true}')
 
 
+def _model_entry(*, reasoning_level=None, client=None, request=None):
+    client_config = {
+        "api_key": "key",
+        "api_base": "https://example.test/v1",
+        "model_name": "model-a",
+        "client_provider": "openai",
+        **(client or {}),
+    }
+    request_config = dict(request or {})
+    if reasoning_level is not None:
+        request_config["reasoning_level"] = reasoning_level
+    return {
+        "model_client_config": client_config,
+        "model_config_obj": request_config,
+    }
+
+
+def _llm_config():
+    return LLMConfig(
+        model="model-a",
+        model_client_config=_model_entry()["model_client_config"],
+    )
+
+
 def test_thinking_disabled_request_overrides_returns_isolated_compatibility_fields():
     first = thinking_disabled_request_overrides()
     second = thinking_disabled_request_overrides()
@@ -100,18 +124,7 @@ def test_llm_config_from_default_models(monkeypatch):
 
 def test_llm_config_removes_internal_reasoning_level():
     config = LLMConfig.from_model_entry(
-        {
-            "model_client_config": {
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "model_name": "model-a",
-                "client_provider": "openai",
-            },
-            "model_config_obj": {
-                "reasoning_level": "off",
-                "max_tokens": 99,
-            },
-        }
+        _model_entry(reasoning_level="off", request={"max_tokens": 99})
     )
 
     request_kwargs = config.model_request_kwargs()
@@ -123,19 +136,17 @@ def test_llm_config_removes_internal_reasoning_level():
 
 def test_llm_config_forces_high_reasoning_config_to_disabled():
     config = LLMConfig.from_model_entry(
-        {
-            "model_client_config": {
-                "api_key": "key",
+        _model_entry(
+            reasoning_level="high",
+            client={
                 "api_base": "https://api.deepseek.com",
                 "model_name": "deepseek-v4-pro",
-                "client_provider": "openai",
             },
-            "model_config_obj": {
-                "reasoning_level": "high",
+            request={
                 "max_tokens": 99,
                 "extra_body": {"custom_option": {"enabled": True}},
             },
-        }
+        )
     )
 
     request_kwargs = config.model_request_kwargs()
@@ -150,20 +161,16 @@ def test_llm_config_forces_high_reasoning_config_to_disabled():
 
 
 def test_llm_config_owns_nested_model_entry_data():
-    entry = {
-        "model_client_config": {
-            "api_key": "key",
-            "api_base": "https://example.test/v1",
-            "model_name": "model-a",
-            "client_provider": "openai",
+    entry = _model_entry(
+        reasoning_level="off",
+        client={
             "custom_headers": {"X-Test": "original"},
         },
-        "model_config_obj": {
-            "reasoning_level": "off",
+        request={
             "response_format": {"type": "json_object"},
             "extra_body": {"custom_option": {"enabled": True}},
         },
-    }
+    )
     original = deepcopy(entry)
 
     config = LLMConfig.from_model_entry(entry)
@@ -232,32 +239,14 @@ def test_llm_config_does_not_fallback_to_environment_model(monkeypatch):
 
 
 def test_create_llm_client_uses_jiuwenswarm_client():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
 
     assert type(client).__name__ == "JiuwenSwarmChatClient"
 
 
 @pytest.mark.asyncio
 async def test_complete_json_async_passes_request_overrides_to_invoke():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
     fake_model = _FakeInvokeModel()
     setattr(client, "_model", fake_model)
 
@@ -278,16 +267,7 @@ async def test_complete_json_async_passes_request_overrides_to_invoke():
 
 @pytest.mark.asyncio
 async def test_complete_json_async_omits_request_overrides_by_default():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
     fake_model = _FakeInvokeModel()
     setattr(client, "_model", fake_model)
 
@@ -299,16 +279,7 @@ async def test_complete_json_async_omits_request_overrides_by_default():
 
 @pytest.mark.asyncio
 async def test_complete_json_many_async_passes_request_overrides_to_each_invoke():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
     fake_model = _FakeInvokeModel()
     setattr(client, "_model", fake_model)
 
@@ -335,16 +306,7 @@ async def test_complete_json_many_async_passes_request_overrides_to_each_invoke(
 
 @pytest.mark.asyncio
 async def test_complete_json_many_async_omits_request_overrides_by_default():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
     fake_model = _FakeInvokeModel()
     setattr(client, "_model", fake_model)
 

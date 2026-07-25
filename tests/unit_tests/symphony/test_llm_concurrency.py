@@ -103,30 +103,26 @@ def _llm_config():
     )
 
 
+def _fingerprint(skill_id, *, consumes):
+    return Fingerprint(
+        type="skill",
+        id=skill_id,
+        name=skill_id,
+        description="Consumes input" if consumes else "Produces result",
+        version="1.0.0",
+        inputs=[ParameterSpec(name="input", type="text")] if consumes else [],
+        outputs=[] if consumes else [ArtifactSpec(name="result", type="text")],
+    )
+
+
 def _registry_and_candidates(count):
     skills = {}
     candidates = []
     for index in range(count):
         source_id = f"source-{index}"
         target_id = f"target-{index}"
-        skills[source_id] = Fingerprint(
-            type="skill",
-            id=source_id,
-            name=source_id,
-            description="Produces result",
-            version="1.0.0",
-            inputs=[],
-            outputs=[ArtifactSpec(name="result", type="text")],
-        )
-        skills[target_id] = Fingerprint(
-            type="skill",
-            id=target_id,
-            name=target_id,
-            description="Consumes input",
-            version="1.0.0",
-            inputs=[ParameterSpec(name="input", type="text")],
-            outputs=[],
-        )
+        skills[source_id] = _fingerprint(source_id, consumes=False)
+        skills[target_id] = _fingerprint(target_id, consumes=True)
         candidates.append(
             RelationCandidate(
                 source_id=source_id,
@@ -153,111 +149,61 @@ def _registry_and_candidates(count):
     return SkillRegistry(skills=skills), candidates
 
 
-@pytest.mark.asyncio
-async def test_graph_consensus_runs_both_directions_concurrently(monkeypatch):
-    client = _DelayedMatchClient()
+def _matcher(monkeypatch, client, *, workers):
     monkeypatch.setattr(
         "jiuwenswarm.symphony.graph.matcher.openai.create_llm_client",
         lambda config: client,
     )
-    matcher = OpenAICompatibleOntologyMatcher(
+    return OpenAICompatibleOntologyMatcher(
         _llm_config(),
         batch_size=1,
-        max_workers=2,
+        max_workers=workers,
         require_consensus=True,
     )
-    registry, candidates = _registry_and_candidates(1)
+
+
+@pytest.mark.parametrize(
+    ("workers", "candidate_count", "expected_max_active"),
+    [(1, 1, 1), (2, 1, 2), (3, 3, 3)],
+)
+@pytest.mark.asyncio
+async def test_graph_consensus_respects_request_worker_limit(
+    monkeypatch,
+    workers,
+    candidate_count,
+    expected_max_active,
+):
+    client = _DelayedMatchClient(delay=0.01)
+    matcher = _matcher(monkeypatch, client, workers=workers)
+    registry, candidates = _registry_and_candidates(candidate_count)
 
     await matcher.match(registry, candidates)
 
-    assert client.call_count == 2
-    assert client.max_active == 2
+    assert client.call_count == candidate_count * 2
+    assert client.max_active == expected_max_active
 
 
+@pytest.mark.parametrize(
+    ("candidate_count", "workers", "expected_calls", "expected_cancelled"),
+    [(1, 2, 2, 1), (2, 4, 4, 3)],
+)
 @pytest.mark.asyncio
-async def test_graph_request_concurrency_never_exceeds_workers(monkeypatch):
-    client = _DelayedMatchClient()
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.graph.matcher.openai.create_llm_client",
-        lambda config: client,
-    )
-    matcher = OpenAICompatibleOntologyMatcher(
-        _llm_config(),
-        batch_size=1,
-        max_workers=3,
-        require_consensus=True,
-    )
-    registry, candidates = _registry_and_candidates(3)
-
-    await matcher.match(registry, candidates)
-
-    assert client.call_count == 6
-    assert client.max_active == 3
-
-
-@pytest.mark.asyncio
-async def test_graph_workers_one_keeps_consensus_requests_serial(monkeypatch):
-    client = _DelayedMatchClient(delay=0)
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.graph.matcher.openai.create_llm_client",
-        lambda config: client,
-    )
-    matcher = OpenAICompatibleOntologyMatcher(
-        _llm_config(),
-        batch_size=1,
-        max_workers=1,
-        require_consensus=True,
-    )
-    registry, candidates = _registry_and_candidates(1)
-
-    await matcher.match(registry, candidates)
-
-    assert client.call_count == 2
-    assert client.max_active == 1
-
-
-@pytest.mark.asyncio
-async def test_graph_consensus_cancels_other_direction_when_one_fails(monkeypatch):
+async def test_graph_failure_cancels_remaining_requests(
+    monkeypatch,
+    candidate_count,
+    workers,
+    expected_calls,
+    expected_cancelled,
+):
     client = _FailingMatchClient()
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.graph.matcher.openai.create_llm_client",
-        lambda config: client,
-    )
-    matcher = OpenAICompatibleOntologyMatcher(
-        _llm_config(),
-        batch_size=1,
-        max_workers=2,
-        require_consensus=True,
-    )
-    registry, candidates = _registry_and_candidates(1)
+    matcher = _matcher(monkeypatch, client, workers=workers)
+    registry, candidates = _registry_and_candidates(candidate_count)
 
     with pytest.raises(RuntimeError, match="forward failed"):
         await matcher.match(registry, candidates)
 
-    assert client.call_count == 2
-    assert client.cancelled_count == 1
-
-
-@pytest.mark.asyncio
-async def test_graph_failure_cancels_requests_from_other_batches(monkeypatch):
-    client = _FailingMatchClient()
-    monkeypatch.setattr(
-        "jiuwenswarm.symphony.graph.matcher.openai.create_llm_client",
-        lambda config: client,
-    )
-    matcher = OpenAICompatibleOntologyMatcher(
-        _llm_config(),
-        batch_size=1,
-        max_workers=4,
-        require_consensus=True,
-    )
-    registry, candidates = _registry_and_candidates(2)
-
-    with pytest.raises(RuntimeError, match="forward failed"):
-        await matcher.match(registry, candidates)
-
-    assert client.call_count == 4
-    assert client.cancelled_count == 3
+    assert client.call_count == expected_calls
+    assert client.cancelled_count == expected_cancelled
 
 
 @pytest.mark.asyncio
