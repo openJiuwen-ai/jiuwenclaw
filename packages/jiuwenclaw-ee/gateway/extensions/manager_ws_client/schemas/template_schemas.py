@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
+from croniter import croniter
 from pydantic import (
     AfterValidator,
     AliasChoices,
@@ -17,21 +18,18 @@ import re
 from .safe_text import SafeTextMixin
 
 
-# cron 字段：数字、字母（JAN/MON）、* / , - ? # L W
-_CRON_FIELD_RE = re.compile(r"^[\w*/,\-?#]+$", re.IGNORECASE)
-# 常见 cron：5 段（分 时 日 月 周）、6 段（含秒）、7 段（含年）
+# croniter：5 段标准；6 段末尾为秒；7 段为 分 时 日 月 周 秒 年
 _CRON_FIELD_COUNTS = frozenset({5, 6, 7})
 
 
 def is_valid_hook_schedule(value: str) -> bool:
-    """校验 hook_config.schedule 为合法 cron 表达式（5/6/7 段）。"""
+    """用 croniter 校验 hook_config.schedule（含字段取值范围）。"""
     text = value.strip()
     if not text:
         return False
-    parts = text.split()
-    if len(parts) not in _CRON_FIELD_COUNTS:
+    if len(text.split()) not in _CRON_FIELD_COUNTS:
         return False
-    return all(_CRON_FIELD_RE.fullmatch(part) for part in parts)
+    return croniter.is_valid(text)
 
 
 def normalize_hook_schedule(schedule: str | None, *, required: bool) -> str | None:
@@ -43,8 +41,8 @@ def normalize_hook_schedule(schedule: str | None, *, required: bool) -> str | No
         return None
     if not is_valid_hook_schedule(text):
         raise ValueError(
-            "hook_config.schedule must be a cron expression "
-            "(5/6/7 fields, e.g. '0 */5 * * *' or '0 0 */5 * * *')"
+            "hook_config.schedule must be a valid cron expression "
+            "(5/6/7 fields via croniter, e.g. '0 */5 * * *' or '0 0 */5 * * *')"
         )
     return text
 

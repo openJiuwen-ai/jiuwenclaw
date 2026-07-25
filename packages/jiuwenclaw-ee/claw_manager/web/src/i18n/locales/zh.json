@@ -293,7 +293,7 @@
     "hookParamsHint": "传入钩子函数的静态参数 (JSON)",
     "hookSchedule": "schedule",
     "hookScheduleHint": "仅钩子类型为 schedule 时必填；cron 表达式，如 0 */5 * * *",
-    "hookScheduleInvalid": "schedule 须为合法 cron 表达式（5/6/7 段，如 0 */5 * * *）",
+    "hookScheduleInvalid": "schedule 须为合法 cron（5/6/7 段且字段取值在有效范围内，如 0 */5 * * *）",
     "hookData": "data",
     "hookDataHint": "单条钩子扩展配置 (JSON)",
     "customConfig": "自定义配置",
