@@ -2568,21 +2568,31 @@ class TestBasicAuthResolution:
         with pytest.raises(ValueError, match="not found or not a regular file"):
             build(entry)
 
-    @pytest.mark.skipif(
-        os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
-        reason="POSIX permission semantics required and not running as root "
-        "(root bypasses file mode, so unreadability cannot be asserted)",
-    )
-    def test_password_file_unreadable_rejected(self, tmp_path):
+    def test_password_file_unreadable_rejected(self, tmp_path, monkeypatch):
+        """Cover the unreadable-file branch deterministically.
+
+        Real ``chmod 0o000`` cannot be asserted under root (root bypasses file
+        mode), which previously forced a long-term skip on root/CI. Instead,
+        monkeypatch ``os.access`` to report the target file as non-readable so
+        the branch is exercised on every platform/uid without depending on the
+        real permission system.
+        """
+        import jiuwenbox.proxy.inference_privacy_proxy_manager as _manager_mod
+
         f = tmp_path / "secret"
         f.write_text("pw")
-        os.chmod(f, 0o000)
-        try:
-            build, entry = self._entry(basic_auth={"username": "u", "password_file": str(f)})
-            with pytest.raises(ValueError, match="not readable"):
-                build(entry)
-        finally:
-            os.chmod(f, 0o600)
+        target = str(f)
+        real_access = os.access
+
+        def fake_access(path, mode):
+            if str(path) == target and mode == os.R_OK:
+                return False
+            return real_access(path, mode)
+
+        monkeypatch.setattr(_manager_mod.os, "access", fake_access)
+        build, entry = self._entry(basic_auth={"username": "u", "password_file": target})
+        with pytest.raises(ValueError, match="not readable"):
+            build(entry)
 
     def test_password_crlf_rejected(self):
         build, entry = self._entry(basic_auth={"username": "u", "password": "pw\r\nX-Inject: bad"})

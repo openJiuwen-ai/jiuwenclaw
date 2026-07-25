@@ -750,3 +750,195 @@ def test_cli_verbose_debug_logs(server_url):
     err = proc.stderr
     assert b"DEBUG" in err, err
     assert b"GET" in err and b"/health" in err, err
+
+# ────────────────────────────── proxy Basic auth ──────────────────────────────
+
+
+@pytest.fixture
+def tracking_proxy_routes(client):
+    """Register proxy route names created via CLI; best-effort delete on teardown."""
+    names: list[str] = []
+    yield names
+    for name in reversed(names):
+        try:
+            client.post(f"/api/v1/proxies/{name}/stop")
+            client.delete(f"/api/v1/proxies/{name}")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class TestCliProxyBasicAuth:
+    """CLI ``proxy create``/``update`` Basic auth options (P2)."""
+
+    @staticmethod
+    def _unique_prefix() -> str:
+        return f"/cli-basic-{uuid.uuid4().hex[:8]}"
+
+    def test_cli_proxy_create_basic_password_redacted(
+        self, server_url, tracking_proxy_routes
+    ):
+        """``--password`` create: detail/list output is redacted (no plaintext)."""
+        secret = "cli-secret-pw-AAAA"
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        proc, data = _run_cli_json(
+            ["proxy", "create", "--prefix", prefix, "--target", "http://upstream:7474",
+             "--username", "neo4j", "--password", secret],
+            base_url=server_url,
+        )
+        assert data["name"] == name
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["username"] == "neo4j"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+        out = proc.stdout.decode("utf-8")
+        assert secret not in out
+
+        proc, listing = _run_cli_json(["proxy", "ls"], base_url=server_url)
+        entry = next(r for r in listing if r["name"] == name)
+        assert entry["route"]["auth_type"] == "basic"
+        assert "password" not in entry["route"]["basic_auth"]
+        assert secret not in proc.stdout.decode("utf-8")
+
+    def test_cli_proxy_create_basic_password_stdin(
+        self, server_url, tracking_proxy_routes
+    ):
+        """``--password-stdin`` reads stdin, sends via REST; secret not in argv."""
+        secret = "stdin-secret-pw-BBBB"
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        proc, data = _run_cli_json(
+            ["proxy", "create", "--prefix", prefix, "--target", "http://upstream:7474",
+             "--username", "neo4j", "--password-stdin"],
+            base_url=server_url,
+            input_bytes=secret.encode("utf-8") + b"\n",
+        )
+        assert data["name"] == name
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+
+    def test_cli_proxy_create_basic_password_file(
+        self, server_url, tracking_proxy_routes, tmp_path
+    ):
+        """``--password-file`` passes a server-side path; CLI never reads it."""
+        secret = "file-secret-pw-CCCC"
+        pw_file = tmp_path / "neo4j_pw"
+        pw_file.write_text(secret + "\n")
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        proc, data = _run_cli_json(
+            ["proxy", "create", "--prefix", prefix, "--target", "http://upstream:7474",
+             "--username", "neo4j", "--password-file", str(pw_file)],
+            base_url=server_url,
+        )
+        assert data["name"] == name
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_file"] == str(pw_file)
+        assert "password" not in detail["route"]["basic_auth"]
+        assert secret not in proc.stdout.decode("utf-8")
+
+    def test_cli_proxy_basic_password_sources_mutually_exclusive(self, server_url):
+        secret = "leakcheck-value-XYZ"
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/mux1", "--target", "http://up:7474",
+             "--username", "u", "--password", secret, "--password-file", "/tmp/x"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        err = proc.stderr.decode("utf-8")
+        assert "mutually exclusive" in err
+        assert secret not in err  # rejected password value is not echoed
+
+    def test_cli_proxy_basic_password_and_stdin_mutually_exclusive(self, server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/mux2", "--target", "http://up:7474",
+             "--username", "u", "--password", "p", "--password-stdin"],
+            base_url=server_url,
+            input_bytes=b"q\n",
+        )
+        assert proc.returncode != 0
+        assert "mutually exclusive" in proc.stderr.decode("utf-8")
+
+    def test_cli_proxy_basic_username_required(self, server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/nouser", "--target", "http://up:7474",
+             "--password", "p"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        assert "username" in proc.stderr.decode("utf-8").lower()
+
+    def test_cli_proxy_basic_password_source_required(self, server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/nosrc", "--target", "http://up:7474",
+             "--username", "u"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        assert "one of --password, --password-file or --password-stdin" in proc.stderr.decode("utf-8")
+
+    def test_cli_proxy_basic_api_key_mutex(self, server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/keymux", "--target", "http://up:7474",
+             "--api-key", "sk", "--username", "u", "--password", "p"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        assert "mutually exclusive" in proc.stderr.decode("utf-8")
+
+    def test_cli_proxy_update_basic_redacted(
+        self, server_url, tracking_proxy_routes
+    ):
+        """``proxy update`` accepts Basic options; output stays redacted."""
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        _run_cli_json(
+            ["proxy", "create", "--prefix", prefix, "--target", "http://up:7474"],
+            base_url=server_url,
+        )
+        secret = "upd-secret-pw-DDDD"
+        proc, _ = _run_cli_json(
+            ["proxy", "update", name, "--prefix", prefix, "--target", "http://up:7474",
+             "--username", "neo4j", "--password", secret],
+            base_url=server_url,
+        )
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+        assert secret not in proc.stdout.decode("utf-8")
+
+    def test_cli_proxy_help_documents_basic_options(self):
+        """Help lists Basic options and the --password dev/test warning."""
+        proc = _run_cli(["proxy", "create", "--help"], base_url="http://127.0.0.1:8321")
+        assert proc.returncode == 0, proc.stderr
+        text = proc.stdout.decode("utf-8")
+        assert "--username" in text
+        assert "--password" in text
+        assert "--password-file" in text
+        assert "--password-stdin" in text
+        assert "DEV/TEST" in text or "dev/test" in text.lower()
