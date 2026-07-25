@@ -1,3 +1,4 @@
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -95,6 +96,87 @@ def test_llm_config_from_default_models(monkeypatch):
     assert config.model_request_kwargs()["temperature"] == 0.0
     assert config.model_request_kwargs()["top_p"] == 1.0
     assert config.model_request_kwargs()["max_tokens"] == 99
+
+
+def test_llm_config_removes_internal_reasoning_level():
+    config = LLMConfig.from_model_entry(
+        {
+            "model_client_config": {
+                "api_key": "key",
+                "api_base": "https://example.test/v1",
+                "model_name": "model-a",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {
+                "reasoning_level": "off",
+                "max_tokens": 99,
+            },
+        }
+    )
+
+    request_kwargs = config.model_request_kwargs()
+
+    assert "reasoning_level" not in request_kwargs
+    assert request_kwargs["max_tokens"] == 99
+    assert request_kwargs["extra_body"] == thinking_disabled_request_overrides()["extra_body"]
+
+
+def test_llm_config_forces_high_reasoning_config_to_disabled():
+    config = LLMConfig.from_model_entry(
+        {
+            "model_client_config": {
+                "api_key": "key",
+                "api_base": "https://api.deepseek.com",
+                "model_name": "deepseek-v4-pro",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {
+                "reasoning_level": "high",
+                "max_tokens": 99,
+                "extra_body": {"custom_option": {"enabled": True}},
+            },
+        }
+    )
+
+    request_kwargs = config.model_request_kwargs()
+
+    assert "reasoning_level" not in request_kwargs
+    assert "reasoning_effort" not in request_kwargs
+    assert request_kwargs["max_tokens"] == 99
+    assert request_kwargs["extra_body"] == {
+        "custom_option": {"enabled": True},
+        **thinking_disabled_request_overrides()["extra_body"],
+    }
+
+
+def test_llm_config_owns_nested_model_entry_data():
+    entry = {
+        "model_client_config": {
+            "api_key": "key",
+            "api_base": "https://example.test/v1",
+            "model_name": "model-a",
+            "client_provider": "openai",
+            "custom_headers": {"X-Test": "original"},
+        },
+        "model_config_obj": {
+            "reasoning_level": "off",
+            "response_format": {"type": "json_object"},
+            "extra_body": {"custom_option": {"enabled": True}},
+        },
+    }
+    original = deepcopy(entry)
+
+    config = LLMConfig.from_model_entry(entry)
+    client_kwargs = config.model_client_kwargs()
+    request_kwargs = config.model_request_kwargs()
+    client_kwargs["custom_headers"]["X-Test"] = "changed"
+    request_kwargs["response_format"]["type"] = "text"
+    request_kwargs["extra_body"]["custom_option"]["enabled"] = False
+
+    assert entry == original
+    assert config.model_client_kwargs()["custom_headers"] == {"X-Test": "original"}
+    assert config.model_request_kwargs()["response_format"] == {"type": "json_object"}
+    assert config.model_request_kwargs()["extra_body"]["custom_option"] == {"enabled": True}
 
 
 def test_llm_config_prefers_resolved_default_model(monkeypatch):
