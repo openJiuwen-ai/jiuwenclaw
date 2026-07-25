@@ -1464,7 +1464,7 @@
     }
   },
   "skills": {
-    "title": "Skill Management",
+    "title": "Skills",
     "subtitle": "Manage and install skills available to the agent.",
     "tabs": {
       "mySkills": "My Skills",
@@ -1477,7 +1477,29 @@
       "enabled": "Enabled",
       "disabled": "Disabled"
     },
+    "publishFilter": {
+      "all": "All",
+      "published": "Published",
+      "unpublished": "Unpublished"
+    },
+    "skillTypes": {
+      "industry": "Industry Skill Packs",
+      "team": "Team Skills",
+      "skill": "Multimodal"
+    },
+    "marketplaceCategories": {
+      "all": "All",
+      "software-development": "Software Development",
+      "office-productivity": "Office Productivity",
+      "content-creation": "Content Creation",
+      "multimodal-media": "Multimodal & Media",
+      "data-science-research": "Data & Research",
+      "compliance-legal": "Legal & Compliance",
+      "lifestyle-health": "Lifestyle & Health",
+      "finance-wealth": "Finance"
+    },
     "enable": "Enable",
+    "disable": "Disable",
     "noDisabledSkills": "No disabled skills",
     "noEnabledSkills": "No enabled skills",
     "setEnabledError": "Failed to set skill enabled status",
@@ -1514,10 +1536,75 @@
       "uninstall": "Uninstall",
       "importLocal": "Import Local Skill",
       "sourceManager": "Source Manager",
+      "create": "Create",
+      "uploadLocalSkill": "Upload Skill",
+      "documentToSkill": "Knowledge to Skill",
+      "createViaChat": "Create via Chat",
       "backToList": "Back to List",
       "viewEvolution": "View Skill Experience",
+      "evolutionTooltip": "This skill has new experience, ready to synthesize a new version",
       "enabling": "Enabling...",
-      "disabling": "Disabling..."
+      "disabling": "Disabling...",
+      "pinSkill": "Pin Skill",
+      "pinSkillPackage": "Pin Skill Package",
+      "unpinSkill": "Unpin Skill",
+      "unpinSkillPackage": "Unpin Skill Package",
+      "edit": "Edit",
+      "refresh": "Refresh",
+      "goToChat": "Go to Chat",
+      "goTry": "Try It",
+      "publish": "Publish",
+      "synthesizeNewVersion": "Rebuild Skill",
+      "synthesizeTooltip": "Synthesize accumulated skill experience with the original skill to generate a new version"
+    },
+    "publishForm": {
+      "title": "Publish Skill",
+      "name": "Name",
+      "skillName": "Skill Name",
+      "version": "Version",
+      "displayName": "Display Name",
+      "description": "Description",
+      "descriptionOptional": "Description (optional)",
+      "tags": "Tags",
+      "tagsOptional": "Tags (optional)",
+      "skillIcon": "Skill Icon",
+      "skillIconOptional": "Skill Icon (optional)",
+      "skillIconHint": "PNG file, max 5MB",
+      "sha256": "SHA-256 Checksum",
+      "versionNote": "Version Note",
+      "versionNoteOptional": "Version Note (Swarm Skill, optional)",
+      "confirm": "Confirm Publish",
+      "cancel": "Cancel",
+      "publish": "Publish",
+      "placeholderSelect": "Please select",
+      "placeholderSha256": "64-digit lowercase hex displayed after packaging",
+      "noticeText": "The skill will be published to JiuwenHub.",
+      "noticeView": "View",
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+    },
+    "uploadSkillModal": {
+      "title": "Upload Skill",
+      "pathLabel": "Local Skill Path",
+      "pathPlaceholder": "Enter skill file/directory path",
+      "notice": "Folders or .zip files must contain a SKILL.md file. The .md file must include skill name and description in YAML format.",
+      "dropHint": "Click or drag a compressed file or folder here",
+      "confirm": "Import",
+      "cancel": "Cancel"
+    },
+    "docToSkillModal": {
+      "title": "Knowledge to Skill",
+      "subtitle": "Extract knowledge, generate skills",
+      "sourceLabel": "Source",
+      "sourceLocal": "Local Upload",
+      "sourceLink": "Link",
+      "dropHint": "Click or drag a document here\nUpload a compressed file",
+      "linkLabel": "Link",
+      "linkTooltip": "Supports web links and video links",
+      "linkPlaceholder": "Please enter",
+      "descLabel": "Skill Description (optional)",
+      "descPlaceholder": "Please enter",
+      "confirm": "Confirm",
+      "cancel": "Cancel"
     },
     "builtIn": "Built-in",
     "status": {
@@ -1553,6 +1640,15 @@
     },
     "detailLoading": "Loading details...",
     "detailError": "Failed to load details",
+    "detail": {
+      "basicInfo": "Basic Info",
+      "versionManage": "Version Management",
+      "tabs": {
+        "contentDetail": "Content Details",
+        "filePreview": "File Preview",
+        "skillExperience": "Skill Experience"
+      }
+    },
     "retrieval": {
       "title": "Local Skill Retrieval",
       "disabled": "Retrieval disabled",

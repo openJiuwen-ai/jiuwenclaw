@@ -133,6 +133,7 @@
   --color-skill-action-surface: #ffffff;
   --color-skill-action-text: #000000;
   --color-skill-action-hover: #f0f0f0;
+  --color-skill-capsule-active: #0066ff;
   --color-team-event-surface: var(--color-surface-elevated);
   --color-team-event-summary-surface: transparent;
   --color-sidebar-nav-hover: #f5f5f5;

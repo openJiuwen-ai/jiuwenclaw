@@ -1643,6 +1643,22 @@ function AppContent() {
     requestComposerFocus();
   }, [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setCurrentSession, setSelectedProject, setTeamAreaExpanded]);
 
+  // 监听从 SkillPanel 发来的"新建会话并插入技能"事件
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { skillName: string; prefixText?: string; suffixText?: string; secondSkillName?: string };
+      enterNewConversation();
+      // 延迟派发，确保 ChatPanel/InputArea 已挂载并注册了事件监听器
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('chat-input-insert-skill', {
+          detail: { skillName: detail.skillName, prefixText: detail.prefixText, suffixText: detail.suffixText, secondSkillName: detail.secondSkillName }
+        }));
+      }, 0);
+    };
+    window.addEventListener('jiuwen:new-conversation', handler);
+    return () => window.removeEventListener('jiuwen:new-conversation', handler);
+  }, [enterNewConversation]);
+
   const handleNewSession = useCallback(async (options?: NewConversationOptions) => {
     enterNewConversation(mode, options);
   }, [enterNewConversation, mode]);
