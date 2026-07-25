@@ -2511,8 +2511,66 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
+    @staticmethod
+    def _sys_operation_isolation_key(sysop_card: SysOperationCard) -> str | None:
+        try:
+            sys_operation = SysOperation(sysop_card)
+            return sys_operation.isolation_key_template
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenClawDeepAdapter] failed to resolve sys_operation isolation key: %s",
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _get_registered_sys_operation_by_isolation_key(
+        isolation_key_template: str | None,
+    ) -> SysOperation | None:
+        if not isolation_key_template:
+            return None
+        try:
+            resource_registry = getattr(Runner.resource_mgr, "_resource_registry", None)
+            if resource_registry is None:
+                return None
+            sys_operation_mgr = resource_registry.sys_operation()
+            owner_map = getattr(sys_operation_mgr, "_sandbox_key_owner_map", {})
+            existing_op_id = owner_map.get(isolation_key_template)
+            if not existing_op_id:
+                return None
+            return Runner.resource_mgr.get_sys_operation(existing_op_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenClawDeepAdapter] failed to get registered sys_operation: %s",
+                exc,
+            )
+            return None
+
+    def _resolve_project_dir_for_sandbox(self) -> str | None:
+        """Best-effort lookup of the user project directory for sandbox builds.
+
+        优先 ``self._instance_overrides['project_dir']``, 否则回落到
+        ``self._workspace_dir``。返回 ``None`` 让 sysop_builder 走自己的 fallback。
+        """
+        overrides = getattr(self, "_instance_overrides", None)
+        if isinstance(overrides, dict):
+            value = overrides.get("project_dir")
+            if value:
+                return str(value)
+        workspace = getattr(self, "_workspace_dir", None)
+        if workspace:
+            return str(workspace)
+        return None
+
     def _create_sys_operation(self) -> SysOperation | None:
-        """Create a sys operation with workspace as working directory."""
+        """Create a sys operation with workspace as working directory.
+
+        是否走沙箱由 ``config.yaml::sandbox.enabled`` 决定（同时要求
+        ``sandbox.url`` / ``sandbox.type`` 已配置）。
+        isolation key 按 project_dir 摘要算（同 project 共享），跨 instance
+        复用守卫：add 之前/失败后都按 isolation_key 查已注册的 sysop，命中即复用，
+        避免撞 agent-core "isolation key already registered" 单例约束。
+        """
         try:
             from jiuwenclaw.utils import get_multi_tenant_user_workspace_dir
 
@@ -2544,36 +2602,48 @@ class JiuWenClawDeepAdapter:
                     excluded_commands=runtime.get("excluded_commands"),
                     idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
                     idle_check_interval=runtime.get("idle_check_interval"),
+                    project_dir=self._resolve_project_dir_for_sandbox(),
                 )
             else:
-                if sandbox_enabled and not (sandbox_url and sandbox_type):
-                    missing = []
-                    if not sandbox_url:
-                        missing.append("JIUWENCLAW_SANDBOX_URL")
-                    if not sandbox_type:
-                        # TYPE 已有默认值, 真触发说明用户显式设了空串, 罕见
-                        missing.append("JIUWENCLAW_SANDBOX_TYPE")
-                    logger.warning(
-                        "[JiuWenClawDeepAdapter] sandbox enabled but missing %s; "
-                        "falling back to local sys_operation. set the env var(s) "
-                        "and restart agent-server to actually use jiuwenbox.",
-                        ", ".join(missing),
-                    )
-                else:
-                    logger.info(
-                        "[JiuWenClawDeepAdapter] local mode (sandbox %s)",
-                        "disabled" if not sandbox_enabled else "url/type empty",
-                    )
+                logger.info(
+                    "[JiuWenClawDeepAdapter] local mode (sandbox %s)",
+                    "disabled" if not sandbox_enabled else "url/type empty",
+                )
                 sysop_card = create_local_sysop_card(work_dir=work_dir)
             if sysop_card is None:
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")
                 return None
+
+            isolation_key_template = JiuWenClawDeepAdapter._sys_operation_isolation_key(sysop_card)
+            registered_sys_operation = (
+                JiuWenClawDeepAdapter._get_registered_sys_operation_by_isolation_key(
+                    isolation_key_template
+                )
+            )
+            if registered_sys_operation is not None:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] reuse registered sys_operation: %s",
+                    registered_sys_operation.id,
+                )
+                return registered_sys_operation
+
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
+                registered_sys_operation = (
+                    JiuWenClawDeepAdapter._get_registered_sys_operation_by_isolation_key(
+                        isolation_key_template
+                    )
+                )
+                if registered_sys_operation is not None:
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] reuse registered sys_operation after add failure: %s",
+                        registered_sys_operation.id,
+                    )
+                    return registered_sys_operation
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", result.msg())
                 return None
             return Runner.resource_mgr.get_sys_operation(sysop_card.id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", exc)
             return None
 

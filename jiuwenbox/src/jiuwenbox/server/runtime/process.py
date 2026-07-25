@@ -16,17 +16,20 @@ import asyncio
 import base64
 import dataclasses
 import errno
-import grp
 import json
 import logging
 import os
-import pwd
 import shutil
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+
+if sys.platform != "win32":
+    # Unix-only; Windows 走 _create_windows 分支, 不触达 grp/pwd 用法.
+    import grp  # noqa: F401
+    import pwd  # noqa: F401
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path

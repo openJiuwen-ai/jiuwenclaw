@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -238,6 +239,198 @@ class AgentWebSocketServer:
 
     # ---------- 生命周期 ----------
 
+    @staticmethod
+    def _parse_sandbox_host_port(url: str) -> tuple[str, int]:
+        """从 sandbox url 解析 host:port; 默认 127.0.0.1:8321."""
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or 8321
+        except Exception:  # noqa: BLE001
+            host, port = "127.0.0.1", 8321
+        return host, int(port)
+
+    @staticmethod
+    def _is_tcp_port_bindable(host: str, port: int) -> bool:
+        """``True`` 表示能在 ``host:port`` 上 bind 成功 (即没被占用)。"""
+        import socket
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            try:
+                sock.bind((host, port))
+            except OSError:
+                return False
+            return True
+        finally:
+            sock.close()
+
+    @staticmethod
+    def _pick_free_tcp_port(host: str) -> int:
+        """让内核挑一个空闲端口 (``bind`` 到 0)。"""
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, 0))
+            return int(sock.getsockname()[1])
+
+    def _allocate_internal_jiuwenbox_port(self, host: str, preferred_port: int) -> int:
+        """internal 模式下确定 jiuwenbox 实际监听端口。
+
+        - 若本 runner 已在 ``host:preferred_port`` 上拥有一个仍在跑的 jiuwenbox, 复用;
+        - 否则若 ``preferred_port`` 当前无人占用, 用之;
+        - 再否则让内核挑一个空闲端口。
+        """
+        from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
+
+        runner = JiuwenBoxRunner.instance()
+        if runner.is_owned_listener(host, preferred_port):
+            return preferred_port
+        if self._is_tcp_port_bindable(host, preferred_port):
+            return preferred_port
+        new_port = self._pick_free_tcp_port(host)
+        logger.warning(
+            "[AgentWebSocketServer] jiuwenbox preferred port %s:%d is busy; "
+            "allocating fresh port %d for new jiuwenbox instance",
+            host, preferred_port, new_port,
+        )
+        return new_port
+
+    async def _bootstrap_internal_jiuwenbox(self) -> None:
+        """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
+
+        触发条件: ``sandbox.startup_mode`` **显式**写为 ``internal``
+        (走 :func:`get_sandbox_startup_mode_explicit`, 字段缺失不拉, 避免没在用
+        沙箱的用户突然多出 jiuwenbox 进程)。不单独依赖 ``sandbox.enabled``:
+        只要 ``startup_mode=internal`` 就拉, 成功后落盘真实 url。
+
+        平台: 支持 Linux 与 Windows (Windows 走 ``_create_windows`` 分支); 其他平台跳过。
+        best-effort: 任何失败只 warning, 不让 agent-server 自身启动失败。
+        """
+        try:
+            if sys.platform not in ("linux", "win32"):
+                logger.info(
+                    "[AgentWebSocketServer] skipping jiuwenbox auto-start: "
+                    "sandbox is only supported on Linux/Windows (current: %r)",
+                    sys.platform,
+                )
+                return
+            from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
+            from jiuwenclaw.config import (
+                DEFAULT_SANDBOX_POLICY_FILE,
+                get_sandbox_endpoint,
+                get_sandbox_startup_mode_explicit,
+                resolve_sandbox_policy_path,
+                update_sandbox_endpoint,
+            )
+
+            explicit_mode = get_sandbox_startup_mode_explicit()
+            if explicit_mode is None:
+                logger.info(
+                    "[AgentWebSocketServer] sandbox.startup_mode 未在 config.yaml "
+                    "中显式配置, skipping jiuwenbox auto-start (如需 agent-server "
+                    "自动拉起 jiuwenbox 子进程, 设置 sandbox.startup_mode: internal)"
+                )
+                return
+            if explicit_mode != "internal":
+                logger.info(
+                    "[AgentWebSocketServer] sandbox.startup_mode=%r, skipping "
+                    "jiuwenbox auto-start (external 模式由用户自行拉起 jiuwenbox-server)",
+                    explicit_mode,
+                )
+                return
+
+            endpoint = get_sandbox_endpoint()
+            url = endpoint.get("url") or "http://127.0.0.1:8321"
+            sandbox_type = endpoint.get("type") or "jiuwenbox"
+            raw_policy = endpoint.get("policy_file") or ""
+            effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
+            policy_path = resolve_sandbox_policy_path(effective_policy_file)
+            if policy_path is None or not policy_path.is_file():
+                logger.warning(
+                    "[AgentWebSocketServer] sandbox auto-start skipped: "
+                    "policy_file=%r 无法解析到存在的文件 (resolved=%s).",
+                    effective_policy_file, policy_path,
+                )
+                return
+
+            host, preferred_port = self._parse_sandbox_host_port(url)
+            port = self._allocate_internal_jiuwenbox_port(host, preferred_port)
+            if port != preferred_port:
+                url = f"http://{host}:{port}"
+                logger.info(
+                    "[AgentWebSocketServer] jiuwenbox auto-start: "
+                    "preferred port %d busy, using %d",
+                    preferred_port, port,
+                )
+
+            # 注入动态路径 env 给 box-server 子进程 (Windows 沙箱用):
+            #   JIUWENBOX_BUNDLED_PYTHON / JIUWENBOX_VENV_DIR
+            try:
+                from jiuwenclaw.runtime.pip_env import (
+                    ensure_runtime_venv, resolve_base_python,
+                )
+                venv_dir = ensure_runtime_venv()
+                os.environ["JIUWENBOX_VENV_DIR"] = str(venv_dir)
+                bundled_python = resolve_base_python()
+                os.environ["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
+                logger.info(
+                    "[AgentWebSocketServer][sandbox] injected env: "
+                    "JIUWENBOX_VENV_DIR=%s, JIUWENBOX_BUNDLED_PYTHON=%s",
+                    venv_dir, bundled_python.parent,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] inject JIUWENBOX_BUNDLED_PYTHON/VENV_DIR failed: %s",
+                    exc,
+                )
+
+            logger.info(
+                "[AgentWebSocketServer][sandbox] spawning box-server (startup_mode=internal)..."
+            )
+            runner = JiuwenBoxRunner.instance()
+            ok = await runner.ensure_running(
+                host=host,
+                port=port,
+                startup_mode="internal",
+                policy_path=policy_path,
+            )
+            if not ok:
+                stderr_tail = runner.get_stderr_tail(20)
+                hint = "\n--- jiuwenbox stderr (tail) ---\n" + stderr_tail if stderr_tail else ""
+                logger.warning(
+                    "[AgentWebSocketServer] jiuwenbox auto-start failed at %s:%d "
+                    "(policy=%s).%s",
+                    host, port, policy_path, hint,
+                )
+                return
+
+            # 落盘最终生效的 url (端口可能被换过), 让后续会话/agent 直接读到正确端点。
+            actual_url = runner.base_url
+            if actual_url and actual_url != endpoint.get("url"):
+                try:
+                    update_sandbox_endpoint(
+                        actual_url, sandbox_type,
+                        startup_mode="internal",
+                        policy_file=effective_policy_file,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentWebSocketServer] persist sandbox endpoint failed "
+                        "after auto-start: %s", exc,
+                    )
+            logger.info(
+                "[AgentWebSocketServer][sandbox] box-server ready at %s, "
+                "sandbox_id 按需 lazy 创建",
+                actual_url,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] jiuwenbox auto-start bootstrap failed: %s", exc,
+            )
+
     async def start(self) -> None:
         """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
         await self._trigger_before_ws_server_start_hook()
@@ -279,6 +472,8 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port,
             extra={'user_visible': 'critical'},
         )
+        # 按 config.yaml::sandbox.startup_mode 自动拉起 jiuwenbox 子进程 (internal 模式)。
+        await self._bootstrap_internal_jiuwenbox()
 
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""

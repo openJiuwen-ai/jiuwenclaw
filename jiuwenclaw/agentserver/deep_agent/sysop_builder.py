@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,6 +34,65 @@ logger = logging.getLogger(__name__)
 
 PreserveFileSharingMode = Literal["mount"]
 _PRESERVE_FILE_SHARING_MODE: PreserveFileSharingMode = "mount"
+
+
+def _resolve_project_dir(override: str | Path | None) -> Path | None:
+    """解析要 bind 进沙箱的 rw 目录。
+
+    优先级:
+      1. ``override`` 入参 (调用方显式指定)。
+      2. ``JIUWENCLAW_SANDBOX_PROJECT_DIR`` env (不改代码也能 pin project dir)。
+      3. ``Path.cwd()``: 调用时的进程工作目录。
+
+    解析失败 / 非目录 / 是文件系统根 (拒绝 rw-bind ``/`` 或 ``C:\\``) → 返回 ``None``。
+    """
+    candidates: list[Path] = []
+    if override is not None:
+        candidates.append(Path(override))
+    env_override = os.getenv("JIUWENCLAW_SANDBOX_PROJECT_DIR")
+    if env_override:
+        candidates.append(Path(env_override))
+    candidates.append(Path.cwd())
+
+    for cand in candidates:
+        try:
+            resolved = cand.expanduser().resolve()
+        except OSError as exc:
+            logger.debug(
+                "[sysop_builder] project_dir candidate %s could not be resolved: %s",
+                cand, exc,
+            )
+            continue
+        if not resolved.is_dir():
+            logger.debug(
+                "[sysop_builder] project_dir candidate %s is not a directory; skipping",
+                resolved,
+            )
+            continue
+        if resolved == Path(resolved.anchor):
+            # 拒绝 rw-bind 文件系统根: 会 shadow 所有 ro mount + 暴露宿主机密。
+            logger.warning(
+                "[sysop_builder] refusing to mount filesystem root %s as rw "
+                "project directory; pick a more specific cwd or set "
+                "JIUWENCLAW_SANDBOX_PROJECT_DIR",
+                resolved,
+            )
+            return None
+        return resolved
+    return None
+
+
+def _sandbox_isolation_custom_id(project_dir: str | Path | None) -> str:
+    """Stable SysOperation isolation key suffix for per-project sandbox sharing.
+
+    同一 project_dir 的多个 agent 共享同一个 sandbox isolation key (摘要形式),
+    不同 project_dir 隔离。project_dir 无法解析时回落到固定占位 ``project_default``。
+    """
+    resolved = _resolve_project_dir(project_dir)
+    if resolved is None:
+        return "project_default"
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
+    return f"project_{digest}"
 
 
 def _normalize_fs_entry(entry: Any, default_permissions: str) -> dict[str, Any] | None:
@@ -232,6 +293,7 @@ def create_sandbox_sysop_card(
     excluded_commands: list[str] | None = None,
     idle_ttl_seconds: int | None = None,
     idle_check_interval: int | None = None,
+    project_dir: str | Path | None = None,
 ) -> SysOperationCard | None:
     """构造 jiuwenbox 沙箱模式 SysOperationCard."""
     # 触发 jiuwenbox provider 注册（@SandboxRegistry.provider 装饰器副作用）
@@ -270,7 +332,7 @@ def create_sandbox_sysop_card(
         gateway_config = SandboxGatewayConfig(
             isolation=SandboxIsolationConfig(
                 container_scope=ContainerScope.CUSTOM,
-                custom_id=agent_id,
+                custom_id=_sandbox_isolation_custom_id(project_dir),
             ),
             launcher_config=PreDeployLauncherConfig(
                 base_url=sandbox_url,
