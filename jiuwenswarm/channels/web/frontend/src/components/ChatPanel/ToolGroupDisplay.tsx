@@ -9,6 +9,11 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { ToolExecution } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
+import {
+  formatToolDisplayLabel,
+  getToolGroupDisplayState,
+  isToolDisplayResultSuccessful,
+} from '../../features/tool-events/toolDisplay';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { SkillTreePath } from './SkillTreePath';
 import { BeamSearchTree } from './BeamSearchTree';
@@ -60,7 +65,7 @@ function ToolStatusIcon({
 }
 
 function isToolResultSuccessful(result?: ToolExecution['result']) {
-  return Boolean(result?.success && !result.result.includes('success=False'));
+  return isToolDisplayResultSuccessful(result);
 }
 
 function isExecutionSuccessful(execution: ToolExecution) {
@@ -81,14 +86,6 @@ function getExecutionTone(execution: ToolExecution): ToolStatusTone {
     return 'error';
   }
   return 'pending';
-}
-
-function getExecutionLabel(execution: ToolExecution, sessionCompletedLabel: string) {
-  if (execution.toolCall.name === 'session') {
-    return execution.toolCall.formatted_args || sessionCompletedLabel;
-  }
-
-  return execution.toolCall.name;
 }
 
 function isSkillToolName(name: string): boolean {
@@ -158,6 +155,7 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
   const isTimeout = status === 'timeout';
   const modalTone = getExecutionTone(execution);
   const resultSuccess = isToolResultSuccessful(result);
+  const displayLabel = formatToolDisplayLabel(toolCall, t);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -196,8 +194,14 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                 className="text-lg font-semibold font-mono"
                 style={{ color: 'var(--color-text-strong)' }}
               >
-                {toolCall.name}
+                {displayLabel}
               </h2>
+              <p
+                className="text-xs mt-1"
+                style={{ color: 'var(--color-text-secondary)' }}
+              >
+                {t('chatUi.toolResult.technicalName')}: <code>{toolCall.name}</code>
+              </p>
               {toolCall.formatted_args && (
                 <p
                   className="text-sm font-mono mt-1"
@@ -369,7 +373,7 @@ function ToolExecutionRow({ execution }: { execution: ToolExecution }) {
 
           <span className="tool-tree-item__main">
             <span className="tool-tree-item__name">
-              {getExecutionLabel(execution, t('chatUi.toolGroup.sessionCompleted'))}
+              {formatToolDisplayLabel(toolCall, t)}
             </span>
           </span>
         </button>
@@ -397,7 +401,6 @@ export function ToolGroupDisplay({
   const visibleExecutions = teamLayout
     ? executions.filter((execution) => !execution.toolCall.memberName)
     : executions;
-  const totalPairs = visibleExecutions.length;
   const hasPending = visibleExecutions.some((execution) => execution.status === 'pending');
 
   useEffect(() => {
@@ -437,7 +440,22 @@ export function ToolGroupDisplay({
     scrollInner(true);
   }, [scrollInner]);
 
-  const headerLabel = t('chatUi.toolGroup.executed', { totalPairs });
+  const groupDisplayState = getToolGroupDisplayState(visibleExecutions);
+  const groupLabelParams = {
+    count: groupDisplayState.total,
+    failedCount: groupDisplayState.failedCount,
+    timeoutCount: groupDisplayState.timeoutCount,
+  };
+  const headerLabel =
+    groupDisplayState.kind === 'running'
+      ? t('chatUi.toolGroup.running', groupLabelParams)
+      : groupDisplayState.kind === 'completedWithFailures'
+        ? t('chatUi.toolGroup.completedWithFailures', groupLabelParams)
+        : groupDisplayState.kind === 'completedWithTimeouts'
+          ? t('chatUi.toolGroup.completedWithTimeouts', groupLabelParams)
+          : groupDisplayState.kind === 'completedWithIssues'
+            ? t('chatUi.toolGroup.completedWithIssues', groupLabelParams)
+            : t('chatUi.toolGroup.completed', groupLabelParams);
   const skillTreeExecutions = visibleExecutions.filter(
     (execution) => execution.result?.skillTree
   );

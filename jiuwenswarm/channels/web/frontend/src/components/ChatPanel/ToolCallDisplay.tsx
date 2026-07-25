@@ -8,6 +8,10 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ToolCall, ToolResult } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
+import {
+  formatToolDisplayLabel,
+  formatToolResultDisplayLabel,
+} from '../../features/tool-events/toolDisplay';
 import clsx from 'clsx';
 
 interface ToolCallDisplayProps {
@@ -20,13 +24,8 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
   const [isExpanded, setIsExpanded] = useState(false);
 
   if (toolCall) {
-    // session 类型：仅显示 会话任务：【description】，不显示 "session" 名称
     const isSession = toolCall.name === 'session';
-    const displayTitle = isSession
-      ? (toolCall.formatted_args || '会话任务已完成')
-      : (toolCall.description ? `${toolCall.name}: ${toolCall.description}` : toolCall.name);
-
-    // 使用格式化的参数摘要（session 类型时 subtitle 已融入 title，不再重复显示）
+    const displayTitle = formatToolDisplayLabel(toolCall, t);
     const displaySubtitle = isSession ? '' : (toolCall.formatted_args || '');
 
     return (
@@ -54,6 +53,9 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
         </div>
         {isExpanded && (
           <div className="mt-2 p-2 rounded-md bg-card border border-border">
+            <div className="mb-2 text-xs text-text-muted">
+              {t('chatUi.toolResult.technicalName')}: <code>{toolCall.name}</code>
+            </div>
             <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap">
               {formatToolArguments(toolCall.arguments)}
             </pre>
@@ -64,12 +66,17 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
   }
 
   if (toolResult) {
-    // 使用格式化的摘要或默认显示（session 类型优先用 summary，避免出现 "session 完成"）
-    const displaySummary = toolResult.summary
-      ? toolResult.summary
-      : (toolResult.toolName === 'session'
-        ? (toolResult.success ? t('chatUi.toolGroup.sessionCompleted') : t('chatUi.toolGroup.sessionFailed'))
-        : `${toolResult.toolName} ${toolResult.success ? t('chatUi.toolResult.success') : t('chatUi.toolResult.failed')}`);
+    const isSession = toolResult.toolName === 'session';
+    const displaySummary = isSession
+      ? (toolResult.success
+        ? t('chatUi.toolGroup.sessionCompleted')
+        : t('chatUi.toolGroup.sessionFailed'))
+      : formatToolResultDisplayLabel(
+        { name: toolResult.toolName, arguments: {} },
+        toolResult.success,
+        toolResult.summary,
+        t,
+      );
 
     return (
       <div className="chat-tool-card animate-rise">
@@ -107,6 +114,9 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
         </div>
         {isExpanded && (
           <div className="mt-2 p-2 rounded-md bg-card border border-border">
+            <div className="mb-2 text-xs text-text-muted">
+              {t('chatUi.toolResult.technicalName')}: <code>{toolResult.toolName}</code>
+            </div>
             <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap max-h-60">
               {formatToolResult(toolResult.result)}
             </pre>
