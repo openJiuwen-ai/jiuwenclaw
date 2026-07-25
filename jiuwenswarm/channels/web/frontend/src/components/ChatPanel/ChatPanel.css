@@ -899,6 +899,15 @@ overflow: hidden;
   height: 12px;
 }
 
+/* Member/role chips have no leading icon container. Keep their remove action
+   in a reserved trailing slot so it never covers the member name on hover. */
+.chat-input-chip-inline--member .chat-input-chip-inline__remove,
+.chat-input-chip-inline--role .chat-input-chip-inline__remove {
+  position: static;
+  transform: none;
+  color: var(--color-action-primary);
+}
+
 .chat-input-chip-inline:hover .chat-input-chip-inline__icon::before {
   opacity: 0;
 }

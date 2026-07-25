@@ -121,6 +121,19 @@ const SWARM_WORKFLOW_LOG_PREVIEW_ROWS = 8;
 const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
+
+/**
+ * Terminal mouse reporting takes ownership of drag events, which prevents the
+ * terminal's native text selection and copy behaviour. Keep it scoped to UI
+ * states that actually need mouse events; a scrollable transcript can still be
+ * navigated with the keyboard without making the whole chat unselectable.
+ */
+export function shouldCaptureTerminalMouse(
+  pendingQuestionActive: boolean,
+  interactiveOverlayActive: boolean,
+): boolean {
+  return pendingQuestionActive || interactiveOverlayActive;
+}
 const CONFIRM_ACTION_RE = /\*\*(?:Agent wants to|Tool `[^`]+` requires your approval)([^*]*)\*\*/i;
 const PLAN_REJECT_INPUT_RE = /(\s+\[ .+ \])$/;
 const PERMISSION_RISK_RE = /安全风险评估：\**\s*([^\s*]+)?\s*\**([^*\n]+?风险)\**/m;
@@ -2936,10 +2949,6 @@ export class AppScreen implements Component, Focusable {
       pendingInput,
       pendingInputBaseline,
     ).length;
-    const approximateFixedHeight =
-      questionLines.length + editorLines.length + composerPreviewLines.length + 2;
-    const transcriptMayScroll =
-      transcriptLineCount > Math.max(0, this.tui.terminal.rows - approximateFixedHeight);
     const interactiveOverlayActive =
       this.startupPromptList !== null ||
       this.resumeSessionList !== null ||
@@ -2954,9 +2963,7 @@ export class AppScreen implements Component, Focusable {
       this.configEditorState !== null ||
       this.questionList !== null;
     this.setMouseTrackingEnabled(
-      transcriptMayScroll ||
-        snapshot.pendingQuestion !== null ||
-        interactiveOverlayActive,
+      shouldCaptureTerminalMouse(snapshot.pendingQuestion !== null, interactiveOverlayActive),
     );
     if (
       this.transcriptScrollOffset > 0 &&

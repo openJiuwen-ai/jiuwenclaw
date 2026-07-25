@@ -1,7 +1,14 @@
 // 7段式 cron 表达式校验（croniter 语法，second_at_beginning=True），原样搬自旧 CronPanel/index.tsx，
 // i18n.errors.cron* key 沿用；周字段范围已按 croniter 实测结果修正（见下方说明）。
 
-function isValidCronField(value: string, min: number, max: number, stepDivisor: number | null, allowQuestion: boolean = false, allowLast: boolean = false): { valid: boolean; error?: string } {
+// 步长（`*/N`）只要求是 ≥1 的整数，不要求能整除字段的取值范围（60/24 等）：croniter 对
+// `*/9` 这类"整不除"的步长一样能正常解析、正常调度（只是在字段回绕到 0 的边界处会出现一次
+// 偏短的间隔，这是 cron 语法本身的固有特性，不是不合法）。之前这里额外加了一条"stepDivisor
+// 必须能被 step 整除"的自造限制，比后端（gateway/cron/cron_expr.py 用 croniter.is_valid 校验
+// 语法）严格得多，导致"按间隔"选分钟填 9、选小时填 5 这类合法值被前端误判非法、"确定"按钮
+// 置灰且没有对得上号的提示（见 2026-07-24 bugfix，bug001）。去掉这条限制，前端和后端的真实
+// 约束就一致了。
+function isValidCronField(value: string, min: number, max: number, allowQuestion: boolean = false, allowLast: boolean = false): { valid: boolean; error?: string } {
   if (value === '*') return { valid: true };
   if (allowQuestion && value === '?') return { valid: true };
   if (allowLast && value === 'L') return { valid: true };
@@ -10,8 +17,7 @@ function isValidCronField(value: string, min: number, max: number, stepDivisor: 
     if (part.includes('/')) {
       const [range, stepStr] = part.split('/');
       const step = parseInt(stepStr, 10);
-      if (isNaN(step) || step <= 0) return { valid: false, error: getStepRangeError(min, max) };
-      if (stepDivisor !== null && stepDivisor % step !== 0) return { valid: false, error: getStepRangeError(min, max) };
+      if (isNaN(step) || step <= 0) return { valid: false, error: getFieldError(min, max) };
       if (range === '*') continue;
       const rangeValid = isValidCronRange(range, min, max);
       if (!rangeValid) return { valid: false, error: getFieldError(min, max) };
@@ -32,12 +38,6 @@ function getFieldError(min: number, max: number): string {
   if (min === 1 && max === 12) return 'cron.errors.cronMonth';
   if (min === 0 && max === 6) return 'cron.errors.cronWeek';
   return 'cron.errors.cronFormat';
-}
-
-function getStepRangeError(min: number, max: number): string {
-  if (min === 0 && max === 59) return 'cron.errors.cronSecondOrMinuteStep';
-  if (min === 0 && max === 23) return 'cron.errors.cronHourStep';
-  return getFieldError(min, max);
 }
 
 function isValidCronRange(range: string, min: number, max: number): boolean {
@@ -66,7 +66,7 @@ function isValidWeekField(value: string): { valid: boolean; error?: string } {
       if (lastMatch && Number(lastMatch[1]) <= 6) continue;
       return { valid: false, error: 'cron.errors.cronWeek' };
     }
-    const plainResult = isValidCronField(part, 0, 6, null);
+    const plainResult = isValidCronField(part, 0, 6);
     if (!plainResult.valid) return { valid: false, error: 'cron.errors.cronWeek' };
   }
   return { valid: true };
@@ -78,16 +78,16 @@ export function validateCronExpr(expr: string): { valid: boolean; error?: string
     return { valid: false, error: 'cron.errors.cronFormat' };
   }
   const [second, minute, hour, day, month, week, year] = parts;
-  const secondResult = isValidCronField(second, 0, 59, 60);
+  const secondResult = isValidCronField(second, 0, 59);
   if (!secondResult.valid) return { valid: false, error: secondResult.error };
-  const minuteResult = isValidCronField(minute, 0, 59, 60);
+  const minuteResult = isValidCronField(minute, 0, 59);
   if (!minuteResult.valid) return { valid: false, error: minuteResult.error };
-  const hourResult = isValidCronField(hour, 0, 23, 24);
+  const hourResult = isValidCronField(hour, 0, 23);
   if (!hourResult.valid) return { valid: false, error: hourResult.error };
   // day 字段允许 'L'（月末最后一天，croniter 支持，见 plan.md §2.3.1 第3点）
-  const dayResult = isValidCronField(day, 1, 31, null, true, true);
+  const dayResult = isValidCronField(day, 1, 31, true, true);
   if (!dayResult.valid) return { valid: false, error: dayResult.error };
-  const monthResult = isValidCronField(month, 1, 12, null);
+  const monthResult = isValidCronField(month, 1, 12);
   if (!monthResult.valid) return { valid: false, error: monthResult.error };
   // 周字段实测范围是 0-6（0=周日...6=周六），不是 Quartz 的 1-7；旧文案/校验此前写反了。
   // 用专门的 isValidWeekField（支持 ?/*、普通值、以及"每月第几周"的 #N / L 形状）

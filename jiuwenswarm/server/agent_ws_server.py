@@ -1103,7 +1103,6 @@ class AgentWebSocketServer:
                 pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
-
         had_server = self._server is not None
         if had_server:
             self._server.close()
@@ -1314,6 +1313,9 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.TEAM_SNAPSHOT:
                 await self._handle_team_snapshot(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_MQ_PUBLISH:
+                await self._handle_team_mq_publish(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.PROACTIVE_TICK:
                 await self._handle_proactive_tick(ws, request, send_lock)
@@ -3128,42 +3130,124 @@ class AgentWebSocketServer:
 
     async def _handle_team_snapshot(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.agents.harness.team import get_team_manager
+        from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import (
+            TeamMonitorHandler,
+        )
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(params.get("session_id") or request.session_id or "").strip()
+        channel_id = request.channel_id or "web"
+        empty_payload = {"members": [], "tasks": [], "team_id": None}
+
+        team_manager = get_team_manager(channel_id)
+        monitor_handler = team_manager.get_monitor_handler(session_id) if session_id else None
+
+        snapshot: dict[str, Any] | None = None
+        source = "empty"
+        if monitor_handler is not None and monitor_handler.is_running:
+            try:
+                snapshot = await monitor_handler.get_team_snapshot()
+                if snapshot is not None:
+                    source = "live"
+            except Exception as e:
+                logger.warning("[AgentWebSocketServer] team.snapshot (live) failed: %s", e)
+
+        def _snapshot_tasks(payload: dict[str, Any] | None) -> list[Any]:
+            if not isinstance(payload, dict):
+                return []
+            tasks = payload.get("tasks")
+            return tasks if isinstance(tasks, list) else []
+
+        # History restore often hits this RPC after the monitor has stopped, OR
+        # while a live handler is still registered but already returns a truthy
+        # empty board ({tasks: [], members: [], team_id: ...}). `if not snapshot`
+        # alone would skip DB in that case and leave the frontend with no
+        # title/content. Fall back whenever live has no tasks.
+        needs_db = snapshot is None or not _snapshot_tasks(snapshot)
+        if needs_db and session_id:
+            team_name = str(params.get("team_name") or "").strip()
+            if not team_name:
+                team_name = str(
+                    team_manager.get_active_team_name(session_id) or ""
+                ).strip()
+            if not team_name:
+                team_name = str(
+                    (get_session_metadata(session_id) or {}).get("team_name") or ""
+                ).strip()
+            if team_name:
+                try:
+                    db_snapshot = await TeamMonitorHandler.get_team_snapshot_from_db(
+                        session_id, team_name
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[AgentWebSocketServer] team.snapshot (db) failed: "
+                        "session_id=%s team_name=%s error=%s",
+                        session_id,
+                        team_name,
+                        e,
+                    )
+                    db_snapshot = None
+                # Prefer DB when it has tasks, or when live was missing entirely.
+                # If both boards have empty tasks, keep live so in-memory
+                # members (if any) are not wiped by an empty DB read.
+                if db_snapshot is not None and (
+                    snapshot is None or _snapshot_tasks(db_snapshot)
+                ):
+                    snapshot = db_snapshot
+                    source = "db"
+
+        payload = snapshot or empty_payload
+        members = payload.get("members") if isinstance(payload, dict) else []
+        tasks = _snapshot_tasks(payload if isinstance(payload, dict) else None)
+        logger.info(
+            "[AgentWebSocketServer] team.snapshot session_id=%s source=%s "
+            "tasks_count=%s members_count=%s",
+            session_id or "-",
+            source if snapshot is not None else "empty",
+            len(tasks),
+            len(members) if isinstance(members, list) else 0,
+        )
+
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=channel_id,
+            ok=True,
+            payload=payload,
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_team_mq_publish(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Relay one external team event into the active core team runtime."""
+        from jiuwenswarm.agents.harness.team import get_team_manager
 
         session_id = request.session_id or ""
         channel_id = request.channel_id or "web"
+        payload = request.params.get("payload")
 
-        team_manager = get_team_manager(channel_id)
-        monitor_handler = team_manager.get_monitor_handler(session_id)
+        if not session_id:
+            success, reason = False, "session_id is required"
+        elif payload is None:
+            success, reason = False, "payload is required"
+        elif not isinstance(payload, dict) or payload.get("type") != "team.external_event":
+            success, reason = False, "invalid_external_event"
+        else:
+            success, reason = await get_team_manager(channel_id).interact(session_id, payload)
 
-        if monitor_handler is None or not monitor_handler.is_running:
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload={"members": [], "tasks": [], "team_id": None},
-            )
-            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await send_wire_payload(ws, wire)
-            return
-
-        try:
-            snapshot = await monitor_handler.get_team_snapshot()
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload=snapshot or {"members": [], "tasks": [], "team_id": None},
-            )
-        except Exception as e:
-            logger.warning("[AgentWebSocketServer] team.snapshot failed: %s", e)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload={"members": [], "tasks": [], "team_id": None},
-            )
-
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=channel_id,
+            ok=success,
+            payload={"published": True} if success else {"error": reason},
+        )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)

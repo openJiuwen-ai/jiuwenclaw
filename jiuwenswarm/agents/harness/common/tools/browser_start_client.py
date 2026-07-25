@@ -229,7 +229,6 @@ class _BrowserProcessHandle:
     host: str
     port: int
     user_data_dir: str
-    reaping: threading.Event = field(default_factory=threading.Event)
 
 
 _BROWSER_PROCESS_REGISTRY: dict[int, _BrowserProcessHandle] = {}
@@ -260,7 +259,6 @@ def _reap_browser_on_exit(handle: _BrowserProcessHandle) -> None:
         except Exception as exc:
             logger.warning(f"Browser reap watcher wait() failed pid={pid}: {exc}")
             return
-        handle.reaping.set()
         logger.info(
             f"Browser main process exited pid={pid}, reaping child processes "
             f"host={handle.host}, port={handle.port}"
@@ -278,7 +276,6 @@ def _reap_browser_on_exit(handle: _BrowserProcessHandle) -> None:
             )
     finally:
         _unregister_browser_process(pid)
-        handle.reaping.clear()
 
 
 def _normalized_path(value: str) -> str:
