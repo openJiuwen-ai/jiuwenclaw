@@ -32,7 +32,7 @@ BODY_MAX_LINES = 500
 DESCRIPTION_MAX_CHARS_CJK = 512
 DESCRIPTION_MAX_CHARS_EN = 1024
 
-EXCLUDE_DIRS = {"__pycache__", "node_modules"}
+EXCLUDE_DIRS = {"__pycache__", "node_modules", ".trash"}
 EXCLUDE_GLOBS = {"*.pyc", "*.swp"}
 EXCLUDE_FILES = {".DS_Store"}
 ROOT_EXCLUDE_DIRS = {"evals", "output"}

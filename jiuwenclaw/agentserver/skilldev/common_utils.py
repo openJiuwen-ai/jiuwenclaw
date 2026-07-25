@@ -12,7 +12,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # 打包排除规则（与 PackageStageHandler 保持一致）
-_EXCLUDE_DIRS = {"__pycache__", "node_modules", ".git"}
+_EXCLUDE_DIRS = {"__pycache__", "node_modules", ".git", ".trash"}
 _EXCLUDE_FILES = {".DS_Store"}
 _EXCLUDE_GLOBS = {"*.pyc"}
 _ROOT_EXCLUDE_DIRS = {"evals"}

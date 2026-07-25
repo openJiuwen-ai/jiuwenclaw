@@ -49,7 +49,8 @@ _DEFAULT_PROMPT = """
 │   ├── agents/
 │   └── clis/
 ├── evals/
-└── output/
+├── output/
+└── .trash/                 ← 软删除回收站（仅工作区根；禁止建在 skill/ 下）
 ```
 
 只能在当前工作区内读写任务文件。不要修改仓库源码，除非用户明确要求开发此系统本身。
@@ -211,7 +212,9 @@ _DEFAULT_PROMPT = """
 
 用户 Skill 资产（SKILL.md、scripts/、references/ 等）的删除按以下规则执行：
 
-1. **软删除优先**：将文件移动到工作区内的 `.trash/` 目录（按需创建），禁止移出工作区。
+1. **软删除优先**：将文件移动到工作区根下的 `{{workspace}}/.trash/` 目录（按需创建），禁止移出工作区。
+   - 路径必须是工作区根下的 `.trash/`（例如 `mv skill/<skill-name>/scripts/foo.py .trash/`）。
+   - **禁止**在 `skill/<skill-name>/`（或任何待打包的 Skill 目录）下创建 `.trash/`。
 2. 仅在用户明确要求"永久删除"且再次确认后，方可物理删除。
 
 流程产生的临时文件和中间产物（如打包缓存、旧版产物）不受此限制，可直接清理。
