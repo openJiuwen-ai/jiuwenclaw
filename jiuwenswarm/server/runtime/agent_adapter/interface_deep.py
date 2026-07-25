@@ -160,6 +160,7 @@ from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.stage_timer import StageTimer
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool, unregister_tool
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
+from jiuwenswarm.server.request_context import build_xiaoyi_model_trace_headers
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
     setup_permission_context,
@@ -983,6 +984,27 @@ class _RuntimeCronToolContext:
     @property
     def tool_scope(self) -> str:
         return self._tool_scope
+
+
+class _RequestContextModel(Model):
+    """Model that adds request-scoped transport headers when available."""
+
+    @staticmethod
+    def _with_request_headers(kwargs: dict[str, Any]) -> dict[str, Any]:
+        trace_headers = build_xiaoyi_model_trace_headers()
+        if not trace_headers:
+            return kwargs
+
+        custom_headers = dict(kwargs.get("custom_headers") or {})
+        kwargs["custom_headers"] = {**custom_headers, **trace_headers}
+        return kwargs
+
+    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        return await super().invoke(*args, **self._with_request_headers(kwargs))
+
+    async def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        async for chunk in super().stream(*args, **self._with_request_headers(kwargs)):
+            yield chunk
 
 
 class JiuWenSwarmDeepAdapter:
@@ -3066,7 +3088,10 @@ class JiuWenSwarmDeepAdapter:
                 model_name=name,
             )
         )
-        return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
+        return _RequestContextModel(
+            model_client_config=ModelClientConfig(**mcc_fields),
+            model_config=m_config,
+        )
 
     def _register_model_cache_entry(
         self,
