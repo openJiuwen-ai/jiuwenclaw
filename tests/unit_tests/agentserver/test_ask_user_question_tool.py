@@ -120,10 +120,15 @@ def test_single_option_normal_pads_with_other():
 
 
 @pytest.mark.asyncio
-async def test_explicit_skipped_answer_is_not_reported_as_answered():
+async def test_empty_answer_shells_preserve_legacy_answered_contract():
     registry = Mock()
     registry.wait_for_answer = AsyncMock(
-        return_value={"status": "skipped", "answers": []},
+        return_value=[
+            {
+                "question": "是否补充范围？",
+                "selected_options": [],
+            },
+        ],
     )
     server = Mock()
     server.send_push = AsyncMock()
@@ -148,8 +153,8 @@ async def test_explicit_skipped_answer_is_not_reported_as_answered():
             },
         ])
 
-    assert result == {
-        "status": "skipped",
-        "message": "用户未提供额外反馈，继续执行原始请求。",
-        "answers": [],
-    }
+    assert result["status"] == "answered"
+    assert "interaction_status" not in result
+    assert result["answers"] == [
+        {"question": "是否补充范围？", "selected_options": []},
+    ]

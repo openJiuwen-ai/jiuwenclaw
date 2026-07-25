@@ -331,13 +331,6 @@ async def _ask_user_question_impl(questions: Any, max_options: int | None = None
     except asyncio.CancelledError:
         return {"status": "cancelled", "message": "会话已取消。", "answers": []}
 
-    if isinstance(answer_result, dict) and answer_result.get("status") == "skipped":
-        return {
-            "status": "skipped",
-            "message": "用户未提供额外反馈，继续执行原始请求。",
-            "answers": [],
-        }
-
     answers = answer_result if isinstance(answer_result, list) else []
     normalized_answers = _normalize_user_answer_option_ids(answers)
     return {

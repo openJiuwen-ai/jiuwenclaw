@@ -222,12 +222,9 @@ class AskUserQuestionRegistry:
         self._pending_sessions.pop(key, None)
         if fut is None or fut.done():
             return False
-        result: Any = (
-            {"status": "skipped", "answers": []}
-            if normalized_status == "skipped"
-            else norm
-        )
-        fut.set_result(result)
+        # Keep the shared ask tool's list-only result contract.  ``status`` is
+        # consumed above only to validate that a skipped response has no input.
+        fut.set_result(norm)
         logger.info(
             "[AskUserQuestionRegistry] resolved request_id=%s tenant=(%s,%s)",
             key[2],
