@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
+import re
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
@@ -12,6 +13,37 @@ ExtensionComponentLiteral = Literal["gateway", "agent_server"]
 ExtensionHookTypeLiteral = Literal["pre_request", "post_request", "error", "schedule"]
 ImagePullPolicyLiteral = Literal["Always", "IfNotPresent", "Never"]
 TemplateIdPath = Annotated[str, Field(min_length=1, max_length=100)]
+
+# cron 字段：数字、字母（JAN/MON）、* / , - ? # L W
+_CRON_FIELD_RE = re.compile(r"^[\w*/,\-?#]+$", re.IGNORECASE)
+# 常见 cron：5 段（分 时 日 月 周）、6 段（含秒）、7 段（含年）
+_CRON_FIELD_COUNTS = frozenset({5, 6, 7})
+
+
+def is_valid_hook_schedule(value: str) -> bool:
+    """校验 hook_config.schedule 为合法 cron 表达式（5/6/7 段）。"""
+    text = value.strip()
+    if not text:
+        return False
+    parts = text.split()
+    if len(parts) not in _CRON_FIELD_COUNTS:
+        return False
+    return all(_CRON_FIELD_RE.fullmatch(part) for part in parts)
+
+
+def normalize_hook_schedule(schedule: str | None, *, required: bool) -> str | None:
+    """规范化 schedule；required 时不可为空，有值时须为合法 cron。"""
+    text = (schedule or "").strip()
+    if not text:
+        if required:
+            raise ValueError("hook_config.schedule is required when hook_type=schedule")
+        return None
+    if not is_valid_hook_schedule(text):
+        raise ValueError(
+            "hook_config.schedule must be a cron expression "
+            "(5/6/7 fields, e.g. '0 */5 * * *' or '0 0 */5 * * *')"
+        )
+    return text
 
 
 def _validate_http_url(value: str) -> str:
@@ -196,6 +228,20 @@ class EmbeddingTemplateListQuery(BaseModel):
     sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
 
 
+class HookConfig(BaseModel):
+    """扩展模板 hook_config 结构（与设计文档一致）。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    handler: str = Field(..., min_length=1, description="钩子实现路径或模块标识")
+    params: dict[str, Any] | None = Field(default=None, description="传入钩子函数的静态参数")
+    schedule: str | None = Field(
+        default=None,
+        description="仅 hook_type=schedule 时必填；cron 表达式（5/6/7 段）",
+    )
+    data: dict[str, Any] | None = Field(default=None, description="单条钩子扩展配置")
+
+
 class ExtensionConfigTemplateCreateBody(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -203,7 +249,7 @@ class ExtensionConfigTemplateCreateBody(BaseModel):
     description: str | None = Field(default=None, max_length=512)
     component: ExtensionComponentLiteral
     hook_type: ExtensionHookTypeLiteral
-    hook_config: dict[str, Any]
+    hook_config: HookConfig
     custom_config: dict[str, Any] | None = None
     enabled: bool = True
     data: dict[str, Any] | None = None
@@ -216,7 +262,7 @@ class ExtensionConfigTemplateUpdateBody(BaseModel):
     description: str | None = Field(default=None, max_length=512)
     component: ExtensionComponentLiteral | None = None
     hook_type: ExtensionHookTypeLiteral | None = None
-    hook_config: dict[str, Any] | None = None
+    hook_config: HookConfig | None = None
     custom_config: dict[str, Any] | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
@@ -254,7 +300,7 @@ class ExtensionConfigTemplateOut(BaseModel):
     description: str | None
     component: str
     hook_type: str
-    hook_config: dict[str, Any]
+    hook_config: HookConfig
     custom_config: dict[str, Any] | None
     enabled: bool
     data: dict[str, Any] | None

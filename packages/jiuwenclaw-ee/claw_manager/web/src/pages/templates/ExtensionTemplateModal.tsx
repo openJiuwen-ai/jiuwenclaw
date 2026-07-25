@@ -6,10 +6,12 @@ import { LimitedTextInput } from '../../components/LimitedTextInput';
 import { ExtensionTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
 import { safeStringify } from '../../utils/format';
+import { isValidHookSchedule } from '../../utils/schedule';
 import type {
   ExtensionConfigTemplate,
   ExtensionConfigTemplateCreateBody,
   ExtensionConfigTemplateUpdateBody,
+  HookConfig,
 } from '../../types';
 
 interface Props {
@@ -68,31 +70,29 @@ function FieldLabel({ children, required }: { children: ReactNode; required?: bo
   );
 }
 
-function hookConfigToForm(hookConfig: Record<string, unknown> | undefined) {
-  const hc = hookConfig ?? {};
-  const params = hc.params;
-  const data = hc.data;
+function hookConfigToForm(hookConfig: HookConfig | undefined) {
+  const hc = hookConfig ?? { handler: '' };
   return {
-    hook_handler: typeof hc.handler === 'string' ? hc.handler : String(hc.handler ?? ''),
+    hook_handler: hc.handler ?? '',
     hook_params:
-      params != null && typeof params === 'object' ? safeStringify(params, 2) : '',
-    hook_schedule: typeof hc.schedule === 'string' ? hc.schedule : String(hc.schedule ?? ''),
-    hook_data: data != null && typeof data === 'object' ? safeStringify(data, 2) : '',
+      hc.params != null && typeof hc.params === 'object' ? safeStringify(hc.params, 2) : '',
+    hook_schedule: hc.schedule ?? '',
+    hook_data: hc.data != null && typeof hc.data === 'object' ? safeStringify(hc.data, 2) : '',
   };
 }
 
-function buildHookConfig(form: FormState): Record<string, unknown> {
-  const config: Record<string, unknown> = {
+function buildHookConfig(form: FormState): HookConfig {
+  const config: HookConfig = {
     handler: form.hook_handler.trim(),
   };
   if (form.hook_params.trim()) {
-    config.params = tryParseJson(form.hook_params, {});
+    config.params = tryParseJson(form.hook_params, {}) as Record<string, unknown>;
   }
   if (form.hook_schedule.trim()) {
     config.schedule = form.hook_schedule.trim();
   }
   if (form.hook_data.trim()) {
-    config.data = tryParseJson(form.hook_data, {});
+    config.data = tryParseJson(form.hook_data, {}) as Record<string, unknown>;
   }
   return config;
 }
@@ -138,6 +138,10 @@ export function ExtensionTemplateModal({ open, template, onClose, onSaved }: Pro
     const missing = requiredChecks.find((item) => item.invalid);
     if (missing) {
       toast('warn', t('extensionTemplate.fieldRequired', { field: missing.label }));
+      return;
+    }
+    if (form.hook_schedule.trim() && !isValidHookSchedule(form.hook_schedule)) {
+      toast('warn', t('extensionTemplate.hookScheduleInvalid'));
       return;
     }
     const paramsErr = checkJson(form.hook_params);

@@ -78,6 +78,14 @@ export interface EmbeddingTemplateCreateBody {
 
 export type EmbeddingTemplateUpdateBody = Partial<EmbeddingTemplateCreateBody>;
 
+/** 与设计文档 hook_config 字段说明一致 */
+export interface HookConfig {
+  handler: string;
+  params?: Record<string, unknown>;
+  schedule?: string;
+  data?: Record<string, unknown>;
+}
+
 export interface ExtensionConfigTemplate {
   id: number;
   template_id: string;
@@ -85,7 +93,7 @@ export interface ExtensionConfigTemplate {
   description?: string | null;
   component: string;
   hook_type: string;
-  hook_config: Record<string, unknown>;
+  hook_config: HookConfig;
   custom_config?: Record<string, unknown> | null;
   enabled: boolean;
   data?: Record<string, unknown> | null;
@@ -98,7 +106,7 @@ export interface ExtensionConfigTemplateCreateBody {
   description?: string;
   component: string;
   hook_type: string;
-  hook_config: Record<string, unknown>;
+  hook_config: HookConfig;
   custom_config?: Record<string, unknown>;
   enabled?: boolean;
   data?: Record<string, unknown>;

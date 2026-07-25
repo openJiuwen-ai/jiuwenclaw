@@ -3,6 +3,50 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+import re
+
+
+# cron 字段：数字、字母（JAN/MON）、* / , - ? # L W
+_CRON_FIELD_RE = re.compile(r"^[\w*/,\-?#]+$", re.IGNORECASE)
+# 常见 cron：5 段（分 时 日 月 周）、6 段（含秒）、7 段（含年）
+_CRON_FIELD_COUNTS = frozenset({5, 6, 7})
+
+
+def is_valid_hook_schedule(value: str) -> bool:
+    """校验 hook_config.schedule 为合法 cron 表达式（5/6/7 段）。"""
+    text = value.strip()
+    if not text:
+        return False
+    parts = text.split()
+    if len(parts) not in _CRON_FIELD_COUNTS:
+        return False
+    return all(_CRON_FIELD_RE.fullmatch(part) for part in parts)
+
+
+def normalize_hook_schedule(schedule: str | None, *, required: bool) -> str | None:
+    """规范化 schedule；required 时不可为空，有值时须为合法 cron。"""
+    text = (schedule or "").strip()
+    if not text:
+        if required:
+            raise ValueError("hook_config.schedule is required when hook_type=schedule")
+        return None
+    if not is_valid_hook_schedule(text):
+        raise ValueError(
+            "hook_config.schedule must be a cron expression "
+            "(5/6/7 fields, e.g. '0 */5 * * *' or '0 0 */5 * * *')"
+        )
+    return text
+
+
+class HookConfig(BaseModel):
+    """扩展模板 hook_config 结构（与设计文档一致）。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    handler: str = Field(..., min_length=1)
+    params: dict[str, Any] | None = None
+    schedule: str | None = None
+    data: dict[str, Any] | None = None
 
 
 class ModelTemplateUpdateRequest(BaseModel):
@@ -47,7 +91,7 @@ class ExtensionConfigTemplateUpdateRequest(BaseModel):
     description: str | None = Field(default=None, max_length=512)
     component: str | None = Field(default=None, max_length=32)
     hook_type: str | None = Field(default=None, max_length=32)
-    hook_config: dict[str, Any] | None = None
+    hook_config: HookConfig | None = None
     custom_config: dict[str, Any] | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None

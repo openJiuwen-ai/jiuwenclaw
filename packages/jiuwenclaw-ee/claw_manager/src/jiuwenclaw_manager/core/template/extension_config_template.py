@@ -18,6 +18,8 @@ from jiuwenclaw_manager.schemas.template_schemas import (
     ExtensionConfigTemplateListQuery,
     ExtensionConfigTemplateOut,
     ExtensionConfigTemplateUpdateBody,
+    HookConfig,
+    normalize_hook_schedule,
 )
 
 _TABLE = EXTENSION_CONFIG_TEMPLATE_TABLE_DEF.table_name
@@ -45,21 +47,31 @@ def _matches_search(row: Any, query: str) -> bool:
     return any(needle in field.lower() for field in fields)
 
 
-def _validate_hook_config(hook_config: dict[str, Any], *, hook_type: str) -> dict[str, Any]:
-    handler = str(hook_config.get("handler") or "").strip()
-    if not handler:
-        raise ValueError("hook_config.handler is required")
-    if hook_type == "schedule":
-        schedule = str(hook_config.get("schedule") or "").strip()
-        if not schedule:
-            raise ValueError("hook_config.schedule is required when hook_type=schedule")
-    return hook_config
+def _validate_hook_config(hook_config: HookConfig | dict[str, Any], *, hook_type: str) -> dict[str, Any]:
+    cfg = (
+        hook_config
+        if isinstance(hook_config, HookConfig)
+        else HookConfig.model_validate(hook_config)
+    )
+    schedule = normalize_hook_schedule(
+        cfg.schedule, required=(hook_type == "schedule")
+    )
+    data = cfg.model_dump(exclude_none=True)
+    if schedule is None:
+        data.pop("schedule", None)
+    else:
+        data["schedule"] = schedule
+    return data
 
 
 def row_to_out(row: Any) -> ExtensionConfigTemplateOut:
-    hook_config = row.hook_config
-    if not isinstance(hook_config, dict):
-        hook_config = dict(hook_config) if hook_config else {}
+    raw_hook = row.hook_config
+    if isinstance(raw_hook, HookConfig):
+        hook_config = raw_hook
+    elif isinstance(raw_hook, dict):
+        hook_config = HookConfig.model_validate(raw_hook)
+    else:
+        hook_config = HookConfig.model_validate(dict(raw_hook) if raw_hook else {})
     custom_config = row.custom_config
     if custom_config is not None and not isinstance(custom_config, dict):
         custom_config = dict(custom_config)
