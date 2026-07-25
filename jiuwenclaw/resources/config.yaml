@@ -647,7 +647,7 @@ react:
 
   # Skills 在线自演进配置
   evolution:
-    enabled: false             # true = 启用在线 Skills 自演进
+    enabled: true             # true = 启用在线 Skills 自演进
     auto_scan: true           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
     auto_save: true           # true = 每轮对话后自动保存演进经验
     skill_base_dir: "agent/skills"  # Skill 根目录
