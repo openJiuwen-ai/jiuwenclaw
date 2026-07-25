@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from importlib.resources import files
 
 from jiuwenswarm.server.runtime.a2ui.protocol import get_protocol_spec
 
 
+LOGGER = logging.getLogger(__name__)
 EXPECTED_PROTOCOL_VERSION = "0.8"
 REQUIRED_ASSET_FILENAMES = (
     "server_to_client.json",
@@ -40,5 +42,6 @@ def verify_a2ui_bundle() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     verify_a2ui_bundle()
-    print("A2UI frozen bundle verification passed (protocol 0.8)")
+    LOGGER.info("A2UI frozen bundle verification passed (protocol 0.8)")
