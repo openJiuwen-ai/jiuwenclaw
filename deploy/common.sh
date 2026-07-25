@@ -46,15 +46,15 @@ urlencode() {
     echo "${encoded}"
 }
 
-# 生成 uuid4 格式实例 ID（小写，带连字符）；失败时返回非零，由调用方在主 shell 中处理
+# 生成 uuid4 格式实例 ID（小写，带连字符）
 gen_uuid4() {
     if command -v uuidgen >/dev/null 2>&1; then
-        uuidgen | tr '[:upper:]' '[:lower:]'
-        return 0
+        uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '\n'
+        return
     fi
     if command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import uuid; print(uuid.uuid4())'
-        return 0
+        python3 -c 'import uuid; print(uuid.uuid4(), end="")'
+        return
     fi
-    return 1
+    error "Cannot generate uuid4: uuidgen or python3 is required"
 }

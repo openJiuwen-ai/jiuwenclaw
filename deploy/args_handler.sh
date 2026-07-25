@@ -12,7 +12,6 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            #nfs|rabbitmq|yr_claw|gateway|web|manager)
             nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|log|jina|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
@@ -21,20 +20,8 @@ parse_args() {
                 DEPLOY_VARS["NAMESPACE"]="${args[$((i+1))]}"
                 i=$((i+2))
                 ;;
-            --web-port)
-                DEPLOY_VARS["WEB_NODE_PORT"]="${args[$((i+1))]}"
-                i=$((i+2))
-                ;;
-            --manager-web-port)
-                DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]="${args[$((i+1))]}"
-                i=$((i+2))
-                ;;
             --render-only)
                 DEPLOY_VARS["RENDER_ONLY"]="true"
-                i=$((i+1))
-                ;;
-            --no-auto-jiuwenclaw-id)
-                DEPLOY_VARS["AUTO_JIUWENCLAW_ID"]="false"
                 i=$((i+1))
                 ;;
             -h|--help)
@@ -91,15 +78,11 @@ Modules (Optional):
 
 Options:
   -n NAMESPACE              Specify Kubernetes namespace (defaults to default if unspecified)
-  --web-port PORT           Set host port for web service （range: 30000-32767）
-  --manager-web-port PORT   Set host port for manager web UI （range: 30000-32767）
   --render-only             Only render and output YAML manifests to conf directory
-  --no-auto-jiuwenclaw-id    Do not auto-generate JIUWENCLAW_ID in .env.custom when deploying gateway (default: auto-generate if unset)
   -h, --help                Display this help message and exit
 
 Examples:
   ./$(basename "$0") up                                # Deploy default modules in default namespace
-  ./$(basename "$0") up web --web-port 30000 -n myns   # Deploy web module with host port 30000 in myns namespace
   ./$(basename "$0") up nfs                            # Deploy NFS (always uses default namespace, ignores -n parameter)
   ./$(basename "$0") down                              # Uninstall default modules in default namespace
   ./$(basename "$0") restart                           # Restart default modules in default namespace
