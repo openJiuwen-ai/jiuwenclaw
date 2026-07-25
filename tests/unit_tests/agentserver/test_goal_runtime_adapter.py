@@ -332,6 +332,34 @@ def test_active_goal_demotes_intermediate_chat_final_to_delta() -> None:
     }
 
 
+def test_outer_loop_remaining_tasks_demotes_chat_final_to_delta() -> None:
+    """enterprise !2079: intermediate OuterLoop answer must not close the bubble."""
+    adapter = _adapter(_FakeGoals())
+
+    class _FakeDeep:
+        class _Cfg:
+            enable_task_loop = True
+
+        _deep_config = _Cfg()
+        _loop_session = object()
+
+        @staticmethod
+        def _has_remaining_tasks(_session) -> bool:
+            return True
+
+    adapter._instance = _FakeDeep()
+
+    payload = adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "task-1 answer"}
+    )
+
+    assert payload == {
+        "event_type": "chat.delta",
+        "content": "task-1 answer",
+        "outer_loop_intermediate": True,
+    }
+
+
 def test_interrupt_resume_dispatch_injects_even_without_output_lease() -> None:
     """Permission answers must send_input when Goal already holds the lease."""
     assert JiuWenSwarmDeepAdapter._is_interrupt_resume_dispatch(
