@@ -33,6 +33,7 @@ from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import
     MemberSkillToolkitRail,
 )
 from jiuwenswarm.agents.harness.team.team_skill_links import (
+    ensure_skill_dir_links,
     is_valid_skill_dir,
     link_skill_dir,
     path_exists_or_link,
@@ -201,6 +202,9 @@ def build_member_skill_toolkit(params: dict, ctx: Any) -> object | None:
             _link_member_configured_skills(
                 member_skills_dir, selected_skills, global_skills_dir
             )
+        else:
+            # No specific skills selected — copy/link all global skills.
+            ensure_skill_dir_links(global_skills_dir, member_skills_dir)
     except Exception as exc:
         logger.warning(
             "[swarm.member_skill_toolkit] skill link refresh failed: %s", exc
