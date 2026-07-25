@@ -8,10 +8,14 @@ import {
   getPlanApprovalListLayout,
   getPlanRejectFeedbackHint,
   isPlanApprovalRequest,
+  renderWrappedQuestionOptions,
   shouldCaptureTerminalMouse,
   shouldAppendPlanRejectFeedback,
   shouldCollectPlanRejectFeedback,
+  wrapPlainText,
 } from "../dist/ui/app-screen.js";
+import { CheckboxList } from "../dist/ui/components/checkbox-list.js";
+import { visibleWidth } from "@mariozechner/pi-tui";
 import { planSwarmflowToggle } from "../dist/core/commands/builtins/swarmflow.js";
 import { buildAppScreenLines } from "../dist/ui/screen-layout.js";
 import {
@@ -76,6 +80,70 @@ assert.equal(
   "[ use \x1b[7m \x1b[0mpytest ]",
 );
 assert.deepEqual(getPlanApprovalListLayout(), { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 });
+
+const narrowQuestionTitle =
+  "[Redis 方案] Redis 接入有三种方案，范围和依赖递增。请根据当前项目选择。";
+const wrappedQuestionTitle = wrapPlainText(narrowQuestionTitle, 30);
+assert.ok(wrappedQuestionTitle.length > 1);
+assert.ok(wrappedQuestionTitle.every((line) => visibleWidth(line) <= 29));
+assert.equal(
+  wrappedQuestionTitle.join("").replace(/\s/g, ""),
+  narrowQuestionTitle.replace(/\s/g, ""),
+);
+
+const wrappedQuestionOptions = renderWrappedQuestionOptions(
+  [
+    {
+      value: "session",
+      label: "方案 A：仅 session",
+      description: "依赖 ioredis 与 express-session，保留完整说明不得截断",
+    },
+    {
+      value: "global",
+      label: "方案 B：全量",
+      description: "增加限流缓存以及额外响应缓存",
+    },
+  ],
+  0,
+  2,
+  36,
+);
+assert.ok(wrappedQuestionOptions.lines.length > 2);
+assert.ok(wrappedQuestionOptions.lines.every((line) => visibleWidth(line) <= 36));
+assert.ok(
+  wrappedQuestionOptions.lines
+    .join("")
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(/\s/g, "")
+    .includes("保留完整说明不得截断"),
+);
+assert.ok(wrappedQuestionOptions.selectedEndIndex > 1);
+
+const narrowCheckboxList = new CheckboxList(
+  [
+    {
+      name: "启用哪些功能模块",
+      items: [
+        {
+          label: "auth",
+          value: "auth",
+          checked: false,
+          description: "认证模块，处理用户登录、权限验证以及完整审计记录",
+        },
+      ],
+    },
+  ],
+  1,
+);
+const narrowCheckboxLines = narrowCheckboxList.render(32);
+assert.ok(narrowCheckboxLines.every((line) => visibleWidth(line) <= 32));
+assert.ok(
+  narrowCheckboxLines
+    .join("")
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(/\s/g, "")
+    .includes("完整审计记录"),
+);
 
 // A long/scrollable transcript must not capture drag events: users should be
 // able to select and copy completed responses with the terminal's native UI.
