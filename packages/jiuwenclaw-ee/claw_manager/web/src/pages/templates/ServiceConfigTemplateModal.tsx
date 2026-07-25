@@ -4,6 +4,8 @@ import { Modal } from '../../components/Modal';
 import { LimitedTextInput } from '../../components/LimitedTextInput';
 import { ServiceConfigTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
+import { isValidK8sCpu, isValidK8sMemory } from '../../utils/k8sResource';
+import { isValidOptionalUnixAbsPath, isValidUnixAbsPath } from '../../utils/path';
 import type {
   ServiceConfigTemplate,
   ServiceConfigTemplateCreateBody,
@@ -73,6 +75,27 @@ const FIELD_MAX_LENGTH = {
   jiuwenbox_memory_request: 32,
   jiuwenbox_cpu_limit: 32,
   jiuwenbox_memory_limit: 32,
+} as const;
+
+/** 与后端 / 库表类型上限一致 */
+const INT32_MAX = 2_147_483_647;
+const DECIMAL_10_3_MAX = 9_999_999.999;
+
+const NUM_LIMITS = {
+  container_port: { min: 1, max: 65535, labelKey: 'containerPort' },
+  replicas: { min: 1, max: INT32_MAX, labelKey: 'replicas' },
+  readiness_initial_delay: { min: 0, max: INT32_MAX, labelKey: 'readinessInitialDelay' },
+  readiness_period: { min: 1, max: INT32_MAX, labelKey: 'readinessPeriod' },
+  ready_timeout: { min: 1, max: INT32_MAX, labelKey: 'readyTimeout' },
+  ready_poll_interval: { min: 1, max: INT32_MAX, labelKey: 'readyPollInterval' },
+  min_idle_services: { min: 0, max: INT32_MAX, labelKey: 'minIdleServices' },
+  max_services: { min: 1, max: INT32_MAX, labelKey: 'maxServices' },
+  service_concurrency: { min: 1, max: INT32_MAX, labelKey: 'serviceConcurrency' },
+  service_ttl: { min: 1, max: INT32_MAX, labelKey: 'serviceTtl' },
+  autoscale_interval: { min: 0.001, max: DECIMAL_10_3_MAX, labelKey: 'autoscaleInterval' },
+  message_timeout: { min: 1, max: INT32_MAX, labelKey: 'messageTimeout' },
+  session_concurrency: { min: 1, max: INT32_MAX, labelKey: 'sessionConcurrency' },
+  session_ttl: { min: 1, max: INT32_MAX, labelKey: 'sessionTtl' },
 } as const;
 
 const empty: FormState = {
@@ -196,6 +219,77 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
       toast('warn', t('serviceConfigTemplate.fieldRequired', { field: missing.label }));
       return;
     }
+    for (const [key, limit] of Object.entries(NUM_LIMITS)) {
+      const value = form[key as keyof typeof NUM_LIMITS];
+      if (!Number.isFinite(value) || value < limit.min || value > limit.max) {
+        toast(
+          'warn',
+          t('serviceConfigTemplate.numberOutOfRange', {
+            field: t(`serviceConfigTemplate.${limit.labelKey}`),
+            min: limit.min,
+            max: limit.max,
+          }),
+        );
+        return;
+      }
+    }
+    if (form.min_idle_services > form.max_services) {
+      toast('warn', t('serviceConfigTemplate.poolRangeInvalid'));
+      return;
+    }
+    const cpuFields = [
+      ['agent_cpu_request', 'agentCpuRequest'],
+      ['agent_cpu_limit', 'agentCpuLimit'],
+      ['jiuwenbox_cpu_request', 'jiuwenboxCpuRequest'],
+      ['jiuwenbox_cpu_limit', 'jiuwenboxCpuLimit'],
+    ] as const;
+    for (const [key, labelKey] of cpuFields) {
+      if (!isValidK8sCpu(form[key])) {
+        toast(
+          'warn',
+          t('serviceConfigTemplate.cpuQuantityInvalid', {
+            field: t(`serviceConfigTemplate.${labelKey}`),
+          }),
+        );
+        return;
+      }
+    }
+    const memoryFields = [
+      ['agent_memory_request', 'agentMemoryRequest'],
+      ['agent_memory_limit', 'agentMemoryLimit'],
+      ['jiuwenbox_memory_request', 'jiuwenboxMemoryRequest'],
+      ['jiuwenbox_memory_limit', 'jiuwenboxMemoryLimit'],
+    ] as const;
+    for (const [key, labelKey] of memoryFields) {
+      if (!isValidK8sMemory(form[key])) {
+        toast(
+          'warn',
+          t('serviceConfigTemplate.memoryQuantityInvalid', {
+            field: t(`serviceConfigTemplate.${labelKey}`),
+          }),
+        );
+        return;
+      }
+    }
+    const nfsPath = form.nfs_path.trim();
+    if (nfsPath && !isValidUnixAbsPath(nfsPath)) {
+      toast(
+        'warn',
+        t('serviceConfigTemplate.pathInvalid', {
+          field: t('serviceConfigTemplate.nfsPath'),
+        }),
+      );
+      return;
+    }
+    if (!isValidOptionalUnixAbsPath(form.nfs_mount_path)) {
+      toast(
+        'warn',
+        t('serviceConfigTemplate.pathInvalid', {
+          field: t('serviceConfigTemplate.nfsMountPath'),
+        }),
+      );
+      return;
+    }
 
     const body: ServiceConfigTemplateCreateBody | ServiceConfigTemplateUpdateBody = {
       template_name: form.template_name.trim(),
@@ -250,19 +344,27 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
     }
   };
 
-  const numField = (key: keyof FormState, label: string, min = 0, step?: number) => (
-    <div>
-      <label className="label">{label}</label>
-      <input
-        className="input"
-        type="number"
-        min={min}
-        step={step}
-        value={form[key] as number}
-        onChange={(e) => update(key, Number(e.target.value) as FormState[typeof key])}
-      />
-    </div>
-  );
+  const numField = (
+    key: keyof typeof NUM_LIMITS,
+    label: string,
+    step?: number,
+  ) => {
+    const limit = NUM_LIMITS[key];
+    return (
+      <div>
+        <label className="label">{label}</label>
+        <input
+          className="input"
+          type="number"
+          min={limit.min}
+          max={limit.max}
+          step={step}
+          value={form[key] as number}
+          onChange={(e) => update(key, Number(e.target.value) as FormState[typeof key])}
+        />
+      </div>
+    );
+  };
 
   const textField = (
     key: keyof FormState,
@@ -338,7 +440,7 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
         {textField('pod_name', t('serviceConfigTemplate.podName'), {
           maxLength: FIELD_MAX_LENGTH.pod_name,
         })}
-        {numField('container_port', t('serviceConfigTemplate.containerPort'), 1)}
+        {numField('container_port', t('serviceConfigTemplate.containerPort'))}
         {textField('port_name', t('serviceConfigTemplate.portName'), {
           maxLength: FIELD_MAX_LENGTH.port_name,
         })}
@@ -360,9 +462,9 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
 
         <SectionTitle>{t('serviceConfigTemplate.sectionReadiness')}</SectionTitle>
         {numField('readiness_initial_delay', t('serviceConfigTemplate.readinessInitialDelay'))}
-        {numField('readiness_period', t('serviceConfigTemplate.readinessPeriod'), 1)}
-        {numField('ready_timeout', t('serviceConfigTemplate.readyTimeout'), 1)}
-        {numField('ready_poll_interval', t('serviceConfigTemplate.readyPollInterval'), 1)}
+        {numField('readiness_period', t('serviceConfigTemplate.readinessPeriod'))}
+        {numField('ready_timeout', t('serviceConfigTemplate.readyTimeout'))}
+        {numField('ready_poll_interval', t('serviceConfigTemplate.readyPollInterval'))}
 
         <SectionTitle>{t('serviceConfigTemplate.sectionNfs')}</SectionTitle>
         <div className="md:col-span-2">
@@ -413,13 +515,13 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
 
         <SectionTitle>{t('serviceConfigTemplate.sectionPool')}</SectionTitle>
         {numField('min_idle_services', t('serviceConfigTemplate.minIdleServices'))}
-        {numField('max_services', t('serviceConfigTemplate.maxServices'), 1)}
-        {numField('service_concurrency', t('serviceConfigTemplate.serviceConcurrency'), 1)}
-        {numField('service_ttl', t('serviceConfigTemplate.serviceTtl'), 1)}
-        {numField('autoscale_interval', t('serviceConfigTemplate.autoscaleInterval'), 0, 0.1)}
-        {numField('message_timeout', t('serviceConfigTemplate.messageTimeout'), 1)}
-        {numField('session_concurrency', t('serviceConfigTemplate.sessionConcurrency'), 1)}
-        {numField('session_ttl', t('serviceConfigTemplate.sessionTtl'), 1)}
+        {numField('max_services', t('serviceConfigTemplate.maxServices'))}
+        {numField('service_concurrency', t('serviceConfigTemplate.serviceConcurrency'))}
+        {numField('service_ttl', t('serviceConfigTemplate.serviceTtl'))}
+        {numField('autoscale_interval', t('serviceConfigTemplate.autoscaleInterval'), 0.1)}
+        {numField('message_timeout', t('serviceConfigTemplate.messageTimeout'))}
+        {numField('session_concurrency', t('serviceConfigTemplate.sessionConcurrency'))}
+        {numField('session_ttl', t('serviceConfigTemplate.sessionTtl'))}
       </div>
     </Modal>
   );
