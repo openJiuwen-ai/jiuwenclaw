@@ -324,6 +324,15 @@ export class CliPiAppState {
   private connectionStatus: ConnectionStatus = "idle";
   private sessionId: string;
   private sessionTitle: string = "";
+  /**
+   * `--session <id>` 启动时传入的目标 session id；为 null 表示用户未显式指定
+   * （走 generateSessionId 新会话路径，不触发 boot resume/create）。
+   * 由 connection.ack 收到后驱动 resumeOrCreateBootSession：已存在→session.switch
+   * 恢复，不存在→session.create 新建并落盘。
+   */
+  private bootSessionId: string | null = null;
+  /** 幂等守卫：boot resume/create 只在首次 connection.ack 触发一次（重连/重发不重试）。 */
+  private bootSessionHandled = false;
   private mode: ClientMode = "code.normal";
   private themeName: ThemeName = getCurrentThemeName();
   private accentColor: AccentColorName = getCurrentAccentColor();
@@ -549,6 +558,10 @@ export class CliPiAppState {
     safeFetchSessionTitle: (sessionId) => {
       this.safeFetchSessionTitle(sessionId);
     },
+    hasBootSession: () => this.bootSessionId !== null,
+    resumeOrCreateBootSession: () => {
+      this.resumeOrCreateBootSession();
+    },
     getSuppressInterruptResult: () => this.suppressInterruptResult,
     clearSuppressInterruptResult: () => {
       this.suppressInterruptResult = false;
@@ -621,6 +634,7 @@ export class CliPiAppState {
     },
   ) {
     this.sessionId = cliSession || generateSessionId();
+    this.bootSessionId = cliSession ? cliSession : null;
     const config = loadTuiConfig();
     if (config.theme) {
       setCurrentThemeName(config.theme);
@@ -3264,6 +3278,69 @@ export class CliPiAppState {
         }
         this.lastError = error instanceof Error ? error.message : String(error);
         this.emitChange();
+      }
+    })();
+  }
+
+  /**
+   * `--session <id>` 启动闭环：connection.ack 收到后驱动。
+   * 先 try `session.create(target)`：
+   *  - 成功 → id 不存在，后端已新建并落盘 metadata；下次同 id 启动即可恢复。
+   *  - 返回 ALREADY_EXISTS → id 已存在，转 `session.switch` 恢复会话生命周期
+   *    （KV cache affinity + team prepare），并按 res.mode 对齐前端 mode。
+   *  - 其他错误 → 降级仅拉历史，不阻断 UI（用户可手动 /resume）。
+   * 收尾统一 safeRestoreHistory + safeFetchSessionTitle 展示历史/标题。
+   * 无 --session（bootSessionId 为 null）时直接 return，由外层走原生成新会话路径。
+   */
+  private resumeOrCreateBootSession(): void {
+    if (this.bootSessionHandled) return;
+    if (this.bootSessionId === null) return;
+    if (this.connectionStatus !== "connected") return;
+    this.bootSessionHandled = true;
+    const target = this.bootSessionId;
+    const previousMode = this.mode;
+    void (async () => {
+      try {
+        await this.request("session.create", {
+          session_id: target,
+          previous_session_id: "",
+          previous_mode: previousMode,
+          mode: previousMode,
+        });
+        // 新建成功：target 已落盘，无历史/标题可拉（空页无害）。
+      } catch (createErr) {
+        const message = createErr instanceof Error ? createErr.message : String(createErr);
+        // ALREADY_EXISTS → 已存在，转 switch 恢复
+        if (/ALREADY_EXISTS|already exists/i.test(message)) {
+          try {
+            const res = await this.request<{
+              session_id?: string;
+              mode?: string;
+              switched?: boolean;
+            }>("session.switch", {
+              session_id: target,
+              previous_session_id: "",
+              previous_mode: previousMode,
+              mode: previousMode,
+            });
+            const resolvedMode = res?.mode;
+            if (typeof resolvedMode === "string" && resolvedMode) {
+              this.setMode(resolvedMode as ClientMode);
+            }
+          } catch (switchErr) {
+            const switchMessage =
+              switchErr instanceof Error ? switchErr.message : String(switchErr);
+            this.lastError = `session.switch failed: ${switchMessage}`;
+            this.emitChange();
+          }
+        } else {
+          // 非已存在错误：降级仅拉历史，不阻断
+          this.lastError = `session.create failed: ${message}`;
+          this.emitChange();
+        }
+      } finally {
+        this.safeRestoreHistory(target);
+        this.safeFetchSessionTitle(target);
       }
     })();
   }
