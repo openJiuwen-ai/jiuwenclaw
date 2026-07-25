@@ -66,6 +66,7 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     build_member_rails,
 )
 from jiuwenswarm.common.utils import get_agent_skills_dir
+from jiuwenswarm.server.request_context import get_xiaoyi_model_trace_headers
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
 logger = logging.getLogger(__name__)
@@ -498,6 +499,7 @@ class TeamManager:
             channel_id=channel_id,
             request_metadata=request_metadata,
         )
+        self._apply_xiaoyi_model_trace_headers(spec, request_metadata=request_metadata)
         return spec
 
     @staticmethod
@@ -512,6 +514,36 @@ class TeamManager:
                 spec.enable_team_plan = True
             except (AttributeError, ValueError):
                 object.__setattr__(spec, "enable_team_plan", True)
+
+    @staticmethod
+    def _apply_xiaoyi_model_trace_headers(
+        spec: TeamAgentSpec,
+        *,
+        request_metadata: dict[str, Any] | None,
+    ) -> None:
+        """Attach request-scoped Xiaoyi trace headers to every team model path."""
+        trace_headers = get_xiaoyi_model_trace_headers(request_metadata)
+        if not trace_headers:
+            return
+
+        def merge_headers(metadata: dict[str, Any] | None) -> dict[str, Any]:
+            merged_metadata = dict(metadata or {})
+            client_config = dict(merged_metadata.get("client") or {})
+            custom_headers = dict(client_config.get("custom_headers") or {})
+            client_config["custom_headers"] = {**custom_headers, **trace_headers}
+            merged_metadata["client"] = client_config
+            return merged_metadata
+
+        for pool_entry in spec.model_pool:
+            pool_entry.metadata = merge_headers(pool_entry.metadata)
+        if spec.model_router is not None:
+            spec.model_router.metadata = merge_headers(spec.model_router.metadata)
+        for agent_spec in spec.agents.values():
+            if agent_spec.model is None:
+                continue
+            client_config = agent_spec.model.model_client_config
+            custom_headers = dict(client_config.custom_headers or {})
+            client_config.custom_headers = {**custom_headers, **trace_headers}
 
     async def prepare_runtime_activation(self, session_id: str, team_name: str) -> None:
         if self._is_distributed_mode(get_config()):
@@ -896,6 +928,7 @@ class TeamManager:
             channel_id=channel_id,
             request_metadata=request_metadata,
         )
+        self._apply_xiaoyi_model_trace_headers(spec, request_metadata=request_metadata)
 
         logger.info("[TeamManager] TeamAgentSpec ready: team_name=%s", spec.team_name)
 
