@@ -12,6 +12,7 @@
     "test:openai-account-model-state": "tsc src/components/ConfigPanel/openaiAccountModelState.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/openai-account-model-state --skipLibCheck && node --test tests/openaiAccountModelState.test.mjs",
     "test:tool-result-lifecycle": "tsc src/stores/toolResultLifecycle.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/tool-result-lifecycle --skipLibCheck --noEmitOnError && node --test tests/toolResultLifecycle.test.mjs",
     "test:create-conversation-session": "tsc src/multi-session/state/createConversationSession.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/create-conversation-session --skipLibCheck --noEmitOnError && node --test tests/createConversationSession.test.mjs",
+    "test:cron-wake-offset": "tsc src/components/CronPanel/cronWakeOffset.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/cron-wake-offset --skipLibCheck --noEmitOnError && node --test tests/cronWakeOffset.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },

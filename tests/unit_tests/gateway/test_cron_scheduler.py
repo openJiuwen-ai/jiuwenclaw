@@ -1484,3 +1484,83 @@ class TestCronJobStoreFileLock:
         assert job.name == "after-unlock"
         listed = await store.list_jobs()
         assert any(j.id == job.id for j in listed)
+
+
+class TestCronJobStoreWakeOffset:
+    """面板「提前唤醒」对应 store 的 wake_offset_seconds 读写（Issue #2533）。"""
+
+    @pytest.mark.asyncio
+    async def test_create_job_persists_wake_offset_seconds(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="daily-meeting",
+            cron_expr="0 0 17 * * ? *",
+            timezone="Asia/Shanghai",
+            description="提醒用户开会",
+            targets="web",
+            wake_offset_seconds=300,
+        )
+        assert job.wake_offset_seconds == 300
+        reloaded = await store.get_job(job.id)
+        assert reloaded is not None
+        assert reloaded.wake_offset_seconds == 300
+
+    @pytest.mark.asyncio
+    async def test_update_job_can_change_and_clear_wake_offset_seconds(self, tmp_path):
+        """前端编辑「提前唤醒」分钟数时，经 cron.job.update patch 写入秒数。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="daily-meeting",
+            cron_expr="0 0 10 * * ? *",
+            timezone="Asia/Shanghai",
+            description="提醒用户开会",
+            targets="web",
+            wake_offset_seconds=300,
+        )
+
+        updated = await store.update_job(
+            job.id,
+            {"cron_expr": "0 0 17 * * ? *", "wake_offset_seconds": 0},
+        )
+        assert updated.cron_expr == "0 0 17 * * ? *"
+        assert updated.wake_offset_seconds == 0
+
+        again = await store.update_job(job.id, {"wake_offset_seconds": 600})
+        assert again.wake_offset_seconds == 600
+        reloaded = await store.get_job(job.id)
+        assert reloaded is not None
+        assert reloaded.wake_offset_seconds == 600
+
+    @pytest.mark.asyncio
+    async def test_update_job_clamps_negative_wake_offset_to_zero(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="daily-meeting",
+            cron_expr="0 0 17 * * ? *",
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="web",
+            wake_offset_seconds=300,
+        )
+        updated = await store.update_job(job.id, {"wake_offset_seconds": -1})
+        assert updated.wake_offset_seconds == 0
+
+    @pytest.mark.asyncio
+    async def test_proactive_tick_update_rejects_wake_offset_patch(self, tmp_path):
+        """proactive.tick 只允许改 cron_expr/timezone，wake_offset 被丢弃。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="proactive-auto",
+            cron_expr="0 0 * * * ? *",
+            timezone="Asia/Shanghai",
+            description="proactive",
+            targets="web",
+            mode="proactive.tick",
+            wake_offset_seconds=0,
+        )
+        updated = await store.update_job(
+            job.id,
+            {"cron_expr": "0 30 * * * ? *", "wake_offset_seconds": 300},
+        )
+        assert updated.cron_expr == "0 30 * * * ? *"
+        assert updated.wake_offset_seconds == 0

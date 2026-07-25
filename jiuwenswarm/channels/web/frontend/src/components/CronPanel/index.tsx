@@ -9,6 +9,7 @@ import type { ProjectInfo } from '../../features/workspace/projectTypes';
 import type { Session } from '../../types';
 import type { CronJobDTO, CronTaskUI, CronTemplateUI } from '../../types/cron';
 import { CRON_TEMPLATES } from './constants';
+import { normalizeWakeOffsetSeconds } from './cronWakeOffset';
 import { cronExprToSchedule, summarizeSchedule } from './scheduleConvert';
 import StatusBadge, { BoldRingIcon, RunningIcon } from './StatusBadge';
 import ConfirmDialog from './ConfirmDialog';
@@ -192,6 +193,7 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
     modelName: job.model_name ?? null,
     cronExpr: job.cron_expr,
     timezone: job.timezone,
+    wakeOffsetSeconds: normalizeWakeOffsetSeconds(job.wake_offset_seconds),
     enabled: job.enabled,
     expired: job.expired,
     deliveryChannel: job.targets,
@@ -496,6 +498,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         timezone: value.timezone,
         targets: value.targets.trim() || 'web',
         enabled: value.enabled,
+        wake_offset_seconds: normalizeWakeOffsetSeconds(value.wakeOffsetSeconds),
         ...(value.projectDir ? { project_dir: value.projectDir } : {}),
         ...(value.modelName ? { model_name: value.modelName } : {}),
         mode,
@@ -537,6 +540,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             timezone: value.timezone,
             targets: value.targets.trim() || 'web',
             enabled: value.enabled,
+            wake_offset_seconds: normalizeWakeOffsetSeconds(value.wakeOffsetSeconds),
             ...(value.modelName ? { model_name: value.modelName } : {}),
             mode,
           };

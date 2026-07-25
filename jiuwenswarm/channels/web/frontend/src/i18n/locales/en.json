@@ -1189,7 +1189,10 @@
         "3": "week 3",
         "4": "week 4",
         "last": "last week"
-      }
+      },
+      "wakeOffset": "Wake early",
+      "wakeOffsetUnit": "minutes",
+      "wakeOffsetHelp": "Start the agent this many minutes before the scheduled push time; 0 means run at the scheduled time"
     },
     "modelPicker": {
       "configured": "Configured",

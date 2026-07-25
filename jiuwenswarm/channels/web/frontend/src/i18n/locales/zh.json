@@ -1190,7 +1190,10 @@
         "3": "第三周",
         "4": "第四周",
         "last": "最后一周"
-      }
+      },
+      "wakeOffset": "提前唤醒",
+      "wakeOffsetUnit": "分钟",
+      "wakeOffsetHelp": "在计划推送时间前启动 Agent 准备结果；0 表示到点执行"
     },
     "modelPicker": {
       "configured": "已配置",
