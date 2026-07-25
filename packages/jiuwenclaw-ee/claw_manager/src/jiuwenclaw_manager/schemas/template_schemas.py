@@ -372,10 +372,10 @@ class SkillWhitelistTemplateOut(BaseModel):
 _SERVICE_INT_MAX = 2_147_483_647
 _SERVICE_DECIMAL_MAX = 9_999_999.999
 
-# K8s resource quantity：CPU 如 500m / 2 / 0.5；内存如 512Mi / 2Gi / 128M
+# K8s resource quantity：CPU 如 500m / 2 / 0.5；内存须带单位 Ki/Mi/Gi/K/M/G
 _K8S_CPU_RE = re.compile(r"^(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)m?$")
 _K8S_MEMORY_RE = re.compile(
-    r"^(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)(?:(?:[KMGTPE]i)|[kMGTPE]|m)?$"
+    r"^(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)(?:Ki|Mi|Gi|K|M|G)$"
 )
 
 
@@ -405,7 +405,8 @@ def _validate_k8s_memory(value: str | None) -> str | None:
         raise ValueError("at most 32 characters")
     if not _K8S_MEMORY_RE.fullmatch(value):
         raise ValueError(
-            "must be a valid Kubernetes memory quantity (e.g. '512Mi', '2Gi')"
+            "must be a Kubernetes memory quantity with unit "
+            "Ki/Mi/Gi/K/M/G (e.g. '512Mi', '2Gi', '128M')"
         )
     return value
 

@@ -335,7 +335,7 @@
     "numberOutOfRange": "{{field}} 须在 {{min}}–{{max}} 之间",
     "poolRangeInvalid": "最小空闲服务数不能大于最大服务数",
     "cpuQuantityInvalid": "{{field}} 须为合法 K8s CPU 规格，如 500m、2、0.5",
-    "memoryQuantityInvalid": "{{field}} 须为合法 K8s 内存规格，如 512Mi、2Gi",
+    "memoryQuantityInvalid": "{{field}} 须为带单位的内存规格（Ki/Mi/Gi/K/M/G），如 512Mi、2Gi",
     "pathInvalid": "{{field}} 须为合法绝对路径，如 / 或 /data/nfs",
     "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "searchPlaceholder": "搜索模板 ID、模板名称、模板描述、AgentServer镜像",

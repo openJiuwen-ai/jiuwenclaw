@@ -335,7 +335,7 @@
     "numberOutOfRange": "{{field}} must be between {{min}} and {{max}}",
     "poolRangeInvalid": "min idle services cannot exceed max services",
     "cpuQuantityInvalid": "{{field}} must be a valid Kubernetes CPU quantity, e.g. 500m, 2, 0.5",
-    "memoryQuantityInvalid": "{{field}} must be a valid Kubernetes memory quantity, e.g. 512Mi, 2Gi",
+    "memoryQuantityInvalid": "{{field}} must include a unit (Ki/Mi/Gi/K/M/G), e.g. 512Mi, 2Gi",
     "pathInvalid": "{{field}} must be a valid absolute path, e.g. / or /data/nfs",
     "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "searchPlaceholder": "Search template ID, name, description, AgentServer image",
