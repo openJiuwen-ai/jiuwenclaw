@@ -466,6 +466,8 @@ class DeepResearchTaskManager:
         }
         return config
 
+    load_config = _load_config
+
     @staticmethod
     def _validate_config(config: Dict[str, str]) -> tuple[bool, str]:
         """验证 DeepResearch 配置."""
@@ -904,6 +906,8 @@ class DeepResearchTaskManager:
             section_titles[idx] = heading
 
         return section_titles
+
+    extract_section_titles = _extract_section_titles
 
     @staticmethod
     def _extract_titles_from_json(data: Any) -> dict[str, str]:
@@ -2398,12 +2402,12 @@ async def get_deepresearch_manager(scope: RuntimeScopeKey) -> DeepResearchTaskMa
 
 def load_deepresearch_config(env: Mapping[str, str] | None = None) -> Dict[str, str]:
     """Return DeepResearch configuration using the manager's resolution rules."""
-    return DeepResearchTaskManager._load_config(env)
+    return DeepResearchTaskManager.load_config(env)
 
 
 def extract_deepresearch_section_titles(text: str) -> Dict[str, str]:
     """Return section title metadata using the manager's outline parser."""
-    return DeepResearchTaskManager._extract_section_titles(text)
+    return DeepResearchTaskManager.extract_section_titles(text)
 
 
 __all__ = [

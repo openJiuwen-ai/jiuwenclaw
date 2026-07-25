@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from functools import wraps
+import functools
 from pathlib import Path
 
 from openjiuwen.core.common.exception.errors import StatusCode, ValidationError
@@ -151,7 +151,7 @@ def _safe_input_tool(
     *, name: str, description: str, input_params: dict, input_error_code: str
 ):
     def decorator(func):
-        @wraps(func)
+        @functools.wraps(func)
         async def wrapped(*args, **kwargs):
             return await func(*args, **kwargs)
 

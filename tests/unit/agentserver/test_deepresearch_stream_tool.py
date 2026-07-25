@@ -3165,6 +3165,7 @@ def test_child_env_enables_hitl_for_interactive_request(monkeypatch):
         "BASE": "1",
         "DEEPSEARCH_HITL": "true",
         "PYTHONUNBUFFERED": "1",
+        "PYTHONUTF8": "1",
     }
 
 

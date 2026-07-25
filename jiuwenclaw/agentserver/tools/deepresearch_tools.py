@@ -17,7 +17,7 @@ import tempfile
 import threading
 import uuid
 import zipfile
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -619,10 +619,12 @@ def _atomic_create_bytes_windows(
     path: Path, payload: bytes
 ) -> os.stat_result:
     """Publish a complete file using Windows-compatible path operations."""
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temp_path = Path(temp_name)
+    temp_path: Path | None = None
     try:
-        with os.fdopen(fd, "wb") as stream:
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{path.name}.", dir=path.parent, delete=False
+        ) as stream:
+            temp_path = Path(stream.name)
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
@@ -630,10 +632,11 @@ def _atomic_create_bytes_windows(
         _rename_windows_no_replace(temp_path, path)
         return metadata
     finally:
-        try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _atomic_create_bytes_posix(
@@ -668,14 +671,19 @@ def _atomic_create_bytes_at(
 ) -> os.stat_result:
     """Publish one immutable child relative to a retained directory handle."""
     temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
-    descriptor = os.open(
-        temporary_name,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-        dir_fd=directory_fd,
-    )
+
+    def open_temporary_child(path: str, flags: int) -> int:
+        return os.open(
+            path,
+            flags | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+
     try:
-        with os.fdopen(descriptor, "wb") as stream:
+        with open(
+            temporary_name, "xb", opener=open_temporary_child
+        ) as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
@@ -774,19 +782,22 @@ def _make_quarantine_directory(parent_fd: int, entry_name: str) -> tuple[str, in
         except FileExistsError:
             continue
         try:
-            quarantine_fd = os.open(
-                quarantine_name,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                mode=0o600,
-                dir_fd=parent_fd,
-            )
+            with ExitStack() as open_handles:
+                quarantine_fd = os.open(
+                    quarantine_name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    mode=0o600,
+                    dir_fd=parent_fd,
+                )
+                open_handles.callback(os.close, quarantine_fd)
+                open_handles.pop_all()
+                return quarantine_name, quarantine_fd
         except BaseException:
             try:
                 os.rmdir(quarantine_name, dir_fd=parent_fd)
             except OSError:
                 pass
             raise
-        return quarantine_name, quarantine_fd
     raise FileExistsError("unable to allocate report cleanup quarantine")
 
 
@@ -1612,7 +1623,6 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     if not script:
         return '{"status":"error","error":"run_deepsearch.py not found"}'
 
-    import tempfile  # pylint: disable=import-outside-toplevel
     progress_file = os.path.join(
         tempfile.gettempdir(), f"dr_progress_{os.getpid()}_{conversation_id or 'new'}.jsonl"
     )

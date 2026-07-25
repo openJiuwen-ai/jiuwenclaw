@@ -325,7 +325,6 @@ def prepare_html_export(
         OSError,
         TypeError,
         RuntimeError,
-        UnicodeDecodeError,
         ValueError,
     ) as exc:
         raise RewriteError("REVISION_CONFLICT", "rewrite export source changed") from exc
