@@ -384,11 +384,13 @@ class SkillToolkit:
             wait_timeout = self._safe_int(timeout_sec, 60)
 
             if resolved_source == "skillnet":
-                if (r := self._check_already_installed(target, resolved_source)) is not None:
+                r = self._check_already_installed(target, resolved_source)
+                if r is not None:
                     return r
                 payload = await self._install_skillnet_sync_wait(target, wait_timeout)
             elif resolved_source == "teamskillshub":
-                if (r := self._check_already_installed(target, resolved_source)) is not None:
+                r = self._check_already_installed(target, resolved_source)
+                if r is not None:
                     return r
                 payload = await self._manager.handle_skills_team_skills_hub_install(
                     {"asset_id": target, "force": False}
@@ -398,7 +400,8 @@ class SkillToolkit:
                 clawhub_owner = ""
                 if "/" in target:
                     clawhub_owner, _, clawhub_slug = target.partition("/")
-                if (r := self._check_already_installed(clawhub_slug, resolved_source)) is not None:
+                r = self._check_already_installed(clawhub_slug, resolved_source)
+                if r is not None:
                     return r
                 payload = await self._manager.handle_skills_clawhub_download(
                     {"slug": clawhub_slug, "owner_handle": clawhub_owner, "force": False}
