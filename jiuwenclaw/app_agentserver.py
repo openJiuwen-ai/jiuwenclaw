@@ -79,6 +79,96 @@ def _atexit_log_exit_reason() -> None:
 atexit.register(_atexit_log_exit_reason)
 
 
+async def _bootstrap_internal_jiuwenbox() -> None:
+    """AgentServer boot 时按 ``get_sandbox_runtime()['startup_mode']`` 拉起 jiuwenbox.
+
+    仅当 runtime ``startup_mode == "internal"`` 时执行 (默认 ``external`` 不 spawn)。
+    失败只记 warning, 不阻塞 AgentServer。不做平台早退。
+    """
+    try:
+        from jiuwenclaw.config import (
+            DEFAULT_SANDBOX_POLICY_FILE,
+            get_sandbox_endpoint,
+            get_sandbox_runtime,
+            persist_sandbox_endpoint_url,
+            resolve_sandbox_policy_path,
+        )
+        from jiuwenclaw.agentserver.sandbox import (
+            JiuwenBoxRunner,
+            allocate_internal_jiuwenbox_port,
+            parse_sandbox_host_port,
+        )
+
+        runtime = get_sandbox_runtime()
+        startup_mode = runtime.get("startup_mode") or "external"
+        if startup_mode != "internal":
+            logger.info(
+                "[AgentServer] sandbox startup_mode=%r; skipping jiuwenbox auto-start",
+                startup_mode,
+            )
+            return
+
+        endpoint = get_sandbox_endpoint()
+        url = endpoint.get("url") or "http://127.0.0.1:8321"
+        raw_policy = endpoint.get("policy_file") or ""
+        effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
+        policy_path = resolve_sandbox_policy_path(effective_policy_file)
+        if policy_path is None or not policy_path.is_file():
+            logger.warning(
+                "[AgentServer] jiuwenbox auto-start skipped: "
+                "policy_file=%r unresolved or missing (resolved=%s)",
+                effective_policy_file,
+                policy_path,
+            )
+            return
+
+        host, preferred_port = parse_sandbox_host_port(url)
+        port = allocate_internal_jiuwenbox_port(host, preferred_port)
+        if port != preferred_port:
+            url = f"http://{host}:{port}"
+            logger.info(
+                "[AgentServer] jiuwenbox auto-start: preferred port %d busy, using %d",
+                preferred_port,
+                port,
+            )
+
+        runner = JiuwenBoxRunner.instance()
+        ok = await runner.ensure_running(
+            host=host,
+            port=port,
+            startup_mode="internal",
+            policy_path=policy_path,
+        )
+        if not ok:
+            logger.warning(
+                "[AgentServer] jiuwenbox auto-start failed at %s:%d (policy=%s). "
+                "stderr tail:\n%s",
+                host,
+                port,
+                policy_path,
+                runner.get_stderr_tail(10) or "(empty)",
+            )
+            return
+
+        try:
+            persist_sandbox_endpoint_url(url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentServer] persist sandbox URL after auto-start failed: %s",
+                exc,
+            )
+
+        logger.info(
+            "[AgentServer] jiuwenbox auto-started at %s (policy=%s)",
+            url,
+            policy_path,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[AgentServer] jiuwenbox auto-start raised; skipping"
+        )
+
+
 class _NopCronScheduler:
     """A no-op scheduler placeholder for CronController.
 
@@ -145,6 +235,10 @@ async def _run(host: str, port: int) -> None:
     )
     await server.start()
 
+
+    # Best-effort: 显式 STARTUP_MODE=internal 时拉起本地 jiuwenbox 子进程。
+    await _bootstrap_internal_jiuwenbox()
+
     logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
 
     stop_event = asyncio.Event()
@@ -176,11 +270,15 @@ async def _run(host: str, port: int) -> None:
             "request summary flush",
             lambda: flush_request_summary_writer(timeout=5.0),
         )
-        # jiuwenbox 服务端没有 idle TTL, 本进程退出后已创建的 sandbox 会在 jiuwenbox
-        # 一侧持续占用直到 jiuwenbox 自己重启。在此处主动 DELETE 掉本进程缓存里的
-        # sandbox 列表; 走线程是因为底层 httpx 是同步 API, 不能直接堵 event loop。
-        # cleanup 自身已经吞了所有异常并永不抛, 外层 try/except 只是再加一道防线,
-        # 兜住 import 阶段 (例如 venv 损坏) 这种极端情况。
+        try:
+            from jiuwenclaw.agentserver.sandbox import JiuwenBoxRunner
+
+            await JiuwenBoxRunner.instance().stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentServer] jiuwenbox runner stop failed: %s", exc,
+            )
+
         try:
             from jiuwenclaw.agentserver.sandbox_lifecycle import (
                 shutdown_jiuwenbox_sandboxes,

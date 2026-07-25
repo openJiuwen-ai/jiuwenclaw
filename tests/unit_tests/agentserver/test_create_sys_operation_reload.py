@@ -52,10 +52,10 @@ def _patch_sandbox(
     endpoint = {
         "url": url,
         "type": sandbox_type,
-        "startup_mode": startup_mode,
     }
     runtime = {
         "enabled": enabled,
+        "startup_mode": startup_mode,
         "files": files or {"allow": [], "deny": []},
         "excluded_commands": excluded_commands or [],
         "idle_ttl_seconds": idle_ttl_seconds,
@@ -147,7 +147,7 @@ def test_maybe_recreate_sys_operation_recreates_when_sandbox_changes(monkeypatch
 
     # 切换 endpoint 指向新 url（_create_sys_operation 会读到新值）
     from jiuwenclaw.agentserver.deep_agent import interface_deep as mod
-    new_endpoint = {"url": "http://new", "type": "jiuwenbox", "startup_mode": "external"}
+    new_endpoint = {"url": "http://new", "type": "jiuwenbox"}
     monkeypatch.setattr(mod, "get_sandbox_endpoint", lambda: new_endpoint)
 
     adapter.maybe_recreate_sys_operation_for_test()
