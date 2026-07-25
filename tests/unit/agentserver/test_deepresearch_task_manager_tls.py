@@ -13,10 +13,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from openjiuwen_deepsearch.framework.openjiuwen.llm.llm_model_factory import (
-    LLMModelFactory,
-    LLMModelParams,
-)
 
 from jiuwenclaw.agentserver.tools import deepresearch_task_manager as manager_module
 from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
@@ -102,10 +98,17 @@ def _patch_task_path_dependencies(
     observed_tls,
     observed_model_verify_ssl,
 ):
+    factory_module = pytest.importorskip(
+        "openjiuwen_deepsearch.framework.openjiuwen.llm.llm_model_factory",
+        reason="real DeepSearch LLM factory is unavailable in this Python build",
+    )
+    llm_model_factory = factory_module.LLMModelFactory
+    llm_model_params = factory_module.LLMModelParams
+
     class FakeAgent:
         async def run(self, **_kwargs):
             observed_tls.append({key: os.environ.get(key) for key in _TLS_ENV})
-            model = LLMModelFactory.get_model(LLMModelParams(
+            model = llm_model_factory.get_model(llm_model_params(
                 model_provider="openai",
                 api_key="test-key",
                 api_base="https://llm.example/v1",
@@ -300,6 +303,10 @@ async def test_task_manager_agent_initialization_cancellation_restores_tls(monke
 async def test_write_report_artifacts_scopes_real_styled_context_tls(
     monkeypatch, tmp_path, initial_verify
 ):
+    pytest.importorskip(
+        "openjiuwen_deepsearch.framework.openjiuwen.llm.llm_model_factory",
+        reason="real DeepSearch styled LLM context is unavailable in this Python build",
+    )
     if initial_verify is None:
         monkeypatch.delenv("LLM_SSL_VERIFY", raising=False)
     else:
