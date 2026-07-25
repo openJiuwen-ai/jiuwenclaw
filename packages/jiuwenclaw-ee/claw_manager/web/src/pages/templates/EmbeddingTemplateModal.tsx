@@ -10,6 +10,7 @@ import type {
   EmbeddingTemplateUpdateBody,
 } from '../../types';
 import { fromCommaList, toCommaList } from '../../utils/format';
+import { isValidHttpUrl } from '../../utils/url';
 
 interface Props {
   open: boolean;
@@ -96,6 +97,10 @@ export function EmbeddingTemplateModal({ open, template, onClose, onSaved }: Pro
         'warn',
         t('embeddingTemplate.fieldRequired', { field: t(`embeddingTemplate.${missing[0]}`) }),
       );
+      return;
+    }
+    if (!isValidHttpUrl(form.api_base)) {
+      toast('warn', t('embeddingTemplate.apiBaseInvalid'));
       return;
     }
 

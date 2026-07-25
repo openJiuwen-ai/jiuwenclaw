@@ -3,14 +3,30 @@
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 ModelTypeLiteral = Literal["default", "video", "audio", "vision"]
 ExtensionComponentLiteral = Literal["gateway", "agent_server"]
 ExtensionHookTypeLiteral = Literal["pre_request", "post_request", "error", "schedule"]
 ImagePullPolicyLiteral = Literal["Always", "IfNotPresent", "Never"]
 TemplateIdPath = Annotated[str, Field(min_length=1, max_length=100)]
+
+
+def _validate_http_url(value: str) -> str:
+    """校验 api_base 为合法 http(s) URL。"""
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("must be a valid http(s) URL")
+    return value
+
+
+ApiBaseUrl = Annotated[
+    str,
+    Field(min_length=1, max_length=512),
+    AfterValidator(_validate_http_url),
+]
 
 
 class ModelTemplateCreateBody(BaseModel):
@@ -20,7 +36,7 @@ class ModelTemplateCreateBody(BaseModel):
     description: str | None = Field(default=None, max_length=512)
     model_type: list[ModelTypeLiteral] = Field(default_factory=list)
     model_tags: list[str] | None = None
-    api_base: str = Field(..., max_length=512)
+    api_base: ApiBaseUrl
     api_key: str
     model_id: str = Field(..., max_length=128)
     model_provider: str = Field(..., max_length=64)
@@ -41,7 +57,7 @@ class ModelTemplateUpdateBody(BaseModel):
     description: str | None = Field(default=None, max_length=512)
     model_type: list[ModelTypeLiteral] | None = None
     model_tags: list[str] | None = None
-    api_base: str | None = Field(default=None, max_length=512)
+    api_base: ApiBaseUrl | None = None
     api_key: str | None = None
     model_id: str | None = Field(default=None, max_length=128)
     model_provider: str | None = Field(default=None, max_length=64)
@@ -117,7 +133,7 @@ class EmbeddingTemplateCreateBody(BaseModel):
     template_name: str = Field(..., min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     embed_tags: list[str] | None = None
-    api_base: str = Field(..., min_length=1, max_length=512)
+    api_base: ApiBaseUrl
     api_key: str = Field(..., min_length=1)
     model_id: str = Field(..., min_length=1, max_length=128)
     model_provider: str = Field(..., min_length=1, max_length=64)
@@ -139,7 +155,7 @@ class EmbeddingTemplateUpdateBody(BaseModel):
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     embed_tags: list[str] | None = None
-    api_base: str | None = Field(default=None, min_length=1, max_length=512)
+    api_base: ApiBaseUrl | None = None
     api_key: str | None = Field(default=None, min_length=1)
     model_id: str | None = Field(default=None, min_length=1, max_length=128)
     model_provider: str | None = Field(default=None, min_length=1, max_length=64)

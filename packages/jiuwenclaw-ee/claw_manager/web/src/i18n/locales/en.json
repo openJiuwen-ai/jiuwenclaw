@@ -246,6 +246,7 @@
     "searchPlaceholder": "Search template ID, name, description, provider, model ID, type, or API base",
     "updatedAt": "UPDATED AT",
     "fieldRequired": "Please fill in {{field}}",
+    "apiBaseInvalid": "API Base must be a valid http(s) URL, e.g. https://api.example.com/v1",
     "timeoutMin": "Timeout must be greater than 0",
     "retryCountMin": "Retry count cannot be negative",
     "deleteConfirm": "Delete this model template? It may be referenced by instance policies."
@@ -269,6 +270,7 @@
     "updatedAt": "UPDATED AT",
     "searchPlaceholder": "Search template ID, name, description, provider, model ID, or API base",
     "fieldRequired": "Please fill in {{field}}",
+    "apiBaseInvalid": "API Base must be a valid http(s) URL, e.g. https://api.example.com/v1",
     "deleteConfirm": "Delete this embedding template? It may be referenced by instance policies."
   },
   "extensionTemplate": {

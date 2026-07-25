@@ -246,6 +246,7 @@
     "searchPlaceholder": "搜索模板 ID、模板名称、模板描述、Provider、模型ID、模型类型、API Base",
     "updatedAt": "修改时间",
     "fieldRequired": "请填写{{field}}",
+    "apiBaseInvalid": "API Base 须为合法的 http(s) URL，例如 https://api.example.com/v1",
     "timeoutMin": "超时需大于 0",
     "retryCountMin": "重试次数不能小于 0",
     "deleteConfirm": "确认删除该模型模板？该模板可能被多个实例策略引用，请确认无副作用。"
@@ -269,6 +270,7 @@
     "updatedAt": "修改时间",
     "searchPlaceholder": "搜索模板 ID、名称、描述、Provider、模型 ID 或 API Base",
     "fieldRequired": "请填写{{field}}",
+    "apiBaseInvalid": "API Base 须为合法的 http(s) URL，例如 https://api.example.com/v1",
     "deleteConfirm": "确认删除该 Embedding 模板？该模板可能被多个实例策略引用，请确认无副作用。"
   },
   "extensionTemplate": {
