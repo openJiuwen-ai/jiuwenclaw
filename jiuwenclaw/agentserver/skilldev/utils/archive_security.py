@@ -115,7 +115,11 @@ def validate_archive_before_extract(
             (
                 f"压缩包 {archive_path.name} 压缩比过高，"
                 f"format={stats.format}，"
-                f"ratio={_format_ratio(stats.ratio)}，limit={_format_ratio(max_ratio)}"
+                f"ratio={_format_ratio(stats.ratio)}，limit={_format_ratio(max_ratio)}。"
+                "已阻止直接解压。请先进行安全检查："
+                "1) 确认压缩包来源是否可信，解压是否安全；"
+                "2) 不要继续执行 unzip/tar 解压命令或使用其他不安全的方式进行解压的操作；"
+                "3) 如需继续，请先请求用户确认或改用受控方式处理。"
             ),
         )
     return stats
