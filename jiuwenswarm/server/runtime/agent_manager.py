@@ -14,7 +14,7 @@ from weakref import WeakValueDictionary
 
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import get_config, get_default_models
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -101,6 +101,9 @@ class AgentManager:
         self._agent_create_locks: WeakValueDictionary[
             tuple[str, str], asyncio.Lock
         ] = WeakValueDictionary()
+        # 上一次默认模型的连接身份快照 (diff_key -> ModelClientConfig), 用于
+        # 模型热更新后关闭"已被删除/改掉凭证"的 LLM 连接 (增量关闭)。
+        self._last_model_conn_configs: dict[tuple, Any] = {}
 
     def _get_agent_create_lock(
         self,
@@ -316,6 +319,7 @@ class AgentManager:
         if isinstance(channel_params, dict) and not channel_params:
             self._agent_create_params.pop("tui", None)
         return True
+
 
     @staticmethod
     def _reload_fingerprint(
@@ -866,6 +870,63 @@ class AgentManager:
                 logger.info(f"channel {channel_id} reload agent config success.")
             if reload_completed:
                 self._last_reload_fingerprint = fingerprint
+            # 模型配置变更时, 关闭已被删除/改掉凭证的旧 LLM 连接 (增量关闭)。
+            if model_scope:
+                await self._evict_stale_llm_clients(effective_config)
+
+    async def _evict_stale_llm_clients(self, effective_config: Any) -> None:
+        """模型热更新后, 关闭"已从 models.defaults 删除/改掉凭证"的 LLM 连接。
+
+        agent-core 的 HTTP client 缓存是进程级、被所有组件共享的, 因此这里只做
+        **增量关闭**(上次默认集 - 本次默认集), 绝不碰其它组件仍在使用的连接。
+        被删除/更新的模型即使有在途调用也会立即断开——用户既然不再使用它, 就不该
+        让它继续偷偷消耗 token。被误伤的连接(若有)也会在下次调用时自愈重建。
+
+        注意: 进程启动后的第一次模型变更, 因无历史快照, 只登记不关闭; 之后的变更
+        才做真正的 diff 关闭。
+        """
+        try:
+            from openjiuwen.core.foundation.llm import ModelClientConfig
+            from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
+                OpenAIModelClient,
+            )
+            from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
+                AnthropicModelClient,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentManager] LLM client evict skipped (import failed): %s", exc)
+            return
+
+        def _diff_key(cfg: Any) -> tuple:
+            return (str(cfg.client_provider), cfg.api_key, cfg.api_base, cfg.verify_ssl, cfg.ssl_cert)
+
+        new_configs: dict[tuple, Any] = {}
+        try:
+            entries = get_default_models(effective_config if isinstance(effective_config, dict) else None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentManager] build live model configs failed: %s", exc)
+            return
+        for entry in entries or []:
+            mcc = (entry or {}).get("model_client_config") or {}
+            mcc_fields = {k: v for k, v in mcc.items() if k != "model_name"}
+            if not mcc_fields.get("client_provider"):
+                mcc_fields["client_provider"] = "OpenAI"
+            try:
+                cfg = ModelClientConfig(**mcc_fields)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AgentManager] skip invalid model config during evict: %s", exc)
+                continue
+            new_configs[_diff_key(cfg)] = cfg
+
+        removed = [cfg for key, cfg in self._last_model_conn_configs.items() if key not in new_configs]
+        self._last_model_conn_configs = new_configs
+        if not removed:
+            return
+        for client_cls in (OpenAIModelClient, AnthropicModelClient):
+            try:
+                await client_cls.aclose_connections(removed)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AgentManager] %s.aclose_connections failed: %s", client_cls.__name__, exc)
 
     async def recreate_agent(self, channel_id: str, *, immediate: bool = True) -> None:
         """重建指定 channel 的所有 agent 实例.
