@@ -804,6 +804,12 @@ function AppContent() {
       upsertSessionMetadata(session, { setCurrent: sessionIdRef.current === targetSessionId });
       if (sessionIdRef.current === targetSessionId) {
         setMissingSessionId((current) => (current === targetSessionId ? null : current));
+        // 同 handleRestoreSession：拿到后端 metadata 里的 model 后还原 selectedModelName，
+        // 覆盖"targetSession 为空、走 loadSessionMetadata"这条恢复路径（如从 cron 触发
+        // 会话列表点进来的占位 session 之后补全元数据的场景，bug002）。
+        if (session?.model) {
+          useSessionStore.getState().setSelectedModelName(targetSessionId, session.model);
+        }
       }
       return session;
     } catch (error) {
@@ -1812,6 +1818,12 @@ function AppContent() {
       setSessionId(targetSessionId);
       if (targetSession) {
         upsertSessionMetadata(targetSession, { setCurrent: true });
+        // 还原后端记录的会话模型：打开会话时若后端 metadata 带 model，写进
+        // runtime.selectedModelName，避免 selectedModelName 为空被全局默认兜底，
+        // 导致界面显示成默认模型（如定时任务选了非默认模型的会话，bug002）。
+        if (targetSession.model) {
+          useSessionStore.getState().setSelectedModelName(targetSessionId, targetSession.model);
+        }
       } else {
         setCurrentSession(null);
       }

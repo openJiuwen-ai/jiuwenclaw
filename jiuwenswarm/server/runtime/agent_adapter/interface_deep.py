@@ -2770,13 +2770,18 @@ class JiuWenSwarmDeepAdapter:
         requested = (requested_model_name or "").strip()
         if not requested:
             return self._model
-        # 精确匹配（#index 格式或纯 model_name key）
+        # 精确匹配（#index 格式，或已注册纯 model_name key 的默认模型）
         if requested in self._model_cache:
             return self._model_cache[requested]
-        # 回退：按纯 model_name 查找 is_default=true 的条目
-        name_to_keys = self._model_name_to_keys
-        if requested in name_to_keys and requested in self._model_cache:
-            return self._model_cache[requested]
+        # 回退：非默认模型只以 {model_name}#{index} 注册在 _model_cache 里，没有纯
+        # model_name 的 key；这里按 _model_name_to_keys 里登记的真实 cache key 去查，
+        # 而不是重复判断上面已知为 False 的 `requested in self._model_cache`
+        # （旧代码在此处写重了，导致非默认模型永远查不到，静默 fallback 回默认模型）。
+        keys = self._model_name_to_keys.get(requested)
+        if keys:
+            resolved = self._model_cache.get(keys[0])
+            if resolved is not None:
+                return resolved
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
