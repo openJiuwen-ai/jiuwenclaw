@@ -4,6 +4,7 @@ import { Modal } from '../../components/Modal';
 import { LimitedTextInput } from '../../components/LimitedTextInput';
 import { SkillWhitelistTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
+import { findUnsafeTextField } from '../../utils/safeText';
 import { isValidHttpUrl } from '../../utils/url';
 import type {
   SkillWhitelistTemplate,
@@ -93,6 +94,16 @@ export function SkillWhitelistTemplateModal({ open, template, onClose, onSaved }
     }
     if (!isValidHttpUrl(form.skill_source)) {
       toast('warn', t('skillWhitelistTemplate.skillSourceInvalid'));
+      return;
+    }
+    const unsafeField = findUnsafeTextField([
+      { label: t('skillWhitelistTemplate.templateName'), value: form.template_name },
+      { label: t('skillWhitelistTemplate.templateDescription'), value: form.description },
+      { label: t('skillWhitelistTemplate.skillId'), value: form.skill_id },
+      { label: t('skillWhitelistTemplate.skillVersion'), value: form.skill_version },
+    ]);
+    if (unsafeField) {
+      toast('warn', t('skillWhitelistTemplate.unsafeText', { field: unsafeField }));
       return;
     }
 

@@ -249,6 +249,7 @@
     "apiBaseInvalid": "API Base 须为合法的 http(s) URL，例如 https://api.example.com/v1",
     "timeoutMin": "超时需大于 0",
     "retryCountMin": "重试次数不能小于 0",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "deleteConfirm": "确认删除该模型模板？该模板可能被多个实例策略引用，请确认无副作用。"
   },
   "embeddingTemplate": {
@@ -271,6 +272,7 @@
     "searchPlaceholder": "搜索模板 ID、名称、描述、Provider、模型 ID 或 API Base",
     "fieldRequired": "请填写{{field}}",
     "apiBaseInvalid": "API Base 须为合法的 http(s) URL，例如 https://api.example.com/v1",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "deleteConfirm": "确认删除该 Embedding 模板？该模板可能被多个实例策略引用，请确认无副作用。"
   },
   "extensionTemplate": {
@@ -299,6 +301,7 @@
     "updatedAt": "修改时间",
     "searchPlaceholder": "搜索模板 ID、模板名称、模板描述、目标组件、钩子类型",
     "fieldRequired": "请填写{{field}}",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "deleteConfirm": "确认删除该扩展模板？"
   },
   "skillWhitelistTemplate": {
@@ -318,6 +321,7 @@
     "filterSkillSource": "按 Skill来源筛选",
     "fieldRequired": "请填写{{field}}",
     "skillSourceInvalid": "Skill来源须为合法的 http(s) URL，例如 https://skillhub.example.com/",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "deleteConfirm": "确认删除该 Skill 白名单模板？该模板可能被多个实例策略引用，请确认无副作用。"
   },
   "serviceConfigTemplate": {
@@ -333,6 +337,7 @@
     "cpuQuantityInvalid": "{{field}} 须为合法 K8s CPU 规格，如 500m、2、0.5",
     "memoryQuantityInvalid": "{{field}} 须为合法 K8s 内存规格，如 512Mi、2Gi",
     "pathInvalid": "{{field}} 须为合法绝对路径，如 / 或 /data/nfs",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "searchPlaceholder": "搜索模板 ID、模板名称、模板描述、AgentServer镜像",
     "agentImage": "AgentServer镜像",
     "podName": "Pod名称",

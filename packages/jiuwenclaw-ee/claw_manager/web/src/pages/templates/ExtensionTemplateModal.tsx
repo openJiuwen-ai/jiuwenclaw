@@ -6,6 +6,7 @@ import { LimitedTextInput } from '../../components/LimitedTextInput';
 import { ExtensionTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
 import { safeStringify } from '../../utils/format';
+import { findUnsafeTextField } from '../../utils/safeText';
 import { isValidHookSchedule } from '../../utils/schedule';
 import type {
   ExtensionConfigTemplate,
@@ -142,6 +143,15 @@ export function ExtensionTemplateModal({ open, template, onClose, onSaved }: Pro
     }
     if (form.hook_schedule.trim() && !isValidHookSchedule(form.hook_schedule)) {
       toast('warn', t('extensionTemplate.hookScheduleInvalid'));
+      return;
+    }
+    const unsafeField = findUnsafeTextField([
+      { label: t('extensionTemplate.templateName'), value: form.template_name },
+      { label: t('extensionTemplate.templateDescription'), value: form.description },
+      { label: t('extensionTemplate.hookHandler'), value: form.hook_handler },
+    ]);
+    if (unsafeField) {
+      toast('warn', t('extensionTemplate.unsafeText', { field: unsafeField }));
       return;
     }
     const paramsErr = checkJson(form.hook_params);

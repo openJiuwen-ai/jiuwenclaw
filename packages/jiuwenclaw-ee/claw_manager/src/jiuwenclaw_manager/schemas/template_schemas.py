@@ -8,6 +8,8 @@ import re
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
+from jiuwenclaw_manager.schemas.safe_text import SafeTextMixin
+
 ModelTypeLiteral = Literal["default", "video", "audio", "vision"]
 ExtensionComponentLiteral = Literal["gateway", "agent_server"]
 ExtensionHookTypeLiteral = Literal["pre_request", "post_request", "error", "schedule"]
@@ -66,7 +68,7 @@ SkillSourceUrl = Annotated[
 ]
 
 
-class ModelTemplateCreateBody(BaseModel):
+class ModelTemplateCreateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str = Field(..., min_length=1, max_length=128)
@@ -87,7 +89,7 @@ class ModelTemplateCreateBody(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class ModelTemplateUpdateBody(BaseModel):
+class ModelTemplateUpdateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
@@ -164,7 +166,7 @@ class ModelTemplateListQuery(BaseModel):
     sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
 
 
-class EmbeddingTemplateCreateBody(BaseModel):
+class EmbeddingTemplateCreateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str = Field(..., min_length=1, max_length=128)
@@ -186,7 +188,7 @@ class EmbeddingTemplateCreateBody(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class EmbeddingTemplateUpdateBody(BaseModel):
+class EmbeddingTemplateUpdateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
@@ -247,7 +249,7 @@ class HookConfig(BaseModel):
     data: dict[str, Any] | None = Field(default=None, description="单条钩子扩展配置")
 
 
-class ExtensionConfigTemplateCreateBody(BaseModel):
+class ExtensionConfigTemplateCreateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str = Field(..., min_length=1, max_length=128)
@@ -260,7 +262,7 @@ class ExtensionConfigTemplateCreateBody(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class ExtensionConfigTemplateUpdateBody(BaseModel):
+class ExtensionConfigTemplateUpdateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
@@ -313,7 +315,7 @@ class ExtensionConfigTemplateOut(BaseModel):
     updated_at: str | None
 
 
-class SkillWhitelistTemplateCreateBody(BaseModel):
+class SkillWhitelistTemplateCreateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str = Field(..., min_length=1, max_length=128)
@@ -325,7 +327,7 @@ class SkillWhitelistTemplateCreateBody(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class SkillWhitelistTemplateUpdateBody(BaseModel):
+class SkillWhitelistTemplateUpdateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
@@ -485,7 +487,7 @@ OptionalUnixAbsPath = Annotated[
 ]
 
 
-class ServiceConfigTemplateCreateBody(BaseModel):
+class ServiceConfigTemplateCreateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str = Field(..., min_length=1, max_length=128)
@@ -533,7 +535,7 @@ class ServiceConfigTemplateCreateBody(BaseModel):
         return self
 
 
-class ServiceConfigTemplateUpdateBody(BaseModel):
+class ServiceConfigTemplateUpdateBody(SafeTextMixin):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     template_name: str | None = Field(default=None, min_length=1, max_length=128)

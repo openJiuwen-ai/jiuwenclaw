@@ -6,6 +6,7 @@ import { ServiceConfigTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
 import { isValidK8sCpu, isValidK8sMemory } from '../../utils/k8sResource';
 import { isValidOptionalUnixAbsPath, isValidUnixAbsPath } from '../../utils/path';
+import { findUnsafeTextField } from '../../utils/safeText';
 import type {
   ServiceConfigTemplate,
   ServiceConfigTemplateCreateBody,
@@ -288,6 +289,19 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
           field: t('serviceConfigTemplate.nfsMountPath'),
         }),
       );
+      return;
+    }
+    const unsafeField = findUnsafeTextField([
+      { label: t('serviceConfigTemplate.templateName'), value: form.template_name },
+      { label: t('serviceConfigTemplate.templateDescription'), value: form.description },
+      { label: t('serviceConfigTemplate.agentImage'), value: form.agent_image },
+      { label: t('serviceConfigTemplate.podName'), value: form.pod_name },
+      { label: t('serviceConfigTemplate.containerName'), value: form.container_name },
+      { label: t('serviceConfigTemplate.portName'), value: form.port_name },
+      { label: t('serviceConfigTemplate.agentRuntime'), value: form.agent_runtime },
+    ]);
+    if (unsafeField) {
+      toast('warn', t('serviceConfigTemplate.unsafeText', { field: unsafeField }));
       return;
     }
 

@@ -14,6 +14,8 @@ from pydantic import (
 )
 import re
 
+from .safe_text import SafeTextMixin
+
 
 # cron 字段：数字、字母（JAN/MON）、* / , - ? # L W
 _CRON_FIELD_RE = re.compile(r"^[\w*/,\-?#]+$", re.IGNORECASE)
@@ -73,7 +75,7 @@ class HookConfig(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class ModelTemplateUpdateRequest(BaseModel):
+class ModelTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     model_type: list[str] | None = None
@@ -92,7 +94,7 @@ class ModelTemplateUpdateRequest(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class EmbeddingTemplateUpdateRequest(BaseModel):
+class EmbeddingTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(
         default=None,
         max_length=128,
@@ -110,7 +112,7 @@ class EmbeddingTemplateUpdateRequest(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class ExtensionConfigTemplateUpdateRequest(BaseModel):
+class ExtensionConfigTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     component: str | None = Field(default=None, max_length=32)
@@ -121,7 +123,7 @@ class ExtensionConfigTemplateUpdateRequest(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class SkillWhitelistTemplateUpdateRequest(BaseModel):
+class SkillWhitelistTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     skill_id: str | None = Field(default=None, max_length=512)
@@ -228,7 +230,7 @@ OptionalUnixAbsPath = Annotated[
 ]
 
 
-class ServiceConfigTemplateUpdateRequest(BaseModel):
+class ServiceConfigTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     agent_image: str | None = Field(default=None, max_length=512)
