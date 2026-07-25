@@ -2843,6 +2843,154 @@ async def test_resume_requires_conversation_id_and_node():
 
 
 @pytest.mark.asyncio
+async def test_feedback_resume_normalizes_answered_empty_result_to_skipped():
+    lines = [
+        json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
+        json.dumps({
+            "__deepsearch_status__": "interrupted",
+            "agent": "feedback_handler",
+            "conversation_id": "C1",
+        }),
+    ]
+    spawn = AsyncMock(return_value=_Proc(lines))
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "", "channel_id": "", "session_id": ""
+         }), \
+         patch("asyncio.create_subprocess_exec", new=spawn), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport"
+         ):
+        await dt.deepresearch_stream._func(
+            action="resume",
+            conversation_id="C1",
+            node="feedback_handler",
+            feedback='{"feedback":"不应使用"}',
+            interaction_result=json.dumps({"status": "answered", "answers": []}),
+        )
+
+    argv = list(spawn.await_args.args)
+    assert argv[argv.index("--feedback") + 1] == (
+        '{"feedback":"","interaction_status":"skipped"}'
+    )
+
+
+@pytest.mark.parametrize(
+    ("interaction_result", "expected"),
+    [
+        (
+            {"status": "answered", "answers": [
+                {"selected_options": [], "custom_input": "  "},
+                {"selected_options": [], "custom_input": None},
+            ]},
+            '{"feedback":"","interaction_status":"skipped"}',
+        ),
+        (
+            {"status": "skipped", "answers": []},
+            '{"feedback":"","interaction_status":"skipped"}',
+        ),
+        (
+            {"status": "answered", "answers": [
+                {"selected_options": ["market_scope"], "custom_input": ""},
+            ]},
+            '{"feedback":"关注市场范围"}',
+        ),
+        (
+            {"status": "answered", "answers": [
+                {"selected_options": [], "custom_input": "补充竞品分析"},
+            ]},
+            '{"feedback":"补充竞品分析"}',
+        ),
+    ],
+)
+def test_normalize_feedback_interaction_result(
+    interaction_result, expected
+):
+    assert dt._normalize_feedback_handler_resume_feedback(
+        '{"feedback":"关注市场范围"}'
+        if "market_scope" in json.dumps(interaction_result)
+        else '{"feedback":"补充竞品分析"}',
+        json.dumps(interaction_result, ensure_ascii=False),
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("interaction_result", "error"),
+    [
+        ("not-json", "合法 JSON"),
+        (json.dumps([]), "JSON 对象"),
+        (json.dumps({"status": "cancelled", "answers": []}), "cancelled"),
+        (json.dumps({"status": "error", "answers": []}), "error"),
+        (json.dumps({"status": "unknown", "answers": []}), "unknown"),
+    ],
+)
+def test_normalize_feedback_interaction_result_rejects_invalid_states(
+    interaction_result, error
+):
+    with pytest.raises(ValueError, match=error):
+        dt._normalize_feedback_handler_resume_feedback(
+            '{"feedback":"原反馈"}',
+            interaction_result,
+        )
+
+
+@pytest.mark.asyncio
+async def test_feedback_resume_rejects_cancelled_without_spawning():
+    spawn = AsyncMock()
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch("asyncio.create_subprocess_exec", new=spawn):
+        result = await dt.deepresearch_stream._func(
+            action="resume",
+            conversation_id="C1",
+            node="feedback_handler",
+            feedback='{"feedback":"不应使用"}',
+            interaction_result=json.dumps({"status": "cancelled", "answers": []}),
+        )
+
+    assert json.loads(result) == {
+        "status": "error",
+        "error": "feedback_handler interaction_result status=cancelled",
+    }
+    spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resume_preserves_legacy_positional_argument_order():
+    lines = [
+        json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
+        json.dumps({
+            "__deepsearch_status__": "interrupted",
+            "agent": "feedback_handler",
+            "conversation_id": "C1",
+        }),
+    ]
+    spawn = AsyncMock(return_value=_Proc(lines))
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "", "channel_id": "", "session_id": ""
+         }), \
+         patch("asyncio.create_subprocess_exec", new=spawn), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport"
+         ):
+        await dt.deepresearch_stream._func(
+            "resume",
+            "",
+            "C1",
+            '{"feedback":"原反馈"}',
+            "feedback_handler",
+            "report-name",
+        )
+
+    argv = list(spawn.await_args.args)
+    assert argv[argv.index("--feedback") + 1] == '{"feedback":"原反馈"}'
+    assert argv[argv.index("--node") + 1] == "feedback_handler"
+
+
+@pytest.mark.asyncio
 async def test_missing_run_script_returns_error():
     # runner 脚本解析失败 → 早返 error(不 spawn)
     with patch.object(dt, "_resolve_run_script", return_value=""):
@@ -3034,6 +3182,40 @@ def test_child_env_disables_hitl_and_overrides_stale_parent(monkeypatch):
 
     assert env["DEEPSEARCH_HITL"] == "false"
     assert env["PYTHONUNBUFFERED"] == "1"
+
+
+def test_child_env_exports_current_tenant_environment(monkeypatch):
+    observed = {}
+
+    def fake_export(service_id, agent_id):
+        observed["tenant"] = (service_id, agent_id)
+        return {
+            "API_KEY": "huawei-maas-session",
+            "default_headers": '{"Authorization":"Basic session"}',
+        }
+
+    def fake_build_bridge_env(source):
+        observed["source"] = source
+        return dict(source)
+
+    monkeypatch.setattr(dt, "export_agent_environ", fake_export, raising=False)
+    monkeypatch.setattr(dt, "_build_bridge_env", fake_build_bridge_env)
+
+    env = dt._build_deepresearch_child_env(
+        {},
+        interactive_ask=True,
+        service_id="service-1",
+        agent_id="office",
+    )
+
+    assert observed == {
+        "tenant": ("service-1", "office"),
+        "source": {
+            "API_KEY": "huawei-maas-session",
+            "default_headers": '{"Authorization":"Basic session"}',
+        },
+    }
+    assert env["default_headers"] == '{"Authorization":"Basic session"}'
 
 
 def _make_fake_skill(parent: str) -> str:

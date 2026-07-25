@@ -34,6 +34,7 @@ from jiuwenclaw.agentserver.tools._deepresearch_tls import (
     DEEPRESEARCH_TLS_ENV_LOCK as _REPORT_STYLE_LLM_INIT_LOCK,
     scoped_deepresearch_tls_env,
 )
+from jiuwenclaw.local_env_config import export_agent_environ
 
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
@@ -1417,9 +1418,18 @@ def _build_bridge_env(os_env: dict[str, str]) -> dict[str, str]:
 
 
 def _build_deepresearch_child_env(
-    os_env: dict[str, str], *, interactive_ask: bool
+    os_env: dict[str, str],
+    *,
+    interactive_ask: bool,
+    service_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict[str, str]:
     """Build the stream child env with an explicit per-request HITL switch."""
+    if service_id is not None or agent_id is not None:
+        os_env = export_agent_environ(
+            service_id or "default",
+            agent_id or "default",
+        )
     env = _build_bridge_env(os_env)
     env["DEEPSEARCH_HITL"] = "true" if interactive_ask else "false"
     env["PYTHONUNBUFFERED"] = "1"
@@ -1454,6 +1464,61 @@ async def _iter_ndjson_lines(stream, read_size: int = 64 * 1024):
         yield bytes(pending)
 
 
+_SKIPPED_FEEDBACK_HANDLER_PAYLOAD = (
+    '{"feedback":"","interaction_status":"skipped"}'
+)
+
+
+def _interaction_answer_has_user_input(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return True
+    selected = item.get("selected_options")
+    if isinstance(selected, list):
+        if any(
+            not isinstance(option, str) or bool(option.strip())
+            for option in selected
+        ):
+            return True
+    elif selected is not None:
+        return True
+    custom_input = item.get("custom_input")
+    if custom_input is None:
+        return False
+    return not isinstance(custom_input, str) or bool(custom_input.strip())
+
+
+def _normalize_feedback_handler_resume_feedback(
+    feedback: str,
+    interaction_result: str,
+) -> str:
+    """Normalize ask_user_question output at the DeepResearch resume boundary."""
+    if not interaction_result:
+        return feedback
+    try:
+        result = json.loads(interaction_result)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("interaction_result 必须是合法 JSON") from exc
+    if not isinstance(result, dict):
+        raise ValueError("interaction_result 必须是 JSON 对象")
+
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"answered", "skipped"}:
+        raise ValueError(
+            f"feedback_handler interaction_result status={status or 'missing'}"
+        )
+    answers = result.get("answers", [])
+    if not isinstance(answers, list):
+        raise ValueError("interaction_result.answers 必须是数组")
+    has_user_input = any(
+        _interaction_answer_has_user_input(item) for item in answers
+    )
+    if status == "skipped" and has_user_input:
+        raise ValueError("skipped interaction_result 不能包含有效回答")
+    if status == "skipped" or not has_user_input:
+        return _SKIPPED_FEEDBACK_HANDLER_PAYLOAD
+    return feedback
+
+
 @tool(
     name="deepresearch_stream",
     description=(
@@ -1462,8 +1527,9 @@ async def _iter_ndjson_lines(stream, read_size: int = 64 * 1024):
         "processing_status)实时推送到前端。执行到人机交互节点时返回 interrupted outcome,"
         "由 agent 调 ask_user_question 处理后,再以 action=resume 调本工具恢复。"
         "outline_interaction 由工具内部以 accepted 自动恢复，不返回给 agent；"
-        "若 feedback_handler 的 ask_user_question 返回 skipped，必须用"
-        ' feedback={"feedback":"","interaction_status":"skipped"} 恢复，'
+        "feedback_handler 恢复时须把 ask_user_question 完整返回值作为"
+        " interaction_result 传入；工具会把 skipped 或 answered+空答案"
+        ' 归一化为 feedback={"feedback":"","interaction_status":"skipped"}，'
         "不得默认选择任何选项或改写为自然语言反馈。"
         "不返回中间 chunk,只返回 outcome,避免污染 agent context。"
         "⚠不适用场景:PPT制作辅助研究、单点数据查询、快速搜索"
@@ -1476,6 +1542,7 @@ async def deepresearch_stream(
     feedback: str = "",
     node: str = "",
     file_name: str = "",
+    interaction_result: str = "",
 ) -> str:
     """流式执行 DeepResearch,进度走 chat 通道,中断/完成返短 outcome.
 
@@ -1486,6 +1553,7 @@ async def deepresearch_stream(
         feedback: action=resume 时的 per-node 反馈 JSON(见 SKILL.md 映射表)
         node: action=resume 时的中断节点 id
         file_name: 报告文件名(不带后缀)
+        interaction_result: feedback_handler 的 ask_user_question 完整返回 JSON
 
     Returns:
         JSON 串:
@@ -1538,6 +1606,17 @@ async def deepresearch_stream(
     elif action == "resume":
         if not conversation_id or not node:
             return '{"status":"error","error":"resume requires conversation_id and node"}'
+        if node == "feedback_handler" and interaction_result:
+            try:
+                feedback = _normalize_feedback_handler_resume_feedback(
+                    feedback,
+                    interaction_result,
+                )
+            except ValueError as exc:
+                return json.dumps(
+                    {"status": "error", "error": str(exc)},
+                    ensure_ascii=False,
+                )
         argv = [python_bin, script, "resume", "--conversation-id", conversation_id,
                 "--feedback", feedback or "", "--node", node,
                 "--interrupt-feedback", "", "--progress-file", progress_file]
@@ -1578,7 +1657,10 @@ async def deepresearch_stream(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_build_deepresearch_child_env(
-                os.environ, interactive_ask=interactive_ask
+                os.environ,
+                interactive_ask=interactive_ask,
+                service_id=str(route.get("service_id") or "default"),
+                agent_id=str(route.get("agent_id") or "default"),
             ),
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught

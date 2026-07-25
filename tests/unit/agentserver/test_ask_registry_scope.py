@@ -32,13 +32,13 @@ async def test_resolve_requires_matching_tenant() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_preserves_explicit_skipped_status() -> None:
+async def test_resolve_normalizes_explicit_skipped_to_answer_list() -> None:
     reg = AskUserQuestionRegistry.get_instance()
     scope = RuntimeScopeKey.from_ids("svc1", "aid1", "sess")
 
     fut = reg.register(scope, "ask_uq_skip")
     assert reg.resolve(scope, "ask_uq_skip", [], status="skipped") is True
-    assert fut.result() == {"status": "skipped", "answers": []}
+    assert fut.result() == []
 
 
 @pytest.mark.asyncio
@@ -59,7 +59,7 @@ async def test_resolve_accepts_skipped_with_empty_answer_shells() -> None:
         answers,
         status="skipped",
     ) is True
-    assert fut.result() == {"status": "skipped", "answers": []}
+    assert fut.result() == answers
 
 
 @pytest.mark.asyncio
