@@ -830,9 +830,17 @@ channels:
     allow_from: []
     # Channel IDs allowed to mention the bot. Empty allows all channels.
     allowed_channel_ids: []
+    # Channel IDs where link messages trigger the bot without an @mention.
+    # Empty disables automatic link processing.
+    auto_link_channel_ids: []
+    # Optional instructions appended to automatically processed link messages.
+    auto_link_prompt: ""
     # Optional fallback channel for messages without request metadata.
     default_channel_id:
     reply_in_thread: true
+    # Immediately confirm accepted requests before agent processing begins.
+    acknowledge_requests: false
+    acknowledgement_text: "Received. Analyzing…"
     enabled: false
   whatsapp:
     # WhatsApp 配置（通过本地 Baileys bridge）

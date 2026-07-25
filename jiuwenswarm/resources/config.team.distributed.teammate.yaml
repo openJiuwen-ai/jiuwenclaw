@@ -402,8 +402,12 @@ channels:
     app_token:
     allow_from: []
     allowed_channel_ids: []
+    auto_link_channel_ids: []
+    auto_link_prompt: ""
     default_channel_id:
     reply_in_thread: true
+    acknowledge_requests: false
+    acknowledgement_text: "Received. Analyzing…"
     enabled: false
   whatsapp:
     # WhatsApp 配置（通过本地 Baileys bridge）

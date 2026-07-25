@@ -650,7 +650,7 @@
       "discordHint": "支持 Discord Bot 消息收发，请确保已在开发者后台开启 Message Content Intent 并配置目标频道，可使用block_dm开关屏蔽私信。",
       "slackTitle": "Slack 频道参数配置",
       "slackSubtitle": "配置 Slack Socket Mode 机器人服务参数",
-      "slackHint": "请创建并启用 Socket Mode 的 Slack App，配置 xoxb Bot Token 和 xapp App Token，并订阅 app_mention 与 message.im 事件。",
+      "slackHint": "请创建并启用 Socket Mode 的 Slack App，配置 xoxb Bot Token 和 xapp App Token。基础对话订阅 app_mention 与 message.im；自动链接频道还需 channels:history 权限和 message.channels 事件。",
       "telegramTitle": "Telegram 频道参数配置",
       "telegramSubtitle": "配置 Telegram Bot 服务相关参数",
       "whatsappTitle": "WhatsApp 频道参数配置",
@@ -692,6 +692,9 @@
       "slackChannelId": "请输入备用 Slack 频道 ID",
       "slackUserIds": "每行一个 Slack 用户 ID（留空允许所有用户）",
       "slackChannelIds": "每行一个 Slack 频道 ID（留空允许所有频道）",
+      "slackAutoLinkChannelIds": "每行一个自动处理链接的 Slack 频道 ID（留空关闭）",
+      "slackAutoLinkPrompt": "可选：附加到自动处理链接消息后的任务说明",
+      "slackAcknowledgementText": "Agent 开始处理前立即发送的确认消息",
       "allowFrom": "每行一个 chatid/userid（也支持逗号分隔）"
     },
     "saved": {
@@ -1433,6 +1436,7 @@
       "tui": "终端 (tui)",
       "xiaoyi": "小艺 (xiaoyi)",
       "feishu": "飞书 (feishu)",
+      "slack": "Slack (slack)",
       "dingtalk": "钉钉 (dingtalk)",
       "whatsapp": "WhatsApp (whatsapp)",
       "wecom": "企业微信 (wecom)",
