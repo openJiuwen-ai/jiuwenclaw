@@ -2796,6 +2796,20 @@ class JiuWenSwarm:
         adapter_cleaned = bool(await cleanup_fn(session_id))
         return processor_cleaned or adapter_cleaned
 
+    def has_session_runtime(self, session_id: str | None = None) -> bool:
+        """Return whether this facade still owns session-scoped runtime."""
+        if self._session_manager.has_session_runtime(session_id):
+            return True
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        has_runtime = getattr(adapter, "has_session_runtime", None)
+        if not callable(has_runtime):
+            return True
+        if session_id is None:
+            return bool(has_runtime())
+        return bool(has_runtime(session_id))
+
     async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时调用：取消 session 流式任务并中止 adapter 内层循环。"""
         await self._session_manager.cancel_all_session_tasks(log_prefix)

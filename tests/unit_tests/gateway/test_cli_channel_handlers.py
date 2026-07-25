@@ -50,6 +50,7 @@ class FakeMessageHandler:
 
     async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
         self.cancelled.append((session_keys, stale_request_keys or []))
+        return True
 
     async def schedule_cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
         self.scheduled.append((session_keys, stale_request_keys or []))
@@ -57,6 +58,22 @@ class FakeMessageHandler:
     def cancel_scheduled_disconnect_cancel(self, channel_id, session_id):
         self.reconnected.append((channel_id, session_id))
         return True
+
+
+class BlockingDisconnectMessageHandler(FakeMessageHandler):
+    def __init__(self):
+        super().__init__()
+        self.cancel_started = asyncio.Event()
+
+    async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+        self.cancel_started.set()
+        await asyncio.Future()
+
+
+class FailedDisconnectMessageHandler(FakeMessageHandler):
+    async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+        self.cancelled.append((session_keys, stale_request_keys or []))
+        return False
 
 
 @pytest.mark.asyncio
@@ -208,6 +225,64 @@ async def test_tui_route_disconnect_skips_scheduled_cancel_after_explicit_exit()
     await binding.disconnect_handler(ws, [("tui", "sess-exit")], [])
 
     assert handler.scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_tui_route_disconnect_retries_when_explicit_exit_cleanup_is_cancelled():
+    server = FakeGatewayServer()
+    handler = BlockingDisconnectMessageHandler()
+    binding = build_cli_route_binding(
+        CliRouteBindParams(path="/tui", message_handler=handler)
+    )
+    binding.install(server)
+    ws = type("FakeWs", (), {})()
+    server.bind_session_owner("tui", "sess-exit-race", ws)
+
+    explicit_exit = asyncio.create_task(
+        server.local_handlers["/tui"]["tui.disconnect"](
+            ws,
+            "req-exit-race",
+            {"reason": "user_exit"},
+            "sess-exit-race",
+        )
+    )
+    await handler.cancel_started.wait()
+    explicit_exit.cancel()
+    await asyncio.gather(explicit_exit, return_exceptions=True)
+
+    await binding.disconnect_handler(
+        ws,
+        [("tui", "sess-exit-race")],
+        [],
+    )
+
+    assert handler.scheduled == [([("tui", "sess-exit-race")], [])]
+
+
+@pytest.mark.asyncio
+async def test_tui_route_disconnect_retries_when_explicit_exit_cleanup_fails():
+    server = FakeGatewayServer()
+    handler = FailedDisconnectMessageHandler()
+    binding = build_cli_route_binding(
+        CliRouteBindParams(path="/tui", message_handler=handler)
+    )
+    binding.install(server)
+    ws = type("FakeWs", (), {})()
+    server.bind_session_owner("tui", "sess-exit-failed", ws)
+
+    await server.local_handlers["/tui"]["tui.disconnect"](
+        ws,
+        "req-exit-failed",
+        {"reason": "user_exit"},
+        "sess-exit-failed",
+    )
+    await binding.disconnect_handler(
+        ws,
+        [("tui", "sess-exit-failed")],
+        [],
+    )
+
+    assert handler.scheduled == [([("tui", "sess-exit-failed")], [])]
 
 
 def test_tui_session_bind_handler_cancels_pending_disconnect_cancel():
