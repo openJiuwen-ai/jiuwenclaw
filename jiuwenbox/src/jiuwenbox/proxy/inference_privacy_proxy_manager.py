@@ -580,13 +580,45 @@ class InferencePrivacyProxyManager:
         if not proxies_config or proxies_config.listen_port <= 0:
             return
 
-        try:
-            routes = [build_proxy_route(route_data) for route_data in proxies_config.routes]
+        # Build each route independently so a single misconfigured route
+        # (e.g. a Basic route whose password_file is missing/unreadable or
+        # whose password contains invalid characters) is skipped without
+        # blocking the remaining valid Bearer / X-Api-Key / Basic / no-auth
+        # routes. ``build_proxy_route`` raises generic, secret-free
+        # ``ValueError`` for every expected assembly failure.
+        routes: list[ProxyRoute] = []
+        skipped: list[str] = []
+        for route_data in proxies_config.routes or []:
+            prefix = getattr(route_data, "path_prefix", "<unknown>")
+            try:
+                routes.append(build_proxy_route(route_data))
+            except ValueError as e:
+                # Secret-free message by construction (see
+                # ``_resolve_basic_credentials``); skip this route only.
+                skipped.append(prefix)
+                logger.error("Skipping proxy route '%s' during policy load: %s", prefix, e)
+            except Exception:  # noqa: BLE001
+                # Unexpected assembly error: skip without echoing the message
+                # (library reprs may echo raw input) so no credential can leak.
+                skipped.append(prefix)
+                logger.error(
+                    "Skipping proxy route '%s' during policy load: "
+                    "unexpected error during route assembly",
+                    prefix,
+                )
 
-            if not routes:
+        if not routes:
+            if skipped:
+                logger.error(
+                    "No proxy routes loaded (%d skipped: %s); global proxy not started.",
+                    len(skipped),
+                    ", ".join(skipped),
+                )
+            else:
                 logger.info("No routes configured")
-                return
+            return
 
+        try:
             config = InferencePrivacyProxyConfig(
                 listen_port=proxies_config.listen_port,
                 listen_host=proxies_config.listen_host or "127.0.0.1",
@@ -600,16 +632,17 @@ class InferencePrivacyProxyManager:
                 await self.start_proxy(route_name)
 
             logger.info(
-                "Started global proxy on %s:%d with %d routes: %s",
+                "Started global proxy on %s:%d with %d routes: %s%s",
                 config.listen_host,
                 proxies_config.listen_port,
                 len(routes),
                 ", ".join(f"{r.path_prefix}->{r.target_endpoint}" for r in routes),
+                f" (skipped {len(skipped)} invalid: {', '.join(skipped)})" if skipped else "",
             )
         except Exception as e:
-            # ``build_proxy_route`` raises generic ValueErrors (no secret) on
-            # unreadable password_file or invalid password content; log and keep
-            # the server running without the proxy rather than crashing startup.
+            # ``create_proxy`` / ``start_proxy`` failures are not per-route
+            # assembly errors; log and keep the server running without the
+            # proxy rather than crashing startup.
             logger.error("Failed to load global proxy: %s", e)
 
 
