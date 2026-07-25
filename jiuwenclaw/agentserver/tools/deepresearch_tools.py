@@ -1443,6 +1443,10 @@ def _build_deepresearch_child_env(
     env = _build_bridge_env(os_env)
     env["DEEPSEARCH_HITL"] = "true" if interactive_ask else "false"
     env["PYTHONUNBUFFERED"] = "1"
+    # Force UTF-8 stdout/stderr (PEP 540). On Chinese Windows the child's default
+    # stdout encoding is cp936/GBK, so NDJSON with Chinese outline text is emitted
+    # as GBK bytes; the sidecar reads stdout as UTF-8 -> decode fails -> mojibake.
+    env["PYTHONUTF8"] = "1"
     return env
 
 
