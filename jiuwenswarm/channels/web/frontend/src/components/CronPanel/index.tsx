@@ -15,6 +15,7 @@ import ConfirmDialog from './ConfirmDialog';
 import CronTaskDrawer, { jobToForm, templateToForm, isDefaultLikeProject, type CronTaskFormValue } from './CronTaskDrawer';
 import { useClickOutside } from './useClickOutside';
 import SimpleSelect from './SimpleSelect';
+import { hasXiaoyiPushApiId, isCronTargetOptionDisabled } from './xiaoyiCronTarget';
 import emptyIllustration from '../../assets/cron-empty.svg';
 
 // 任务列表分页：每页条数可选项（默认 20），纯前端本地分页——后端 cron.job.list 目前
@@ -228,6 +229,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   const [jobs, setJobs] = useState<CronTaskUI[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [enabledChannels, setEnabledChannels] = useState<Set<string>>(new Set());
+  // 小艺推送依赖 api_id；频道已注册但未配 api_id 时仍应置灰（Issue #2497）
+  const [xiaoyiPushReady, setXiaoyiPushReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -337,7 +340,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     }
   }, []);
 
-  // 沿用旧 CronPanel 的做法：按已启用的推送频道决定"推送频道"下拉里哪些选项可选
+  // 按已启用频道决定推送下拉可选项；小艺额外要求 api_id 已配置（Issue #2497）
   const loadChannels = useCallback(async () => {
     try {
       const payload = await webRequest<{ channels?: unknown[] }>('channel.get');
@@ -354,12 +357,26 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       setEnabledChannels(enabled);
     } catch {
       // 忽略错误，保持空集合（下拉里全部选项禁用，用户仍可看到但选不了，不阻塞其他功能）
+      setEnabledChannels(new Set());
+    }
+
+    try {
+      const xiaoyiPayload = await webRequest<{ config?: unknown }>('channel.xiaoyi.get_conf');
+      setXiaoyiPushReady(hasXiaoyiPushApiId(xiaoyiPayload?.config));
+    } catch {
+      // 拉不到小艺配置时保守置为不可用，避免无 api_id 仍可选
+      setXiaoyiPushReady(false);
     }
   }, []);
 
   const targetOptions = useMemo(
-    () => SELECTABLE_TARGET_KEYS.map((id) => ({ value: id, label: t(`cron.targets.${id}`), disabled: !enabledChannels.has(id) })),
-    [enabledChannels, t],
+    () =>
+      SELECTABLE_TARGET_KEYS.map((id) => ({
+        value: id,
+        label: t(`cron.targets.${id}`),
+        disabled: isCronTargetOptionDisabled(id, enabledChannels, xiaoyiPushReady),
+      })),
+    [enabledChannels, t, xiaoyiPushReady],
   );
 
   useEffect(() => {
@@ -641,6 +658,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     // 抽屉打开瞬间主动重拉一次项目列表：CronPanel 的 projects 只在挂载时拉取一次，
     // 停留页面期间新建的项目不会自动同步进来（bug003），这里保证每次打开抽屉都是最新数据
     void loadProjects();
+    // 同步刷新推送频道可用性（含小艺 api_id），避免刚改完频道配置仍用旧置灰状态
+    void loadChannels();
     setDrawer({ mode: 'template', initial: templateToForm(tpl, t(tpl.titleKey), t(tpl.descriptionKey)) });
   }
 
@@ -730,6 +749,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                     setCreateMenuOpen(false);
                     // 同 openTemplateDrawer：打开抽屉瞬间重拉一次项目列表，避免拿到挂载时的旧快照
                     void loadProjects();
+                    void loadChannels();
                     setDrawer({ mode: 'create' });
                   }}
                   className="block w-full px-3 py-2 text-left text-sm font-semibold text-text hover:bg-bg-hover"
@@ -864,8 +884,9 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
               <img src={emptyIllustration} alt="" className="h-20 w-20" />
               <button
                 onClick={() => {
-                  // 同上：打开抽屉瞬间重拉一次项目列表
+                  // 同上：打开抽屉瞬间重拉一次项目列表与频道可用性
                   void loadProjects();
+                  void loadChannels();
                   setDrawer({ mode: 'create' });
                 }}
                 className="btn !px-4 !py-2"
@@ -973,7 +994,10 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                             </button>
                           )}
                           <button
-                            onClick={() => setDrawer({ mode: 'edit', initial: jobToForm(job), jobId: job.id })}
+                            onClick={() => {
+                              void loadChannels();
+                              setDrawer({ mode: 'edit', initial: jobToForm(job), jobId: job.id });
+                            }}
                             className="text-sm text-cron-action-link hover:opacity-80"
                           >
                             {t('cron.table.edit')}

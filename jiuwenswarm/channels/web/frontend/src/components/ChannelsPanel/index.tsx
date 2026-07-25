@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { ChevronRight, Plus, Trash2, X } from 'lucide-react';
 import i18n from '../../i18n';
 import { webRequest } from '../../services/webClient';
 import { AvatarPermEditor } from './AvatarPermEditor';
@@ -877,6 +877,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   const [xiaoyiSaving, setXiaoyiSaving] = useState(false);
   const [xiaoyiSaveError, setXiaoyiSaveError] = useState<string | null>(null);
   const [xiaoyiSuccess, setXiaoyiSuccess] = useState<string | null>(null);
+  const [xiaoyiApiIdHintDismissed, setXiaoyiApiIdHintDismissed] = useState(false);
   const [dingtalkConfig, setDingtalkConfig] = useState<DingTalkConfig>(DEFAULT_DINGTALK_CONF);
   const [dingtalkDraft, setDingtalkDraft] = useState<DingTalkDraft>(draftFromDingtalkConfig(DEFAULT_DINGTALK_CONF));
   const [dingtalkVisibleFields, setDingtalkVisibleFields] = useState<Record<string, boolean>>({});
@@ -1351,6 +1352,10 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setXiaoyiDraft((prev) => ({ ...prev, [key]: value }));
     setXiaoyiSaveError(null);
     setXiaoyiSuccess(null);
+    // 填入 api_id 后重置关闭状态，清空时警告横幅可再次出现
+    if (key === 'api_id' && String(value ?? '').trim()) {
+      setXiaoyiApiIdHintDismissed(false);
+    }
   };
 
   const handleCancelXiaoyiConfig = () => {
@@ -1902,15 +1907,36 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     </div>
   );
 
-  const renderXiaoyiConfigEditor = () => (
-    <table className="w-full text-sm">
-      <tbody>
-        {(['enabled', 'enable_streaming', 'ak', 'sk', 'agent_id', 'api_id'] as const).map((field) =>
-          renderXiaoyiField(xiaoyiDraft, field),
-        )}
-      </tbody>
-    </table>
-  );
+  const renderXiaoyiConfigEditor = () => {
+    // 仅在启用且未填 api_id 时显示警告横幅；填入后直接消失，不切换成灰色说明条
+    const showApiIdHint =
+      xiaoyiDraft.enabled && !xiaoyiDraft.api_id.trim() && !xiaoyiApiIdHintDismissed;
+    return (
+      <>
+        {showApiIdHint ? (
+          <div className="mb-3 flex items-start gap-2 rounded-md border border-warn/30 bg-warn-subtle px-3 py-2 text-xs text-warn">
+            <p className="min-w-0 flex-1">{t('channels.placeholders.xiaoyiApiIdRequiredForCron')}</p>
+            <button
+              type="button"
+              onClick={() => setXiaoyiApiIdHintDismissed(true)}
+              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-current/70 hover:bg-secondary hover:text-current"
+              aria-label={t('common.close')}
+              title={t('common.close')}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ) : null}
+        <table className="w-full text-sm">
+          <tbody>
+            {(['enabled', 'enable_streaming', 'ak', 'sk', 'agent_id', 'api_id'] as const).map((field) =>
+              renderXiaoyiField(xiaoyiDraft, field),
+            )}
+          </tbody>
+        </table>
+      </>
+    );
+  };
   const configErrorNotice = useMemo(() => {
     return Array.from(
       new Set(
