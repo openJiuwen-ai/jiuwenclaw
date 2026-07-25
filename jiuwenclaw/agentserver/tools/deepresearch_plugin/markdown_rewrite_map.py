@@ -292,9 +292,19 @@ def _encode_markdown_literal(text: str) -> str:
     return "".join(encoded)
 
 
-def _looks_like_unmatched_construct(raw: str, index: int) -> bool:
+_UNMATCHED_CONSTRUCT_PREFIXES = ("**", "__", "~~", "[", "]", "<", "`", "![")
+
+
+def _matched_unmatched_construct(raw: str, index: int) -> str | None:
     tail = raw[index:]
-    return tail.startswith(("**", "__", "~~", "[", "]", "<", "`", "!["))
+    for marker in _UNMATCHED_CONSTRUCT_PREFIXES:
+        if tail.startswith(marker):
+            return marker
+    return None
+
+
+def _looks_like_unmatched_construct(raw: str, index: int) -> bool:
+    return _matched_unmatched_construct(raw, index) is not None
 
 
 def _token_identity(token: Token) -> tuple[object, ...]:
@@ -379,6 +389,17 @@ class _InlineScanner:
     ) -> None:
         if not rendered:
             return
+        # CommonMark flanking rules can leave a balanced, paired `**`/`__`/`~~`
+        # as literal text inside a text token (e.g. `每周**≤2次**。`, where the
+        # opener is followed by the punctuation `≤`). markdown-it has already
+        # decided these are literal, so consuming them as text preserves the
+        # lossless invariant. Only genuinely unbalanced markers (odd count,
+        # e.g. a stray unterminated `**`) keep failing closed.
+        balanced_double_markers = {
+            marker
+            for marker in ("**", "__", "~~")
+            if rendered.count(marker) % 2 == 0
+        }
         start = self.cursor
         boundaries = [self._byte(start)]
         for visible in rendered:
@@ -390,7 +411,11 @@ class _InlineScanner:
             ):
                 self.cursor += 2
             elif self.cursor < len(self.raw) and self.raw[self.cursor] == visible:
-                if _looks_like_unmatched_construct(self.raw, self.cursor):
+                construct = _matched_unmatched_construct(self.raw, self.cursor)
+                if (
+                    construct is not None
+                    and construct not in balanced_double_markers
+                ):
                     raise _InlineTopologyError("unmatched inline marker")
                 self.cursor += 1
             else:

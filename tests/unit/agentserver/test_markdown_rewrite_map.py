@@ -558,6 +558,30 @@ def test_ambiguous_inline_topology_fails_closed(markdown):
     ]
 
 
+@pytest.mark.parametrize(
+    ("markdown", "expects_literal_stars"),
+    [
+        # CommonMark flanking rules decline to treat a paired `**` as emphasis
+        # when the opener is followed by punctuation (here the math symbol `<=`),
+        # so markdown-it emits the `**` as literal text. The engine must consume
+        # those literal markers as text instead of demoting the whole paragraph.
+        ("每周**≤2次**。", True),
+        ("x**≤**y", True),
+        # When flanking succeeds the `**` parses as emphasis and the markers are
+        # stripped from the slot text; the paragraph is still supported.
+        ("a**b≤c**d", False),
+    ],
+)
+def test_balanced_literal_format_markers_stay_supported(markdown, expects_literal_stars):
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert len(rewrite_map.units) == 1
+    assert rewrite_map.units[0].unit_type == "paragraph"
+    assert rewrite_map.unsupported_regions == ()
+    slot_texts = [slot.text for slot in rewrite_map.units[0].slots]
+    assert any("**" in text for text in slot_texts) is expects_literal_stars
+
+
 def test_inline_map_types_are_frozen_and_slotted():
     slot = RewriteSlot("slot", 0, 1, "x", (), None, (0, 1))
     anchor = ProtectedAnchor("anchor", "syntax", 0, 1, "*")
