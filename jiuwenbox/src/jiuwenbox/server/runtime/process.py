@@ -2779,7 +2779,12 @@ class ProcessRuntime(RuntimeAdapter):
         # ensure_windows_setup 传入 policy 的代理端口范围 (WFP Permit 必须与
         # win_proxy 监听端口一致, 否则代理路径被 Block 拦截; review MAJOR #7).
         policy_pre = self._load_policy(policy_path)
-        await win_setup.ensure_windows_setup(
+        # ensure_windows_setup 是同步函数 (def, 非 async def): 内部读注册表
+        # 幂等检查 + 必要时阻塞跑 UAC 提权子进程. 原代码 `await` 它的返回值
+        # (None) → "object NoneType can't be used in 'await' expression".
+        # 该 bug 之前被 WinError 5 (注册表读权限) 掩在 ensure_windows_setup
+        # 内部, 修复注册表后此 bug 暴露. 去掉 await, 直接同步调用.
+        win_setup.ensure_windows_setup(
             preinstall_paths=(
                 policy_pre.windows.filesystem.read_acl_preinstall or None
             ),

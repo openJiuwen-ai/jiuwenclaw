@@ -72,13 +72,19 @@ MAX_FILE_BYTES = 256 * 1024 * 1024          # 256 MiB read/write upper bound
 ACCEPT_BACKLOG = 128
 
 
-def recv_exact(sock: socket.socket, n: int) -> bytes:
-    """Read exactly ``n`` bytes from ``sock`` or raise ``ConnectionError``."""
+def recv_exact(sock, n: int) -> bytes:
+    """Read exactly ``n`` bytes from ``sock`` or raise ``ConnectionError``.
+
+    ``sock`` 可以是 socket (有 ``recv``) 或 anonymous pipe 的 BufferedReader
+    (有 ``read``). Windows 沙箱 runner roundtrip 用 ``os.fdopen`` 打开的
+    pipe file object, 没有 ``recv``.
+    """
     if n == 0:
         return b""
+    recv = getattr(sock, "recv", None) or sock.read
     buf = bytearray()
     while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
+        chunk = recv(n - len(buf))
         if not chunk:
             raise ConnectionError(
                 f"socket closed after {len(buf)}/{n} bytes",
@@ -87,13 +93,24 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(buf)
 
 
-def send_frame(sock: socket.socket, payload: bytes) -> None:
-    """Send a single length-prefixed frame on ``sock``."""
+def send_frame(sock, payload: bytes) -> None:
+    """Send a single length-prefixed frame on ``sock``.
+
+    ``sock`` 可以是 socket (有 ``sendall``) 或 anonymous pipe 的 BufferedWriter
+    (用 ``write`` + ``flush``). Windows 沙箱 runner roundtrip 用后者.
+    """
     if len(payload) > 0xFFFFFFFF:
         raise ValueError(f"frame size {len(payload)} exceeds 4 GiB")
-    sock.sendall(struct.pack(">I", len(payload)))
-    if payload:
-        sock.sendall(payload)
+    sendall = getattr(sock, "sendall", None)
+    if sendall is not None:
+        sendall(struct.pack(">I", len(payload)))
+        if payload:
+            sendall(payload)
+    else:
+        sock.write(struct.pack(">I", len(payload)))
+        if payload:
+            sock.write(payload)
+        sock.flush()
 
 
 def recv_frame(sock: socket.socket, max_size: int) -> bytes:

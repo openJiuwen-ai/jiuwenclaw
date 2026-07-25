@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import yaml
 
@@ -102,7 +103,15 @@ class PolicyEngine:
 
     @staticmethod
     def _is_absolute_sandbox_path(path: str) -> bool:
-        return PurePosixPath(path).is_absolute()
+        # 接受 Windows 绝对路径 (C:\\... / \\server\\share / C:/...) 与 POSIX 绝对
+        # 路径 (/...), 不依赖 box-server 自身运行平台. 原实现硬编码 PurePosixPath
+        # 会把 Windows 的 C:\\... 判成非绝对, 导致 HTTP 400 "must be absolute".
+        if not path:
+            return False
+        return (
+            PureWindowsPath(path).is_absolute()
+            or PurePosixPath(path).is_absolute()
+        )
 
     @staticmethod
     def _directory_path(directory: object) -> str:

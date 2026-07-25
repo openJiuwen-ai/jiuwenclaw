@@ -60,8 +60,11 @@ def _get_netapi32() -> ctypes.WinDLL:
             ctypes.c_void_p, wintypes.DWORD,
         ]
         _netapi32.NetLocalGroupAddMembers.restype = wintypes.DWORD
+        # NetLocalGroupAdd(servername:LPCWSTR, level:DWORD, buf:LPBYTE, parm_err:LPDWORD)
+        # 原代码 argtypes 错位 (把 level 标成 LPCWSTR, buf 标成 DWORD),
+        # 调用时 int 0(level) 喂给 c_wchar_p → ctypes.ArgumentError.
         _netapi32.NetLocalGroupAdd.argtypes = [
-            wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p,
             ctypes.c_void_p,
         ]
         _netapi32.NetLocalGroupAdd.restype = wintypes.DWORD
@@ -138,7 +141,13 @@ def _get_shell32() -> ctypes.WinDLL:
 # 注册表读写.
 # ---------------------------------------------------------------------------
 HKEY_LOCAL_MACHINE = wintypes.HKEY(0x80000002)
-KEY_READ_WRITE = 0x20019  # KEY_READ | KEY_WRITE
+# Win32 SAM 权限位: KEY_READ=0x20019, KEY_WRITE=0x20006, KEY_READ|KEY_WRITE=0x2001F.
+# 原代码误把 KEY_READ_WRITE 标为 0x20019 (实为只读 KEY_READ), 导致 _reg_set_str
+# 用只读 hkey 调 RegSetValueExW → WinError 5 (即使 admin 也写不了). 拆成两个
+# 常量: KEY_READ_ONLY 给 _reg_get_str 用 (普通用户能读 HKLM 已存在 key),
+# KEY_READ_WRITE 给 _reg_open_create (写注册表, 需 admin).
+KEY_READ_ONLY = 0x20019
+KEY_READ_WRITE = 0x2001F
 REG_SZ = 1
 REG_DWORD = 4
 
@@ -171,12 +180,36 @@ def _reg_set_str(name: str, value: str) -> None:
 
 
 def _reg_get_str(name: str) -> str | None:
+    # 读操作只用 KEY_READ 打开已存在 key (RegOpenKeyEx, 不创建).
+    # 原实现复用 _reg_open_create() 的 RegCreateKeyExW+KEY_READ_WRITE:
+    # 普通用户对 HKLM 无写权限, 即使 key 已存在也被拒 (WinError 5),
+    # 导致 ensure_windows_setup 第一步幂等检查就抛, install() 里的 UAC
+    # 提权分支永远走不到. 改为只读打开: key 不存在/无权限均返回 None,
+    # 让上层走 install() 的正常提权路径.
     advapi32 = _get_advapi32()
-    hkey = _reg_open_create()
+    hkey = wintypes.HKEY()
+    ret = advapi32.RegOpenKeyExW(
+        HKEY_LOCAL_MACHINE, const.REG_BASE_KEY, 0, KEY_READ_ONLY,
+        ctypes.byref(hkey),
+    )
+    if ret != 0:
+        # ERROR_FILE_NOT_FOUND (2) / ERROR_ACCESS_DENIED (5) 均视为"未读到".
+        return None
     try:
-        buf = ctypes.create_unicode_buffer(512)
-        size = wintypes.DWORD(512 * 2)
         typ = wintypes.DWORD(0)
+        # 两阶段读: 先用空 buffer 查真实 size (返回 ERROR_MORE_DATA=234),
+        # 再按 size 分配 buffer. 原实现固定 512 chars (1024 bytes), DPAPI
+        # 密码 blob 的 hex 串远超此长度 → RegQueryValueExW 返回 234, 代码
+        # 误当"未读到"返回 None, 导致 get_sandbox_user_password 拿不到密码.
+        size = wintypes.DWORD(0)
+        ret = advapi32.RegQueryValueExW(
+            hkey, name, None, ctypes.byref(typ), None, ctypes.byref(size),
+        )
+        if ret != 0 and ret != 234:
+            return None
+        # size 是字节数 (含 NUL). REG_SZ 是 UTF-16, char 数 = size/2.
+        char_count = max(1, size.value // 2 + 1)
+        buf = ctypes.create_unicode_buffer(char_count)
         ret = advapi32.RegQueryValueExW(
             hkey, name, None, ctypes.byref(typ), buf, ctypes.byref(size),
         )
@@ -241,12 +274,16 @@ def _create_sandbox_user(password: str) -> None:
     """创建 jbx-sandbox 本地用户 (幂等: 已存在则跳过)."""
     netapi32 = _get_netapi32()
     info = _USER_INFO_1()
-    info.usri1_name = ctypes.create_unicode_buffer(const.SANDBOX_USER_NAME)
-    info.usri1_password = ctypes.create_unicode_buffer(password)
+    # LPWSTR (c_wchar_p) 字段直接赋 str: ctypes 自动转为以 NUL 结尾的宽字符串
+    # 指针并绑定到 info 的生命周期. 原实现用 create_unicode_buffer 返回
+    # c_wchar_Array_N, 新版 Python (3.13) ctypes 严格类型检查拒绝数组→指针赋值
+    # (TypeError: incompatible types, c_wchar_Array_N instead of c_wchar_p).
+    info.usri1_name = const.SANDBOX_USER_NAME
+    info.usri1_password = password
     info.usri1_password_age = 0
     info.usri1_priv = USER_PRIV_USER
     info.usri1_home_dir = None
-    info.usri1_comment = ctypes.create_unicode_buffer("JiuwenBox sandbox user")
+    info.usri1_comment = "JiuwenBox sandbox user"
     info.usri1_flags = const.SANDBOX_USER_FLAGS
     info.usri1_script_path = None
 
@@ -254,10 +291,11 @@ def _create_sandbox_user(password: str) -> None:
     ret = netapi32.NetUserAdd(
         None, const.USER_INFO_1_LEVEL, ctypes.byref(info), ctypes.byref(err),
     )
-    # NERR_Success = 0; NERR_UserExists = 2236
+    # NERR_Success = 0; NERR_UserExists = 2224 (lmerr.h: 用户名已存在).
+    # 原代码误写 2236, 导致幂等重装时遇到已存在用户被当失败 raise.
     if ret == 0:
         logger.info("创建沙箱用户 %s 成功", const.SANDBOX_USER_NAME)
-    elif ret == 2236:
+    elif ret == 2224:
         logger.info("沙箱用户 %s 已存在, 跳过创建", const.SANDBOX_USER_NAME)
     else:
         raise RuntimeError(
@@ -273,7 +311,7 @@ def _add_user_to_group() -> None:
         _fields_ = [("lgrpi0_name", wintypes.LPWSTR)]
 
     grp_info = _LOCALGROUP_INFO_0()
-    grp_info.lgrpi0_name = ctypes.create_unicode_buffer(const.SANDBOX_USER_GROUP)
+    grp_info.lgrpi0_name = const.SANDBOX_USER_GROUP  # LPWSTR 直接赋 str (见 _create_sandbox_user 注释)
     ret = netapi32.NetLocalGroupAdd(
         None, 0, ctypes.byref(grp_info), None,
     )
@@ -289,7 +327,7 @@ def _add_user_to_group() -> None:
         _fields_ = [("lgrmi0_name", wintypes.LPWSTR)]
 
     member = _LOCALGROUP_MEMBERS_INFO_0()
-    member.lgrmi0_name = ctypes.create_unicode_buffer(const.SANDBOX_USER_NAME)
+    member.lgrmi0_name = const.SANDBOX_USER_NAME  # LPWSTR 直接赋 str
     ret = netapi32.NetLocalGroupAddMembers(
         None, const.SANDBOX_USER_GROUP, 0,
         ctypes.byref(member), 1,
