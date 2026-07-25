@@ -16,15 +16,17 @@ def compact_json(payload: Any) -> str:
 
 def prune_empty(value: Any) -> Any:
     if isinstance(value, dict):
-        return {
-            key: cleaned
-            for key, item in value.items()
-            if (cleaned := prune_empty(item)) not in (None, "", [], {})
-        }
+        cleaned_items = {}
+        for key, item in value.items():
+            cleaned = prune_empty(item)
+            if cleaned not in (None, "", [], {}):
+                cleaned_items[key] = cleaned
+        return cleaned_items
     if isinstance(value, list):
-        return [
-            cleaned
-            for item in value
-            if (cleaned := prune_empty(item)) not in (None, "", [], {})
-        ]
+        cleaned_items = []
+        for item in value:
+            cleaned = prune_empty(item)
+            if cleaned not in (None, "", [], {}):
+                cleaned_items.append(cleaned)
+        return cleaned_items
     return value

@@ -224,12 +224,14 @@ def _coerce_confidence(value: Any) -> float:
     return max(0.0, min(1.0, number))
 
 
-_IO_NAME_PROMPT_BATCH_RESOLVER_PROMPT = """Resolve each candidate Skill I/O name against the supplied canonical vocabulary.
+_IO_NAME_PROMPT_BATCH_RESOLVER_PROMPT = (
+    "Resolve each candidate Skill I/O name against the supplied canonical vocabulary.\n\n"
+    "Return JSON only:\n"
+    '{"resolutions":[{"id":"i1","action":"alias_existing|create_new|merge_existing|'
+    'exclude_from_vocab","target":"term","confidence":0.0,"definition":"optional",'
+    '"reason":"optional short reason"}]}\n\n'
+    """Return exactly one resolution for each candidate id.
 
-Return JSON only:
-{"resolutions":[{"id":"i1","action":"alias_existing|create_new|merge_existing|exclude_from_vocab","target":"term","confidence":0.0,"definition":"optional","reason":"optional short reason"}]}
-
-Return exactly one resolution for each candidate id.
 - alias_existing: synonymous with an existing term.
 - merge_existing: should use the closest existing semantic role.
 - create_new: a distinct runtime semantic role.
@@ -239,3 +241,4 @@ Judge semantic role independently of data carrier type. Prefer merging harmless
 lexical variants, but preserve directional differences such as source_language
 and target_language. Keep reason to one short sentence when needed.
 """
+)

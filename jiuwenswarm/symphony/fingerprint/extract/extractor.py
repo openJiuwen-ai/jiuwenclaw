@@ -233,11 +233,12 @@ def _build_llm_context(
 def _short_texts(values: Any) -> List[str]:
     if not isinstance(values, list):
         return []
-    return [
-        text[:_MAX_REASON_LENGTH]
-        for item in values
-        if (text := str(item).strip())
-    ]
+    texts: List[str] = []
+    for item in values:
+        text = str(item).strip()
+        if text:
+            texts.append(text[:_MAX_REASON_LENGTH])
+    return texts
 
 
 def _normalize_body_limit(body_limit: int | None) -> int | None:

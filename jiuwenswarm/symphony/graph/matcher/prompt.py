@@ -241,11 +241,13 @@ def _supporting_fields(evidence: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _field_names(values: Any) -> List[str]:
-    return [
-        str(item.get("name"))
-        for item in values if isinstance(values, list)
-        if isinstance(item, dict) and item.get("name")
-    ]
+    if not isinstance(values, list):
+        return []
+    names: List[str] = []
+    for item in values:
+        if isinstance(item, dict) and item.get("name"):
+            names.append(str(item["name"]))
+    return names
 
 
 def _protocol_diagnostic(code: str, message: str) -> GraphDiagnostic:
