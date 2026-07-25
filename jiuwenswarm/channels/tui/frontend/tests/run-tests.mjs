@@ -249,6 +249,134 @@ assert.equal(pendingQuestionExitCount, 0);
 assert.ok(pendingQuestionInterruptCount === 2 && pendingQuestionExitCount === 0);
 console.log("ctrl+d render requests:", pendingQuestionRenderCount - renderCountBeforeCtrlD);
 
+async function submitMultiSelectOther(selectedValues, customInput) {
+  const submitted = [];
+  const pendingQuestion = {
+    requestId: "multi-select-other",
+    source: "ask_user_interrupt",
+    questions: [
+      {
+        header: "Modules",
+        question: "Which modules?",
+        multiSelect: true,
+        options: [
+          { label: "auth" },
+          { label: "log" },
+          { label: "Other" },
+        ],
+      },
+    ],
+  };
+  const screen = Object.create(AppScreen.prototype);
+  Object.assign(screen, {
+    activeQuestionIndex: 0,
+    pendingQuestionAnswers: new Map(),
+    pendingMultiSelectAnswers: new Map(),
+    pendingQuestionCustomInputs: new Map(),
+    questionList: null,
+    questionCheckboxList: { handleInput: () => undefined },
+    otherInputMode: false,
+    configEditorState: null,
+    modelList: null,
+    composerAttachments: [],
+    expandPastedText: (text) => text,
+    buildOutgoingMessage: (text) => ({ content: text, attachments: [] }),
+    setMouseTrackingEnabled: () => undefined,
+    syncEditorSubmitState: () => undefined,
+    editor: { setText: () => undefined },
+    state: {
+      recordActivity: () => undefined,
+      getSnapshot: () => ({ pendingQuestion }),
+      submitQuestionAnswers: (answers) => submitted.push(answers),
+    },
+    tui: { requestRender: () => undefined },
+  });
+
+  screen.handleMultiSelectConfirm(selectedValues);
+  assert.equal(screen.otherInputMode, true);
+  assert.equal(screen.questionCheckboxList, null);
+  assert.equal(submitted.length, 0);
+
+  await screen.handleSubmit(customInput);
+  return submitted[0];
+}
+
+assert.deepEqual(
+  await submitMultiSelectOther(["Other"], "metrics"),
+  [
+    {
+      question: "Which modules?",
+      selected_options: ["Other"],
+      custom_input: "metrics",
+    },
+  ],
+);
+assert.deepEqual(
+  await submitMultiSelectOther(["auth", "Other"], "metrics"),
+  [
+    {
+      question: "Which modules?",
+      selected_options: ["auth", "Other"],
+      custom_input: "metrics",
+    },
+  ],
+);
+
+// No "Other" selected: must not enter the free-text input mode, and must submit
+// immediately without a custom_input field.
+function submitMultiSelectNoOther(selectedValues) {
+  const submitted = [];
+  const pendingQuestion = {
+    requestId: "multi-select-no-other",
+    source: "ask_user_interrupt",
+    questions: [
+      {
+        header: "Modules",
+        question: "Which modules?",
+        multiSelect: true,
+        options: [{ label: "auth" }, { label: "log" }, { label: "Other" }],
+      },
+    ],
+  };
+  const screen = Object.create(AppScreen.prototype);
+  Object.assign(screen, {
+    activeQuestionIndex: 0,
+    pendingQuestionAnswers: new Map(),
+    pendingMultiSelectAnswers: new Map(),
+    pendingQuestionCustomInputs: new Map(),
+    questionList: null,
+    questionCheckboxList: { handleInput: () => undefined },
+    otherInputMode: false,
+    configEditorState: null,
+    modelList: null,
+    composerAttachments: [],
+    expandPastedText: (text) => text,
+    buildOutgoingMessage: (text) => ({ content: text, attachments: [] }),
+    setMouseTrackingEnabled: () => undefined,
+    syncEditorSubmitState: () => undefined,
+    syncQuestionList: () => undefined,
+    editor: { setText: () => undefined },
+    state: {
+      recordActivity: () => undefined,
+      getSnapshot: () => ({ pendingQuestion }),
+      submitQuestionAnswers: (answers) => submitted.push(answers),
+    },
+    tui: { requestRender: () => undefined },
+  });
+
+  screen.handleMultiSelectConfirm(selectedValues);
+  assert.equal(screen.otherInputMode, false);
+  assert.equal(submitted.length, 1);
+  return submitted[0];
+}
+
+assert.deepEqual(submitMultiSelectNoOther(["auth", "log"]), [
+  {
+    question: "Which modules?",
+    selected_options: ["auth", "log"],
+  },
+]);
+
 const agent = (name, node_type, correlation_id, id = `${name}-${node_type ?? "plain"}-${correlation_id ?? "none"}`) => ({
   id,
   name,

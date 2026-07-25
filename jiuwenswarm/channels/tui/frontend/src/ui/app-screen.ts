@@ -1459,6 +1459,7 @@ export class AppScreen implements Component, Focusable {
   private syncingComposerInput = false;
   private pendingQuestionAnswers = new Map<number, string>();
   private pendingMultiSelectAnswers = new Map<number, string[]>();
+  private pendingQuestionCustomInputs = new Map<number, string>();
   private questionList: SelectList | null = null;
   private questionCheckboxList: CheckboxList | null = null;
   private questionDetailsMap: Map<string, string[]> | null = null;
@@ -3070,11 +3071,14 @@ export class AppScreen implements Component, Focusable {
       if (this.otherInputMode) {
         const pendingQuestion = snapshot.pendingQuestion;
         const pickedLabel = this.pendingQuestionAnswers.get(this.activeQuestionIndex) ?? "";
+        this.pendingQuestionCustomInputs.set(this.activeQuestionIndex, text);
         this.otherInputMode = false;
         this.syncEditorSubmitState(this.state.getSnapshot());
 
         if (this.activeQuestionIndex < pendingQuestion.questions.length - 1) {
-          this.pendingQuestionAnswers.set(this.activeQuestionIndex, pickedLabel || text);
+          if (!pickedLabel && !this.pendingMultiSelectAnswers.has(this.activeQuestionIndex)) {
+            this.pendingQuestionAnswers.set(this.activeQuestionIndex, text);
+          }
           this.activeQuestionIndex += 1;
           this.syncQuestionList(this.state.getSnapshot());
           this.editor.setText("");
@@ -3084,24 +3088,23 @@ export class AppScreen implements Component, Focusable {
 
         const answers = pendingQuestion.questions.map((question, index) => {
           const label = this.pendingQuestionAnswers.get(index) ?? "";
+          const multi = this.pendingMultiSelectAnswers.get(index);
           const isPlanRejectFeedback = shouldAppendPlanRejectFeedback(
             pendingQuestion.source,
             label,
             pendingQuestion.planApprovalKind,
           );
-          if (label === "Other" || isPlanRejectFeedback) {
+          const customInput = this.pendingQuestionCustomInputs.get(index);
+          if (customInput || label === "Other" || isPlanRejectFeedback) {
             return {
               question: question.question,
-              selected_options: [label],
-              custom_input:
-                index === this.activeQuestionIndex && (label === "Other" || text)
-                  ? text
-                  : undefined,
+              selected_options: multi ?? [label],
+              custom_input: customInput,
             };
           }
           return {
             question: question.question,
-            selected_options: [label || text],
+            selected_options: multi ?? [label || text],
           };
         });
         this.state.submitQuestionAnswers(answers);
@@ -3398,6 +3401,7 @@ export class AppScreen implements Component, Focusable {
       this.activeQuestionIndex = 0;
       this.pendingQuestionAnswers.clear();
       this.pendingMultiSelectAnswers.clear();
+      this.pendingQuestionCustomInputs.clear();
       this.draftBeforeQuestion = this.editor.getText();
       this.editor.setText("");
       const pendingQuestion = snapshot.pendingQuestion;
@@ -3416,6 +3420,7 @@ export class AppScreen implements Component, Focusable {
       this.otherInputMode = false;
       this.pendingQuestionAnswers.clear();
       this.pendingMultiSelectAnswers.clear();
+      this.pendingQuestionCustomInputs.clear();
       this.questionList = null;
       this.questionCheckboxList = null;
       this.questionDetailsMap = null;
@@ -9046,9 +9051,18 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
+    this.pendingMultiSelectAnswers.set(this.activeQuestionIndex, selectedValues);
+    if (selectedValues.includes("Other")) {
+      this.otherInputMode = true;
+      this.questionCheckboxList = null;
+      this.setMouseTrackingEnabled(false);
+      this.syncEditorSubmitState(snapshot);
+      this.tui.requestRender();
+      return;
+    }
+
     if (this.activeQuestionIndex < pendingQuestion.questions.length - 1) {
       // Multiple questions: advance to the next one
-      this.pendingMultiSelectAnswers.set(this.activeQuestionIndex, selectedValues);
       this.activeQuestionIndex += 1;
       this.syncQuestionList(this.state.getSnapshot());
       this.tui.requestRender();
@@ -9062,10 +9076,12 @@ export class AppScreen implements Component, Focusable {
         index === this.activeQuestionIndex
           ? selectedValues
           : this.pendingMultiSelectAnswers.get(index);
-      return {
+      const answer = {
         question: question.question,
         selected_options: multi ?? [this.pendingQuestionAnswers.get(index) ?? ""],
       };
+      const customInput = this.pendingQuestionCustomInputs.get(index);
+      return customInput ? { ...answer, custom_input: customInput } : answer;
     });
     this.state.submitQuestionAnswers(answers);
   }
@@ -9115,6 +9131,10 @@ export class AppScreen implements Component, Focusable {
         question: question.question,
         selected_options: multi ?? [answerValue],
       };
+      const customInput = this.pendingQuestionCustomInputs.get(index);
+      if (customInput) {
+        return { ...answer, custom_input: customInput };
+      }
       if (
         index === this.activeQuestionIndex &&
         collectPlanRejectFeedback &&

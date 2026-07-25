@@ -1237,10 +1237,16 @@ class JiuWenSwarm:
                             for raw_option in selected_options
                             if str(raw_option or "").strip()
                         ]
-                        # When the only selection is "Other", prefer the free-text
-                        # custom_input (single-select free-text path).
-                        if len(cleaned_options) == 1 and cleaned_options[0] == "Other" and custom_input:
-                            answer_value: Any = custom_input
+                        if custom_input:
+                            # "Other" is only a UI placeholder. Preserve normal
+                            # multi-select choices and append the user's text.
+                            normal_options = [
+                                option for option in cleaned_options if option != "Other"
+                            ]
+                            if normal_options:
+                                answer_value: Any = [*normal_options, custom_input]
+                            else:
+                                answer_value = custom_input
                         elif len(cleaned_options) == 1:
                             answer_value = cleaned_options[0]
                         elif cleaned_options:
