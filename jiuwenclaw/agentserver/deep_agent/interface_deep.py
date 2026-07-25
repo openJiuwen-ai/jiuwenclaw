@@ -519,12 +519,22 @@ def _normalize_tool_names(value: Any, default: list[str] | None = None) -> list[
 _DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
     "tools_search",
     "invoke_tool",
+    "web_search",
+    "fetch_webpage",
+    "ask_user_question",
+    "list_files",
     "read_file",
     "write_file",
     "edit_file",
-    "grep",
     "glob",
+    "grep",
     "bash",
+    "code",
+    "skill_tool",
+    "skill_complete",
+    "todo_create",
+    "todo_list",
+    "todo_modify",
 ]
 
 _SUBAGENT_PROGRESSIVE_EAGER_EXCLUDE_BY_KIND: dict[str, frozenset[str]] = {
