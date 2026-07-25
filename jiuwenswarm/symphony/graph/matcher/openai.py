@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict, Iterable, List, Optional, Protocol
+from typing import Any, Awaitable, Dict, Iterable, List, Optional, Protocol
 
 from jiuwenswarm.symphony.graph.matcher.constants import DEFAULT_THRESHOLDS
 from jiuwenswarm.symphony.graph.matcher.consensus import consensus_matches
@@ -98,17 +98,18 @@ class OpenAICompatibleOntologyMatcher:
                 (batch_index, candidate_list[start: start + self.batch_size])
             )
         batch_sizes = {batch_index: len(batch) for batch_index, batch in batches}
-        semaphore = asyncio.Semaphore(self.max_workers)
-
-        async def match_with_limit(
-            batch_index: int,
-            batch: List[RelationCandidate],
-        ) -> tuple[int, List[LLMMatch], List[GraphDiagnostic]]:
-            async with semaphore:
-                return await self._match_batch(registry, batch, batch_index, total_batches)
-
-        results = await asyncio.gather(
-            *(match_with_limit(batch_index, batch) for batch_index, batch in batches)
+        request_semaphore = asyncio.Semaphore(self.max_workers)
+        results = await _gather_cancel_on_error(
+            *(
+                self._match_batch(
+                    registry,
+                    batch,
+                    batch_index,
+                    total_batches,
+                    request_semaphore=request_semaphore,
+                )
+                for batch_index, batch in batches
+            )
         )
 
         for batch_index, batch_matches, batch_diagnostics in sorted(
@@ -160,6 +161,8 @@ class OpenAICompatibleOntologyMatcher:
         batch: List[RelationCandidate],
         batch_index: int,
         total_batches: int,
+        *,
+        request_semaphore: asyncio.Semaphore,
     ) -> tuple[int, List[LLMMatch], List[GraphDiagnostic]]:
         self._emit_progress(
             "batch_start",
@@ -171,19 +174,29 @@ class OpenAICompatibleOntologyMatcher:
                 "consensus_runs": 2 if self.require_consensus else 1,
             },
         )
-        first_matches, first_diagnostics = await self._request_and_validate_batch(
-            registry,
-            batch,
-            reverse_skill_order=False,
-        )
+        async def request(
+            *,
+            reverse_skill_order: bool,
+        ) -> tuple[List[LLMMatch], List[GraphDiagnostic]]:
+            async with request_semaphore:
+                return await self._request_and_validate_batch(
+                    registry,
+                    batch,
+                    reverse_skill_order=reverse_skill_order,
+                )
+
         if not self.require_consensus:
+            first_matches, first_diagnostics = await request(
+                reverse_skill_order=False,
+            )
             return batch_index, first_matches, first_diagnostics
 
-        second_matches, second_diagnostics = await self._request_and_validate_batch(
-            registry,
-            batch,
-            reverse_skill_order=True,
+        first_result, second_result = await _gather_cancel_on_error(
+            request(reverse_skill_order=False),
+            request(reverse_skill_order=True),
         )
+        first_matches, first_diagnostics = first_result
+        second_matches, second_diagnostics = second_result
         agreed_matches, consensus_diagnostics = consensus_matches(
             first_matches,
             second_matches,
@@ -252,3 +265,14 @@ class OpenAICompatibleOntologyMatcher:
         if self.progress is None:
             return
         self.progress(event, current, total, details)
+
+
+async def _gather_cancel_on_error(*awaitables: Awaitable[Any]) -> List[Any]:
+    tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
