@@ -15,6 +15,8 @@ from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
     load_yuanrong_ssh_settings,
 )
 
+DEFAULT_AGENT_WORKSPACE_ROOT = "/home/agentos/users"
+
 
 @dataclass(frozen=True)
 class SshChannelEndpoint:
@@ -35,6 +37,7 @@ class RouterConfig:
     agent_timeout_s: float = 300.0
     creating_timeout_seconds: float = 60.0
     agent_key_fields: tuple[str, ...] = DEFAULT_AGENT_KEY_FIELDS
+    workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT
     ssh: YuanrongSshSettings = YuanrongSshSettings()
     ssh_channel: SshChannelEndpoint | None = None
 
@@ -117,6 +120,10 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         agent_key_fields=normalize_agent_key_fields(
             agentos.get("agent_key_fields")
         ),
+        workspace_root=str(
+            agentos.get("workspace_root") or DEFAULT_AGENT_WORKSPACE_ROOT
+        ).strip()
+        or DEFAULT_AGENT_WORKSPACE_ROOT,
         ssh=load_yuanrong_ssh_settings(agentos.get("ssh")),
         ssh_channel=load_ssh_channel_endpoint(config),
     )

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,10 +19,13 @@ from jiuwenswarm.extensions.agentos.agentos_router.config import (
 )
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
 from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
+    DEFAULT_CLIENT_KEYS_DIR,
     DEFAULT_SSH_USER_TEMPLATE,
     YuanrongSshRelay,
     YuanrongSshSettings,
+    list_client_key_paths,
     load_yuanrong_ssh_settings,
+    resolve_client_keys_dir,
 )
 from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshRelaySession
 
@@ -68,7 +72,7 @@ class StubSshRelay:
         backend_host: str = "frontend.yuanrong.test",
         backend_port: int = 2222,
     ) -> None:
-        self.ran: list[tuple[str, str]] = []
+        self.ran: list[tuple[str, str, str]] = []
         self.failed: list[tuple[str, str]] = []
         self.backend_host = backend_host
         self.backend_port = backend_port
@@ -76,8 +80,14 @@ class StubSshRelay:
     def backend_username(self, instance_id: str) -> str:
         return DEFAULT_SSH_USER_TEMPLATE.format(instance=instance_id)
 
-    async def run(self, session: Any, instance_id: str) -> int:
-        self.ran.append((session.session_id, instance_id))
+    async def run(
+        self,
+        session: Any,
+        instance_id: str,
+        *,
+        user_id: str = "",
+    ) -> int:
+        self.ran.append((session.session_id, instance_id, user_id))
         session.exit_code = 0
         session.done.set()
         return 0
@@ -124,12 +134,52 @@ def test_load_yuanrong_ssh_settings_defaults() -> None:
     assert settings.port == 2222
     assert settings.user_template == DEFAULT_SSH_USER_TEMPLATE
     assert settings.connect_timeout_s == 30.0
+    assert settings.client_keys_dir == DEFAULT_CLIENT_KEYS_DIR
 
     custom = load_yuanrong_ssh_settings(
-        {"port": 2223, "user_template": "yr:{instance}"}
+        {
+            "port": 2223,
+            "user_template": "yr:{instance}",
+            "client_keys_dir": "/data/{user_id}/keys",
+        }
     )
     assert custom.port == 2223
     assert custom.user_template == "yr:{instance}"
+    assert custom.client_keys_dir == "/data/{user_id}/keys"
+
+
+def test_resolve_client_keys_dir_defaults_to_root_ssh() -> None:
+    assert resolve_client_keys_dir(DEFAULT_CLIENT_KEYS_DIR, "alice") == Path(
+        "/root/.ssh"
+    )
+    assert resolve_client_keys_dir(
+        "/home/{user_id}/.ssh", "alice/../bob"
+    ) == Path("/home/alice_.._bob/.ssh")
+
+
+def test_list_client_key_paths_reads_default_names(tmp_path: Path) -> None:
+    (tmp_path / "id_ed25519").write_text("key-ed", encoding="utf-8")
+    (tmp_path / "id_rsa").write_text("key-rsa", encoding="utf-8")
+    (tmp_path / "id_rsa.pub").write_text("pub", encoding="utf-8")
+    (tmp_path / "known_hosts").write_text("h", encoding="utf-8")
+    assert list_client_key_paths(tmp_path) == [
+        str(tmp_path / "id_ed25519"),
+        str(tmp_path / "id_rsa"),
+    ]
+    assert list_client_key_paths(tmp_path / "missing") == []
+
+
+def test_resolve_client_keys_requires_private_key(tmp_path: Path) -> None:
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(client_keys_dir=str(tmp_path / "{user_id}")),
+    )
+    with pytest.raises(ValueError, match="no SSH private keys found"):
+        relay._resolve_client_keys("alice")
+
+    key_dir = tmp_path / "alice"
+    key_dir.mkdir()
+    (key_dir / "id_ed25519").write_text("k", encoding="utf-8")
+    assert relay._resolve_client_keys("alice") == [str(key_dir / "id_ed25519")]
 
 
 def test_import_asyncssh_raises_actionable_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,6 +222,8 @@ def test_load_router_config_parses_ssh_block() -> None:
     assert loaded.ssh.port == 2222
     assert loaded.ssh.user_template == DEFAULT_SSH_USER_TEMPLATE
     assert loaded.ssh_channel == SshChannelEndpoint(ip="192.168.1.10", port=2222)
+    assert loaded.ssh.client_keys_dir == DEFAULT_CLIENT_KEYS_DIR
+    assert loaded.workspace_root == "/home/agentos/users"
 
 
 def test_load_router_config_ssh_channel_requires_enabled() -> None:
@@ -217,7 +269,7 @@ async def test_ssh_relay_creates_instance_and_starts_relay() -> None:
         assert response.payload["status"] == "relay_started"
 
         await asyncio.wait_for(session.done.wait(), timeout=5)
-        assert stub_relay.ran == [("ssh_alice_1234", "sbx-1")]
+        assert stub_relay.ran == [("ssh_alice_1234", "sbx-1", "alice")]
         assert stub_relay.failed == []
         assert session.exit_code == 0
 
@@ -281,7 +333,7 @@ async def test_ssh_relay_follows_user_current_agent_type() -> None:
         await asyncio.wait_for(session.done.wait(), timeout=5)
 
         assert yuanrong.create_calls == 1  # switch 已创建，SSH 复用
-        assert stub_relay.ran == [("ssh_alice_switch", "sbx-1")]
+        assert stub_relay.ran == [("ssh_alice_switch", "sbx-1", "alice")]
         agents = await agent_manager.list_user_agents("alice")
         assert [a.info.agent_type for a in agents] == ["opencode"]
     finally:

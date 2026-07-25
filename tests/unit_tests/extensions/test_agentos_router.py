@@ -9,6 +9,7 @@ from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import AgentManager
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
+    DEFAULT_AGENT_WORKSPACE_ROOT,
     SshChannelEndpoint,
     agentos_router_selected,
     load_router_config,
@@ -19,7 +20,10 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import (
     AgentStatus,
     ImageInfo,
 )
-from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
+from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
+    AgentOSRouterClient,
+    resolve_agent_workspace,
+)
 from jiuwenswarm.extensions.yuanrong_frontend_client import SandboxInfo
 
 
@@ -211,6 +215,14 @@ async def test_swarm_request_repeated_stays_direct() -> None:
     assert yuanrong.send_calls == 2
 
 
+def test_resolve_agent_workspace_defaults_under_agentos_users() -> None:
+    assert resolve_agent_workspace("alice") == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/alice"
+    assert resolve_agent_workspace("alice/../bob") == (
+        f"{DEFAULT_AGENT_WORKSPACE_ROOT}/alice_.._bob"
+    )
+    assert resolve_agent_workspace("u1", workspace_root="/data/ws") == "/data/ws/u1"
+
+
 @pytest.mark.asyncio
 async def test_third_party_type_creates_via_yuanrong() -> None:
     yuanrong = FakeYuanRongClient()
@@ -221,11 +233,13 @@ async def test_third_party_type_creates_via_yuanrong() -> None:
 
     assert response.ok
     assert yuanrong.create_calls == 1
+    assert yuanrong.create_payloads[0]["workspace"] == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/u1"
     assert yuanrong.send_calls == 1
     agents = await agent_manager.list_user_agents("u1")
     assert agents[0].info.agent_type == "opencode"
     assert agents[0].info.status is AgentStatus.READY
     assert agents[0].info.sandbox_id == "sbx-1"
+    assert agents[0].info.metadata["workspace"] == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/u1"
 
 
 @pytest.mark.asyncio
@@ -477,6 +491,8 @@ def test_load_router_config_agent_key_fields() -> None:
             },
             "agentos": {
                 "agent_key_fields": ["user_id", "agent_type", "session_id"],
+                "workspace_root": "/data/agentos/users",
+                "ssh": {"client_keys_dir": "/data/agentos/.ssh"},
                 "registry": {
                     "endpoint": "http://127.0.0.1:8000",
                     "node": "192.168.0.12",
@@ -486,6 +502,8 @@ def test_load_router_config_agent_key_fields() -> None:
     }
     loaded = load_router_config(config)
     assert loaded.agent_key_fields == ("user_id", "agent_type", "session_id")
+    assert loaded.workspace_root == "/data/agentos/users"
+    assert loaded.ssh.client_keys_dir == "/data/agentos/.ssh"
     assert loaded.registry.endpoint == "http://127.0.0.1:8000"
     assert loaded.registry.node == "192.168.0.12"
 
@@ -500,6 +518,30 @@ def test_load_router_config_agent_key_fields() -> None:
         }
     )
     assert default_loaded.agent_key_fields == ("user_id", "agent_type")
+    assert default_loaded.workspace_root == DEFAULT_AGENT_WORKSPACE_ROOT
+    assert default_loaded.ssh.client_keys_dir == "/root/.ssh"
+
+
+@pytest.mark.asyncio
+async def test_create_uses_configured_workspace_root() -> None:
+    yuanrong = FakeYuanRongClient()
+    client = AgentOSRouterClient(
+        yuanrong,
+        FakeRegistryClient(),
+        AgentManager(),
+        ssh_channel_endpoint=_ssh_channel(),
+        workspace_root="/mnt/workspaces",
+    )
+    try:
+        response = await client.thirdagent_switch(
+            user_id="u1",
+            agent_type="claude",
+            session_id="sess-1",
+        )
+        assert response["ok"] is True
+        assert yuanrong.create_payloads[0]["workspace"] == "/mnt/workspaces/u1"
+    finally:
+        await client.shutdown()
 
 
 @pytest.mark.asyncio

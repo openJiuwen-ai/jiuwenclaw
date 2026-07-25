@@ -52,6 +52,7 @@ class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
             self._agent_manager,
             ssh_relay=self._ssh_relay,
             ssh_channel_endpoint=config.ssh_channel,
+            workspace_root=config.workspace_root,
         )
         self._third_agent = AgentOSThirdAgent(self._router_client)
         self._closed = False

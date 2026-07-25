@@ -580,6 +580,8 @@ gateway:
   # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
   agentos:
     creating_timeout_seconds: 60
+    # Agent create 时宿主机 workspace 父目录；实际路径为 {workspace_root}/{user_id}
+    workspace_root: "/home/agentos/users"
     # Agent 复用 key 字段，默认 user_id + agent_type。
     # 可选字段：user_id、agent_type、session_id（必须包含前两项）。
     # 示例：加入 session_id 后同一用户每个会话独立 Agent。
@@ -595,10 +597,12 @@ gateway:
     # SSH 南向接入 YuanRong 实例（配合 channels.ssh 北向使用）：
     # ssh -p <port> 'yr:instance:<instance_id>'@<frontend-host>
     # 主机取自 agent_client.frontend_endpoint；<instance_id> 为 create agent 返回的实例 id。
+    # 客户端私钥目录（默认 /root/.ssh；若模板含 {user_id} 则按用户替换）。
     ssh:
       port: 2222
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
+      client_keys_dir: "/root/.ssh"
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
