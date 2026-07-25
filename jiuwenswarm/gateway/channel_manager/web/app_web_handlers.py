@@ -2016,8 +2016,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if api_base.endswith("/chat/completions"):
-            api_base = api_base.rsplit("/chat/completions", 1)[0]
         api_base = api_base.rstrip("/")
 
         verify_ssl = bool(params.get("verify_ssl", False))
