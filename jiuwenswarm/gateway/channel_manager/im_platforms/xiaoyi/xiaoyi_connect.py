@@ -1173,10 +1173,12 @@ class XiaoyiChannel(BaseChannel):
         text = ""
         file_attachments: list[str] = []
         media_files: list[dict[str, Any]] = []
+        has_content_part = False  # 是否出现过任何业务 part(text/file/data)
 
         for part in parts:
             kind = part.get("kind")
             if kind == "text" and part.get("text"):
+                has_content_part = True
                 text += part.get("text", "")
             elif kind == "file" and part.get("file"):
                 file_info = part["file"]
@@ -1209,6 +1211,7 @@ class XiaoyiChannel(BaseChannel):
                     logger.error(f"XiaoYi: Failed to process file {name}: {e}")
                     file_attachments.append(f"[文件处理失败: {name}]")
             elif kind == "data":
+                has_content_part = True
                 data = part.get("data", {})
                 if isinstance(data, dict):
                     push_id = data.get("variables", {}).get("systemVariables", {}).get("push_id", "")
@@ -1286,19 +1289,18 @@ class XiaoyiChannel(BaseChannel):
             logger.warning("XiaoyiChannel failed to update .xiaoyiruntime", exc_info=True)
 
         raw_msg_id = message.get("id")
-        # ── 空 message/stream 帧拦截 ───────────────────────────────────
-        # 端侧在授权完成等事件点会通过同一条 WS 推一些 method=message/stream 但
-        # msg_type=None 的事件帧：它们没有真实用户文本/文件，顶层 id 与 params.id
-        # （task_id）缺失或被下游 fallback 成占位符字面量 "taskId"。若不拦截，这条
-        # 空内容、假 id 的帧会被当成空 user 消息路由进对话流，凭空起新 session 让
-        # 模型对空 input 回无关寒暄（如"晚上好又见面了"）。判定：无文本且无文件
-        # 附件，且 id 与 task_id 均"无效"（为空 / None / 占位符 "taskId"）—— 直接
-        # return，不构造 Message、不路由。正常用户消息必有真实 id（如 67b958ef-...）
-        # 且有 text 或 file，不会被误拦。
-        if not text and not file_attachments and not media_files and \
-                _is_invalid_id(raw_msg_id) and _is_invalid_id(task_id):
+        # ── 空 message/stream 帧拦截（放宽版）───────────────────────────
+        # 端侧会通过同一条 WS 推一些 method=message/stream 的事件帧：它们没有真实
+        # 用户文本/文件，parts 为空或只含无 kind 的占位 part（顶层 id 可能真实也可能
+        # 是占位符 "taskId"）。若不拦截，这条空内容帧会被当成空 user 消息路由进对话流，
+        # 凭空起新 session 让模型对空 input 回无关寒暄（如"晚上好又见面了"/"又收到一条
+        # 空白消息啦"）。判定：无文本且无文件附件且无 media，且未出现任何业务 part
+        # （text/file/data）—— 直接 return，不构造 Message、不路由。
+        # 注：有 data part 的设备指令/事件帧（如 push_id 回写）仍放过，不误拦。
+        # 正常用户消息必有 text 或 file part（has_content_part=True），不会被拦。
+        if not text and not file_attachments and not media_files and not has_content_part:
             logger.info(
-                "[XiaoyiChannel] 跳过空 message/stream 事件帧（无文本/文件且 id/task_id 无效）"
+                "[XiaoyiChannel] 跳过空 message/stream 事件帧（无文本/文件/media 且无业务 part）"
                 " session_id=%s method=message/stream msg_type=%s task_id=%r raw_msg_id=%r",
                 str(message.get("sessionId") or ""),
                 str(message.get("msgType")),
