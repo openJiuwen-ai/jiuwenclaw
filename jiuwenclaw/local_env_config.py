@@ -595,7 +595,14 @@ def export_agent_environ(
     service_id: str,
     agent_id: str,
 ) -> dict[str, str]:
-    """B (de-prefixed tip+ns) ∪ A (present spawn keys) ∪ C for child ``env=``."""
+    """B (de-prefixed tip+ns) ∪ A (present spawn keys) ∪ C for child ``env=``.
+
+    On Windows, also pass through platform vars (SYSTEMROOT/SystemDrive/windir/
+    TEMP/COMSPEC/PATHEXT/USERPROFILE/...) that ``WSAStartup`` and ``CreateProcess``
+    need; without ``SYSTEMROOT`` the child's ``import asyncio`` -> ``import
+    _overlapped`` fails with WinError 10106 because the WinSock provider cannot
+    initialize (mswsock.dll lives under ``%SystemRoot%\\System32``).
+    """
     out: dict[str, str] = {}
     tip = effective_tip(service_id, agent_id)
     for k, v in tip.items():
@@ -616,7 +623,42 @@ def export_agent_environ(
     for k in PROCESS_UNIQUE_ENV_KEYS:
         if k in os.environ:
             out[k] = os.environ[k]
+    _ensure_windows_platform_env(out)
     return out
+
+
+def _ensure_windows_platform_env(out: dict[str, str]) -> None:
+    """Pass through OS-level vars a Windows child process needs to function.
+
+    The curated allowlist (B/A/C) only carries business + runtime config; it
+    intentionally omits platform vars. On Windows, ``WSAStartup`` (called by
+    ``import _overlapped`` -> ``asyncio``) loads the WinSock provider from
+    ``%SystemRoot%\\System32``; if ``SYSTEMROOT`` is absent the provider init
+    fails (WinError 10106) and the child cannot even ``import asyncio``.
+    Copy these through from ``os.environ`` when present and not already set,
+    so business/tip config always wins over the inherited OS value.
+    """
+    if os.name != "nt":
+        return
+    for k in (
+        "SYSTEMROOT",
+        "SystemDrive",
+        "windir",
+        "TEMP",
+        "TMP",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+    ):
+        v = os.environ.get(k)
+        if v and k not in out:
+            out[k] = v
 
 
 def mirror_bare_business_env_to_default_ns(*, force: bool = False) -> None:
