@@ -16,7 +16,7 @@ from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapt
 
 def _make_adapter() -> JiuWenClawDeepAdapter:
     adapter = object.__new__(JiuWenClawDeepAdapter)
-    adapter._config_cache = {"evolution": {"enabled": False, "auto_scan": False}}
+    adapter._config_cache = {"evolution": {"enabled": False}}
     adapter._skill_evolution_rail = None
     adapter._model = None
     adapter._registered_skill_dirs = []

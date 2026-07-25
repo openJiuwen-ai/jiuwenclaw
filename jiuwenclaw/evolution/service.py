@@ -38,25 +38,15 @@ class EvolutionService:
         llm: Any,
         model: str,
         skills_base_dir: str,
-        auto_scan: bool = False,
     ) -> None:
         self._store = EvolutionStore(skills_base_dir)
         self._evolver = SkillEvolver(llm, model)
-        self._auto_scan = auto_scan
         self._pending_approvals: Dict[str, asyncio.Future] = {}
         self._processed_signal_keys: set[tuple[str, str]] = set()
 
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
-
-    @property
-    def auto_scan(self) -> bool:
-        return self._auto_scan
-
-    @auto_scan.setter
-    def auto_scan(self, value: bool) -> None:
-        self._auto_scan = value
 
     @property
     def skills_base_dir(self) -> str:

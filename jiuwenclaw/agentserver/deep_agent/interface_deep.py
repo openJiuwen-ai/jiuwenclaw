@@ -2705,7 +2705,6 @@ class JiuWenClawDeepAdapter:
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> JiuClawSkillEvolutionRail | None:
         """Build JiuClawSkillEvolutionRail with BOOTSTRAP.md builtin skill exclusion."""
         try:
-            evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
             trajectory_dir = self._resolve_evolution_trajectory_dir()
             registered_skill_dirs = self._registered_skill_dirs_for_rail()
@@ -2713,15 +2712,13 @@ class JiuWenClawDeepAdapter:
                 skills_dir=registered_skill_dirs,
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
-                auto_scan=evolution_auto_scan,
                 auto_save=evolution_auto_save,
                 trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
             logger.info(
-                "[JiuWenClaw] SkillEvolutionRail create success,  trajectory_dir=%s, auto_scan=%r, auto_save=%r",
+                "[JiuWenClaw] SkillEvolutionRail create success,  trajectory_dir=%s, auto_save=%r",
                 trajectory_dir,
-                evolution_auto_scan,
                 evolution_auto_save,
                 extra={'user_visible': 'progress'},
             )
@@ -3466,9 +3463,8 @@ class JiuWenClawDeepAdapter:
             if new_evolution_rail is not None:
                 evolution_rail_action = ("create", new_evolution_rail)
         elif self._skill_evolution_rail is not None and evolution_enabled:
-            # enabled unchanged (on): in-place update LLM / auto_scan / auto_save, rail retained.
+            # enabled unchanged (on): in-place update LLM / auto_save, rail retained.
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
-            self._skill_evolution_rail.auto_scan = config.get("evolution", {}).get("auto_scan", False)
             self._skill_evolution_rail.auto_save = config.get("evolution", {}).get("auto_save", True)
 
         self._skill_rail = self._build_skill_rail(

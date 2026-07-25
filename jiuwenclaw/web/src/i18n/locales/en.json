@@ -458,7 +458,6 @@
       "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" }
     },
     "booleanLabels": {
-      "evolutionAutoScan": "Auto-detect evolution signals",
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",

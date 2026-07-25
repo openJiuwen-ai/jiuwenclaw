@@ -277,8 +277,6 @@ def _build_config_schema() -> list[dict]:
          "type": "toggle", "source": "yaml", "default": "false"},
         {"key": "preferred_language", "label": "显示语言", "group": "Features", "type": "select",
          "options": ["zh", "en"], "source": "yaml", "default": "zh"},
-        {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
-         "type": "toggle", "source": "env", "default": "false"},
     ]
 
 
