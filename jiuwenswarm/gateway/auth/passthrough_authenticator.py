@@ -18,20 +18,19 @@ from jiuwenswarm.gateway.auth.credential_authenticator import (
     UnsupportedOperationError,
     KeyPair,
     AuthResult,
-    TokenAuthenticator,
-    SSHAuthenticator,
+    CredentialAuthenticator,
     AuthContext,
     SSHCertificate
 )
 
 
-class PassthroughAuthenticator(TokenAuthenticator, SSHAuthenticator):
+class PassthroughAuthenticator(CredentialAuthenticator):
 
     def __init__(self, ca_private_key_pem: bytes | None = None):
         self._ca_private_key = ca_private_key_pem
 
     async def authenticate(self, context: AuthContext) -> AuthResult:
-        """认证直接通过，返回默认用户"""
+        """认证直接通过，返回默认用户; 是否需要做基础验证？"""
         return AuthResult(success=True, user_id="anonymous")
 
     def generate_api_key(self) -> str:

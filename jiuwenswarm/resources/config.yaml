@@ -959,6 +959,14 @@ extensions:
   # EXTENSION_DIRS="E:/a;D:/b"
   extension_dirs: ${EXTENSION_DIRS:-jiuwenswarm/extensions}
 
+# Gateway 认证器：由 extensions/auth 扩展在 load_all_extensions 时按 type 动态注册。
+# type: passthrough（默认，不注册额外实现） | agentos（注册 AgentOSAuthenticator）
+auth:
+  type: passthrough # passthrough | agentos
+  agentos:
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    gateway_secret_key: ${GATEWAY_SECRET_KEY:-}
+
 
 # ============================================================
 # Hooks 配置

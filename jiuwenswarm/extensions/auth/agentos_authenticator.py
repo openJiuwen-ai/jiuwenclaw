@@ -4,13 +4,12 @@ from jose import jwt, JWTError
 import httpx
 
 from jiuwenswarm.gateway.auth.credential_authenticator import (
-    TokenAuthenticator,
+    CredentialAuthenticator,
     AuthContext,
     AuthResult,
     KeyPair,
     SSHCertificate,
 )
-
 
 
 class AuthServiceClient:
@@ -35,7 +34,7 @@ class CredentialManager:
         pass
 
 
-class AgentOSAuthenticator(TokenAuthenticator):
+class AgentOSAuthenticator(CredentialAuthenticator):
 
     def __init__(self, auth_service_url: str,  # agent-os 后端地址，例如 "http://localhost:8000"
                  gateway_secret_key: str,  # jwt_secret_key
@@ -51,16 +50,13 @@ class AgentOSAuthenticator(TokenAuthenticator):
         self._public_key_map: dict[str, str] | None = None  # public_key -> agent_id 映射
 
     async def _authenticate_token(self, token: str, extra_headers: dict | None = None) -> AuthResult:
-        """通过 REST API 验证 JWT access_token。
 
-        调用 agent-os 的 /api/v1/auth/verify 接口进行验证。
-        """
         """验证 JWT access_token。
 
-           支持从 extra_headers 中提取 Authorization header 覆盖 token 参数。
-           如果配置了 jwt_secret_key，优先本地解码（零 IO）；
-           否则调用 agent-os 的 /api/v1/auth/verify 接口验证。
-           """
+        支持从 extra_headers 中提取 Authorization header 覆盖 token 参数。
+ 	    如果配置了 gateway_secret_key，优先本地解码（零 IO）；
+ 	    否则调用 agent-os 的 /api/v1/auth/verify 接口验证。
+        """
 
         # 如果 extra_headers 中有 Authorization header，优先从中提取 token
         if extra_headers:
@@ -219,58 +215,15 @@ class AgentOSAuthenticator(TokenAuthenticator):
         pass
 
     def _lookup_agent_by_public_key(self, public_key):
-        """通过公钥查找 agent_id
-
-            根据设计文档 4.4.2.2 节：
-            在本地存储中查找 public_key 对应的 agent_id。
-            当前为简化实现，后续应接入数据库或配置中心。
-            """
         # 接入数据库/配置中心存储公钥与 agent_id 的映射关系
         # 当前简化实现：从 self._public_key_map 中查找
+        pass
         if hasattr(self, '_public_key_map') and self._public_key_map:
             return self._public_key_map.get(public_key)
         return None
 
-    async def authenticate(self, context: AuthContext) -> AuthResult:
-        """根据 context.credentials 中的凭证类型选择认证方式。
-
-        支持以下凭证类型（按优先级）：
-          - token: Bearer JWT access_token
-          - api_key: API Key
-          - certificate: SSH 证书
-          - public_key: SSH 公钥（直接映射为匿名用户）
-        """
-
-        """支持Token、API-KEY、SSH证书等多种认证方式"""
-        credentials = context.credentials or {}
-        extra_headers = getattr(context, 'headers', None) or {}  # 从 context 取自定义 header
-
-        # 1. Token认证（Web/TUI Channel）
-        if "token" in credentials:
-            return await self._authenticate_token(credentials["token"], extra_headers)
-
-        # 2. API-KEY认证（3rd Agent PUB）
-        if "api_key" in credentials:
-            return self._authenticate_api_key(credentials["api_key"])
-
-        # 3. SSH证书认证（SSH Channel）
-        if "certificate" in credentials:
-            return self._authenticate_certificate(credentials["certificate"])
-
-        # 4. Public Key认证（SSH Channel）
-        if "public_key" in credentials:
-            return self._authenticate_public_key(credentials["public_key"])
-
-        return AuthResult(success=False, error="No valid credentials")
-
     def _authenticate_api_key(self, api_key: str) -> AuthResult:
-        """API-KEY认证
-
-        根据设计文档 4.5.4.2 节：
-        1. 计算 API-KEY 的 HMAC 值：HMAC-SHA256(api_key, gateway_secret_key)
-        2. 与本地存储的 HMAC 值进行恒定时间比对
-        3. 验证通过后返回 agent_id
-        """
+        """验证通过后返回 agent_id"""
         if not self._gateway_secret_key:
             return AuthResult(
                 success=False, user_id="",
@@ -307,6 +260,38 @@ class AgentOSAuthenticator(TokenAuthenticator):
         if agent_id:
             return AuthResult(success=True, user_id=agent_id)
         return AuthResult(success=False, error="Unknown public key")
+
+    async def authenticate(self, context: AuthContext) -> AuthResult:
+        """根据 context.credentials 中的凭证类型选择认证方式。
+
+        支持以下凭证类型（按优先级）：
+          - token: Bearer JWT access_token
+          - api_key: API Key
+          - certificate: SSH 证书
+          - public_key: SSH 公钥（直接映射为匿名用户）
+        """
+
+        """支持Token、API-KEY、SSH证书等多种认证方式"""
+        credentials = context.credentials or {}
+        extra_headers = getattr(context, 'headers', None) or {}  # 从 context 取自定义 header
+
+        # 1. Token认证（Web/TUI Channel）
+        if "token" in credentials:
+            return await self._authenticate_token(credentials["token"], extra_headers)
+
+        # 2. API-KEY认证（3rd Agent PUB）
+        if "api_key" in credentials:
+            return self._authenticate_api_key(credentials["api_key"])
+
+        # 3. SSH证书认证（SSH Channel）
+        if "certificate" in credentials:
+            return self._authenticate_certificate(credentials["certificate"])
+
+        # 4. Public Key认证（SSH Channel）
+        if "public_key" in credentials:
+            return self._authenticate_public_key(credentials["public_key"])
+
+        return AuthResult(success=False, error="No valid credentials")
 
     # 凭证管理实现 --- 当前暂时不支持，抛出异常
     def generate_api_key(self) -> str:

@@ -36,7 +36,7 @@ def create_test_token(
     }
     return jwt.encode(payload, secret, algorithm=algorithm)
 
-#PASS
+
 class TestAgentOSAuthenticatorInit:
 
     def test_init_with_required_params(self):
@@ -67,7 +67,7 @@ class TestAgentOSAuthenticatorInit:
         )
         assert isinstance(auth._auth_client, httpx.AsyncClient)
 
-#PASS
+
 class TestVerifyAccessTokenLocal:
 
     @pytest.fixture
@@ -103,7 +103,7 @@ class TestVerifyAccessTokenLocal:
         result = auth._verify_access_token_local("")
         assert result is None
 
-#PASS
+
 class TestAuthenticateTokenLocal:
 
     @pytest.fixture
@@ -144,14 +144,14 @@ class TestAuthenticateTokenLocal:
         assert result.success is True
         assert result.user_id == "user-123"
 
-#PASS
+
 class TestAuthenticateTokenHttp:
 
     @pytest.fixture
     def auth(self):
         return AgentOSAuthenticator(
             auth_service_url="http://test-auth:8000",
-            gateway_secret_key=None,
+            gateway_secret_key = None,
         )
 
     @pytest.mark.asyncio
@@ -249,7 +249,7 @@ class TestAuthenticateTokenHttp:
         assert result.success is False
         assert "超时" in result.error
 
-#PASS
+
 class TestAuthenticate:
 
     @pytest.fixture
@@ -288,7 +288,7 @@ class TestAuthenticate:
         assert result.success is True
         assert result.user_id == "user-123"
 
-#PASS
+
 class TestCredentialManager:
 
     @pytest.mark.xfail(reason="CredentialManager is stubbed, returns None instead of proper values")

@@ -1,6 +1,4 @@
 from typing import Any, Callable
-import os
-import yaml
 
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
@@ -11,9 +9,9 @@ from jiuwenswarm.extensions.sdk.crypto_utility import CryptoUtility
 from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
 from jiuwenswarm.extensions.types import ExtensionConfig
 from jiuwenswarm.common.security.base_crypto import CryptoProvider
+from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenticator
 from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
 
-from jiuwenswarm.gateway.auth.credential_authenticator import TokenAuthenticator
 from jiuwenswarm.gateway.auth.passthrough_authenticator import PassthroughAuthenticator
 from jiuwenswarm.extensions.auth.agentos_authenticator import AgentOSAuthenticator
 
@@ -31,7 +29,8 @@ class ExtensionRegistry:
         self._crypto_tool: CryptoUtility | None = None
         self._third_agent: ThirdAgentExtension | None = None
         self._rpc_handlers: dict[str, Callable] = {}
-        self._authenticator: TokenAuthenticator = PassthroughAuthenticator()
+        # 默认 passthrough；AgentOS 等实现由 extensions/auth 扩展按配置动态注册
+        self._authenticator: CredentialAuthenticator = PassthroughAuthenticator()
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
 
@@ -51,31 +50,13 @@ class ExtensionRegistry:
         if cls._instance is not None:
             raise RuntimeError("ExtensionRegistry 已初始化，请勿重复调用 create_instance()")
 
-        # 自动加载 gateway.yaml（如果存在），合并到 config 中
-        _gateway_path = os.path.join(os.path.dirname(__file__), "..", "..", "gateway.yaml")
-        if os.path.exists(_gateway_path):
-            with open(_gateway_path, "r", encoding="utf-8") as f:
-                _gateway_cfg = yaml.safe_load(f) or {}
-            config = {**config, **_gateway_cfg.get("extensions", {})}
-
+        # 不在此处实例化具体认证器；由 extensions/auth 在 load_all_extensions 时按配置注册
         cls._instance = cls(
             callback_framework=callback_framework,
             config=config,
             logger=logger,
         )
 
-        # 根据配置自动加载认证器
-        auth_config = config.get("auth", {})
-        auth_type = auth_config.get("type", "passthrough")
-        if auth_type != "agentos":
-            pass
-        else:
-            agentos_config = auth_config.get("agentos", {})
-            authenticator = AgentOSAuthenticator(
-                auth_service_url=agentos_config["auth_service_url"],
-                gateway_secret_key=agentos_config.get("gateway_secret_key"),
-            )
-            cls._instance.register_authenticator(authenticator)
         return cls._instance
 
     @classmethod
@@ -83,11 +64,11 @@ class ExtensionRegistry:
         cls._instance = None
 
     # 3rd
-    def register_authenticator(self, authenticator: TokenAuthenticator) -> None:
+    def register_authenticator(self, authenticator: CredentialAuthenticator) -> None:
         """注册认证器（替换默认的PassthroughAuthenticator）"""
         self._authenticator = authenticator
 
-    def get_authenticator(self) -> TokenAuthenticator:
+    def get_authenticator(self) -> CredentialAuthenticator:
         """获取认证器"""
         return self._authenticator
 

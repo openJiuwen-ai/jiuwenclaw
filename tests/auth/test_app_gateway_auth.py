@@ -26,7 +26,7 @@ from jiuwenswarm.gateway.app_gateway import (
     get_auth_handler,
 )
 from jiuwenswarm.gateway.auth.credential_authenticator import (
-    TokenAuthenticator, AuthContext,
+    CredentialAuthenticator, AuthContext,
 )
 
 #PASS
@@ -36,7 +36,7 @@ class TestInitAuthHandler:
         """验证 _init_auth_handler 返回 ExtensionRegistry 中的认证器"""
         registry = ExtensionRegistry.get_instance()
 
-        mock_auth = MagicMock(spec=TokenAuthenticator)
+        mock_auth = MagicMock(spec=CredentialAuthenticator)
         registry.register_authenticator(mock_auth)
 
         result = _init_auth_handler()
@@ -62,7 +62,7 @@ class TestGetAuthHandler:
     def test_returns_authenticator(self):
         """验证 get_auth_handler 返回认证器实例"""
         result = get_auth_handler()
-        assert isinstance(result, TokenAuthenticator)
+        assert isinstance(result, CredentialAuthenticator)
 
     def test_caches_instance(self):
         """验证多次调用返回同一对象（缓存机制）"""

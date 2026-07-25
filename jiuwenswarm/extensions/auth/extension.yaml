@@ -1,0 +1,9 @@
+id: auth
+name: Authenticator
+version: 0.1.0
+description: Pluggable gateway authenticators(passthrough by default; agentos on demand)
+author: jiuwenswarm
+min_jiuwenswarm_version: "0.2.3"
+dependencies: {}
+config_schema:
+  type: object

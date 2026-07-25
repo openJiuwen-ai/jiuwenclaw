@@ -17,6 +17,7 @@ ExtensionRegistry.create_instance(
 
 from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
 from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext, AuthResult
+from jiuwenswarm.gateway.channel_manager.common import extract_token, extract_headers, get_remote_addr
 
 
 # ── Fixture ──────────────────────────────────────────
@@ -39,7 +40,7 @@ class TestExtractToken:
         ws.path = "/ws?token=my-test-token"
         ws.request = None
         ws.request_headers = None
-        assert channel.extract_token(ws) == "my-test-token"
+        assert extract_token(ws) == "my-test-token"
 
     def test_from_authorization_header(self, channel):
         """从 Authorization: Bearer xxx 提取"""
@@ -47,7 +48,7 @@ class TestExtractToken:
         ws.path = "/ws"
         ws.request = None
         ws.request_headers = {"Authorization": "Bearer header-token"}
-        assert channel.extract_token(ws) == "header-token"
+        assert extract_token(ws) == "header-token"
 
     def test_from_x_token_header(self, channel):
         """从 X-Token: xxx 提取"""
@@ -55,7 +56,7 @@ class TestExtractToken:
         ws.path = "/ws"
         ws.request = None
         ws.request_headers = {"X-Token": "x-token-value"}
-        assert channel.extract_token(ws) == "x-token-value"
+        assert extract_token(ws) == "x-token-value"
 
     def test_no_token_returns_none(self, channel):
         """没有 token 时返回 None"""
@@ -63,7 +64,7 @@ class TestExtractToken:
         ws.path = "/ws"
         ws.request = None
         ws.request_headers = {}
-        assert channel.extract_token(ws) is None
+        assert extract_token(ws) is None
 
     def test_authorization_without_bearer(self, channel):
         """Authorization 不以 Bearer 开头时不提取"""
@@ -71,7 +72,7 @@ class TestExtractToken:
         ws.path = "/ws"
         ws.request = None
         ws.request_headers = {"Authorization": "Basic xxx"}
-        assert channel.extract_token(ws) is None
+        assert extract_token(ws) is None
 
     def test_from_request_attr_headers(self, channel):
         """兼容 ws.request.headers 属性"""
@@ -80,7 +81,7 @@ class TestExtractToken:
         ws.request = MagicMock()
         ws.request.headers = {"Authorization": "Bearer req-token"}
         ws.request_headers = None
-        assert channel.extract_token(ws) == "req-token"
+        assert extract_token(ws) == "req-token"
 
 
 # ── TestExtractHeaders ───────────────────────────────
