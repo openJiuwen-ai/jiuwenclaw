@@ -26,6 +26,7 @@ from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
     EXTENDED_INPUT_PARAMS_CN,
     EXTENDED_INPUT_PARAMS_EN,
+    MAX_STRUCTURED_QUESTIONS,
     StructuredAskUserRail,
     StructuredAskUserTool,
 )
@@ -110,6 +111,19 @@ class TestStructuredAskUserToolSchema:
         """Only `query` is required; `questions` is optional."""
         assert EXTENDED_INPUT_PARAMS_EN["required"] == ["query"]
         assert EXTENDED_INPUT_PARAMS_CN["required"] == ["query"]
+
+    @staticmethod
+    def test_questions_schema_limits_each_call_to_four():
+        """English and Chinese schemas must enforce the same question limit."""
+        assert MAX_STRUCTURED_QUESTIONS == 4
+        assert (
+            EXTENDED_INPUT_PARAMS_EN["properties"]["questions"]["maxItems"]
+            == MAX_STRUCTURED_QUESTIONS
+        )
+        assert (
+            EXTENDED_INPUT_PARAMS_CN["properties"]["questions"]["maxItems"]
+            == MAX_STRUCTURED_QUESTIONS
+        )
 
     @staticmethod
     def test_questions_item_schema_structure():
@@ -561,6 +575,43 @@ class TestStructuredAskUserRailResolveInterrupt:
         # Should be an InterruptResult
         from openjiuwen.harness.rails.interrupt.interrupt_base import InterruptResult
         assert isinstance(decision, InterruptResult)
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_four_questions_are_allowed():
+        """The maximum supported batch should still produce an interrupt."""
+        rail = StructuredAskUserRail()
+        tc = _make_tool_call(arguments={
+            "query": "Setup info",
+            "questions": [
+                {"question": f"Question {index}?", "header": f"Q{index}"}
+                for index in range(1, MAX_STRUCTURED_QUESTIONS + 1)
+            ],
+        })
+
+        decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+        from openjiuwen.harness.rails.interrupt.interrupt_base import InterruptResult
+        assert isinstance(decision, InterruptResult)
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_more_than_four_questions_are_rejected():
+        """An oversized batch should return an argument error without prompting."""
+        rail = StructuredAskUserRail()
+        tc = _make_tool_call(arguments={
+            "query": "Setup info",
+            "questions": [
+                {"question": f"Question {index}?", "header": f"Q{index}"}
+                for index in range(1, MAX_STRUCTURED_QUESTIONS + 2)
+            ],
+        })
+
+        decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+        from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
+        assert isinstance(decision, RejectResult)
+        assert "at most 4 questions" in decision.tool_result
 
     @staticmethod
     @pytest.mark.asyncio

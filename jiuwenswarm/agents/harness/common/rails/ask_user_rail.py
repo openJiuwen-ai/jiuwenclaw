@@ -40,6 +40,8 @@ from openjiuwen.harness.rails.interrupt.interrupt_base import (
 
 logger = logging.getLogger(__name__)
 
+MAX_STRUCTURED_QUESTIONS = 4
+
 # ---------------------------------------------------------------------------
 # Extended input schema
 # ---------------------------------------------------------------------------
@@ -105,10 +107,12 @@ EXTENDED_INPUT_PARAMS_EN: dict[str, Any] = {
             "description": (
                 "Structured questions with selectable options. "
                 "Use this when you want the user to choose from predefined options "
-                "instead of typing free text. Each question must have 2-4 options. "
+                "instead of typing free text. Ask at most 4 questions per call. "
+                "Each question must have 2-4 options. "
                 "The user can always select 'Other' for custom input."
             ),
             "items": _QUESTIONS_ITEM_SCHEMA,
+            "maxItems": MAX_STRUCTURED_QUESTIONS,
         },
     },
     "required": ["query"],
@@ -125,9 +129,11 @@ EXTENDED_INPUT_PARAMS_CN: dict[str, Any] = {
             "type": "array",
             "description": (
                 "带选项的结构化问题。当希望用户从预定义选项中选择而非自由输入时使用。"
+                "每次调用最多询问 4 个问题。"
                 "每个问题必须提供 2-4 个选项。用户始终可以选择「其他」进行自定义输入。"
             ),
             "items": _QUESTIONS_ITEM_SCHEMA,
+            "maxItems": MAX_STRUCTURED_QUESTIONS,
         },
     },
     "required": ["query"],
@@ -140,7 +146,8 @@ _EXTENDED_DESCRIPTION_EN: str = (
     "2. Structured questions (multi-choice): pass `query` + `questions` — "
     "the user selects from predefined options. "
     "Use `questions` when you want the user to choose between specific options "
-    "(e.g., 'Apply update' vs 'Skip'). Each question can have 2-4 options. "
+    "(e.g., 'Apply update' vs 'Skip'). Ask at most 4 questions per call. "
+    "Each question can have 2-4 options. "
     "For single-select questions, an option may carry a `preview` (markdown, "
     "e.g. fenced code block ASCII mockup) shown beside it to compare concrete "
     "artifacts; use it only when a visual comparison helps the user decide."
@@ -151,7 +158,8 @@ _EXTENDED_DESCRIPTION_CN: str = (
     "1. 纯文本查询：只传 `query` —— 用户自由输入回答。\n"
     "2. 结构化选项：传 `query` + `questions` —— 用户从预定义选项中选择。"
     "当你希望用户在特定选项间做选择时（如「应用更新」vs「跳过」）使用 `questions`。"
-    "每个问题可提供 2-4 个选项。对于单选问题，选项可携带 `preview`（markdown，"
+    "每次调用最多询问 4 个问题。每个问题可提供 2-4 个选项。"
+    "对于单选问题，选项可携带 `preview`（markdown，"
     "如带围栏代码块的 ASCII mockup）展示在选项旁，用于对比具体产物；"
     "仅在视觉对比有助于用户决策时使用。"
 )
@@ -280,11 +288,24 @@ class StructuredAskUserRail(AskUserRail):
 
         For plain query: delegate to parent class behavior (AskUserPayload).
         """
+        questions_data = self.extract_questions(tool_call)
+        if (
+            questions_data is not None
+            and len(questions_data) > MAX_STRUCTURED_QUESTIONS
+        ):
+            return self.reject(
+                tool_result=(
+                    "[INVALID_ARGUMENT] ask_user accepts at most "
+                    f"{MAX_STRUCTURED_QUESTIONS} questions per call; "
+                    f"received {len(questions_data)}. "
+                    "Split them across multiple calls."
+                )
+            )
+
         if user_input is None:
             return self.interrupt(self._build_ask_request(tool_call))
 
         # Detect if this was a structured questions call by checking tool_args
-        questions_data = self.extract_questions(tool_call)
         is_structured = questions_data is not None and len(questions_data) > 0
 
         if is_structured:
