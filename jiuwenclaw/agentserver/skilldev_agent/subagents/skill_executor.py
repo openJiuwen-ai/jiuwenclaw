@@ -11,7 +11,6 @@ from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.schema.config import SubAgentConfig
-from openjiuwen.harness.tools.bash import BashTool
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.tools.filesystem import (
@@ -22,6 +21,7 @@ from openjiuwen.harness.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
+from jiuwenclaw.agentserver.skilldev.guarded_bash_tool import GuardedBashTool
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.invoke_tool import (
     get_invoke_tool,
 )
@@ -229,7 +229,7 @@ def _build_executor_tools(
         tool_classes = [
             ReadFileTool, WriteFileTool, EditFileTool,
             GlobTool, GrepTool, ListDirTool,
-            BashTool, CodeTool,
+            GuardedBashTool, CodeTool,
         ]
         tools = [cls(sys_operation, language=language, agent_id=agent_id) for cls in tool_classes]
 

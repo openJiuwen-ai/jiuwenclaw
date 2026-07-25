@@ -9,7 +9,6 @@ from typing import Optional
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.harness.tools.bash import BashTool
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.filesystem import (
     EditFileTool,
@@ -26,6 +25,7 @@ from openjiuwen.harness.prompts.sections.tools.filesystem import (
     get_write_file_input_params,
 )
 
+from jiuwenclaw.agentserver.skilldev.guarded_bash_tool import GuardedBashTool
 from jiuwenclaw.agentserver.tools.ask_user_question_tool import get_ask_user_question_tool
 from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
     JiuwenHarnessFetchWebpageTool,
@@ -134,7 +134,7 @@ HARNESS_TOOL_CLASSES = {
     "file_glob": GlobTool,
     "file_grep": GrepTool,
     "file_listdir": ListDirTool,
-    "shell": BashTool,
+    "shell": GuardedBashTool,
     "code_execute": CodeTool,
 }
 

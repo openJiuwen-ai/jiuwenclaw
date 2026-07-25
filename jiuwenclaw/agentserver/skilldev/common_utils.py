@@ -9,6 +9,10 @@ import shutil
 import zipfile
 from pathlib import Path
 
+from jiuwenclaw.agentserver.skilldev.utils.archive_security import (
+    validate_zip_archive_before_extract,
+)
+
 logger = logging.getLogger(__name__)
 
 # 打包排除规则（与 PackageStageHandler 保持一致）
@@ -49,6 +53,8 @@ def safe_extract_zip(
     """
     if not zipfile.is_zipfile(zip_path):
         raise ValueError(f"文件不是合法的 zip: {zip_path.name}")
+
+    validate_zip_archive_before_extract(zip_path)
 
     extract_dir = dest_dir / zip_path.stem if extract_to_stem_dir else dest_dir
     extract_dir.mkdir(parents=True, exist_ok=True)

@@ -1181,7 +1181,7 @@ class SkillDevService:
                     shutil.rmtree(target_dir)
                 target_dir.mkdir(parents=True, exist_ok=True)
 
-                shutil.unpack_archive(str(tmp_zip), str(target_dir))
+                safe_extract_zip(tmp_zip, target_dir, extract_to_stem_dir=False)
                 logger.info(
                     "[SkillDevService] batch_download 解压成功: session_id=%s, target=%s",
                     sid, target_dir,
