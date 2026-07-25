@@ -4,6 +4,7 @@ import { Modal } from '../../components/Modal';
 import { LimitedTextInput } from '../../components/LimitedTextInput';
 import { SkillWhitelistTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
+import { isValidHttpUrl } from '../../utils/url';
 import type {
   SkillWhitelistTemplate,
   SkillWhitelistTemplateCreateBody,
@@ -88,6 +89,10 @@ export function SkillWhitelistTemplateModal({ open, template, onClose, onSaved }
     const missing = requiredChecks.find((item) => item.invalid);
     if (missing) {
       toast('warn', t('skillWhitelistTemplate.fieldRequired', { field: missing.label }));
+      return;
+    }
+    if (!isValidHttpUrl(form.skill_source)) {
+      toast('warn', t('skillWhitelistTemplate.skillSourceInvalid'));
       return;
     }
 

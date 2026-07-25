@@ -317,6 +317,7 @@
     "filterSkillId": "Filter by Skill ID",
     "filterSkillSource": "Filter by Skill Source",
     "fieldRequired": "Please fill in {{field}}",
+    "skillSourceInvalid": "Skill Source must be a valid http(s) URL, e.g. https://skillhub.example.com/",
     "deleteConfirm": "Delete this skill whitelist template? It may be referenced by instance policies."
   },
   "serviceConfigTemplate": {

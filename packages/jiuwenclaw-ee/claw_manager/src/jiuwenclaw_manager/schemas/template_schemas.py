@@ -47,7 +47,7 @@ def normalize_hook_schedule(schedule: str | None, *, required: bool) -> str | No
 
 
 def _validate_http_url(value: str) -> str:
-    """校验 api_base 为合法 http(s) URL。"""
+    """校验为合法 http(s) URL（须含主机）。"""
     parsed = urlparse(value)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("must be a valid http(s) URL")
@@ -57,6 +57,11 @@ def _validate_http_url(value: str) -> str:
 ApiBaseUrl = Annotated[
     str,
     Field(min_length=1, max_length=512),
+    AfterValidator(_validate_http_url),
+]
+SkillSourceUrl = Annotated[
+    str,
+    Field(min_length=1, max_length=2048),
     AfterValidator(_validate_http_url),
 ]
 
@@ -315,7 +320,7 @@ class SkillWhitelistTemplateCreateBody(BaseModel):
     description: str | None = Field(default=None, max_length=512)
     skill_id: str = Field(..., min_length=1, max_length=512)
     skill_version: str = Field(..., min_length=1, max_length=64)
-    skill_source: str = Field(..., min_length=1, max_length=2048)
+    skill_source: SkillSourceUrl
     enabled: bool = True
     data: dict[str, Any] | None = None
 
@@ -327,7 +332,7 @@ class SkillWhitelistTemplateUpdateBody(BaseModel):
     description: str | None = Field(default=None, max_length=512)
     skill_id: str | None = Field(default=None, min_length=1, max_length=512)
     skill_version: str | None = Field(default=None, min_length=1, max_length=64)
-    skill_source: str | None = Field(default=None, min_length=1, max_length=2048)
+    skill_source: SkillSourceUrl | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
