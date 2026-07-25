@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from functools import wraps
 from pathlib import Path
 
 from openjiuwen.core.common.exception.errors import StatusCode, ValidationError
@@ -150,13 +151,17 @@ def _safe_input_tool(
     *, name: str, description: str, input_params: dict, input_error_code: str
 ):
     def decorator(func):
+        @wraps(func)
+        async def wrapped(*args, **kwargs):
+            return await func(*args, **kwargs)
+
         return _SafeInputLocalFunction(
             card=ToolCard(
                 name=name,
                 description=description,
                 input_params=input_params,
             ),
-            func=func,
+            func=wrapped,
             input_error_code=input_error_code,
         )
 
@@ -176,13 +181,29 @@ def _validate_prepare_contract(
     selection: object,
     instruction: object,
 ) -> None:
+    def invalid_request_shape() -> bool:
+        return (
+            len(instruction) > 2_000
+            or not isinstance(action, str)
+            or action not in {"polish", "expand", "shorten"}
+        )
+
+    def invalid_selection_fields() -> bool:
+        return (
+            type(start) is not int
+            or type(end) is not int
+            or start < 0
+            or end <= start
+            or not isinstance(selected_text, str)
+            or not selected_text
+            or len(selected_text) > 12_000
+            or not isinstance(source_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
+        )
+
     if not isinstance(report_path, str) or not isinstance(instruction, str):
         raise RewriteError("BAD_REQUEST", "invalid rewrite request")
-    if (
-        len(instruction) > 2_000
-        or not isinstance(action, str)
-        or action not in {"polish", "expand", "shorten"}
-    ):
+    if invalid_request_shape():
         raise RewriteError("BAD_REQUEST", "invalid rewrite request")
     if not isinstance(selection, dict):
         raise RewriteError(
@@ -206,21 +227,19 @@ def _validate_prepare_contract(
     end = selection["end_byte"]
     selected_text = selection["selected_text"]
     source_sha256 = selection["source_sha256"]
-    if (
-        type(start) is not int
-        or type(end) is not int
-        or start < 0
-        or end <= start
-        or not isinstance(selected_text, str)
-        or not selected_text
-        or len(selected_text) > 12_000
-        or not isinstance(source_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
-    ):
+    if invalid_selection_fields():
         raise RewriteError("BAD_REQUEST", "invalid rewrite selection")
 
 
 def _validate_commit_contract(context_token: object, structured_result: object) -> None:
+    def invalid_slot(slot: object) -> bool:
+        return (
+            not isinstance(slot, dict)
+            or set(slot) != {"slot_id", "text"}
+            or not isinstance(slot.get("slot_id"), str)
+            or not isinstance(slot.get("text"), str)
+        )
+
     if not isinstance(context_token, str) or not isinstance(structured_result, dict):
         raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
     if set(structured_result) != {"units", "facts_added"}:
@@ -239,12 +258,7 @@ def _validate_commit_contract(context_token: object, structured_result: object) 
         if not isinstance(slots, list) or not slots:
             raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
         for slot in slots:
-            if (
-                not isinstance(slot, dict)
-                or set(slot) != {"slot_id", "text"}
-                or not isinstance(slot.get("slot_id"), str)
-                or not isinstance(slot.get("text"), str)
-            ):
+            if invalid_slot(slot):
                 raise RewriteError(
                     "MODEL_OUTPUT_INVALID", "invalid structured rewrite result"
                 )

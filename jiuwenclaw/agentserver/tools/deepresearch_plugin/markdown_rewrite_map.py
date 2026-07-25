@@ -195,7 +195,7 @@ class _SourceLines:
                 lines.append(source[line_start:index])
                 line_start = index
             elif character == "\r":
-                index += 2 if source[index + 1 : index + 2] == "\n" else 1
+                index += 2 if source[index + 1:index + 2] == "\n" else 1
                 lines.append(source[line_start:index])
                 line_start = index
             else:
@@ -216,14 +216,14 @@ class _SourceLines:
             return line[:-1]
         return line
 
+    def _invalid_line_map(self, line_map: list[int] | None) -> bool:
+        if line_map is None or len(line_map) != 2:
+            return True
+        start_line, end_line = line_map
+        return start_line < 0 or start_line >= end_line or end_line > len(self.lines)
+
     def byte_range(self, line_map: list[int] | None) -> tuple[int, int] | None:
-        if (
-            line_map is None
-            or len(line_map) != 2
-            or line_map[0] < 0
-            or line_map[0] >= line_map[1]
-            or line_map[1] > len(self.lines)
-        ):
+        if self._invalid_line_map(line_map):
             return None
         start_line, end_line = line_map
         while end_line > start_line and not self._content(
@@ -272,6 +272,16 @@ class _InlineTopologyError(ValueError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class _SlotDraft:
+    start: int
+    end: int
+    text: str
+    boundaries: list[int]
+    formats: tuple[str, ...]
+    link_id: str | None
+
+
 def _encode_markdown_literal(text: str) -> str:
     """Encode final visible inline text without introducing Markdown syntax."""
     encoded: list[str] = []
@@ -279,7 +289,7 @@ def _encode_markdown_literal(text: str) -> str:
     while index < len(text):
         character = text[index]
         if character == "\r":
-            if text[index + 1 : index + 2] == "\n":
+            if text[index + 1:index + 2] == "\n":
                 index += 1
             encoded.append("\\\n")
         elif character == "\n":
@@ -343,28 +353,20 @@ class _InlineScanner:
     def _byte(self, local_index: int) -> int:
         return self.source_boundaries[self.raw_start + local_index]
 
-    def _add_slot(
-        self,
-        start: int,
-        end: int,
-        text: str,
-        boundaries: list[int],
-        formats: tuple[str, ...],
-        link_id: str | None,
-    ) -> None:
-        if not text:
+    def _add_slot(self, draft: _SlotDraft) -> None:
+        if not draft.text:
             return
-        start_byte, end_byte = self._byte(start), self._byte(end)
+        start_byte, end_byte = self._byte(draft.start), self._byte(draft.end)
         ordinal = len(self.slots)
         self.slots.append(
             RewriteSlot(
                 f"{self.unit_id}:slot:{ordinal}:{start_byte}:{end_byte}",
                 start_byte,
                 end_byte,
-                text,
-                formats,
-                link_id,
-                tuple(boundaries),
+                draft.text,
+                draft.formats,
+                draft.link_id,
+                tuple(draft.boundaries),
             )
         )
 
@@ -403,12 +405,13 @@ class _InlineScanner:
         start = self.cursor
         boundaries = [self._byte(start)]
         for visible in rendered:
-            if (
+            is_escaped_visible = (
                 self.cursor + 1 < len(self.raw)
                 and self.raw[self.cursor] == "\\"
                 and self.raw[self.cursor + 1] in _ESCAPABLE
                 and self.raw[self.cursor + 1] == visible
-            ):
+            )
+            if is_escaped_visible:
                 self.cursor += 2
             elif self.cursor < len(self.raw) and self.raw[self.cursor] == visible:
                 construct = _matched_unmatched_construct(self.raw, self.cursor)
@@ -422,12 +425,7 @@ class _InlineScanner:
                 raise _InlineTopologyError("rendered text does not align with source")
             boundaries.append(self._byte(self.cursor))
         self._add_slot(
-            start,
-            self.cursor,
-            rendered,
-            boundaries,
-            formats,
-            link_id,
+            _SlotDraft(start, self.cursor, rendered, boundaries, formats, link_id)
         )
 
     def _parsed_children(self, candidate: str) -> list[Token]:
@@ -459,7 +457,7 @@ class _InlineScanner:
         formats: tuple[str, ...],
     ) -> int:
         close_index = self._matching_child_close(index)
-        expected = self.children[index : close_index + 1]
+        expected = self.children[index:close_index + 1]
         link_open = self.children[index]
         href = link_open.attrGet("href") or ""
         link_start = self.cursor
@@ -563,12 +561,14 @@ class _InlineScanner:
                 else:
                     raise _InlineTopologyError("soft break does not align")
                 self._add_slot(
-                    start,
-                    self.cursor,
-                    " ",
-                    [self._byte(start), self._byte(self.cursor)],
-                    formats,
-                    link_id,
+                    _SlotDraft(
+                        start,
+                        self.cursor,
+                        " ",
+                        [self._byte(start), self._byte(self.cursor)],
+                        formats,
+                        link_id,
+                    )
                 )
                 index += 1
                 continue
@@ -621,11 +621,12 @@ class _InlineScanner:
 def _inline_source_span(
     markdown: str,
     boundary_table: Utf8BoundaryTable,
-    unit_type: UnitType,
-    start_byte: int,
-    end_byte: int,
+    unit: RewriteUnit,
     inline: Token,
 ) -> tuple[str, int]:
+    unit_type = unit.unit_type
+    start_byte = unit.start_byte
+    end_byte = unit.end_byte
     start = boundary_table.require_byte_boundary(start_byte)
     end = boundary_table.require_byte_boundary(end_byte)
     unit_source = markdown[start:end]
@@ -644,7 +645,7 @@ def _inline_source_span(
     if unit_type == "heading":
         if not unit_source.startswith(inline.content, prefix_end):
             raise _InlineTopologyError("inline content is not an exact source slice")
-        suffix = unit_source[prefix_end + len(inline.content) :]
+        suffix = unit_source[prefix_end + len(inline.content):]
         if _HEADING_SUFFIX.fullmatch(suffix) is None:
             raise _InlineTopologyError("heading suffix does not align")
         raw = inline.content
@@ -666,9 +667,7 @@ def _scan_unit_inline(
     raw, raw_start = _inline_source_span(
         markdown,
         boundary_table,
-        unit.unit_type,
-        unit.start_byte,
-        unit.end_byte,
+        unit,
         inline,
     )
     return _InlineScanner(
@@ -708,7 +707,7 @@ def _is_image_only(inline: Token) -> bool:
 
 
 def _list_item_kind(tokens: list[Token], open_index: int, close_index: int) -> str | None:
-    contents = tokens[open_index + 1 : close_index]
+    contents = tokens[open_index + 1:close_index]
     if any(token.type in _LIST_OPEN_TYPES for token in contents):
         return "nested_list"
     paragraph_count = sum(token.type == "paragraph_open" for token in contents)
@@ -806,7 +805,7 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
             inline = next(
                 (
                     candidate
-                    for candidate in tokens[index + 1 : close_index]
+                    for candidate in tokens[index + 1:close_index]
                     if candidate.type == "inline"
                 ),
                 None,
@@ -847,12 +846,8 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
                 and inline.type == "inline"
                 and tokens[close_index].type == "heading_close"
             )
-            if (
-                byte_range is None
-                or not valid_shape
-                or not token.tag.startswith("h")
-                or not token.tag[1:].isdigit()
-            ):
+            valid_tag = token.tag.startswith("h") and token.tag[1:].isdigit()
+            if byte_range is None or not valid_shape or not valid_tag:
                 add_unsupported("ambiguous_heading", byte_range)
             elif _is_image_only(inline):
                 add_unsupported("image_only", byte_range)
@@ -866,12 +861,13 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
         if token.type == "paragraph_open":
             close_index = _matching_close(tokens, index)
             inline = tokens[index + 1] if index + 1 < len(tokens) else None
-            if (
-                close_index is None
-                or byte_range is None
-                or inline is None
-                or inline.type != "inline"
-            ):
+            valid_shape = (
+                close_index is not None
+                and byte_range is not None
+                and inline is not None
+                and inline.type == "inline"
+            )
+            if not valid_shape:
                 add_unsupported("ambiguous_paragraph", byte_range)
             elif _is_image_only(inline):
                 add_unsupported("image_only", byte_range)
@@ -942,12 +938,13 @@ def build_document_anchor_index(markdown: str) -> DocumentAnchorIndex:
                 ambiguous = ambiguous or heading_ambiguous
         if token.type != "inline":
             continue
-        internal_hrefs = [
-            unquote(child.attrGet("href") or "")[1:]
-            for child in token.children or []
-            if child.type == "link_open"
-            and unquote(child.attrGet("href") or "").startswith("#")
-        ]
+        internal_hrefs = []
+        for child in token.children or []:
+            if child.type != "link_open":
+                continue
+            href = unquote(child.attrGet("href") or "")
+            if href.startswith("#"):
+                internal_hrefs.append(href[1:])
         if not internal_hrefs:
             continue
         expected_links.extend(internal_hrefs)
@@ -1086,12 +1083,12 @@ def reconstruct_markdown(
             if not isinstance(slot, RewriteSlot):
                 conflict("invalid rewrite slot")
             visible_boundaries = slot.visible_boundary_to_byte
-            if (
-                len(visible_boundaries) != len(slot.text) + 1
-                or not visible_boundaries
-                or visible_boundaries[0] != start_byte
-                or visible_boundaries[-1] != end_byte
-            ):
+            covers_slot_range = (
+                visible_boundaries
+                and visible_boundaries[0] == start_byte
+                and visible_boundaries[-1] == end_byte
+            )
+            if len(visible_boundaries) != len(slot.text) + 1 or not covers_slot_range:
                 conflict("slot visible boundaries do not cover its byte range")
             for index, character in enumerate(slot.text):
                 visible_start = visible_boundaries[index]
@@ -1136,12 +1133,11 @@ def reconstruct_markdown(
         for slot in unit.slots
     }
     replacements: list[tuple[int, int, bytes]] = []
-    syntax_anchors = [
-        anchor
-        for unit in rewrite_map.units
-        for anchor in unit.protected
-        if anchor.kind == "syntax" and anchor.source in {"*", "_", "**", "__"}
-    ]
+    syntax_anchors = []
+    for unit in rewrite_map.units:
+        for anchor in unit.protected:
+            if anchor.kind == "syntax" and anchor.source in {"*", "_", "**", "__"}:
+                syntax_anchors.append(anchor)
     for slot_id, replacement in requests.items():
         slot = slots_by_id[slot_id]
         if selected_ranges is None:
@@ -1149,12 +1145,13 @@ def reconstruct_markdown(
             original_visible = slot.text
         else:
             byte_range = selected_ranges[slot_id]
-            if (
-                not isinstance(byte_range, tuple)
-                or len(byte_range) != 2
-                or type(byte_range[0]) is not int
-                or type(byte_range[1]) is not int
-            ):
+            valid_range_shape = (
+                isinstance(byte_range, tuple)
+                and len(byte_range) == 2
+                and type(byte_range[0]) is int
+                and type(byte_range[1]) is int
+            )
+            if not valid_range_shape:
                 conflict("selected reconstruction range must contain two byte offsets")
             start_byte, end_byte = byte_range
             try:
@@ -1173,14 +1170,16 @@ def reconstruct_markdown(
                     _encode_markdown_literal(replacement).encode("utf-8"),
                 )
             )
-        if (
+        removes_formatted_slot = (
             selected_ranges is not None
             and not replacement
             and start_byte == slot.start_byte
             and end_byte == slot.end_byte
-            and slot.formats
-            and set(slot.formats) <= {"strong", "emphasis"}
-        ):
+        )
+        simple_inline_formats = (
+            bool(slot.formats) and set(slot.formats) <= {"strong", "emphasis"}
+        )
+        if removes_formatted_slot and simple_inline_formats:
             left = []
             cursor = start_byte
             for anchor in reversed(syntax_anchors):
@@ -1198,10 +1197,8 @@ def reconstruct_markdown(
                     if len(right) == len(slot.formats):
                         break
             if len(left) == len(right) == len(slot.formats):
-                replacements.extend(
-                    (anchor.start_byte, anchor.end_byte, b"")
-                    for anchor in (*left, *right)
-                )
+                for anchor in (*left, *right):
+                    replacements.append((anchor.start_byte, anchor.end_byte, b""))
 
     replacements.sort(key=lambda item: (item[0], item[1]))
     if any(

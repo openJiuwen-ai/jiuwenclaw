@@ -273,9 +273,9 @@ class DeepResearchTaskManager:
     @staticmethod
     def _resolve_petal_search_url(env: Mapping[str, str] | None = None) -> str:
         """Build Petal Search URL from LLM API_BASE: strip trailing /v2, append /v1/ai-tools/web-search."""
-        read = lambda name, default="": DeepResearchTaskManager._read_config_value(
-            name, default, env
-        )
+        def read(name: str, default: str = "") -> str:
+            return DeepResearchTaskManager._read_config_value(name, default, env)
+
         petal_api_url = read("PETAL_API_URL").strip()
         if petal_api_url:
             return petal_api_url
@@ -304,9 +304,9 @@ class DeepResearchTaskManager:
         返回：
             Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"bocha": "sk-xxx", "petal": "url"}
         """
-        read = lambda name, default="": DeepResearchTaskManager._read_config_value(
-            name, default, env
-        )
+        def read(name: str, default: str = "") -> str:
+            return DeepResearchTaskManager._read_config_value(name, default, env)
+
         configured_engines = {}
 
         # SerpAPI 搜索引擎
@@ -372,9 +372,8 @@ class DeepResearchTaskManager:
           WEB_SEARCH_ENGINE_NAME, WEB_SEARCH_API_KEY, WEB_SEARCH_URL, EXECUTION_METHOD
         - 项目全局：MODEL_NAME, MODEL_PROVIDER, API_BASE, API_KEY
         """
-        read = lambda name, default="": DeepResearchTaskManager._read_config_value(
-            name, default, env
-        )
+        def read(name: str, default: str = "") -> str:
+            return DeepResearchTaskManager._read_config_value(name, default, env)
 
         # 大模型相关配置：DeepSearch 专属优先，fallback 到项目全局
         llm_model_name = (
@@ -2397,11 +2396,22 @@ async def get_deepresearch_manager(scope: RuntimeScopeKey) -> DeepResearchTaskMa
     return await DeepResearchTaskManagerPool.get_or_create(scope.tenant())
 
 
+def load_deepresearch_config(env: Mapping[str, str] | None = None) -> Dict[str, str]:
+    """Return DeepResearch configuration using the manager's resolution rules."""
+    return DeepResearchTaskManager._load_config(env)
+
+
+def extract_deepresearch_section_titles(text: str) -> Dict[str, str]:
+    """Return section title metadata using the manager's outline parser."""
+    return DeepResearchTaskManager._extract_section_titles(text)
+
 
 __all__ = [
     "DeepResearchTaskManager",
     "DeepResearchTaskManagerPool",
+    "extract_deepresearch_section_titles",
     "get_deepresearch_manager",
+    "load_deepresearch_config",
     "TaskStatus",
     "DeepResearchTask",
 ]

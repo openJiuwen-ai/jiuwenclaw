@@ -272,12 +272,12 @@ def prepare_html_export(
         report = Path(report_path).expanduser().resolve()
     except (TypeError, OSError, RuntimeError, ValueError) as exc:
         raise RewriteError("BAD_REQUEST", "invalid HTML export request") from exc
-    if (
-        not _inside(report, root)
-        or report.suffix.lower() != ".md"
-        or not isinstance(revision_id, str)
-        or re.fullmatch(r"rev_[A-Za-z0-9_-]{1,128}", revision_id) is None
-    ):
+    valid_report_path = _inside(report, root) and report.suffix.lower() == ".md"
+    valid_revision_id = (
+        isinstance(revision_id, str)
+        and re.fullmatch(r"rev_[A-Za-z0-9_-]{1,128}", revision_id) is not None
+    )
+    if not valid_report_path or not valid_revision_id:
         raise RewriteError("BAD_REQUEST", "invalid HTML export request")
 
     try:
@@ -292,17 +292,31 @@ def prepare_html_export(
             provenance_markdown_path = report.parent / provenance_markdown_path
         provenance_markdown_path = provenance_markdown_path.resolve()
         parent_revision_id = provenance.get("parent_revision_id")
-        if (
-            provenance_markdown_path != report
-            or provenance.get("revision_id") != revision_id
-            or not isinstance(parent_revision_id, str)
-            or re.fullmatch(r"rev_[A-Za-z0-9_-]{1,128}", parent_revision_id) is None
-            or type(provenance.get("rewrite_protocol_version")) is not int
-            or provenance.get("rewrite_protocol_version") != 2
-            or not isinstance(provenance.get("rewrite_history"), list)
-            or not provenance["rewrite_history"]
-            or provenance.get("content_sha256") != _sha256(markdown_bytes)
-        ):
+        valid_parent_revision_id = (
+            isinstance(parent_revision_id, str)
+            and re.fullmatch(r"rev_[A-Za-z0-9_-]{1,128}", parent_revision_id)
+            is not None
+        )
+        valid_protocol = (
+            type(provenance.get("rewrite_protocol_version")) is int
+            and provenance.get("rewrite_protocol_version") == 2
+        )
+        valid_history = (
+            isinstance(provenance.get("rewrite_history"), list)
+            and bool(provenance["rewrite_history"])
+        )
+        provenance_matches_report = (
+            provenance_markdown_path == report
+            and provenance.get("revision_id") == revision_id
+            and provenance.get("content_sha256") == _sha256(markdown_bytes)
+        )
+        valid_provenance_state = (
+            provenance_matches_report
+            and valid_parent_revision_id
+            and valid_protocol
+            and valid_history
+        )
+        if not valid_provenance_state:
             raise RewriteError("REVISION_CONFLICT", "rewrite export source changed")
         snapshot = _load_final_result_snapshot(report, provenance, root)
         if not isinstance(snapshot, dict):
@@ -313,7 +327,6 @@ def prepare_html_export(
         RuntimeError,
         UnicodeDecodeError,
         ValueError,
-        RewriteError,
     ) as exc:
         raise RewriteError("REVISION_CONFLICT", "rewrite export source changed") from exc
 
@@ -339,27 +352,25 @@ def _citation_index(
         raw_id = item.get("id")
         raw_reference_index = item.get("reference_index")
         url = item.get("url")
-        if (
+        invalid_citation_identity = (
             isinstance(raw_id, bool)
             or not isinstance(raw_id, (str, int))
             or isinstance(raw_reference_index, bool)
             or not isinstance(raw_reference_index, (str, int))
             or not isinstance(url, str)
-        ):
+        )
+        if invalid_citation_identity:
             raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is invalid")
         source_id = str(raw_id).strip()
         reference_index = str(raw_reference_index).strip()
         url = url.strip()
-        if (
-            not source_id
-            or not reference_index
-            or not url
-            or re.fullmatch(r"https?://\S+", url, re.IGNORECASE) is None
-            or any(
-                field_size(value) > CITATION_FIELD_MAX_BYTES
-                for value in (source_id, reference_index, url)
-            )
-        ):
+        valid_url = re.fullmatch(r"https?://\S+", url, re.IGNORECASE) is not None
+        field_too_large = any(
+            field_size(value) > CITATION_FIELD_MAX_BYTES
+            for value in (source_id, reference_index, url)
+        )
+        required_fields_present = bool(source_id and reference_index and url)
+        if not required_fields_present or not valid_url or field_too_large:
             raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is invalid")
         for field in ("title", "content", "chunk", "source"):
             value = item.get(field)
@@ -431,7 +442,8 @@ def _validate_selection_request(selection: object) -> tuple[int, int, str, str]:
     end = selection.get("end_byte")
     selected_text = selection.get("selected_text")
     source_hash = selection.get("source_sha256")
-    if type(start) is not int or type(end) is not int or start < 0 or end <= start:
+    valid_byte_range = type(start) is int and type(end) is int and start >= 0 and end > start
+    if not valid_byte_range:
         _mapping_conflict("selection byte range is invalid")
     if not isinstance(selected_text, str):
         _mapping_conflict("selected text must be a string")
@@ -674,14 +686,13 @@ def prepare_rewrite(
     document_id = provenance.get("document_id")
     revision_id = provenance.get("revision_id")
     content_sha256 = provenance.get("content_sha256")
-    if (
-        not isinstance(document_id, str)
-        or not SAFE_ID_RE.fullmatch(document_id)
-        or not isinstance(revision_id, str)
-        or not SAFE_ID_RE.fullmatch(revision_id)
-        or not isinstance(content_sha256, str)
-        or not re.fullmatch(r"[a-fA-F0-9]{64}", content_sha256)
-    ):
+    valid_document_id = isinstance(document_id, str) and SAFE_ID_RE.fullmatch(document_id)
+    valid_revision_id = isinstance(revision_id, str) and SAFE_ID_RE.fullmatch(revision_id)
+    valid_content_hash = (
+        isinstance(content_sha256, str)
+        and re.fullmatch(r"[a-fA-F0-9]{64}", content_sha256)
+    )
+    if not valid_document_id or not valid_revision_id or not valid_content_hash:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report provenance is invalid")
     actual_hash = _sha256(report_bytes)
     if actual_hash != content_sha256:
@@ -708,12 +719,11 @@ def prepare_rewrite(
 
     citation_occurrences = _citation_occurrence_index(markdown, final_result_citations)
     allowed: dict[str, dict] = {}
-    selected_anchors = tuple(
-        anchor
-        for unit in covered
-        for anchor in unit.protected
-        if _intersects(start, end, anchor.start_byte, anchor.end_byte)
-    )
+    selected_anchors = []
+    for unit in covered:
+        for anchor in unit.protected:
+            if _intersects(start, end, anchor.start_byte, anchor.end_byte):
+                selected_anchors.append(anchor)
     for anchor in selected_anchors:
         if anchor.kind != "citation":
             continue
@@ -816,6 +826,14 @@ def _validate_structured_units(
     structured_result: object,
     expected_units: tuple[_SelectedUnitRange, ...],
 ) -> dict[str, str]:
+    def invalid_slot(slot: object, expected_slot: _SelectedSlotRange) -> bool:
+        return (
+            not isinstance(slot, dict)
+            or set(slot) != {"slot_id", "text"}
+            or slot.get("slot_id") != expected_slot.slot_id
+            or not isinstance(slot.get("text"), str)
+        )
+
     if (
         not isinstance(structured_result, dict)
         or set(structured_result) != {"units", "facts_added"}
@@ -838,12 +856,7 @@ def _validate_structured_units(
         if not isinstance(slots, list) or len(slots) != len(expected_unit.slots):
             raise RewriteError("MODEL_OUTPUT_INVALID", "slot IDs must match prepared slots exactly")
         for slot, expected_slot in zip(slots, expected_unit.slots):
-            if (
-                not isinstance(slot, dict)
-                or set(slot) != {"slot_id", "text"}
-                or slot.get("slot_id") != expected_slot.slot_id
-                or not isinstance(slot.get("text"), str)
-            ):
+            if invalid_slot(slot, expected_slot):
                 raise RewriteError("MODEL_OUTPUT_INVALID", "slot IDs must match prepared slots exactly")
             text = slot["text"]
             try:
@@ -922,12 +935,14 @@ def _repair_internal_heading_anchor(
                     "FORMAT_CONFLICT", "linked heading ID cannot become empty"
                 )
             continue
-        if (
-            original_anchor_index.ambiguous
-            or child_anchor_index.ambiguous
-            or original_heading_ids.count(old_id) != 1
-            or child_heading_ids.count(new_id) != 1
-        ):
+        ambiguous_anchor_index = (
+            original_anchor_index.ambiguous or child_anchor_index.ambiguous
+        )
+        unique_heading_pair = (
+            original_heading_ids.count(old_id) == 1
+            and child_heading_ids.count(new_id) == 1
+        )
+        if ambiguous_anchor_index or not unique_heading_pair:
             raise RewriteError(
                 "FORMAT_CONFLICT", "same-document heading anchor is ambiguous"
             )
@@ -1083,15 +1098,14 @@ def _current_highlight_ranges(
                 start = max(highlight_start, child_cursor)
                 end = min(highlight_end, child_end)
                 if start < end:
-                    ranges.extend(
-                        (range_start, range_end, child_unit.unit_type)
-                        for range_start, range_end in visible_slot_byte_ranges(
-                            child_map.source,
-                            child_slot,
-                            start - child_cursor,
-                            end - child_cursor,
-                        )
+                    visible_ranges = visible_slot_byte_ranges(
+                        child_map.source,
+                        child_slot,
+                        start - child_cursor,
+                        end - child_cursor,
                     )
+                    for range_start, range_end in visible_ranges:
+                        ranges.append((range_start, range_end, child_unit.unit_type))
             child_cursor = child_end
     ranges.sort()
     merged: list[tuple[int, int, str]] = []
@@ -1167,18 +1181,20 @@ def _allows_empty_wrapper_deletion(
         for unit in original_map.units
         for slot in unit.slots
     }
-    empty_wrappers = {
-        slot_id
-        for slot_id, text in slot_texts.items()
-        if not text
-        and slot_id in slots
-        and selected_ranges[slot_id] == (
-            slots[slot_id].start_byte,
-            slots[slot_id].end_byte,
+    empty_wrappers = set()
+    for slot_id, text in slot_texts.items():
+        if text or slot_id not in slots:
+            continue
+        slot = slots[slot_id]
+        selected_whole_slot = selected_ranges[slot_id] == (
+            slot.start_byte,
+            slot.end_byte,
         )
-        and slots[slot_id].formats
-        and set(slots[slot_id].formats) <= {"strong", "emphasis"}
-    }
+        simple_inline_formats = (
+            bool(slot.formats) and set(slot.formats) <= {"strong", "emphasis"}
+        )
+        if selected_whole_slot and simple_inline_formats:
+            empty_wrappers.add(slot_id)
     if not empty_wrappers:
         return False
     placeholders = dict(slot_texts)
@@ -1340,7 +1356,7 @@ def _publish_child(
             provenance_payload = json.dumps(
                 published_provenance, ensure_ascii=False, indent=2
             ).encode("utf-8")
-        except (TypeError, ValueError, UnicodeError) as exc:
+        except (TypeError, ValueError) as exc:
             logger.error(
                 "PROVENANCE_DIAG _publish_child json-encode failed type=%s msg=%s",
                 type(exc).__name__,
@@ -1466,7 +1482,7 @@ def _first_visible_character_after(
     if not candidates:
         return None
     candidate = min(candidates)
-    gap = rewrite_map.source.encode("utf-8")[byte_offset : candidate[0]]
+    gap = rewrite_map.source.encode("utf-8")[byte_offset:candidate[0]]
     return None if b"\r" in gap or b"\n" in gap else candidate
 
 
@@ -1477,7 +1493,7 @@ def _normalize_unselected_right_punctuation(
 ) -> dict[str, str]:
     source_bytes = original_map.source.encode("utf-8")
     selection = source_bytes[
-        context.selection_start_byte : context.selection_end_byte
+        context.selection_start_byte:context.selection_end_byte
     ].decode("utf-8")
     selected_slots = [
         slot
@@ -1601,7 +1617,7 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
             "action": context.action,
             "parent_revision_id": context.parent_revision_id,
             "selection_sha256": _sha256(
-                current_bytes[context.selection_start_byte : context.selection_end_byte]
+                current_bytes[context.selection_start_byte:context.selection_end_byte]
             ),
             "result_sha256": _sha256(result_bytes),
             "unit_types": [

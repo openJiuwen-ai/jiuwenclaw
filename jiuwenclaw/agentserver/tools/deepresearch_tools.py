@@ -27,7 +27,9 @@ from openjiuwen.core.foundation.tool import tool
 from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
 from jiuwenclaw.agentserver.tools.deepresearch_task_manager import (
     DeepResearchTaskRequest,
+    extract_deepresearch_section_titles,
     get_deepresearch_manager,
+    load_deepresearch_config,
 )
 from jiuwenclaw.config import get_config
 from jiuwenclaw.agentserver.tools._deepresearch_tls import (
@@ -480,7 +482,7 @@ async def _generate_report_html(
             )
 
             if not isinstance(fallback_markdown, str):
-                raise TypeError("invalid fallback report content")
+                raise TypeError("invalid fallback report content") from exc
             with tempfile.TemporaryDirectory(
                 prefix="jiuwenclaw_report_fallback_"
             ) as temporary_dir:
@@ -775,6 +777,7 @@ def _make_quarantine_directory(parent_fd: int, entry_name: str) -> tuple[str, in
             quarantine_fd = os.open(
                 quarantine_name,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                mode=0o600,
                 dir_fd=parent_fd,
             )
         except BaseException:
@@ -829,11 +832,13 @@ def _restore_quarantined_directory(
         source_fd = os.open(
             "entry",
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            mode=0o600,
             dir_fd=quarantine_fd,
         )
         destination_fd = os.open(
             entry_name,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            mode=0o600,
             dir_fd=parent_fd,
         )
         os.fchmod(destination_fd, stat.S_IMODE(metadata.st_mode))
@@ -868,6 +873,7 @@ def _quarantine_created_artifact(artifact: _CreatedArtifact) -> None:
         parent_fd = os.open(
             artifact.path.parent,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            mode=0o600,
         )
         close_parent_fd = True
 
@@ -1002,6 +1008,7 @@ def _publish_staged_asset_directory_posix(
     parent_fd = os.open(
         final_directory.parent,
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        mode=0o600,
     )
     directory_fd = -1
     try:
@@ -1019,6 +1026,7 @@ def _publish_staged_asset_directory_posix(
         directory_fd = os.open(
             final_directory.name,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            mode=0o600,
             dir_fd=parent_fd,
         )
         handle_metadata = os.fstat(directory_fd)
@@ -1372,6 +1380,8 @@ _PROVIDER_TO_TYPE = {
     "deepseek": "deepseek",
     "modelarts": "qwen",  # 华为云 ModelArts,spike 确认
 }
+
+
 def _map_provider_to_type(provider: str) -> str:
     return _PROVIDER_TO_TYPE.get(provider.strip().lower(), provider.strip().lower())
 
@@ -1382,7 +1392,7 @@ def _build_bridge_env(os_env: dict[str, str]) -> dict[str, str]:
     for key in ("WEB_SEARCH_ENGINE_NAME", "WEB_SEARCH_API_KEY", "WEB_SEARCH_URL"):
         env.pop(key, None)
 
-    resolved = _get_task_manager_cls()._load_config(os_env)
+    resolved = load_deepresearch_config(os_env)
     api_key = resolved["LLM_API_KEY"]
     model = resolved["LLM_MODEL_NAME"]
     base_url = resolved["LLM_BASE_URL"]
@@ -1519,6 +1529,10 @@ def _normalize_feedback_handler_resume_feedback(
     return feedback
 
 
+async def _call_deepresearch_stream_impl(**kwargs) -> str:
+    return await getattr(deepresearch_stream, "_func")(**kwargs)
+
+
 @tool(
     name="deepresearch_stream",
     description=(
@@ -1535,7 +1549,7 @@ def _normalize_feedback_handler_resume_feedback(
         "⚠不适用场景:PPT制作辅助研究、单点数据查询、快速搜索"
     ),
 )
-async def deepresearch_stream(
+async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     action: str,
     query: str = "",
     conversation_id: str = "",
@@ -1718,15 +1732,18 @@ async def deepresearch_stream(
                     questions = collected_questions(state)
                     if questions:
                         marker["questions"] = questions
-                if (
-                    node_id == "outline_interaction"
-                    and not marker.get("outline")
-                    and (
-                        not marker.get("content")
-                        or is_outline_status_placeholder(marker.get("content"))
-                    )
-                    and state.outline_parts
-                ):
+                has_outline_payload = bool(marker.get("outline"))
+                content_is_placeholder = (
+                    not marker.get("content")
+                    or is_outline_status_placeholder(marker.get("content"))
+                )
+                should_inject_outline = all((
+                    node_id == "outline_interaction",
+                    not has_outline_payload,
+                    content_is_placeholder,
+                    state.outline_parts,
+                ))
+                if should_inject_outline:
                     marker["outline"] = "".join(state.outline_parts)
                 resolved_cid = (
                     chunk.get("conversation_id", outcome_cid)
@@ -1735,7 +1752,7 @@ async def deepresearch_stream(
                 if node_id == "outline_interaction":
                     outline_content = marker.get("outline") or marker.get("content")
                     if outline_content:
-                        section_titles = _get_task_manager_cls()._extract_section_titles(
+                        section_titles = extract_deepresearch_section_titles(
                             outline_content if isinstance(outline_content, str)
                             else json.dumps(outline_content, ensure_ascii=False)
                         )
@@ -1766,7 +1783,9 @@ async def deepresearch_stream(
                     if isinstance(final_result, dict)
                     else ""
                 )
-                has_chat_route = bool(route.get("session_id") and route.get("channel_id"))
+                has_chat_route = bool(
+                    route.get("session_id") and route.get("channel_id")
+                )
                 if response_content and has_chat_route:
                     citation_artifacts = _normalize_citation_artifacts(chunk)
                     try:
@@ -1848,7 +1867,7 @@ async def deepresearch_stream(
             if chunk.get("agent") == "outline":
                 outline_content = chunk.get("content")
                 if outline_content:
-                    section_titles = _get_task_manager_cls()._extract_section_titles(
+                    section_titles = extract_deepresearch_section_titles(
                         outline_content if isinstance(outline_content, str)
                         else json.dumps(outline_content, ensure_ascii=False)
                     )
@@ -1866,7 +1885,7 @@ async def deepresearch_stream(
                 proc.kill()
         try:
             await asyncio.wait_for(stderr_task, timeout=2)
-        except (asyncio.TimeoutError, Exception):  # pylint: disable=broad-exception-caught
+        except Exception:  # pylint: disable=broad-exception-caught
             stderr_task.cancel()
         if outcome.get("status") == "error":
             outcome["returncode"] = proc.returncode
@@ -1894,7 +1913,7 @@ async def deepresearch_stream(
                 },
                 ensure_ascii=False,
             )
-        return await deepresearch_stream._func(
+        return await _call_deepresearch_stream_impl(
             action="resume",
             conversation_id=str(outcome.get("conversation_id", outcome_cid)),
             feedback='{"interrupt_feedback":"accepted","feedback":""}',

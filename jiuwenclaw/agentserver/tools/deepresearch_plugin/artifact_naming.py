@@ -299,7 +299,7 @@ def _read_file_bytes(path: Path, limit: int, label: str) -> bytes:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     open_flags = os.O_RDONLY | nofollow if nofollow is not None else os.O_RDONLY
     try:
-        descriptor = os.open(path, open_flags)
+        descriptor = os.open(path, open_flags, mode=0o600)
         with os.fdopen(descriptor, "rb") as stream:
             content = stream.read(limit + 1)
     except OSError as exc:
