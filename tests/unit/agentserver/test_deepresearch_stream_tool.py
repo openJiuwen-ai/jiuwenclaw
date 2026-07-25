@@ -3184,6 +3184,40 @@ def test_child_env_disables_hitl_and_overrides_stale_parent(monkeypatch):
     assert env["PYTHONUNBUFFERED"] == "1"
 
 
+def test_child_env_exports_current_tenant_environment(monkeypatch):
+    observed = {}
+
+    def fake_export(service_id, agent_id):
+        observed["tenant"] = (service_id, agent_id)
+        return {
+            "API_KEY": "huawei-maas-session",
+            "default_headers": '{"Authorization":"Basic session"}',
+        }
+
+    def fake_build_bridge_env(source):
+        observed["source"] = source
+        return dict(source)
+
+    monkeypatch.setattr(dt, "export_agent_environ", fake_export, raising=False)
+    monkeypatch.setattr(dt, "_build_bridge_env", fake_build_bridge_env)
+
+    env = dt._build_deepresearch_child_env(
+        {},
+        interactive_ask=True,
+        service_id="service-1",
+        agent_id="office",
+    )
+
+    assert observed == {
+        "tenant": ("service-1", "office"),
+        "source": {
+            "API_KEY": "huawei-maas-session",
+            "default_headers": '{"Authorization":"Basic session"}',
+        },
+    }
+    assert env["default_headers"] == '{"Authorization":"Basic session"}'
+
+
 def _make_fake_skill(parent: str) -> str:
     """在 parent/deepresearch/scripts/run_deepsearch.py 建假 skill,返回 skill dir。"""
     import os

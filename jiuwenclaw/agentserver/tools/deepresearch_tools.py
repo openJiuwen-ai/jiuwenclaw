@@ -34,6 +34,7 @@ from jiuwenclaw.agentserver.tools._deepresearch_tls import (
     DEEPRESEARCH_TLS_ENV_LOCK as _REPORT_STYLE_LLM_INIT_LOCK,
     scoped_deepresearch_tls_env,
 )
+from jiuwenclaw.local_env_config import export_agent_environ
 
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
@@ -1417,9 +1418,18 @@ def _build_bridge_env(os_env: dict[str, str]) -> dict[str, str]:
 
 
 def _build_deepresearch_child_env(
-    os_env: dict[str, str], *, interactive_ask: bool
+    os_env: dict[str, str],
+    *,
+    interactive_ask: bool,
+    service_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict[str, str]:
     """Build the stream child env with an explicit per-request HITL switch."""
+    if service_id is not None or agent_id is not None:
+        os_env = export_agent_environ(
+            service_id or "default",
+            agent_id or "default",
+        )
     env = _build_bridge_env(os_env)
     env["DEEPSEARCH_HITL"] = "true" if interactive_ask else "false"
     env["PYTHONUNBUFFERED"] = "1"
@@ -1647,7 +1657,10 @@ async def deepresearch_stream(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_build_deepresearch_child_env(
-                os.environ, interactive_ask=interactive_ask
+                os.environ,
+                interactive_ask=interactive_ask,
+                service_id=str(route.get("service_id") or "default"),
+                agent_id=str(route.get("agent_id") or "default"),
             ),
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
