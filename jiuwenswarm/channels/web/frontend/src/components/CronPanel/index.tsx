@@ -496,7 +496,13 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         timezone: value.timezone,
         targets: value.targets.trim() || 'web',
         enabled: value.enabled,
-        ...(value.projectDir ? { project_dir: value.projectDir } : {}),
+        // 始终显式带上 project_dir（未选项目传空串），不能省略这个 key——后端
+        // gateway/channel_manager/web/app_web_handlers.py 的 _cron_job_create 用
+        // "key 是否存在"区分"用户显式选了默认项目"（key 存在、值为空串，不可覆盖）和
+        // "调用方未表达项目意图"（key 缺失，会从当前 WebSocket 会话的 project_dir 兜底填充）。
+        // 手动创建抽屉这条链路用户明确看到并操作了"项目"下拉框，属于前一种情况；
+        // 之前省略 key 会命中后端的会话兜底，导致"不选项目"被错误绑定成当前会话所在项目（bug003）。
+        project_dir: value.projectDir ?? '',
         ...(value.modelName ? { model_name: value.modelName } : {}),
         mode,
         session_id: sessionId,
