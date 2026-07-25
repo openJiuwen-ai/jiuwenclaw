@@ -17,7 +17,7 @@ from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import find_skill
 
 logger = logging.getLogger(__name__)
 
-_PKG_EXCLUDE_DIRS: frozenset[str] = frozenset({"__pycache__", "node_modules"})
+_PKG_EXCLUDE_DIRS: frozenset[str] = frozenset({"__pycache__", "node_modules", ".trash"})
 _PKG_EXCLUDE_GLOBS: frozenset[str] = frozenset({"*.pyc", "*.swp", "*.bak-*"})
 _PKG_EXCLUDE_FILES: frozenset[str] = frozenset({".DS_Store"})
 _PKG_ROOT_EXCLUDE_DIRS: frozenset[str] = frozenset({"evals", "output"})

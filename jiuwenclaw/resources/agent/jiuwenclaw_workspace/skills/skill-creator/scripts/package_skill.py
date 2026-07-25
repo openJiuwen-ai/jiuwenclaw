@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # Patterns to exclude when packaging skills.
-EXCLUDE_DIRS = {"__pycache__", "node_modules"}
+EXCLUDE_DIRS = {"__pycache__", "node_modules", ".trash"}
 EXCLUDE_GLOBS = {"*.pyc"}
 EXCLUDE_FILES = {".DS_Store"}
 # Directories excluded only at the skill root (not when nested deeper).
