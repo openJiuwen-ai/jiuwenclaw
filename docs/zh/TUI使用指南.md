@@ -21,7 +21,7 @@
 | **同窗口新消息** | 在同一窗口（相同 `session_id`）再次发送聊天，仍会取消该 session 上旧的流式任务。 |
 | **与 ACP 差异** | ACP 仍为 single-user channel（新消息会取消同 channel 上所有进行中任务）；TUI/CLI 已改为按 session 隔离。 |
 
-**打开多窗口**：在多个终端分别运行 `jiuwenswarm-tui` 或 `jiuwenswarm-cli` 即可。需要恢复特定会话时使用 `--session <id>` 或 `/resume`。
+**打开多窗口**：在多个终端分别运行 `jiuwenswarm-tui` 或 `jiuwenswarm-cli` 即可。需要恢复或指定会话时使用 `--session <id>`（启动时，详见下文 [CLI 参考](#cli-参考) 中的 `--session` 小节）或运行时 `/resume`。注意：同一 `--session <id>` 在两个窗口同时启动会被 Gateway 拒绝（`SESSION_IN_USE`），需先关闭另一窗口。
 
 > **与「单机多实例」的区别**：[单机多实例运行](单机多实例运行.md) 指不同工作区、不同端口的独立后端；**多窗口 TUI** 指多个终端共享同一 Gateway 后端。二者可同时使用（例如 `dev` 实例上开两个 TUI 窗口），但不要混淆端口与工作区。
 
@@ -36,14 +36,57 @@
 | `jiuwenswarm-tui` | 通过 `jiuwenswarm-tui` PyPI 包启动时，由包装器拉起对应平台的二进制（见 `packages/jiuwenswarm-tui`）。 |
 | `jiuwenswarm-cli` | 源码/开发路径下，在 `jiuwenswarm/cli` 执行 `npm run dev` 或 `npm run start` 后使用 `jiuwenswarm-cli`（见 `package.json` 的 `bin`）。 |
 
-以下 **命令行标志** 由 `jiuwenswarm/cli/src/index.ts` 中的 `parseArgs` 定义：
+以下 **命令行标志** 由 `jiuwenswarm/channels/tui/frontend/src/index.ts` 中的 `parseArgs` 定义：
 
 | 标志 | 说明 | 默认值 | 示例 |
 |------|------|--------|------|
 | `--url <url>` | Gateway 的 CLI WebSocket 地址 | `ws://127.0.0.1:19001/tui` | `jiuwenswarm-cli --url ws://192.168.1.10:19001/tui` |
-| `--session <id>` | 启动时恢复指定会话 ID | 无 | `jiuwenswarm-cli --session abc-123` |
+| `--session <id>` | 启动时按 id **恢复或新建**会话（详见下节） | 无 | `jiuwenswarm-tui --session tui_myproj_001` |
 | `--token <token>` | 鉴权令牌（若 Gateway 需要） | 空字符串 | `jiuwenswarm-cli --token YOUR_TOKEN` |
 | `-h`, `--help` | 打印帮助并退出 | - | `jiuwenswarm-cli -h` |
+
+### `--session`：按 id 恢复或新建会话
+
+`--session <id>` 让 TUI 在启动时**以指定 session id 为身份**连接后端，并在连接建立后按 id 是否已存在走两条路径之一：
+
+| id 状态 | 启动行为 | 后端 RPC |
+|------|------|------|
+| **已存在** | 恢复该会话：触发 `session.switch` 生命周期（KV cache affinity / Team 状态迁移），前端按后端返回的 `mode` 对齐当前模式，随后拉取历史并回显到界面 | `session.switch` + `history.get` + `session.rename`（取标题） |
+| **不存在** | 新建并落盘该会话：触发 `session.create`（建目录 + 写 `metadata.json` + 生命周期初始化），界面为空会话。**已落盘即可下次恢复** | `session.create` + `history.get`（空）|
+
+判定方式为 **try-create-then-switch**：先尝试 `session.create(<id>)`，返回 `ALREADY_EXISTS` 则转 `session.switch` 恢复。该逻辑在连接收到 `connection.ack` 后由 `app-state.ts` 的 `resumeOrCreateBootSession` 驱动，仅执行一次（重连/重发幂等）。
+
+**示例**：
+
+```bash
+# 首次用某 id 启动 → 不存在 → 新建落盘
+jiuwenswarm-tui --session tui_myproj_001
+# 在 TUI 内对话若干轮后退出。该 id 已落盘到 ~/.jiuwenswarm/agent/sessions/tui_myproj_001/
+
+# 再次用同 id 启动 → 已存在 → 恢复并回显历史
+jiuwenswarm-tui --session tui_myproj_001
+```
+
+**与运行时 `/resume` 的关系**：`--session` 是**启动时**的恢复/新建入口；`/resume` 是 TUI 已启动后**运行中**切换到另一会话的命令。两者调同一套后端 RPC（`session.switch`/`session.create`），但 `--session` 在握手首帧触发、`/resume` 在用户手动输入时触发。正常时序无冲突。
+
+**id 命名约束**（前端在启动前校验，不合规直接报错退出，不进入 TUI）：
+
+| 约束 | 值 | 原因 |
+|------|------|------|
+| 长度上限 | ≤ 128 字符 | `session_id` 直接作为目录名落地（`~/.jiuwenswarm/agent/sessions/<id>/`），受文件系统单项 255 字符限制，留路径前缀余量 |
+| 允许字符 | `A-Z a-z 0-9 . _ -` | 与 `generateSessionId` 产出的 `tui_<hex>_<hex>` 同字符集 |
+| 禁止字符 | 中文、空格、`/ \ : * ? " < > \|` 等 | 防止目录注入（`/` 会建出嵌套目录导致会话丢失）与跨平台 `mkdir` 失败 |
+
+不合规示例：
+
+```bash
+jiuwenswarm-tui --session 测试会话       # 含中文 → 启动即退出：--session <id> 含非法字符
+jiuwenswarm-tui --session "my session"   # 含空格 → 同上
+jiuwenswarm-tui --session a/b            # 含 / → 同上
+jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超限
+```
+
+**不传 `--session`**：前端生成随机 id（`generateSessionId` → `tui_<hex>_<hex>`），后端目录在**首条对话写入历史时**懒创建。即未传参启动、未发消息即退出 → 后端无目录、`/sessions` 列表不显示该 id（空会话不污染列表）。传 `--session` 启动即建目录，**即使不发言也会出现在列表**，方便下次恢复——这是两者关键行为差异。
 
 ### 连接到非标准端口（端口冲突回退后）
 
