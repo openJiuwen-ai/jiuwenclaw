@@ -77,12 +77,23 @@ import {
   isDesktopSaveOk,
 } from './utils/desktopSave';
 import type { DesktopSaveApiResult } from './utils/desktopSave';
+import {
+  ModelSetupGuide,
+  type ModelSetupGuideStep,
+} from './features/modelSetupGuide/ModelSetupGuide';
+import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
 import './App.css';
 
 const TEAM_SESSION_MODES = new Set(['team', 'team.plan', 'code.team']);
+const PREVIEW_MODEL_SETUP_GUIDE = import.meta.env.DEV
+  && new URLSearchParams(window.location.search).get('modelSetupGuide') === '1';
 
 function isTeamMode(mode: string): boolean {
   return TEAM_SESSION_MODES.has(mode);
+}
+
+function shouldPreviewModelSetupGuide(): boolean {
+  return PREVIEW_MODEL_SETUP_GUIDE;
 }
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
@@ -280,12 +291,15 @@ function AppContent() {
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
+  const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
+  const [modelSetupGuideManual, setModelSetupGuideManual] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const [missingSessionId, setMissingSessionId] = useState<string | null>(null);
   const startupUpdateCheckRef = useRef(false);
+  const modelSetupGuideEvaluatedRef = useRef(false);
   /** 从 SkillNet 等入口跳转配置页时，首次展开对应配置分组（如第三方服务） */
   const [configInitialExpandGroup, setConfigInitialExpandGroup] = useState<string | null>(null);
 
@@ -822,6 +836,14 @@ function AppContent() {
       setA2UIFeatureEnabled(normalizeA2UIEnabled(config.a2ui_enabled));
       setServerConfig(config);
       setConfigError(null);
+      if (!modelSetupGuideEvaluatedRef.current) {
+        modelSetupGuideEvaluatedRef.current = true;
+        if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
+          setActiveNav('chat');
+          setModelSetupGuideManual(false);
+          setModelSetupGuideStep(1);
+        }
+      }
     } catch (error) {
       console.error('Failed to fetch config:', error);
       setServerConfig(null);
@@ -1926,8 +1948,38 @@ function AppContent() {
 
   const handleNavigate = useCallback((nav: MainNavKey) => {
     setActiveNav(nav);
+    if (modelSetupGuideStep === 1 && nav === 'configpanel') {
+      setModelSetupGuideStep(2);
+    }
     if (nav === 'skills') setHasVisitedSkills(true);
     if (nav === 'channels') setHasVisitedChannels(true);
+  }, [modelSetupGuideStep]);
+
+  const skipModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
+  }, []);
+
+  const acknowledgeModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
+
+    void request('config.set', { setup_guide_enabled: 'false' })
+      .then(() => {
+        setServerConfig((current) => ({
+          ...(current ?? {}),
+          setup_guide_enabled: 'false',
+        }));
+      })
+      .catch((error) => {
+        console.error('Failed to disable setup guide:', error);
+      });
+  }, [request]);
+
+  const openModelSetupGuide = useCallback(() => {
+    setActiveNav('chat');
+    setModelSetupGuideManual(true);
+    setModelSetupGuideStep(1);
   }, []);
 
   const handleExportShare = useCallback(async () => {
@@ -2033,7 +2085,17 @@ function AppContent() {
         showNewSession={false}
         hiddenNavItems={['sessions', 'browserpanel', 'updatepanel']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
+        onSetupGuideRequest={openModelSetupGuide}
       />
+
+      {modelSetupGuideStep ? (
+        <ModelSetupGuide
+          step={modelSetupGuideStep}
+          manual={modelSetupGuideManual}
+          onAcknowledge={acknowledgeModelSetupGuide}
+          onSkip={skipModelSetupGuide}
+        />
+      ) : null}
 
       {/* Main Content */}
       <main className={`content ${activeNav === 'chat' ? 'content--chat' : ''} ${isTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
