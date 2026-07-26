@@ -692,6 +692,23 @@
       "addApp": "添加应用"
     }
   },
+  "modelSetupGuide": {
+    "progress": "第 {{current}} 步，共 {{total}} 步",
+    "clickMore": "点击“更多”继续",
+    "acknowledge": "我知道了",
+    "skip": "跳过",
+    "open": "配置指引",
+    "steps": {
+      "1": {
+        "title": "配置你的首个模型",
+        "description": "模型配置位于“更多”中的“配置信息”。"
+      },
+      "2": {
+        "title": "完成模型配置",
+        "description": "在默认模型区域填写模型名称、API 地址、API Key 和模型提供商，然后点击保存。"
+      }
+    }
+  },
   "config": {
     "title": "配置信息",
     "subtitle": "按顶部标签分类编辑；保存后后端将自动重启以加载最新配置。",

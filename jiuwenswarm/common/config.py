@@ -598,6 +598,19 @@ def update_auto_recap_enabled_in_config(value: bool) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def update_setup_guide_enabled_in_config(value: bool) -> None:
+    """原子更新 setup_guide.enabled（Web 首次配置引导开关）。"""
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        section = data.get("setup_guide")
+        if not isinstance(section, dict):
+            section = {}
+            data["setup_guide"] = section
+        section["enabled"] = value
+        return data
+
+    update_config(mutator)
+
+
 def update_proactive_recommendation_in_config(updates: dict[str, Any]) -> None:
     """更新 proactive_recommendation 配置段并写回。"""
     data = load_yaml_round_trip(CONFIG_YAML_PATH)

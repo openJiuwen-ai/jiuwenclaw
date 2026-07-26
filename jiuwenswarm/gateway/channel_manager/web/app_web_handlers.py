@@ -61,6 +61,7 @@ from jiuwenswarm.common.config import (
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
+    update_setup_guide_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
     update_swarmflow_enabled_in_config,
@@ -166,7 +167,7 @@ class _ConfigChangeSet:
                 scopes.add("proactive")
             elif key_text.startswith("symphony") or key_text.startswith("skill_retrieval"):
                 scopes.add("agent_runtime")
-            elif key_text.startswith("a2ui_"):
+            elif key_text.startswith("a2ui_") or key_text == "setup_guide_enabled":
                 scopes.add("web_ui")
             else:
                 scopes.add("agent_runtime")
@@ -799,6 +800,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
+    "setup_guide_enabled",
 })
 
 # 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
@@ -1500,6 +1502,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # 合并 config.yaml 中的配置项
         try:
             raw = get_config_raw()
+            setup_guide_cfg = raw.get("setup_guide") or {}
+            payload["setup_guide_enabled"] = (
+                "true" if setup_guide_cfg.get("enabled", True) else "false"
+            )
             for key, val in payload.items():
                 from jiuwenswarm.extensions.registry import ExtensionRegistry
                 if (("api_key" in key.lower() or "token" in key.lower())
@@ -1554,6 +1560,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
+            payload.setdefault("setup_guide_enabled", "true")
             payload.setdefault("skill_create", "false")
             payload.setdefault("evolution_auto_scan", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
@@ -1703,6 +1710,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
                     update_permissions_enabled_in_config(parsed)
+                elif param_key == "setup_guide_enabled":
+                    update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_enabled":
                     update_memory_forbidden_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_description":
