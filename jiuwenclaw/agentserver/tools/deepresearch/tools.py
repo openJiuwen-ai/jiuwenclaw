@@ -25,7 +25,7 @@ from pathlib import Path
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
-from jiuwenclaw.agentserver.tools.deepresearch.task_manager import (
+from jiuwenclaw.agentserver.tools.deepresearch_task_manager import (
     DeepResearchTaskRequest,
     extract_deepresearch_section_titles,
     get_deepresearch_manager,
@@ -1144,7 +1144,7 @@ def _deepresearch_dependency_available() -> bool:
 
 def _get_task_manager_cls():
     """Resolve the manager class used by shared configuration helpers."""
-    from jiuwenclaw.agentserver.tools.deepresearch.task_manager import (
+    from jiuwenclaw.agentserver.tools.deepresearch_task_manager import (
         DeepResearchTaskManager,
     )
 
