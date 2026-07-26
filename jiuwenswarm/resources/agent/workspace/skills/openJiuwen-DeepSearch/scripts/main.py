@@ -126,6 +126,7 @@ async def run_jiuwen_workflow(query: str, agent_config: dict):
 
     return full_report
 
+
 def load_agent_config() -> dict:
     """
     从环境变量加载 Agent 配置
