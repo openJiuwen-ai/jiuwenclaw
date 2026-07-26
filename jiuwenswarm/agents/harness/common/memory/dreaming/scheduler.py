@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone as datetime_timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
@@ -50,8 +50,8 @@ def _delay_until(next_time: datetime, now: datetime) -> float:
     return max(
         0.0,
         (
-            next_time.astimezone(timezone.utc)
-            - now.astimezone(timezone.utc)
+            next_time.astimezone(datetime_timezone.utc)
+            - now.astimezone(datetime_timezone.utc)
         ).total_seconds(),
     )
 
@@ -134,8 +134,6 @@ class CronDreamingOrchestrator:
                 await asyncio.sleep(delay)
                 if self._running:
                     await self._tick()
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception(
                 "[%s] cron loop terminated unexpectedly",
@@ -164,7 +162,5 @@ class CronDreamingOrchestrator:
             logger.info("[%s] start sweep", self._name)
             await self._sweep_fn()
             logger.info("[%s] sweep completed", self._name)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception("[%s] sweep failed", self._name)
