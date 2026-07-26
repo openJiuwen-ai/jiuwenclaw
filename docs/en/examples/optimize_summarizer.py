@@ -13,6 +13,7 @@ run it against a real model.
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
 from dataclasses import replace
 
@@ -29,6 +30,8 @@ from jiuwenswarm.symphony.optimization.models import PromptCandidate
 from jiuwenswarm.symphony.optimization.policy.base import PolicyRequest, PromptPolicy
 from jiuwenswarm.symphony.optimization.reward.components import CustomReward
 from jiuwenswarm.symphony.optimization.reward.composite import CompositeReward
+
+logger = logging.getLogger(__name__)
 
 # The "good practices" a strong summarizer prompt should contain. The stub policy
 # discovers them incrementally; the environment rewards prompts that include them.
@@ -79,7 +82,7 @@ def structure_reward(execution, task) -> float:
 def brevity_reward(execution, task) -> float:
     scores = []
     for r in execution.visible_results:
-        n = max(1, len([l for l in r.output.splitlines() if l.strip()]))
+        n = max(1, len([line for line in r.output.splitlines() if line.strip()]))
         scores.append(1.0 if n <= 3 else 3 / n)
     return sum(scores) / max(1, len(scores))
 
@@ -130,13 +133,14 @@ async def main() -> None:
         )
         result = await optimizer.optimize(task)
 
-    print("\n=== Reward over iterations ===")
+    logger.info("=== Reward over iterations ===")
     for it in result.iterations:
         obs = "; ".join(it.observations[:2])
-        print(f"iter {it.iteration}: best={it.best_score:.3f}  ({obs})")
-    print("\nconverged:", result.converged, "-", result.convergence_reason)
-    print(f"\n=== Best prompt (reward {result.best_score:.3f}) ===\n{result.best_prompt}")
+        logger.info("iter %s: best=%.3f  (%s)", it.iteration, it.best_score, obs)
+    logger.info("converged: %s - %s", result.converged, result.convergence_reason)
+    logger.info("=== Best prompt (reward %.3f) ===\n%s", result.best_score, result.best_prompt)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     asyncio.run(main())
