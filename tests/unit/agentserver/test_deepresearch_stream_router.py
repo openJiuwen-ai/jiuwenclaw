@@ -2,7 +2,7 @@
 """deepresearch_stream router 纯函数单测。"""
 import json
 
-from jiuwenclaw.agentserver.tools.deepresearch_stream_router import (
+from jiuwenclaw.agentserver.tools.deepresearch.stream_router import (
     RouterState,
     build_interrupt_prompt,
     collected_questions,

@@ -633,7 +633,7 @@ class TenantAgentPool:
             )
 
         try:
-            from jiuwenclaw.agentserver.tools.deepresearch_task_manager import (
+            from jiuwenclaw.agentserver.tools.deepresearch.task_manager import (
                 DeepResearchTaskManagerPool,
             )
 

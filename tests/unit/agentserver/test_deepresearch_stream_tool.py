@@ -3250,7 +3250,7 @@ def test_get_deepresearch_tools_exposes_stream_and_rewrite_tools(monkeypatch):
     monkeypatch.setattr(dt, "enable_deepresearch", lambda: True)
     monkeypatch.setattr(dt, "_deepresearch_dependency_available", lambda: True)
 
-    from jiuwenclaw.agentserver.tools import deepresearch_rewrite_tools as rt
+    from jiuwenclaw.agentserver.tools.deepresearch import rewrite_tools as rt
 
     assert dt.get_deepresearch_tools() == [
         dt.deepresearch_stream,

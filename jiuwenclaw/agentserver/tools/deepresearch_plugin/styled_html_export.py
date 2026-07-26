@@ -18,7 +18,7 @@ from openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime import 
     report_style_llm_context,
 )
 
-from jiuwenclaw.agentserver.tools._deepresearch_tls import (
+from jiuwenclaw.agentserver.tools.deepresearch.tls import (
     TASK_MANAGER_TLS_ENV,
     scoped_deepresearch_tls_env,
 )

@@ -28,7 +28,7 @@ from openjiuwen_deepsearch.utils.log_utils.log_manager import LogManager
 
 from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketGatewayPushTransport
 from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
-from jiuwenclaw.agentserver.tools._deepresearch_tls import (
+from jiuwenclaw.agentserver.tools.deepresearch.tls import (
     TASK_MANAGER_TLS_ENV,
     iterate_with_scoped_tls_initialization,
 )

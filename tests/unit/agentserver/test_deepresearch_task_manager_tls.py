@@ -14,10 +14,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from jiuwenclaw.agentserver.tools import deepresearch_task_manager as manager_module
 from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
-from jiuwenclaw.agentserver.tools import _deepresearch_tls as tls_module
-from jiuwenclaw.agentserver.tools.deepresearch_task_manager import (
+from jiuwenclaw.agentserver.tools.deepresearch import task_manager as manager_module
+from jiuwenclaw.agentserver.tools.deepresearch import tls as tls_module
+from jiuwenclaw.agentserver.tools.deepresearch.task_manager import (
     DeepResearchTask,
     DeepResearchTaskManager,
     TaskStatus,

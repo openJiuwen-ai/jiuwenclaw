@@ -10,7 +10,7 @@ from openjiuwen.core.runner.callback import get_callback_framework
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
-from jiuwenclaw.agentserver.tools import deepresearch_rewrite_tools as rt
+from jiuwenclaw.agentserver.tools.deepresearch import rewrite_tools as rt
 
 
 def _document(root: Path, citation_artifacts: dict[str, str] | None = None):

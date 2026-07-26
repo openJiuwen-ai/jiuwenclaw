@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("markdown")
 
 from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
-from jiuwenclaw.agentserver.tools.deepresearch_task_manager import (
+from jiuwenclaw.agentserver.tools.deepresearch.task_manager import (
     DeepResearchTaskManagerPool,
     DeepResearchTaskRequest,
     get_deepresearch_manager,
@@ -73,7 +73,7 @@ async def test_deepresearch_pool_remove_shutdown() -> None:
 
 @pytest.mark.asyncio
 async def test_get_instance_uses_explicit_default_tenant() -> None:
-    from jiuwenclaw.agentserver.tools.deepresearch_task_manager import DeepResearchTaskManager
+    from jiuwenclaw.agentserver.tools.deepresearch.task_manager import DeepResearchTaskManager
 
     with pytest.warns(DeprecationWarning, match="get_instance\\(\\) is deprecated"):
         legacy = await DeepResearchTaskManager.get_instance()
@@ -87,7 +87,7 @@ async def test_get_instance_uses_explicit_default_tenant() -> None:
 
 @pytest.mark.asyncio
 async def test_create_task_captures_env_snapshot(monkeypatch) -> None:
-    from jiuwenclaw.agentserver.tools import deepresearch_task_manager as drm
+    from jiuwenclaw.agentserver.tools.deepresearch import task_manager as drm
 
     mgr = await get_deepresearch_manager(RuntimeScopeKey.from_ids("svc", "aid"))
 
