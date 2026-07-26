@@ -32,7 +32,7 @@ class HistoryEntry:
         lines = [f"### Iteration {self.iteration} — reward {self.reward:.3f}", "Prompt:", prompt]
         if self.observations:
             lines.append("Observations:")
-            lines.extend(f"- {o}" for o in self.observations)
+            lines.extend(f"- {obs}" for obs in self.observations)
         return "\n".join(lines)
 
 
