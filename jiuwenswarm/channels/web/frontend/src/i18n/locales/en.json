@@ -707,6 +707,23 @@
       "addApp": "Add app"
     }
   },
+  "modelSetupGuide": {
+    "progress": "Step {{current}} of {{total}}",
+    "clickMore": "Select More to continue",
+    "acknowledge": "Got it",
+    "skip": "Skip",
+    "open": "Setup guide",
+    "steps": {
+      "1": {
+        "title": "Configure your first model",
+        "description": "Model settings are under More, in Configuration."
+      },
+      "2": {
+        "title": "Complete model configuration",
+        "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
+      }
+    }
+  },
   "config": {
     "title": "Configuration",
     "subtitle": "Edit by category using the tabs above. The backend will restart after saving to load changes.",

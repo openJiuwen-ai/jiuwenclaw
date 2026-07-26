@@ -19,6 +19,7 @@ from jiuwenswarm.common.config import (
     replace_teams_in_config,
     resolve_env_vars,
     update_skill_retrieval_in_config,
+    update_setup_guide_enabled_in_config,
     update_xiaoyi_runtime_in_config,
 )
 
@@ -117,6 +118,18 @@ class TestResolveEnvVars:
 
 class TestConfigFunctions:
     """Test config module functions."""
+
+    @staticmethod
+    def test_update_setup_guide_enabled_in_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_setup_guide_enabled_in_config(False)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["setup_guide"] == {"enabled": False}
 
     @pytest.mark.parametrize(
         ("config", "expected"),
