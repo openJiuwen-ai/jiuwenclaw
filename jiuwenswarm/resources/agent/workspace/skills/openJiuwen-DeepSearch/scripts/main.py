@@ -14,11 +14,13 @@ import datetime
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import uuid
 from pathlib import Path
 import shutil
+from typing import Any, ClassVar, Dict, List
 
 from dotenv import load_dotenv
 from openjiuwen_deepsearch.config.config import Config
@@ -30,6 +32,11 @@ from openjiuwen_deepsearch.utils.log_utils.log_manager import LogManager
 
 from convert_docx import convert_md_to_docx
 from convert_html import convert_md_to_html
+
+CHECKED_CITATION_RE = re.compile(
+    r"\[\s*checked_citation:\s*\d+\s*\](\[\[\d+\]\]\((?:[^()]|\([^()]*\))*\))"
+)
+LEGACY_CITATION_RE = re.compile(r"\[\s*citation:\s*\d+\s*\]")
 
 # 获取技能根目录，优先使用 SKILL_ROOT 环境变量，否则自动检测
 SKILL_ROOT = Path(os.getenv("SKILL_ROOT", Path(__file__).parent.parent))
@@ -47,7 +54,7 @@ LogManager.init(
     log_dir=str(log_dir),
     max_bytes=100 * 1024 * 1024,
     backup_count=20,
-    level="DEBUG",
+    level="INFO",
     is_sensitive=False
 )
 
@@ -90,19 +97,14 @@ async def run_jiuwen_workflow(query: str, agent_config: dict):
             logger.debug("[Final Report is: %s]", report_result)
             if not full_report:
                 full_report = report_result.get("response_content", "")
+                full_report = CHECKED_CITATION_RE.sub(r"\1", full_report)
+                full_report = LEGACY_CITATION_RE.sub("", full_report)
 
     output_md = f"{query}.md"
     output_html = f"{query}.html"
     output_docx = f"{query}.docx"
 
-    workspace = Path("..") / ".." / "workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    workspace_md_path = workspace / output_md
-    workspace_html_path = workspace / output_html
-    workspace_docx_path = workspace / output_docx
-
-    output_dir = Path("output")
+    output_dir = SKILL_ROOT / "output" / "reports"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     output_md_path = output_dir / output_md
@@ -115,19 +117,14 @@ async def run_jiuwen_workflow(query: str, agent_config: dict):
         convert_md_to_html(output_md, output_html)
         convert_md_to_docx(output_md, output_docx)
         
-        shutil.copy(output_md, workspace_md_path)
-        shutil.copy(output_html, workspace_html_path)
-        shutil.copy(output_docx, workspace_docx_path)
-
-        shutil.copy(output_md, output_md_path)
-        shutil.copy(output_html, output_html_path)
-        shutil.copy(output_docx, output_docx_path)
+        shutil.move(output_md, output_md_path)
+        shutil.move(output_html, output_html_path)
+        shutil.move(output_docx, output_docx_path)
     except OSError as e:
         with open(output_md, "w", encoding="utf-8") as f:
             f.write(full_report)
 
     return full_report
-
 
 def load_agent_config() -> dict:
     """
@@ -171,6 +168,7 @@ def load_agent_config() -> dict:
         "model_type": os.getenv("LLM_MODEL_TYPE"),
         "base_url": os.getenv("LLM_BASE_URL"),
         "api_key": bytearray(os.getenv("LLM_API_KEY", ""), encoding="utf-8"),
+        "verify_ssl": False,
     }
 
     # 搜索引擎配置
@@ -185,6 +183,8 @@ def load_agent_config() -> dict:
     config["workflow_human_in_the_loop"] = False
     config["search_mode"] = "research"
     config["outliner_max_section_num"] = 5
+    config["outline_interaction_enabled"] = False
+    config["source_tracer_infer_switch"] = False
 
     # 执行方式
     execution_method = os.getenv("EXECUTION_METHOD", "parallel")
