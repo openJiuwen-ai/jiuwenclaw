@@ -93,10 +93,19 @@ memory:
     agent:
       enabled: false
       interval_seconds: 14400   # 4 hours by default
+      # cron_expr: "0 0 * * *"  # Optional: every day at 00:00
+      # timezone: Asia/Shanghai
     code:
       enabled: false
       interval_seconds: 14400
+      # cron_expr: "0 0 * * *"
+      # timezone: Asia/Shanghai
 ```
+
+`cron_expr` accepts either a 5-field cron expression
+(`minute hour day month weekday`) or a 7-field Quartz expression
+(`second minute hour day month weekday year`). When set, it takes precedence
+over `interval_seconds`.
 
 Env overrides:
 
@@ -105,6 +114,8 @@ Env overrides:
 | `DREAMING_AGENT_ENABLED` | Toggle for agent-mode Dreaming |
 | `DREAMING_CODE_ENABLED` | Toggle for code-mode Dreaming |
 | `DREAMING_INTERVAL` | Sweep interval in seconds (applies to both modes) |
+| `DREAMING_CRON_EXPR` | Cron schedule (applies to both modes and takes precedence over the interval) |
+| `DREAMING_TIMEZONE` | IANA timezone for the cron schedule; defaults to `Asia/Shanghai` |
 
 The LLM call reuses `models.default`; no extra model config required.
 
@@ -167,7 +178,9 @@ For enabling, see [Configuration → Dreaming Configuration](#dreaming-configura
 
 ### How it works
 
-- **Scheduling**: an in-process Orchestrator fires every `interval_seconds`, with a 120s initial delay after startup
+- **Scheduling**: without `cron_expr`, an in-process Orchestrator fires every
+  `interval_seconds`, with a 120s initial delay after startup. With
+  `cron_expr`, it fires at the next matching wall-clock time in `timezone`.
 - **Busy backoff**: skipped when the agent is actively handling a request; retried next cycle
 - **Incremental scan**: a checkpoint tracks processed sessions; sessions with fewer than 4 rounds or older than 30 days are skipped
 - **Cost control**: at most 10 sessions per sweep, each compressed to under 30K tokens; at most 5 entries extracted per session
