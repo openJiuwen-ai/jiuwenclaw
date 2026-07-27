@@ -66,6 +66,10 @@ from jiuwenswarm.integrations.ai4research_subscription.provider_capabilities imp
     model_client_config_looks_usable,
 )
 from jiuwenswarm.gateway.routing.agent_client import _to_json
+from tests.unit_tests.codex_lifecycle_test_support import (
+    assert_zombie_only_quarantine,
+    discard_zombie_only_test_quarantine,
+)
 
 
 def _patch_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -798,13 +802,30 @@ time.sleep(60)
 """,
     )
     runner = CodexProcessRunner(binary_path=binary)
-    with pytest.raises(CodexProviderError, match="timeout"):
+    quarantined = False
+    try:
         await runner.run(
             messages=[{"role": "user", "content": "hello"}],
             tools=[],
             timeout=0.1,
         )
+    except CodexProviderError as exc:
+        quarantined = exc.code == "provider_quarantined"
+        if not quarantined:
+            assert exc.code == "timeout"
+    else:
+        raise AssertionError("the timed-out Codex turn unexpectedly succeeded")
     pids = json.loads((tmp_path / "pids.json").read_text(encoding="utf-8"))
+    if quarantined:
+        try:
+            assert_zombie_only_quarantine(
+                profile,
+                pgid=pids[0],
+                expected_pids=pids,
+            )
+        finally:
+            discard_zombie_only_test_quarantine(profile)
+        return
     await _wait_for_posix_pids_to_exit(pids)
     assert all(not _pid_exists(pid) for pid in pids)
     assert list(profile.turns_dir.iterdir()) == []
@@ -1309,10 +1330,28 @@ time.sleep(60)
     assert pid_path.exists()
 
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    quarantined = False
+    try:
         await task
+    except asyncio.CancelledError:
+        pass
+    except CodexProviderError as exc:
+        assert exc.code == "provider_quarantined"
+        quarantined = True
+    else:
+        raise AssertionError("the cancelled Codex turn unexpectedly succeeded")
 
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
+    if quarantined:
+        try:
+            assert_zombie_only_quarantine(
+                profile,
+                pgid=pids[0],
+                expected_pids=pids,
+            )
+        finally:
+            discard_zombie_only_test_quarantine(profile)
+        return
     await _wait_for_posix_pids_to_exit(pids)
     assert all(not _pid_exists(pid) for pid in pids)
     assert list(profile.turns_dir.iterdir()) == []
@@ -1384,10 +1423,28 @@ for event in [
             break
         await asyncio.sleep(0.005)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    quarantined = False
+    try:
         await task
+    except asyncio.CancelledError:
+        pass
+    except CodexProviderError as exc:
+        assert exc.code == "provider_quarantined"
+        quarantined = True
+    else:
+        raise AssertionError("the double-cancelled Codex turn unexpectedly succeeded")
 
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
+    if quarantined:
+        try:
+            assert_zombie_only_quarantine(
+                profile,
+                pgid=pids[0],
+                expected_pids=pids,
+            )
+        finally:
+            discard_zombie_only_test_quarantine(profile)
+        return
     await _wait_for_posix_pids_to_exit(pids)
     assert all(not _pid_exists(pid) for pid in pids)
     assert list(profile.turns_dir.iterdir()) == []

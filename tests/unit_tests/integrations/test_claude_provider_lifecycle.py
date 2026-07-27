@@ -28,7 +28,9 @@ import pytest
 
 from jiuwenswarm.integrations.ai4research_subscription import claude_binary, claude_process
 from jiuwenswarm.integrations.ai4research_subscription.claude_process import ClaudeProcessRunner
-from jiuwenswarm.integrations.ai4research_subscription.errors import ClaudeProviderError
+from jiuwenswarm.integrations.ai4research_subscription.claude_quarantine import (
+    reset_quarantine_for_tests,
+)
 
 pytestmark = pytest.mark.skipif(
     os.name != "posix", reason="process-group cleanup is POSIX-specific"
@@ -93,7 +95,9 @@ def _fake_cli_forking(pid_path: Path, *, parent_lingers: bool) -> str:
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "sys.stdin.read()\n"
         'child = subprocess.Popen([sys.executable, "-c", "import signal,time; '
-        'signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"])\n'
+        'signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"], '
+        'stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, '
+        'stderr=subprocess.DEVNULL)\n'
         f"pathlib.Path({str(pid_path)!r}).write_text(json.dumps([os.getpid(), child.pid]))\n"
         f"{tail}\n"
     )
@@ -132,8 +136,10 @@ def _fast_grace(monkeypatch: pytest.MonkeyPatch):
     # reaped without a long grace wait.
     monkeypatch.setattr(claude_process, "PROCESS_TERMINATE_GRACE_SECONDS", 0.25)
     claude_binary._VERIFIED_EXECUTABLES.clear()
+    reset_quarantine_for_tests()
     yield
     claude_binary._VERIFIED_EXECUTABLES.clear()
+    reset_quarantine_for_tests()
 
 
 # --------------------------------------------------------------------------- #

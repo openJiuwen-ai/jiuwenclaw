@@ -26,6 +26,7 @@ from jiuwenswarm.integrations.ai4research_subscription.locking import (
 from jiuwenswarm.integrations.ai4research_subscription.process_lifecycle import (
     ProcessTreeCleanupError,
     process_group_is_empty,
+    process_group_snapshot,
 )
 from jiuwenswarm.integrations.ai4research_subscription.profiles import (
     build_codex_environment,
@@ -40,6 +41,10 @@ from jiuwenswarm.integrations.ai4research_subscription.quarantine import (
 from jiuwenswarm.integrations.ai4research_subscription.turn_directory import (
     TurnDirectoryCleanupError,
     cleanup_owned_turn_directory,
+)
+from tests.unit_tests.codex_lifecycle_test_support import (
+    assert_zombie_only_quarantine,
+    discard_zombie_only_test_quarantine,
 )
 
 
@@ -89,6 +94,19 @@ async def _wait_for_pids_to_exit(pids: list[int]) -> None:
         if all(not _pid_exists(pid) for pid in pids):
             return
         await asyncio.sleep(0.005)
+
+
+async def _wait_for_recordable_process_group(pid_path: Path) -> list[int]:
+    """Wait until the marker snapshot can observe the full fake process group."""
+
+    await _wait_for_file(pid_path)
+    pids = json.loads(pid_path.read_text(encoding="utf-8"))
+    for _ in range(400):
+        members = {int(item["pid"]) for item in process_group_snapshot(pids[0])}
+        if set(pids) <= members:
+            return pids
+        await asyncio.sleep(0.005)
+    raise AssertionError("timed out waiting for the complete fake process group")
 
 
 def _model_script(*, content: str = "ok") -> str:
@@ -572,6 +590,7 @@ time.sleep(60)
     )
 
     async def fail_cleanup(*_args, **_kwargs):
+        await _wait_for_recordable_process_group(pid_path)
         raise ProcessTreeCleanupError("injected tree uncertainty")
 
     runner = CodexProcessRunner(binary_path=binary, enforce_version=False)
@@ -591,8 +610,18 @@ time.sleep(60)
     assert profile_is_quarantined(profile)
     with pytest.raises(CodexProviderError, match="provider_busy"):
         acquire_profile_lock(profile)
-    await reconcile_profile_quarantine(profile)
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
+    try:
+        await reconcile_profile_quarantine(profile)
+    except CodexProviderError as exc:
+        assert exc.code == "provider_quarantined"
+        assert_zombie_only_quarantine(
+            profile,
+            pgid=pids[0],
+            expected_pids=pids,
+        )
+        discard_zombie_only_test_quarantine(profile)
+        return
     await _wait_for_pids_to_exit(pids)
     assert all(not _pid_exists(pid) for pid in pids)
     assert not profile_is_quarantined(profile)
@@ -628,6 +657,7 @@ time.sleep(60)
     )
 
     async def fail_cleanup(*_args, **_kwargs):
+        await _wait_for_recordable_process_group(pid_path)
         raise ProcessTreeCleanupError("injected version uncertainty")
 
     with monkeypatch.context() as scoped:
@@ -639,8 +669,19 @@ time.sleep(60)
             await verify_codex_version(binary, environment, profile)
         assert captured.value.code == "provider_quarantined"
     assert profile_is_quarantined(profile)
-    await reconcile_profile_quarantine(profile)
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
+    try:
+        await reconcile_profile_quarantine(profile)
+    except CodexProviderError as exc:
+        assert exc.code == "provider_quarantined"
+        assert_zombie_only_quarantine(
+            profile,
+            pgid=pids[0],
+            expected_pids=pids,
+            expect_lock_held=False,
+        )
+        discard_zombie_only_test_quarantine(profile)
+        return
     await _wait_for_pids_to_exit(pids)
     assert all(not _pid_exists(pid) for pid in pids)
 

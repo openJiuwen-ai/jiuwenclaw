@@ -37,6 +37,9 @@ from jiuwenswarm.integrations.ai4research_subscription.constants import (
     CODEX_MODEL_ALIAS,
     CODEX_PROVIDER_NAME,
 )
+from jiuwenswarm.integrations.ai4research_subscription.errors import (
+    CodexProviderError,
+)
 from jiuwenswarm.integrations.ai4research_subscription.model_client import (
     CodexSubscriptionModelClient,
 )
@@ -49,6 +52,10 @@ from jiuwenswarm.integrations.ai4research_subscription.profiles import (
 )
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+from tests.unit_tests.codex_lifecycle_test_support import (
+    assert_zombie_only_quarantine,
+    discard_zombie_only_test_quarantine,
+)
 
 
 class FakeWebSocket:
@@ -439,6 +446,7 @@ time.sleep(60)
         is_stream=True,
         timestamp=0.0,
     )
+    tasks_before_stream = asyncio.all_tasks()
     server_stream_task = asyncio.create_task(
         server.handle_message_for_test(
             ws,
@@ -453,6 +461,14 @@ time.sleep(60)
             break
         await asyncio.sleep(0.01)
     assert pid_path.exists()
+    provider_asend_tasks = [
+        task
+        for task in asyncio.all_tasks() - tasks_before_stream
+        if not task.done()
+        and type(task.get_coro()).__name__ == "async_generator_asend"
+    ]
+    assert len(provider_asend_tasks) == 1
+    provider_asend_task = provider_asend_tasks[0]
     owner = adapter._codex_turn_owners["sess"]
     model_call_task = owner._model_call_task
     facade_tasks = [
@@ -484,31 +500,62 @@ time.sleep(60)
         send_lock,
     )
     await asyncio.wait_for(server_stream_task, timeout=5)
+    done, _pending = await asyncio.wait({provider_asend_task}, timeout=5)
+    assert done == {provider_asend_task}
+    provider_failure: CodexProviderError | None = None
+    provider_cancelled = False
+    try:
+        provider_asend_task.result()
+    except asyncio.CancelledError:
+        provider_cancelled = True
+    except CodexProviderError as exc:
+        provider_failure = exc
 
     evidence = json.loads(pid_path.read_text(encoding="utf-8"))
     assert len(set(evidence["pgids"])) == 1
-    for _ in range(100):
-        if all(not Path(f"/proc/{pid}").exists() for pid in evidence["pids"]):
-            break
-        await asyncio.sleep(0.01)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in evidence["pids"])
-    assert list(profile.turns_dir.iterdir()) == []
-    lock_handle = acquire_profile_lock(profile)
-    release_profile_lock(lock_handle)
     assert adapter._codex_turn_owners == {}
-    assert terminal_snapshots == [
-        {"pids_absent": True, "owners_empty": True, "turns_empty": True}
-    ]
+    if profile.quarantine_path.exists():
+        try:
+            assert_zombie_only_quarantine(
+                profile,
+                pgid=evidence["pgids"][0],
+                expected_pids=evidence["pids"],
+            )
+        finally:
+            discard_zombie_only_test_quarantine(profile)
+        assert len(terminal_snapshots) == 1
+        assert terminal_snapshots[0]["owners_empty"] is True
+        assert any(
+            item.get("event") == "profile_quarantined"
+            and item.get("quarantined") is True
+            for item in runner.lifecycle_evidence
+        )
+        assert provider_failure is not None
+        assert provider_failure.code == "provider_quarantined"
+        assert provider_cancelled is False
+    else:
+        for _ in range(100):
+            if all(not Path(f"/proc/{pid}").exists() for pid in evidence["pids"]):
+                break
+            await asyncio.sleep(0.01)
+        assert all(not Path(f"/proc/{pid}").exists() for pid in evidence["pids"])
+        assert list(profile.turns_dir.iterdir()) == []
+        lock_handle = acquire_profile_lock(profile)
+        release_profile_lock(lock_handle)
+        assert terminal_snapshots == [
+            {"pids_absent": True, "owners_empty": True, "turns_empty": True}
+        ]
+        assert any(
+            item.get("event") == "cleanup_finished" and item.get("cleanup_complete")
+            for item in runner.lifecycle_evidence
+        )
+        assert provider_failure is None
     interrupt_frames = [
         frame for frame in ws.sent if "chat.interrupt_result" in json.dumps(frame)
     ]
     assert len(interrupt_frames) == 1
     encoded = json.dumps(interrupt_frames[0])
     assert '"success": true' in encoded
-    assert any(
-        item.get("event") == "cleanup_finished" and item.get("cleanup_complete")
-        for item in runner.lifecycle_evidence
-    )
 
     processors = list(facade._session_manager._session_processors.values())
     for processor in processors:
