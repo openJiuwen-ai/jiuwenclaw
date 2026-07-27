@@ -386,6 +386,11 @@ def _is_restorable_history_record(record: Any) -> bool:
         )
 
     if role == "user":
+        mode = record.get("mode", "")
+        if mode == "team":
+            channel_id = record.get("channel_id", "")
+            if channel_id not in ("web", "tui"):
+                return False
         return has_content or has_media
 
     event_type = record.get("event_type")
