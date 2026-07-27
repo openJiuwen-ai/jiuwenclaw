@@ -50,18 +50,6 @@ In visible mode, the Chrome window appears when the first browser task starts.
 Complete login, MFA, or other required manual authorization in that window, then
 continue the task in the conversation.
 
-### 2.4 Troubleshooting
-
-If the browser task fails to execute, follow these steps to troubleshoot:
-
-| Issue | Possible Cause | Solution |
-|-------|---------------|----------|
-| First browser task has no response | Incorrect Chrome path configuration | Check `browser.chrome_path` in `config.yaml`, ensure the path points to an actual `chrome.exe` |
-| Chrome starts and immediately closes | Port is occupied | Check if port `9333` is occupied; the managed browser automatically allocates free ports |
-| Chrome not installed | Chrome not installed or path error | Install Chrome browser and update `browser.chrome_path` configuration |
-| Frontend shows connection failed | Browser runtime not started properly | Check backend service logs, confirm the browser agent started successfully |
-| Cannot open specific webpage | Network or permission issues | Check network connectivity, ensure the target website is accessible, test manually in the managed Chrome window if necessary |
-
 ## 3. Usage guidance
 
 - Keep the same agent session for long workflows that depend on login state.
