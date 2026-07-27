@@ -270,6 +270,17 @@ def apply_sandbox_acl(
             mode="ALLOW",
             recursive=recursive,
         )
+        # venv_dir (runner python 所在目录) 落在 allow_write, 第一跳 runner 用
+        # jbx-sandbox 真实 SID token 读不了只授合成 SID 的路径 → CreateProcessWithLogonW
+        # WinError 5. 给真实 SID 也 grant Read+Execute (FILE_GENERIC_READ 已含),
+        # Write 仍只给合成 SID (受限 token 第二跳才写), 真实 SID 能读能执行不能写.
+        if sandbox_user_sid:
+            grant_ace(
+                expanded, sandbox_user_sid,
+                rights=const.FILE_GENERIC_READ,
+                mode="ALLOW",
+                recursive=recursive,
+            )
         applied.append(expanded)
     for path in deny_write:
         expanded = os.path.expandvars(path)

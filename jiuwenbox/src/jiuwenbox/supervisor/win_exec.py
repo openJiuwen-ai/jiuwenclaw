@@ -113,11 +113,26 @@ class SECURITY_ATTRIBUTES(ctypes.Structure):
     ]
 
 
+class _SID_AND_ATTRIBUTES(ctypes.Structure):
+    """SID_AND_ATTRIBUTES (Win32): {PVOID Sid; DWORD Attributes}.
+
+    CreateRestrictedToken 的 restricting sids 参数是 PSID_AND_ATTRIBUTES
+    (指向此结构数组的指针), 非 PVOID 数组. 旧版用 c_void_p*3 传给 c_void_p
+    参数, ctypes marshal 错指针 → WinError 998. 模块级定义供 argtypes 引用.
+    """
+    _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+
 class _TOKEN_GROUPS(ctypes.Structure):
-    """TOKEN_GROUPS 变长结构, 仅取第一个组用于解析 (我们只需 logon session SID)."""
+    """TOKEN_GROUPS 变长结构, 仅取第一个组用于解析 (我们只需 logon session SID).
+
+    Groups 字段用 _SID_AND_ATTRIBUTES 数组 (而非 c_byte*0): SID_AND_ATTRIBUTES
+    在 64 位对齐 8, ctypes 自动给 GroupCount 后加 4 字节 padding → Groups.offset=8,
+    与 Win32 TOKEN_GROUPS 实际布局一致. 旧版 c_byte*0 对齐 1 → offset=4 → 读错位.
+    """
     _fields_ = [
         ("GroupCount", wintypes.DWORD),
-        ("Groups", ctypes.c_byte * 0),  # 变长, 实际用 pointer 解析
+        ("Groups", _SID_AND_ATTRIBUTES * 1),  # 变长, 实际按 count 重新 cast
     ]
 
 
@@ -146,7 +161,7 @@ def _get_advapi32() -> ctypes.WinDLL:
             wintypes.HANDLE, wintypes.DWORD,
             wintypes.DWORD, ctypes.c_void_p,  # disabling sids
             wintypes.DWORD, ctypes.c_void_p,  # deleting privileges
-            wintypes.DWORD, ctypes.c_void_p,  # restricting sids
+            wintypes.DWORD, ctypes.POINTER(_SID_AND_ATTRIBUTES),  # restricting sids
             ctypes.POINTER(wintypes.HANDLE),
         ]
         _advapi32.CreateRestrictedToken.restype = wintypes.BOOL
@@ -167,8 +182,8 @@ def _get_advapi32() -> ctypes.WinDLL:
         ]
         _advapi32.LookupAccountNameW.restype = wintypes.BOOL
         _advapi32.AllocateAndInitializeSid.argtypes = [
-            ctypes.c_void_p, wintypes.BYTE, ctypes.c_void_p,
-            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.BYTE,
+            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
             wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
             ctypes.POINTER(ctypes.c_void_p),
         ]
@@ -255,20 +270,21 @@ def _build_runner_command(
     control_port 经命令行参数传 (而非 env), 避开 CreateProcessWithLogonW
     传 env 块时 WinError 87 (ctypes 传 c_wchar_Array 给 c_void_p 参数报错).
 
-    runner python 用 isolation_venv 真实 venv python
-    (``$JIUWENBOX_VENV_DIR/Scripts/python.exe``), 不用 ``sys.executable``:
-    部署环境 box-server 常跑在 uv trampoline launcher 上, jbx-sandbox 对
-    trampoline 及其依赖路径无读/执行权限, trampoline 内部 spawn child 时
-    permission denied (os error 5), runner 起不来. isolation_venv 的 venv
-    python 是 virtualenv 创建的真实解释器 (非 trampoline), ACL 配好
-    isolation_venv + bundled_python 目录后 jbx-sandbox 可直接执行.
+    runner python 用标准 CPython (非 uv trampoline/venv launcher):
+    jbx-sandbox 对 uv 缓存/AppData 无读权限, 任何 uv 体系 venv python (`.venv`
+    / isolation_venv / uv 全局) 第一跳 CreateProcessWithLogonW 都报 WinError 5
+    或 trampoline spawn child permission denied. 必须用自包含的标准 CPython
+    (jbx-sandbox grant RX 到安装目录即可跑).
+
+    优先级: ``JIUWENBOX_RUNNER_PYTHON`` env (显式指定) > 默认系统 python 路径.
+    dev 实测设 ``JIUWENBOX_RUNNER_PYTHON`` 指向系统 CPython 安装;
+    打包环境设 tools/python/python.exe. 系统 python 需先装 jiuwenbox_dev.pth
+    指向源码 (否则 ``-m jiuwenbox...`` 找不到) + pip install uvicorn
+    (logging_config 触发).
     """
-    venv_dir = (os.environ.get("JIUWENBOX_VENV_DIR") or "").strip()
-    py = sys.executable or "python"
-    if venv_dir:
-        candidate = os.path.join(venv_dir, "Scripts", "python.exe")
-        if os.path.isfile(candidate):
-            py = candidate
+    py = (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip()
+    if not py or not os.path.isfile(py):
+        py = sys.executable or "python"
     parts = [
         py,
         "-m", RUNNER_MODULE,
@@ -461,7 +477,7 @@ def _get_synthetic_write_sid_ptr() -> "ctypes.c_void_p":
         const.SYNTHETIC_WRITE_SID_SUBAUTHS[0],
         const.SYNTHETIC_WRITE_SID_SUBAUTHS[1],
         const.SYNTHETIC_WRITE_SID_RID,
-        0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0,  # sub4..sub7 占位 (nSubAuthorityCount=4, 后 4 个忽略)
         ctypes.byref(sid_ptr),
     )
     if not ok:
@@ -490,19 +506,73 @@ def _create_restricted_token() -> int:
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        logon_sid = _get_logon_session_sid()
-        everyone_sid = _get_everyone_sid()
-        write_sid = _get_synthetic_write_sid_ptr()
-        # 构造 restricting sids 数组 (PVOID[]).
-        restricting = (ctypes.c_void_p * 3)(
-            everyone_sid, logon_sid, write_sid,
+        # SID buffer 生命周期: _get_everyone_sid / _get_logon_session_sid
+        # 返回的指针指向 Python 管理的 c_byte buffer, 函数返回后 buffer 被 GC
+        # → 悬垂指针, CreateRestrictedToken 读它 → WinError 998. 这里内联构造
+        # 并持有 buffer 引用直到 CreateRestrictedToken 返回.
+        # Everyone SID (CreateWellKnownSid, 持久 buffer).
+        everyone_buf = (ctypes.c_byte * 64)()
+        everyone_size = wintypes.DWORD(64)
+        if not advapi32.CreateWellKnownSid(
+            const.WIN_WORLD_SID, None, everyone_buf, ctypes.byref(everyone_size),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        # Logon session SID (从 token TokenGroups 提取, 持久 buffer).
+        ret_len = wintypes.DWORD(0)
+        advapi32.GetTokenInformation(
+            h_token, const.TOKEN_GROUPS, None, 0, ctypes.byref(ret_len),
+        )
+        logon_buf = (ctypes.c_byte * ret_len.value)()
+        if not advapi32.GetTokenInformation(
+            h_token, const.TOKEN_GROUPS, logon_buf, ret_len, ctypes.byref(ret_len),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        groups_struct = ctypes.cast(logon_buf, ctypes.POINTER(_TOKEN_GROUPS)).contents
+        count = groups_struct.GroupCount
+        arr_t = _SID_AND_ATTRIBUTES * count
+        # groups 起始 = Groups 字段偏移 (ctypes 自动算含对齐, 64 位 DWORD 后有
+        # 4 字节 padding 让 SID_AND_ATTRIBUTES 8 字节对齐). 旧版手动加 sizeof(DWORD)
+        # 在 64 位漏 padding → 读错位 → logon_sid 垃圾值 → WinError 998.
+        groups = ctypes.cast(
+            ctypes.addressof(groups_struct) + _TOKEN_GROUPS.Groups.offset,
+            ctypes.POINTER(arr_t),
+        ).contents
+        SE_GROUP_LOGON_ID = 0x40000000
+        logon_sid_val = None
+        for g in groups:
+            if g.Attributes & SE_GROUP_LOGON_ID:
+                logon_sid_val = g.Sid
+                break
+        if logon_sid_val is None:
+            logon_sid_val = groups[0].Sid if count else None
+
+        # 合成 JHXSandboxWrite SID (AllocateAndInitializeSid 堆分配, 不悬垂).
+        SID_AUTH_NT = (ctypes.c_byte * 6)(0, 0, 0, 0, 0, 5)
+        write_sid_ptr = ctypes.c_void_p()
+        ok = advapi32.AllocateAndInitializeSid(
+            ctypes.byref(SID_AUTH_NT), 4,
+            21,
+            const.SYNTHETIC_WRITE_SID_SUBAUTHS[0],
+            const.SYNTHETIC_WRITE_SID_SUBAUTHS[1],
+            const.SYNTHETIC_WRITE_SID_RID,
+            0, 0, 0, 0,
+            ctypes.byref(write_sid_ptr),
+        )
+        if not ok:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        restricting = (_SID_AND_ATTRIBUTES * 3)(
+            _SID_AND_ATTRIBUTES(ctypes.cast(everyone_buf, ctypes.c_void_p), 0),
+            _SID_AND_ATTRIBUTES(logon_sid_val, 0),
+            _SID_AND_ATTRIBUTES(write_sid_ptr, 0),
         )
         restricted = wintypes.HANDLE()
         ok = advapi32.CreateRestrictedToken(
             h_token, const.RESTRICTED_TOKEN_FLAGS,
             0, None,       # disabling sids (空)
             0, None,       # deleting privileges (空)
-            3, restricting,  # restricting sids
+            3, restricting,  # restricting sids (PSID_AND_ATTRIBUTES, 数组对象自动转指针)
             ctypes.byref(restricted),
         )
         if not ok:

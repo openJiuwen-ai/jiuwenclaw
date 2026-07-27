@@ -368,6 +368,10 @@ class AgentWebSocketServer:
 
             # 注入动态路径 env 给 box-server 子进程 (Windows 沙箱用):
             #   JIUWENBOX_BUNDLED_PYTHON / JIUWENBOX_VENV_DIR
+            #   JIUWENBOX_RUNNER_PYTHON = runner 用的标准 CPython (非 uv venv).
+            #     jbx-sandbox 跑不了 uv trampoline/venv launcher (WinError 5 / os error 5),
+            #     runner 必须用自包含的标准 CPython. dev 实测设 D:\Files\python313,
+            #     打包环境设 tools/python/python.exe. 探测候选路径, 找到即注入.
             try:
                 from jiuwenclaw.runtime.pip_env import (
                     ensure_runtime_venv, resolve_base_python,
@@ -376,10 +380,22 @@ class AgentWebSocketServer:
                 os.environ["JIUWENBOX_VENV_DIR"] = str(venv_dir)
                 bundled_python = resolve_base_python()
                 os.environ["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
+                if not (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
+                    for _cand in (
+                        r"D:\Files\python313\python.exe",  # dev 实测机
+                        r"C:\Python313\python.exe",
+                        r"C:\Python312\python.exe",
+                        str(Path(__file__).resolve().parents[2] / "tools" / "python" / "python.exe"),  # 打包
+                    ):
+                        if _cand and Path(_cand).is_file():
+                            os.environ["JIUWENBOX_RUNNER_PYTHON"] = _cand
+                            break
                 logger.info(
                     "[AgentWebSocketServer][sandbox] injected env: "
-                    "JIUWENBOX_VENV_DIR=%s, JIUWENBOX_BUNDLED_PYTHON=%s",
+                    "JIUWENBOX_VENV_DIR=%s, JIUWENBOX_BUNDLED_PYTHON=%s, "
+                    "JIUWENBOX_RUNNER_PYTHON=%s",
                     venv_dir, bundled_python.parent,
+                    os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "<未注入>",
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
