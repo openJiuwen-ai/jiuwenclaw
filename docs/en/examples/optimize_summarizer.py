@@ -46,7 +46,6 @@ PRACTICES = [
 class StubPolicy(PromptPolicy):
     """Stands in for the LLM policy: proposes prompts that build on the best-so-far,
     each adding one not-yet-used practice (the 'textual policy gradient' in miniature)."""
-
     async def generate(self, request: PolicyRequest) -> list[PromptCandidate]:
         best = request.history.best_prompt or "Summarize the support ticket."
         present = [p for p in PRACTICES if p in best]
