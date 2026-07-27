@@ -56,6 +56,8 @@ class FingerprintExtractor:
         self.progress = progress
         self.event_log = event_log
         self.max_workers = max(1, max_workers)
+        # Reserved for a future deterministic merge strategy. Normalization LLM
+        # batches remain serial because every batch may extend the shared vocabulary.
         self.normalization_workers = max(
             1,
             int(normalization_workers if normalization_workers is not None else max_workers),

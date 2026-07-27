@@ -233,6 +233,35 @@ class TestProjectInfo:
         assert resp_h["ok"] is False
         assert resp_h["code"] == "NOT_FOUND"
 
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_real_project_git_payload_backfills_new_error_fields(
+        registered_channel, tmp_path,
+    ):
+        """旧 Project.git 快照缺少 error_code/hint 时,响应层补齐默认值。"""
+        from jiuwenswarm.server.runtime.session.project_store import save_project
+
+        pa = _abspath(tmp_path, "legacy")
+        proj = _make_project("旧项目", pa)
+        proj.git = {
+            "enabled": True,
+            "repo_root": pa,
+            "initialized_by_jiuwenswarm": False,
+            "detected_at": 1,
+            "status": "error",
+            "branch": "",
+            "error": "legacy error",
+            "is_dirty": False,
+        }
+        save_project(proj)
+
+        resp = await _call(registered_channel, "project.info", {"project_id": proj.project_id})
+
+        assert resp["ok"] is True
+        assert resp["payload"]["git"]["error"] == "legacy error"
+        assert resp["payload"]["git"]["error_code"] == ""
+        assert resp["payload"]["git"]["hint"] == ""
+
 
 # ===========================================================================
 # project.get_sessions

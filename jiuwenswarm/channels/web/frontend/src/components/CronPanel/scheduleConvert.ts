@@ -1,4 +1,5 @@
 import type { CronSchedule } from '../../types/cron';
+import { normalizeWeekAlphas } from './cronWeekAlpha';
 
 // schedule ⇄ cron_expr（7段式：秒 分 时 日 月 周 年，croniter 语法）双向转换。
 // 星期字段用 croniter 实测出的真实编号：0=周日...6=周六（不是 Quartz 的 1=SUN），见 plan.md §2.3.1。
@@ -135,7 +136,13 @@ export function scheduleToCronExpr(schedule: CronSchedule): string {
 export function cronExprToSchedule(expr: string): CronSchedule | null {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 7) return null;
-  const [second, minute, hour, day, month, week, year] = parts;
+  const [second, minute, hour, day, month, weekRaw, year] = parts;
+  // 周字段可能带英文缩写（SUN/MON/.../SAT，大小写不敏感，见 cronExprValidation.ts 里
+  // isValidWeekField 的同款归一化——bugfix 2026072401/bug010 第 4 轮：cron 表达式校验那边已经
+  // 支持缩写、能创建成功，但这里解析成"周期/按间隔/单次"可视化表单时如果不归一化，
+  // parseIntList/parseMonthlyWeekdayField 只认纯数字，会把 MON 当成无法识别，导致可视化 Tab
+  // 显示不出对应的星期选项）。先归一化成数字，下面的解析逻辑不用再改。
+  const week = normalizeWeekAlphas(weekRaw);
   // 秒字段只要求"是单个具体数字"（不含 */,- 等形状），具体数值不参与结构化模型——
   // 结构化 tab 本身不提供秒级精度，生成时永远写 0；但识别时不应该因为秒不是 0
   // 就整体拒绝，否则像 Agent 工具/OpenClaw "at" 调度产生的、秒字段带着原始时间戳

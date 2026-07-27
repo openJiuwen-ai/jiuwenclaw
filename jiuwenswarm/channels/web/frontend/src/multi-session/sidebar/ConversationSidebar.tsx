@@ -819,6 +819,14 @@ export function ConversationSidebar({
 
   async function handleRenameSession(sessionId: string, title: string) {
     await renameSession(sessionId, title);
+    // 重命名后刷新所有展开的定时任务触发列表，保证标题立即更新
+    for (const [groupId, isOpen] of Object.entries(expandedCronGroups)) {
+      if (!isOpen) continue;
+      const cronId = groupId.startsWith('cron-') ? groupId.slice(5) : groupId;
+      const job = cronJobs.find((j) => j.id === cronId);
+      if (!job) continue;
+      void loadCronSessions(job.project_id || 'default', cronId);
+    }
   }
 
   async function handleRenameSubmit(value: string) {
@@ -1080,7 +1088,6 @@ export function ConversationSidebar({
           onClick={() => setWorkModeMenuOpen((open) => !open)}
           aria-haspopup="menu"
           aria-expanded={workModeMenuOpen}
-          disabled={Boolean(activeSessionId && runtimes[activeSessionId]?.isProcessing)}
         >
           <span>{workMode === 'code' ? t('codeMode.code') : t('codeMode.work')}</span>
           <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />

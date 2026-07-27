@@ -940,7 +940,7 @@ class GitDiffWatcherRegistry:
             include_hunks = need_hunks
 
             # 计算 session 级 ``last_turn`` diff(不复用跨 session)。
-            # 直接调 ``get_turn_diffs`` + ``_convert_turn_diff``,避免再次调
+            # 直接调 ``get_turn_diff_summaries`` + ``_convert_turn_diff``,避免再次调
             # ``get_project_diff_status``(会重复计算项目级 ``current``)。
             # 异常处理与 ``get_project_diff_status`` 内部一致:捕获后 last_turn=None。
             last_turn = None
@@ -952,13 +952,18 @@ class GitDiffWatcherRegistry:
                     # 工作时的改动会被漏读,导致实时轮询推送的 last_turn 数据残缺。
                     extra_roots = get_session_extra_history_roots(session_id)
                     turns = await asyncio.to_thread(
-                        diff_service.get_turn_diffs,
+                        diff_service.get_turn_diff_summaries,
                         session_id, project_dir,
+                        repo_context={
+                            "repo_root": repo_root,
+                            "branch": base_status.repo.branch,
+                            "base_head": base_status.repo.head,
+                        },
                         extra_history_roots=extra_roots,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "[GitDiffWatcher] get_turn_diffs failed (session=%s): %s",
+                        "[GitDiffWatcher] get_turn_diff_summaries failed (session=%s): %s",
                         session_id, exc,
                     )
                     turns = []

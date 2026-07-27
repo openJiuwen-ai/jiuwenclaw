@@ -318,18 +318,24 @@ export function ToolPanel({
           current?.teamTaskEvents ?? [],
           (event) => event.task_id
         );
-        if (mergedTaskEvents.length > 0) {
-          setTeamTaskEvents(sessionId, mergedTaskEvents);
-        }
+        // Always apply — an empty restored list must clear stale events too.
+        setTeamTaskEvents(sessionId, mergedTaskEvents);
 
+        // History/snapshot is the authoritative board after restore. Never import
+        // live-only task_ids (LLM `id` orphans left in the waiting column from
+        // a prior optimistic upsert). Always setTeamTasks — including [] — so
+        // an empty restore actually clears those orphans instead of leaving
+        // the previous store contents untouched.
+        const restoredTaskIds = new Set(historyState.tasks.map((task) => task.task_id));
+        const liveTasksForMerge = (current?.teamTasks ?? []).filter((task) =>
+          restoredTaskIds.has(task.task_id)
+        );
         const mergedTasks = mergeById(
           historyState.tasks,
-          current?.teamTasks ?? [],
+          liveTasksForMerge,
           (task) => task.task_id
         );
-        if (mergedTasks.length > 0) {
-          setTeamTasks(sessionId, mergedTasks);
-        }
+        setTeamTasks(sessionId, mergedTasks);
         mergeTeamTaskProgressBaseline(sessionId, historyState.taskProgressBaseline);
 
         const mergedExecutionEvents = mergeById(

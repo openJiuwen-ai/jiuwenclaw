@@ -42,7 +42,7 @@ import {
   useWorkspaceStore,
   useCronStore,
 } from '../stores';
-import type { TeamTask, TeamTaskStatus, TeamTaskUpsert } from '../stores/sessionStore';
+import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
 import {
   fetchTtsAudio,
@@ -343,25 +343,6 @@ function getConnectSignature(options: WebConnectOptions): string {
   });
 }
 
-const TEAM_TASK_STATUS_SET = new Set<TeamTaskStatus>([
-  'pending',
-  'blocked',
-  'planning',
-  'in_progress',
-  'in_review',
-  'completed',
-  'cancelled',
-]);
-
-function normalizeTeamTaskStatus(
-  status: unknown,
-  fallback: TeamTaskStatus = 'pending'
-): TeamTaskStatus {
-  return typeof status === 'string' && TEAM_TASK_STATUS_SET.has(status as TeamTaskStatus)
-    ? status as TeamTaskStatus
-    : fallback;
-}
-
 function pickString(...values: unknown[]) {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) {
@@ -423,69 +404,6 @@ function getPayloadRequestId(payload: Record<string, unknown>): string | undefin
   return undefined;
 }
 
-function normalizeStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const normalized = value.filter(
-    (item): item is string => typeof item === 'string' && item.trim().length > 0
-  );
-  return normalized.length ? normalized : undefined;
-}
-
-function normalizeTaskEvent(value: unknown): TeamTaskUpsert | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const raw = value as Record<string, unknown>;
-  const taskId = pickString(raw.task_id, raw.id);
-  if (!taskId) {
-    return null;
-  }
-  // Status is resolved server-side (swarm layer) and read directly here — the
-  // frontend no longer derives it from the event type. An absent status means
-  // "no change"; the store preserves the task's existing status.
-  const rawStatus = pickString(raw.status);
-  return {
-    task_id: taskId,
-    title: pickString(raw.title, raw.name, raw.description),
-    content: pickString(raw.content),
-    status: rawStatus ? normalizeTeamTaskStatus(rawStatus) : undefined,
-    assignee: pickString(raw.assignee, raw.member_id, raw.claimed_by, raw.claimedBy, raw.from_member),
-    team_id: pickString(raw.team_id),
-    timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
-    skills: normalizeStringArray(raw.skills),
-    files: normalizeStringArray(raw.files),
-  };
-}
-
-function normalizeTaskRecord(
-  value: unknown,
-  fallbackStatus: TeamTaskStatus = 'pending'
-): TeamTask | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const raw = value as Record<string, unknown>;
-  const taskId = pickString(raw.task_id, raw.id);
-  if (!taskId) {
-    return null;
-  }
-  const title = pickString(raw.title, raw.name, raw.description);
-  const content = pickString(raw.content);
-  return {
-    task_id: taskId,
-    title,
-    content,
-    status: normalizeTeamTaskStatus(raw.status, fallbackStatus),
-    assignee: pickString(raw.assignee, raw.member_id, raw.claimed_by, raw.claimedBy, raw.from_member),
-    team_id: pickString(raw.team_id),
-    timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
-    skills: normalizeStringArray(raw.skills),
-    files: normalizeStringArray(raw.files),
-  };
-}
-
 function parseShutdownMemberName(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -512,38 +430,16 @@ function getShutdownMemberFromToolResult(toolResult: ToolResult): string | undef
   return parseShutdownMemberName(toolResult.result) || parseShutdownMemberName(toolResult.summary);
 }
 
-function upsertTaskRecords(sessionId: string, values: unknown, fallbackStatus: TeamTaskStatus = 'pending') {
-  if (!Array.isArray(values)) {
-    const task = normalizeTaskRecord(values, fallbackStatus);
-    if (task) {
-      useSessionStore.getState().upsertTeamTask(sessionId, task);
-    }
-    return;
-  }
-  values.forEach((item) => {
-    const task = normalizeTaskRecord(item, fallbackStatus);
-    if (task) {
-      useSessionStore.getState().upsertTeamTask(sessionId, task);
-    }
-  });
-}
-
-function applyTeamTaskToolCall(sessionId: string, toolCall: ToolCall) {
-  if (toolCall.name === 'create_task') {
-    upsertTaskRecords(sessionId, Array.isArray(toolCall.arguments.tasks) ? toolCall.arguments.tasks : toolCall.arguments);
-    return;
-  }
-  if (toolCall.name === 'update_task') {
-    const taskId = pickString(toolCall.arguments.task_id, toolCall.arguments.id);
-    const existingStatus = taskId
-      ? useSessionStore.getState().getRuntime(sessionId)?.teamTasks.find((task) => task.task_id === taskId)?.status
-      : undefined;
-    upsertTaskRecords(sessionId, toolCall.arguments, existingStatus || 'pending');
-    return;
-  }
-  if (toolCall.name === 'claim_task') {
-    return;
-  }
+// The task card's title/content are now sourced solely from the backend
+// `team.task` events (which carry the DB task_id + body) and the `team.snapshot`
+// fallback — never from tool_call arguments. Building an optimistic card from
+// the tool_call `id` produced a duplicate card because the LLM's `id` differs
+// from the DB task_id AgentCore falls back to (see OpenSpec change
+// `fix-team-task-card-duplicate`, D5). So `create_task` / `update_task` no
+// longer pre-create cards; `claim_task` was already a no-op. This handler is
+// kept as an explicit early return so the call site stays intentional.
+function applyTeamTaskToolCall(_sessionId: string, _toolCall: ToolCall) {
+  return;
 }
 
 interface UseWebSocketOptions {
@@ -2050,13 +1946,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
             useChatStore.getState().updateMessage(sessionId, existingMsg.id, updatePayload);
           } else {
+            // 点击"停止"（team 模式走 pause）之后，本轮 LLM 生成往往不会被后端立即掐断，
+            // 还会有若干个迟到的 chat.delta 补投过来。此时 currentStreamId/team-leader
+            // 收尾逻辑已经跑过一轮（见 chat.interrupt_result 的 pause 分支），这些迟到内容
+            // 找不到 existingMsg，会重新起一条新气泡；如果还标 isStreaming:true，光标会
+            // 因为再也等不到后续 chat.final 收尾而永久闪烁（bug001）。paused 状态下新起的
+            // 气泡直接落地为非 streaming，內容仍然展示，只是不再挂一个不会消失的光标。
+            const isPaused = Boolean(useChatStore.getState().getRuntime(sessionId)?.isPaused);
             const msgId = `team-leader-${Date.now()}`;
             useChatStore.getState().addMessage(sessionId, {
               id: msgId,
               role: 'system',
               content: content,
               timestamp: new Date().toISOString(),
-              isStreaming: true,
+              isStreaming: !isPaused,
             });
           }
           return;
@@ -2905,6 +2808,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           useChatStore.getState().setProcessing(sessionId, false);
           useChatStore.getState().setThinking(sessionId, false);
+          // 集群模式下输入框的"停止"按钮走的是 pause（不是 cancel，见 App.tsx
+          // handleCancel：mode==='team' 时调用 pause）。team-leader 消息的
+          // isStreaming 不经过 currentStreamId 收尾，这里同 cancel 分支一样显式
+          // 关闭还在 streaming 的 team-leader 消息，避免光标永久闪烁（bug001）。
+          closeActiveTeamLeaderMessages(sessionId);
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             // 直接设置所有状态值
@@ -2939,6 +2847,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           // 用户主动点了停止/删除就该让当前气泡收尾，不再等一个可能被误判、永远不会来的
           // 真正 chat.final。
           useChatStore.getState().stopStreaming(sessionId);
+          // 集群模式下 team-leader 消息的 isStreaming 不经过 currentStreamId 收尾，
+          // stopStreaming 对它无效；取消后本该到来的 chat.final 也不会再来兜底，
+          // 这里显式收尾，避免 team-leader 气泡的光标永久闪烁（bug001）。
+          closeActiveTeamLeaderMessages(sessionId);
         } else if (resultPayload.intent === 'supplement') {
           useChatStore.getState().setPaused(sessionId, false);
         }
@@ -3431,6 +3343,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setContextCompressionStats,
     clearThinkingForVisibleOutput,
     findActiveTeamLeaderMessage,
+    closeActiveTeamLeaderMessages,
     updateSession,
     resolveEventSessionId,
     shouldDropDuplicatedEvent,

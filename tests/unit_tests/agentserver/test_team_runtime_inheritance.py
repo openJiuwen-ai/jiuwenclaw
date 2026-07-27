@@ -119,6 +119,20 @@ def test_build_member_rails_adds_structured_ask_user_rail_for_leader_only():
     assert all(type(rail).__name__ != "StructuredAskUserRail" for rail in teammate_rails)
 
 
+def test_build_member_rails_omits_task_planning_for_leader_only():
+    leader_rails = build_member_rails(
+        member_info=MemberInfo(role="leader"),
+        runtime=RuntimeInfo(language="cn"),
+    )
+    teammate_rails = build_member_rails(
+        member_info=MemberInfo(role="teammate"),
+        runtime=RuntimeInfo(language="cn"),
+    )
+
+    assert all(type(rail).__name__ != "TaskPlanningRail" for rail in leader_rails)
+    assert any(type(rail).__name__ == "TaskPlanningRail" for rail in teammate_rails)
+
+
 # -- resolve_model_config tests --
 
 def test_resolve_model_config_from_default():

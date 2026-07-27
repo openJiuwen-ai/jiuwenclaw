@@ -15,6 +15,7 @@ import { parseHistoryJsonFileToPreviewMessages } from './historyRestore';
 import { parseTeamHistoryPanelRecords } from './teamHistoryPanelRestore';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
 import { getSvgNaturalHeight, getSvgNaturalWidth } from '../utils/svgDimensions';
+import { generateUuidV4 } from '../utils/uuid';
 import './shareImageExport.css';
 
 export interface ShareImageMetadata {
@@ -481,25 +482,6 @@ function crc32(bytes: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-/** Generate a v4 UUID, falling back when crypto.randomUUID is unavailable. */
-function generateUuid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  const random = (typeof crypto !== 'undefined' && crypto.getRandomValues)
-    ? (n: number) => crypto.getRandomValues(new Uint8Array(n))
-    : (n: number) => {
-      const out = new Uint8Array(n);
-      for (let i = 0; i < n; i++) out[i] = Math.floor(Math.random() * 256);
-      return out;
-    };
-  const b = random(16);
-  b[6] = (b[6] & 0x0f) | 0x40;
-  b[8] = (b[8] & 0x3f) | 0x80;
-  const hex = Array.from(b, (x) => x.toString(16).padStart(2, '0'));
-  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10, 16).join('')}`;
-}
-
 const EMPTY_MD5 = '';
 
 /**
@@ -515,7 +497,7 @@ const EMPTY_MD5 = '';
  */
 function buildAigcLabel(): { xmp: string } {
   const producer = 'JiuwenSwarm';
-  const produceId = generateUuid();
+  const produceId = generateUuidV4();
   const payload = {
     Label: '1',
     ContentProducer: producer,

@@ -317,8 +317,15 @@ def _format_skills_for_llm(skills: list[dict[str, Any]]) -> str:
     for s in skills:
         name = s.get("name", "")
         desc = (s.get("description", "") or "")[:80]
-        installed = " [已安装]" if s.get("installed") else ""
-        lines.append(f"- {name} | {desc}{installed}")
+        installed = s.get("installed", False)
+        source = s.get("source", "")
+        if installed:
+            status = "[已安装]"
+        elif source == "builtin":
+            status = "[未安装·内置技能]"
+        else:
+            status = "[未安装]"
+        lines.append(f"- {name} | {desc} {status}")
     return "\n".join(lines) if lines else "（无候选 skill）"
 
 

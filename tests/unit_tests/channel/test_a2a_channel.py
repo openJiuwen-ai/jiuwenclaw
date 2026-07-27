@@ -231,6 +231,28 @@ def test_dispatch_a2a_request_and_send_queue_roundtrip():
     asyncio.run(_run())
 
 
+def test_dispatch_a2a_request_defaults_metadata_to_empty_dict():
+    """A2A ingress must not leave Message.metadata as None (breaks MessageHandler)."""
+    channel = build_channel()
+    seen = []
+
+    async def on_message(msg: Message):
+        seen.append(msg)
+
+    async def _run():
+        channel.on_message(on_message)
+        await channel.dispatch_a2a_request(
+            request_id="req-empty-md",
+            session_id="sess-empty-md",
+            query="hello",
+        )
+
+        assert len(seen) == 1
+        assert seen[0].metadata == {}
+
+    asyncio.run(_run())
+
+
 def test_a2a_channel_start_serves_agent_card():
     pytest.importorskip("a2a.types")
     httpx = pytest.importorskip("httpx")

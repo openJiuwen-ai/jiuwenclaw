@@ -1110,13 +1110,15 @@ class WebChannel(BaseWsChannel):
         )
         session_id = _explicit_session_id if has_explicit_session else self._make_session_id()
 
-        # 追踪 ws → session_id 映射，用于断连时清理
-        ws_id = id(ws)
-        sessions = self._ws_sessions.get(ws_id)
-        if sessions is None:
-            sessions = set()
-            self._ws_sessions[ws_id] = sessions
-        sessions.add(session_id)
+        # 追踪 ws → 真实 session_id，用于断连清理/日志。
+        # 与 register_ws 一致：仅显式 session 入集；临时 id 只供 Message 构造，避免膨胀。
+        if has_explicit_session:
+            ws_id = id(ws)
+            sessions = self._ws_sessions.get(ws_id)
+            if sessions is None:
+                sessions = set()
+                self._ws_sessions[ws_id] = sessions
+            sessions.add(session_id)
 
         params = await self._process_files(params)
 

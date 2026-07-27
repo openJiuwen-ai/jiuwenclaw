@@ -87,6 +87,68 @@ class FakeHeartbeatService:
         return dict(self.config)
 
 
+@pytest.mark.asyncio
+async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = FakeWebChannel()
+    agent_client = object()
+    saved_configs: list[dict] = []
+    lifecycle_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_browser_in_config",
+        lambda config: saved_configs.append(config),
+    )
+
+    async def fake_clear(client):
+        lifecycle_calls.append(("reload", client))
+
+    async def fake_restart(client):
+        lifecycle_calls.append(("restart", client))
+
+    monkeypatch.setattr(app_web_handlers, "_clear_agent_config_cache", fake_clear)
+    monkeypatch.setattr(
+        app_web_handlers,
+        "_restart_agent_browser_runtime",
+        fake_restart,
+    )
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["path.set"](
+        object(),
+        "req-path",
+        {"chrome_path": " C:\\Chrome\\chrome.exe ", "headless": False},
+        "sess-1",
+    )
+
+    assert saved_configs == [
+        {"chrome_path": "C:\\Chrome\\chrome.exe", "headless": False}
+    ]
+    assert lifecycle_calls == [
+        ("reload", agent_client),
+        ("restart", agent_client),
+    ]
+    assert channel.responses[-1] == {
+        "id": "req-path",
+        "ok": True,
+        "payload": {
+            "chrome_path": "C:\\Chrome\\chrome.exe",
+            "headless": False,
+        },
+        "error": None,
+        "code": None,
+    }
+
+
+class FakeUpdaterService:
+    def get_runtime_config(self):
+        return {"release_api_type": "gitcode", "release_api_url": ""}
+
+
 @pytest.fixture
 def cleared_openai_account_login_jobs():
     with app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
@@ -176,6 +238,25 @@ async def test_openai_account_models_list_returns_refreshed_auth_status(
             "base_url": "https://chatgpt.com/backend-api/codex",
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_updater_reset_source_registered_and_restores_defaults(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_update_updater_in_config(updates):
+        captured.update(updates)
+
+    monkeypatch.setattr(app_web_handlers, "update_updater_in_config", fake_update_updater_in_config)
+
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, updater_service=FakeUpdaterService()))
+
+    await channel.methods["updater.reset_source"](object(), "req-reset", {}, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"] == {"release_api_type": "gitcode", "release_api_url": ""}
+    assert captured == app_web_handlers.DEFAULT_SOURCE_CONFIG
 
 
 @pytest.mark.asyncio
@@ -381,6 +462,83 @@ async def test_config_set_reports_saved_when_hot_reload_callback_fails(monkeypat
             "code": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_config_set_persists_setup_guide_without_runtime_reload(monkeypatch):
+    channel = FakeWebChannel()
+    persisted: list[bool] = []
+    reload_options_seen: list[dict] = []
+
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config_raw",
+        lambda: {"setup_guide": {"enabled": True}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"setup_guide": {"enabled": False}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_setup_guide_enabled_in_config",
+        lambda enabled: persisted.append(enabled),
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        del updated_keys, env_updates, config_payload
+        reload_options_seen.append(dict(reload_options))
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-setup-guide",
+        {"setup_guide_enabled": "false"},
+        "sess-setup-guide",
+    )
+
+    assert persisted == [False]
+    assert reload_options_seen == [{
+        "target_channel_id": "web",
+        "reload_scopes": ["web_ui"],
+    }]
+    assert channel.responses[-1]["payload"] == {
+        "updated": ["setup_guide_enabled"],
+        "applied_without_restart": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_config", "expected"),
+    [
+        ({}, "true"),
+        ({"setup_guide": {"enabled": False}}, "false"),
+    ],
+)
+async def test_config_get_returns_setup_guide_switch(monkeypatch, raw_config, expected):
+    channel = FakeWebChannel()
+    monkeypatch.setattr(app_web_handlers, "get_config_raw", lambda: raw_config)
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: raw_config)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["config.get"](
+        object(),
+        "req-get-setup-guide",
+        {},
+        "sess-get-setup-guide",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["setup_guide_enabled"] == expected
 
 
 @pytest.mark.asyncio

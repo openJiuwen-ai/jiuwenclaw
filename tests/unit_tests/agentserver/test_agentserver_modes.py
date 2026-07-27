@@ -493,6 +493,50 @@ def test_build_inputs_preserves_original_request_on_ask_user_answers(monkeypatch
     }
 
 
+def test_build_inputs_merges_multi_select_custom_input(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-answer",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "tool-ask-1",
+            "source": "ask_user_interrupt",
+            "answers": [
+                {
+                    "question": "启用哪些模块？",
+                    "selected_options": ["auth", "Other"],
+                    "custom_input": "metrics",
+                },
+                {
+                    "question": "还有其他需求吗？",
+                    "selected_options": ["Other"],
+                    "custom_input": "tracing",
+                },
+            ],
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-1": {
+            "answers": {
+                "启用哪些模块？": ["auth", "metrics"],
+                "还有其他需求吗？": "tracing",
+            }
+        }
+    }
+
+
 def test_chat_answer_routes_team_plan_confirm_interrupt_to_adapter(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 

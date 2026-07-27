@@ -586,7 +586,9 @@ def restore_session_files(
             if info["action"] == "write":
                 # 文件在目标 turn 前已有内容，写回 old_content
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(info["restore_content"], encoding="utf-8")
+                path.write_text(
+                    info["restore_content"], encoding="utf-8", newline=""
+                )
                 restored.append(file_path)
             elif info["action"] == "delete":
                 # 文件由 agent 在目标 turn 后创建，删除
@@ -901,6 +903,37 @@ async def rewind_session_context(
     try:
         session.update_state({"context": None})
         session.update_state({_SESSION_STATE_KEY: None})
+        # Clear persisted HITL tool-interrupt state.  When a turn is cancelled
+        # mid-tool (e.g. user ESC'd an ask_user prompt), the SDK persists the
+        # pending interrupt under INTERRUPTION_KEY via _hitl_handler.save().
+        # rewind truncates history.json and rebuilds context_engine, but if we
+        # leave INTERRUPTION_KEY in the checkpoint, the next chat.send loads it
+        # in react_agent.invoke() (hitl_state = self._hitl_handler.load(session))
+        # and treats the new user message as the resume answer for the OLD
+        # interrupted tool_call — replaying the cancelled tool and swallowing
+        # the new question.  Wipe it here so the rebuilt session starts clean.
+        try:
+            from openjiuwen.core.single_agent.interrupt.state import (
+                INTERRUPTION_KEY,
+                INTERRUPT_AUTO_CONFIRM_KEY,
+            )
+            session.update_state({INTERRUPTION_KEY: None})
+            session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: None})
+        except Exception as int_exc:
+            logger.warning(
+                "rewind_session_context: HITL interrupt wipe failed for %s: %s",
+                session_id, int_exc,
+            )
+        # Best-effort in-memory clear via the handler too (defence-in-depth).
+        try:
+            hitl_handler = getattr(react_agent, "_hitl_handler", None)
+            if hitl_handler is not None:
+                hitl_handler.clear(session)
+        except Exception as int_exc:
+            logger.warning(
+                "rewind_session_context: in-memory HITL clear failed for %s: %s",
+                session_id, int_exc,
+            )
     except Exception as exc:
         logger.warning("rewind_session_context: state wipe failed for %s: %s", session_id, exc)
 

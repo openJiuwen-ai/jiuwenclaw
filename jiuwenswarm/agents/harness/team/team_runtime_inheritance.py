@@ -213,9 +213,10 @@ def build_member_rails(
             logger.warning("[TeamRuntime] StructuredAskUserRail failed: %s", exc)
 
     try:
-        rail = TaskPlanningRail()
-        rails_list.append(rail)
-        logger.info("[TeamRuntime] TaskPlanningRail created")
+        if role != "leader":
+            rail = TaskPlanningRail()
+            rails_list.append(rail)
+            logger.info("[TeamRuntime] TaskPlanningRail created")
     except Exception as exc:
         logger.warning("[TeamRuntime] TaskPlanningRail failed: %s", exc)
 

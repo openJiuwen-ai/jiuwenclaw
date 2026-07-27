@@ -8,10 +8,16 @@ import {
   getPlanApprovalListLayout,
   getPlanRejectFeedbackHint,
   isPlanApprovalRequest,
+  renderWrappedQuestionOptions,
+  shouldCaptureTerminalMouse,
   shouldAppendPlanRejectFeedback,
   shouldCollectPlanRejectFeedback,
+  wrapPlainText,
 } from "../dist/ui/app-screen.js";
+import { CheckboxList } from "../dist/ui/components/checkbox-list.js";
+import { visibleWidth } from "@mariozechner/pi-tui";
 import { planSwarmflowToggle } from "../dist/core/commands/builtins/swarmflow.js";
+import { buildAppScreenLines } from "../dist/ui/screen-layout.js";
 import {
   canOpenSessionHistory,
   groupWorkflowAgentsByName,
@@ -74,6 +80,154 @@ assert.equal(
   "[ use \x1b[7m \x1b[0mpytest ]",
 );
 assert.deepEqual(getPlanApprovalListLayout(), { minPrimaryColumnWidth: 10, maxPrimaryColumnWidth: 10 });
+
+const narrowQuestionTitle =
+  "[Redis 方案] Redis 接入有三种方案，范围和依赖递增。请根据当前项目选择。";
+const wrappedQuestionTitle = wrapPlainText(narrowQuestionTitle, 30);
+assert.ok(wrappedQuestionTitle.length > 1);
+assert.ok(wrappedQuestionTitle.every((line) => visibleWidth(line) <= 29));
+assert.equal(
+  wrappedQuestionTitle.join("").replace(/\s/g, ""),
+  narrowQuestionTitle.replace(/\s/g, ""),
+);
+
+const wrappedQuestionOptions = renderWrappedQuestionOptions(
+  [
+    {
+      value: "session",
+      label: "方案 A：仅 session",
+      description: "依赖 ioredis 与 express-session，保留完整说明不得截断",
+    },
+    {
+      value: "global",
+      label: "方案 B：全量",
+      description: "增加限流缓存以及额外响应缓存",
+    },
+  ],
+  0,
+  2,
+  36,
+);
+assert.ok(wrappedQuestionOptions.lines.length > 2);
+assert.ok(wrappedQuestionOptions.lines.every((line) => visibleWidth(line) <= 36));
+assert.ok(
+  wrappedQuestionOptions.lines
+    .join("")
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(/\s/g, "")
+    .includes("保留完整说明不得截断"),
+);
+assert.ok(wrappedQuestionOptions.selectedEndIndex > 1);
+
+const narrowCheckboxList = new CheckboxList(
+  [
+    {
+      name: "启用哪些功能模块",
+      items: [
+        {
+          label: "auth",
+          value: "auth",
+          checked: false,
+          description: "认证模块，处理用户登录、权限验证以及完整审计记录",
+        },
+      ],
+    },
+  ],
+  1,
+);
+const narrowCheckboxLines = narrowCheckboxList.render(32);
+assert.ok(narrowCheckboxLines.every((line) => visibleWidth(line) <= 32));
+assert.ok(
+  narrowCheckboxLines
+    .join("")
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(/\s/g, "")
+    .includes("完整审计记录"),
+);
+
+// A long/scrollable transcript must not capture drag events: users should be
+// able to select and copy completed responses with the terminal's native UI.
+assert.equal(shouldCaptureTerminalMouse(false, false), false);
+assert.equal(shouldCaptureTerminalMouse(true, false), true);
+assert.equal(shouldCaptureTerminalMouse(false, true), true);
+
+const teamSnapshot = {
+  connectionStatus: "connected",
+  sessionId: "team-session",
+  mode: "code.normal",
+  themeName: "default",
+  accentColor: "blue",
+  transcriptMode: "compact",
+  transcriptFoldMode: "none",
+  collapsedToolGroupIds: new Set(),
+  entries: [],
+  toolExecutions: [],
+  streamingState: "idle",
+  pendingQuestion: null,
+  lastError: null,
+  isProcessing: false,
+  cancellableWork: false,
+  isPaused: false,
+  isInterrupted: false,
+  activeSubtasks: [],
+  todos: [],
+  teamMemberEvents: [
+    {
+      id: "member-ready",
+      type: "team.member.status_changed",
+      teamId: "team-1",
+      memberId: "member-1",
+      newStatus: "idle",
+      timestamp: Date.now(),
+    },
+  ],
+  teamTaskEvents: [],
+  teamMessageEvents: [],
+  workflowRuns: [],
+  pendingHumanPrompts: new Map(),
+  evolutionStatus: "idle",
+  contextCompression: null,
+  contextWindowLimit: null,
+  contextUsedPercentage: null,
+  modelInfo: { provider: "", model: "", version: "" },
+  preferredLanguage: "zh",
+  sessionTitle: "",
+  statusLineText: null,
+  memoryWarnings: [],
+  runningCommand: null,
+  streamStalled: false,
+  streamIdleMs: null,
+  currentQueryUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+  btwOverlay: null,
+  btwOverlayIndex: -1,
+  btwOverlayTotal: 0,
+  btwActive: false,
+};
+const teamLayoutOptions = {
+  width: 80,
+  questionLines: [],
+  editorLines: [],
+  composerPreviewLines: [],
+  showFullThinking: false,
+  showToolDetails: false,
+  showShortcutHelp: false,
+  todosCollapsed: false,
+  showTeamPanel: false,
+  selectedTeamMemberId: "member-1",
+  viewedTeamMemberId: null,
+  transientNotice: null,
+  animationPhase: 0,
+  overlayTranscriptLines: [],
+};
+const collapsedTeamLines = buildAppScreenLines(teamSnapshot, teamLayoutOptions);
+assert.equal(collapsedTeamLines.some((line) => line.includes("teammate")), false);
+assert.equal(collapsedTeamLines.some((line) => line.includes("Member 1")), false);
+
+const expandedTeamLines = buildAppScreenLines(teamSnapshot, {
+  ...teamLayoutOptions,
+  showTeamPanel: true,
+});
+assert.equal(expandedTeamLines.some((line) => line.includes("teammate")), true);
 
 const slashCommands = AppScreen.prototype.buildSlashCommands.call({
   commands: {
@@ -162,6 +316,134 @@ assert.equal(pendingQuestionExitCount, 0);
 // render depending on the list handler, but it must not interrupt or exit.
 assert.ok(pendingQuestionInterruptCount === 2 && pendingQuestionExitCount === 0);
 console.log("ctrl+d render requests:", pendingQuestionRenderCount - renderCountBeforeCtrlD);
+
+async function submitMultiSelectOther(selectedValues, customInput) {
+  const submitted = [];
+  const pendingQuestion = {
+    requestId: "multi-select-other",
+    source: "ask_user_interrupt",
+    questions: [
+      {
+        header: "Modules",
+        question: "Which modules?",
+        multiSelect: true,
+        options: [
+          { label: "auth" },
+          { label: "log" },
+          { label: "Other" },
+        ],
+      },
+    ],
+  };
+  const screen = Object.create(AppScreen.prototype);
+  Object.assign(screen, {
+    activeQuestionIndex: 0,
+    pendingQuestionAnswers: new Map(),
+    pendingMultiSelectAnswers: new Map(),
+    pendingQuestionCustomInputs: new Map(),
+    questionList: null,
+    questionCheckboxList: { handleInput: () => undefined },
+    otherInputMode: false,
+    configEditorState: null,
+    modelList: null,
+    composerAttachments: [],
+    expandPastedText: (text) => text,
+    buildOutgoingMessage: (text) => ({ content: text, attachments: [] }),
+    setMouseTrackingEnabled: () => undefined,
+    syncEditorSubmitState: () => undefined,
+    editor: { setText: () => undefined },
+    state: {
+      recordActivity: () => undefined,
+      getSnapshot: () => ({ pendingQuestion }),
+      submitQuestionAnswers: (answers) => submitted.push(answers),
+    },
+    tui: { requestRender: () => undefined },
+  });
+
+  screen.handleMultiSelectConfirm(selectedValues);
+  assert.equal(screen.otherInputMode, true);
+  assert.equal(screen.questionCheckboxList, null);
+  assert.equal(submitted.length, 0);
+
+  await screen.handleSubmit(customInput);
+  return submitted[0];
+}
+
+assert.deepEqual(
+  await submitMultiSelectOther(["Other"], "metrics"),
+  [
+    {
+      question: "Which modules?",
+      selected_options: ["Other"],
+      custom_input: "metrics",
+    },
+  ],
+);
+assert.deepEqual(
+  await submitMultiSelectOther(["auth", "Other"], "metrics"),
+  [
+    {
+      question: "Which modules?",
+      selected_options: ["auth", "Other"],
+      custom_input: "metrics",
+    },
+  ],
+);
+
+// No "Other" selected: must not enter the free-text input mode, and must submit
+// immediately without a custom_input field.
+function submitMultiSelectNoOther(selectedValues) {
+  const submitted = [];
+  const pendingQuestion = {
+    requestId: "multi-select-no-other",
+    source: "ask_user_interrupt",
+    questions: [
+      {
+        header: "Modules",
+        question: "Which modules?",
+        multiSelect: true,
+        options: [{ label: "auth" }, { label: "log" }, { label: "Other" }],
+      },
+    ],
+  };
+  const screen = Object.create(AppScreen.prototype);
+  Object.assign(screen, {
+    activeQuestionIndex: 0,
+    pendingQuestionAnswers: new Map(),
+    pendingMultiSelectAnswers: new Map(),
+    pendingQuestionCustomInputs: new Map(),
+    questionList: null,
+    questionCheckboxList: { handleInput: () => undefined },
+    otherInputMode: false,
+    configEditorState: null,
+    modelList: null,
+    composerAttachments: [],
+    expandPastedText: (text) => text,
+    buildOutgoingMessage: (text) => ({ content: text, attachments: [] }),
+    setMouseTrackingEnabled: () => undefined,
+    syncEditorSubmitState: () => undefined,
+    syncQuestionList: () => undefined,
+    editor: { setText: () => undefined },
+    state: {
+      recordActivity: () => undefined,
+      getSnapshot: () => ({ pendingQuestion }),
+      submitQuestionAnswers: (answers) => submitted.push(answers),
+    },
+    tui: { requestRender: () => undefined },
+  });
+
+  screen.handleMultiSelectConfirm(selectedValues);
+  assert.equal(screen.otherInputMode, false);
+  assert.equal(submitted.length, 1);
+  return submitted[0];
+}
+
+assert.deepEqual(submitMultiSelectNoOther(["auth", "log"]), [
+  {
+    question: "Which modules?",
+    selected_options: ["auth", "log"],
+  },
+]);
 
 const agent = (name, node_type, correlation_id, id = `${name}-${node_type ?? "plain"}-${correlation_id ?? "none"}`) => ({
   id,

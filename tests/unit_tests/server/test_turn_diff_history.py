@@ -155,7 +155,7 @@ def test_get_turn_diffs_reads_extra_history_roots(tmp_path, monkeypatch):
     team_hist = team_root / ".agent_history"
     team_hist.mkdir(parents=True)
     target_file = project_root / "team_file.py"
-    internal_file = tmp_path / ".agent_teams" / "unit-team" / "workspaces" / "worker_workspace" / "notes.md"
+    session_file = tmp_path / ".agent_teams" / "unit-team" / "sessions" / "sess-1" / "state.json"
     (team_hist / "file_ops_jiuwen_team_unit_worker_sess-1.json").write_text(
         json.dumps(
             {
@@ -167,7 +167,7 @@ def test_get_turn_diffs_reads_extra_history_roots(tmp_path, monkeypatch):
                         "new_content": "old\nnew\n",
                     },
                 ],
-                str(internal_file): [
+                str(session_file): [
                     {
                         "action": "write",
                         "timestamp": _ts(1784542850.0),
@@ -201,10 +201,71 @@ def test_get_turn_diffs_reads_extra_history_roots(tmp_path, monkeypatch):
 
     assert len(turns) == 1
     expected_path = str(target_file.resolve())
-    internal_path = str(internal_file.resolve())
+    session_path = str(session_file.resolve())
     assert expected_path in turns[0]["files"]
-    assert internal_path not in turns[0]["files"]
+    assert session_path in turns[0]["files"]
     assert turns[0]["files"][expected_path]["linesAdded"] == 1
+
+
+def test_get_turn_diffs_keeps_default_team_workspace_deliverables(tmp_path, monkeypatch):
+    """默认 .agent_teams/team-workspace 下的 file_ops 条目都应进入 last-turn。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    team_root = tmp_path / ".agent_teams" / "unit-team" / "team-workspace"
+    team_hist = team_root / ".agent_history"
+    team_hist.mkdir(parents=True)
+    deliverable = team_root / "poem-tang.md"
+    bookkeeping = team_root / ".jiuwen" / "state.json"
+    (team_hist / "file_ops_leader_sess-1.json").write_text(
+        json.dumps(
+            {
+                str(deliverable): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": None,
+                        "new_content": "spring rain\n",
+                    },
+                ],
+                str(bookkeeping): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": None,
+                        "new_content": "{}\n",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs(
+            "sess-1",
+            str(project_root),
+            extra_history_roots=[str(team_root)],
+        )
+
+    expected_path = str(deliverable.resolve())
+    bookkeeping_path = str(bookkeeping.resolve())
+    assert len(turns) == 1
+    assert expected_path in turns[0]["files"]
+    assert bookkeeping_path in turns[0]["files"]
+    assert turns[0]["files"][expected_path]["isNewFile"] is True
 
 
 def test_get_turn_diffs_maps_project_worktree_file_ops_to_repo_root(tmp_path, monkeypatch):
@@ -932,6 +993,53 @@ def test_get_session_extra_history_roots_sanitizes_manual_session_worktree(tmp_p
     assert str(tmp_path / "team-home" / "sessions" / "sess_1_bad" / "worktrees") in roots
 
 
+def test_get_session_extra_history_roots_adds_spawned_member_workspaces(tmp_path):
+    history = [
+        {
+            "role": "assistant",
+            "extra": {
+                "event": {
+                    "type": "team.member.spawned",
+                    "name": "poet-song",
+                    "member_id": "poet-song-id",
+                }
+            },
+        }
+    ]
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={
+                "team_name": "unit-team",
+                "team_file_monitor_roots": [
+                    str(tmp_path / ".agent_teams" / "unit-team" / "team-workspace"),
+                ],
+            },
+        ),
+        patch(
+            "jiuwenswarm.server.runtime.session.session_history.load_history_records",
+            return_value=history,
+        ),
+        patch(
+            "openjiuwen.agent_teams.paths.team_home",
+            return_value=tmp_path / "team-home",
+        ),
+        patch(
+            "openjiuwen.agent_teams.paths.independent_member_workspace",
+            side_effect=lambda name: tmp_path / "independent" / f"{name}_workspace",
+        ),
+    ):
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            get_session_extra_history_roots,
+        )
+
+        roots = get_session_extra_history_roots("sess-1")
+
+    assert str(tmp_path / ".agent_teams" / "unit-team" / "workspaces" / "poet-song_workspace") in roots
+    assert str(tmp_path / "team-home" / "workspaces" / "poet-song_workspace") in roots
+    assert str(tmp_path / "independent" / "poet-song_workspace") in roots
+
+
 def test_is_valid_file_ops_file_uses_suffix_match():
     """session_id 后缀匹配,避免子串误匹配其他 session 的 file_ops 文件。"""
     service = DiffService()
@@ -1200,6 +1308,53 @@ def test_diff_status_falls_back_to_last_turn_when_git_not_found():
     assert result["current"] is None
     assert result["last_turn"] is not None
     assert "file_b.py" in result["last_turn"]["files"]
+
+
+def test_diff_status_uses_turn_summaries_for_last_turn_snapshot_fallback():
+    snapshot_turn = {
+        "turnIndex": 3,
+        "timestamp": _ts(1784543000.0),
+        "userPromptPreview": "snapshot only",
+        "stats": {"filesChanged": 1, "linesAdded": 7, "linesRemoved": 2},
+        "files": {
+            "/proj/from_snapshot.py": {
+                "linesAdded": 7,
+                "linesRemoved": 2,
+                "isNewFile": True,
+            },
+        },
+        "change_set_id": "cs-snapshot",
+        "request_id": "req-snapshot",
+        "assistant_message_id": "req-snapshot:assistant",
+        "user_message_id": "req-snapshot:user",
+        "status": "completed",
+    }
+    with (
+        patch.object(DiffService, "get_git_diff", return_value={}),
+        patch.object(DiffService, "get_turn_diffs", return_value=[]) as full_diffs,
+        patch.object(
+            DiffService,
+            "get_turn_diff_summaries",
+            return_value=[snapshot_turn],
+        ) as summaries,
+    ):
+        result = DiffStatusService.get_project_diff_status(
+            project=_PROJECT,
+            session_id="sess-1",
+            include_files=False,
+            include_hunks=False,
+        ).to_dict(include_hunks=False)
+
+    full_diffs.assert_not_called()
+    summaries.assert_called_once()
+    assert result["last_turn"] is not None
+    assert result["last_turn"]["change_set_id"] == "cs-snapshot"
+    assert result["last_turn"]["stats"] == {
+        "files_changed": 1,
+        "lines_added": 7,
+        "lines_removed": 2,
+    }
+    assert result["last_turn"]["files"] == {}
 
 
 def test_turn_diff_list_falls_back_when_not_git_repository():
