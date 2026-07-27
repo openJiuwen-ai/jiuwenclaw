@@ -1859,6 +1859,7 @@ class DiffService:
         #    否则文件会永久失去回滚能力。
         agent_history = self._read_agent_history(
             session_id, project_dir, include_rewound=True,
+            extra_history_roots=extra_history_roots,
         )
 
         # 3. 对于每个文件，找到第一条 timestamp >= target_timestamp 的 entry
