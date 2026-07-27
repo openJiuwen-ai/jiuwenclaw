@@ -23,20 +23,6 @@ export interface CronJobDTO {
   model_name?: string;
 }
 
-/** create/update 请求体；project_dir 而非 project_id，见 CronController.create_job */
-export interface CronJobUpsertParams {
-  name: string;
-  cron_expr: string;
-  timezone: string;
-  enabled: boolean;
-  description: string;
-  targets: string;
-  wake_offset_seconds?: number;
-  model_name?: string;
-  project_dir?: string;
-  mode?: string;
-}
-
 /** UI 层展示用结构，来自 CronJobDTO 派生（见 cronJobToUI） */
 export interface CronTaskUI {
   id: string;
@@ -45,7 +31,7 @@ export interface CronTaskUI {
   projectName: string | null;
   description: string;
   modelName: string | null;
-  /** 执行模式：单Agent('agent')/集群('team')，从后端 mode 归一而来，见 CronPanel/index.tsx cronJobModeToUI */
+  /** 执行模式：单Agent('agent')/集群('team')，从后端 mode 归一而来，见 CronPanel/index.tsx cronJobToUI */
   mode: AgentMode;
   cronExpr: string;
   timezone: string;

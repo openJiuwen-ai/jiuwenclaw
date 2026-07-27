@@ -40,9 +40,7 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
     return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [open]);
 
-  if (availableModels.length === 0) return null;
-
-  const selected = availableModels.find((m) => m.model_name === value) ?? availableModels[0];
+  const selected = availableModels.find((m) => m.model_name === value) ?? null;
 
   const handleTriggerClick = () => {
     if (disabled) return;
@@ -71,14 +69,22 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
         aria-expanded={open}
         data-testid="cron-model-picker"
       >
-        <span className="chat-mode-select__value">
-          <span className="chat-mode-select__icon" aria-hidden="true">
-            <ModelProviderIcon model={selected} />
+        {selected ? (
+          <span className="chat-mode-select__value">
+            <span className="chat-mode-select__icon" aria-hidden="true">
+              <ModelProviderIcon model={selected} />
+            </span>
+            <span className="chat-mode-select__label">
+              {selected.alias || selected.model_name}
+            </span>
           </span>
-          <span className="chat-mode-select__label">
-            {selected.alias || selected.model_name}
+        ) : (
+          <span className="chat-mode-select__value">
+            <span className="chat-mode-select__label text-text-muted">
+              {t('cron.drawer.placeholderSelect')}
+            </span>
           </span>
-        </span>
+        )}
         {!disabled && (
           <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
@@ -96,7 +102,11 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
             : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
           }
         >
-          <div className="model-select__section-header">{t('cron.modelPicker.configured')}</div>
+          {availableModels.length === 0 ? (
+            <div className="px-2 py-2 text-xs text-text-muted">{t('cron.modelPicker.empty')}</div>
+          ) : (
+            <div className="model-select__section-header">{t('cron.modelPicker.configured')}</div>
+          )}
           {availableModels.map((m) => {
             const key = m.model_name;
             const active = key === value;

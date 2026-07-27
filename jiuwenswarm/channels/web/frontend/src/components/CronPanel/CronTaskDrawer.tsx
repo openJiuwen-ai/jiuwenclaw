@@ -262,7 +262,10 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
                 输入框那种"输入区 + 底部工具栏"结构——pill 直接贴在 textarea 下沿，
                 不再是独立一块浮在描述框下方、中间留一大段空隙。容器用 fieldClass 的
                 边框/背景，textarea 去掉自己的边框只保留内边距，视觉上连成一片。 */}
-            <div className={`${fieldClass} flex flex-col gap-2 p-0`}>
+            {/* fieldClass 自带的 focus:border-accent 对这个容器 div 本身不会触发（div 不可聚焦）；
+                额外加 focus-within:border-accent，textarea 获得焦点时通过子元素状态高亮容器边框，
+                避免用户聚焦描述框时完全没有视觉反馈（见 review G3）。 */}
+            <div className={`${fieldClass} focus-within:border-accent flex flex-col gap-2 p-0`}>
               <textarea
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
