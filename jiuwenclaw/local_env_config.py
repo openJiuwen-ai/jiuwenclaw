@@ -58,6 +58,8 @@ SPAWN_ENV_KEYS: frozenset[str] = frozenset(
         "OTEL_LOG_MESSAGES",
         "PATH",
         "AGENT_RUNTIME",
+        # launchEnv / config.yaml ${EXTENSION_DIRS}; process-shared (relay RELAYCLAW_SHARED_ENV_KEYS TBD).
+        "EXTENSION_DIRS",
     }
 )
 
@@ -79,7 +81,6 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
         "ENABLED_SKILLS",
         "DISABLED_SKILLS",
         "JIUWENCLAW_DISABLED_SKILLS",
-        "JIUWENCLAW_RUNTIME_SKILLS_DIR",
         "JIUWENCLAW_SHARED_SKILLS_DIRS",
         "BOCHA_API_KEY",
         "JINA_API_KEY",
@@ -282,6 +283,19 @@ def effective_tip(
     return merged
 
 
+def _invalidate_resolved_config_cache(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """Drop get_config() resolved cache for this ns (lazy import avoids cycle)."""
+    try:
+        from jiuwenclaw.config import clear_config_cache
+    except ImportError as e:
+        logger.debug("clear_config_cache unavailable during import: %s", e)
+        return
+    clear_config_cache(service_id=service_id, agent_id=agent_id)
+
+
 def stage_env_overrides(
     env_overrides: dict[str, Any] | None,
     *,
@@ -326,6 +340,7 @@ def promote_staged_env(
             active[name] = value
             _set_ns_os(sid, aid, name, value)
     _staged_bags.pop(key, None)
+    _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
 # Incremental reload must not seal empty model credentials into tip (OfficeClaw
@@ -369,6 +384,7 @@ def apply_env_overrides_to_active(
                 continue
             active[name] = value
             _set_ns_os(sid, aid, name, value)
+    _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
 def replace_active_env(
@@ -400,6 +416,7 @@ def replace_active_env(
         _set_ns_os(sid, aid, name, value)
     if clear_staged:
         _staged_bags.pop(key, None)
+    _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
 def clear_agent_env_ns(service_id: str, agent_id: str) -> None:
@@ -434,6 +451,7 @@ def apply_env_removals(
         # Legacy bare-key cleanup only for default/default (Gateway .env compat).
         if sid == "default" and aid == "default":
             os.environ.pop(name, None)
+    _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
 def build_effective_env_overlay(
@@ -865,3 +883,4 @@ def reset_local_env_state_for_tests() -> None:
     # Best-effort: cannot fully reset ContextVar without tokens; set unbound.
     _task_env_overlay.set(_UNBOUND)
     _agent_env_ns.set(None)
+    _invalidate_resolved_config_cache()
