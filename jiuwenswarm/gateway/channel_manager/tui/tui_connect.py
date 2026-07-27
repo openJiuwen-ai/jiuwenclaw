@@ -2197,7 +2197,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["intent"] = intent
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
-    async def _tui_disconnect_request(ws, req_id, params, session_id):
+    async def _tui_disconnect_request(
+        ws,
+        req_id,
+        params,
+        session_id,
+        user_id=None,
+    ):
         payload = {"accepted": True, "session_id": session_id}
         try:
             await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -2211,7 +2217,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if callable(is_bound_to_client):
             owns_session = bool(is_bound_to_client("tui", sid, ws))
         if mh is not None and sid and owns_session:
-            cleaned = await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+            disconnect_user_id = str(
+                user_id or getattr(ws, "_gateway_user_id", None) or ""
+            ).strip() or None
+            cleaned = await mh.cancel_agent_sessions_on_disconnect(
+                [("tui", sid)],
+                user_id=disconnect_user_id,
+            )
             if not cleaned:
                 logger.warning(
                     "[tui.disconnect] immediate cleanup failed; "
@@ -3322,13 +3334,21 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         request_keys = stale_request_keys or []
         if not stale_session_keys and not request_keys:
             return
+        disconnect_user_id = str(
+            getattr(_ws, "_gateway_user_id", None) or ""
+        ).strip() or None
         if hasattr(mh, "schedule_cancel_agent_sessions_on_disconnect"):
             await mh.schedule_cancel_agent_sessions_on_disconnect(
                 stale_session_keys,
                 stale_request_keys=request_keys,
+                user_id=disconnect_user_id,
             )
             return
-        await mh.cancel_agent_sessions_on_disconnect(stale_session_keys, stale_request_keys=request_keys)
+        await mh.cancel_agent_sessions_on_disconnect(
+            stale_session_keys,
+            stale_request_keys=request_keys,
+            user_id=disconnect_user_id,
+        )
 
     def _tui_session_bound(channel_id: str, session_id: str) -> None:
         mh = bind.message_handler
