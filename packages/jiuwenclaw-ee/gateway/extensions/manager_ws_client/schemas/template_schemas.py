@@ -1,11 +1,79 @@
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Annotated, Any
+from urllib.parse import urlparse
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from croniter import croniter
+from pydantic import (
+    AfterValidator,
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    model_validator,
+)
+
+from .safe_text import SafeTextMixin
 
 
-class ModelTemplateUpdateRequest(BaseModel):
+# croniter：5 段标准；6 段末尾为秒；7 段为 分 时 日 月 周 秒 年
+_CRON_FIELD_COUNTS = frozenset({5, 6, 7})
+
+
+def is_valid_hook_schedule(value: str) -> bool:
+    """用 croniter 校验 hook_config.schedule（含字段取值范围）。"""
+    text = value.strip()
+    if not text:
+        return False
+    if len(text.split()) not in _CRON_FIELD_COUNTS:
+        return False
+    return croniter.is_valid(text)
+
+
+def normalize_hook_schedule(schedule: str | None, *, required: bool) -> str | None:
+    """规范化 schedule；required 时不可为空，有值时须为合法 cron。"""
+    text = (schedule or "").strip()
+    if not text:
+        if required:
+            raise ValueError("hook_config.schedule is required when hook_type=schedule")
+        return None
+    if not is_valid_hook_schedule(text):
+        raise ValueError(
+            "hook_config.schedule must be a valid cron expression "
+            "(5/6/7 fields via croniter, e.g. '0 */5 * * *' or '0 0 */5 * * *')"
+        )
+    return text
+
+
+def _validate_http_url(value: str) -> str:
+    """校验为合法 http(s) URL（须含主机）。"""
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("must be a valid http(s) URL")
+    return value
+
+
+SkillSourceUrl = Annotated[
+    str,
+    Field(min_length=1, max_length=2048),
+    AfterValidator(_validate_http_url),
+]
+
+
+class HookConfig(BaseModel):
+    """扩展模板 hook_config 结构（与设计文档一致）。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    handler: str = Field(..., min_length=1)
+    params: dict[str, Any] | None = None
+    schedule: str | None = None
+    data: dict[str, Any] | None = None
+
+
+class ModelTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     model_type: list[str] | None = None
@@ -24,7 +92,7 @@ class ModelTemplateUpdateRequest(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class EmbeddingTemplateUpdateRequest(BaseModel):
+class EmbeddingTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(
         default=None,
         max_length=128,
@@ -42,28 +110,126 @@ class EmbeddingTemplateUpdateRequest(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class ExtensionConfigTemplateUpdateRequest(BaseModel):
+class ExtensionConfigTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     component: str | None = Field(default=None, max_length=32)
     hook_type: str | None = Field(default=None, max_length=32)
-    hook_config: dict[str, Any] | None = None
+    hook_config: HookConfig | None = None
     custom_config: dict[str, Any] | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
 
-class SkillWhitelistTemplateUpdateRequest(BaseModel):
+class SkillWhitelistTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     skill_id: str | None = Field(default=None, max_length=512)
     skill_version: str | None = Field(default=None, max_length=64)
-    skill_source: str | None = Field(default=None, max_length=2048)
+    skill_source: SkillSourceUrl | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
 
-class ServiceConfigTemplateUpdateRequest(BaseModel):
+# 与 Manager / 库表类型上限一致：integer → 有符号 32 位；autoscale_interval → DECIMAL(10,3)
+_SERVICE_INT_MAX = 2_147_483_647
+_SERVICE_DECIMAL_MAX = 9_999_999.999
+
+# K8s resource quantity：CPU 如 500m / 2 / 0.5；内存须带单位 Ki/Mi/Gi/K/M/G
+_K8S_CPU_RE = re.compile(r"^(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)m?$")
+_K8S_MEMORY_RE = re.compile(
+    r"^(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)(?:Ki|Mi|Gi|K|M|G)$"
+)
+
+
+def _normalize_resource_quantity(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _validate_k8s_cpu(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if len(value) > 32:
+        raise ValueError("at most 32 characters")
+    if not _K8S_CPU_RE.fullmatch(value):
+        raise ValueError(
+            "must be a valid Kubernetes CPU quantity (e.g. '500m', '2', '0.5')"
+        )
+    return value
+
+
+def _validate_k8s_memory(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if len(value) > 32:
+        raise ValueError("at most 32 characters")
+    if not _K8S_MEMORY_RE.fullmatch(value):
+        raise ValueError(
+            "must be a Kubernetes memory quantity with unit "
+            "Ki/Mi/Gi/K/M/G (e.g. '512Mi', '2Gi', '128M')"
+        )
+    return value
+
+
+K8sCpuQuantity = Annotated[
+    str | None,
+    BeforeValidator(_normalize_resource_quantity),
+    AfterValidator(_validate_k8s_cpu),
+]
+K8sMemoryQuantity = Annotated[
+    str | None,
+    BeforeValidator(_normalize_resource_quantity),
+    AfterValidator(_validate_k8s_memory),
+]
+
+
+def is_valid_unix_abs_path(value: str) -> bool:
+    """校验绝对 Unix 路径：以 / 开头，禁止 \\、空段、. 与 ..。"""
+    if not value or len(value) > 512:
+        return False
+    if "\0" in value or "\\" in value:
+        return False
+    if not value.startswith("/"):
+        return False
+    if value == "/":
+        return True
+    core = value.rstrip("/")
+    if not core.startswith("/"):
+        return False
+    for segment in core[1:].split("/"):
+        if not segment or segment in (".", ".."):
+            return False
+    return True
+
+
+def _normalize_optional_unix_path(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _validate_optional_unix_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not is_valid_unix_abs_path(value):
+        raise ValueError(
+            "must be an absolute Unix path (e.g. '/mnt/nfs')"
+        )
+    return value
+
+
+OptionalUnixAbsPath = Annotated[
+    str | None,
+    BeforeValidator(_normalize_optional_unix_path),
+    AfterValidator(_validate_optional_unix_path),
+]
+
+
+class ServiceConfigTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     agent_image: str | None = Field(default=None, max_length=512)
@@ -73,31 +239,43 @@ class ServiceConfigTemplateUpdateRequest(BaseModel):
     container_port: int | None = Field(default=None, ge=1, le=65535)
     port_name: str | None = Field(default=None, max_length=64)
     image_pull_policy: str | None = Field(default=None, max_length=32)
-    replicas: int | None = Field(default=None, ge=1)
+    replicas: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
     kubeconfig: str | None = Field(default=None, max_length=512)
     agent_runtime: str | None = Field(default=None, max_length=128)
-    readiness_initial_delay: int | None = Field(default=None, ge=0)
-    readiness_period: int | None = Field(default=None, ge=1)
-    ready_timeout: int | None = Field(default=None, ge=1)
-    ready_poll_interval: int | None = Field(default=None, ge=1)
+    readiness_initial_delay: int | None = Field(default=None, ge=0, le=_SERVICE_INT_MAX)
+    readiness_period: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
+    ready_timeout: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
+    ready_poll_interval: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
     nfs_server: str | None = Field(default=None, max_length=256)
-    nfs_path: str | None = Field(default=None, max_length=512)
-    nfs_mount_path: str | None = Field(default=None, max_length=512)
-    agent_cpu_request: str | None = Field(default=None, max_length=32)
-    agent_memory_request: str | None = Field(default=None, max_length=32)
-    agent_cpu_limit: str | None = Field(default=None, max_length=32)
-    agent_memory_limit: str | None = Field(default=None, max_length=32)
-    jiuwenbox_cpu_request: str | None = Field(default=None, max_length=32)
-    jiuwenbox_memory_request: str | None = Field(default=None, max_length=32)
-    jiuwenbox_cpu_limit: str | None = Field(default=None, max_length=32)
-    jiuwenbox_memory_limit: str | None = Field(default=None, max_length=32)
-    min_idle_services: int | None = Field(default=None, ge=0)
-    max_services: int | None = Field(default=None, ge=1)
-    service_concurrency: int | None = Field(default=None, ge=1)
-    service_ttl: int | None = Field(default=None, ge=1)
-    autoscale_interval: float | None = Field(default=None, gt=0)
-    message_timeout: int | None = Field(default=None, ge=1)
-    session_concurrency: int | None = Field(default=None, ge=1)
-    session_ttl: int | None = Field(default=None, ge=1)
+    nfs_path: OptionalUnixAbsPath = None
+    nfs_mount_path: OptionalUnixAbsPath = None
+    agent_cpu_request: K8sCpuQuantity = None
+    agent_memory_request: K8sMemoryQuantity = None
+    agent_cpu_limit: K8sCpuQuantity = None
+    agent_memory_limit: K8sMemoryQuantity = None
+    jiuwenbox_cpu_request: K8sCpuQuantity = None
+    jiuwenbox_memory_request: K8sMemoryQuantity = None
+    jiuwenbox_cpu_limit: K8sCpuQuantity = None
+    jiuwenbox_memory_limit: K8sMemoryQuantity = None
+    min_idle_services: int | None = Field(default=None, ge=0, le=_SERVICE_INT_MAX)
+    max_services: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
+    service_concurrency: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
+    service_ttl: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
+    autoscale_interval: float | None = Field(
+        default=None, gt=0, le=_SERVICE_DECIMAL_MAX
+    )
+    message_timeout: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
+    session_concurrency: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
+    session_ttl: int | None = Field(default=None, ge=1, le=_SERVICE_INT_MAX)
     enabled: bool | None = None
     data: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_pool_range(self) -> ServiceConfigTemplateUpdateRequest:
+        if (
+            self.min_idle_services is not None
+            and self.max_services is not None
+            and self.min_idle_services > self.max_services
+        ):
+            raise ValueError("min_idle_services must be <= max_services")
+        return self

@@ -246,8 +246,10 @@
     "searchPlaceholder": "Search template ID, name, description, provider, model ID, type, or API base",
     "updatedAt": "UPDATED AT",
     "fieldRequired": "Please fill in {{field}}",
+    "apiBaseInvalid": "API Base must be a valid http(s) URL, e.g. https://api.example.com/v1",
     "timeoutMin": "Timeout must be greater than 0",
     "retryCountMin": "Retry count cannot be negative",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "deleteConfirm": "Delete this model template? It may be referenced by instance policies."
   },
   "embeddingTemplate": {
@@ -269,6 +271,8 @@
     "updatedAt": "UPDATED AT",
     "searchPlaceholder": "Search template ID, name, description, provider, model ID, or API base",
     "fieldRequired": "Please fill in {{field}}",
+    "apiBaseInvalid": "API Base must be a valid http(s) URL, e.g. https://api.example.com/v1",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "deleteConfirm": "Delete this embedding template? It may be referenced by instance policies."
   },
   "extensionTemplate": {
@@ -288,7 +292,8 @@
     "hookParams": "params",
     "hookParamsHint": "Static parameters passed to the hook (JSON)",
     "hookSchedule": "schedule",
-    "hookScheduleHint": "Required when hook type is schedule; cron or interval, e.g. 0 */5 * * *",
+    "hookScheduleHint": "Required when hook type is schedule; cron expression, e.g. 0 */5 * * *",
+    "hookScheduleInvalid": "schedule must be a valid cron (5/6/7 fields with in-range values, e.g. 0 */5 * * *)",
     "hookData": "data",
     "hookDataHint": "Per-hook extension config (JSON)",
     "customConfig": "Custom Config",
@@ -296,6 +301,7 @@
     "updatedAt": "UPDATED AT",
     "searchPlaceholder": "Search template ID, name, description, component, or hook type",
     "fieldRequired": "Please fill in {{field}}",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "deleteConfirm": "Delete this extension template?"
   },
   "skillWhitelistTemplate": {
@@ -314,6 +320,8 @@
     "filterSkillId": "Filter by Skill ID",
     "filterSkillSource": "Filter by Skill Source",
     "fieldRequired": "Please fill in {{field}}",
+    "skillSourceInvalid": "Skill Source must be a valid http(s) URL, e.g. https://skillhub.example.com/",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "deleteConfirm": "Delete this skill whitelist template? It may be referenced by instance policies."
   },
   "serviceConfigTemplate": {
@@ -324,6 +332,12 @@
     "templateName": "Template Name",
     "templateDescription": "Template Description",
     "fieldRequired": "Please fill in {{field}}",
+    "numberOutOfRange": "{{field}} must be between {{min}} and {{max}}",
+    "poolRangeInvalid": "min idle services cannot exceed max services",
+    "cpuQuantityInvalid": "{{field}} must be a valid Kubernetes CPU quantity, e.g. 500m, 2, 0.5",
+    "memoryQuantityInvalid": "{{field}} must include a unit (Ki/Mi/Gi/K/M/G), e.g. 512Mi, 2Gi",
+    "pathInvalid": "{{field}} must be a valid absolute path, e.g. / or /data/nfs",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "searchPlaceholder": "Search template ID, name, description, AgentServer image",
     "agentImage": "AgentServer Image",
     "podName": "Pod Name",

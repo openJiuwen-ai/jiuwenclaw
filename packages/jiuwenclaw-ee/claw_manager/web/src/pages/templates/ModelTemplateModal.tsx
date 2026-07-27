@@ -6,6 +6,8 @@ import { LimitedTextInput } from '../../components/LimitedTextInput';
 import { ModelTemplateApi, ApiError } from '../../services/api';
 import { toast } from '../../stores/uiStore';
 import { fromCommaList, safeStringify, toCommaList } from '../../utils/format';
+import { findUnsafeTextField } from '../../utils/safeText';
+import { isValidHttpUrl } from '../../utils/url';
 import type {
   ModelTemplate,
   ModelTemplateCreateBody,
@@ -176,6 +178,24 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
     const missing = requiredChecks.find((item) => item.invalid);
     if (missing) {
       toast('warn', t('modelTemplate.fieldRequired', { field: missing.label }));
+      return;
+    }
+    if (!isValidHttpUrl(form.api_base)) {
+      toast('warn', t('modelTemplate.apiBaseInvalid'));
+      return;
+    }
+    const unsafeField = findUnsafeTextField([
+      { label: t('modelTemplate.templateName'), value: form.template_name },
+      { label: t('modelTemplate.templateDescription'), value: form.description },
+      { label: t('modelTemplate.modelProvider'), value: form.model_provider },
+      { label: t('modelTemplate.modelId'), value: form.model_id },
+      ...fromCommaList(form.model_tags).map((tag) => ({
+        label: t('modelTemplate.modelTags'),
+        value: tag,
+      })),
+    ]);
+    if (unsafeField) {
+      toast('warn', t('modelTemplate.unsafeText', { field: unsafeField }));
       return;
     }
     if (!Number.isFinite(form.timeout) || form.timeout < 1) {

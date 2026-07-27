@@ -10,6 +10,8 @@ import type {
   EmbeddingTemplateUpdateBody,
 } from '../../types';
 import { fromCommaList, toCommaList } from '../../utils/format';
+import { findUnsafeTextField } from '../../utils/safeText';
+import { isValidHttpUrl } from '../../utils/url';
 
 interface Props {
   open: boolean;
@@ -96,6 +98,23 @@ export function EmbeddingTemplateModal({ open, template, onClose, onSaved }: Pro
         'warn',
         t('embeddingTemplate.fieldRequired', { field: t(`embeddingTemplate.${missing[0]}`) }),
       );
+      return;
+    }
+    if (!isValidHttpUrl(form.api_base)) {
+      toast('warn', t('embeddingTemplate.apiBaseInvalid'));
+      return;
+    }
+    const unsafeField = findUnsafeTextField([
+      { label: t('embeddingTemplate.templateName'), value: form.template_name },
+      { label: t('embeddingTemplate.templateDescription'), value: form.description },
+      { label: t('embeddingTemplate.modelId'), value: form.model_id },
+      ...fromCommaList(form.embed_tags).map((tag) => ({
+        label: t('embeddingTemplate.embedTags'),
+        value: tag,
+      })),
+    ]);
+    if (unsafeField) {
+      toast('warn', t('embeddingTemplate.unsafeText', { field: unsafeField }));
       return;
     }
 
