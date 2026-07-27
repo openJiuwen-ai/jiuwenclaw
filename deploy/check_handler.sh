@@ -307,7 +307,7 @@ check_nfs_up_dependency(){
     local arch=$(uname -m)
 
     if [[ "$arch" =~ ^aarch64 || "$arch" =~ arm ]]; then
-        info "ARM arch unsupported for NFS, abort deployment."
+        error "ARM arch unsupported for NFS, abort deployment."
     fi
 }
 
