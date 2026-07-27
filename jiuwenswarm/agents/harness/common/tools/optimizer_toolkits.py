@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
@@ -22,6 +23,18 @@ from jiuwenswarm.symphony.optimization.config import load_optimization_config
 logger = logging.getLogger(__name__)
 
 _OPTIMIZE_TIMEOUT_S = 1800.0
+
+
+@dataclass
+class OptimizePromptRequest:
+    """Parameters for :meth:`PromptOptimizerToolkit.optimize_prompt`, mirroring the tool's input schema."""
+
+    objective: str
+    cases: list[dict[str, Any]] | None = None
+    constraints: list[str] | None = None
+    base_prompt: str = ""
+    candidate_prompts: int | None = None
+    max_iterations: int | None = None
 
 
 class PromptOptimizerToolkit:
@@ -60,15 +73,8 @@ class PromptOptimizerToolkit:
             return {"success": False, "detail": f"{method}: {exc}"}
         return payload if isinstance(payload, dict) else {"success": True, "result": payload}
 
-    async def optimize_prompt(
-        self,
-        objective: str,
-        cases: list[dict[str, Any]] | None = None,
-        constraints: list[str] | None = None,
-        base_prompt: str = "",
-        candidate_prompts: int | None = None,
-        max_iterations: int | None = None,
-    ) -> dict[str, Any]:
+    async def optimize_prompt(self, **kwargs: Any) -> dict[str, Any]:
+        request = OptimizePromptRequest(**kwargs)
         if not self.is_enabled():
             return {
                 "success": False,
@@ -76,15 +82,15 @@ class PromptOptimizerToolkit:
                 "detail": "Prompt optimizer disabled: symphony.optimization.enabled=false",
             }
         params: dict[str, Any] = {
-            "objective": str(objective or "").strip(),
-            "cases": cases or [],
-            "constraints": constraints or [],
-            "base_prompt": base_prompt or "",
+            "objective": str(request.objective or "").strip(),
+            "cases": request.cases or [],
+            "constraints": request.constraints or [],
+            "base_prompt": request.base_prompt or "",
         }
-        if candidate_prompts:
-            params["candidate_prompts"] = candidate_prompts
-        if max_iterations:
-            params["max_iterations"] = max_iterations
+        if request.candidate_prompts:
+            params["candidate_prompts"] = request.candidate_prompts
+        if request.max_iterations:
+            params["max_iterations"] = request.max_iterations
         return await self._call_rpc("optimizer.optimize", params)
 
     def get_tools(self, config: dict[str, Any] | None = None) -> list[Tool]:
