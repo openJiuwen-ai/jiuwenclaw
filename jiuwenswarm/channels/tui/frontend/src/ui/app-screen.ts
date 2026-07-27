@@ -765,12 +765,87 @@ function fallbackAtFileSuggestions(
   return suggestions.length > 0 ? { items: suggestions, prefix: atPrefix } : null;
 }
 
+/**
+ * 放宽 pi-tui Editor 的行内 slash 补全触发。
+ *
+ * pi-tui 的 `isInSlashCommandContext`（打字母时是否触发 slash 补全）是 private 方法，
+ * 硬编码 `isSlashMenuAllowed()(=cursorLine===0) && trimStart().startsWith("/")`（行首限制）。
+ * private 无法用子类 public 覆盖（TS2415），故用运行时 monkey-patch 直接替换实例方法：
+ * 仍要求光标在第一行，但触发条件放宽为"最后一个 token 以 / 开头"，使行内 `/skill` 也能触发。
+ */
+function patchEditorInlineSlash(editor: Editor): void {
+  const target = editor as unknown as {
+    state: { cursorLine: number; lines: string[]; cursorCol: number };
+    isInSlashCommandContext: (textBeforeCursor: string) => boolean;
+    isAtStartOfMessage: () => boolean;
+  };
+
+  // Patch 1: 打字母时的触发判断
+  target.isInSlashCommandContext = function (textBeforeCursor: string): boolean {
+    if (this.state.cursorLine !== 0) return false;
+    const tokens = textBeforeCursor.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] ?? "";
+    return lastToken.startsWith("/");
+  };
+
+  // Patch 2: 打 `/` 首字符时的触发判断
+  // 放宽为：仍要求第一行，但允许 `/` 前有内容，只要 `/` 是当前 token 的开头。
+  target.isAtStartOfMessage = function (): boolean {
+    if (this.state.cursorLine !== 0) return false;
+    const currentLine = this.state.lines[this.state.cursorLine] || "";
+    const beforeCursor = currentLine.slice(0, this.state.cursorCol);
+    const tokens = beforeCursor.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] ?? "";
+    return lastToken === "/";
+  };
+}
+
 class ComposerAutocompleteProvider implements AutocompleteProvider {
   constructor(
     private readonly inner: AutocompleteProvider,
     private readonly cwd: string,
     private readonly memoryArgCompletion?: (sub: string) => Promise<{ label: string; description: string }[]>,
+    // 行内 skill 补全候选源。
+    // 内层 CombinedAutocompleteProvider 硬编码"行首 /"，
+    // 行内 /skill 不会进它的命令补全分支，故外层自备 skill 列表在行内自行补全。
+    private readonly skillCommands: readonly InstalledSkillEntry[] = [],
   ) {}
+
+  /** 光标前最后一个 token（以空白切分）。 */
+  private static lastToken(textBeforeCursor: string): string {
+    const parts = textBeforeCursor.split(/\s+/);
+    return parts[parts.length - 1] ?? "";
+  }
+
+  /** 是否为"行内 skill 补全"场景：最后 token 形如 /xxx 且它不是整行第一个 token。 */
+  private isInlineSkillContext(textBeforeCursor: string): boolean {
+    const last = ComposerAutocompleteProvider.lastToken(textBeforeCursor);
+    if (!last.startsWith("/")) return false;
+    // 行首（整行只有这一个 token）交给内层库处理；行内才由外层接管。
+    const trimmed = textBeforeCursor.replace(/\s+$/, "");
+    return trimmed.length > last.length;
+  }
+
+  /** 用最后 token 的 / 后缀去 fuzzy 匹配已装 skill，生成候选。 */
+  private inlineSkillSuggestions(textBeforeCursor: string): {
+    items: AutocompleteItem[];
+    prefix: string;
+  } | null {
+    const last = ComposerAutocompleteProvider.lastToken(textBeforeCursor);
+    const term = last.slice(1).toLowerCase(); // 去掉开头 /
+    const matched = this.skillCommands.filter((s) =>
+      s.name.toLowerCase().includes(term),
+    );
+    if (matched.length === 0) return null;
+    return {
+      items: matched.map((s) => ({
+        value: s.name,
+        label: s.name,
+        ...(s.description ? { description: s.description } : {}),
+      })),
+      prefix: last,
+    };
+  }
 
   async getSuggestions(
     lines: string[],
@@ -780,11 +855,23 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
   ) {
     const currentLine = lines[cursorLine] ?? "";
     const textBeforeCursor = currentLine.slice(0, cursorCol);
-    const isCommandNameCompletion =
-      textBeforeCursor.startsWith("/") && !textBeforeCursor.includes(" ");
+    // 命令名补全触发：
+    // 光标前最后一个 token 以 / 开头 → 补全命令+skill 全集（不区分行首/行内）。
+    const tokens = textBeforeCursor.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] ?? "";
+    const isCommandNameCompletion = lastToken.startsWith("/");
 
     if (isCommandNameCompletion && cursorCol !== currentLine.length) {
       return null;
+    }
+
+    // 行内 skill 补全：内层库 CombinedAutocompleteProvider 硬编码"行首 /"（只认整行
+    // 第一个字符是 /），行内 `/xxx` 不会进它的命令补全。外层在此接管行内场景。
+    if (this.isInlineSkillContext(textBeforeCursor)) {
+      const result = this.inlineSkillSuggestions(textBeforeCursor);
+      if (result) {
+        return result;
+      }
     }
 
     // /memory edit|toggle + 空格：直接调用 completion 获取文件/key 列表，绕过 CombinedAutocompleteProvider
@@ -858,10 +945,26 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
   ) {
     const currentLine = lines[cursorLine] ?? "";
     const textBeforeCursor = currentLine.slice(0, cursorCol);
+    // 行首/行内统一：命令或 skill 名补全的 prefix 形如 /xxx（无第二个 /）。
+    // 原逻辑要求整行等于 prefix（强制行首），现改为比较光标前最后一个 token，
+    // 使行内 /skill 也能应用补全。
+    const lastToken = textBeforeCursor.split(/\s+/).pop() ?? "";
     const isCommandNameCompletion = prefix.startsWith("/") && !prefix.slice(1).includes("/");
 
-    if (isCommandNameCompletion && textBeforeCursor !== prefix) {
+    if (isCommandNameCompletion && lastToken !== prefix) {
       return { lines, cursorLine, cursorCol };
+    }
+
+    // 行内 skill 补全应用：内层库 applyCompletion 的 isSlashCommand 要求 /
+    // 前面为空（行首），行内会误走 path 分支。外层在此自行替换最后一个 /token。
+    if (isCommandNameCompletion && this.isInlineSkillContext(textBeforeCursor)) {
+      const before = textBeforeCursor.slice(0, textBeforeCursor.length - lastToken.length);
+      const afterCursor = currentLine.slice(cursorCol);
+      const newLine = `${before}/${item.value} ${afterCursor}`;
+      const newLines = [...lines];
+      newLines[cursorLine] = newLine;
+      const newCol = before.length + item.value.length + 2; // "/" + name + 空格
+      return { lines: newLines, cursorLine, cursorCol: newCol };
     }
 
     const result = this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
@@ -1517,6 +1620,7 @@ export class AppScreen implements Component, Focusable {
     private readonly exit: () => void,
   ) {
     this.editor = new Editor(tui, editorTheme, { paddingX: 1, autocompleteMaxVisible: 6 });
+    patchEditorInlineSlash(this.editor);  // 方案 E：行内 slash 补全 monkey-patch
     this.composerAutocompleteProvider = this.rebuildAutocompleteProvider();
     this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
     // Whenever CommandService refreshes its installed-skills cache (on first
@@ -3171,6 +3275,41 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (text.startsWith("/")) {
+      // /<installedSkill> 行首分流：命中已装 skill 时当普通消息发送（content 原样
+      // 保留 /<skill> 前缀，skill 名由 extractSkillsFromContent 提取注入 params.skills）。
+      // 未命中已装 skill 的 /xxx 不在此拦截，继续走下面的命令分支（仍可能 Unknown command）。
+      {
+        const slashMatch = text.match(/^\/(\S+)/);
+        const firstToken = slashMatch?.[1] ?? "";
+        const installedSkill = firstToken
+          ? this.commands.getInstalledSkills().find((s) => s.name === firstToken)
+          : undefined;
+        if (installedSkill) {
+          this.beginPendingSubmittedInput(text, snapshot);
+          const extractedSkills = this.extractSkillsFromContent(content);
+          const requestId = this.state.sendMessage(
+            content,
+            attachments,
+            undefined,
+            undefined,
+            extractedSkills,
+          );
+          if (!requestId) {
+            this.clearPendingSubmittedInput();
+            this.state.addItem({
+              kind: "error",
+              id: `offline-${Date.now()}`,
+              sessionId: snapshot.sessionId,
+              content: "offline: waiting for reconnect",
+              at: new Date().toISOString(),
+            });
+            return;
+          }
+          this.editor.addToHistory(text);
+          this.editor.setText("");
+          return;
+        }
+      }
       // Check for mode switch when there's ongoing work
       if (/^\/(?:mode|switch)\s/.test(text) && snapshot.cancellableWork) {
         const currentMode = snapshot.mode;
@@ -3354,7 +3493,8 @@ export class AppScreen implements Component, Focusable {
     }
 
     this.beginPendingSubmittedInput(text, snapshot);
-    const requestId = this.state.sendMessage(content, attachments);
+    const extractedSkills = this.extractSkillsFromContent(content);
+    const requestId = this.state.sendMessage(content, attachments, undefined, undefined, extractedSkills);
     if (!requestId) {
       this.clearPendingSubmittedInput();
       this.state.addItem({
@@ -7265,6 +7405,33 @@ export class AppScreen implements Component, Focusable {
     };
   }
 
+  /**
+   * 从消息文本里提取被 /<skillName> 标记的已装 skill 名（用于 params.skills）。
+   *
+   * 规则：
+   * - 遍历已装 skill 名，在 content 里搜 `/<完整名>`。无空格也识别（如 `/doc写文档`）。
+   * - `/` 前必须是行首或空白（`(^|\s)/name`），避免 `路径a/doc` 这种误命中。
+   * - skill 名后必须是词边界（`/name\b`），避免 `/docs`、`/doc123` 这类更长非 skill
+   *   文本被当成短 skill 名误命中（如 `/docs` 不该命中 `doc`）。
+   *   u 模式下 CJK 字符不属于 `\w`，故 `/doc写文档` 的 `doc` 后是 `\b` 边界，正常命中。
+   * - content 本身不改动，仅返回命中的 skill 名（去重，按 content 中出现位置排序）。
+   */
+  private extractSkillsFromContent(content: string): string[] {
+    if (!content) return [];
+    const installed = this.commands.getInstalledSkills();
+    const found: { name: string; idx: number }[] = [];
+    for (const skill of installed) {
+      const escaped = skill.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(^|\\s)/${escaped}\\b`, "u");
+      const match = re.exec(content);
+      if (match && !found.some((f) => f.name === skill.name)) {
+        found.push({ name: skill.name, idx: match.index });
+      }
+    }
+    found.sort((a, b) => a.idx - b.idx);
+    return found.map((f) => f.name);
+  }
+
   private handleConfigEditorInput(data: string): void {
     if (!this.configEditorState) return;
     const state = this.configEditorState;
@@ -8427,6 +8594,7 @@ export class AppScreen implements Component, Focusable {
       async (sub: string) => {
         return this.ensureMvController().getMemoryCompletions(sub);
       },
+      skills, // ← 传给外层，用于行内 skill 补全
     );
   }
 
