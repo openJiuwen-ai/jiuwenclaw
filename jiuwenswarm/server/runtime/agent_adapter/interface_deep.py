@@ -5416,6 +5416,18 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] stop failed during cleanup: %s",
                     exc,
                 )
+            try:
+                from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
+                    clear_sent_files_for_session,
+                )
+
+                clear_sent_files_for_session(self._parent_session_id)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] send_file dedup cleanup failed: session_id=%s error=%s",
+                    self._parent_session_id,
+                    exc,
+                )
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
         # 去触发 manager.sync（此时 rail/manager 可能已失效）。
         if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
