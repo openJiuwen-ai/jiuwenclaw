@@ -192,17 +192,24 @@ function githubRollupStatus(rollup: unknown): ChecksVerdict {
 // ---------------------------------------------------------------------------
 
 /**
- * Whether the checkout has no uncommitted changes. A watch auto-commits and
- * pushes unattended, so it must refuse to start on a dirty tree — otherwise it
- * could sweep in or act on work the user has not committed. Returns true only
- * when `git status --porcelain` is empty; any git failure returns false (refuse).
+ * Whether the checkout has no uncommitted changes to *tracked* files. A watch
+ * auto-commits and pushes unattended, so it must refuse to start when tracked
+ * files are modified/staged — otherwise those changes could be swept into a
+ * commit or acted on. Untracked files are deliberately ignored: build output,
+ * agent history, __pycache__, .gitignore etc. are present in almost every real
+ * checkout and the autofix agent only ever stages the files it changed (never
+ * `git add .`), so they are not a contamination risk — counting them would make
+ * a watch refuse to start almost everywhere.
+ *
+ * Returns true only when `git status --porcelain --untracked-files=no` is empty;
+ * any git failure returns false (refuse), since runCmd yields "" on failure too.
  */
 export async function isWorkingTreeClean(projectDir: string): Promise<boolean> {
   // Confirm a real git repo first: runCmd returns "" on failure too, so without
   // this a git error would masquerade as an empty (clean) status.
   const inRepo = await runCmd("git", ["-C", projectDir, "rev-parse", "--is-inside-work-tree"]);
   if (inRepo !== "true") return false;
-  const out = await runCmd("git", ["-C", projectDir, "status", "--porcelain"]);
+  const out = await runCmd("git", ["-C", projectDir, "status", "--porcelain", "--untracked-files=no"]);
   return out === "";
 }
 
