@@ -7,6 +7,7 @@ import DatePicker from './DatePicker';
 import SimpleSelect from './SimpleSelect';
 import TemplateClusterIcon from './TemplateClusterIcon';
 import { validateCronExpr } from './cronExprValidation';
+import { normalizeWakeOffsetSeconds } from './cronWakeOffset';
 import { cronExprToSchedule, isOnceScheduleExpired } from './scheduleConvert';
 import { TIMEZONE_OPTIONS } from './constants';
 import type { CronTaskUI, CronTemplateUI } from '../../types/cron';
@@ -18,6 +19,12 @@ import { getProjectDisplayName } from '../../stores/workspaceStore';
 // 等后端接口交付后再打开——代码/state（`CronTaskFormValue.effectiveDate`）都保留，不用重写
 const CRON_EFFECTIVE_DATE_UI_ENABLED = false;
 
+// 名称/描述最大长度：需与后端 jiuwenswarm/gateway/cron/models.py 里的
+// CRON_JOB_NAME_MAX_LENGTH / CRON_JOB_DESCRIPTION_MAX_LENGTH 保持一致，
+// 前端负责提前拦截+提示，后端负责兜底校验（防止绕过前端直接调 API/MCP 工具）。
+const CRON_NAME_MAX_LENGTH = 64;
+const CRON_DESCRIPTION_MAX_LENGTH = 500;
+
 export interface CronTaskFormValue {
   name: string;
   projectDir: string | null; // 仅创建/模板创建模式使用；编辑模式不展示项目字段，不参与提交
@@ -25,6 +32,8 @@ export interface CronTaskFormValue {
   description: string;
   targets: string; // 推送频道，对应后端 CronJob.targets
   cronExpr: string;
+  /** 提前唤醒秒数，对应后端 CronJob.wake_offset_seconds；0 表示到点执行 */
+  wakeOffsetSeconds: number;
   timezone: string;
   effectiveDate: string | null; // 【backend-requests.md #3】仅前端展示，不下发
   enabled: boolean;
@@ -38,6 +47,7 @@ function emptyForm(): CronTaskFormValue {
     description: '',
     targets: 'web',
     cronExpr: '',
+    wakeOffsetSeconds: 0,
     timezone: 'Asia/Shanghai',
     effectiveDate: null,
     enabled: true,
@@ -52,6 +62,7 @@ export function jobToForm(job: CronTaskUI): CronTaskFormValue {
     description: job.description,
     targets: job.deliveryChannel,
     cronExpr: job.cronExpr,
+    wakeOffsetSeconds: normalizeWakeOffsetSeconds(job.wakeOffsetSeconds),
     timezone: job.timezone,
     effectiveDate: null,
     enabled: job.enabled,
@@ -66,6 +77,7 @@ export function templateToForm(tpl: CronTemplateUI, title: string, description: 
     description,
     targets: 'web',
     cronExpr: tpl.cronExpr,
+    wakeOffsetSeconds: 0,
     timezone: 'Asia/Shanghai',
     effectiveDate: null,
     enabled: true,
@@ -90,23 +102,21 @@ interface CronTaskDrawerProps {
 const fieldClass = 'w-full rounded-md border border-border bg-card px-3 py-1.5 text-sm text-text outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50';
 
 // 后端存在两条"默认项目"记录（project_id 分别为 'default'/'default_code'，对应普通/代码工作模式），
-// 二者 project_dir 均为空串，展示名也都被 getProjectDisplayName 统一成"默认项目"（见 workspaceStore.ts）。
-// 项目下拉框按原始 projects 直接 map 会把这两条都列出来，造成"默认项目"重复出现两次（bug005）。
-// 这里只保留第一条命中的默认类项目，其余同类项目过滤掉——跟 ConversationSidebar.tsx 里对默认项目的
-// 收敛处理是同一思路，但收敛范围只限于这个下拉框的可选项，不改 CronPanel 里传入的 projects 原始列表
-// （cronJobToUI 还要用完整列表按 project_id 精确匹配任务归属的项目名，见 index.tsx）。
-function isDefaultLikeProject(p: ProjectInfo): boolean {
+// 二者 project_dir 均为空串，与"未选项目"状态的 value（也是空串）完全相同，SimpleSelect 无法区分
+// "选中了默认项目"和"没选任何项目"，总会显示"默认项目"，与任务列表里未选项目显示"-"不一致（bug009）。
+// 这里索性把所有默认类项目都从下拉框选项里过滤掉——下拉框只保留 project_dir 为非空绝对路径的真实项目，
+// 不选时 SimpleSelect 找不到匹配项，走 placeholder 显示"-"，与列表里的"未选项目"语义保持一致。
+// 判断口径跟 ChatPanel/projectSelection.ts 的 isDefaultInputProject、ConversationSidebar.tsx 等处一致
+// （is_default 或 project_id 命中 'default'/'default_code' 都算默认项目）。这个函数导出给
+// index.tsx 的 cronJobToUI 复用：会话本身锁定在默认项目下时，cron job 的 project_id 会原样
+// 存成 'default'/'default_code'（而不是空串），任务列表也要按同样口径把它当"未选项目"处理，
+// 不能只看 project_id 是否非空，否则会显示成"默认项目"而不是"-"（bug009 第 5 轮修复）。
+export function isDefaultLikeProject(p: ProjectInfo): boolean {
   return p.is_default || p.project_id === 'default' || p.project_id === 'default_code';
 }
 
-function dedupeDefaultProjects(projects: ProjectInfo[]): ProjectInfo[] {
-  let seenDefault = false;
-  return projects.filter((p) => {
-    if (!isDefaultLikeProject(p)) return true;
-    if (seenDefault) return false;
-    seenDefault = true;
-    return true;
-  });
+function filterNonDefaultProjects(projects: ProjectInfo[]): ProjectInfo[] {
+  return projects.filter((p) => !isDefaultLikeProject(p));
 }
 
 export default function CronTaskDrawer({ mode, initial, projects, targetOptions, proactiveLocked = false, onClose, onSubmit, onSwitchToManual, onSwitchToTemplate }: CronTaskDrawerProps) {
@@ -114,7 +124,15 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
   const [form, setForm] = useState<CronTaskFormValue>(initial ?? emptyForm());
 
   const title = mode === 'edit' ? t('cron.drawer.titleEdit') : mode === 'template' ? t('cron.drawer.titleTemplate') : t('cron.drawer.titleCreate');
-  const projectOptions = dedupeDefaultProjects(projects).map((p) => ({ value: p.project_dir, label: getProjectDisplayName(p) }));
+  // 显式加一条 value 为空串的"-"选项，代表"未选项目"，放在真实项目列表最后面（列表顺序：
+  // 真实项目在前，"-"清空项在最后）。SimpleSelect 按 value 严格匹配，真实项目的 project_dir
+  // 都是非空绝对路径，不会跟这条空串选项冲突；选中它后 onChange('') -> setForm({ ...form,
+  // projectDir: '' || null }) 归一成 null，与"未选"语义一致。这样用户选了真实项目后，
+  // 还能通过下拉框自己改回"未选"状态，不用关闭重开抽屉。
+  const projectOptions = [
+    ...filterNonDefaultProjects(projects).map((p) => ({ value: p.project_dir, label: getProjectDisplayName(p) })),
+    { value: '', label: t('cron.drawer.placeholderProject') ?? '-' },
+  ];
   const timezoneOptions = TIMEZONE_OPTIONS.map((tz) => ({ value: tz, label: tz }));
   // 必填项缺失时，收集清单用来在"确定"按钮旁给出具体提示（而不是只让按钮变灰、不说原因）
   const missingFieldLabels: string[] = [];
@@ -172,18 +190,27 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           )}
 
           <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">
-              {t('cron.drawer.fieldName')} <span className="text-danger">*</span>
-            </label>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <label className="block text-sm font-bold text-text-strong">
+                {t('cron.drawer.fieldName')} <span className="text-danger">*</span>
+              </label>
+              <span className={`shrink-0 text-xs ${form.name.length >= CRON_NAME_MAX_LENGTH ? 'text-danger' : 'text-text-muted'}`}>
+                {t('cron.drawer.charCount', { count: form.name.length, max: CRON_NAME_MAX_LENGTH })}
+              </span>
+            </div>
             <input
               type="text"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               placeholder={t('cron.drawer.placeholderInput') ?? undefined}
+              maxLength={CRON_NAME_MAX_LENGTH}
               disabled={proactiveLocked}
               title={lockedTitle}
               className={fieldClass}
             />
+            {form.name.length >= CRON_NAME_MAX_LENGTH && (
+              <p className="mt-1 text-xs text-danger">{t('cron.drawer.maxLengthReachedHint', { max: CRON_NAME_MAX_LENGTH })}</p>
+            )}
           </div>
 
           {mode !== 'edit' && (
@@ -193,7 +220,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
                 value={form.projectDir ?? ''}
                 onChange={(v) => setForm({ ...form, projectDir: v || null })}
                 options={projectOptions}
-                placeholder={t('cron.drawer.placeholderSelect') ?? undefined}
+                placeholder={t('cron.drawer.placeholderProject') ?? undefined}
               />
             </div>
           )}
@@ -204,18 +231,27 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">
-              {t('cron.drawer.fieldDescription')} <span className="text-danger">*</span>
-            </label>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <label className="block text-sm font-bold text-text-strong">
+                {t('cron.drawer.fieldDescription')} <span className="text-danger">*</span>
+              </label>
+              <span className={`shrink-0 text-xs ${form.description.length >= CRON_DESCRIPTION_MAX_LENGTH ? 'text-danger' : 'text-text-muted'}`}>
+                {t('cron.drawer.charCount', { count: form.description.length, max: CRON_DESCRIPTION_MAX_LENGTH })}
+              </span>
+            </div>
             <textarea
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
               placeholder={t('cron.drawer.placeholderInput') ?? undefined}
               rows={4}
+              maxLength={CRON_DESCRIPTION_MAX_LENGTH}
               disabled={proactiveLocked}
               title={lockedTitle}
               className={`${fieldClass} resize-none`}
             />
+            {form.description.length >= CRON_DESCRIPTION_MAX_LENGTH && (
+              <p className="mt-1 text-xs text-danger">{t('cron.drawer.maxLengthReachedHint', { max: CRON_DESCRIPTION_MAX_LENGTH })}</p>
+            )}
           </div>
 
           <div>
@@ -228,7 +264,14 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
             />
           </div>
 
-          <ScheduleEditor value={form.cronExpr} onChange={(cronExpr) => setForm({ ...form, cronExpr })} timezone={form.timezone} />
+          <ScheduleEditor
+            value={form.cronExpr}
+            onChange={(cronExpr) => setForm({ ...form, cronExpr })}
+            timezone={form.timezone}
+            wakeOffsetSeconds={form.wakeOffsetSeconds}
+            onWakeOffsetSecondsChange={(wakeOffsetSeconds) => setForm({ ...form, wakeOffsetSeconds })}
+            wakeOffsetDisabled={proactiveLocked}
+          />
 
           <div>
             <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldTimezone')}</label>

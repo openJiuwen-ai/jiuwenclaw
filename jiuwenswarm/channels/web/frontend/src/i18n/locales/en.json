@@ -37,7 +37,7 @@
     "more": "More",
     "settings": "Settings",
     "config": "Configuration",
-    "browser": "Browser Service",
+    "browser": "Browser",
     "logs": "Logs",
     "update": "Updates"
   },
@@ -495,6 +495,7 @@
       "wecom": "WeCom",
       "wechat": "WeChat",
       "discord": "Discord",
+      "slack": "Slack",
       "heartbeat": "Heartbeat",
       "tui": "TUI",
       "unknown": "Unknown"
@@ -575,6 +576,7 @@
       "dingtalk": "DingTalk",
       "telegram": "Telegram",
       "discord": "Discord",
+      "slack": "Slack",
       "whatsapp": "WhatsApp",
       "wecom": "WeCom",
       "wechat": "WeChat"
@@ -599,6 +601,9 @@
       "discordTitle": "Discord Channel Configuration",
       "discordSubtitle": "Configure Discord bot service settings",
       "discordHint": "Discord Bot messaging is supported. Enable Message Content Intent in Developer Portal and optionally set the target channel, the block_dm toggle can be used to block direct message.",
+      "slackTitle": "Slack Channel Configuration",
+      "slackSubtitle": "Configure Slack Socket Mode bot settings",
+      "slackHint": "Create a Slack app with Socket Mode enabled, an xoxb bot token, and an xapp app token. Subscribe to app_mention and message.im events.",
       "telegramTitle": "Telegram Channel Configuration",
       "telegramSubtitle": "Configure Telegram Bot service settings",
       "whatsappTitle": "WhatsApp Channel Configuration",
@@ -614,6 +619,7 @@
       "feishu": "Loading Lark settings...",
       "telegram": "Loading Telegram settings...",
       "discord": "Loading Discord settings...",
+      "slack": "Loading Slack settings...",
       "whatsapp": "Loading WhatsApp settings...",
       "wecom": "Loading WeCom settings...",
       "wechat": "Loading WeChat settings..."
@@ -630,8 +636,15 @@
       "whatsappJids": "One WhatsApp JID per line (comma-separated is also supported)",
       "wecomDefaultChatId": "userid or chatid (group)",
       "wecomDefaultChatIdHint": "Target for heartbeat/scheduled push. Leave empty to use last chatid",
+      "xiaoyiApiIdHint": "Scheduled task push to Xiaoyi requires api_id. Without it, Xiaoyi cannot be selected as a cron push channel.",
+      "xiaoyiApiIdRequiredForCron": "api_id is not configured: Xiaoyi cannot be selected as a cron push channel.",
       "discordGuildId": "Enter the Discord server ID (direct message still works without this)",
       "discordChannelId": "Enter the Discord server's channel ID (direct message still works without this)",
+      "slackBotToken": "Enter the xoxb bot token",
+      "slackAppToken": "Enter the xapp app token",
+      "slackChannelId": "Enter the fallback Slack channel ID",
+      "slackUserIds": "One Slack user ID per line (empty allows all users)",
+      "slackChannelIds": "One Slack channel ID per line (empty allows all channels)",
       "allowFrom": "One chatid/userid per line (comma-separated is also supported)"
     },
     "saved": {
@@ -640,6 +653,7 @@
       "dingtalk": "DingTalk settings saved",
       "telegram": "Telegram settings saved",
       "discord": "Discord settings saved",
+      "slack": "Slack settings saved",
       "whatsapp": "WhatsApp settings saved",
       "wecom": "WeCom settings saved",
       "wechat": "WeChat settings saved"
@@ -675,6 +689,7 @@
       "loadDingtalk": "Failed to load DingTalk settings",
       "loadTelegram": "Failed to load Telegram settings",
       "loadDiscord": "Failed to load Discord settings",
+      "loadSlack": "Failed to load Slack settings",
       "loadWhatsApp": "Failed to load WhatsApp settings",
       "loadWecom": "Failed to load WeCom settings",
       "loadWechat": "Failed to load WeChat settings",
@@ -697,6 +712,23 @@
       "appIdNotConfigured": "app_id not configured",
       "deleteApp": "Delete app",
       "addApp": "Add app"
+    }
+  },
+  "modelSetupGuide": {
+    "progress": "Step {{current}} of {{total}}",
+    "clickMore": "Select More to continue",
+    "acknowledge": "Got it",
+    "skip": "Skip",
+    "open": "Setup guide",
+    "steps": {
+      "1": {
+        "title": "Configure your first model",
+        "description": "Model settings are under More, in Configuration."
+      },
+      "2": {
+        "title": "Complete model configuration",
+        "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
+      }
     }
   },
   "config": {
@@ -1065,6 +1097,12 @@
       "noResults": "No matching templates found. Try a different keyword.",
       "noResultsJobs": "No matching tasks found. Try a different keyword."
     },
+    "pagination": {
+      "pageSize": "Rows per page",
+      "rangeInfo": "{{start}}-{{end}} of {{total}}",
+      "prev": "Previous page",
+      "next": "Next page"
+    },
     "filter": {
       "reset": "Reset"
     },
@@ -1076,7 +1114,7 @@
       "timezone": "Timezone",
       "channel": "Channel",
       "actions": "Actions",
-      "noProject": "–",
+      "noProject": "-",
       "runNow": "Run now",
       "stop": "Stop",
       "edit": "Edit",
@@ -1118,9 +1156,12 @@
       "fieldEnabled": "Enabled",
       "placeholderInput": "Enter",
       "placeholderSelect": "Select",
+      "placeholderProject": "-",
       "placeholderEffectiveDate": "Select effective date",
       "missingFieldsHint": "Still needed: {{fields}}",
-      "scheduleAlreadyExpiredHint": "The selected run time is already in the past, please choose another"
+      "scheduleAlreadyExpiredHint": "The selected run time is already in the past, please choose another",
+      "charCount": "{{count}}/{{max}}",
+      "maxLengthReachedHint": "Maximum length reached ({{max}} characters)"
     },
     "schedule": {
       "title": "Schedule",
@@ -1184,7 +1225,10 @@
         "3": "week 3",
         "4": "week 4",
         "last": "last week"
-      }
+      },
+      "wakeOffset": "Wake early",
+      "wakeOffsetUnit": "minutes",
+      "wakeOffsetHelp": "Start the agent this many minutes before the scheduled push time; 0 means run at the scheduled time"
     },
     "modelPicker": {
       "configured": "Configured",
@@ -1244,7 +1288,7 @@
     },
     "placeholders": {
       "name": "Enter task name",
-      "cron": "7 fields (Quartz): second minute hour day month dow year. Ranges: second(0-59), minute(0-59), hour(0-23), day(1-31), month(1-12), dow(1-7 or ?), year(1970-2099 or *). Day and dow cannot both be specific. Examples: daily 9am='0 0 9 * * ? *'; one-shot 2026-04-29 17:30='0 30 17 29 4 ? 2026'",
+      "cron": "7 fields (Quartz): second minute hour day month dow year. Ranges: second(0-59), minute(0-59), hour(0-23), day(1-31), month(1-12), dow(0-6 or ?, 0=Sun, 1=Mon...6=Sat; also accepts SUN/MON/TUE/WED/THU/FRI/SAT, case-insensitive), year(1970-2099 or *). Day and dow can both be specific at once; the job then fires when either matches (e.g. the 15th OR every Monday — an OR, not an AND). Examples: daily 9am='0 0 9 * * ? *'; one-shot 2026-04-29 17:30='0 30 17 29 4 ? 2026'",
       "cronShort": "7 fields (Quartz): second minute hour day month dow year",
       "description": "Enter description",
       "wakeOffset": "Wake offset in seconds"
@@ -1274,7 +1318,9 @@
     "errors": {
       "loadJobs": "Failed to load scheduled tasks",
       "createFailed": "Failed to create task",
+      "createFailedWithReason": "Failed to create task: {{reason}}",
       "updateFailed": "Failed to update task",
+      "updateFailedWithReason": "Failed to update task: {{reason}}",
       "deleteFailed": "Failed to delete task",
       "toggleFailed": "Failed to update task status",
       "previewFailed": "Failed to preview next runs",
@@ -1290,7 +1336,7 @@
       "cronHour": "Invalid hour field (0-23, supports * / - ,)",
       "cronDay": "Invalid day field (1-31, supports * ? - ,)",
       "cronMonth": "Invalid month field (1-12, supports * - ,)",
-      "cronWeek": "Invalid dow field (0-6, supports * ? - ,, 0=Sun, 1=Mon...6=Sat)",
+      "cronWeek": "Invalid dow field (0-6, supports * ? - ,, 0=Sun, 1=Mon...6=Sat; also accepts SUN/MON/TUE/WED/THU/FRI/SAT, case-insensitive)",
       "cronYear": "Invalid year field (1970-2099 or *)",
       "timezoneRequired": "Time zone is required",
       "targetRequired": "Target channel is required",
@@ -1298,32 +1344,20 @@
     }
   },
   "browser": {
-    "title": "Browser Service",
-    "subtitle": "Configure the browser path and start the browser service.",
+    "title": "Browser",
+    "subtitle": "Configure the Chrome path and display mode used by browser agents.",
     "refreshPath": "Refresh Path",
     "savePath": "Save Path",
-    "startService": "Start Browser Service",
-    "starting": "Starting...",
     "pathConfigHelp": "Chrome path configuration (open chrome://version in Chrome and copy the executable path)",
     "examplePath": "Example: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "success": {
-      "pathSaved": "Chrome path saved",
-      "started": "Browser service started successfully"
-    },
-    "tooltips": {
-      "fillPath": "Enter a Chrome path first",
-      "savePath": "Save the Chrome path first"
+      "pathSaved": "Chrome path saved"
     },
     "showBrowser": "Show Browser",
     "showBrowserDesc": "Open a visible browser window when running browser tasks.",
     "errors": {
       "loadPath": "Failed to load Chrome path",
-      "savePath": "Failed to save Chrome path",
-      "pathRequired": "Chrome path cannot be empty",
-      "saveBeforeStart": "Save the Chrome path before starting the browser service",
-      "startFailed": "Failed to start browser service",
-      "startFailedWithCode": "Browser service failed to start, return code {{code}}",
-      "startFailedWithMessage": "Browser service failed to start: {{message}}"
+      "savePath": "Failed to save Chrome path"
     }
   },
   "logsPanel": {
@@ -1612,7 +1646,7 @@
     "evolution": {
       "closeAria": "Close skill experience dialog",
       "title": "Skill Experience: {{name}}",
-      "subtitle": "You can edit experience content (change.content), delete entries, and save.",
+      "subtitle": "Edit or delete experiences, then save to apply your changes.",
       "empty": "No experience entries",
       "deleteConfirm": "Delete this experience entry?",
       "actions": {
@@ -1621,12 +1655,29 @@
       "fields": {
         "id": "ID",
         "source": "Source",
-        "section": "Section",
-        "target": "Target",
+        "section": "Type",
+        "target": "Improvement target",
         "applied": "Applied",
-        "timestamp": "Timestamp",
+        "timestamp": "Created at",
         "context": "Context",
         "content": "Experience Content"
+      },
+      "values": {
+        "section": {
+          "instructions": "Usage instructions",
+          "examples": "Examples",
+          "troubleshooting": "Troubleshooting",
+          "workflow": "Workflow",
+          "constraints": "Constraints",
+          "roles": "Roles",
+          "collaboration": "Collaboration",
+          "scripts": "Scripts"
+        },
+        "target": {
+          "description": "Skill description",
+          "body": "Skill body",
+          "script": "Skill scripts"
+        }
       },
       "messages": {
         "saved": "Saved successfully"
@@ -2166,7 +2217,8 @@
       "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
       "errors": {
         "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project.",
-        "nameExists": "This project name already exists. Please choose another name."
+        "nameExists": "This project name already exists. Please choose another name.",
+        "pathMissing": "Project directory does not exist. Choose an existing directory."
       },
       "cancel": "Cancel",
       "confirm": "Confirm"

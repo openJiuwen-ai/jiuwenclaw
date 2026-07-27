@@ -388,9 +388,12 @@ const PROACTIVE_KEYS = new Set([
   "proactive_recommendation_max_recommend_per_day",
   "proactive_recommendation_max_rounds_per_tick",
 ]);
-// 调度频率已交给定时任务面板，ConfigPanel 不再暴露 tick_interval。
-// 即便后端残留下发，也在比较/提交时跳过，避免误提交空值。
-const PROACTIVE_HIDDEN_FROM_UI_KEYS = new Set(["proactive_recommendation_tick_interval_minutes"]);
+// ConfigPanel 暂不展示这些配置；保留后端下发值，并在比较/提交时跳过。
+const HIDDEN_FROM_UI_CONFIG_KEYS = new Set([
+  "proactive_recommendation_tick_interval_minutes",
+  "kv_cache_release_enabled",
+  "kv_cache_affinity_enabled",
+]);
 
 function classifyKey(key: string): string {
   if (MODEL_DEFAULT_KEYS.has(key)) return "model_default";
@@ -970,7 +973,6 @@ function GroupSection({
                                 <option value="DashScope">DashScope</option>
                                 <option value="SiliconFlow">SiliconFlow</option>
                                 <option value="InferenceAffinity">InferenceAffinity</option>
-                                <option value="AscendAffinity">AscendAffinity</option>
                                 <option value="DeepSeek">DeepSeek</option>
                                 <option value="OpenRouter">OpenRouter</option>
                               </>
@@ -1085,7 +1087,6 @@ const MODEL_PROVIDER_OPTIONS = [
   "DashScope",
   "SiliconFlow",
   "InferenceAffinity",
-  ASCEND_AFFINITY_PROVIDER,
   "DeepSeek",
 ] as const;
 const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
@@ -1791,7 +1792,7 @@ function OpenAIAccountAuthPanel({
       ) : null}
 
       {authError ? (
-        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-2 py-1.5 text-[11px] text-danger">
+        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-2 py-1.5 text-[11px] text-danger">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>{authError}</span>
         </div>
@@ -3790,7 +3791,7 @@ export function ConfigPanel({
     if (!Object.keys(normalizedConfig).length) return [];
     const buckets: Record<string, [string, string][]> = {};
     for (const [key, value] of Object.entries(normalizedConfig)) {
-      if (HIDDEN_CONFIG_KEYS.has(key)) continue;
+      if (HIDDEN_CONFIG_KEYS.has(key) || HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
       const tag = classifyKey(key);
       // 临时注释：先隐藏邮件配置，后续需要时可恢复。
       if (tag === "email") continue;
@@ -3864,12 +3865,12 @@ export function ConfigPanel({
   const topLevelGroupCount = groups.length;
   const hasConfigChanges = useMemo(() => {
     const keys = Object.keys(normalizedConfig);
-    return keys.some((key) => !PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key) && (draftValues[key] ?? "") !== normalizedConfig[key]);
+    return keys.some((key) => !HIDDEN_FROM_UI_CONFIG_KEYS.has(key) && (draftValues[key] ?? "") !== normalizedConfig[key]);
   }, [draftValues, normalizedConfig]);
   const configUpdates = useMemo(() => {
     const updates: Record<string, string> = {};
     for (const key of Object.keys(normalizedConfig)) {
-      if (PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key)) continue;
+      if (HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
       const draftValue = draftValues[key] ?? "";
       if (draftValue !== normalizedConfig[key]) {
         updates[key] = draftValue;
@@ -4329,7 +4330,7 @@ export function ConfigPanel({
           </div>
         ) : null}
         {!error && hasMissingModelName ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.modelNameRequired')}
           </div>
         ) : null}
@@ -4397,7 +4398,7 @@ export function ConfigPanel({
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelName ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.modelNameRequired')}
                     </div>
                   ) : null}

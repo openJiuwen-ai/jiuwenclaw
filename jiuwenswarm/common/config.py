@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ruamel.yaml import YAML
-from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString, PlainScalarString
 import yaml
 import portalocker
 
@@ -381,6 +381,67 @@ def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def _as_plain_yaml_str(value: Any) -> Any:
+    """字符串写成无引号 plain scalar，避免顶层/apps 因旧值风格（如 ``''``）不一致。"""
+    if isinstance(value, str):
+        return PlainScalarString(value)
+    return value
+
+
+def update_xiaoyi_runtime_in_config(
+    conf: dict[str, Any],
+    *,
+    api_id: str = "",
+    agent_id: str = "",
+) -> None:
+    """更新 ``channels.xiaoyi`` 运行时身份，并在存在 ``push_id`` 时同步写入 ``apps[]``。
+
+    顶层字段（``last_session_id`` / ``last_task_id`` / ``push_id`` 等）供 cron 等读；
+    ``apps[].push_id`` 供频道重启后 ``XiaoyiChannelConfig`` 加载。一次 IO 写完，避免不一致。
+
+    ``apps`` 匹配优先级：``api_id`` → ``agent_id`` → ``is_default`` → 唯一 app。
+    """
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "channels" not in data:
+        data["channels"] = {}
+    channels = data["channels"]
+    if "xiaoyi" not in channels or not isinstance(channels["xiaoyi"], dict):
+        channels["xiaoyi"] = {}
+    section = channels["xiaoyi"]
+    for k, v in conf.items():
+        section[k] = _as_plain_yaml_str(v)
+
+    push_id = conf.get("push_id")
+    if push_id:
+        plain_push_id = _as_plain_yaml_str(str(push_id))
+        apps = section.get("apps")
+        if isinstance(apps, list) and apps:
+            target: dict[str, Any] | None = None
+            api_id = str(api_id or "").strip()
+            agent_id = str(agent_id or "").strip()
+            if api_id:
+                for app in apps:
+                    if isinstance(app, dict) and str(app.get("api_id") or "").strip() == api_id:
+                        target = app
+                        break
+            if target is None and agent_id:
+                for app in apps:
+                    if isinstance(app, dict) and str(app.get("agent_id") or "").strip() == agent_id:
+                        target = app
+                        break
+            if target is None:
+                for app in apps:
+                    if isinstance(app, dict) and app.get("is_default", False):
+                        target = app
+                        break
+            if target is None and len(apps) == 1 and isinstance(apps[0], dict):
+                target = apps[0]
+            if target is not None:
+                target["push_id"] = plain_push_id
+
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
 def update_channel_subsection_in_config(
     channel_id: str,
     subsection_id: str,
@@ -632,6 +693,19 @@ def update_auto_recap_enabled_in_config(value: bool) -> None:
         data["auto_recap"] = {}
     data["auto_recap"]["enabled"] = value
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_setup_guide_enabled_in_config(value: bool) -> None:
+    """原子更新 setup_guide.enabled（Web 首次配置引导开关）。"""
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        section = data.get("setup_guide")
+        if not isinstance(section, dict):
+            section = {}
+            data["setup_guide"] = section
+        section["enabled"] = value
+        return data
+
+    update_config(mutator)
 
 
 def update_proactive_recommendation_in_config(updates: dict[str, Any]) -> None:

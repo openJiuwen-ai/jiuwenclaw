@@ -44,6 +44,7 @@ import {
 } from '../stores';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
+import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
 import {
   fetchTtsAudio,
   playAudioBase64,
@@ -60,6 +61,10 @@ import { findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn } from
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
+
+function streamDeltaBatchKey(sessionId: string, streamId: string): string {
+  return `${sessionId}\u0000${streamId}`;
+}
 
 function isCompletedResumeResult(interruptResult: unknown): boolean {
   if (!interruptResult || typeof interruptResult !== 'object') {
@@ -781,6 +786,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     beforeCompressed: number | null;
     afterCompressed: number | null;
   }>>(new Map());
+  const streamDeltaBatcherRef = useRef<ReturnType<typeof createStreamDeltaBatcher> | null>(null);
+  if (streamDeltaBatcherRef.current === null) {
+    streamDeltaBatcherRef.current = createStreamDeltaBatcher();
+  }
 
   // Stores: 仅保留全局 action（A 类，不需要 sessionId）
   const {
@@ -803,6 +812,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     },
     []
   );
+
+  const flushPendingStreamDelta = useCallback((sessionId: string) => {
+    const streamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
+    if (!streamId) return;
+    streamDeltaBatcherRef.current?.flush(streamDeltaBatchKey(sessionId, streamId));
+  }, []);
 
   const handleTtsPlayback = useCallback(
     (sessionId: string, messageId: string, content: string) => {
@@ -1946,19 +1961,26 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
             useChatStore.getState().updateMessage(sessionId, existingMsg.id, updatePayload);
           } else {
+            // 点击"停止"（team 模式走 pause）之后，本轮 LLM 生成往往不会被后端立即掐断，
+            // 还会有若干个迟到的 chat.delta 补投过来。此时 currentStreamId/team-leader
+            // 收尾逻辑已经跑过一轮（见 chat.interrupt_result 的 pause 分支），这些迟到内容
+            // 找不到 existingMsg，会重新起一条新气泡；如果还标 isStreaming:true，光标会
+            // 因为再也等不到后续 chat.final 收尾而永久闪烁（bug001）。paused 状态下新起的
+            // 气泡直接落地为非 streaming，內容仍然展示，只是不再挂一个不会消失的光标。
+            const isPaused = Boolean(useChatStore.getState().getRuntime(sessionId)?.isPaused);
             const msgId = `team-leader-${Date.now()}`;
             useChatStore.getState().addMessage(sessionId, {
               id: msgId,
               role: 'system',
               content: content,
               timestamp: new Date().toISOString(),
-              isStreaming: true,
+              isStreaming: !isPaused,
             });
           }
           return;
         }
 
-        const currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
+        let currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
         clearThinkingForVisibleOutput(sessionId);
         if (!currentStreamId && content) {
           const assistantMsgId = `assistant-${Date.now()}`;
@@ -1970,8 +1992,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             isStreaming: true,
           });
           useChatStore.getState().startStreaming(sessionId, assistantMsgId);
+          currentStreamId = assistantMsgId;
         }
-        useChatStore.getState().appendStreamContent(sessionId, content);
+        if (!currentStreamId || !content) return;
+        const streamId = currentStreamId;
+        streamDeltaBatcherRef.current?.enqueue(streamDeltaBatchKey(sessionId, streamId), content, batchedContent => {
+          const chatStore = useChatStore.getState();
+          if (chatStore.getRuntime(sessionId)?.currentStreamId !== streamId) {
+            return;
+          }
+          chatStore.appendStreamContent(sessionId, batchedContent);
+        });
       }),
       webClient.on('chat.reasoning', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
@@ -2039,6 +2070,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
         }
         if (!sessionId) return;
+        flushPendingStreamDelta(sessionId);
 
         const memberAction = pickString(payload.member_action);
         const actionMemberName = pickString(payload.member_name);
@@ -2268,18 +2300,28 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!targetId) {
           return;
         }
-        const updates: { content?: string; mediaItems?: MediaItem[] } = {};
-        if (mediaPayload.content !== undefined) {
-          updates.content = mediaPayload.content;
-        }
-        if (mediaPayload.media_items?.length) {
-          updates.mediaItems = mediaPayload.media_items;
-        }
-        if (Object.keys(updates).length > 0) {
-          useChatStore.getState().updateMessage(sessionId, targetId, updates);
-        }
-        if (mediaPayload.content) {
-          handleTtsPlayback(sessionId, targetId, mediaPayload.content);
+        const applyMediaUpdate = () => {
+          const updates: { content?: string; mediaItems?: MediaItem[] } = {};
+          if (mediaPayload.content !== undefined) {
+            updates.content = mediaPayload.content;
+          }
+          if (mediaPayload.media_items?.length) {
+            updates.mediaItems = mediaPayload.media_items;
+          }
+          if (Object.keys(updates).length > 0) {
+            useChatStore.getState().updateMessage(sessionId, targetId, updates);
+          }
+          if (mediaPayload.content) {
+            handleTtsPlayback(sessionId, targetId, mediaPayload.content);
+          }
+        };
+        if (currentStreamId && streamDeltaBatcherRef.current) {
+          streamDeltaBatcherRef.current.flushBefore(
+            streamDeltaBatchKey(sessionId, currentStreamId),
+            applyMediaUpdate
+          );
+        } else {
+          applyMediaUpdate();
         }
       }),
       webClient.on('chat.file', ({ payload }) => {
@@ -2554,6 +2596,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (isProcessingNow && useChatStore.getState().getRuntime(sessionId)?.isPaused) {
           return;
         }
+        if (!isProcessingNow) {
+          flushPendingStreamDelta(sessionId);
+        }
         useChatStore.getState().setProcessing(sessionId, isProcessingNow);
         const sessionPatch: Partial<Session> = {
           is_processing: isProcessingNow,
@@ -2790,6 +2835,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.interrupt_result', payload)) return;
         // 切换模式时忽略中断结果
         if (useChatStore.getState().getRuntime(sessionId)?.switchingMode) return;
+        flushPendingStreamDelta(sessionId);
         const resultPayload = payload as unknown as InterruptResultPayload;
         useChatStore.getState().setInterruptResult(sessionId, resultPayload);
         // has_active_task 为 false 表示没有活跃任务（任务已完成）
@@ -2801,6 +2847,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           useChatStore.getState().setProcessing(sessionId, false);
           useChatStore.getState().setThinking(sessionId, false);
+          // 集群模式下输入框的"停止"按钮走的是 pause（不是 cancel，见 App.tsx
+          // handleCancel：mode==='team' 时调用 pause）。team-leader 消息的
+          // isStreaming 不经过 currentStreamId 收尾，这里同 cancel 分支一样显式
+          // 关闭还在 streaming 的 team-leader 消息，避免光标永久闪烁（bug001）。
+          closeActiveTeamLeaderMessages(sessionId);
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             // 直接设置所有状态值
@@ -2835,6 +2886,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           // 用户主动点了停止/删除就该让当前气泡收尾，不再等一个可能被误判、永远不会来的
           // 真正 chat.final。
           useChatStore.getState().stopStreaming(sessionId);
+          // 集群模式下 team-leader 消息的 isStreaming 不经过 currentStreamId 收尾，
+          // stopStreaming 对它无效；取消后本该到来的 chat.final 也不会再来兜底，
+          // 这里显式收尾，避免 team-leader 气泡的光标永久闪烁（bug001）。
+          closeActiveTeamLeaderMessages(sessionId);
         } else if (resultPayload.intent === 'supplement') {
           useChatStore.getState().setPaused(sessionId, false);
         }
@@ -3302,6 +3357,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('harness.session_finished', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+        flushPendingStreamDelta(sessionId);
         useChatStore.getState().setExecutionError(sessionId, null);
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
@@ -3310,6 +3366,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     ];
 
     return () => {
+      streamDeltaBatcherRef.current?.flushAll();
       unsubs.forEach((fn) => fn());
     };
   }, [
@@ -3319,6 +3376,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     clearTeamMemberContextCompressionStatus,
     findExistingTeamMemberId,
     finishContextCompressionTurn,
+    flushPendingStreamDelta,
     handleConnectionAck,
     handleContextCompressionState,
     handleTeamMemberContextCompressionState,
@@ -3327,6 +3385,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setContextCompressionStats,
     clearThinkingForVisibleOutput,
     findActiveTeamLeaderMessage,
+    closeActiveTeamLeaderMessages,
     updateSession,
     resolveEventSessionId,
     shouldDropDuplicatedEvent,
@@ -3378,6 +3437,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   useEffect(() => {
     return () => {
+      streamDeltaBatcherRef.current?.flushAll();
       lastConnectSignatureRef.current = '';
       webClient.disconnect();
       setConnected(false);
@@ -3426,6 +3486,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         lastError: null,
       });
       if (!connected && (state === 'reconnecting' || state === 'closed')) {
+        streamDeltaBatcherRef.current?.flushAll();
         onDisconnectRef.current?.();
       }
       // 断线恢复（false -> true 跳变）：真实环境联调方案 B.8——对"曾经查到过目标"的会话主动

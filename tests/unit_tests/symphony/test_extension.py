@@ -23,6 +23,8 @@ from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.symphony.config import symphony_config_from_dict
 from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
 
+_REAL_SCORE_STATUS = SymphonyExtension.score_status
+
 
 @pytest.fixture(autouse=True)
 def _use_chinese_preferred_language(monkeypatch):
@@ -913,6 +915,189 @@ def test_pause_build_cancels_active_build(monkeypatch, tmp_path):
     assert build_result["paused"] is True
     assert build_result["build_progress"]["status"] == "paused"
     assert build_result["build_log"][-1]["stage"] == "update.paused"
+
+
+def test_score_status_repairs_interrupted_build_after_restart(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    skills_root = tmp_path / "skills"
+    logger = _BuildProcessLogger(configured_score_dir / "build_log.jsonl")
+    logger.reset()
+    logger.record("update.start")
+    logger.record("graph.resolve.start")
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {
+                "paths": {
+                    "skills_root": str(skills_root),
+                    "score_dir": str(configured_score_dir),
+                }
+            }
+        ),
+    )
+
+    class _Status:
+        @staticmethod
+        def to_dict():
+            return {
+                "success": True,
+                "score_dir": str(configured_score_dir),
+                "exists": False,
+                "stale": True,
+            }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.score_status",
+        lambda *args, **kwargs: _Status(),
+    )
+
+    async def run_case():
+        extension = SymphonyExtension()
+        first = await _REAL_SCORE_STATUS(extension, {})
+        second = await _REAL_SCORE_STATUS(extension, {})
+        return first, second
+
+    first, second = asyncio.run(run_case())
+
+    assert first["build_progress"]["status"] == "paused"
+    assert first["build_log"][-1]["stage"] == "update.paused"
+    assert first["build_log"][-1]["reason"] == "process_interrupted"
+    assert second["build_progress"]["status"] == "paused"
+    assert [
+        entry["stage"] for entry in second["build_log"]
+    ].count("update.paused") == 1
+
+
+def test_score_status_keeps_active_build_running(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    skills_root = tmp_path / "skills"
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {
+                "paths": {
+                    "skills_root": str(skills_root),
+                    "score_dir": str(configured_score_dir),
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    class _Status:
+        @staticmethod
+        def to_dict():
+            return {
+                "success": True,
+                "score_dir": str(configured_score_dir),
+                "exists": False,
+                "stale": True,
+            }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.score_status",
+        lambda *args, **kwargs: _Status(),
+    )
+
+    async def run_case():
+        started = asyncio.Event()
+
+        async def fake_build_score(*args, **kwargs):
+            del args
+            kwargs["build_log"]("graph.resolve.start")
+            started.set()
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(
+            "jiuwenswarm.extensions.symphony.extension.service_build_score",
+            fake_build_score,
+        )
+        extension = SymphonyExtension()
+        build_task = asyncio.create_task(extension.build_score({}))
+        await started.wait()
+        status = await _REAL_SCORE_STATUS(extension, {})
+        await extension.pause_build({})
+        await build_task
+        return status
+
+    result = asyncio.run(run_case())
+
+    assert result["build_progress"]["status"] == "running"
+    assert all(
+        entry.get("reason") != "process_interrupted"
+        for entry in result["build_log"]
+    )
+
+
+def test_pause_build_repairs_interrupted_build_without_active_task(
+    monkeypatch, tmp_path
+):
+    configured_score_dir = tmp_path / "configured"
+    logger = _BuildProcessLogger(configured_score_dir / "build_log.jsonl")
+    logger.reset()
+    logger.record("update.start")
+    logger.record("graph.resolve.start")
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {
+                "paths": {
+                    "skills_root": str(tmp_path / "skills"),
+                    "score_dir": str(configured_score_dir),
+                }
+            }
+        ),
+    )
+
+    async def run_case():
+        extension = SymphonyExtension()
+        first = await extension.pause_build({})
+        second = await extension.pause_build({})
+        return first, second
+
+    result, repeated = asyncio.run(run_case())
+
+    assert result["success"] is True
+    assert result["paused"] is True
+    assert result["build_progress"]["status"] == "paused"
+    assert result["build_log"][-1]["stage"] == "update.paused"
+    assert result["build_log"][-1]["reason"] == "process_interrupted"
+    assert repeated["paused"] is True
+    assert repeated["build_progress"]["status"] == "paused"
+    assert [
+        entry["stage"] for entry in repeated["build_log"]
+    ].count("update.paused") == 1
+
+
+def test_graph_repairs_interrupted_build_without_status_request(
+    monkeypatch, tmp_path
+):
+    configured_score_dir = tmp_path / "configured"
+    logger = _BuildProcessLogger(configured_score_dir / "build_log.jsonl")
+    logger.reset()
+    logger.record("update.start")
+    logger.record("graph.resolve.start")
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {
+                "paths": {
+                    "skills_root": str(tmp_path / "skills"),
+                    "score_dir": str(configured_score_dir),
+                }
+            }
+        ),
+    )
+
+    result = asyncio.run(SymphonyExtension().graph({}))
+
+    assert result["success"] is False
+    assert result["build_progress"]["status"] == "paused"
+    assert result["build_log"][-1]["stage"] == "update.paused"
+    assert result["build_log"][-1]["reason"] == "process_interrupted"
 
 
 def test_graph_returns_business_error_when_artifacts_missing(monkeypatch, tmp_path):

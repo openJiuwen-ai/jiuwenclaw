@@ -962,3 +962,37 @@ async def test_fire_and_forget_cancel_publishes_interrupt_result() -> None:
     }
     await asyncio.sleep(0)
     assert len(_FakeAgentClient.sent_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_forward_loop_cancel_intent_uses_fire_and_forget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CHAT_CANCEL intent=cancel 必须 fire_and_forget，避免堵 _forward_loop。"""
+    handler = _TestMessageHandler.create()
+    notify_modes: list[str] = []
+
+    async def _spy_cancel(msg, old_sid, **kwargs):
+        notify_modes.append(str(kwargs.get("agent_notify", "await")))
+
+    monkeypatch.setattr(handler, "_cancel_agent_work_for_session", _spy_cancel)
+    await handler.start_forwarding()
+    try:
+        cancel_msg = Message(
+            id="cancel-fire-and-forget",
+            type="req",
+            channel_id="web",
+            session_id="sess-1",
+            params={"intent": "cancel", "session_id": "sess-1"},
+            timestamp=0.0,
+            ok=True,
+            req_method=ReqMethod.CHAT_CANCEL,
+            is_stream=False,
+        )
+        await handler.publish_user_messages(cancel_msg)
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while not notify_modes and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert notify_modes == ["fire_and_forget"]
+    finally:
+        await handler.stop_forwarding()

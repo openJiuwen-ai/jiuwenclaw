@@ -8,6 +8,8 @@ from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr
 from jiuwenswarm.gateway.cron.models import (
+    CRON_JOB_DESCRIPTION_MAX_LENGTH,
+    CRON_JOB_NAME_MAX_LENGTH,
     CronTargetChannel,
     cron_job_metadata,
     cron_job_modes_for_tools,
@@ -429,7 +431,10 @@ class CronController:
                 input_params={
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "Job name"},
+                        "name": {
+                            "type": "string",
+                            "description": f"Job name (max {CRON_JOB_NAME_MAX_LENGTH} characters).",
+                        },
                         "cron_expr": {
                             "type": "string",
                             "description": (
@@ -465,7 +470,8 @@ class CronController:
                             "type": "string",
                             "description": (
                                 "Task payload text sent to the assistant at run time. "
-                                "Do not include time or frequency."
+                                "Do not include time or frequency. "
+                                f"Max {CRON_JOB_DESCRIPTION_MAX_LENGTH} characters."
                             ),
                         },
                         "wake_offset_seconds": {
@@ -529,7 +535,9 @@ class CronController:
                 description=(
                     "Update an existing cron job. Pass job_id and a patch dict with fields to update "
                     "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, "
-                    "targets, mode, model_name, project_dir, project_id)."
+                    "targets, mode, model_name, project_dir, project_id). "
+                    f"name max {CRON_JOB_NAME_MAX_LENGTH} characters, "
+                    f"description max {CRON_JOB_DESCRIPTION_MAX_LENGTH} characters."
                 ),
                 input_params={
                     "type": "object",
