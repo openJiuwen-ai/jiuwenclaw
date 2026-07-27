@@ -232,6 +232,7 @@ class PromptOptimizer:
         best_eval = _best_evaluation(iterations)
         metrics = best_eval.reward.raw_components if best_eval else {}
         observations = best_eval.reward.notes if best_eval else []
+        baseline = self._safe_baseline(task.objective)
         record = PromptRecord(
             prompt=best_prompt,
             reward=best_score,
@@ -240,11 +241,19 @@ class PromptOptimizer:
             metrics=dict(metrics),
             observations=list(observations),
             metadata={"iterations": len(iterations), **task.metadata},
+            baseline_reward=baseline.reward if baseline is not None else None,
         )
         try:
             self._memory.add(record)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("PromptOptimizer: failed to persist best prompt: %s", exc)
+
+    def _safe_baseline(self, objective: str) -> PromptRecord | None:
+        try:
+            return self._memory.best_for_objective(objective)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("PromptOptimizer: baseline lookup failed: %s", exc)
+            return None
 
 
 def _observations(evaluation: Evaluation) -> list[str]:

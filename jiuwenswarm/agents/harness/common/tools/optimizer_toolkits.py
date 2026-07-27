@@ -93,6 +93,30 @@ class PromptOptimizerToolkit:
             params["max_iterations"] = request.max_iterations
         return await self._call_rpc("optimizer.optimize", params)
 
+    async def list_pending_prompt_improvements(
+        self,
+        threshold: float | None = None,
+    ) -> dict[str, Any]:
+        if not self.is_enabled():
+            return {
+                "success": False,
+                "disabled": True,
+                "detail": "Prompt optimizer disabled: symphony.optimization.enabled=false",
+            }
+        params: dict[str, Any] = {}
+        if threshold is not None:
+            params["threshold"] = threshold
+        return await self._call_rpc("optimizer.pending_improvements", params)
+
+    async def mark_prompt_improvement_applied(self, record_id: str) -> dict[str, Any]:
+        if not self.is_enabled():
+            return {
+                "success": False,
+                "disabled": True,
+                "detail": "Prompt optimizer disabled: symphony.optimization.enabled=false",
+            }
+        return await self._call_rpc("optimizer.mark_applied", {"record_id": record_id})
+
     def get_tools(self, config: dict[str, Any] | None = None) -> list[Tool]:
         if not self.is_enabled(config):
             return []
@@ -160,7 +184,52 @@ class PromptOptimizerToolkit:
                     "required": ["objective"],
                 },
                 self.optimize_prompt,
-            )
+            ),
+            make_tool(
+                "list_pending_prompt_improvements",
+                (
+                    "List prompt-optimization results that scored better than their prior "
+                    "baseline but have not been confirmed as applied anywhere yet — the "
+                    "'review queue' for RLAF-P. Use this to check whether a previously "
+                    "optimized, still-unused prompt exists for a task before assuming none "
+                    "does. Each entry includes a 'record_id' for use with "
+                    "'mark_prompt_improvement_applied'."
+                ),
+                {
+                    "type": "object",
+                    "properties": {
+                        "threshold": {
+                            "type": "number",
+                            "description": (
+                                "Minimum reward gain over baseline to count as an "
+                                "improvement (default from config)."
+                            ),
+                        },
+                    },
+                },
+                self.list_pending_prompt_improvements,
+            ),
+            make_tool(
+                "mark_prompt_improvement_applied",
+                (
+                    "Confirm that a prompt returned by 'optimize_prompt' or found via "
+                    "'list_pending_prompt_improvements' has actually been installed as a "
+                    "teammate's live system prompt. This does NOT install the prompt "
+                    "anywhere — call it only after the prompt has actually been put to use, "
+                    "so it stops showing up in future review-queue listings."
+                ),
+                {
+                    "type": "object",
+                    "properties": {
+                        "record_id": {
+                            "type": "string",
+                            "description": "The record_id of the applied prompt.",
+                        },
+                    },
+                    "required": ["record_id"],
+                },
+                self.mark_prompt_improvement_applied,
+            ),
         ]
 
 

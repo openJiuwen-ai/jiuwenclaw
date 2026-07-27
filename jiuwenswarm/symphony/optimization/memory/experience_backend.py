@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,43 @@ class ExperienceBankPromptMemory(PromptMemory):
             if record is not None:
                 records.append(record)
         return records
+
+    def best_for_objective(self, objective: str) -> PromptRecord | None:
+        matches = [r for r in self._records.values() if r.objective == objective]
+        return max(matches, key=lambda r: r.reward, default=None)
+
+    def pending(self, threshold: float = 0.0) -> list[PromptRecord]:
+        candidates = [
+            r for r in self._records.values() if not r.applied and r.gain > threshold
+        ]
+        candidates.sort(key=lambda r: r.gain, reverse=True)
+        return candidates
+
+    def mark_applied(self, record_id: str) -> bool:
+        with self._lock:
+            target_item_id = None
+            for item_id, record in self._records.items():
+                if record.record_id == record_id:
+                    record.applied = True
+                    record.applied_at = time.time()
+                    target_item_id = item_id
+                    break
+            if target_item_id is None:
+                return False
+            self._rewrite_sidecar()
+            return True
+
+    def _rewrite_sidecar(self) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with self._sidecar.open("w", encoding="utf-8") as handle:
+            for item_id, record in self._records.items():
+                handle.write(
+                    json.dumps(
+                        {"item_id": item_id, "record": record.to_dict()},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
 
 
 __all__ = ["ExperienceBankPromptMemory"]
