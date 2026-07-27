@@ -108,7 +108,7 @@ export function EmbeddingTemplateModal({ open, template, onClose, onSaved }: Pro
       { label: t('embeddingTemplate.templateName'), value: form.template_name },
       { label: t('embeddingTemplate.templateDescription'), value: form.description },
       { label: t('embeddingTemplate.modelId'), value: form.model_id },
-      ...fromCommaList(form.embed_tags).map((tag) => ({
+      ...(fromCommaList(form.embed_tags) ?? []).map((tag) => ({
         label: t('embeddingTemplate.embedTags'),
         value: tag,
       })),
