@@ -136,8 +136,19 @@ export interface CommandContext {
   hasServerTask?: () => boolean;
   /** TaskLifecyclePort：等待型取消；只供 /switch 等生命周期动作使用。 */
   cancelAndWaitForIdle?: (options?: CancelAndWaitOptions) => Promise<void>;
-  /** Start a TUI-side PR watch: re-run /autofix-pr on an interval until green. */
-  startPrWatch?: (config: { repo: string; prNumber: string; platform: string; intervalMs?: number }) => void;
+  /** Start a TUI-side PR watch: re-run /autofix-pr on an interval until green.
+   *  `autoApprove` grants run-scoped auto-approval; it must be applied inside
+   *  startPrWatch (after the prior watch's onStopped clears it, before the first
+   *  round is sent) so round 1 is auto-approved too. `preferredLanguage` localizes
+   *  the watch's own user-visible messages. */
+  startPrWatch?: (config: {
+    repo: string;
+    prNumber: string;
+    platform: string;
+    intervalMs?: number;
+    autoApprove?: boolean;
+    preferredLanguage?: PreferredLanguage;
+  }) => void;
   /** Stop the active PR watch; returns true if one was running. */
   stopPrWatch?: () => boolean;
   /** Whether a PR watch is currently active. */

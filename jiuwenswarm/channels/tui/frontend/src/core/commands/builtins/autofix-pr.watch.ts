@@ -1,3 +1,4 @@
+import type { PreferredLanguage } from "../types.js";
 import { buildAutofixPrPrompt } from "./autofix-pr.prompts.js";
 import { checkPrStatus, type PrStatus } from "./autofix-pr.status.js";
 
@@ -29,8 +30,11 @@ export interface PrWatchDeps {
   isConnected: () => boolean;
   /** Surface a message to the user (info, or error when isError). */
   notify: (message: string, isError?: boolean) => void;
+  /** UI language for the watch's own user-visible messages (stop reason, fuse).
+   *  Also forwarded to checkStatus so its reasons match. Defaults to "zh". */
+  preferredLanguage?: PreferredLanguage;
   /** Read the PR's status; defaults to the real checkPrStatus. Injectable for tests. */
-  checkStatus?: (repo: string, prNumber: string, platform: string) => Promise<PrStatus>;
+  checkStatus?: (repo: string, prNumber: string, platform: string, lang: PreferredLanguage) => Promise<PrStatus>;
   /** Called once when the watch stops (any reason) — lets the owner clean up
    *  (e.g. drop the run-scoped auto-approve grant). */
   onStopped?: () => void;
@@ -51,7 +55,8 @@ export class PrWatchController {
   private ticking = false;
   private readonly intervalMs: number;
   private readonly maxRounds: number;
-  private readonly checkStatus: (repo: string, prNumber: string, platform: string) => Promise<PrStatus>;
+  private readonly lang: PreferredLanguage;
+  private readonly checkStatus: (repo: string, prNumber: string, platform: string, lang: PreferredLanguage) => Promise<PrStatus>;
 
   constructor(
     private readonly deps: PrWatchDeps,
@@ -59,6 +64,7 @@ export class PrWatchController {
   ) {
     this.intervalMs = config.intervalMs ?? DEFAULT_WATCH_INTERVAL_MS;
     this.maxRounds = config.maxRounds ?? DEFAULT_WATCH_MAX_ROUNDS;
+    this.lang = deps.preferredLanguage ?? "zh";
     this.checkStatus = deps.checkStatus ?? checkPrStatus;
   }
 
@@ -87,7 +93,8 @@ export class PrWatchController {
       this.timer = null;
     }
     if (!opts?.silent) {
-      this.deps.notify(`⏹ PR watch 已停止：${reason}`);
+      const prefix = this.lang === "zh" ? "⏹ PR watch 已停止：" : "⏹ PR watch stopped: ";
+      this.deps.notify(`${prefix}${reason}`);
     }
     this.deps.onStopped?.();
   }
@@ -102,7 +109,7 @@ export class PrWatchController {
     try {
       let stopReason: string | null = null;
       try {
-        const status = await this.checkStatus(this.config.repo, this.config.prNumber, this.config.platform);
+        const status = await this.checkStatus(this.config.repo, this.config.prNumber, this.config.platform, this.lang);
         if (status.shouldStop) stopReason = status.reason;
       } catch {
         // An unreadable check never ends a watch — try again next tick.
@@ -116,7 +123,11 @@ export class PrWatchController {
         return;
       }
       if (this.roundsRun >= this.maxRounds) {
-        this.stop(`已连续跑满 ${this.maxRounds} 轮仍未通过（保险丝）`);
+        this.stop(
+          this.lang === "zh"
+            ? `已连续跑满 ${this.maxRounds} 轮仍未通过（保险丝）`
+            : `Ran ${this.maxRounds} rounds without passing (safety fuse)`,
+        );
         return;
       }
       // Still red, budget left, session idle → run another round.

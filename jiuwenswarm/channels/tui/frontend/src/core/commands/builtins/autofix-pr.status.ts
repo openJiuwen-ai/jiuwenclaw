@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import type { PreferredLanguage } from "../types.js";
 
 /**
  * Code-side "is this PR done?" check for the /autofix-pr watch, ported from the
@@ -52,6 +53,9 @@ export interface PrContext {
   isComplete: boolean;
 }
 
+/** Pick a user-visible string by UI language (watch reasons are shown verbatim). */
+const msg = (lang: PreferredLanguage, zh: string, en: string): string => (lang === "zh" ? zh : en);
+
 const stop = (state: PrState, checks: ChecksVerdict, reason: string): PrStatus => ({
   state,
   checks,
@@ -74,52 +78,74 @@ export async function checkPrStatus(
   repo: string,
   prNumber: string,
   platform = "",
+  lang: PreferredLanguage = "zh",
 ): Promise<PrStatus> {
   if (!repo || !repo.includes("/") || !String(prNumber).trim()) {
-    return keepWatching("unknown", "unknown", `PR 元信息不完整（repo=${repo} pr=${prNumber}）`);
+    return keepWatching(
+      "unknown",
+      "unknown",
+      msg(lang, `PR 元信息不完整（repo=${repo} pr=${prNumber}）`, `Incomplete PR metadata (repo=${repo} pr=${prNumber})`),
+    );
   }
   const forge = platform.trim().toLowerCase();
-  if (forge === "github") return checkGithub(repo, String(prNumber));
-  if (forge === "gitcode") return checkGitcode(repo, String(prNumber));
+  if (forge === "github") return checkGithub(repo, String(prNumber), lang);
+  if (forge === "gitcode") return checkGitcode(repo, String(prNumber), lang);
 
   // Unspecified: this project lives on GitCode, so try it first and fall back.
-  const s = await checkGitcode(repo, String(prNumber));
+  const s = await checkGitcode(repo, String(prNumber), lang);
   if (s.state !== "unknown") return s;
-  return checkGithub(repo, String(prNumber));
+  return checkGithub(repo, String(prNumber), lang);
 }
 
-async function checkGitcode(repo: string, prNumber: string): Promise<PrStatus> {
+async function checkGitcode(repo: string, prNumber: string, lang: PreferredLanguage): Promise<PrStatus> {
   const [owner, name] = splitRepo(repo);
   const detail = await getJson(`${GITCODE_V5}/repos/${owner}/${name}/pulls/${prNumber}`, {
     Accept: "application/json",
     "User-Agent": "jiuwenswarm-auto-harness",
   });
   if (!detail || typeof detail !== "object") {
-    return keepWatching("unknown", "unknown", "GitCode PR 详情读取失败");
+    return keepWatching("unknown", "unknown", msg(lang, "GitCode PR 详情读取失败", "Failed to read GitCode PR details"));
   }
   const d = detail as Record<string, unknown>;
   const state = String(d.state ?? "").toLowerCase();
   if (d.merged === true || d.merged_at) {
-    return stop("merged", "unknown", `PR ${prNumber} 已合并`);
+    return stop("merged", "unknown", msg(lang, `PR ${prNumber} 已合并`, `PR ${prNumber} merged`));
   }
   if (state && state !== "open") {
-    return stop(state === "merged" ? "merged" : "closed", "unknown", `PR ${prNumber} 已${state === "merged" ? "合并" : "关闭"}`);
+    const merged = state === "merged";
+    return stop(
+      merged ? "merged" : "closed",
+      "unknown",
+      msg(lang, `PR ${prNumber} 已${merged ? "合并" : "关闭"}`, `PR ${prNumber} ${merged ? "merged" : "closed"}`),
+    );
   }
   const head = (d.head ?? {}) as Record<string, unknown>;
   const headSha = String(head.sha ?? "");
   if (!headSha) {
-    return keepWatching("open", "unknown", "读不到 PR head sha，无法查流水线");
+    return keepWatching(
+      "open",
+      "unknown",
+      msg(lang, "读不到 PR head sha，无法查流水线", "Could not read PR head sha; cannot check pipeline"),
+    );
   }
   const checks = await gitcodePipelineStatus(owner, name, prNumber, headSha);
   if (checks === "success") {
-    return stop("open", "success", `PR ${prNumber} 流水线已通过（${headSha.slice(0, 8)}）`);
+    return stop(
+      "open",
+      "success",
+      msg(lang, `PR ${prNumber} 流水线已通过（${headSha.slice(0, 8)}）`, `PR ${prNumber} pipeline passed (${headSha.slice(0, 8)})`),
+    );
   }
   if (checks === "unknown") {
     // Personal repos have no pipeline: keep watching, the prompt falls back to
     // running the project's own checks locally.
-    return keepWatching("open", "unknown", "GitCode 无可读流水线信号，继续本地校验");
+    return keepWatching(
+      "open",
+      "unknown",
+      msg(lang, "GitCode 无可读流水线信号，继续本地校验", "No readable GitCode pipeline signal; continuing with local checks"),
+    );
   }
-  return keepWatching("open", checks, `PR ${prNumber} 流水线 ${checks}`);
+  return keepWatching("open", checks, msg(lang, `PR ${prNumber} 流水线 ${checks}`, `PR ${prNumber} pipeline ${checks}`));
 }
 
 async function gitcodePipelineStatus(
@@ -150,19 +176,25 @@ async function gitcodePipelineStatus(
   return "unknown";
 }
 
-async function checkGithub(repo: string, prNumber: string): Promise<PrStatus> {
+async function checkGithub(repo: string, prNumber: string, lang: PreferredLanguage): Promise<PrStatus> {
   const payload = await ghJson(["pr", "view", prNumber, "--repo", repo, "--json", "state,statusCheckRollup"]);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return keepWatching("unknown", "unknown", "gh 不可用或读取 PR 失败");
+    return keepWatching("unknown", "unknown", msg(lang, "gh 不可用或读取 PR 失败", "gh unavailable or failed to read PR"));
   }
   const p = payload as Record<string, unknown>;
   const state = String(p.state ?? "").toLowerCase();
-  if (state === "merged") return stop("merged", "unknown", `PR ${prNumber} 已合并`);
-  if (state === "closed") return stop("closed", "unknown", `PR ${prNumber} 已关闭`);
+  if (state === "merged") return stop("merged", "unknown", msg(lang, `PR ${prNumber} 已合并`, `PR ${prNumber} merged`));
+  if (state === "closed") return stop("closed", "unknown", msg(lang, `PR ${prNumber} 已关闭`, `PR ${prNumber} closed`));
   const checks = githubRollupStatus(p.statusCheckRollup);
-  if (checks === "success") return stop("open", "success", `PR ${prNumber} 检查已全绿`);
-  if (checks === "unknown") return keepWatching("open", "unknown", "GitHub 无可读检查信号，继续本地校验");
-  return keepWatching("open", checks, `PR ${prNumber} 检查 ${checks}`);
+  if (checks === "success") return stop("open", "success", msg(lang, `PR ${prNumber} 检查已全绿`, `PR ${prNumber} checks all green`));
+  if (checks === "unknown") {
+    return keepWatching(
+      "open",
+      "unknown",
+      msg(lang, "GitHub 无可读检查信号，继续本地校验", "No readable GitHub check signal; continuing with local checks"),
+    );
+  }
+  return keepWatching("open", checks, msg(lang, `PR ${prNumber} 检查 ${checks}`, `PR ${prNumber} checks ${checks}`));
 }
 
 function githubRollupStatus(rollup: unknown): ChecksVerdict {

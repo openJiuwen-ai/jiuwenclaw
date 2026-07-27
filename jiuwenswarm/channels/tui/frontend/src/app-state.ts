@@ -1254,8 +1254,16 @@ export class CliPiAppState {
     prNumber: string;
     platform: string;
     intervalMs?: number;
+    autoApprove?: boolean;
+    preferredLanguage?: PreferredLanguage;
   }): void => {
+    const { autoApprove, preferredLanguage, ...watchConfig } = config;
     this.prWatchController?.stop("被新的 watch 取代", { silent: true });
+    // Apply the run-scoped grant here — after the prior watch's onStopped has
+    // cleared it, but before start() synchronously sends the first round — so
+    // round 1 is auto-approved too. (Setting it in the command before this call
+    // would be wiped by the replaced watch's onStopped.)
+    if (autoApprove) this.autofixAutoApprove = true;
     this.prWatchController = new PrWatchController(
       {
         sendMessage: (prompt) => this.sendMessage(prompt, undefined, this.mode, { logAsUser: false }),
@@ -1266,13 +1274,14 @@ export class CliPiAppState {
         isConnected: () => this.connectionStatus === "connected",
         notify: (message, isError) =>
           this.addItem((isError ? addError : addInfo)(this.sessionId, message, isError ? undefined : "i")),
+        preferredLanguage: preferredLanguage ?? this.preferredLanguage,
         onStopped: () => {
           // Watch ended (green / merged / closed / fuse / replaced) → drop the
           // run-scoped auto-approve grant so the next run asks again.
           this.autofixAutoApprove = false;
         },
       },
-      config,
+      watchConfig,
     );
     this.prWatchController.start();
   };
@@ -1280,7 +1289,7 @@ export class CliPiAppState {
   /** Stop the active PR watch; returns true if one was running. */
   readonly stopPrWatch = (): boolean => {
     if (!this.prWatchController?.active) return false;
-    this.prWatchController.stop("用户手动停止");
+    this.prWatchController.stop(this.preferredLanguage === "zh" ? "用户手动停止" : "stopped by user");
     this.prWatchController = null;
     return true;
   };

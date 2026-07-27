@@ -173,10 +173,17 @@ export function createAutofixPrCommand(): SlashCommand {
         return;
       }
 
-      ctx.startPrWatch({ repo: prCtx.repo, prNumber: prCtx.prNumber, platform: prCtx.platform, intervalMs });
-      // Set after startPrWatch: creating the watch may stop a prior one (which
-      // clears the grant via onStopped), so grant last to keep it for this watch.
-      if (autoApprove) ctx.setAutofixAutoApprove?.(true);
+      // Pass the grant into startPrWatch rather than setting it here: creating the
+      // watch stops any prior one, whose onStopped clears the grant — so it must be
+      // applied inside, after that stop and before the first round is sent.
+      ctx.startPrWatch({
+        repo: prCtx.repo,
+        prNumber: prCtx.prNumber,
+        platform: prCtx.platform,
+        intervalMs,
+        autoApprove,
+        preferredLanguage: ctx.preferredLanguage,
+      });
       const everyMin = (intervalMs ?? DEFAULT_WATCH_INTERVAL_MS) / 60_000;
       const everyText = zh ? `每 ${everyMin} 分钟` : `every ${everyMin} min`;
       ctx.addItem(
