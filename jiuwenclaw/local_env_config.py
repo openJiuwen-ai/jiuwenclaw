@@ -300,7 +300,10 @@ def stage_env_overrides(
         if env_value is None:
             bag.pop(key, None)
         else:
-            bag[key] = str(env_value)
+            text = str(env_value)
+            if key in _EMPTY_OMIT_ENV_KEYS and not text.strip():
+                continue
+            bag[key] = text
 
 
 def promote_staged_env(
@@ -323,6 +326,19 @@ def promote_staged_env(
             active[name] = value
             _set_ns_os(sid, aid, name, value)
     _staged_bags.pop(key, None)
+
+
+# Incremental reload must not seal empty model credentials into tip (OfficeClaw
+# often sends API_BASE="" when callbackEnv is not yet resolved). Null still deletes.
+_EMPTY_OMIT_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "API_BASE",
+        "API_KEY",
+        "MODEL_PROVIDER",
+        "EMBED_API_BASE",
+        "EMBED_API_KEY",
+    }
+)
 
 
 def apply_env_overrides_to_active(
@@ -349,6 +365,8 @@ def apply_env_overrides_to_active(
             _pop_ns_os(sid, aid, name)
         else:
             value = str(env_value)
+            if name in _EMPTY_OMIT_ENV_KEYS and not value.strip():
+                continue
             active[name] = value
             _set_ns_os(sid, aid, name, value)
 
@@ -432,7 +450,16 @@ def build_effective_env_overlay(
                 if value is None:
                     merged.pop(k, None)
                 else:
-                    merged[k] = str(value)
+                    text = str(value)
+                    if k in _EMPTY_OMIT_ENV_KEYS and not text.strip():
+                        # Omit empty credentials from sealed overlay so they do not
+                        # block fallthrough; do not actively clear a good tip value.
+                        continue
+                    merged[k] = text
+    # Drop empty credential keys already present in tip so seal does not pin "".
+    for k in _EMPTY_OMIT_ENV_KEYS:
+        if k in merged and not str(merged.get(k) or "").strip():
+            merged.pop(k, None)
     return merged
 
 
@@ -633,6 +660,9 @@ def mirror_bare_business_env_to_default_ns(*, force: bool = False) -> None:
         if key not in os.environ:
             continue
         raw = os.environ[key]
+        # Do not seal empty credentials into default tip (spawn often has API_BASE="").
+        if key in _EMPTY_OMIT_ENV_KEYS and not str(raw).strip():
+            continue
         os.environ[ns_key] = raw
         active = _bag(_active_bags, (_DEFAULT_SERVICE_ID, _DEFAULT_AGENT_ID))
         active.setdefault(key, raw)
