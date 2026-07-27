@@ -4335,7 +4335,7 @@ export function ConfigPanel({
               <span className="mono">{t('config.paramsCount', { count: totalItems })}</span>
             </div>
             <div className="app-subtabs shrink-0" role="tablist" aria-label={t('config.tabsAriaLabel')}>
-              {(["model", "agent", "security", "other"] as const).map((tab) => (
+              {(["model", "security", "other"] as const).map((tab) => (
                 <button
                   key={tab}
                   type="button"
