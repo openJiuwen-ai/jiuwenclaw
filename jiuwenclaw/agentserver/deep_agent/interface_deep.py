@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import uuid
-from contextvars import ContextVar, Token
+from contextvars import ContextVar, Token, copy_context
 from dataclasses import dataclass, field
 
 from pathlib import Path
@@ -2278,6 +2278,15 @@ class JiuWenClawDeepAdapter:
                     "[_build_model_from_entry] 从环境变量 API_BASE 获取到 api_base: model_name=%s",
                     name,
                 )
+            else:
+                # Align with resolve_env_vars: sealed miss may still have bare os.environ.
+                bare = str(os.environ.get("API_BASE") or "").strip()
+                if bare:
+                    mcc["api_base"] = bare
+                    logger.info(
+                        "[_build_model_from_entry] 从进程 os.environ API_BASE 获取到 api_base: model_name=%s",
+                        name,
+                    )
 
         if not name:
             env_model_name = read_env("MODEL_NAME").strip()
@@ -2288,6 +2297,17 @@ class JiuWenClawDeepAdapter:
                     "[_build_model_from_entry] 从环境变量 MODEL_NAME 获取到 model_name: %s",
                     name,
                 )
+
+        if not str(mcc.get("api_base") or "").strip():
+            raise ValueError(
+                f"model client config api_base is required but empty "
+                f"(model_name={name!r}). Set API_BASE in sync/reload env or process environment."
+            )
+        if mcc.get("api_key") == "placeholder-api-key":
+            logger.warning(
+                "[_build_model_from_entry] api_key 仍为占位值，后续调用可能鉴权失败: model_name=%s",
+                name,
+            )
 
         m_config = ModelRequestConfig(
             model=name,
@@ -3648,7 +3668,9 @@ class JiuWenClawDeepAdapter:
 
         # 小艺手机端工具：由 channels.xiaoyi.phone_tools_enabled 控制
         loop = asyncio.get_running_loop()
-        config_base = await loop.run_in_executor(None, get_config)
+        # Preserve sealed overlay / agent env ns across the executor thread.
+        _cfg_ctx = copy_context()
+        config_base = await loop.run_in_executor(None, _cfg_ctx.run, get_config)
         xiaoyi_phone_tools_enabled = (
             config_base.get("channels", {}).get("xiaoyi", {}).get("phone_tools_enabled", False)
         )
@@ -3844,7 +3866,9 @@ class JiuWenClawDeepAdapter:
         loop = asyncio.get_running_loop()
         # Align with reload: drop stale resolved ${VAR} cache before reading under seal.
         clear_global_config_cache()
-        config_base = await loop.run_in_executor(None, get_config)
+        # Preserve sealed overlay / agent env ns across the executor thread.
+        _cfg_ctx = copy_context()
+        config_base = await loop.run_in_executor(None, _cfg_ctx.run, get_config)
         self._latest_config_base = config_base if isinstance(config_base, dict) else None
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
