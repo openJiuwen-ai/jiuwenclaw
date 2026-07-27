@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from typing import Any
+from urllib.parse import quote
 
 from jiuwenswarm.common.device_rpc.models import DeviceCommandContext
 from jiuwenswarm.common.schema.agent import AgentRequest
@@ -47,6 +48,10 @@ def build_xiaoyi_model_trace_headers(
         return {}
 
     metadata = dict(request.metadata or {})
+    cron_headers = _build_cron_model_trace_headers(request, metadata)
+    if cron_headers:
+        return cron_headers
+
     is_xiaoyi = str(request.channel_id or "").strip().lower() == "xiaoyi" or any(
         str(key).startswith("xiaoyi_")
         and key != XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY
@@ -125,3 +130,32 @@ def _first_text(*values: Any) -> str | None:
         if text:
             return text
     return None
+
+
+def _build_cron_model_trace_headers(
+    request: AgentRequest,
+    metadata: dict[str, Any],
+) -> dict[str, str]:
+    request_id = _first_text(request.request_id)
+    if request_id is None or not request_id.startswith("cron-"):
+        return {}
+
+    params = request.params if isinstance(request.params, dict) else {}
+    cron_metadata = metadata.get("cron")
+    if not isinstance(cron_metadata, dict):
+        cron_metadata = params.get("cron")
+    if not isinstance(cron_metadata, dict):
+        return {}
+
+    job_id = _first_text(cron_metadata.get("job_id"))
+    run_id = _first_text(cron_metadata.get("run_id"))
+    if job_id is None or run_id is None:
+        return {}
+
+    encoded_job_id = quote(job_id, safe="")
+    encoded_run_id = quote(run_id, safe="")
+    return {
+        "x-hag-trace-id": f"cron_{encoded_run_id}",
+        "x-session-id": encoded_job_id,
+        "x-interaction-id": encoded_run_id,
+    }

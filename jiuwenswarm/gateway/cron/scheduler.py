@@ -5,6 +5,7 @@ import heapq
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -441,7 +442,7 @@ class CronSchedulerService:
         now = datetime.now(tz=ZoneInfo(job.timezone))
         push_dt = now
         wake_dt = now
-        run_id = f"{job.id}:{int(push_dt.timestamp())}"
+        run_id = f"{job.id}:{uuid.uuid4().hex}:{int(push_dt.timestamp())}"
         self._schedule_event(wake_dt, "wake", job.id, run_id)
         self._schedule_event(push_dt, "push", job.id, run_id)
         self._reload_event.set()
