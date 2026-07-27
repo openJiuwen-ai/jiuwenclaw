@@ -1894,6 +1894,63 @@ class JsonOnlyFormatter(logging.Formatter):
         return record.getMessage()
 
 
+# 源头脱敏是否已安装（全局，避免重复设置 LogRecordFactory）。
+_source_record_masking_installed = False
+
+
+def install_source_record_masking() -> None:
+    """在 LogRecord 创建层（``logging.setLogRecordFactory``）安装源头脱敏。
+
+    这是比 handler 上挂 ``SensitiveDataFilter`` 更彻底的兜底层：无论哪个 logger
+    发出的 record——包括 **jiuwenswarm 命名空间之外**的第三方库（openjiuwen /
+    openai / httpx / urllib3 等，它们自带 handler、不 propagate 到 jiuwenswarm
+    根 logger），在 LogRecord **创建瞬间**就被脱敏 message 与 traceback，
+    保证任何来源的 api_key 都不明文落盘。
+
+    覆盖场景：
+    - ``app_agentserver.py`` 用 ``logging.getLogger("openjiuwen.harness.security")``
+      等 openjiuwen 命名空间 logger；
+    - clawee（yuanrong faas）拉起的 AgentServer 内 openjiuwen SDK 自有 logger；
+    - httpx/openai SDK 在 DEBUG 级别打印请求头（含 Authorization）。
+
+    复用带指纹的 ``_sanitize_log_text``，与 handler 层 ``SensitiveDataFilter``
+    共存为双保险：若 record 已在源头脱敏，handler 层的 ``_is_already_masked``
+    会跳过重算，不破坏指纹。幂等，重复调用安全。
+    """
+    global _source_record_masking_installed
+    if _source_record_masking_installed:
+        return
+
+    old_factory = logging.getLogRecordFactory()
+
+    def _sanitizing_record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = old_factory(*args, **kwargs)
+        try:
+            # message 脱敏（含 %s/format 格式化后的最终文本）。
+            msg = record.getMessage()
+            record.msg = _sanitize_log_text(msg)
+            record.args = ()
+            # traceback 脱敏：traceback 由 Formatter.formatException 从
+            # record.exc_text 单独渲染，getMessage 覆盖不到。此处提前渲染并脱敏，
+            # 清空 exc_info 使 Formatter 复用已脱敏的 exc_text。
+            exc_info = record.exc_info
+            if exc_info and not record.exc_text:
+                import traceback as _tb
+
+                formatted = "".join(_tb.format_exception(exc_info[1]))
+                record.exc_text = _sanitize_log_text(formatted)
+                record.exc_info = None
+            elif record.exc_text:
+                record.exc_text = _sanitize_log_text(record.exc_text)
+        except Exception:
+            # 永不因脱敏失败而阻断日志输出。
+            pass
+        return record
+
+    logging.setLogRecordFactory(_sanitizing_record_factory)
+    _source_record_masking_installed = True
+
+
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """配置 ``jiuwenswarm`` 根日志：控制台 + 分组件文件 + 汇总 full.log。
 
@@ -1957,6 +2014,10 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     stream_handler.setFormatter(formatter)
     stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
+
+    # 源头脱敏：覆盖 jiuwenswarm 命名空间之外的第三方 logger（openjiuwen/openai/
+    # httpx 等），在 LogRecord 创建时统一脱敏，保证任何来源的 api_key 都不明文落盘。
+    install_source_record_masking()
     return root
 
 
