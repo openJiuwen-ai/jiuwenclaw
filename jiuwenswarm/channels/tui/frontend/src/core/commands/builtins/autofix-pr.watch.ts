@@ -17,7 +17,7 @@ import { checkPrStatus, type PrStatus } from "./autofix-pr.status.js";
  * only bound; on repos with real CI, green-detection ends it promptly.
  */
 
-export const DEFAULT_WATCH_INTERVAL_MS = 5 * 60_000;
+export const DEFAULT_WATCH_INTERVAL_MS = 10 * 60_000;
 export const DEFAULT_WATCH_MAX_ROUNDS = 12;
 
 export interface PrWatchDeps {

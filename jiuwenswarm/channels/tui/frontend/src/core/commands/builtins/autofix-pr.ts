@@ -2,6 +2,7 @@ import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import { buildAutofixPrPrompt } from "./autofix-pr.prompts.js";
 import { isWorkingTreeClean, resolvePrContext } from "./autofix-pr.status.js";
+import { DEFAULT_WATCH_INTERVAL_MS } from "./autofix-pr.watch.js";
 
 /**
  * /autofix-pr - Drive the current branch's open PR to green.
@@ -136,9 +137,8 @@ export function createAutofixPrCommand(): SlashCommand {
       }
 
       ctx.startPrWatch({ repo: prCtx.repo, prNumber: prCtx.prNumber, platform: prCtx.platform, intervalMs });
-      const everyText = intervalMs
-        ? zh ? `每 ${intervalMs / 60_000} 分钟` : `every ${intervalMs / 60_000} min`
-        : zh ? "每 5 分钟" : "every 5 min";
+      const everyMin = (intervalMs ?? DEFAULT_WATCH_INTERVAL_MS) / 60_000;
+      const everyText = zh ? `每 ${everyMin} 分钟` : `every ${everyMin} min`;
       ctx.addItem(
         addInfo(
           ctx.sessionId,
