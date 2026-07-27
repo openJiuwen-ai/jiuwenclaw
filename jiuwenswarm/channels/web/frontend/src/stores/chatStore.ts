@@ -37,6 +37,7 @@ function computeTimeoutAt(baseIso: string): string {
 }
 
 function resolveExecutionStatus(result: ToolResult): ToolExecutionStatus {
+  if (result.canceled) return 'canceled';
   return result.success ? 'completed' : 'error';
 }
 
@@ -196,7 +197,11 @@ interface ChatState {
   setInterruptResult: (sessionId: string, result: InterruptResultPayload | null) => void;
   setSwitchingMode: (sessionId: string, switching: boolean) => void;
   setNewSession: (sessionId: string, isNew: boolean) => void;
-  addToolCall: (sessionId: string, toolCall: ToolCall, options?: { startedAt?: string; requestId?: string }) => void;
+  addToolCall: (
+    sessionId: string,
+    toolCall: ToolCall,
+    options?: { startedAt?: string; requestId?: string; beforeToolCallId?: string }
+  ) => void;
   updateToolProgress: (sessionId: string, toolCallId: string, progress: Partial<ToolResult>) => void;
   addToolResult: (sessionId: string, toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: (sessionId: string) => void;
@@ -694,7 +699,20 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         requestId: options?.requestId,
       });
 
-      const nextOrder = [...runtime.toolExecutionOrder, toolCall.id];
+      const beforeId =
+        typeof options?.beforeToolCallId === 'string' ? options.beforeToolCallId.trim() : '';
+      let nextOrder: string[];
+      if (beforeId) {
+        const idx = runtime.toolExecutionOrder.indexOf(beforeId);
+        if (idx >= 0) {
+          nextOrder = [...runtime.toolExecutionOrder];
+          nextOrder.splice(idx, 0, toolCall.id);
+        } else {
+          nextOrder = [...runtime.toolExecutionOrder, toolCall.id];
+        }
+      } else {
+        nextOrder = [...runtime.toolExecutionOrder, toolCall.id];
+      }
       return {
         runtimes: {
           ...state.runtimes,
@@ -903,7 +921,11 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       if (!runtime) return state;
       const newSubtasks = new Map(runtime.activeSubtasks);
 
-      if (payload.status === 'completed' || payload.status === 'error') {
+      if (
+        payload.status === 'completed' ||
+        payload.status === 'error' ||
+        payload.status === 'canceled'
+      ) {
         newSubtasks.delete(payload.task_id);
       } else {
         newSubtasks.set(payload.task_id, {
@@ -927,37 +949,92 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       };
     });
 
+    const description = (payload.description || '').trim();
+    if (!description) return;
+
     const todoState = useTodoStore.getState();
-    const todoRuntime = todoState.getRuntime(sessionId);
-    const todos = todoRuntime?.todos ?? [];
-    const setTodos = todoState.setTodos;
+    todoState.ensureRuntime(sessionId);
+    const todos = todoState.getRuntime(sessionId)?.todos ?? [];
+    const descLower = description.toLowerCase();
+    const syntheticId = `session-task-${payload.task_id}`;
 
-    const matchingTodo = todos.find(
-      (todo: TodoItem) =>
-        todo.status === 'in_progress' &&
-        (todo.content.includes(payload.description) ||
-         payload.description.includes(todo.content.slice(0, 20)))
-    );
-
-    if (matchingTodo) {
-      let activeForm = '';
-      if (payload.status === 'starting') {
-        activeForm = `正在${payload.description}...`;
-      } else if (payload.status === 'tool_call') {
-        activeForm = `正在调用 ${payload.tool_name}...`;
-      } else if (payload.status === 'completed') {
-        activeForm = '';
-      }
-
-      if (activeForm || payload.status === 'completed') {
-        const updatedTodos = todos.map((todo: TodoItem) =>
-          todo.id === matchingTodo.id
-            ? { ...todo, activeForm }
-            : todo
+    const textMatches = (todo: TodoItem): boolean => {
+      const content = (todo.content || '').trim();
+      const activeForm = (todo.activeForm || '').trim();
+      if (!content && !activeForm) return false;
+      return [content, activeForm].some((text) => {
+        const lower = text.toLowerCase();
+        return (
+          text.includes(description) ||
+          description.includes(text.slice(0, 20)) ||
+          lower.includes(descLower.slice(0, 20)) ||
+          descLower.includes(lower.slice(0, 20))
         );
-        setTodos(sessionId, updatedTodos);
+      });
+    };
+
+    const matchingTodo =
+      todos.find((todo) => todo.id === syntheticId) ||
+      todos.find(
+        (todo) =>
+          textMatches(todo) &&
+          (todo.status === 'in_progress' || todo.status === 'pending')
+      );
+
+    if (payload.status === 'starting' || payload.status === 'tool_call') {
+      if (matchingTodo) {
+        todoState.updateTodo(sessionId, matchingTodo.id, {
+          status: 'in_progress',
+          content: matchingTodo.content || description,
+          activeForm:
+            payload.status === 'starting'
+              ? `正在${description}...`
+              : `正在调用 ${payload.tool_name || 'tool'}...`,
+        });
+        return;
       }
+      const now = new Date().toISOString();
+      todoState.addTodo(sessionId, {
+        id: syntheticId,
+        content: description,
+        activeForm: `正在${description}...`,
+        status: 'in_progress',
+        createdAt: now,
+        updatedAt: now,
+      });
+      return;
     }
+
+    const terminalTodoStatus =
+      payload.status === 'completed'
+        ? 'completed'
+        : payload.status === 'canceled' || payload.status === 'error'
+          ? 'cancelled'
+          : null;
+    if (!terminalTodoStatus) return;
+
+    const terminalMatch =
+      matchingTodo ||
+      todos.find((todo) => textMatches(todo));
+
+    if (terminalMatch) {
+      todoState.updateTodo(sessionId, terminalMatch.id, {
+        status: terminalTodoStatus,
+        content: terminalMatch.content || description,
+        activeForm: '',
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    todoState.addTodo(sessionId, {
+      id: syntheticId,
+      content: description,
+      activeForm: '',
+      status: terminalTodoStatus,
+      createdAt: now,
+      updatedAt: now,
+    });
   },
 
   clearSubtasks: (sessionId) => {

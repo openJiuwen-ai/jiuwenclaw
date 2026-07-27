@@ -590,17 +590,22 @@ export function applyToolResult(
             : undefined;
   const status = asString(toolPayload.status);
   const success = typeof toolPayload.success === "boolean" ? toolPayload.success : undefined;
-  const isError =
-    (success !== undefined ? !success : undefined) ??
-    (status ? status === "error" : undefined) ??
-    asBoolean(payload.is_error) ??
-    inferToolResultError(toolPayload) ??
-    inferToolResultError(payload) ??
-    inferToolResultError(result) ??
-    false;
+  const canceled =
+    toolPayload.canceled === true ||
+    status === "canceled" ||
+    status === "cancelled";
+  const isError = canceled
+    ? false
+    : (success !== undefined ? !success : undefined) ??
+      (status ? status === "error" : undefined) ??
+      asBoolean(payload.is_error) ??
+      inferToolResultError(toolPayload) ??
+      inferToolResultError(payload) ??
+      inferToolResultError(result) ??
+      false;
   return {
     ...tool,
-    status: isError ? "error" : "completed",
+    status: canceled ? "canceled" : isError ? "error" : "completed",
     result,
     summary: asString(toolPayload.summary),
     isError,
@@ -614,8 +619,17 @@ export function createSessionResultToolDisplay(
   const sessionId = asString(payload.session_id) ?? "";
   const description = asString(payload.description) ?? "";
   const result = asString(payload.result) ?? "";
-  const status = payload.status === "error" ? "error" : "completed";
-  const callId = `session-${sessionId || "unknown"}-${typeof payload.index === "number" ? payload.index : Date.now()}`;
+  const rawStatus = typeof payload.status === "string" ? payload.status : "";
+  let status: ToolCallDisplay["status"] = "completed";
+  if (rawStatus === "error") {
+    status = "error";
+  } else if (rawStatus === "canceled" || rawStatus === "cancelled") {
+    status = "canceled";
+  }
+  const taskId = asString(payload.task_id);
+  const callId = taskId
+    ? `session-${taskId}`
+    : `session-${sessionId || "unknown"}-${typeof payload.index === "number" ? payload.index : Date.now()}`;
   const fullResult = description ? `描述: ${description}\n\n结果: ${result}` : result;
 
   return {
@@ -634,7 +648,8 @@ export function createSessionResultToolDisplay(
     formattedArgs: `会话任务：【${description || "未知任务"}】`,
     status,
     result: fullResult,
-    summary: status === "error" ? "失败" : "完成",
+    summary:
+      status === "error" ? "失败" : status === "canceled" ? "已取消" : "完成",
     isError: status === "error",
   };
 }

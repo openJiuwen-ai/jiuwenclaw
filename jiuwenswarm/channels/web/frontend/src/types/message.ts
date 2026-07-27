@@ -102,6 +102,8 @@ export interface ToolResult {
   toolName: string;
   result: string;
   success: boolean;
+  /** Session/subagent task was canceled (distinct from failure). */
+  canceled?: boolean;
   toolCallId?: string;
   summary?: string;  // 结果摘要
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
@@ -109,7 +111,7 @@ export interface ToolResult {
   beamSearch?: BeamSearchProgress;
 }
 
-export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error';
+export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error' | 'canceled';
 
 export interface ToolExecution {
   toolCallId: string;

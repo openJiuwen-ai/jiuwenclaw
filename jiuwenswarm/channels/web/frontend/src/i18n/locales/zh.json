@@ -1810,6 +1810,7 @@
     "toolResult": {
       "success": "完成",
       "failed": "失败",
+      "canceled": "已取消",
       "timeout": "执行超时",
       "running": "执行中...",
       "arguments": "参数",
@@ -1821,6 +1822,7 @@
       "sessionExecuted": "{{count}} 个会话任务已完成",
       "sessionCompleted": "会话任务已完成",
       "sessionFailed": "会话失败",
+      "sessionCanceled": "会话任务已取消",
       "pending": "{{pendingCount}} 个执行中",
       "timeout": "{{timeoutCount}} 个超时",
       "latest": "↓ 最新"

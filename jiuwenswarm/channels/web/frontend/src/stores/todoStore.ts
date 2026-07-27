@@ -5,7 +5,12 @@
  */
 
 import { create } from 'zustand';
-import { TodoItem, TodoStatus } from '../types';
+import {
+  TodoItem,
+  TodoStatus,
+  isTodoStatusRegression,
+  normalizeTodoStatus,
+} from '../types';
 
 interface TodoRuntime {
   todos: TodoItem[];
@@ -13,6 +18,13 @@ interface TodoRuntime {
 
 function createEmptyRuntime(): TodoRuntime {
   return { todos: [] };
+}
+
+function normalizeTodoItem(todo: TodoItem): TodoItem {
+  return {
+    ...todo,
+    status: normalizeTodoStatus(todo.status),
+  };
 }
 
 interface TodoState {
@@ -64,23 +76,40 @@ export const useTodoStore = create<TodoState>((set, get) => ({
       runtime.todos.forEach((todo) => {
         if (!prevById.has(todo.id)) prevById.set(todo.id, todo);
       });
-      // 后端快照不含 updatedAt：在转入 in_progress 时记一个本地基准，
-      // 维持 in_progress 时保留既有基准，避免整盘重发把进度计时清零。
-      const mergedTodos = todos.map((todo) => {
+
+      const mergedTodos = todos.map((raw) => {
+        const todo = normalizeTodoItem(raw);
         const prev = prevById.get(todo.id);
+        let status = todo.status;
+        // session_result may flip UI to completed before model updates todos;
+        // do not let a stale snapshot regress terminal status.
+        if (prev && isTodoStatusRegression(prev.status, status)) {
+          status = prev.status;
+        }
         const wasInProgress = prev?.status === 'in_progress';
-        if (todo.status === 'in_progress' && !wasInProgress) {
-          return { ...todo, updatedAt: new Date().toISOString() };
+        if (status === 'in_progress' && !wasInProgress) {
+          return { ...todo, status, updatedAt: new Date().toISOString() };
         }
-        if (todo.status === 'in_progress' && prev?.updatedAt) {
-          return { ...todo, updatedAt: prev.updatedAt };
+        if (status === 'in_progress' && prev?.updatedAt) {
+          return { ...todo, status, updatedAt: prev.updatedAt };
         }
-        return todo;
+        return { ...todo, status };
       });
+
+      // Keep local session_result / spawn synthesized rows not present in snapshot.
+      const incomingIds = new Set(mergedTodos.map((todo) => todo.id));
+      const preservedLocal = runtime.todos.filter(
+        (todo) =>
+          todo.id.startsWith('session-task-') && !incomingIds.has(todo.id)
+      );
+
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, todos: mergedTodos },
+          [sessionId]: {
+            ...runtime,
+            todos: [...mergedTodos, ...preservedLocal],
+          },
         },
       };
     });
@@ -93,7 +122,10 @@ export const useTodoStore = create<TodoState>((set, get) => ({
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, todos: [...runtime.todos, todo] },
+          [sessionId]: {
+            ...runtime,
+            todos: [...runtime.todos, normalizeTodoItem(todo)],
+          },
         },
       };
     });
@@ -103,14 +135,22 @@ export const useTodoStore = create<TodoState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const normalizedUpdates =
+        updates.status !== undefined
+          ? { ...updates, status: normalizeTodoStatus(updates.status) }
+          : updates;
       return {
         runtimes: {
           ...state.runtimes,
           [sessionId]: {
             ...runtime,
             todos: runtime.todos.map((todo) =>
-              todo.id === id || todo.id.startsWith(id)
-                ? { ...todo, ...updates, updatedAt: new Date().toISOString() }
+              todo.id === id
+                ? {
+                    ...todo,
+                    ...normalizedUpdates,
+                    updatedAt: new Date().toISOString(),
+                  }
                 : todo
             ),
           },
@@ -123,14 +163,19 @@ export const useTodoStore = create<TodoState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const normalized = normalizeTodoStatus(status);
       return {
         runtimes: {
           ...state.runtimes,
           [sessionId]: {
             ...runtime,
             todos: runtime.todos.map((todo) =>
-              todo.id === id || todo.id.startsWith(id)
-                ? { ...todo, status, updatedAt: new Date().toISOString() }
+              todo.id === id
+                ? {
+                    ...todo,
+                    status: normalized,
+                    updatedAt: new Date().toISOString(),
+                  }
                 : todo
             ),
           },
@@ -148,7 +193,7 @@ export const useTodoStore = create<TodoState>((set, get) => ({
           ...state.runtimes,
           [sessionId]: {
             ...runtime,
-            todos: runtime.todos.filter((todo) => todo.id !== id && !todo.id.startsWith(id)),
+            todos: runtime.todos.filter((todo) => todo.id !== id),
           },
         },
       };

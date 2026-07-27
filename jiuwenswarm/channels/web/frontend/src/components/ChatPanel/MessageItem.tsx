@@ -383,13 +383,11 @@ export const MessageItem = memo(function MessageItem({
 
   // 系统消息
   if (role === 'system') {
- 	     // 检查是否为 chat.session_result 事件
+ 	     // Legacy history: session_result embedded as system text.
  	     if (content && content.startsWith('chat.session_result:')) {
- 	       console.log('chat.session_result event:', content);
  	       const [, jsonStr] = content.split('chat.session_result:');
  	       try {
  	         const sessionData = JSON.parse(jsonStr);
- 	         console.log('Parsed session data:', sessionData);
  	         const { description, result } = sessionData;
  	         
  	         return (

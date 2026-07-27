@@ -46,7 +46,7 @@ export interface ToolCallDisplay {
   arguments?: unknown;
   description?: string;
   formattedArgs?: string;
-  status: "running" | "completed" | "error" | "timeout";
+  status: "running" | "completed" | "error" | "timeout" | "canceled";
   result?: string;
   summary?: string;
   isError?: boolean;
@@ -88,7 +88,7 @@ export interface ContextCompressionStats {
   trigger?: "manual" | "auto";
 }
 
-export type TodoStatus = "pending" | "in_progress" | "completed" | "error";
+export type TodoStatus = "pending" | "in_progress" | "completed" | "error" | "cancelled";
 
 export interface TodoItem {
   id: string;

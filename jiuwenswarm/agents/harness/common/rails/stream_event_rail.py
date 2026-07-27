@@ -49,6 +49,22 @@ def _structured_tool_result_payload(result: Any) -> Any | None:
     detailed_output = getattr(result, "detailed_output", None)
     if detailed_output is not None:
         return detailed_output
+    # ToolOutput / similar pydantic models: expose structured fields
+    # (e.g. sessions_spawn.data) for clients that need them.
+    if hasattr(result, "model_dump") and callable(result.model_dump):
+        try:
+            dumped = result.model_dump()
+        except Exception:
+            dumped = None
+        if isinstance(dumped, (dict, list)):
+            return dumped
+    data = getattr(result, "data", None)
+    if data is not None and hasattr(result, "success"):
+        return {
+            "success": bool(getattr(result, "success", True)),
+            "data": data,
+            "error": getattr(result, "error", None),
+        }
     if isinstance(result, (dict, list)):
         return result
     return None
@@ -521,7 +537,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "tool_name": getattr(tc, "name", ""),
                 "tool_call_id": tc_id,
                 "result": "[Interrupted] Tool execution cancelled by user.",
-                "status": "error",
+                "status": "canceled",
+                "canceled": True,
+                "success": False,
             })
             self._inflight_tool_calls.pop(tc_id, None)
         logger.info(
@@ -684,13 +702,17 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     @staticmethod
     async def _emit_tool_call(session: Session, tool_call: Any) -> None:
         try:
+            tool_name = str(getattr(tool_call, "name", "") or "")
+            # Legacy/history only; sessions_close is not registered anymore.
+            if tool_name == "sessions_close":
+                return
             await session.write_stream(
                 OutputSchema(
                     type="tool_call",
                     index=0,
                     payload={
                         "tool_call": {
-                            "name": getattr(tool_call, "name", ""),
+                            "name": tool_name,
                             "arguments": getattr(tool_call, "arguments", {}),
                             "tool_call_id": getattr(tool_call, "id", ""),
                         }
@@ -700,6 +722,22 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         except Exception:
             logger.debug("tool_call emit failed", exc_info=True)
 
+    @staticmethod
+    def _strip_capacity_closed_from_raw_output(tool_name: str, raw_output: Any) -> Any:
+        """Drop capacity-eviction ``closed`` from sessions_spawn tool output."""
+        if tool_name != "sessions_spawn":
+            return raw_output
+        if not isinstance(raw_output, dict):
+            return raw_output
+        cleaned = dict(raw_output)
+        data = cleaned.get("data")
+        if isinstance(data, dict) and "closed" in data:
+            data = dict(data)
+            data.pop("closed", None)
+            cleaned["data"] = data
+        cleaned.pop("closed", None)
+        return cleaned
+
     async def _emit_tool_result(
         self,
         session: Session,
@@ -707,9 +745,13 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         result: Any,
     ) -> None:
         try:
+            tool_name = str(getattr(tool_call, "name", "") or "") if tool_call else ""
+            if tool_name == "sessions_close":
+                return
             raw_output = _structured_tool_result_payload(result)
+            raw_output = self._strip_capacity_closed_from_raw_output(tool_name, raw_output)
             tool_result_payload = {
-                "tool_name": getattr(tool_call, "name", "") if tool_call else "",
+                "tool_name": tool_name,
                 "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
                 "result": str(result)[:60000] if result is not None else "",
             }
@@ -854,8 +896,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         """Format todo items for frontend compatibility.
 
         Maps internal TodoStatus values to frontend-compatible status strings.
-        Cancelled items are omitted because the frontend todo panel tracks
-        actionable or completed tasks only.
+        Cancelled items are included so the recent-tasks panel can show cancel.
 
         Args:
             todos_data: List of TodoItem objects from TodoListTool.
@@ -867,6 +908,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             TodoStatus.PENDING: "pending",
             TodoStatus.IN_PROGRESS: "in_progress",
             TodoStatus.COMPLETED: "completed",
+            TodoStatus.CANCELLED: "cancelled",
         }
 
         return [
@@ -877,7 +919,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "status": status_mapping.get(item.status, item.status.value),
             }
             for item in todos_data
-            if item.status != TodoStatus.CANCELLED
         ]
 
     @staticmethod

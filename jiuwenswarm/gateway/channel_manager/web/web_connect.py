@@ -578,6 +578,12 @@ class WebChannel(BaseWsChannel):
                 ptype = msg.payload.get("proactive_type")
                 if ptype:
                     payload["proactive_type"] = ptype
+                # Background session_task_summary bubbles need stable ids for
+                # parallel sibling dedupe / history alignment.
+                for _key in ("task_id", "subagent_id"):
+                    _val = msg.payload.get(_key)
+                    if _val is not None:
+                        payload[_key] = _val
                 if source == "proactive_recommendation":
                     logger.info(
                         "[WebChannel] proactive push frame: source=%s proactive_type=%s "
@@ -608,9 +614,10 @@ class WebChannel(BaseWsChannel):
         _has_fanout = bool((getattr(msg, "metadata", None) or {}).get("fan_out_targets"))
         logger.debug(
             "[WebChannel] send() called: id=%s event_type=%s payload_et=%s has_fanout=%s"
-            " has_routing_target=%s client_count=%s",
+            " has_routing_target=%s client_count=%s session_id=%s",
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
+            getattr(msg, "session_id", None),
         )
         # ── 心跳 relay：临时 session_id（heartbeat_{ts}_{suffix}）不匹配任何前端连接，
         # 按常规 session_id 路由会被当作"无连接"丢弃。心跳状态是全局的（非会话级），

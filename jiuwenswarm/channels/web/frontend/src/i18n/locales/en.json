@@ -1809,6 +1809,7 @@
     "toolResult": {
       "success": "done",
       "failed": "failed",
+      "canceled": "canceled",
       "timeout": "Execution timed out",
       "running": "Running...",
       "arguments": "Arguments",
@@ -1820,6 +1821,7 @@
       "sessionExecuted": "{{count}} session tasks completed",
       "sessionCompleted": "Session task completed",
       "sessionFailed": "Session failed",
+      "sessionCanceled": "Session task canceled",
       "pending": "{{pendingCount}} running",
       "timeout": "{{timeoutCount}} timed out",
       "latest": "↓ Latest"

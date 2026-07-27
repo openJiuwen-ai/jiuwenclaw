@@ -52,6 +52,7 @@ import {
   normalizeFinalContent,
 } from '../utils';
 import {
+  buildSessionResultReplay,
   normalizeToolCallPayload,
   normalizeToolResultPayload,
   normalizeToolUpdatePayload,
@@ -2008,6 +2009,41 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
     };
 
+    const applySessionResultEvent = (payload: Record<string, unknown>) => {
+      const sessionId = resolveEventSessionId(payload);
+      if (!sessionId) return;
+      clearThinkingForVisibleOutput(sessionId);
+      const replay = buildSessionResultReplay({ sessionId, payload });
+      // Subagent finish must flip matching 最近任务 rows immediately.
+      useChatStore.getState().updateSubtask(sessionId, {
+        task_id: replay.taskId,
+        description: replay.description,
+        status: replay.status,
+        index: replay.index,
+        total: replay.total,
+        message: replay.result,
+        is_parallel: replay.isParallel,
+      });
+      useChatStore.getState().addToolCall(sessionId, {
+        id: replay.toolCallId,
+        name: 'session',
+        arguments: {
+          session_id: sessionId,
+          description: replay.description,
+        },
+        description: replay.description || '会话完成',
+        formatted_args: `会话任务：【${replay.description || '未知任务'}】`,
+      });
+      useChatStore.getState().addToolResult(sessionId, {
+        toolName: 'session',
+        result: replay.fullResult,
+        success: replay.status === 'completed',
+        canceled: replay.status === 'canceled',
+        toolCallId: replay.toolCallId,
+        summary: replay.summary,
+      });
+    };
+
     const unsubs = [
       webClient.on('connection.ack', ({ payload }) => {
         handleConnectionAck(payload);
@@ -2099,6 +2135,40 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const notifContent = normalizeFinalContent(payload);
           if (notifContent) {
             useHarnessStore.getState().setProactiveNotification(notifContent);
+          }
+          return;
+        }
+
+        // 后台 subagent 完成推送的摘要：独立气泡，绝不能并进当前流式消息，
+        // 也不能 setProcessing(false)/clearSubtasks（否则会打断进行中的主回复或
+        // auto-invoke）。并行双城查询时每条任务各推一次，必须都能落盘可见。
+        if (typeof payload.source === 'string' && payload.source === 'session_task_summary') {
+          const summarySessionId = resolveEventSessionId(payload);
+          if (!summarySessionId) return;
+          const summaryContent = normalizeFinalContent(payload);
+          if (!summaryContent) return;
+          const taskId =
+            typeof payload.task_id === 'string' ? payload.task_id.trim() : '';
+          const messageId = taskId
+            ? `session-task-summary-${taskId}`
+            : `session-task-summary-${Date.now()}`;
+          const existing = useChatStore
+            .getState()
+            .getRuntime(summarySessionId)
+            ?.messages.find((m) => m.id === messageId);
+          if (existing) {
+            useChatStore.getState().updateMessage(summarySessionId, messageId, {
+              content: summaryContent,
+              isStreaming: false,
+            });
+          } else {
+            useChatStore.getState().addMessage(summarySessionId, {
+              id: messageId,
+              role: 'assistant',
+              content: summaryContent,
+              timestamp: normalizeEventTimestampIso(payload.timestamp),
+              isStreaming: false,
+            });
           }
           return;
         }
@@ -2444,6 +2514,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         clearThinkingForVisibleOutput(sessionId);
         const toolCall = normalizeToolCallPayload(payload);
+        // Legacy/history only; sessions_close is not registered anymore.
+        if (toolCall.name === 'sessions_close') {
+          return;
+        }
         const shutdownMemberId = getShutdownMemberFromToolCall(toolCall);
         if (shutdownMemberId) {
           shutdownMemberToolCallRef.current.set(toolCall.id, shutdownMemberId);
@@ -2479,13 +2553,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : currentStreamId
               ? messages.find((msg) => msg.id === currentStreamId)
               : undefined;
-        useChatStore.getState().addToolCall(
-          sessionId,
-          toolCall,
-          currentStreamMessage?.timestamp
-            ? { startedAt: currentStreamMessage.timestamp, requestId: toolRequestId }
-            : { requestId: toolRequestId }
-        );
+        const insertBefore =
+          typeof toolCall.arguments?.__insert_before_tool_call_id === 'string'
+            ? toolCall.arguments.__insert_before_tool_call_id.trim()
+            : '';
+        useChatStore.getState().addToolCall(sessionId, toolCall, {
+          ...(currentStreamMessage?.timestamp
+            ? { startedAt: currentStreamMessage.timestamp }
+            : {}),
+          requestId: toolRequestId,
+          ...(insertBefore ? { beforeToolCallId: insertBefore } : {}),
+        });
+        // Seal text-before-tools as its own bubble. The backend persists that
+        // segment to history on tool_call but does not emit chat.final on the
+        // wire; if we keep currentStreamId, a later chat.final replaces the
+        // same bubble and wipes the earlier answer from the live UI.
+        if (currentMode !== 'team') {
+          useChatStore.getState().stopStreaming(sessionId);
+        }
         if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
           applyTeamTaskToolCall(sessionId, toolCall);
         }
@@ -2506,6 +2591,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const toolResult = normalizeToolResultPayload(payload);
+        if (toolResult.toolName === 'sessions_close') {
+          return;
+        }
         const activeSessionId = getPayloadSessionId(payload) || undefined;
         const shutdownMemberId =
           (toolResult.toolCallId
@@ -2896,6 +2984,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (useChatStore.getState().getRuntime(sessionId)?.switchingMode) return;
         const resultPayload = payload as unknown as InterruptResultPayload;
         useChatStore.getState().setInterruptResult(sessionId, resultPayload);
+        // Cancel/pause may attach refreshed todos (incl. cancelled); apply so
+        // 最近任务 does not stay stuck on in_progress.
+        if (Array.isArray(resultPayload.todos)) {
+          useTodoStore.getState().ensureRuntime(sessionId);
+          useTodoStore.getState().setTodos(
+            sessionId,
+            resultPayload.todos as Parameters<
+              ReturnType<typeof useTodoStore.getState>['setTodos']
+            >[1]
+          );
+        }
         // has_active_task 为 false 表示没有活跃任务（任务已完成）
         const hasActiveTask = resultPayload.has_active_task !== false;
 
@@ -2987,75 +3086,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         };
         useChatStore.getState().setPendingQuestion(sessionId, normalizedPayload);
       }),
-      // 同时监听 session_result 事件，以处理后端可能发送的不同格式
+      // Legacy alias + canonical event share one handler (backend emits chat.session_result).
       webClient.on('session_result', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
-        if (!sessionId) return;
-        clearThinkingForVisibleOutput(sessionId);
-        const description =
-          typeof payload.description === 'string' ? payload.description : '';
-        const result = typeof payload.result === 'string' ? payload.result : '';
-        // 创建工具调用对象
-        const toolCallId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        const sessionToolCall: ToolCall = {
-          id: toolCallId,
-          name: 'session',
-          arguments: {
-            session_id: sessionId,
-            description: description,
-          },
-          description: description || '会话完成',
-          formatted_args: `会话任务：【${description || '未知任务'}】`,
-        };
-        useChatStore.getState().addToolCall(sessionId, sessionToolCall);
-        // 组合 description 和 result 作为完整结果
-        const fullResult = description
-          ? `描述: ${description}\n\n结果: ${result}`
-          : result;
-        const sessionResult: ToolResult = {
-          toolName: 'session',
-          result: fullResult,
-          success: true,
-          toolCallId: toolCallId,
-          summary: '完成',
-        };
-        useChatStore.getState().addToolResult(sessionId, sessionResult);
+        applySessionResultEvent(payload as Record<string, unknown>);
       }),
       webClient.on('chat.session_result', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
-        if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.session_result', payload)) {
           return;
         }
-        clearThinkingForVisibleOutput(sessionId);
-        const description =
-          typeof payload.description === 'string' ? payload.description : '';
-        const result = typeof payload.result === 'string' ? payload.result : '';
-        // 创建工具调用对象
-        const toolCallId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        const sessionToolCall: ToolCall = {
-          id: toolCallId,
-          name: 'session',
-          arguments: {
-            session_id: sessionId,
-            description: description,
-          },
-          description: description || '会话完成',
-          formatted_args: `会话任务：【${description || '未知任务'}】`,
-        };
-        useChatStore.getState().addToolCall(sessionId, sessionToolCall);
-        // 组合 description 和 result 作为完整结果
-        const fullResult = description
-          ? `描述: ${description}\n\n结果: ${result}`
-          : result;
-        const sessionResult: ToolResult = {
-          toolName: 'session',
-          result: fullResult,
-          success: true,
-          toolCallId: toolCallId,
-          summary: '完成',
-        };
-        useChatStore.getState().addToolResult(sessionId, sessionResult);
+        applySessionResultEvent(payload as Record<string, unknown>);
       }),
       webClient.on('proactive_recommendation', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);

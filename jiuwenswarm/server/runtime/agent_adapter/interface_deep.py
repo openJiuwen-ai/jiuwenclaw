@@ -90,6 +90,10 @@ from openjiuwen.harness.schema.interaction import (
     InputDispatchMode,
     SendInputRequest,
 )
+from openjiuwen.harness.tools.subagent.session_notify import (
+    SessionTaskNotifier,
+    SessionTaskNotifyContext,
+)
 
 GOAL_UPDATED_EVENT_TYPE = InteractionEventType.GOAL_UPDATED.value
 _ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
@@ -891,6 +895,8 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
+        # Lazily created; reused across reload_agent_config().
+        self._session_task_notifier: SessionTaskNotifier | None = None
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
@@ -3647,11 +3653,35 @@ class JiuWenSwarmDeepAdapter:
             task_planning_rail = None
         return task_planning_rail
 
-    @staticmethod
-    def _build_subagent_rail() -> SubagentRail | None:
-        """Build SubagentRail for subagent delegation."""
+    def _session_scoped_tool_agent_id(self) -> str | None:
+        """Return a per-session id override, or ``None`` for the shared/root adapter."""
+        if getattr(self, "_is_session_scoped_adapter", False) and self._parent_session_id:
+            return f"jiuwenswarm_{self._parent_session_id}"
+        return None
+
+    def _apply_session_scoped_ability_owner(self) -> None:
+        """Scope AbilityManager owner_id per session to avoid global tool shadowing.
+
+        All session adapters share ``AgentCard(id='jiuwenswarm')``; without a
+        per-session owner_id, later registrations overwrite earlier ones in
+        ``Runner.resource_mgr``.
+        """
+        if self._instance is None:
+            return
+        tool_agent_id = self._session_scoped_tool_agent_id()
+        if tool_agent_id is None:
+            return
+        self._instance.ability_manager.set_owner_id(tool_agent_id)
+
+    def _build_subagent_rail(self, enable_async_subagent: bool = False) -> SubagentRail | None:
+        """Build SubagentRail (async sessions_* when True; else sync task_tool).
+
+        Defaults to False for code/plan modes. Agent chat enables async via
+        ``_build_agent_rails``. Tool id isolation relies on
+        ``_apply_session_scoped_ability_owner``, not ``tool_agent_id``.
+        """
         try:
-            subagent_rail = SubagentRail()
+            subagent_rail = SubagentRail(enable_async_subagent=enable_async_subagent)
             logger.info("[JiuWenSwarmDeepAdapter] SubagentRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -3970,7 +4000,16 @@ class JiuWenSwarmDeepAdapter:
             ),
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
-            _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
+            _RailBuildInfo(
+                "_subagent_rail",
+                self._build_subagent_rail,
+                {
+                    # Only the single-agent deep-chat mode uses async
+                    # sessions_spawn/sessions_resume; code/plan modes keep
+                    # the synchronous task_tool dispatch they already rely on.
+                    "enable_async_subagent": isinstance(mode, str) and mode.startswith("agent"),
+                },
+            ),
             _RailBuildInfo(
                 "_permission_rail",
                 build_permission_rail,
@@ -4553,6 +4592,16 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
+        if self._session_task_notifier is None:
+            from jiuwenswarm.server.runtime.agent_adapter.session_task_notifier import (
+                SwarmSessionTaskNotifier,
+            )
+
+            self._session_task_notifier = SwarmSessionTaskNotifier()
+        self._instance.set_session_task_notifier(self._session_task_notifier)
+
+        # Before ensure_initialized so rail tool registration uses scoped owner_id.
+        self._apply_session_scoped_ability_owner()
         await self._instance.ensure_initialized()
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
@@ -4819,6 +4868,10 @@ class JiuWenSwarmDeepAdapter:
             self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
         self._commit_reload_fingerprints(reload_fingerprints)
         self._sync_active_evolution_review_agent_after_reload()
+        # configure() resets owner_id to card.id; restore session scope.
+        self._apply_session_scoped_ability_owner()
+        if self._session_task_notifier is not None:
+            self._instance.set_session_task_notifier(self._session_task_notifier)
 
         if _headless_changed:
             # The running playwright_official_stdio subprocess was started with the old
@@ -5032,12 +5085,6 @@ class JiuWenSwarmDeepAdapter:
             if self._ask_user_rail is not None:
                 await self._instance.register_rail(self._ask_user_rail)
                 logger.info("[JiuWenSwarmDeepAdapter] StructuredAskUserRail registered for agent mode")
-        # 卸载 multi-session 工具
-        for existing in list(self._instance.ability_manager.list() or []):
-            if getattr(existing, "name", "").startswith(
-                ("session_new", "session_cancel", "session_list")
-            ):
-                self._instance.ability_manager.remove(existing.name)
         # agent 模式，根据config选择是否注册或者卸载memory rail（固定被动记忆）
         await self._handle_memory_rail_by_config("agent")
         # 外接记忆 rail（mode-independent，注册一次，跨 reload 持久）
@@ -5148,13 +5195,13 @@ class JiuWenSwarmDeepAdapter:
     async def _update_tools_for_mode(
         self, mode: str, session_id: str | None, request_id: str | None
     ) -> None:
-        """multi-session 工具装配。
+        """Drop legacy multi-session tools if any remain registered.
 
-        plan / fast 合并为单一 ``agent`` 模式后，多会话工具
-        （session_new / session_cancel / session_list）不再注册：
-        清理任何遗留的 session_* 工具后返回。
+        ``session_new`` / ``session_cancel`` / ``session_list`` are no longer
+        registered (replaced by agent-core ``sessions_*``). Keep a cleanup pass
+        so older in-memory agent instances do not retain shadowed tools.
         """
-        # 清理历史遗留的 multi-session 工具（旧 agent.fast 会话切换而来）
+        _ = (mode, session_id, request_id)
         try:
             for existing in list(self._instance.ability_manager.list() or []):
                 if getattr(existing, "name", "").startswith(
@@ -5350,6 +5397,15 @@ class JiuWenSwarmDeepAdapter:
         )
         task_cwd = runtime_config.cwd or task_workspace
         self._seed_runtime_cwd(task_cwd, workspace=task_workspace)
+        # sessions_spawn/sessions_resume execute as model tool calls during this
+        # request, so request_id/channel_id/session_id must be set before any
+        # rails/tools update below runs.
+        self._instance.set_session_task_notify_context(
+            SessionTaskNotifyContext(
+                request_id=runtime_config.request_id or "",
+                channel_id=runtime_config.channel_id or "",
+            )
+        )
         resolved_language = self._resolve_runtime_language()
         resolved_channel = (
             str(
@@ -6020,7 +6076,9 @@ class JiuWenSwarmDeepAdapter:
                             "tool_name": tool_info.get("tool_name", ""),
                             "tool_call_id": tool_info.get("tool_call_id", ""),
                             "result": tool_info.get("result", ""),
-                            "status": tool_info.get("status", "error"),
+                            "status": tool_info.get("status", "canceled"),
+                            "canceled": bool(tool_info.get("canceled", True)),
+                            "success": bool(tool_info.get("success", False)),
                         },
                     },
                     mode=request.params.get("mode", "unknown") if isinstance(request.params, dict) else "unknown",

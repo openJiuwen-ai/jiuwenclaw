@@ -2899,13 +2899,11 @@ export class CliPiAppState {
     if (status === undefined) {
       return undefined;
     }
-    if (
-      status === "deleted" ||
-      status === "delete" ||
-      status === "cancelled" ||
-      status === "canceled"
-    ) {
+    if (status === "deleted" || status === "delete") {
       return null;
+    }
+    if (status === "cancelled" || status === "canceled") {
+      return "cancelled";
     }
     if (
       status === "in_progress" ||

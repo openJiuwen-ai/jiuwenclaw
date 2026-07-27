@@ -63,13 +63,26 @@ function isToolResultSuccessful(result?: ToolExecution['result']) {
   return Boolean(result?.success && !result.result.includes('success=False'));
 }
 
+function isExecutionCanceled(execution: ToolExecution) {
+  return (
+    execution.status === 'canceled' || Boolean(execution.result?.canceled)
+  );
+}
+
 function isExecutionSuccessful(execution: ToolExecution) {
-  return execution.status === 'completed' && isToolResultSuccessful(execution.result);
+  return (
+    execution.status === 'completed' &&
+    isToolResultSuccessful(execution.result) &&
+    !isExecutionCanceled(execution)
+  );
 }
 
 function getExecutionTone(execution: ToolExecution): ToolStatusTone {
   if (execution.status === 'pending') {
     return 'pending';
+  }
+  if (isExecutionCanceled(execution)) {
+    return 'warning';
   }
   if (isExecutionSuccessful(execution)) {
     return 'success';
@@ -83,8 +96,15 @@ function getExecutionTone(execution: ToolExecution): ToolStatusTone {
   return 'pending';
 }
 
-function getExecutionLabel(execution: ToolExecution, sessionCompletedLabel: string) {
+function getExecutionLabel(
+  execution: ToolExecution,
+  sessionCompletedLabel: string,
+  sessionCanceledLabel: string,
+) {
   if (execution.toolCall.name === 'session') {
+    if (isExecutionCanceled(execution)) {
+      return execution.toolCall.formatted_args || sessionCanceledLabel;
+    }
     return execution.toolCall.formatted_args || sessionCompletedLabel;
   }
 
@@ -157,7 +177,8 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
   const { toolCall, result, status } = execution;
   const isTimeout = status === 'timeout';
   const modalTone = getExecutionTone(execution);
-  const resultSuccess = isToolResultSuccessful(result);
+  const resultCanceled = isExecutionCanceled(execution);
+  const resultSuccess = isToolResultSuccessful(result) && !resultCanceled;
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -265,15 +286,30 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
               <div
                 className="flex items-center gap-2 mb-3"
                 style={{
-                  color: resultSuccess
-                    ? 'var(--color-feedback-success)'
-                    : 'var(--color-feedback-danger)',
+                  color: resultCanceled
+                    ? 'var(--color-feedback-warning)'
+                    : resultSuccess
+                      ? 'var(--color-feedback-success)'
+                      : 'var(--color-feedback-danger)',
                 }}
               >
-                <ToolStatusIcon tone={resultSuccess ? 'success' : 'error'} />
+                <ToolStatusIcon
+                  tone={resultCanceled ? 'warning' : resultSuccess ? 'success' : 'error'}
+                />
                 <span className="text-sm font-semibold">
                   {t('chatUi.toolResult.result')}
-                  {!resultSuccess && (
+                  {resultCanceled && (
+                    <span
+                      className="ml-2 px-2 py-0.5 rounded text-xs font-medium"
+                      style={{
+                        backgroundColor: 'var(--color-feedback-warning-subtle)',
+                        color: 'var(--color-feedback-warning)',
+                      }}
+                    >
+                      {t('chatUi.toolResult.canceled')}
+                    </span>
+                  )}
+                  {!resultSuccess && !resultCanceled && (
                     <span
                       className="ml-2 px-2 py-0.5 rounded text-xs font-medium"
                       style={{
@@ -301,9 +337,10 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                     lineHeight: '1.5',
                     backgroundColor: 'var(--color-surface-elevated)',
                     border: '1px solid var(--color-border-default)',
-                    color: resultSuccess
-                      ? 'var(--color-text-primary)'
-                      : 'var(--color-feedback-danger)',
+                    color:
+                      resultSuccess || resultCanceled
+                        ? 'var(--color-text-primary)'
+                        : 'var(--color-feedback-danger)',
                     wordBreak: 'break-word',
                   }}
                 >
@@ -369,7 +406,11 @@ function ToolExecutionRow({ execution }: { execution: ToolExecution }) {
 
           <span className="tool-tree-item__main">
             <span className="tool-tree-item__name">
-              {getExecutionLabel(execution, t('chatUi.toolGroup.sessionCompleted'))}
+              {getExecutionLabel(
+                execution,
+                t('chatUi.toolGroup.sessionCompleted'),
+                t('chatUi.toolGroup.sessionCanceled'),
+              )}
             </span>
           </span>
         </button>
