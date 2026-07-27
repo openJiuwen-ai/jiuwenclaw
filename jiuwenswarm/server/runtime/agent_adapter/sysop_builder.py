@@ -20,8 +20,13 @@ from openjiuwen.core.sys_operation.config import (
     SandboxIsolationConfig,
 )
 
-from jiuwenswarm.common.config import get_sandbox_startup_mode
+from jiuwenswarm.common.config import (
+    get_sandbox_endpoint,
+    get_sandbox_runtime,
+    get_sandbox_startup_mode,
+)
 from jiuwenswarm.common.utils import (
+    get_agent_root_dir,
     get_agent_workspace_dir,
     get_config_file,
 )
@@ -242,6 +247,149 @@ def _sandbox_isolation_custom_id(project_dir: str | Path | None) -> str:
     return f"project_{digest}"
 
 
+def _resolve_agent_root_dir() -> Path | None:
+    """Resolve agent_root for yuanrong identity mount (enterprise_dev-style)."""
+    try:
+        agent_root = Path(get_agent_root_dir()).expanduser().resolve()
+    except OSError as exc:
+        logger.debug("[sysop_builder] agent_root resolve failed: %s", exc)
+        return None
+    if agent_root == Path(agent_root.anchor):
+        logger.warning(
+            "[sysop_builder] refusing to mount filesystem root %s as agent_root",
+            agent_root,
+        )
+        return None
+    try:
+        agent_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "[sysop_builder] could not ensure agent_root %s: %s",
+            agent_root,
+            exc,
+        )
+        return None
+    if not agent_root.is_dir():
+        logger.warning(
+            "[sysop_builder] agent_root %s is not a directory; skipping mount",
+            agent_root,
+        )
+        return None
+    return agent_root
+
+
+def _merge_yuanrong_mounts(
+    agent_root_mount: dict[str, Any],
+    config_mounts: list[Any] | None,
+) -> list[dict[str, Any]]:
+    """Merge forced agent_root mount with optional yaml mounts; dedupe by source+target."""
+    merged: list[dict[str, Any]] = [dict(agent_root_mount)]
+    seen = {
+        (
+            str(agent_root_mount.get("source") or ""),
+            str(agent_root_mount.get("target") or ""),
+        )
+    }
+    for entry in config_mounts or []:
+        if not isinstance(entry, dict):
+            continue
+        source = str(entry.get("source") or "").strip()
+        target = str(entry.get("target") or source).strip()
+        if not source or not target:
+            continue
+        key = (source, target)
+        if key in seen:
+            continue
+        seen.add(key)
+        mount = {
+            "source": source,
+            "target": target,
+            "readonly": bool(entry.get("readonly", False)),
+        }
+        merged.append(mount)
+    return merged
+
+
+def _build_yuanrong_extra_params() -> dict[str, Any]:
+    """Assemble yuanrong provider extra_params; always identity-mount agent_root."""
+    endpoint = get_sandbox_endpoint()
+    executor = str(endpoint.get("executor") or "docker").strip().lower() or "docker"
+    agent_root = _resolve_agent_root_dir()
+    if agent_root is None:
+        raise ValueError("yuanrong sandbox requires a resolvable agent_root directory")
+
+    agent_root_str = str(agent_root)
+    agent_root_mount = {
+        "source": agent_root_str,
+        "target": agent_root_str,
+        "readonly": False,
+    }
+    config_mounts = endpoint.get("mounts")
+    if not isinstance(config_mounts, list):
+        config_mounts = None
+
+    extra_params: dict[str, Any] = {
+        "executor": executor,
+        "mounts": _merge_yuanrong_mounts(agent_root_mount, config_mounts),
+    }
+
+    workdir = endpoint.get("workdir")
+    if workdir is not None and str(workdir).strip():
+        extra_params["workdir"] = str(workdir).strip()
+    else:
+        extra_params["workdir"] = agent_root_str
+
+    for key in ("image", "cpu", "cpu_limit", "memory", "mem_limit", "rootfs"):
+        if key not in endpoint:
+            continue
+        value = endpoint[key]
+        if key == "rootfs":
+            if isinstance(value, dict):
+                rootfs = dict(value)
+                existing = rootfs.get("mounts")
+                rootfs["mounts"] = _merge_yuanrong_mounts(
+                    agent_root_mount,
+                    existing if isinstance(existing, list) else None,
+                )
+                if "workdir" not in rootfs or not str(rootfs.get("workdir") or "").strip():
+                    rootfs["workdir"] = extra_params["workdir"]
+                extra_params["rootfs"] = rootfs
+            continue
+        if value is not None:
+            extra_params[key] = value
+    return extra_params
+
+
+def build_yuanrong_sandbox_status_view() -> dict[str, Any]:
+    """Read-only yuanrong status for TUI ``/sandbox`` (enabled / executor / mounts)."""
+    runtime = get_sandbox_runtime()
+    endpoint = get_sandbox_endpoint()
+    executor = str(endpoint.get("executor") or "docker").strip().lower() or "docker"
+    try:
+        mounts = list(_build_yuanrong_extra_params().get("mounts") or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[sysop_builder] yuanrong status mounts fallback: %s",
+            exc,
+        )
+        config_mounts = endpoint.get("mounts")
+        mounts = [
+            {
+                "source": str(entry.get("source") or "").strip(),
+                "target": str(entry.get("target") or entry.get("source") or "").strip(),
+                "readonly": bool(entry.get("readonly", False)),
+            }
+            for entry in (config_mounts if isinstance(config_mounts, list) else [])
+            if isinstance(entry, dict) and str(entry.get("source") or "").strip()
+        ]
+    return {
+        "type": "yuanrong",
+        "enabled": bool(runtime.get("enabled")),
+        "executor": executor,
+        "mounts": mounts,
+    }
+
+
 def build_filesystem_policy(
     files_runtime: dict[str, Any] | None,
     *,
@@ -433,18 +581,56 @@ def create_sandbox_sysop_card(
     is_code_agent: bool = False,
     startup_mode: str | None = None,
 ) -> SysOperationCard | None:
-    """create jiuwenbox SysOperationCard."""
-    # 触发 jiuwenbox provider 注册（@SandboxRegistry.provider 装饰器副作用）
+    """Create sandbox SysOperationCard (jiuwenbox or yuanrong)."""
+    # 触发 sandbox provider 注册（@SandboxRegistry.provider 装饰器副作用）
     import openjiuwen.extensions.sys_operation.sandbox.providers  # noqa: F401
 
+    normalized_type = str(sandbox_type or "").strip().lower()
     try:
+        if normalized_type == "yuanrong":
+            extra_params = _build_yuanrong_extra_params()
+            isolation_custom_id = _sandbox_isolation_custom_id(project_dir)
+            gateway_config = SandboxGatewayConfig(
+                isolation=SandboxIsolationConfig(
+                    container_scope=ContainerScope.CUSTOM,
+                    custom_id=isolation_custom_id,
+                ),
+                launcher_config=PreDeployLauncherConfig(
+                    base_url=sandbox_url,
+                    sandbox_type="yuanrong",
+                    idle_ttl_seconds=idle_ttl_seconds,
+                    extra_params=extra_params,
+                ),
+            )
+            sysop_card = SysOperationCard(
+                mode=OperationMode.SANDBOX,
+                work_config=LocalWorkConfig(shell_allowlist=None),
+                gateway_config=gateway_config,
+            )
+            logger.info(
+                "[sysop_builder] yuanrong SysOperationCard created:\n"
+                "  base_url=%s sandbox_type=yuanrong\n"
+                "  isolation_custom_id=%s\n"
+                "  idle_ttl=%s\n"
+                "  executor=%s workdir=%s\n"
+                "  mounts(%d)=%s",
+                sandbox_url,
+                isolation_custom_id,
+                idle_ttl_seconds,
+                extra_params.get("executor"),
+                extra_params.get("workdir"),
+                len(extra_params.get("mounts") or []),
+                extra_params.get("mounts") or [],
+            )
+            return sysop_card
+
         policy, upload_list = build_filesystem_policy(
             files_runtime,
             project_dir=project_dir,
             is_code_agent=is_code_agent,
             startup_mode=startup_mode,
         )
-        extra_params: dict[str, Any] = {
+        extra_params = {
             "policy": policy,
             "policy_mode": "append",
             "excluded_commands": list(excluded_commands or []),
@@ -791,6 +977,7 @@ def find_auto_managed_match(
 __all__ = [
     "PreserveFileSharingMode",
     "build_filesystem_policy",
+    "build_yuanrong_sandbox_status_view",
     "create_sandbox_sysop_card",
     "create_local_sysop_card",
     "effective_files_from_policy",

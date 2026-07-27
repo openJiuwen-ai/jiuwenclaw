@@ -1501,6 +1501,7 @@ export class AppScreen implements Component, Focusable {
   private runningStoppedAtMs: number | null = null;
   /** Whether the eager skill-cache fetch on first WebSocket connection has already been fired. */
   private didEagerFetchSkills = false;
+  private didEagerFetchSandboxMeta = false;
   private pendingSubmittedInput: string | null = null;
   private pendingSubmittedBaseline = 0;
   private pendingSubmittedSessionId: string | null = null;
@@ -3384,6 +3385,21 @@ export class AppScreen implements Component, Focusable {
     if (!this.didEagerFetchSkills && snapshot.connectionStatus === "connected") {
       this.didEagerFetchSkills = true;
       void this.commands.refreshSkills(this.state.getCommandContext());
+    }
+    // Hide /sandbox subcommand inline hints when sandbox.type=yuanrong.
+    if (!this.didEagerFetchSandboxMeta && snapshot.connectionStatus === "connected") {
+      this.didEagerFetchSandboxMeta = true;
+      void import("../core/commands/builtins/sandbox.js")
+        .then(({ refreshSandboxCommandPresentation }) =>
+          refreshSandboxCommandPresentation(this.state.getCommandContext()),
+        )
+        .then(() => {
+          this.composerAutocompleteProvider = this.rebuildAutocompleteProvider();
+          this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
+        })
+        .catch(() => {
+          // Best-effort; /sandbox action still probes on use.
+        });
     }
     if (
       this.pendingSubmittedInput &&

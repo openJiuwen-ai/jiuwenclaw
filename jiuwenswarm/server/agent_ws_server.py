@@ -66,6 +66,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
 )
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
+    build_yuanrong_sandbox_status_view,
     effective_files_from_policy,
     find_auto_managed_match,
     find_nested_files_conflict,
@@ -997,6 +998,13 @@ class AgentWebSocketServer:
             endpoint = get_sandbox_endpoint()
             url = endpoint.get("url") or "http://127.0.0.1:8321"
             sandbox_type = endpoint.get("type") or "jiuwenbox"
+            # yuanrong 不需要本机 jiuwenbox 进程; 仅通过 config 启用 SysOperation。
+            if str(sandbox_type).strip().lower() == "yuanrong":
+                logger.info(
+                    "[AgentWebSocketServer] sandbox.type=yuanrong, skipping "
+                    "jiuwenbox auto-start (YuanRong uses YR_* env + yr.init)"
+                )
+                return
             raw_policy = endpoint.get("policy_file") or ""
             effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
             policy_path = resolve_sandbox_policy_path(effective_policy_file)
@@ -4849,46 +4857,73 @@ class AgentWebSocketServer:
         ``enable``/``disable`` 走 ``agent_manager.recreate_agent`` (重建 sys_operation 类型);
         其他写动作通过 ``adapter.apply_sandbox_runtime_patch()`` 立即热更,
         不重建 agent.
+
+        当 ``sandbox.type=yuanrong`` 时仅允许 ``status`` (裸 ``/sandbox`` 查看
+        enabled/executor/mounts); 任意子指令一律拒绝。
         """
         params = request.params or {}
-        sub = str(params.get("sub", "status")).strip().lower()
+        sub = str(params.get("sub", "status")).strip().lower() or "status"
         channel_id = request.channel_id or "default"
         try:
             # 平台守卫: ``/sandbox`` 全家桶仅在 Linux 上可用。 放在 try 内部是
             # 故意的, 让 ValueError 命中下方 ``except ValueError`` 分支转成
             # ``SANDBOX_BAD_REQUEST`` 回执, 跟其它入参校验失败的处理一致。
             _require_sandbox_supported()
-            validate_sandbox_files_runtime(get_sandbox_runtime().get("files"))
-            if sub == "status":
-                payload = {"runtime": get_sandbox_runtime()}
-            elif sub == "enable":
-                payload = await self._handle_sandbox_enable(channel_id)
-            elif sub == "disable":
-                payload = await self._handle_sandbox_disable(channel_id)
-            elif sub == "exclude.add":
-                payload = await self._handle_sandbox_exclude_add(channel_id, params)
-            elif sub == "exclude.remove":
-                payload = await self._handle_sandbox_exclude_remove(channel_id, params)
-            elif sub == "exclude.list":
-                payload = {"excluded_commands": list(get_sandbox_runtime().get("excluded_commands") or [])}
-            elif sub == "files.allow":
-                payload = await self._handle_sandbox_files_set(channel_id, params, bucket="allow")
-            elif sub == "files.deny":
-                payload = await self._handle_sandbox_files_set(channel_id, params, bucket="deny")
-            elif sub == "files.remove":
-                payload = await self._handle_sandbox_files_remove(channel_id, params)
-            elif sub == "files.list":
-                payload = {"files": dict(get_sandbox_runtime().get("files") or {})}
+            endpoint = get_sandbox_endpoint()
+            sandbox_type = str(endpoint.get("type") or "").strip().lower()
+            if sandbox_type == "yuanrong":
+                if sub != "status":
+                    raise ValueError(
+                        "sandbox.type=yuanrong: only /sandbox (view config) is "
+                        "supported; subcommands are disabled"
+                    )
+                payload = build_yuanrong_sandbox_status_view()
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload=payload,
+                )
             else:
-                raise ValueError(f"unknown sub: {sub!r}")
-            self._attach_effective_sandbox_files(payload, channel_id, params)
-            await self._attach_landlock_status(payload)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload=payload,
-            )
+                validate_sandbox_files_runtime(get_sandbox_runtime().get("files"))
+                if sub == "status":
+                    payload = {"runtime": get_sandbox_runtime()}
+                elif sub == "enable":
+                    payload = await self._handle_sandbox_enable(channel_id)
+                elif sub == "disable":
+                    payload = await self._handle_sandbox_disable(channel_id)
+                elif sub == "exclude.add":
+                    payload = await self._handle_sandbox_exclude_add(channel_id, params)
+                elif sub == "exclude.remove":
+                    payload = await self._handle_sandbox_exclude_remove(channel_id, params)
+                elif sub == "exclude.list":
+                    payload = {
+                        "excluded_commands": list(
+                            get_sandbox_runtime().get("excluded_commands") or []
+                        )
+                    }
+                elif sub == "files.allow":
+                    payload = await self._handle_sandbox_files_set(
+                        channel_id, params, bucket="allow"
+                    )
+                elif sub == "files.deny":
+                    payload = await self._handle_sandbox_files_set(
+                        channel_id, params, bucket="deny"
+                    )
+                elif sub == "files.remove":
+                    payload = await self._handle_sandbox_files_remove(channel_id, params)
+                elif sub == "files.list":
+                    payload = {"files": dict(get_sandbox_runtime().get("files") or {})}
+                else:
+                    raise ValueError(f"unknown sub: {sub!r}")
+                self._attach_effective_sandbox_files(payload, channel_id, params)
+                await self._attach_landlock_status(payload)
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload=payload,
+                )
         except ValueError as exc:
             resp = AgentResponse(
                 request_id=request.request_id,
