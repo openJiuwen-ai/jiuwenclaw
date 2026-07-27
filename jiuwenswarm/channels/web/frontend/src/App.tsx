@@ -2094,7 +2094,7 @@ function AppContent() {
         isConnected={isConnected}
         onNewSession={handleNewSession}
         showNewSession={false}
-        hiddenNavItems={['sessions', 'browserpanel', 'updatepanel']}
+        hiddenNavItems={['teams', 'sessions', 'browserpanel', 'updatepanel']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
         onSetupGuideRequest={openModelSetupGuide}
       />
