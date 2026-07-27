@@ -132,6 +132,8 @@ class DeliveryNode(PlanNode):
                     "send_file_status": send_file_status,
                     "pptx_filename": pptx_filename,
                     "task_completed": task_completed,
+                    # prod 新增：演讲备注状态（best-effort，可能 skipped/partial/ok）
+                    "speaker_notes_status": str(inputs.get("speaker_notes_status") or "skipped"),
                 },
                 "files": [{"path": pptx_path}] if pptx_path else [],
             },

@@ -113,14 +113,14 @@ def test_resolve_pptx_root_skill_root_is_skill_dir() -> None:
 
 
 @pytest.mark.unit
-def test_resolve_pptx_root_fallback_pptx_craft() -> None:
-    """skill_root 下没找到 skill_name 但有 pptx-craft 时 fallback。"""
+def test_resolve_pptx_root_rejects_mismatched_skill_name() -> None:
+    """skill_name 不匹配时必须报错，不得静默回退到其他 skill。"""
     with tempfile.TemporaryDirectory() as tmpdir:
         old_dir = os.path.join(tmpdir, "pptx-craft")
         os.makedirs(old_dir, exist_ok=True)
         inputs = {"skill_root": tmpdir, "skill_name": "pptx-craft-skill_turbo"}
-        result = pi._resolve_pptx_root(inputs)
-        assert result == str(os.path.realpath(old_dir))
+        with pytest.raises(pi.PipelineInitError, match="pptx-craft-skill_turbo"):
+            pi._resolve_pptx_root(inputs)
 
 
 @pytest.mark.unit

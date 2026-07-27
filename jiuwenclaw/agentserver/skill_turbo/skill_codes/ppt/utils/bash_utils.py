@@ -25,28 +25,15 @@ def quote_path(path: str) -> str:
     return f'"{normalized}"'
 
 
-def fill_js_path(pptx_root: str) -> str:
-    """构建 fill.js 脚本路径（template-filler 子技能的脚本入口）。"""
-    fill_script = Path(pptx_root) / "template-filler" / "scripts" / "fill.js"
-    if not fill_script.is_file():
-        raise BashExecError(f"fill.js 不存在: {fill_script}")
-    return f"node {quote_path(str(fill_script))}"
+def cli_path(subcommand: str, pptx_root: str) -> str:
+    """构建 cli.js 子命令路径。
 
-
-_PPT_DIR = Path(__file__).resolve().parent.parent
-
-
-def cli_path(subcommand: str, pptx_root: str | None = None) -> str:
-    """[TEMP-EXTERNAL-SKILL] 构建 cli.js 子命令路径。
-
-    pptx_root 为外部 skill 目录时，scripts 在 {pptx_root}/scripts/ 下；
-    pptx_root 为 None 时 fallback 到内置 _PPT_DIR/scripts/（仅兼容旧调用）。
+    prod 版 cli.js 位于 {pptx_root}/packages/cli/dist/cli.js。
     """
-    if pptx_root:
-        scripts_dir = Path(pptx_root) / "scripts"
-    else:
-        scripts_dir = _PPT_DIR / "scripts"
-    cli = scripts_dir / "cli.js"
+    if not str(pptx_root or "").strip():
+        raise BashExecError("缺少 pptx_root，无法定位新版 pptx-craft CLI")
+    cli_dir = Path(pptx_root) / "packages" / "cli" / "dist"
+    cli = cli_dir / "cli.js"
     if not cli.is_file():
         raise BashExecError(f"cli.js 不存在: {cli}")
     return f"node {quote_path(str(cli))} {subcommand}"

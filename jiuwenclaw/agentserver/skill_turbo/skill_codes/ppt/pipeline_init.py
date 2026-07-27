@@ -45,20 +45,14 @@ class PipelineInitError(RuntimeError):
     """P0 流水线初始化失败。"""
 
 
-# [TEMP-EXTERNAL-SKILL] _BUILTIN_PPTX_ROOT 保留定义但不再作为 pptx_root fallback 或 workdir。
-# 后续稳定版可删除此常量及 skill_codes/ppt 下的 scripts/styles/assets 拷贝文件。
-_BUILTIN_PPTX_ROOT = str(Path(__file__).resolve().parent)
-
-
 def _resolve_pptx_root(inputs: dict[str, Any]) -> str:
-    """[TEMP-EXTERNAL-SKILL] 解析 pptx_root —— 只用外部 skill_root，不 fallback builtin。
+    """解析 pptx_root，只使用已注册的新版外部 skill 目录。
 
     优先级：
     1. inputs["pptx_root"] — 显式指定（最高优先级）
     2. inputs["skill_root"] + inputs["skill_name"] — 外部 skill 目录拼接
     3. 找不到 → raise PipelineInitError
     """
-    builtin = str(Path(__file__).resolve().parent)
     # 1. 显式指定 pptx_root
     pptx_root = inputs.get("pptx_root")
     if pptx_root:
@@ -66,7 +60,7 @@ def _resolve_pptx_root(inputs: dict[str, Any]) -> str:
         if not root.is_dir():
             raise PipelineInitError(f"pptx_root 不存在: {root}")
         resolved = str(root)
-        logger.info("[P0] pptx_root resolved (source=pptx_root): %s builtin=%s", resolved, builtin)
+        logger.info("[P0] pptx_root resolved (source=pptx_root): %s", resolved)
         return resolved
 
     # 2. skill_root + skill_name
@@ -77,23 +71,13 @@ def _resolve_pptx_root(inputs: dict[str, Any]) -> str:
         # skill_root 本身就是 skill 目录（目录名 == skill_name）
         if skill_root_path.name == skill_name and skill_root_path.is_dir():
             resolved = str(skill_root_path)
-            logger.info("[P0] pptx_root resolved (source=skill_root_is_skill_dir): %s builtin=%s", resolved, builtin)
+            logger.info("[P0] pptx_root resolved (source=skill_root_is_skill_dir): %s", resolved)
             return resolved
         # skill_root 是 skills 根目录，拼接 skill_name 子目录
         candidate = skill_root_path / skill_name
         if candidate.is_dir():
             resolved = str(candidate)
-            logger.info("[P0] pptx_root resolved (source=skill_root+skill_name): %s builtin=%s", resolved, builtin)
-            return resolved
-        # 兜底尝试 pptx-craft（兼容旧配置）
-        fallback = skill_root_path / "pptx-craft"
-        if fallback.is_dir():
-            resolved = str(fallback)
-            logger.warning(
-                "[P0] pptx_root resolved (source=fallback_pptx-craft): %s builtin=%s — "
-                "skill_root 下未找到 %s 但存在 pptx-craft，使用旧目录",
-                resolved, builtin, skill_name,
-            )
+            logger.info("[P0] pptx_root resolved (source=skill_root+skill_name): %s", resolved)
             return resolved
 
     raise PipelineInitError(
@@ -103,14 +87,16 @@ def _resolve_pptx_root(inputs: dict[str, Any]) -> str:
 
 
 _NPM_DEPS = {
-    "commander": "^12.0.0",
-    "express": "^4.21.0",
-    "get-port": "^7.1.0",
-    "playwright": "^1.52.0",
+    "commander": "^13.0.0",
+    "express": "^5.2.1",
+    "get-port": "^7.2.0",
+    "playwright": "1.57.0",
+    "jszip": "^3.10.1",
 }
 
 _PACKAGE_JSON_CONTENT = (
-    '{"name":"ppt-scripts","version":"1.0.0","private":true,"type":"module",'
+    '{"name":"pptx-craft-runtime","version":"2.0.0","private":true,"type":"module",'
+    f'"bin":{{"pptx-craft-cli":"./packages/cli/dist/cli.js"}},'
     f'"dependencies":{json.dumps(_NPM_DEPS)}}}\n'
 )
 

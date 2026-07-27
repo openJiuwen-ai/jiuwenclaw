@@ -424,20 +424,21 @@ class ImagePrepareNode(PlanNode):
             logger.warning("[P6.5] text_to_image 工具不可用，跳过 ai 源")
             return
 
-        script = Path(pptx_root) / "image-insert" / "ai-plan.js"
-        if not script.is_file():
-            logger.warning("[P6.5] ai-plan.js 不存在: %s", script)
-            return
-
+        # prod: 改用 cli stage-ai-image 替代旧 ai-plan.js（含 SHA-256 精确复制）
+        from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.utils.bash_utils import cli_path as _cli_path
         sources_csv = ",".join(image_sources)
-        cmd = f"node {quote_path(str(script))} {quote_path(output_dir)} {sources_csv}"
+        cmd = (
+            f"{_cli_path('stage-ai-image', pptx_root)} "
+            f"--output-dir {quote_path(output_dir)} "
+            f"--sources {sources_csv}"
+        )
         try:
             result = await run_bash(self, cmd, workdir=pptx_root, required=False)
-            logger.info("[P6.5] ai-plan.js: %s", (result.stdout or "")[:300])
+            logger.info("[P6.5] stage-ai-image: %s", (result.stdout or "")[:300])
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
-            logger.warning("[P6.5] ai-plan.js 失败: %s", e)
+            logger.warning("[P6.5] stage-ai-image 失败，降级跳过 ai 源: %s", e)
             return
 
         ai_plan_raw = await PptCommon.read_file(
@@ -495,6 +496,7 @@ class ImagePrepareNode(PlanNode):
                     src = paths[0]
                     ext = Path(src).suffix or ".png"
                     dest = images_dir / f"page_{page}_ai_{i + 1}{ext}"
+                    # prod: 用 stage-ai-image 的精确复制（含 SHA-256），但当前固化代码用 cp 兜底
                     cp_result = await run_bash(
                         self,
                         f"cp {quote_path(src)} {quote_path(str(dest))}",
@@ -542,7 +544,7 @@ class ImagePrepareNode(PlanNode):
     async def _step_d_finalize(
         self, output_dir: str, pptx_root: str, total_pages: int,
     ) -> bool:
-        script = Path(pptx_root) / "image-insert" / "stepD-finalize.js"
+        script = Path(pptx_root) / "image-insert" / "scripts" / "stepD-finalize.js"
         if not script.is_file():
             logger.warning("[P6.5] stepD-finalize.js 不存在: %s", script)
             return False
