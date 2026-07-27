@@ -229,6 +229,26 @@ const expandedTeamLines = buildAppScreenLines(teamSnapshot, {
 });
 assert.equal(expandedTeamLines.some((line) => line.includes("teammate")), true);
 
+const btwMarkdownLines = buildAppScreenLines(
+  {
+    ...teamSnapshot,
+    btwOverlay: {
+      question: "Explain React Hooks",
+      answer: "**React Hooks** use `useState`.\n\n- Manage state",
+    },
+    btwOverlayIndex: 0,
+    btwOverlayTotal: 1,
+    btwActive: true,
+  },
+  teamLayoutOptions,
+);
+const btwMarkdownText = btwMarkdownLines.join("\n").replace(/\u001b\[[0-9;]*m/g, "");
+assert.equal(btwMarkdownText.includes("React Hooks"), true);
+assert.equal(btwMarkdownText.includes("useState"), true);
+assert.equal(btwMarkdownText.includes("**React Hooks**"), false);
+assert.equal(btwMarkdownText.includes("`useState`"), false);
+assert.equal(btwMarkdownText.includes("- Manage state"), false);
+
 const slashCommands = AppScreen.prototype.buildSlashCommands.call({
   commands: {
     getAll: () => [
