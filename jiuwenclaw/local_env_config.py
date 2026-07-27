@@ -39,11 +39,16 @@ SPAWN_ENV_KEYS: frozenset[str] = frozenset(
         "JIUWENCLAW_AGENT_ROOT",
         "PYTHONUNBUFFERED",
         "WEB_HOST",
+        # Align with relay-claw launchEnv / sync_agents_configs shared_env (short names).
         "OFFICE_CLAW_MCP_SERVER_PATH",
+        "OFFICE_CLAW_MCP_COMMAND",
+        "OFFICE_CLAW_MCP_ARGS_JSON",
+        "OFFICE_CLAW_MCP_CWD",
+        "OFFICE_CLAW_MCP_EXCLUDED_TOOLS",
+        # Legacy aliases (pre-alignment SPAWN table); accept so old shared_env is not ignored.
         "OFFICE_CLAW_MCP_SERVER_COMMAND",
         "OFFICE_CLAW_MCP_SERVER_ARGS_JSON",
         "OFFICE_CLAW_MCP_SERVER_CWD",
-        "OFFICE_CLAW_MCP_EXCLUDED_TOOLS",
         "OTEL_ENABLED",
         "OTEL_TRACES_EXPORTER",
         "OTEL_METRICS_EXPORTER",
@@ -80,6 +85,8 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
         "JINA_API_KEY",
         "PERPLEXITY_API_KEY",
         "SERPER_API_KEY",
+        "PETAL_SEARCH_URL",
+        "PETAL_SEARCH_HEADERS",
         "default_headers",
         "DEFAULT_HEADERS",
         "VISION_API_KEY",
@@ -293,7 +300,10 @@ def stage_env_overrides(
         if env_value is None:
             bag.pop(key, None)
         else:
-            bag[key] = str(env_value)
+            text = str(env_value)
+            if key in _EMPTY_OMIT_ENV_KEYS and not text.strip():
+                continue
+            bag[key] = text
 
 
 def promote_staged_env(
@@ -316,6 +326,19 @@ def promote_staged_env(
             active[name] = value
             _set_ns_os(sid, aid, name, value)
     _staged_bags.pop(key, None)
+
+
+# Incremental reload must not seal empty model credentials into tip (OfficeClaw
+# often sends API_BASE="" when callbackEnv is not yet resolved). Null still deletes.
+_EMPTY_OMIT_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "API_BASE",
+        "API_KEY",
+        "MODEL_PROVIDER",
+        "EMBED_API_BASE",
+        "EMBED_API_KEY",
+    }
+)
 
 
 def apply_env_overrides_to_active(
@@ -342,6 +365,8 @@ def apply_env_overrides_to_active(
             _pop_ns_os(sid, aid, name)
         else:
             value = str(env_value)
+            if name in _EMPTY_OMIT_ENV_KEYS and not value.strip():
+                continue
             active[name] = value
             _set_ns_os(sid, aid, name, value)
 
@@ -425,7 +450,16 @@ def build_effective_env_overlay(
                 if value is None:
                     merged.pop(k, None)
                 else:
-                    merged[k] = str(value)
+                    text = str(value)
+                    if k in _EMPTY_OMIT_ENV_KEYS and not text.strip():
+                        # Omit empty credentials from sealed overlay so they do not
+                        # block fallthrough; do not actively clear a good tip value.
+                        continue
+                    merged[k] = text
+    # Drop empty credential keys already present in tip so seal does not pin "".
+    for k in _EMPTY_OMIT_ENV_KEYS:
+        if k in merged and not str(merged.get(k) or "").strip():
+            merged.pop(k, None)
     return merged
 
 
@@ -588,7 +622,14 @@ def export_agent_environ(
     service_id: str,
     agent_id: str,
 ) -> dict[str, str]:
-    """B (de-prefixed tip+ns) ∪ A (present spawn keys) ∪ C for child ``env=``."""
+    """B (de-prefixed tip+ns) ∪ A (present spawn keys) ∪ C for child ``env=``.
+
+    On Windows, also pass through platform vars (SYSTEMROOT/SystemDrive/windir/
+    TEMP/COMSPEC/PATHEXT/USERPROFILE/...) that ``WSAStartup`` and ``CreateProcess``
+    need; without ``SYSTEMROOT`` the child's ``import asyncio`` -> ``import
+    _overlapped`` fails with WinError 10106 because the WinSock provider cannot
+    initialize (mswsock.dll lives under ``%SystemRoot%\\System32``).
+    """
     out: dict[str, str] = {}
     tip = effective_tip(service_id, agent_id)
     for k, v in tip.items():
@@ -609,7 +650,42 @@ def export_agent_environ(
     for k in PROCESS_UNIQUE_ENV_KEYS:
         if k in os.environ:
             out[k] = os.environ[k]
+    _ensure_windows_platform_env(out)
     return out
+
+
+def _ensure_windows_platform_env(out: dict[str, str]) -> None:
+    """Pass through OS-level vars a Windows child process needs to function.
+
+    The curated allowlist (B/A/C) only carries business + runtime config; it
+    intentionally omits platform vars. On Windows, ``WSAStartup`` (called by
+    ``import _overlapped`` -> ``asyncio``) loads the WinSock provider from
+    ``%SystemRoot%\\System32``; if ``SYSTEMROOT`` is absent the provider init
+    fails (WinError 10106) and the child cannot even ``import asyncio``.
+    Copy these through from ``os.environ`` when present and not already set,
+    so business/tip config always wins over the inherited OS value.
+    """
+    if os.name != "nt":
+        return
+    for k in (
+        "SYSTEMROOT",
+        "SystemDrive",
+        "windir",
+        "TEMP",
+        "TMP",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+    ):
+        v = os.environ.get(k)
+        if v and k not in out:
+            out[k] = v
 
 
 def mirror_bare_business_env_to_default_ns(*, force: bool = False) -> None:
@@ -626,6 +702,9 @@ def mirror_bare_business_env_to_default_ns(*, force: bool = False) -> None:
         if key not in os.environ:
             continue
         raw = os.environ[key]
+        # Do not seal empty credentials into default tip (spawn often has API_BASE="").
+        if key in _EMPTY_OMIT_ENV_KEYS and not str(raw).strip():
+            continue
         os.environ[ns_key] = raw
         active = _bag(_active_bags, (_DEFAULT_SERVICE_ID, _DEFAULT_AGENT_ID))
         active.setdefault(key, raw)

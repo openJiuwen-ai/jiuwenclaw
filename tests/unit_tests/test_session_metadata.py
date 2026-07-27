@@ -673,4 +673,3 @@ class TestRemoveTeamModeSessionsAtStartup:
         dirs = sm.iter_tenant_sessions_dirs(workspace)
         assert len(dirs) == 1
         assert dirs[0] == default_sessions
-

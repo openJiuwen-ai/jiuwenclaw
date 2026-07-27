@@ -1025,6 +1025,12 @@ Approach each task methodically and deliver high-quality results.
                 workspace=workspace_obj,  # Pass workspace for artifact path detection
             ),
             RecentToolResultsRail(parent_session=parent_session),
+            self._build_thinking_inject_rail(
+                task.thinking,
+                model or self._model,
+                role_id=getattr(task, "role_id", "") or "",
+                agent_id=getattr(task, "task_id", "") or "",
+            ),
             # active-skill body 的 lift/pin 由 rail.after_tool_call 触发;
             # include_tools=False：read_file/code/bash 已由 FileSystemRail 注册;
             # include_skill_body_tools=True：子代理自行注册 skill_tool/skill_complete，

@@ -32,6 +32,59 @@ async def test_resolve_requires_matching_tenant() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_normalizes_explicit_skipped_to_answer_list() -> None:
+    reg = AskUserQuestionRegistry.get_instance()
+    scope = RuntimeScopeKey.from_ids("svc1", "aid1", "sess")
+
+    fut = reg.register(scope, "ask_uq_skip")
+    assert reg.resolve(scope, "ask_uq_skip", [], status="skipped") is True
+    assert fut.result() == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_accepts_skipped_with_empty_answer_shells() -> None:
+    reg = AskUserQuestionRegistry.get_instance()
+    scope = RuntimeScopeKey.from_ids("svc1", "aid1", "sess")
+
+    fut = reg.register(scope, "ask_uq_empty_shells")
+    answers = [
+        {"question": "问题一", "selected_options": []},
+        {"question": "问题二", "selected_options": [], "custom_input": None},
+        {"question": "问题三", "selected_options": [], "custom_input": "   "},
+    ]
+
+    assert reg.resolve(
+        scope,
+        "ask_uq_empty_shells",
+        answers,
+        status="skipped",
+    ) is True
+    assert fut.result() == answers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"question": "问题", "selected_options": ["选项一"]},
+        {"question": "问题", "selected_options": [], "custom_input": "补充内容"},
+    ],
+)
+async def test_resolve_rejects_skipped_with_user_input(answer: dict) -> None:
+    reg = AskUserQuestionRegistry.get_instance()
+    scope = RuntimeScopeKey.from_ids("svc1", "aid1", "sess")
+
+    fut = reg.register(scope, "ask_uq_with_input")
+    assert reg.resolve(
+        scope,
+        "ask_uq_with_input",
+        [answer],
+        status="skipped",
+    ) is False
+    assert not fut.done()
+
+
+@pytest.mark.asyncio
 async def test_cancel_for_session_is_tenant_scoped() -> None:
     reg = AskUserQuestionRegistry.get_instance()
     scope_a = RuntimeScopeKey.from_ids("svc1", "aid1", "sess")

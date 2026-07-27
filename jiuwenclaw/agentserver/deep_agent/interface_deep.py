@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import uuid
-from contextvars import ContextVar, Token
+from contextvars import ContextVar, Token, copy_context
 from dataclasses import dataclass, field
 
 from pathlib import Path
@@ -1347,10 +1347,9 @@ class JiuWenClawDeepAdapter:
         # request_id -> toolkit；session_id -> 关联的 request_id 集合（interrupt 时按会话精确取消）
         self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
         self._session_toolkit_requests: dict[str, set[str]] = {}
-        self._pending_evolution_summary_by_session: dict[str, str] = {}
         # Skills that auto_save evolution just persisted; drained for auto rebuild.
         self._pending_auto_rebuild_skills: list[str] = []
-        # Fire-and-forget: wait for rail evolution then rebuild / stash footnote.
+        # Fire-and-forget: wait for rail evolution then auto rebuild.
         self._pending_evolution_followup_tasks: set[asyncio.Task[Any]] = set()
         self._pending_reload: tuple[
             dict[str, Any] | None, dict[str, Any] | None, bool
@@ -2279,6 +2278,15 @@ class JiuWenClawDeepAdapter:
                     "[_build_model_from_entry] 从环境变量 API_BASE 获取到 api_base: model_name=%s",
                     name,
                 )
+            else:
+                # Align with resolve_env_vars: sealed miss may still have bare os.environ.
+                bare = str(os.environ.get("API_BASE") or "").strip()
+                if bare:
+                    mcc["api_base"] = bare
+                    logger.info(
+                        "[_build_model_from_entry] 从进程 os.environ API_BASE 获取到 api_base: model_name=%s",
+                        name,
+                    )
 
         if not name:
             env_model_name = read_env("MODEL_NAME").strip()
@@ -2289,6 +2297,17 @@ class JiuWenClawDeepAdapter:
                     "[_build_model_from_entry] 从环境变量 MODEL_NAME 获取到 model_name: %s",
                     name,
                 )
+
+        if not str(mcc.get("api_base") or "").strip():
+            raise ValueError(
+                f"model client config api_base is required but empty "
+                f"(model_name={name!r}). Set API_BASE in sync/reload env or process environment."
+            )
+        if mcc.get("api_key") == "placeholder-api-key":
+            logger.warning(
+                "[_build_model_from_entry] api_key 仍为占位值，后续调用可能鉴权失败: model_name=%s",
+                name,
+            )
 
         m_config = ModelRequestConfig(
             model=name,
@@ -2706,7 +2725,6 @@ class JiuWenClawDeepAdapter:
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> JiuClawSkillEvolutionRail | None:
         """Build JiuClawSkillEvolutionRail with BOOTSTRAP.md builtin skill exclusion."""
         try:
-            evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
             trajectory_dir = self._resolve_evolution_trajectory_dir()
             registered_skill_dirs = self._registered_skill_dirs_for_rail()
@@ -2714,15 +2732,13 @@ class JiuWenClawDeepAdapter:
                 skills_dir=registered_skill_dirs,
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
-                auto_scan=evolution_auto_scan,
                 auto_save=evolution_auto_save,
                 trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
             logger.info(
-                "[JiuWenClaw] SkillEvolutionRail create success,  trajectory_dir=%s, auto_scan=%r, auto_save=%r",
+                "[JiuWenClaw] SkillEvolutionRail create success,  trajectory_dir=%s, auto_save=%r",
                 trajectory_dir,
-                evolution_auto_scan,
                 evolution_auto_save,
                 extra={'user_visible': 'progress'},
             )
@@ -3467,9 +3483,8 @@ class JiuWenClawDeepAdapter:
             if new_evolution_rail is not None:
                 evolution_rail_action = ("create", new_evolution_rail)
         elif self._skill_evolution_rail is not None and evolution_enabled:
-            # enabled unchanged (on): in-place update LLM / auto_scan / auto_save, rail retained.
+            # enabled unchanged (on): in-place update LLM / auto_save, rail retained.
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
-            self._skill_evolution_rail.auto_scan = config.get("evolution", {}).get("auto_scan", False)
             self._skill_evolution_rail.auto_save = config.get("evolution", {}).get("auto_save", True)
 
         self._skill_rail = self._build_skill_rail(
@@ -3653,7 +3668,9 @@ class JiuWenClawDeepAdapter:
 
         # 小艺手机端工具：由 channels.xiaoyi.phone_tools_enabled 控制
         loop = asyncio.get_running_loop()
-        config_base = await loop.run_in_executor(None, get_config)
+        # Preserve sealed overlay / agent env ns across the executor thread.
+        _cfg_ctx = copy_context()
+        config_base = await loop.run_in_executor(None, _cfg_ctx.run, get_config)
         xiaoyi_phone_tools_enabled = (
             config_base.get("channels", {}).get("xiaoyi", {}).get("phone_tools_enabled", False)
         )
@@ -3849,7 +3866,9 @@ class JiuWenClawDeepAdapter:
         loop = asyncio.get_running_loop()
         # Align with reload: drop stale resolved ${VAR} cache before reading under seal.
         clear_global_config_cache()
-        config_base = await loop.run_in_executor(None, get_config)
+        # Preserve sealed overlay / agent env ns across the executor thread.
+        _cfg_ctx = copy_context()
+        config_base = await loop.run_in_executor(None, _cfg_ctx.run, get_config)
         self._latest_config_base = config_base if isinstance(config_base, dict) else None
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
@@ -5595,6 +5614,7 @@ class JiuWenClawDeepAdapter:
         request_id = params.get("request_id", "")
         answers = params.get("answers", [])
         source = params.get("source", "")
+        interaction_status = params.get("status", "answered")
         resolved = False
         if source == "skill_evolve":
             resolved = await self._handle_evolution_approval(request_id, answers)
@@ -5607,6 +5627,7 @@ class JiuWenClawDeepAdapter:
                 RuntimeScopeKey.from_adapter(self, session_id=str(request.session_id or "")),
                 request_id,
                 answers,
+                status=interaction_status,
             )
         else:
             # Backward compatibility: keep request_id-prefix routing for old channels/frontends.
@@ -5621,6 +5642,7 @@ class JiuWenClawDeepAdapter:
                     RuntimeScopeKey.from_adapter(self, session_id=str(request.session_id or "")),
                     request_id,
                     answers,
+                    status=interaction_status,
                 )
 
         return AgentResponse(
@@ -6335,6 +6357,8 @@ class JiuWenClawDeepAdapter:
 
     async def _do_evolve_rollback(
         self, skill_name: str, version: str | None,
+        store=None,
+        skill_path: str | None = None,
     ) -> dict[str, Any]:
         """Shared rollback used by slash command and skills.evolution.rollback RPC.
 
@@ -6342,10 +6366,11 @@ class JiuWenClawDeepAdapter:
 
         Returns a structured dict:
         - ``{ok, rolled_back: False, name, versions}`` when *version* is omitted (list only)
-        - ``{ok, rolled_back: True, name, version[, warning]}`` on successful rollback
+        - ``{ok, rolled_back: True, name, version[, warning][, skill_path]}`` on successful rollback
         - ``{ok: False, error}`` on failure
         """
-        store = self._get_disk_evolution_store()
+        if store is None:
+            store = self._get_disk_evolution_store()
 
         guard = self._guard_bootstrap_skill(skill_name)
         if guard:
@@ -6415,6 +6440,8 @@ class JiuWenClawDeepAdapter:
                 "name": skill_name,
                 "version": resolved,
             }
+            if skill_path:
+                result["skill_path"] = skill_path
             if not evo_ok:
                 result["warning"] = (
                     "Skill body 已回滚，但 evolution log 恢复失败，"
@@ -6453,7 +6480,22 @@ class JiuWenClawDeepAdapter:
         raw_version = params.get("version")
         version = str(raw_version).strip() if raw_version is not None and str(raw_version).strip() else None
 
-        result = await self._do_evolve_rollback(skill_name, version)
+        raw_path = params.get("skill_path") or params.get("path")
+        skill_path = str(raw_path).strip() if raw_path is not None and str(raw_path).strip() else None
+
+        store = None
+        if skill_path:
+            skill_path = self._validate_rebuild_skill_path(skill_path)
+            resolved_path = Path(skill_path).expanduser().resolve()
+            if resolved_path.name != "SKILL.md":
+                raise ValueError(f"skill_path 必须指向 SKILL.md，当前为：{skill_path}")
+            skill_dir = resolved_path.parent
+            if skill_dir.name != skill_name:
+                raise ValueError(f"skill_path 目录名必须与 name 一致：name={skill_name}，目录名={skill_dir.name}")
+            skills_base = skill_dir.parent
+            store = EvolutionStore([str(skills_base)])
+
+        result = await self._do_evolve_rollback(skill_name, version, store=store, skill_path=skill_path)
         if not result.get("ok"):
             raise ValueError(str(result.get("error") or "回滚失败"))
 
@@ -6464,6 +6506,8 @@ class JiuWenClawDeepAdapter:
                 "version": result["version"],
                 "rolled_back": True,
             }
+            if result.get("skill_path"):
+                payload["skill_path"] = result["skill_path"]
             if result.get("warning"):
                 payload["warning"] = result["warning"]
             return payload
@@ -7838,23 +7882,6 @@ class JiuWenClawDeepAdapter:
         cid = request.channel_id
         usage_accumulator = self._new_usage_accumulator()
 
-        pending_evolution_summary = self._take_pending_evolution_summary(session_id)
-        if pending_evolution_summary:
-            logger.info(
-                "[JiuWenClawDeepAdapter] emitting deferred evolution UI footnote after HITL resume: "
-                "request_id=%s session_id=%s chars=%d",
-                rid,
-                session_id,
-                len(pending_evolution_summary),
-                extra={"user_visible": "progress"},
-            )
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"event_type": "chat.delta", "content": pending_evolution_summary},
-                is_complete=False,
-            )
-
         # ── SkillTurbo V2：resume 请求仍由适配器层面路由 ──
         skill_turbo_resume_stream = await self._try_skill_turbo_resume(request, inputs)
         if skill_turbo_resume_stream is not None:
@@ -8375,9 +8402,9 @@ class JiuWenClawDeepAdapter:
                             is_complete=False,
                         )
 
-                # Always schedule followup so evolution summary is stashed for the
-                # next turn (including HITL pause). Auto rebuild runs only when the
-                # turn fully completed (not HITL-pending).
+                # Always schedule followup to drain evolution summary for auto
+                # rebuild. Auto rebuild itself runs only when the turn fully
+                # completed (not HITL-pending).
                 self._schedule_background_evolution_followup(
                     request_id=rid,
                     session_id=session_id,
@@ -8507,10 +8534,10 @@ class JiuWenClawDeepAdapter:
         session_id: str,
         hitl_pending: bool = False,
     ) -> None:
-        """Fire-and-forget: wait for rail evolution, then stash footnote + auto rebuild.
+        """Fire-and-forget: wait for rail evolution, then auto rebuild.
 
         Must not be awaited from the chat stream — keeps the user turn non-blocking.
-        When ``hitl_pending`` is True, still collect/stash the evolution summary but
+        When ``hitl_pending`` is True, still drain the evolution summary but
         skip auto rebuild (same policy as the former in-stream path).
         """
         rail = self._skill_evolution_rail
@@ -8580,19 +8607,9 @@ class JiuWenClawDeepAdapter:
         hitl_pending: bool = False,
         timeout: float | None = 300.0,
     ) -> None:
-        """Detached worker: join rail evolution, stash UI summary, run auto rebuild."""
+        """Detached worker: join rail evolution, drain summary, run auto rebuild."""
         await self._await_pending_skill_evolution(request_id, timeout=timeout)
-        summary_text = self._collect_evolution_run_summary_text(request_id)
-        if summary_text:
-            self._stash_pending_evolution_summary(session_id, summary_text, request_id)
-            logger.info(
-                "[JiuWenClawDeepAdapter] stashed evolution footnote for next turn: "
-                "request_id=%s session_id=%s chars=%d",
-                request_id,
-                session_id,
-                len(summary_text),
-                extra={"user_visible": "progress"},
-            )
+        self._drain_evolution_run_summary(request_id)
 
         # Late approval events (e.g. skill_creator_follow_up) after evolution —
         # cannot yield on the closed stream; log for ops visibility.
@@ -8692,8 +8709,8 @@ class JiuWenClawDeepAdapter:
         )
         return action == "auto"
 
-    def _collect_evolution_run_summary_text(self, request_id: str) -> str:
-        """Drain and format evolution summary; also fills ``_pending_auto_rebuild_skills``.
+    def _drain_evolution_run_summary(self, request_id: str) -> None:
+        """Drain rail run summary and fill ``_pending_auto_rebuild_skills``.
 
         Intended for the detached evolution followup after rail evolution finishes.
         Only skills whose ``resolve_skill_evolution_action`` is ``auto`` are queued
@@ -8702,14 +8719,13 @@ class JiuWenClawDeepAdapter:
         self._pending_auto_rebuild_skills = []
         if self._skill_evolution_rail is None:
             logger.info(
-                "[JiuWenClawDeepAdapter] evolution UI summary skipped: request_id=%s reason=skill_evolution_rail_none",
+                "[JiuWenClawDeepAdapter] evolution summary skipped: request_id=%s reason=skill_evolution_rail_none",
                 request_id,
                 extra={"user_visible": "progress"},
             )
-            return ""
+            return
         try:
             evolution_summary = self._skill_evolution_rail.take_run_summary()
-            evolution_summary_text = self._format_evolution_summary_markdown(evolution_summary)
             if isinstance(evolution_summary, dict):
                 names: list[str] = []
                 for item in self._iter_evolution_summary_items(evolution_summary.get("skills")):
@@ -8725,23 +8741,21 @@ class JiuWenClawDeepAdapter:
                 self._pending_auto_rebuild_skills = names
         except Exception as exc:
             logger.warning(
-                "[JiuWenClawDeepAdapter] evolution UI summary format failed: request_id=%s error=%s",
+                "[JiuWenClawDeepAdapter] evolution summary drain failed: request_id=%s error=%s",
                 request_id,
                 exc,
                 exc_info=True,
                 extra={"user_visible": "progress"},
             )
-            return ""
+            return
         logger.info(
-            "[JiuWenClawDeepAdapter] evolution UI summary drain: request_id=%s has_summary=%s chars=%d "
+            "[JiuWenClawDeepAdapter] evolution summary drain: request_id=%s has_summary=%s "
             "auto_rebuild_skills=%s",
             request_id,
             bool(evolution_summary),
-            len(evolution_summary_text),
             self._pending_auto_rebuild_skills,
             extra={"user_visible": "progress"},
         )
-        return evolution_summary_text
 
     def _take_pending_auto_rebuild_skills(self) -> list[str]:
         """Return and clear skill names queued for auto rebuild after online evolution."""
@@ -8925,96 +8939,11 @@ class JiuWenClawDeepAdapter:
                     is_complete=False,
                 )
 
-    def _stash_pending_evolution_summary(
-        self,
-        session_id: str | None,
-        text: str,
-        request_id: str,
-    ) -> None:
-        sid = (session_id or "").strip()
-        if not sid or not text:
-            return
-        self._pending_evolution_summary_by_session[sid] = text
-        logger.info(
-            "[JiuWenClawDeepAdapter] stashed evolution UI footnote for HITL resume: "
-            "request_id=%s session_id=%s chars=%d",
-            request_id,
-            sid,
-            len(text),
-            extra={"user_visible": "progress"},
-        )
-
-    def _take_pending_evolution_summary(self, session_id: str | None) -> str:
-        sid = (session_id or "").strip()
-        if not sid:
-            return ""
-        return self._pending_evolution_summary_by_session.pop(sid, "")
-
-    @staticmethod
-    def _escape_markdown_literal(text: str) -> str:
-        """Escape user-controlled text embedded in Markdown footnotes."""
-        for old, new in (
-            ("\\", "\\\\"),
-            ("`", "\\`"),
-            ("[", "\\["),
-            ("]", "\\]"),
-            ("(", "\\("),
-            (")", "\\)"),
-        ):
-            text = text.replace(old, new)
-        return text
-
-    @staticmethod
-    def _safe_nonneg_int(value: Any, default: int = 0) -> int:
-        if isinstance(value, int):
-            return max(value, 0)
-        try:
-            return max(int(value), 0)
-        except (TypeError, ValueError):
-            return default
-
     @staticmethod
     def _iter_evolution_summary_items(raw: Any) -> list[Any]:
         if isinstance(raw, (list, tuple)):
             return list(raw)
         return []
-
-    @staticmethod
-    def _format_evolution_summary_markdown(summary: dict[str, Any] | None) -> str:
-        """Format auto_save evolution summary as a chat.delta footnote for the frontend."""
-        if not summary:
-            return ""
-        display = summary.get("display_text")
-        if isinstance(display, str) and display.strip():
-            return JiuWenClawDeepAdapter._escape_markdown_literal(display.strip())
-        lines = ["\n\n---", "### 📚 技能演进"]
-        for item in JiuWenClawDeepAdapter._iter_evolution_summary_items(summary.get("skills")):
-            if not isinstance(item, dict):
-                continue
-            skill_name = str(item.get("skill_name", "")).strip()
-            if not skill_name:
-                continue
-            skill_name = JiuWenClawDeepAdapter._escape_markdown_literal(skill_name)
-            total = JiuWenClawDeepAdapter._safe_nonneg_int(item.get("records_count", 0))
-            body_count = JiuWenClawDeepAdapter._safe_nonneg_int(item.get("body_count", 0))
-            desc_count = JiuWenClawDeepAdapter._safe_nonneg_int(item.get("description_count", 0))
-            parts: list[str] = []
-            if body_count:
-                parts.append(f"body: {body_count}")
-            if desc_count:
-                parts.append(f"description: {desc_count}")
-            detail = f"（{', '.join(parts)}）" if parts else ""
-            lines.append(f"- `{skill_name}`：新增 {total} 条经验{detail}")
-        for item in JiuWenClawDeepAdapter._iter_evolution_summary_items(summary.get("new_skills")):
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name", "")).strip()
-            if name:
-                name = JiuWenClawDeepAdapter._escape_markdown_literal(name)
-                lines.append(f"- 新建技能 `{name}`：已写入 skills 目录")
-        if len(lines) <= 2:
-            return ""
-        return "\n".join(lines)
 
     @staticmethod
     def _is_ask_user_payload(payload: Any) -> bool:

@@ -937,6 +937,9 @@ def _sanitize_wire_tool_pairing(params: dict[str, Any]) -> None:
 def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
     """Patched version: ensure usage chunks and sanitize tool arguments before provider calls."""
     params = _ORIGINAL_BUILD_REQUEST_PARAMS(self, stream=stream, **kwargs)
+    if os.getenv("OFFICE_CLAW_DISABLE_TOOL_CALLING", "").strip().lower() in {"1", "true", "yes", "on"}:
+        params.pop("tools", None)
+        params.pop("tool_choice", None)
     decision = resolve_tool_calling_guard()
     if decision.strip_tools:
         params.pop("tools", None)

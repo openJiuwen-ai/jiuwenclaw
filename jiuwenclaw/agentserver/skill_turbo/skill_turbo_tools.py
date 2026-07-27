@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.foundation.tool import tool
 
+from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
+
 if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session
 
@@ -58,6 +60,16 @@ _SKILL_TURBO_SKIP_EVENT_TYPES: frozenset[str] = frozenset({
     "plan.finished",
     "node.started",
     "node.finished",
+})
+
+# ── SkillTurbo 内部任务事件类型 ──
+# task.update 会覆盖前端唯一的 taskProgress 槽位，导致外层 DeepAgent 的 todo 列表
+# 被替换为 PPT 内部步骤；task.start/task.complete 驱动前端的 taskStack 决定
+# chat.* 事件的 segment 归属。当外层有活跃 todo 时需要特殊处理这三类事件。
+_SKILL_TURBO_TASK_EVENT_TYPES: frozenset[str] = frozenset({
+    "task.start",
+    "task.complete",
+    "task.update",
 })
 
 # ── ContextVar：在 before_tool_call 中注入，供工具函数读取 ──
@@ -244,6 +256,23 @@ async def skill_turbo(query: str) -> dict[str, Any]:
 
     parent_session: Session | None = get_subagent_parent_session()
 
+    # 检查外层 DeepAgent 是否有活跃的 todo 步骤（task_execution_rail 在 task.start 时
+    # 设置 _ACTIVE_TASK_ID，task.complete 时清除）。用运行时 ContextVar 而非读取
+    # todo.json，避免上一轮异常中止残留旧 todo 导致误判。
+    # 有活跃 todo 时：跳过 PPT 内部的 task.* 事件（task.update 覆盖外层 todo 槽位，
+    # task.start/task.complete 导致前端 taskStack 嵌套、segment 分裂），让 PPT 的
+    # chat.* 事件自然归到外层 todo 步骤的 segment 下渲染。
+    # 无活跃 todo 时：PPT 的 task 事件正常转发，独立展示步骤列表。
+    outer_task_id = get_current_task_id()
+    has_outer_todo = outer_task_id is not None
+    logger.info(
+        "[SkillTurboTool] outer todo active=%s outer_task_id=%s, "
+        "task events will be %s",
+        has_outer_todo,
+        outer_task_id,
+        "skipped" if has_outer_todo else "forwarded as-is",
+    )
+
     # 构造 config 和 SkillTurbo 实例
     config = adapter.build_skill_turbo_config()
     skill_turbo_inst = SkillTurbo(config)
@@ -297,6 +326,16 @@ async def skill_turbo(query: str) -> dict[str, Any]:
             # plan/node 生命周期事件：前端无 handler，跳过转发；
             # 其 content 若进入 _parse_stream_chunk 会被误改写为 chat.delta 泄露给用户
             if event_type in _SKILL_TURBO_SKIP_EVENT_TYPES:
+                continue
+
+            # 外层有活跃 todo 时，跳过 PPT 内部的全部 task 事件：
+            # - task.update：会整体替换前端唯一的 taskProgress 槽位，覆盖外层 todo
+            # - task.start/task.complete：外层 task_execution_rail 已为当前 todo 步骤
+            #   发了 task.start（task_id="todo:uuid"），PPT 再发 task.start（task_id="task_xxx"）
+            #   会导致前端 taskStack 嵌套，chat.* 事件被盖戳 PPT 的 task_xxx，归到独立 segment。
+            #   而该 segment 的 taskId 与外层 todo 不匹配，被 resolveSegmentForRow 丢弃，
+            #   PPT 的思考/工具调用全部不显示。跳过后 chat.* 归到外层 todo 的 segment，正常渲染。
+            if has_outer_todo and event_type in _SKILL_TURBO_TASK_EVENT_TYPES:
                 continue
 
             # 转发 chunk 到父会话 stream（前端实时可见）

@@ -24,7 +24,6 @@ class JiuClawSkillEvolutionRail(SkillEvolutionRail):
         *,
         llm: Model,
         model: str,
-        auto_scan: bool = True,
         auto_save: bool = True,
         **kwargs: Any,
     ) -> None:
@@ -33,7 +32,6 @@ class JiuClawSkillEvolutionRail(SkillEvolutionRail):
             skills_dir,
             llm=llm,
             model=model,
-            auto_scan=auto_scan,
             auto_save=auto_save,
             **kwargs,
         )
