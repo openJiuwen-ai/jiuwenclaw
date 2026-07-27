@@ -9,15 +9,6 @@
     "dedupeAdjacent": true,
     "trimEmptyEdges": true
   },
-  "summarize": {
-    "head": 8,
-    "tail": 8
-  },
-  "failure": {
-    "preserveOnFailure": true,
-    "head": 12,
-    "tail": 20
-  },
   "counters": [
     {
       "name": "error",

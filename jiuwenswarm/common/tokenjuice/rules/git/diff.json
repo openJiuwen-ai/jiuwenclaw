@@ -39,14 +39,10 @@
       "^\\s*delete mode .+"
     ]
   },
-  "summarize": {
-    "head": 40,
-    "tail": 20
-  },
   "failure": {
     "preserveOnFailure": true,
-    "head": 24,
-    "tail": 16
+    "head": 40,
+    "tail": 20
   },
   "counters": [
     {

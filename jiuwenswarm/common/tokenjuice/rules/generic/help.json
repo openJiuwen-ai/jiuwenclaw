@@ -27,12 +27,12 @@
     "trimEmptyEdges": true
   },
   "summarize": {
-    "head": 80,
-    "tail": 40
+    "head": 40,
+    "tail": 20
   },
   "failure": {
     "preserveOnFailure": true,
-    "head": 80,
-    "tail": 40
+    "head": 40,
+    "tail": 20
   }
 }

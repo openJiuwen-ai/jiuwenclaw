@@ -17,13 +17,13 @@
     "trimEmptyEdges": true
   },
   "summarize": {
-    "head": 8,
-    "tail": 6
+    "head": 20,
+    "tail": 20
   },
   "failure": {
     "preserveOnFailure": true,
-    "head": 12,
-    "tail": 10
+    "head": 20,
+    "tail": 20
   },
   "counters": [
     {
