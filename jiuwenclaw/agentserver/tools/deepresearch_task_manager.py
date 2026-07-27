@@ -11,12 +11,12 @@ import secrets
 import threading
 import time
 import warnings
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List
+from typing import Any, ClassVar, Dict, List, Mapping
 
 from openjiuwen_deepsearch.config.config import Config
 from openjiuwen_deepsearch.config.method import ExecutionMethod
@@ -28,6 +28,10 @@ from openjiuwen_deepsearch.utils.log_utils.log_manager import LogManager
 
 from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketGatewayPushTransport
 from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
+from jiuwenclaw.agentserver.tools.deepresearch.tls import (
+    TASK_MANAGER_TLS_ENV,
+    iterate_with_scoped_tls_initialization,
+)
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import build_report_bundle
 from jiuwenclaw.local_env_config import (
     bind_agent_env_ns,
@@ -38,7 +42,6 @@ from jiuwenclaw.local_env_config import (
     get_local_config,
     reset_agent_env_ns,
     reset_task_env_overlay,
-    set_os_environ,
 )
 from jiuwenclaw.utils import get_logs_dir
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
@@ -256,32 +259,73 @@ class DeepResearchTaskManager:
         return await get_deepresearch_manager(RuntimeScopeKey.from_ids("default", "default"))
 
     @staticmethod
-    def _resolve_petal_search_url() -> str:
-        """Read Petal Search URL from dedicated env var."""
-        return str(get_local_config("PETAL_SEARCH_URL", "") or "").strip()
+    @staticmethod
+    def _read_config_value(
+        name: str,
+        default: str = "",
+        env: Mapping[str, str] | None = None,
+    ) -> str:
+        """Read an explicit snapshot, or the active tenant-aware configuration."""
+        if env is not None:
+            return str(env.get(name, default) or default)
+        return str(get_local_config(name, default) or default)
 
     @staticmethod
-    def _detect_configured_search_engines() -> Dict[str, str]:
+    def _resolve_petal_search_url(env: Mapping[str, str] | None = None) -> str:
+        """Build Petal Search URL from LLM API_BASE: strip trailing /v2, append /v1/ai-tools/web-search."""
+        def read(name: str, default: str = "") -> str:
+            return DeepResearchTaskManager._read_config_value(name, default, env)
+
+        petal_api_url = read("PETAL_API_URL").strip()
+        if petal_api_url:
+            return petal_api_url
+        api_base = (
+            read("API_BASE")
+            or read("OPENAI_BASE_URL")
+            or read("OPENAI_API_BASE")
+            or ""
+        )
+        if isinstance(api_base, str):
+            api_base = api_base.strip()
+        else:
+            api_base = str(api_base or "").strip()
+        if not api_base:
+            return ""
+        trimmed = api_base.rstrip("/")
+        if trimmed.lower().endswith("/v2"):
+            trimmed = trimmed[:-3]
+        trimmed = trimmed.rstrip("/")
+        return f"{trimmed}/v1/ai-tools/web-search"
+
+    @staticmethod
+    def _detect_configured_search_engines(env: Mapping[str, str] | None = None) -> Dict[str, str]:
         """自动识别环境变量中已配置的检索引擎.
 
         返回：
             Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"bocha": "sk-xxx", "petal": "url"}
         """
+        def read(name: str, default: str = "") -> str:
+            return DeepResearchTaskManager._read_config_value(name, default, env)
+
         configured_engines = {}
 
-        serper_api_key = str(get_local_config("SERPER_API_KEY", "") or "").strip()
+        # SerpAPI 搜索引擎
+        serper_api_key = read("SERPER_API_KEY").strip()
         if serper_api_key:
             configured_engines[SearchEngine.SERPER.value] = serper_api_key
 
-        jina_api_key = str(get_local_config("JINA_API_KEY", "") or "").strip()
+        # JINA 搜索引擎
+        jina_api_key = read("JINA_API_KEY").strip()
         if jina_api_key:
             configured_engines[SearchEngine.JINA.value] = jina_api_key
 
-        bocha_api_key = str(get_local_config("BOCHA_API_KEY", "") or "").strip()
+        # 博查搜索引擎
+        bocha_api_key = read("BOCHA_API_KEY").strip()
         if bocha_api_key:
             configured_engines[SearchEngine.BOCHA.value] = bocha_api_key
 
-        perplexity_api_key = str(get_local_config("PERPLEXITY_API_KEY", "") or "").strip()
+        # Perplexity 搜索引擎
+        perplexity_api_key = read("PERPLEXITY_API_KEY").strip()
         if perplexity_api_key:
             configured_engines[SearchEngine.PERPLEXITY.value] = perplexity_api_key
 
@@ -299,19 +343,24 @@ class DeepResearchTaskManager:
     ) -> tuple[dict, dict]:
         """Build isolated LLM configs for the workflow and report styling."""
 
-        def build_config() -> dict:
+        def build_config(model_type: str) -> dict:
             return {
                 "model_name": config["LLM_MODEL_NAME"],
-                "model_type": config["LLM_MODEL_TYPE"],
+                "model_type": model_type,
                 "base_url": config["LLM_BASE_URL"],
                 "extension": extension,
                 "api_key": bytearray(config["LLM_API_KEY"], encoding="utf-8"),
             }
 
-        return build_config(), build_config()
+        workflow_model_type = config["LLM_MODEL_TYPE"]
+        report_style_model_type = workflow_model_type.strip().lower()
+        if report_style_model_type not in ("openai", "siliconflow"):
+            report_style_model_type = "openai"
+
+        return build_config(workflow_model_type), build_config(report_style_model_type)
 
     @staticmethod
-    def _load_config() -> Dict[str, str]:
+    def _load_config(env: Mapping[str, str] | None = None) -> Dict[str, str]:
         """从环境变量加载 DeepSearch 配置.
 
         策略：
@@ -323,29 +372,32 @@ class DeepResearchTaskManager:
           WEB_SEARCH_ENGINE_NAME, WEB_SEARCH_API_KEY, WEB_SEARCH_URL, EXECUTION_METHOD
         - 项目全局：MODEL_NAME, MODEL_PROVIDER, API_BASE, API_KEY
         """
+        def read(name: str, default: str = "") -> str:
+            return DeepResearchTaskManager._read_config_value(name, default, env)
+
         # 大模型相关配置：DeepSearch 专属优先，fallback 到项目全局
         llm_model_name = (
-            str(get_local_config("LLM_MODEL_NAME", "") or "").strip()
-            or str(get_local_config("MODEL_NAME", "") or "").strip()
+            read("LLM_MODEL_NAME").strip()
+            or read("MODEL_NAME").strip()
         )
         llm_model_type = (
-            str(get_local_config("LLM_MODEL_TYPE", "") or "").strip().lower()
-            or str(get_local_config("MODEL_PROVIDER", "") or "").strip().lower()
+            read("LLM_MODEL_TYPE").strip().lower()
+            or read("MODEL_PROVIDER").strip().lower()
         )
         llm_base_url = (
-            str(get_local_config("LLM_BASE_URL", "") or "").strip()
-            or str(get_local_config("API_BASE", "") or "").strip()
+            read("LLM_BASE_URL").strip()
+            or read("API_BASE").strip()
         )
         llm_api_key = (
-            str(get_local_config("LLM_API_KEY", "") or "").strip()
-            or str(get_local_config("API_KEY", "") or "").strip()
+            read("LLM_API_KEY").strip()
+            or read("API_KEY").strip()
         )
 
         # 自动识别已配置的检索引擎
-        configured_engines = DeepResearchTaskManager._detect_configured_search_engines()
+        configured_engines = DeepResearchTaskManager._detect_configured_search_engines(env)
 
         # 确定搜索引擎名称：WEB_SEARCH_ENGINE_NAME > 已配置搜索引擎 > petal
-        web_search_engine_name = str(get_local_config("WEB_SEARCH_ENGINE_NAME", "") or "").strip()
+        web_search_engine_name = read("WEB_SEARCH_ENGINE_NAME").strip().lower()
         if not web_search_engine_name and configured_engines:
             # 使用第一个已配置的搜索引擎
             web_search_engine_name = next(iter(configured_engines.keys()))
@@ -353,24 +405,31 @@ class DeepResearchTaskManager:
             web_search_engine_name = SearchEngine.PETAL.value
 
         # 确定搜索引擎 API Key：WEB_SEARCH_API_KEY > 已配置搜索引擎的 API Key > OPENAI_DEFAULT_HEADERS/default_headers
-        web_search_api_key = str(get_local_config("WEB_SEARCH_API_KEY", "") or "").strip()
+        web_search_api_key = read("WEB_SEARCH_API_KEY").strip()
+        if not web_search_api_key and web_search_engine_name:
+            web_search_api_key = read(f"{web_search_engine_name.upper()}_API_KEY").strip()
         if not web_search_api_key and configured_engines and web_search_engine_name in configured_engines:
             # 使用对应引擎的 API Key
             web_search_api_key = configured_engines[web_search_engine_name]
         if not web_search_api_key:
+            for header_name in ("default_headers", "DEFAULT_HEADERS", "OPENAI_DEFAULT_HEADERS"):
+                web_search_api_key = read(header_name).strip()
+                if web_search_api_key:
+                    break
+        if not web_search_api_key and env is None:
             web_search_api_key = read_default_headers_raw()
 
-        web_search_url = str(get_local_config("WEB_SEARCH_URL", "") or "").strip()
+        web_search_url = read("WEB_SEARCH_URL").strip()
         if not web_search_url and web_search_engine_name == SearchEngine.PETAL.value:
-            web_search_url = DeepResearchTaskManager._resolve_petal_search_url()
+            web_search_url = DeepResearchTaskManager._resolve_petal_search_url(env)
 
-        execution_method = str(get_local_config("EXECUTION_METHOD", "parallel") or "parallel").strip()
+        execution_method = read("EXECUTION_METHOD", "parallel").strip()
 
         # 检查 VISION 相关配置
-        vision_api_key = str(get_local_config("VISION_API_KEY", "") or "").strip()
-        vision_api_base = str(get_local_config("VISION_API_BASE", "") or "").strip()
-        vision_provider = str(get_local_config("VISION_PROVIDER", "") or "").strip().lower()
-        vision_model_name = str(get_local_config("VISION_MODEL_NAME", "") or "").strip()
+        vision_api_key = read("VISION_API_KEY").strip()
+        vision_api_base = read("VISION_API_BASE").strip()
+        vision_provider = read("VISION_PROVIDER").strip().lower()
+        vision_model_name = read("VISION_MODEL_NAME").strip()
 
         # 如果 VISION 相关环境变量已配置，启用 VLM 图表生成器
         vlm_chart_generator_enable = "False"
@@ -406,6 +465,8 @@ class DeepResearchTaskManager:
             "VISION_MODEL_NAME": vision_model_name,
         }
         return config
+
+    load_config = _load_config
 
     @staticmethod
     def _validate_config(config: Dict[str, str]) -> tuple[bool, str]:
@@ -846,6 +907,8 @@ class DeepResearchTaskManager:
 
         return section_titles
 
+    extract_section_titles = _extract_section_titles
+
     @staticmethod
     def _extract_titles_from_json(data: Any) -> dict[str, str]:
         """从 JSON 结构中提取章节标题.
@@ -1073,9 +1136,6 @@ class DeepResearchTaskManager:
             collect_progress=True: (最终研究报告内容, 进度条目列表)
         """
         try:
-            agent_factory = AgentFactory()
-            agent = agent_factory.create_agent(agent_config)
-
             last_report = None
             chunk_count = 0
 
@@ -1090,147 +1150,157 @@ class DeepResearchTaskManager:
             section_titles: dict[str, str] = {}
             progress_entries: list[str] = []
 
-            async for chunk in agent.run(
+            def create_agent_stream():
+                agent_factory = AgentFactory()
+                agent = agent_factory.create_agent(agent_config)
+                return agent.run(
                     message=query,
                     conversation_id=str(secrets.token_hex(16)),
                     report_template=report_template,
                     interrupt_feedback="",
                     agent_config=agent_config
-            ):
-                chunk_count += 1
-                logger.debug("[DeepResearchTaskManager] Stream chunk #%d from node", chunk_count)
-                chunk_content = json.loads(chunk)
+                )
 
-                # === 解析节点进度信息 ===
-                agent_name = chunk_content.get("agent", "")
-                event = chunk_content.get("event", "")
-                section_idx = chunk_content.get("section_idx", "0")
-                content_preview = chunk_content.get("content", "")[:50] if chunk_content.get("content") else ""
+            stream = iterate_with_scoped_tls_initialization(
+                create_agent_stream,
+                TASK_MANAGER_TLS_ENV,
+            )
+            async with aclosing(stream):
+                async for chunk in stream:
+                    chunk_count += 1
+                    logger.debug("[DeepResearchTaskManager] Stream chunk #%d from node", chunk_count)
+                    chunk_content = json.loads(chunk)
 
-                # 构建唯一节点标识（包含 section 编号）
-                node_key = f"{agent_name}_{section_idx}" if section_idx != "0" else agent_name
+                    # === 解析节点进度信息 ===
+                    agent_name = chunk_content.get("agent", "")
+                    event = chunk_content.get("event", "")
+                    section_idx = chunk_content.get("section_idx", "0")
+                    content_preview = chunk_content.get("content", "")[:50] if chunk_content.get("content") else ""
 
-                # === 收集大纲内容并持续解析章节标题 ===
-                # （不受 collect_progress 限制，因为 WebSocket 推送也需要 section_titles）
-                if agent_name == "outline":
-                    chunk_text = chunk_content.get("content", "")
-                    if chunk_text:
-                        outline_content_parts.append(chunk_text)
-                        # 每次收到 outline 内容都重新解析章节标题
-                        # （大纲是流式到达的，每次可能有新的标题出现）
-                        full_outline = "".join(outline_content_parts)
-                        parsed = self._extract_section_titles(full_outline)
-                        if parsed and parsed != section_titles:
-                            new_count = len(parsed)
-                            old_count = len(section_titles)
-                            section_titles = parsed
-                            if old_count == 0:
-                                logger.info(
-                                    "[DeepResearchTaskManager] 从大纲中提取到 %d 个章节标题: %s",
-                                    new_count,
-                                    section_titles,
-                                )
-                            else:
-                                logger.info(
-                                    "[DeepResearchTaskManager] 大纲更新，章节标题从 %d 个增至 %d 个: %s",
-                                    old_count, new_count,
-                                    section_titles,
-                                )
+                    # 构建唯一节点标识（包含 section 编号）
+                    node_key = f"{agent_name}_{section_idx}" if section_idx != "0" else agent_name
 
-                # === 节点生命周期管理（支持并行执行） ===
-                # DeepSearch 引擎的多数节点不发送 event=start CustomSchema chunk，
-                # 但每个 chunk 都携带 agent 字段。当首次收到某节点的 chunk 时，
-                # 视为该节点开始执行；收到显式 event=done 时，视为节点完成。
-                # 使用 active_nodes 字典独立追踪每个节点的状态，支持并行章节。
-                if agent_name and node_key not in active_nodes:
-                    display_info = self.NODE_DISPLAY_INFO.get(agent_name)
-                    if display_info:
-                        # 首次收到该节点的 chunk，发送开始推送
-                        display_name = display_info[0]
-                        description = display_info[1]
-                        push_preview = self._build_push_preview(
-                            agent_name, section_idx, section_titles, content_preview, query,
-                        )
-                        # 进度条目（工具返回值）
-                        if collect_progress:
-                            entry = self._build_progress_entry(
-                                agent_name, display_name, description,
-                                section_idx, section_titles, content_preview, query,
+                    # === 收集大纲内容并持续解析章节标题 ===
+                    # （不受 collect_progress 限制，因为 WebSocket 推送也需要 section_titles）
+                    if agent_name == "outline":
+                        chunk_text = chunk_content.get("content", "")
+                        if chunk_text:
+                            outline_content_parts.append(chunk_text)
+                            # 每次收到 outline 内容都重新解析章节标题
+                            # （大纲是流式到达的，每次可能有新的标题出现）
+                            full_outline = "".join(outline_content_parts)
+                            parsed = self._extract_section_titles(full_outline)
+                            if parsed and parsed != section_titles:
+                                new_count = len(parsed)
+                                old_count = len(section_titles)
+                                section_titles = parsed
+                                if old_count == 0:
+                                    logger.info(
+                                        "[DeepResearchTaskManager] 从大纲中提取到 %d 个章节标题: %s",
+                                        new_count,
+                                        section_titles,
+                                    )
+                                else:
+                                    logger.info(
+                                        "[DeepResearchTaskManager] 大纲更新，章节标题从 %d 个增至 %d 个: %s",
+                                        old_count, new_count,
+                                        section_titles,
+                                    )
+
+                    # === 节点生命周期管理（支持并行执行） ===
+                    # DeepSearch 引擎的多数节点不发送 event=start CustomSchema chunk，
+                    # 但每个 chunk 都携带 agent 字段。当首次收到某节点的 chunk 时，
+                    # 视为该节点开始执行；收到显式 event=done 时，视为节点完成。
+                    # 使用 active_nodes 字典独立追踪每个节点的状态，支持并行章节。
+                    if agent_name and node_key not in active_nodes:
+                        display_info = self.NODE_DISPLAY_INFO.get(agent_name)
+                        if display_info:
+                            # 首次收到该节点的 chunk，发送开始推送
+                            display_name = display_info[0]
+                            description = display_info[1]
+                            push_preview = self._build_push_preview(
+                                agent_name, section_idx, section_titles, content_preview, query,
                             )
-                            if entry:
-                                progress_entries.append(entry)
-                        # 修改1：推同一 section 内未完成节点的 done
-                        # 同一 section 内节点串行执行，新节点出现意味着上一节点已完成。
-                        # 必须按 section_idx 过滤，避免并行 section 的误推。
-                        for other_key, other_state in active_nodes.items():
-                            if (other_state["started"] and not other_state["done"]
-                                    and other_state["section_idx"] == section_idx
-                                    and other_key != node_key):
+                            # 进度条目（工具返回值）
+                            if collect_progress:
+                                entry = self._build_progress_entry(
+                                    agent_name, display_name, description,
+                                    section_idx, section_titles, content_preview, query,
+                                )
+                                if entry:
+                                    progress_entries.append(entry)
+                            # 修改1：推同一 section 内未完成节点的 done
+                            # 同一 section 内节点串行执行，新节点出现意味着上一节点已完成。
+                            # 必须按 section_idx 过滤，避免并行 section 的误推。
+                            for other_key, other_state in active_nodes.items():
+                                if (other_state["started"] and not other_state["done"]
+                                        and other_state["section_idx"] == section_idx
+                                        and other_key != node_key):
+                                    await self._send_progress_push(
+                                        session_id, channel_id, request_id,
+                                        other_state["agent_name"], "done", other_state["section_idx"],
+                                        section_titles=section_titles,
+                                    )
+                                    other_state["done"] = True
+                            # WebSocket 推送（前端实时进度）
+                            await self._send_progress_push(
+                                session_id, channel_id, request_id,
+                                agent_name, "start", section_idx, push_preview,
+                                section_titles=section_titles,
+                            )
+                            # 记录节点状态
+                            active_nodes[node_key] = {
+                                "started": True,
+                                "done": False,
+                                "agent_name": agent_name,
+                                "section_idx": section_idx,
+                            }
+                            # 修改2：终态节点立即推 done
+                            if agent_name in self.INSTANT_COMPLETE_NODES:
                                 await self._send_progress_push(
                                     session_id, channel_id, request_id,
-                                    other_state["agent_name"], "done", other_state["section_idx"],
+                                    agent_name, "done", section_idx,
                                     section_titles=section_titles,
                                 )
-                                other_state["done"] = True
-                        # WebSocket 推送（前端实时进度）
-                        await self._send_progress_push(
-                            session_id, channel_id, request_id,
-                            agent_name, "start", section_idx, push_preview,
-                            section_titles=section_titles,
-                        )
-                        # 记录节点状态
-                        active_nodes[node_key] = {
-                            "started": True,
-                            "done": False,
-                            "agent_name": agent_name,
-                            "section_idx": section_idx,
-                        }
-                        # 修改2：终态节点立即推 done
-                        if agent_name in self.INSTANT_COMPLETE_NODES:
+                                active_nodes[node_key]["done"] = True
+
+                    # === 处理显式 event=done 事件 ===
+                    # 部分节点（outline、plan_reasoning）通过 custom_stream_output
+                    # 显式发送 event=done，这些事件可能携带更精确的信息
+                    # （如 outline 的 done 触发 section_titles 最终解析）。
+                    if agent_name and event == "done":
+                        # outline 完成时：对累积大纲做最终一次 section_titles 解析
+                        if agent_name == "outline" and outline_content_parts:
+                            full_outline = "".join(outline_content_parts)
+                            final_parsed = self._extract_section_titles(full_outline)
+                            if final_parsed and final_parsed != section_titles:
+                                logger.info(
+                                    "[DeepResearchTaskManager] outline done: 最终解析章节标题 "
+                                    "从 %d 个增至 %d 个: %s",
+                                    len(section_titles), len(final_parsed),
+                                    final_parsed,
+                                )
+                                section_titles = final_parsed
+
+                        # 节点完成：仅在已开始且未完成时推送
+                        node_state = active_nodes.get(node_key)
+                        if node_state and node_state["started"] and not node_state["done"]:
                             await self._send_progress_push(
                                 session_id, channel_id, request_id,
                                 agent_name, "done", section_idx,
                                 section_titles=section_titles,
                             )
-                            active_nodes[node_key]["done"] = True
+                            node_state["done"] = True
 
-                # === 处理显式 event=done 事件 ===
-                # 部分节点（outline、plan_reasoning）通过 custom_stream_output
-                # 显式发送 event=done，这些事件可能携带更精确的信息
-                # （如 outline 的 done 触发 section_titles 最终解析）。
-                if agent_name and event == "done":
-                    # outline 完成时：对累积大纲做最终一次 section_titles 解析
-                    if agent_name == "outline" and outline_content_parts:
-                        full_outline = "".join(outline_content_parts)
-                        final_parsed = self._extract_section_titles(full_outline)
-                        if final_parsed and final_parsed != section_titles:
-                            logger.info(
-                                "[DeepResearchTaskManager] outline done: 最终解析章节标题 "
-                                "从 %d 个增至 %d 个: %s",
-                                len(section_titles), len(final_parsed),
-                                final_parsed,
-                            )
-                            section_titles = final_parsed
-
-                    # 节点完成：仅在已开始且未完成时推送
-                    node_state = active_nodes.get(node_key)
-                    if node_state and node_state["started"] and not node_state["done"]:
-                        await self._send_progress_push(
-                            session_id, channel_id, request_id,
-                            agent_name, "done", section_idx,
-                            section_titles=section_titles,
+                    # 现有逻辑：解析最终报告
+                    report_result = parse_endnode_content(chunk_content)
+                    if report_result:
+                        last_report = report_result
+                        logger.info(
+                            "[DeepResearchTaskManager] Final report received at chunk #%d",
+                            chunk_count,
+                            extra={'user_visible': 'critical'}
                         )
-                        node_state["done"] = True
-
-                # 现有逻辑：解析最终报告
-                report_result = parse_endnode_content(chunk_content)
-                if report_result:
-                    last_report = report_result
-                    logger.info(
-                        "[DeepResearchTaskManager] Final report received at chunk #%d",
-                        chunk_count,
-                        extra={'user_visible': 'critical'}
-                    )
 
             # === 发送所有活跃节点的完成通知 ===
             # 遍历所有已开始但未完成的节点，发送完成推送。
@@ -1453,12 +1523,6 @@ class DeepResearchTaskManager:
             config_valid, config_msg = self._validate_config(config)
             if not config_valid:
                 raise ValueError(config_msg)
-
-            # 3. 设置 SSL 配置
-            set_os_environ("LLM_SSL_VERIFY", "false")
-            set_os_environ("LLM_SSL_CERT", "")
-            set_os_environ("TOOL_SSL_VERIFY", "false")
-            set_os_environ("TOOL_SSL_CERT", "")
 
             config_extension = {
                 "extra_body": {
@@ -1789,8 +1853,12 @@ class DeepResearchTaskManager:
             )
 
         task_id = f"dr_{time.monotonic_ns()}_{secrets.token_hex(4)}"
-        sid = (service_id or self.service_id or "default").strip() or "default"
-        aid = (agent_id or self.agent_id or "default").strip() or "default"
+        sid = (
+            service_id or getattr(self, "service_id", "default") or "default"
+        ).strip() or "default"
+        aid = (
+            agent_id or getattr(self, "agent_id", "default") or "default"
+        ).strip() or "default"
         env_snapshot = self._capture_env_snapshot(sid, aid)
         workspace_dir = get_effective_request_workspace_dir() or ""
 
@@ -2094,7 +2162,11 @@ class DeepResearchTaskManager:
             raise RuntimeError(f"DeepResearch task not found after execution: {task_id}")
         return task_info
 
-    async def run_task_direct(self, request: DeepResearchTaskRequest) -> str:
+    async def run_task_direct(
+        self,
+        request: DeepResearchTaskRequest | str,
+        file_name: str | None = None,
+    ) -> str:
         """直接执行深度研究任务并阻塞等待完成，不提交到任务池.
 
         与 create_task 的区别：
@@ -2109,7 +2181,8 @@ class DeepResearchTaskManager:
         - 不需要异步后台执行的场景
 
         Args:
-            request: 任务查询、文件名、路由与租户参数
+            request: 任务查询、文件名、路由与租户参数；也兼容旧版 query 字符串
+            file_name: 旧版调用方式中的报告文件名
 
         Returns:
             报告保存路径信息字符串
@@ -2118,6 +2191,11 @@ class DeepResearchTaskManager:
             ValueError: 配置验证失败或执行结果为空
             Exception: 工作流执行过程中的其他异常
         """
+        if isinstance(request, str):
+            if file_name is None:
+                raise TypeError("file_name is required when request is a query string")
+            request = DeepResearchTaskRequest(query=request, file_name=file_name)
+
         query = request.query
         file_name = request.file_name
         session_id = request.session_id
@@ -2128,8 +2206,12 @@ class DeepResearchTaskManager:
 
         # 生成临时任务 ID（仅用于日志和报告文件命名）
         temp_task_id = f"dr_blocking_{time.monotonic_ns()}_{secrets.token_hex(4)}"
-        sid = (service_id or self.service_id or "default").strip() or "default"
-        aid = (agent_id or self.agent_id or "default").strip() or "default"
+        sid = (
+            service_id or getattr(self, "service_id", "default") or "default"
+        ).strip() or "default"
+        aid = (
+            agent_id or getattr(self, "agent_id", "default") or "default"
+        ).strip() or "default"
         ephemeral = DeepResearchTask(
             task_id=temp_task_id,
             query=query,
@@ -2166,12 +2248,6 @@ class DeepResearchTaskManager:
             config_valid, config_msg = self._validate_config(config)
             if not config_valid:
                 raise ValueError(config_msg)
-
-            # 3. 设置 SSL 配置
-            set_os_environ("LLM_SSL_VERIFY", "false")
-            set_os_environ("LLM_SSL_CERT", "")
-            set_os_environ("TOOL_SSL_VERIFY", "false")
-            set_os_environ("TOOL_SSL_CERT", "")
 
             config_extension = {
                 "extra_body": {
@@ -2324,11 +2400,22 @@ async def get_deepresearch_manager(scope: RuntimeScopeKey) -> DeepResearchTaskMa
     return await DeepResearchTaskManagerPool.get_or_create(scope.tenant())
 
 
+def load_deepresearch_config(env: Mapping[str, str] | None = None) -> Dict[str, str]:
+    """Return DeepResearch configuration using the manager's resolution rules."""
+    return DeepResearchTaskManager.load_config(env)
+
+
+def extract_deepresearch_section_titles(text: str) -> Dict[str, str]:
+    """Return section title metadata using the manager's outline parser."""
+    return DeepResearchTaskManager.extract_section_titles(text)
+
 
 __all__ = [
     "DeepResearchTaskManager",
     "DeepResearchTaskManagerPool",
+    "extract_deepresearch_section_titles",
     "get_deepresearch_manager",
+    "load_deepresearch_config",
     "TaskStatus",
     "DeepResearchTask",
 ]

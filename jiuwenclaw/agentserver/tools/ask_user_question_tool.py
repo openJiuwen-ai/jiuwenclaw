@@ -327,10 +327,11 @@ async def _ask_user_question_impl(questions: Any, max_options: int | None = None
 
     registry = AskUserQuestionRegistry.get_instance()
     try:
-        answers = await registry.wait_for_answer(ask_id)
+        answer_result = await registry.wait_for_answer(ask_id)
     except asyncio.CancelledError:
         return {"status": "cancelled", "message": "会话已取消。", "answers": []}
 
+    answers = answer_result if isinstance(answer_result, list) else []
     normalized_answers = _normalize_user_answer_option_ids(answers)
     return {
         "status": "answered",
