@@ -38,11 +38,11 @@ def _extract_designer_section(text: str, *, include_charts: bool = False) -> str
         start = text.find(header)
         if start == -1:
             return ""
-        candidates = [
-            pos
-            for marker in end_markers
-            if (pos := text.find(marker, start + len(header))) != -1
-        ]
+        candidates = []
+        for marker in end_markers:
+            pos = text.find(marker, start + len(header))
+            if pos != -1:
+                candidates.append(pos)
         end = min(candidates) if candidates else len(text)
         return text[start:end].rstrip()
 

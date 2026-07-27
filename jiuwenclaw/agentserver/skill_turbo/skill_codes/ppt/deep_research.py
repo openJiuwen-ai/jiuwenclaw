@@ -591,7 +591,8 @@ class PageWorkerNode(PlanNode):
         # validate-research 全量门禁（prod 契约：所有页面写完后统一校验）
         pptx_root = str(inputs.get("pptx_root") or "").strip()
         outline_path = str(inputs.get("outline_path") or "").strip()
-        if research_paths and output_dir and pptx_root and outline_path:
+        validation_inputs_ready = all((research_paths, output_dir, pptx_root, outline_path))
+        if validation_inputs_ready:
             validation_ok = await self._run_validate_research(output_dir, pptx_root, outline_path, research_depth)
             if not validation_ok:
                 logger.warning("[P6.1] validate-research 全量门禁未通过，但不阻塞 pipeline（降级继续）")

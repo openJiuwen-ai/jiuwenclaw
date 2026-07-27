@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,19 @@ from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.utils.bash_utils import 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TONE = "简洁干练"
+
+
+@dataclass(frozen=True, slots=True)
+class _SpeakerNotesContext:
+    """生成和校验逐页演讲备注所需的共享上下文。"""
+
+    pages_dir: str
+    page_texts: dict[int, str]
+    total_pages: int
+    topic: str
+    audience: str
+    presentation_purpose: str
+    tone_rules: str
 
 
 class SpeakerNotesNode(PlanNode):
@@ -72,18 +86,21 @@ class SpeakerNotesNode(PlanNode):
 
         # 2. cli notes extract-text 抽取每页可见纯文本
         page_texts = await self._extract_page_texts(pptx_path, pptx_root)
+        notes_context = _SpeakerNotesContext(
+            pages_dir=pages_dir,
+            page_texts=page_texts,
+            total_pages=total_pages,
+            topic=topic,
+            audience=audience,
+            presentation_purpose=presentation_purpose,
+            tone_rules=tone_rules,
+        )
 
         # 3. 按页并发生成备注分片
-        await self._generate_notes_per_page(
-            pages_dir, page_texts, total_pages,
-            topic, audience, presentation_purpose, tone_rules,
-        )
+        await self._generate_notes_per_page(notes_context)
 
         # 4. 分片校验 + 缺失重跑
-        await self._validate_and_retry(
-            pages_dir, page_texts, total_pages,
-            topic, audience, presentation_purpose, tone_rules,
-        )
+        await self._validate_and_retry(notes_context)
 
         # 5. 单进程注入
         inject_ok = await self._inject_notes(pptx_path, pages_dir, pptx_root)
@@ -152,33 +169,27 @@ class SpeakerNotesNode(PlanNode):
 
     async def _generate_notes_per_page(
         self,
-        pages_dir: str,
-        page_texts: dict[int, str],
-        total_pages: int,
-        topic: str,
-        audience: str,
-        presentation_purpose: str,
-        tone_rules: str,
+        context: _SpeakerNotesContext,
     ) -> None:
         """按页并发生成备注分片。"""
         async def _gen_one(page_num: int) -> None:
-            page_text = page_texts.get(page_num, "")
+            page_text = context.page_texts.get(page_num, "")
             # 判断页类型
             if page_num == 1:
                 page_type = "cover"
-            elif page_num >= total_pages:
+            elif page_num >= context.total_pages:
                 page_type = "ending"
             else:
                 page_type = "content"
 
             prompt = (
-                f"你是演讲备注撰写者。请为第 {page_num}/{total_pages} 页幻灯片生成口播备注。\n"
+                f"你是演讲备注撰写者。请为第 {page_num}/{context.total_pages} 页幻灯片生成口播备注。\n"
                 f"页类型：{page_type}\n"
                 f"页可见文本：{page_text[:2000]}\n"
-                f"主题：{topic}\n"
-                f"受众：{audience}\n"
-                f"演讲目的：{presentation_purpose}\n"
-                f"语调规则：{tone_rules}\n"
+                f"主题：{context.topic}\n"
+                f"受众：{context.audience}\n"
+                f"演讲目的：{context.presentation_purpose}\n"
+                f"语调规则：{context.tone_rules}\n"
                 f"要求：生成纯文本口播备注，50-200字，直接输出备注正文，不要解释。\n"
             )
             try:
@@ -187,7 +198,7 @@ class SpeakerNotesNode(PlanNode):
                     system_prompt="你是演讲备注撰写专家，直接输出口播备注正文。",
                 )
                 if notes and notes.strip():
-                    out_path = Path(pages_dir) / f"speaker-notes-page-{page_num}.txt"
+                    out_path = Path(context.pages_dir) / f"speaker-notes-page-{page_num}.txt"
                     await PptCommon.write_file(self, out_path, notes.strip())
                     logger.debug("[P11] 生成备注分片 page=%d", page_num)
             except Exception as e:
@@ -195,42 +206,36 @@ class SpeakerNotesNode(PlanNode):
                     raise
                 logger.warning("[P11] 生成备注分片失败 page=%d: %s", page_num, e)
 
-        tasks = [_gen_one(i) for i in range(1, total_pages + 1)]
+        tasks = [_gen_one(i) for i in range(1, context.total_pages + 1)]
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _validate_and_retry(
         self,
-        pages_dir: str,
-        page_texts: dict[int, str],
-        total_pages: int,
-        topic: str,
-        audience: str,
-        presentation_purpose: str,
-        tone_rules: str,
+        context: _SpeakerNotesContext,
     ) -> None:
         """分片校验：缺失/空页重跑一次。"""
-        for page_num in range(1, total_pages + 1):
-            out_path = Path(pages_dir) / f"speaker-notes-page-{page_num}.txt"
+        for page_num in range(1, context.total_pages + 1):
+            out_path = Path(context.pages_dir) / f"speaker-notes-page-{page_num}.txt"
             content = await PptCommon.read_file(self, str(out_path), label=f"notes-page-{page_num}")
             if content and content.strip():
                 continue
             # 缺失，重跑一次
             logger.warning("[P11] 备注分片缺失 page=%d，重跑", page_num)
-            page_text = page_texts.get(page_num, "")
+            page_text = context.page_texts.get(page_num, "")
             if page_num == 1:
                 page_type = "cover"
-            elif page_num >= total_pages:
+            elif page_num >= context.total_pages:
                 page_type = "ending"
             else:
                 page_type = "content"
             prompt = (
-                f"你是演讲备注撰写者。请为第 {page_num}/{total_pages} 页幻灯片生成口播备注。\n"
+                f"你是演讲备注撰写者。请为第 {page_num}/{context.total_pages} 页幻灯片生成口播备注。\n"
                 f"页类型：{page_type}\n"
                 f"页可见文本：{page_text[:2000]}\n"
-                f"主题：{topic}\n"
-                f"受众：{audience}\n"
-                f"演讲目的：{presentation_purpose}\n"
-                f"语调规则：{tone_rules}\n"
+                f"主题：{context.topic}\n"
+                f"受众：{context.audience}\n"
+                f"演讲目的：{context.presentation_purpose}\n"
+                f"语调规则：{context.tone_rules}\n"
                 f"要求：生成纯文本口播备注，50-200字，直接输出备注正文，不要解释。\n"
             )
             try:
