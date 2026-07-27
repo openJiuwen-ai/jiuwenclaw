@@ -48,6 +48,9 @@ _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
+_STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
+_STREAM_COALESCE_MAX_FRAMES = 32
+
 _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
     {
         "connection.ack",
@@ -139,6 +142,76 @@ class WebChannel(BaseWsChannel):
         # Git diff 监控注册表(设计文档阶段10):由 app_gateway 在启动期注入,
         # handler 通过 ``getattr(channel, "git_watcher_registry", None)`` 防御性读取。
         self.git_watcher_registry: Any = None
+
+    @staticmethod
+    def _coalescible_stream_frame(
+        frame: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any], str] | None:
+        """Return decoded/comparable/content parts for a merge-safe stream frame."""
+        if not isinstance(frame, str):
+            return None
+        try:
+            decoded = json.loads(frame)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(decoded, dict) or decoded.get("type") != "event":
+            return None
+        if decoded.get("event") not in _STREAM_COALESCE_EVENT_TYPES:
+            return None
+        payload = decoded.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        content = payload.get("content")
+        if not isinstance(content, str):
+            return None
+        comparable = {
+            **decoded,
+            "payload": {
+                key: value
+                for key, value in payload.items()
+                if key != "content"
+            },
+        }
+        return decoded, comparable, content
+
+    def _coalesce(
+        self,
+        first_frame: Any,
+        queue: asyncio.Queue,
+    ) -> list[Any]:
+        """Merge only contiguous stream frames with identical non-content data."""
+        parsed = self._coalescible_stream_frame(first_frame)
+        if parsed is None:
+            return [first_frame]
+
+        decoded, comparable, merged_content = parsed
+        merged_count = 1
+        trailing: list[Any] = []
+
+        while merged_count < _STREAM_COALESCE_MAX_FRAMES:
+            try:
+                candidate = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if candidate is None:
+                trailing.append(None)
+                break
+            candidate_parsed = self._coalescible_stream_frame(candidate)
+            if candidate_parsed is None or candidate_parsed[1] != comparable:
+                trailing.append(candidate)
+                break
+            merged_content += candidate_parsed[2]
+            merged_count += 1
+
+        if merged_count == 1:
+            return [first_frame, *trailing]
+
+        merged_payload = {**decoded["payload"], "content": merged_content}
+        merged_frame = json.dumps(
+            {**decoded, "payload": merged_payload},
+            ensure_ascii=False,
+        )
+        return [merged_frame, *trailing]
 
     # ── 公共属性 ──────────────────────────────────────────
 

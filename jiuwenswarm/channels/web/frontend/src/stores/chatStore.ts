@@ -455,7 +455,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
   setThinking: (sessionId, status) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
+      if (!runtime || runtime.isThinking === status) return state;
       return {
         runtimes: {
           ...state.runtimes,

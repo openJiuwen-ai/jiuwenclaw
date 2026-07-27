@@ -235,14 +235,14 @@ class BaseWsChannel(BaseChannel):
             data = await q.get()
             if data is None:  # 收尾哨兵
                 return
-            # 默认 _coalesce 只取刚 get 的这 1 帧；子类可覆写批量合并流式 chunk
-            frames = [data] + self._coalesce(q)
+            # 默认只发送刚 get 的帧；子类可覆写并安全合并连续流式 chunk。
+            frames = self._coalesce(data, q)
             if getattr(ws, "closed", False):
                 logger.debug("[%s] writer skip on closed ws ws_id=%s", self.channel_id, ws_id)
                 return
             for frame in frames:
                 if frame is None:
-                    continue
+                    return
                 try:
                     await asyncio.wait_for(ws.send(frame), timeout=10.0)
                 except asyncio.TimeoutError:
@@ -268,17 +268,13 @@ class BaseWsChannel(BaseChannel):
                         )
                     return
 
-    def _coalesce(self, q: "asyncio.Queue") -> list:
-        """chunk 合并扩展点：从队列取若干帧合并为一帧，减小 ws.send 次数。
+    def _coalesce(self, first_frame: Any, _queue: "asyncio.Queue") -> list:
+        """chunk 合并扩展点，默认保持单帧发送。
 
-        默认实现：只取 1 帧（不合并）。子类可覆写对 chat.delta/chat.reasoning
-        批量 get_nowait 合并 content，缓解高频流式 chunk 的背压。
-        队列为空时返回 []，不阻塞（writer 已 get 主帧）。
+        子类可从队列头继续取帧并合并，但必须返回包含 ``first_frame``
+        语义的有序帧列表，且不能跨控制帧重排。
         """
-        try:
-            return [q.get_nowait()]
-        except asyncio.QueueEmpty:
-            return []
+        return [first_frame]
 
     async def _drain_and_cleanup_writer(self, ws: Any, ws_id: str) -> None:
         """收尾：flush 残余帧 → 取消 writer → 移除队列。

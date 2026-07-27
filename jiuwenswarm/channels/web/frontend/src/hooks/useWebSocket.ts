@@ -44,6 +44,7 @@ import {
 } from '../stores';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
+import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
 import {
   fetchTtsAudio,
   playAudioBase64,
@@ -60,6 +61,10 @@ import { findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn } from
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
+
+function streamDeltaBatchKey(sessionId: string, streamId: string): string {
+  return `${sessionId}\u0000${streamId}`;
+}
 
 function isCompletedResumeResult(interruptResult: unknown): boolean {
   if (!interruptResult || typeof interruptResult !== 'object') {
@@ -781,6 +786,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     beforeCompressed: number | null;
     afterCompressed: number | null;
   }>>(new Map());
+  const streamDeltaBatcherRef = useRef<ReturnType<typeof createStreamDeltaBatcher> | null>(null);
+  if (streamDeltaBatcherRef.current === null) {
+    streamDeltaBatcherRef.current = createStreamDeltaBatcher();
+  }
 
   // Stores: 仅保留全局 action（A 类，不需要 sessionId）
   const {
@@ -803,6 +812,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     },
     []
   );
+
+  const flushPendingStreamDelta = useCallback((sessionId: string) => {
+    const streamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
+    if (!streamId) return;
+    streamDeltaBatcherRef.current?.flush(streamDeltaBatchKey(sessionId, streamId));
+  }, []);
 
   const handleTtsPlayback = useCallback(
     (sessionId: string, messageId: string, content: string) => {
@@ -1965,7 +1980,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           return;
         }
 
-        const currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
+        let currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
         clearThinkingForVisibleOutput(sessionId);
         if (!currentStreamId && content) {
           const assistantMsgId = `assistant-${Date.now()}`;
@@ -1977,8 +1992,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             isStreaming: true,
           });
           useChatStore.getState().startStreaming(sessionId, assistantMsgId);
+          currentStreamId = assistantMsgId;
         }
-        useChatStore.getState().appendStreamContent(sessionId, content);
+        if (!currentStreamId || !content) return;
+        const streamId = currentStreamId;
+        streamDeltaBatcherRef.current?.enqueue(streamDeltaBatchKey(sessionId, streamId), content, batchedContent => {
+          const chatStore = useChatStore.getState();
+          if (chatStore.getRuntime(sessionId)?.currentStreamId !== streamId) {
+            return;
+          }
+          chatStore.appendStreamContent(sessionId, batchedContent);
+        });
       }),
       webClient.on('chat.reasoning', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
@@ -2046,6 +2070,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
         }
         if (!sessionId) return;
+        flushPendingStreamDelta(sessionId);
 
         const memberAction = pickString(payload.member_action);
         const actionMemberName = pickString(payload.member_name);
@@ -2275,18 +2300,28 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!targetId) {
           return;
         }
-        const updates: { content?: string; mediaItems?: MediaItem[] } = {};
-        if (mediaPayload.content !== undefined) {
-          updates.content = mediaPayload.content;
-        }
-        if (mediaPayload.media_items?.length) {
-          updates.mediaItems = mediaPayload.media_items;
-        }
-        if (Object.keys(updates).length > 0) {
-          useChatStore.getState().updateMessage(sessionId, targetId, updates);
-        }
-        if (mediaPayload.content) {
-          handleTtsPlayback(sessionId, targetId, mediaPayload.content);
+        const applyMediaUpdate = () => {
+          const updates: { content?: string; mediaItems?: MediaItem[] } = {};
+          if (mediaPayload.content !== undefined) {
+            updates.content = mediaPayload.content;
+          }
+          if (mediaPayload.media_items?.length) {
+            updates.mediaItems = mediaPayload.media_items;
+          }
+          if (Object.keys(updates).length > 0) {
+            useChatStore.getState().updateMessage(sessionId, targetId, updates);
+          }
+          if (mediaPayload.content) {
+            handleTtsPlayback(sessionId, targetId, mediaPayload.content);
+          }
+        };
+        if (currentStreamId && streamDeltaBatcherRef.current) {
+          streamDeltaBatcherRef.current.flushBefore(
+            streamDeltaBatchKey(sessionId, currentStreamId),
+            applyMediaUpdate
+          );
+        } else {
+          applyMediaUpdate();
         }
       }),
       webClient.on('chat.file', ({ payload }) => {
@@ -2561,6 +2596,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (isProcessingNow && useChatStore.getState().getRuntime(sessionId)?.isPaused) {
           return;
         }
+        if (!isProcessingNow) {
+          flushPendingStreamDelta(sessionId);
+        }
         useChatStore.getState().setProcessing(sessionId, isProcessingNow);
         const sessionPatch: Partial<Session> = {
           is_processing: isProcessingNow,
@@ -2797,6 +2835,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.interrupt_result', payload)) return;
         // 切换模式时忽略中断结果
         if (useChatStore.getState().getRuntime(sessionId)?.switchingMode) return;
+        flushPendingStreamDelta(sessionId);
         const resultPayload = payload as unknown as InterruptResultPayload;
         useChatStore.getState().setInterruptResult(sessionId, resultPayload);
         // has_active_task 为 false 表示没有活跃任务（任务已完成）
@@ -3318,6 +3357,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('harness.session_finished', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+        flushPendingStreamDelta(sessionId);
         useChatStore.getState().setExecutionError(sessionId, null);
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
@@ -3326,6 +3366,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     ];
 
     return () => {
+      streamDeltaBatcherRef.current?.flushAll();
       unsubs.forEach((fn) => fn());
     };
   }, [
@@ -3335,6 +3376,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     clearTeamMemberContextCompressionStatus,
     findExistingTeamMemberId,
     finishContextCompressionTurn,
+    flushPendingStreamDelta,
     handleConnectionAck,
     handleContextCompressionState,
     handleTeamMemberContextCompressionState,
@@ -3395,6 +3437,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   useEffect(() => {
     return () => {
+      streamDeltaBatcherRef.current?.flushAll();
       lastConnectSignatureRef.current = '';
       webClient.disconnect();
       setConnected(false);
@@ -3443,6 +3486,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         lastError: null,
       });
       if (!connected && (state === 'reconnecting' || state === 'closed')) {
+        streamDeltaBatcherRef.current?.flushAll();
         onDisconnectRef.current?.();
       }
       // 断线恢复（false -> true 跳变）：真实环境联调方案 B.8——对"曾经查到过目标"的会话主动
