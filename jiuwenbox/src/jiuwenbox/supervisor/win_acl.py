@@ -219,6 +219,45 @@ def grant_ace(
     )
 
 
+def grant_read_ace(
+    path: str,
+    sid: str | object,
+    *,
+    recursive: bool = True,
+) -> None:
+    """施加 Allow Read ACE (合成 SID 或真实 SID).
+
+    对齐 docs/window沙箱.md 6.7 读控制 allow: 用 FILE_GENERIC_READ
+    (含 Read + Execute). deny-then-allow 模型里由 apply_sandbox_acl
+    控制 deny 在前 allow 在后的施加顺序, 本函数只负责单条 ACE.
+    """
+    grant_ace(
+        path, sid,
+        rights=const.FILE_GENERIC_READ,
+        mode="ALLOW",
+        recursive=recursive,
+    )
+
+
+def deny_read_ace(
+    path: str,
+    sid: str | object,
+    *,
+    recursive: bool = True,
+) -> None:
+    """施加 Deny Read ACE (合成 SID).
+
+    对齐 docs/window沙箱.md 6.7 读控制 deny: 用 FILE_GENERIC_READ
+    (NTFS Deny 优先于 Allow, 显式 deny_read 路径将被沙箱进程读不了).
+    """
+    grant_ace(
+        path, sid,
+        rights=const.FILE_GENERIC_READ,
+        mode="DENY",
+        recursive=recursive,
+    )
+
+
 def apply_sandbox_acl(
     workspace: str,
     allow_write: list[str],

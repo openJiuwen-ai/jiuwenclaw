@@ -546,6 +546,15 @@ def _create_restricted_token() -> int:
                 break
         if logon_sid_val is None:
             logon_sid_val = groups[0].Sid if count else None
+        # 防御: 若拿不到 logon session SID (count==0 或无 LOGON_ID 组),
+        # 不要硬塞 NULL 进 restricting 数组 (CreateRestrictedToken 会
+        # 返回 WinError 87). 此时只用 [Everyone, JHXSandboxWrite] 两个
+        # restricting SID, 数组大小动态调整.
+        entries = [
+            _SID_AND_ATTRIBUTES(ctypes.cast(everyone_buf, ctypes.c_void_p), 0),
+        ]
+        if logon_sid_val is not None:
+            entries.append(_SID_AND_ATTRIBUTES(logon_sid_val, 0))
 
         # 合成 JHXSandboxWrite SID (AllocateAndInitializeSid 堆分配, 不悬垂).
         SID_AUTH_NT = (ctypes.c_byte * 6)(0, 0, 0, 0, 0, 5)
@@ -561,22 +570,26 @@ def _create_restricted_token() -> int:
         )
         if not ok:
             raise ctypes.WinError(ctypes.get_last_error())
+        entries.append(_SID_AND_ATTRIBUTES(write_sid_ptr, 0))
 
-        restricting = (_SID_AND_ATTRIBUTES * 3)(
-            _SID_AND_ATTRIBUTES(ctypes.cast(everyone_buf, ctypes.c_void_p), 0),
-            _SID_AND_ATTRIBUTES(logon_sid_val, 0),
-            _SID_AND_ATTRIBUTES(write_sid_ptr, 0),
-        )
+        restricting = (_SID_AND_ATTRIBUTES * len(entries))(*entries)
         restricted = wintypes.HANDLE()
+        logger.info(
+            "CreateRestrictedToken 调用: restricting_sids=%d, flags=0x%x",
+            len(entries), const.RESTRICTED_TOKEN_FLAGS,
+        )
         ok = advapi32.CreateRestrictedToken(
             h_token, const.RESTRICTED_TOKEN_FLAGS,
             0, None,       # disabling sids (空)
             0, None,       # deleting privileges (空)
-            3, restricting,  # restricting sids (PSID_AND_ATTRIBUTES, 数组对象自动转指针)
+            len(entries), restricting,  # restricting sids (PSID_AND_ATTRIBUTES, 数组对象自动转指针)
             ctypes.byref(restricted),
         )
         if not ok:
-            raise ctypes.WinError(ctypes.get_last_error())
+            err = ctypes.WinError(ctypes.get_last_error())
+            logger.error("CreateRestrictedToken 失败: %s", err)
+            raise err
+        logger.info("CreateRestrictedToken 成功: handle=%d", int(restricted.value))
         return int(restricted.value)
     finally:
         kernel32.CloseHandle(h_token)
@@ -664,7 +677,18 @@ def runner_main(argv: list[str]) -> int:
         args.sandbox_id, args.workspace, args.control_port,
     )
 
-    restricted_token = _create_restricted_token()
+    # runner 由 CreateProcessWithLogonW + CREATE_NO_WINDOW 拉起, stderr 无落盘.
+    # 任何早期异常 (尤其 _create_restricted_token) 会让 runner 静默退出,
+    # box-server 端只看到 control_port ECONNREFUSED, 无法定位根因.
+    # 这里在最外层包 try/except, 把异常完整落盘 + logger.error, 方便 debug.
+    try:
+        restricted_token = _create_restricted_token()
+    except Exception:
+        logger.exception(
+            "runner _create_restricted_token 失败, runner 退出 (sandbox_id=%s)",
+            args.sandbox_id,
+        )
+        return 1
 
     # TCP loopback 控制端口 (box-server 分配, 命令行参数传入). runner bind + listen,
     # box-server 每次 exec connect 一条新连接, 发一帧请求读一帧响应后 close.

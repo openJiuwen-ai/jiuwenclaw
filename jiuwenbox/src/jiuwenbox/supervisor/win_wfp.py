@@ -49,6 +49,71 @@ def _require_windows() -> None:
         )
 
 
+# WFP 专用 HRESULT 段 0x80320xxx (FWP_E_*) 的常见码, 帮助诊断。完整列表见
+# fwperr.h。S9: ctypes.WinError(hr) 对高位为 1 的 HRESULT 会 OverflowError
+# (FormatError 内部转 signed long 溢出), 掩盖真实错误码。统一用 _wfp_error 抛出。
+_WFP_ERROR_NAMES: dict[int, str] = {
+    0x80320001: "FWP_E_CALLOUT_NOT_FOUND",
+    0x80320002: "FWP_E_CONDITION_NOT_FOUND",
+    0x80320003: "FWP_E_FILTER_NOT_FOUND",
+    0x80320004: "FWP_E_LAYER_NOT_FOUND",
+    0x80320005: "FWP_E_PROVIDER_NOT_FOUND",
+    0x80320006: "FWP_E_PROVIDER_CONTEXT_NOT_FOUND",
+    0x80320007: "FWP_E_SUBLAYER_NOT_FOUND",
+    0x80320008: "FWP_E_NOT_FOUND",
+    0x80320009: "FWP_E_ALREADY_EXISTS",
+    0x8032000A: "FWP_E_IN_USE",
+    0x8032000B: "FWP_E_DUPLICATE_CONDITION",
+    0x8032000C: "FWP_E_DUPLICATE_KEYMOD",
+    0x8032000D: "FWP_E_IN_USE_LOCKED",
+    0x8032000E: "FWP_E_INVALID_PLUGIN",
+    0x8032000F: "FWP_E_INVALID_PLUGIN_TRUSTED",
+    0x80320010: "FWP_E_DROP_NO_EXEMPT",  # 通用无效参数/类型类
+    0x80320011: "FWP_E_NULL_KEY",
+    0x80320012: "FWP_E_INVALID_ENUMERATOR",
+    0x80320013: "FWP_E_INVALID_FLAGS",
+    0x80320014: "FWP_E_INVALID_NET_MASK",
+    0x80320015: "FWP_E_INVALID_STATUS",
+    0x80320016: "FWP_E_INVALID_RANGE",
+    0x80320017: "FWP_E_INVALID_INTERVAL",
+    0x80320018: "FWP_E_TOO_MANY_REFERENCES",
+    0x80320019: "FWP_E_NAME_NOT_FOUND",
+    0x80320020: "FWP_E_INVALID_WEIGHT",
+    0x80320021: "FWP_E_MATCH_TYPE_MISMATCH",
+    0x80320023: "FWP_E_INVALID_AUTH_VALUE",
+    0x80320024: "FWP_E_INVALID_KEY",
+    0x80320031: "FWP_E_KEY_NOT_FOUND",
+    0x80320032: "FWP_E_FILTER_NOT_FOUND (delete)",
+    0xC0360017: "FWP_E_TRUSTED_PACKAGE_MISMATCH",
+}
+
+
+def _wfp_error(hr: int, where: str) -> "OSError":
+    """把 WFP HRESULT 转成带明文的 OSError (避免 WinError OverflowError).
+
+    hr 是 Fwpm* API 返回的 DWORD (unsigned), 高位为 1 的 HRESULT (0x80320xxx)
+    经 ctypes.WinError 会溢出。这里显式格式化为 0xXXXXXXXX + 已知名, 便于
+    实跑定位。system error (位 0x80070000 段) 也兼容 (如 0x80070005 = access denied)。
+
+    落在 0x80320xxx 段但 _WFP_ERROR_NAMES 未登记的码 (如 0x80320027, 多为
+    condition value 类型与 layer/field 不匹配类校验错误), 不再裸显示 UNKNOWN,
+    而是标注段名 + 提示对照本地 SDK fwperr.h, 便于实跑定位。
+    """
+    name = _WFP_ERROR_NAMES.get(hr)
+    # 位 0x80070000 段 = HRESULT_FROM_WIN32, 取低 16 位是 Win32 错误码。
+    if name is None and (hr & 0xFFFF0000) == 0x80070000:
+        win32 = hr & 0xFFFF
+        _SYS = {5: "ERROR_ACCESS_DENIED", 87: "ERROR_INVALID_PARAMETER",
+                1377: "ERROR_MEMBER_IN_ALIAS", 2224: "NERR_UserExists"}
+        name = _SYS.get(win32, f"WIN32_{win32}")
+    if name is None and 0x80320000 <= hr <= 0x8032FFFF:
+        # FWP_E_* 段未登记码: 多为 condition value / filter 结构校验类错误,
+        # 精确名需对照本地 SDK fwperr.h (无法在线核实时不臆测写死).
+        name = f"FWP_E_UNLISTED_{hr & 0xFFFF:04X} (check fwperr.h)"
+    label = name or "UNKNOWN"
+    return OSError(f"[{where}] WFP/HRESULT hr=0x{hr:08X} ({label})")
+
+
 # ---------------------------------------------------------------------------
 # GUID 结构体 (WFP 大量使用 GUID 作为 layer/condition/filter key).
 # 布局对齐 Windows SDK GUID: { DWORD; WORD; WORD; BYTE[8] }.
@@ -79,6 +144,25 @@ def _guid_from_str(s: str) -> GUID:
     for i, b in enumerate(u.bytes_le[8:]):
         g.Data4[i] = b
     return g
+
+
+# 固定 namespace GUID (任意合法 UUID), 用于 uuid5 派生 per-port filter key。
+# uuid5 基于 (namespace, name) 哈希, 确定性、不依赖时间/随机, install/uninstall
+# 用相同 (base_key, port) 派生出相同 GUID, 保证幂等删。
+_PERMIT_FILTER_NAMESPACE = "6f9b2a3c-1d4e-4b5f-8a90-7c2e1b3a4d5f"
+
+
+def _permit_filter_guid_str(base_key: str, port: int) -> str:
+    """为端口 Permit filter 派生确定性 GUID 字符串.
+
+    S9 实跑: 旧版 port_key = f"{base_key}-{port}" 不是合法 UUID (含端口后缀),
+    _guid_from_str 里 uuid.UUID(s) 报 ValueError, install/uninstall 全崩。
+    改用 uuid5(namespace, f"{base_key}:{port}") 生成合法 GUID, 同 (base,port)
+    派生同 GUID, 幂等安装/卸载。
+    """
+    import uuid
+    ns = uuid.UUID(_PERMIT_FILTER_NAMESPACE)
+    return str(uuid.uuid5(ns, f"{base_key}:{port}"))
 
 
 # ---------------------------------------------------------------------------
@@ -213,29 +297,55 @@ class FWPM_FILTER_CONDITION0(ctypes.Structure):
     ]
 
 
-class FWPM_ACTION0(ctypes.Structure):
-    """Filter action: type + union{filterType GUID; calloutKey GUID}.
+class _FWPM_ACTION0_UNION(ctypes.Union):
+    """FWPM_ACTION0 内嵌 union: {GUID filterType; GUID calloutKey}.
 
-    BLOCK/PERMIT 不用 union, 但 SDK 结构体 union 占 GUID (16B) 尺寸,
-    需保留以使后续字段对齐.
+    两个成员都是 GUID (16B), union = 16B.
     """
     _fields_ = [
-        ("type", ctypes.c_uint32),  # FWP_ACTION_*
-        ("filterType", GUID),       # union{ GUID filterType; GUID calloutKey; }
+        ("filterType", GUID),   # FWP_ACTION_FLAG_CALLOUT 时是 filterType
+        ("calloutKey", GUID),   # 否则是 calloutKey
+    ]
+
+
+class FWPM_ACTION0(ctypes.Structure):
+    """Filter action: type(4B + 4B pad) + union(16B) = 24B (x64).
+
+    对齐 windows-sys FWPM_ACTION0 repr(C): type + Anonymous union.
+    BLOCK/PERMIT 只用 type, union 留空 (ctypes 零初始化).
+    """
+    _fields_ = [
+        ("type", ctypes.c_uint32),          # FWP_ACTION_*
+        ("Anonymous", _FWPM_ACTION0_UNION),
     ]
 
 
 # ---------------------------------------------------------------------------
-# FWPM_FILTER0 (fwpmtypes.h). 布局严格对齐 SDK:
-#   filterKey(GUID) displayData(FWPM_DISPLAY_DATA0 内嵌) flags(UINT32)
-#   providerKey(GUID*) providerData(FWP_BYTE_BLOB 内嵌) layerKey(GUID)
-#   subLayerKey(GUID) weight(FWP_VALUE0) numFilterConditions(UINT32)
-#   filterCondition(FWPM_FILTER_CONDITION0*) action(FWPM_ACTION0)
-#   union{ UINT64 rawContext; GUID providerContextKey; }(占 8B)
-#   reserved(GUID*) filterId(UINT64) effectiveWeight(FWP_VALUE0)
-# review 错误: 旧版多了不存在的 providerDataSize、缺 flags、reserved 误为
-# c_uint64. 已修.
+# FWPM_FILTER0 (fwpmtypes.h). 布局严格对齐 windows-sys SDK (repr(C), x64):
+#   filterKey(GUID,16@0) displayData(FWPM_DISPLAY_DATA0,16@16) flags(UINT32,4@32)
+#   pad(4@36) providerKey(GUID*,8@40) providerData(FWP_BYTE_BLOB,16@48)
+#   layerKey(GUID,16@64) subLayerKey(GUID,16@80) weight(FWP_VALUE0,16@96)
+#   numFilterConditions(UINT32,4@112) pad(4@116)
+#   filterCondition(FWPM_FILTER_CONDITION0*,8@120) action(FWPM_ACTION0,24@128)
+#   Anonymous(FWPM_FILTER0_0,16@152)  union{UINT64 rawContext; GUID providerContextKey}
+#   reserved(GUID*,8@168) filterId(UINT64,8@176) effectiveWeight(FWP_VALUE0,16@184)
+#   sizeof = 200B (x64).
+#
+# S9 旧 bug: rawContext 写成 c_uint64 (8B), 实际 SDK 是 16B union
+# (UINT64 与 GUID 取 max=16B). 旧版 sizeof(flt)=192 少 8B, BFE 收到错误
+# 大小的结构体经 RPC 返回 RPC_X_BAD_STUB_DATA (hr=0x6F7). 改为 16B union.
 # ---------------------------------------------------------------------------
+class _FWPM_FILTER0_UNION(ctypes.Union):
+    """FWPM_FILTER0 内嵌 union: {UINT64 rawContext; GUID providerContextKey}.
+
+    UINT64 (8B) 与 GUID (16B) 取 max=16B, 8B 对齐.
+    """
+    _fields_ = [
+        ("rawContext", ctypes.c_uint64),
+        ("providerContextKey", GUID),
+    ]
+
+
 class FWPM_FILTER0(ctypes.Structure):
     _fields_ = [
         ("filterKey", GUID),
@@ -249,7 +359,7 @@ class FWPM_FILTER0(ctypes.Structure):
         ("numFilterConditions", ctypes.c_uint32),
         ("filterCondition", ctypes.POINTER(FWPM_FILTER_CONDITION0)),
         ("action", FWPM_ACTION0),
-        ("rawContext", ctypes.c_uint64),           # union{rawContext; providerContextKey}
+        ("Anonymous", _FWPM_FILTER0_UNION),       # union{rawContext; providerContextKey}
         ("reserved", ctypes.c_void_p),            # GUID*
         ("filterId", ctypes.c_uint64),            # BFE 填, 调用方不设
         ("effectiveWeight", FWP_VALUE0),          # BFE 填
@@ -347,20 +457,28 @@ def _open_engine() -> wintypes.HANDLE:
         ctypes.byref(session), ctypes.byref(engine),
     )
     if hr != 0:
-        raise ctypes.WinError(hr)
+        raise _wfp_error(hr, "FwpmEngineOpen0")
     return engine
 
 
 def _add_sublayer(engine: wintypes.HANDLE, sublayer_key: str, weight: int) -> GUID:
-    """创建/复用 sublayer (幂等: 已存在则忽略 ERROR_ALREADY_EXISTS)."""
+    """创建/复用 sublayer (幂等: 已存在则忽略 ERROR_ALREADY_EXISTS).
+
+    S9 实跑: displayData.name 不能为 NULL (BFE 报 FWP_E_INVALID_AUTH_VALUE=
+    0x80320023, 文档 0x80320023 = "displayData.name field cannot be null")。
+    旧版未设 displayData → 报错。显式设 name/description。
+    """
     fwpu = _get_fwpuclnt()
     sublayer = FWPM_SUBLAYER0()
     sublayer.subLayerKey = _guid_from_str(sublayer_key)
-    sublayer.weight = ctypes.c_uint16(weight)
+    # displayData.name 是 c_wchar_p, 必须赋 str (非 None); 否则 BFE 拒绝。
+    sublayer.displayData.name = "JiuwenBoxSandboxSublayer"
+    sublayer.displayData.description = "JiuwenBox sandbox egress filter sublayer"
     sublayer.flags = 0
+    sublayer.weight = weight  # 字段已是 c_uint16, 直接赋 int
     hr = fwpu.FwpmSubLayerAdd0(engine, ctypes.byref(sublayer), None)
     if hr != 0 and hr != 0x800700B7:  # FWP_E_ALREADY_EXISTS
-        raise ctypes.WinError(hr)
+        raise _wfp_error(hr, "FwpmSubLayerAdd0")
     return sublayer.subLayerKey
 
 
@@ -391,7 +509,7 @@ def _build_loopback_v6_condition() -> "tuple[FWPM_FILTER_CONDITION0, FWP_V6_ADDR
     cond = FWPM_FILTER_CONDITION0()
     cond.fieldKey = _guid_from_str(const.FWPM_CONDITION_IP_REMOTE_ADDRESS)
     cond.matchType = const.FWP_MATCH_EQUAL
-    cond.conditionValue.type = const.FWP_V6_ADDR_MASK
+    cond.conditionValue.type = const.FWP_V6_ADDR_AND_MASK
     addr_mask = FWP_V6_ADDR_AND_MASK()
     addr_arr = (ctypes.c_uint8 * 16)(
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -435,28 +553,56 @@ def _build_ale_user_condition(sandbox_user_sid: str) -> "tuple[FWPM_FILTER_CONDI
 
     # jbx-sandbox 用户的 SID (字符串 -> SID 对象).
     user_sid_obj = win32security.ConvertStringSidToSid(sandbox_user_sid)
-    # pywin32 EXPLICIT_ACCESS dict 字段为大写键 (AccessPermissions/AccessMode/
-    # Inheritance/Trustee, 见 pywin32 PyACL.cpp PyWinObject_AsEXPLICIT_ACCESS).
-    # Trustee 接受 TRUSTEE 对象; 用 BuildTrusteeWithSid 从 SID 构造.
-    trustee = win32security.TRUSTEE()
-    win32security.BuildTrusteeWithSid(trustee, user_sid_obj)
+    # S9 实跑: win32security 无 TRUSTEE 属性/BuildTrusteeWithSid 未暴露。
+    # pywin32 SetEntriesInAcl 接受 EXPLICIT_ACCESS dict, 其 Trustee 字段本身
+    # 也是 dict (见 PyACL.cpp PyWinObject_AsTRUSTEE): {TrusteeType, TrusteeForm,
+    # Identifier}. TrusteeForm=TRUSTEE_IS_SID 时 Identifier 放 PySID 对象。
     explicit = {
         "AccessPermissions": const.FWP_ACTRL_MATCH_FILTER,
         "AccessMode": win32security.GRANT_ACCESS,
         "Inheritance": 0,  # 不继承
-        "Trustee": trustee,
+        "Trustee": {
+            "TrusteeType": win32security.TRUSTEE_IS_USER,
+            "TrusteeForm": win32security.TRUSTEE_IS_SID,
+            "Identifier": user_sid_obj,
+        },
     }
     # SetEntriesInAcl 是 PyACL 方法: 在空 ACL 上添加 entries.
     dacl = win32security.ACL()
     dacl.SetEntriesInAcl([explicit])
     sd = win32security.SECURITY_DESCRIPTOR()
+    # S9 实跑: FwpmFilterAdd0 报 RPC_X_BAD_STUB_DATA(0x6F7)。SDK 示例用
+    # BuildSecurityDescriptorW 构造带 owner/group/DACL 的完整 SD。pywin32 的
+    # SetSecurityDescriptorDacl 内部 _MakeAbsoluteSD 需 owner/group, 缺失时
+    # 可能产生不一致的 self-relative SD → BFE marshal 校验失败。
+    # 显式 Initialize + 设 owner/group(用 jbx-sandbox 自己的 SID) 再设 DACL,
+    # 构造完整 SD。Owner 用沙箱用户自己, 保证 SD 自洽。
+    sd.Initialize()
+    sd.SetSecurityDescriptorOwner(user_sid_obj, 0)
+    sd.SetSecurityDescriptorGroup(user_sid_obj, 0)
     sd.SetSecurityDescriptorDacl(1, dacl, 0)
-    # MakeSelfRelativeSD 返回自相关 SD 的 bytes (contiguous, FWP 要求此格式).
-    sd_bytes = win32security.MakeSelfRelativeSD(sd)
+    # S9 实跑: win32security 无 MakeSelfRelativeSD。PySECURITY_DESCRIPTOR 对象内部
+    # 始终以 self-relative 格式存储 (见 pywin32 PySECURITY_DESCRIPTOR.cpp SetSD),
+    # 且支持 buffer 接口, bytes(sd) 直接拿到 self-relative 原始字节 (FWP 要求此格式)。
+    sd_bytes = bytes(sd)
+    # 诊断: SD 长度 + control flags (确认 self-relative 位)。
+    try:
+        ctrl, _rev = sd.GetSecurityDescriptorControl()
+        sr_bit = bool(ctrl & 0x8000)  # SE_SELF_RELATIVE
+    except Exception:  # noqa: BLE001
+        sr_bit = "?"
+    logger.info(
+        "ALE_USER_ID SD: len=%d valid=%s self_relative=%s sid=%s",
+        len(sd_bytes), bool(sd_bytes), sr_bit, sandbox_user_sid,
+    )
 
     blob = FWP_BYTE_BLOB()
-    # 持有 sd_bytes (bytes) 引用, blob.data 指向其缓冲.
-    buf = (ctypes.c_uint8 * len(sd_bytes)).from_buffer_copy(sd_bytes)
+    # S9 实跑: FwpmFilterAdd0 报 RPC_X_BAD_STUB_DATA(0x6F7), SD 本身有效(self_relative
+    # =True, 176B), 根因在 blob.data 指针的内存来源。SDK 示例用 BuildSecurityDescriptorW
+    # 返回的 LocalAlloc 内存, blob.data 直接指它。旧版用 from_buffer_copy 创建 ctypes
+    # 数组, 该 buffer 的内存来源/对齐可能让 BFE RPC marshal 校验失败。改用
+    # create_string_buffer (malloc 分配, 标准 8 字节对齐, RPC 友好), 与 SDK 对齐。
+    buf = ctypes.create_string_buffer(sd_bytes, len(sd_bytes))
     blob.size = len(sd_bytes)
     blob.data = ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint8))
     cond.conditionValue.value.sd = ctypes.cast(
@@ -511,20 +657,57 @@ def _add_filter(
     flt.filterKey = fkey
     flt.layerKey = _guid_from_str(layer_key)
     flt.subLayerKey = sublayer_key
+    # S9: displayData.name 不能为 NULL (同 sublayer, BFE 拒绝)。用传入的 display_name。
+    flt.displayData.name = display_name
+    flt.displayData.description = display_name
     flt.weight.type = const.FWP_UINT8
     flt.weight.value.uint8 = weight
     flt.action.type = action_type
 
     cond_array = (FWPM_FILTER_CONDITION0 * len(conditions))(*conditions)
     flt.numFilterConditions = ctypes.c_uint32(len(conditions))
-    flt.filterConditions = ctypes.cast(
+    # S12 旧 bug: 字段名拼错成 filterConditions (带 s), ctypes 当成新实例属性,
+    # 结构体内的 filterCondition 字段保持 NULL, BFE 收到 numFilterConditions=1
+    # 但 filterCondition=NULL, 返回 RPC_X_BAD_STUB_DATA (hr=0x6F7).
+    flt.filterCondition = ctypes.cast(
         cond_array, ctypes.POINTER(FWPM_FILTER_CONDITION0),
     )
 
     fid = ctypes.c_uint64(0)
     hr = fwpu.FwpmFilterAdd0(engine, ctypes.byref(flt), None, ctypes.byref(fid))
     if hr != 0 and hr != 0x800700B7:  # FWP_E_ALREADY_EXISTS
-        raise ctypes.WinError(hr)
+        # 诊断: 0x6F7=RPC_X_BAD_STUB_DATA 时打结构体布局 + 指针字段值助定位。
+        # 关键: sizeof(flt) 应与 SDK sizeof(FWPM_FILTER0)=168 一致 (Windows x64);
+        # 各指针字段(filterConditions/providerKey/reserved) 指向有效内存或 NULL;
+        # cond 的 conditionValue.value.sd 应指向 blob (FWP_BYTE_BLOB*)。
+        # 整块 try 防诊断自身异常掩盖真实 hr (旧版 hex(POINTER) 抛 TypeError)。
+        try:
+            def _ptr_val(p):
+                v = ctypes.cast(p, ctypes.c_void_p).value
+                return hex(v) if v else "NULL"
+            cond_types = [getattr(c.conditionValue, "type", -1) for c in conditions]
+            cond_sd_ptrs = []
+            for c in conditions:
+                try:
+                    cond_sd_ptrs.append(_ptr_val(c.conditionValue.value.sd))
+                except Exception:  # noqa: BLE001
+                    cond_sd_ptrs.append("?")
+            flt_bytes = bytes(flt)
+            logger.error(
+                "FwpmFilterAdd0 失败 display=%s hr=0x%08X sizeof_flt=%d "
+                "num_conds=%d cond_types=%s cond_sd_ptrs=%s weight_type=%d "
+                "action=%d filterConditions_ptr=%s providerKey=%s reserved=%s "
+                "flt_hex_first32=%s",
+                display_name, hr, ctypes.sizeof(flt), len(conditions),
+                cond_types, cond_sd_ptrs, flt.weight.type, action_type,
+                _ptr_val(flt.filterCondition),
+                _ptr_val(flt.providerKey),
+                _ptr_val(flt.reserved),
+                flt_bytes[:32].hex(),
+            )
+        except Exception:  # noqa: BLE001
+            logger.error("FwpmFilterAdd0 诊断自身异常 hr=0x%08X", hr, exc_info=True)
+        raise _wfp_error(hr, f"FwpmFilterAdd0({display_name})")
     logger.info("WFP filter 安装: %s (layer=%s, action=%d)", display_name, layer_key, action_type)
 
 
@@ -577,16 +760,24 @@ def install_wfp_filters(
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V4, const.JBX_FILTER_PERMIT_KEY_V4),
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V6, const.JBX_FILTER_PERMIT_KEY_V6),
             ):
+                # 按 layer GUID 显式判断 V4/V6, 不能用 "V4" in base_key:
+                # base_key 是纯 hex GUID 字符串 (如 "BC5D4E3F-...-DEF0"),
+                # 不含 "V4"/"V6" 子串, 旧代码两路都走 else → V4 层装了
+                # IPv6 ::1 条件 (FWP_V6_ADDR_AND_MASK=257), BFE 因 condition
+                # 类型与 layer 不匹配返回 0x80320027, 主路径失败降级防火墙.
+                is_v4 = (layer == const.FWPM_LAYER_ALE_AUTH_CONNECT_V4)
                 for port in range(permit_port_start, permit_port_end + 1):
                     user_cond, user_ka = _build_ale_user_condition(sandbox_user_sid)
                     keeps.append(user_ka)
-                    if "V4" in base_key:
+                    if is_v4:
                         lb_cond, lb_ka = _build_loopback_v4_condition()
                     else:
                         lb_cond, lb_ka = _build_loopback_v6_condition()
                     keeps.append(lb_ka)
                     port_cond = _build_port_eq_condition(port)
-                    port_key = f"{base_key}-{port}"
+                    # S9: port_key 必须是合法 UUID (旧版 f"{base}-{port}" 非法,
+                    # _guid_from_str 报 ValueError)。用 uuid5 派生确定性 GUID。
+                    port_key = _permit_filter_guid_str(base_key, port)
                     _add_filter(
                         engine, port_key, layer, sublayer_key,
                         [user_cond, lb_cond, port_cond],
@@ -626,19 +817,25 @@ def uninstall_wfp_filters(
             const.JBX_FILTER_BLOCK_KEY_V6,
         ):
             _delete_filter_by_key(fwpu, engine, fkey)
-        # Permit filter (每端口一个 key).
+        # Permit filter (每端口一个 key, S9: 用 uuid5 派生, 与 install 一致)。
         for base_key in (
             const.JBX_FILTER_PERMIT_KEY_V4,
             const.JBX_FILTER_PERMIT_KEY_V6,
         ):
             for port in range(permit_port_start, permit_port_end + 1):
-                _delete_filter_by_key(fwpu, engine, f"{base_key}-{port}")
+                _delete_filter_by_key(
+                    fwpu, engine, _permit_filter_guid_str(base_key, port),
+                )
         try:
             hr = fwpu.FwpmSubLayerDeleteByKey0(
                 engine, ctypes.byref(_guid_from_str(const.JBX_SUBLAYER_KEY)),
             )
-            if hr not in (0, 0x800700B7):
-                logger.warning("删除 WFP sublayer 返回 0x%X", hr)
+            # W3: sublayer not-found 是 0x80320031 (KEY_NOT_FOUND), 幂等静默。
+            if hr not in (0, 0x80320031):
+                logger.warning(
+                    "删除 WFP sublayer: %s",
+                    _wfp_error(hr, "FwpmSubLayerDeleteByKey0"),
+                )
         except Exception:  # noqa: BLE001
             logger.warning("删除 WFP sublayer 异常", exc_info=True)
     finally:
@@ -647,13 +844,23 @@ def uninstall_wfp_filters(
 
 
 def _delete_filter_by_key(fwpu, engine, fkey: str) -> None:
-    """按 key 删除单个 WFP filter (幂等, not-found 静默)."""
+    """按 key 删除单个 WFP filter (幂等, not-found 静默).
+
+    W3: 旧版把 0x800700B7 (ERROR_ALREADY_EXISTS, add 路径才出现) 当 not-found 忽略,
+    但 delete 的 not-found 是 FWP_E_KEY_NOT_FOUND=0x80320031 / FWP_E_FILTER_NOT_FOUND=
+    0x80320003 (0x80320xxx 段)。改为忽略正确的 not-found 码, 其余用 _wfp_error。
+    """
+    # delete 路径的 "不存在" 码: 视为幂等成功, 静默。
+    _DELETE_NOT_FOUND = {0x80320031, 0x80320003}
     try:
         hr = fwpu.FwpmFilterDeleteByKey0(
             engine, ctypes.byref(_guid_from_str(fkey)),
         )
-        if hr not in (0, 0x800700B7):  # 0x800700B7 = not found
-            logger.warning("删除 WFP filter %s 返回 0x%X", fkey, hr)
+        if hr == 0:
+            return
+        if hr in _DELETE_NOT_FOUND:
+            return
+        logger.warning("删除 WFP filter %s: %s", fkey, _wfp_error(hr, "FwpmFilterDeleteByKey0"))
     except Exception:  # noqa: BLE001
         logger.warning("删除 WFP filter %s 异常", fkey, exc_info=True)
 
@@ -662,33 +869,54 @@ def install_firewall_rule_fallback(
     sandbox_user_name: str,
     permit_port_start: int,
     permit_port_end: int,
-) -> None:
+    sandbox_user_sid: str | None = None,
+) -> bool:
     """降级方案: 用 PowerShell New-NetFirewallRule 实现用户级出站拦截.
 
     对齐 docs/window沙箱.md 6.4.2 降级路径. 牺牲内核态优先级控制与绕过保护,
-    功能等价 (按用户名拦截出站).
+    功能等价 (按用户拦截出站).
+
+    S10: 旧版加 `-ErrorAction SilentlyContinue` 吞掉 stderr, 失败只 warning 且循环
+    外无条件打"安装完成" → 假成功。改为不打 SilentlyContinue, 捕获 stderr 明文
+    打印; 返回是否全部成功, 调用方据此决定是否致命 raise (S12)。
+
+    S12 实跑修复 (failed.txt):
+      1) -LocalUser 裸传 'S-1-5-21-...' 被拒 (stderr: 本地用户权限列表无效,
+         只能含字母和 :/._ 不含连字符 '-'). 微软文档要求 -LocalUser 传 SDDL
+         字符串 'D:(A;;CC;;;<SID>)', 不是裸 SID. 构造 SDDL 传入.
+      2) -RemotePort 配 -RemoteAddress 但缺 -Protocol, stderr: 协议绑定对象
+         选择与所选协议不匹配 (HRESULT 0x80070057). 显式加 -Protocol TCP.
     """
     _require_windows()
     rule_block = "JiuwenBox-Block-Sandbox-Egress"
     rule_permit = "JiuwenBox-Permit-Loopback"
     port_range = f"{permit_port_start}-{permit_port_end}"
 
-    # Block 规则: 拦截 sandbox 用户的所有出站.
+    # -LocalUser 要的是 SDDL 字符串 (微软文档): D:(A;;CC;;;<SID>).
+    # 无 SID 时退回裸用户名 (含 '-' 会被拒, 但至少留下诊断).
+    if sandbox_user_sid:
+        local_user = f"D:(A;;CC;;;{sandbox_user_sid})"
+    else:
+        local_user = sandbox_user_name
+    # Block 规则: 拦截 sandbox 用户的所有出站。
     ps_block = (
         f"New-NetFirewallRule -DisplayName '{rule_block}' "
         f"-Direction Outbound -Action Block "
-        f"-LocalUser '{sandbox_user_name}' -ErrorAction SilentlyContinue"
+        f"-LocalUser '{local_user}'"
     )
-    # Permit 规则: 放行 sandbox 用户到 127.0.0.1:port_range (放行需在 Block 之前).
-    # Windows Firewall 不直接支持 loopback 目标过滤, 这里用放行本地端口 + 程序
-    # 规则近似; 真实环境若需精确 loopback 仍推荐走 WFP 主路径.
+    # Permit 规则: 放行 sandbox 用户到 127.0.0.1:port_range (放行需在 Block 之前)。
+    # 注: Windows Firewall 对 loopback 目标过滤支持有限, -RemoteAddress 127.0.0.1
+    # 在部分版本不生效; 真要精确 loopback 仍走 WFP 主路径。降级路径主要靠 Block 规则。
+    # S12: 显式 -Protocol TCP (缺省协议对 -RemotePort 报 "协议不匹配").
     ps_permit = (
         f"New-NetFirewallRule -DisplayName '{rule_permit}' "
         f"-Direction Outbound -Action Allow "
-        f"-LocalUser '{sandbox_user_name}' "
+        f"-Protocol TCP "
+        f"-LocalUser '{local_user}' "
         f"-RemoteAddress 127.0.0.1 "
-        f"-RemotePort {port_range} -ErrorAction SilentlyContinue"
+        f"-RemotePort {port_range}"
     )
+    all_ok = True
     for ps in (ps_permit, ps_block):
         try:
             subprocess.run(
@@ -696,13 +924,26 @@ def install_firewall_rule_fallback(
                 check=True, capture_output=True, timeout=30,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            all_ok = False
+            stderr = b""
+            if isinstance(exc, subprocess.CalledProcessError):
+                stderr = exc.stderr or b""
+            stderr_text = stderr.decode("utf-8", errors="replace").strip()
             logger.warning(
-                "PowerShell 防火墙规则安装失败 (%s): %s", ps[:40], exc,
+                "PowerShell 防火墙规则安装失败 (%s): %s | stderr: %s",
+                ps[:60], exc, stderr_text or "<空>",
             )
-    logger.info(
-        "降级防火墙规则安装完成: user=%s permit_port=%s",
-        sandbox_user_name, port_range,
-    )
+    if all_ok:
+        logger.info(
+            "降级防火墙规则安装完成: user=%s permit_port=%s",
+            sandbox_user_name, port_range,
+        )
+    else:
+        logger.error(
+            "降级防火墙规则安装存在失败: user=%s permit_port=%s "
+            "(网络隔离可能不完整)", sandbox_user_name, port_range,
+        )
+    return all_ok
 
 
 def uninstall_firewall_rule_fallback() -> None:

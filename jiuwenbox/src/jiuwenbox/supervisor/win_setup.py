@@ -348,7 +348,13 @@ def _set_user_password(user_name: str, password: str) -> None:
 
 
 def _add_user_to_group() -> None:
-    """把 jbx-sandbox 加入 jbx-sandbox-users 组 (幂等)."""
+    """把 jbx-sandbox 加入 jbx-sandbox-users 组 (幂等, 失败 raise).
+
+    S8: 旧版用 level 0 (LOCALGROUP_MEMBERS_INFO_0, 字段是 PSID) 却塞用户名字符串
+    -> netapi 解析 PSID 失败返回 1337 (ERROR_INVALID_PASSWORD), 用户没进组。
+    改用 level 3 (LOCALGROUP_MEMBERS_INFO_3, lgrpi3_domainandname 接受
+    "DOMAIN\\user" 名字串), 与 LookupAccountName 拿到的域\\用户格式一致。
+    """
     netapi32 = _get_netapi32()
     # 先尝试建组 (已存在则忽略, 错误码 2237 = NERR_GroupExists).
     class _LOCALGROUP_INFO_0(ctypes.Structure):
@@ -364,21 +370,29 @@ def _add_user_to_group() -> None:
     elif ret == 2237:
         logger.info("组 %s 已存在, 跳过", const.SANDBOX_USER_GROUP)
     else:
-        logger.warning("NetLocalGroupAdd 返回 %d (继续)", ret)
+        # 组创建失败是致命 (S12): 没组就没法加成员, 后续组级 ACL 全废。
+        raise RuntimeError(f"NetLocalGroupAdd 失败 ret={ret}")
 
-    # 加入成员 (LOCALGROUP_MEMBERS_INFO_0 = { PSID }, 但用名字更简单 -> level 3).
-    class _LOCALGROUP_MEMBERS_INFO_0(ctypes.Structure):
-        _fields_ = [("lgrmi0_name", wintypes.LPWSTR)]
+    # 加入成员用 level 3: LOCALGROUP_MEMBERS_INFO_3 { lgrpi3_domainandname: LPWSTR }.
+    # level 0 字段是 PSID, 传名字串会返回 1337 (实跑日志已证实)。level 3 显式接受
+    # "DOMAIN\\user" 或裸 "user" 名字串, netapi 内部解析账户。本地账户用裸名即可。
+    class _LOCALGROUP_MEMBERS_INFO_3(ctypes.Structure):
+        _fields_ = [("lgrpi3_domainandname", wintypes.LPWSTR)]
 
-    member = _LOCALGROUP_MEMBERS_INFO_0()
-    member.lgrmi0_name = const.SANDBOX_USER_NAME  # LPWSTR 直接赋 str
+    member = _LOCALGROUP_MEMBERS_INFO_3()
+    member.lgrpi3_domainandname = const.SANDBOX_USER_NAME  # LPWSTR 直接赋 str
     ret = netapi32.NetLocalGroupAddMembers(
-        None, const.SANDBOX_USER_GROUP, 0,
+        None, const.SANDBOX_USER_GROUP, 3,
         ctypes.byref(member), 1,
     )
-    # 0 = 成功; 1377 = ERROR_MEMBER_IN_ALIAS (已在组中).
+    # 0 = 成功; 1377 = ERROR_MEMBER_IN_ALIAS (已在组中, 幂等).
     if ret not in (0, 1377):
-        logger.warning("NetLocalGroupAddMembers 返回 %d", ret)
+        # S12: 成员加入失败是致命, 组级 ACL 对 jbx-sandbox 不生效。
+        raise RuntimeError(
+            f"NetLocalGroupAddMembers 失败 ret={ret} (user={const.SANDBOX_USER_NAME} "
+            f"group={const.SANDBOX_USER_GROUP})"
+        )
+    logger.info("用户 %s 已加入组 %s", const.SANDBOX_USER_NAME, const.SANDBOX_USER_GROUP)
 
 
 def _lookup_user_sid(user_name: str) -> str:
@@ -588,84 +602,110 @@ def install(
 
     logger.info("开始 Windows 沙箱安装...")
 
-    # 1. 创建用户 + 组.
-    password = _generate_password()
-    _create_sandbox_user(password)
-    _add_user_to_group()
-    # 从登录界面隐藏 jbx-sandbox 用户 (Winlogon SpecialAccounts\UserList=0).
+    # S1/S12: install 主体包 try/except, 致命步骤失败时调 uninstall() 回滚并 raise,
+    # 不许写 installed=1 (旧版各步 best-effort 只 warning, 最后无条件标完成 = 假成功,
+    # 实跑日志证实: 组成员失败/WFP 失败/预装失败后仍打"安装完成")。
+    # 致命步骤定义: 用户+组创建 (S8)、网络隔离至少一条路成功 (WFP 或降级, S9/S10)。
+    # 非致命: 隐藏登录界面用户、DPAPI 密码加密、合成 SID 缓存、读 ACL 预装 (S11)。
     try:
-        _reg_set_dword_under(
-            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-            r"\SpecialAccounts\UserList",
-            const.SANDBOX_USER_NAME,
-            0,
-        )
-    except Exception:  # noqa: BLE001 - 隐藏失败不阻断安装
-        logger.warning("隐藏登录界面用户失败, 不影响功能", exc_info=True)
-
-    # 2. 查 SID 并存注册表.
-    sid = _lookup_user_sid(const.SANDBOX_USER_NAME)
-    _reg_set_str(const.REG_VALUE_SANDBOX_USER_SID, sid)
-    # 密码用 DPAPI 加密存储 (机器范围). 简化: 用 win32crypt.
-    try:
-        import win32crypt  # type: ignore[import-not-found]
-        enc = win32crypt.CryptProtectData(
-            password.encode("utf-8"), "jbx-sandbox-pw", None, None, None, 0,
-        )
-        _reg_set_str(const.REG_VALUE_SANDBOX_USER_PW, enc.hex())
-    except ImportError:  # pragma: no cover
-        logger.warning("pywin32 缺失, 沙箱用户密码未加密存储 (仅开发环境)")
-
-    # 合成 SID 缓存.
-    from jiuwenbox.supervisor import win_acl
-    synth_sid = win_acl.get_synthetic_write_sid()
-    _reg_set_str(const.REG_VALUE_SYNTHETIC_WRITE_SID, synth_sid)
-
-    # 3. 安装 WFP filter set (网络隔离). 失败则降级到防火墙规则.
-    # 使用调用方传入的 policy 端口范围 (M7), 不再硬编码默认端口.
-    try:
-        from jiuwenbox.supervisor import win_wfp
-        win_wfp.install_wfp_filters(sid, proxy_port_start, proxy_port_end)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "WFP filter 安装失败, 降级到 PowerShell 防火墙规则", exc_info=True,
-        )
+        # 1. 创建用户 + 组 (致命: S8 修后 _add_user_to_group 失败会 raise).
+        password = _generate_password()
+        _create_sandbox_user(password)
+        _add_user_to_group()
+        # 从登录界面隐藏 jbx-sandbox 用户 (非致命).
         try:
-            from jiuwenbox.supervisor import win_wfp
-            win_wfp.install_firewall_rule_fallback(
-                const.SANDBOX_USER_NAME, proxy_port_start, proxy_port_end,
+            _reg_set_dword_under(
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+                r"\SpecialAccounts\UserList",
+                const.SANDBOX_USER_NAME,
+                0,
             )
         except Exception:  # noqa: BLE001
-            logger.error("防火墙规则降级也失败, 网络隔离不可用", exc_info=True)
+            logger.warning("隐藏登录界面用户失败, 不影响功能", exc_info=True)
 
-    # 4. 异步预装读 ACL. 路径优先取 policy 的 read_acl_preinstall,
-    # 否则用默认系统目录. install 是提权子进程, 必须等预装完成再退出,
-    # 否则 daemon 线程被强杀 (文档 6.4.3: 后台线程异步执行, 但 install
-    # 子进程本身要活到预装结束).
-    if preinstall_paths:
-        paths_to_preinstall = [
-            os.path.expandvars(p) for p in preinstall_paths if p
-        ]
-    else:
-        paths_to_preinstall = [
-            os.environ.get("USERPROFILE", ""),
-            os.environ.get("SystemRoot", r"C:\Windows"),
-            os.environ.get("ProgramFiles", r"C:\Program Files"),
-            os.environ.get("ProgramData", r"C:\ProgramData"),
-        ]
-        paths_to_preinstall = [p for p in paths_to_preinstall if p]
-    preinstall_thread = _preinstall_read_acl_async(paths_to_preinstall, sid)
-    preinstall_thread.join(timeout=PREINSTALL_JOIN_TIMEOUT_SECONDS)
-    if preinstall_thread.is_alive():
-        logger.warning(
-            "读 ACL 预装未在 %.0fs 内完成, 剩余路径将由后续创建沙箱补做",
-            PREINSTALL_JOIN_TIMEOUT_SECONDS,
-        )
+        # 2. 查 SID 并存注册表.
+        sid = _lookup_user_sid(const.SANDBOX_USER_NAME)
+        _reg_set_str(const.REG_VALUE_SANDBOX_USER_SID, sid)
+        # 密码用 DPAPI 加密存储 (机器范围). 简化: 用 win32crypt.
+        try:
+            import win32crypt  # type: ignore[import-not-found]
+            enc = win32crypt.CryptProtectData(
+                password.encode("utf-8"), "jbx-sandbox-pw", None, None, None, 0,
+            )
+            _reg_set_str(const.REG_VALUE_SANDBOX_USER_PW, enc.hex())
+        except ImportError:  # pragma: no cover
+            logger.warning("pywin32 缺失, 沙箱用户密码未加密存储 (仅开发环境)")
 
-    # 5. 写完成标记; 全部预装成功则清进度标记 (断点续传已无用).
-    _reg_set_str(const.REG_VALUE_INSTALLED, "1")
-    _reg_set_str(const.REG_VALUE_READ_ACL_PROGRESS, "")
-    logger.info("Windows 沙箱安装完成")
+        # 合成 SID 缓存.
+        from jiuwenbox.supervisor import win_acl
+        synth_sid = win_acl.get_synthetic_write_sid()
+        _reg_set_str(const.REG_VALUE_SYNTHETIC_WRITE_SID, synth_sid)
+
+        # 3. 安装 WFP filter set (网络隔离). 失败则降级到防火墙规则 (致命:
+        # WFP 主路径 + 降级路径都失败 = 网络隔离不可用, raise 触发回滚)。
+        network_isolation_ok = False
+        wfp_exc = None
+        try:
+            from jiuwenbox.supervisor import win_wfp
+            win_wfp.install_wfp_filters(sid, proxy_port_start, proxy_port_end)
+            network_isolation_ok = True
+        except Exception as exc:  # noqa: BLE001
+            wfp_exc = exc
+            logger.warning(
+                "WFP filter 安装失败, 降级到 PowerShell 防火墙规则", exc_info=True,
+            )
+            try:
+                from jiuwenbox.supervisor import win_wfp
+                fallback_ok = win_wfp.install_firewall_rule_fallback(
+                    const.SANDBOX_USER_NAME, proxy_port_start, proxy_port_end,
+                    sandbox_user_sid=sid,
+                )
+            except Exception as fallback_exc:  # noqa: BLE001
+                logger.error(
+                    "防火墙规则降级也失败, 网络隔离不可用", exc_info=True,
+                )
+                raise RuntimeError(
+                    "网络隔离不可用: WFP 主路径与 PowerShell 降级均失败"
+                ) from (exc, fallback_exc)
+            if not fallback_ok:
+                raise RuntimeError(
+                    "网络隔离不可用: WFP 主路径失败, PowerShell 降级部分失败"
+                ) from exc
+            network_isolation_ok = True
+        if not network_isolation_ok:
+            # 不应到达此处 (上面任一路径失败已 raise), 防御性兜底。
+            raise RuntimeError("网络隔离不可用 (未知原因)") from wfp_exc
+
+        # 4. 异步预装读 ACL (非致命: S11 修后默认不 preinstall 系统目录,
+        # 只 grant 调用方显式传入的 preinstall_paths; 失败不影响 install 成功,
+        # 沙箱工作区读权限由 _create_windows 的 apply_sandbox_acl 在创建时 grant)。
+        if preinstall_paths:
+            paths_to_preinstall = [
+                os.path.expandvars(p) for p in preinstall_paths if p
+            ]
+        else:
+            paths_to_preinstall = []
+        preinstall_thread = _preinstall_read_acl_async(paths_to_preinstall, sid)
+        preinstall_thread.join(timeout=PREINSTALL_JOIN_TIMEOUT_SECONDS)
+        if preinstall_thread.is_alive():
+            logger.warning(
+                "读 ACL 预装未在 %.0fs 内完成, 剩余路径将由后续创建沙箱补做",
+                PREINSTALL_JOIN_TIMEOUT_SECONDS,
+            )
+
+        # 5. 全部致命步骤通过, 写完成标记; 清进度标记 (断点续传已无用)。
+        _reg_set_str(const.REG_VALUE_INSTALLED, "1")
+        _reg_set_str(const.REG_VALUE_READ_ACL_PROGRESS, "")
+        logger.info("Windows 沙箱安装完成")
+    except Exception:
+        # S1: 任一致命步骤失败 → 回滚 (删用户/组/WFP/注册表, 含 S7 profile 清理),
+        # 不写 installed=1, re-raise 让上层 (ensure_windows_setup) 报错。
+        logger.error("install 失败, 执行回滚", exc_info=True)
+        try:
+            uninstall()
+        except Exception:  # noqa: BLE001 - 回滚 best-effort, 不掩盖原异常
+            logger.error("install 失败后回滚也失败", exc_info=True)
+        raise
 
 
 def ensure_windows_setup(
@@ -748,14 +788,16 @@ def uninstall() -> None:
     # 改为彻底删用户/组, reinstall 干净重建.
     netapi32 = _get_netapi32()
     ret = netapi32.NetUserDel(None, const.SANDBOX_USER_NAME)
-    # 0 = 成功; 2201 = NERR_UserNotFound (已不存在, 幂等).
-    if ret not in (0, 2201):
+    # 0 = 成功; 2221 = NERR_UserNotFound (已不存在, 幂等). 旧版误用 2201
+    # (实为 NERR_BadPassword), 导致幂等卸载时落进 warning 分支 (实跑日志
+    # "NetUserDel 返回 2221" 即被错判). 已据 lmerr.h 改回 2221.
+    if ret not in (0, 2221):
         logger.warning("NetUserDel 返回 %d (继续)", ret)
     else:
         logger.info("删除沙箱用户 %s", const.SANDBOX_USER_NAME)
     ret = netapi32.NetLocalGroupDel(None, const.SANDBOX_USER_GROUP)
-    # 0 = 成功; 2201 = NERR_GroupNotFound.
-    if ret not in (0, 2201):
+    # 0 = 成功; 2220 = NERR_GroupNotFound (已不存在, 幂等). 旧版误用 2201.
+    if ret not in (0, 2220):
         logger.warning("NetLocalGroupDel 返回 %d (继续)", ret)
     else:
         logger.info("删除沙箱组 %s", const.SANDBOX_USER_GROUP)

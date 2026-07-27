@@ -636,7 +636,7 @@ class ProcessRuntime(RuntimeAdapter):
         # runner pipe 句柄 + Job handle + ACL workspace + runner pid/handle.
         self._win_runners: dict[str, dict] = {}
         self._win_job_handles: dict[str, int] = {}
-        self._win_acl_paths: dict[str, str] = {}
+        self._win_acl_paths: dict[str, list[str]] = {}
         self._win_policies: dict[str, SecurityPolicy] = {}
         self._win_exec_sem: asyncio.Semaphore | None = None
         # 每个 sandbox 的 runner pipe 是单连接同步通道: 同一时刻只能有一个

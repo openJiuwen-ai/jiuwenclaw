@@ -56,13 +56,18 @@ TOKEN_SESSION_REFERENCE = 16
 TOKEN_SANDBOX_INERT = 29
 
 # ---------------------------------------------------------------------------
-# CreateRestrictedToken 标志.
-#   DISABLE_MAX_PRIVILEGE  : 清除 token 中所有特权.
-#   SANDBOX_INERT          : 标记 token 为沙箱 inert (某些路径豁免检查).
-#   WRITE_RESTRICTED      : 只对写操作做 Restricted SID 双重 ACL 检查.
+# CreateRestrictedToken 标志 (对齐 winnt.h).
+#   DISABLE_MAX_PRIVILEGE = 0x1 : 清除 token 中所有特权.
+#   SANDBOX_INERT        = 0x2 : 标记 token 为沙箱 inert (某些路径豁免检查).
+#   LUA_TOKEN            = 0x4 : 创建 UAC 筛选 token (低完整性), 非本项目所需.
+#   WRITE_RESTRICTED     = 0x8 : 只对写操作做 Restricted SID 双重 ACL 检查.
+#
+# 注意: 旧版误把 SANDBOX_INERT 标成 0x4 (实为 LUA_TOKEN 的值), RESTRICTED_TOKEN_FLAGS
+# 实际组合出 DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED, 与文档 6.5
+# 要求的 SANDBOX_INERT 语义不符. 已据 winnt.h 改回 0x2.
 # ---------------------------------------------------------------------------
 DISABLE_MAX_PRIVILEGE = 0x1
-SANDBOX_INERT = 0x4
+SANDBOX_INERT = 0x2
 WRITE_RESTRICTED = 0x8
 
 # CreateRestrictedToken 组合: 文档 6.5 要求的受限 SID 列表 =
@@ -104,31 +109,34 @@ TOKEN_IMPERSONATION = 2
 SecurityImpersonation = 2
 
 # ---------------------------------------------------------------------------
-# 用户账户标志 (USER_INFO_1.usri1_flags / NetUserAdd).
-#
-# 注意: netapi.h 中 UF_* 与 USER_PRIV_* / USER_UNK_* 是不同的位域,
-# 但头文件里 DONT_EXPIRE_PASSWD 与 NORMAL_ACCOUNT 实际各自位宽不冲突:
-#   UF_SCRIPT             = 0x0001  (NetUserAdd 强制要求)
+# 用户账户标志 (USER_INFO_1.usri1_flags / NetUserAdd), 对齐 lmaccess.h.
+#   UF_SCRIPT             = 0x0001   (NetUserAdd 强制要求)
 #   UF_ACCOUNTDISABLE     = 0x0002  (禁用账户; 沙箱用户不能设, 否则 LogonUser 失败)
 #   UF_HOMEDIR_REQUIRED   = 0x0008
-#   UF_PASSWD_CANT_CHANGE = 0x0040  (用户不能改密码)
-#   UF_DONT_EXPIRE_PASSWD = 0x0200  (密码不过期)
-#   UF_NORMAL_ACCOUNT     = 0x0200  (普通账户; 见 netapi.h UF_NORMAL_ACCOUNT)
+#   UF_PASSWD_CANT_CHANGE = 0x0040   (用户不能改密码)
+#   UF_NORMAL_ACCOUNT     = 0x0200   (普通账户类型)
+#   UF_DONT_EXPIRE_PASSWD = 0x10000  (密码不过期)
 #
-# 头文件中 UF_DONT_EXPIRE_PASSWD 与 UF_NORMAL_ACCOUNT 的数值在历史上确实同
-# 占 0x0200, 但二者属不同语义域 (一个属 UF_* 标志位, 一个属账户类型分类),
-# 在 USER_INFO_1.usri1_flags 里高位区段(0x0200 及以上)按账户类型解析,
-# 低位区段(0x0001..0x0080)按能力标志解析, 因此同时设置语义不冲突.
+# 旧版误把 UF_DONT_EXPIRE_PASSWD 标成 0x0200 (实为 UF_NORMAL_ACCOUNT 的值),
+# 并声称"二者历史上同占 0x0200 但语义域不同故不冲突" — 这与 lmaccess.h 实际定义
+# 不符: UF_DONT_EXPIRE_PASSWD 是 0x10000, 与 UF_NORMAL_ACCOUNT(0x0200) 位宽
+# 完全不重叠. 旧值导致 SANDBOX_USER_FLAGS 漏设"密码不过期"位, 沙箱用户密码
+# 会按本地账户策略过期. 已据 lmaccess.h 改回 0x10000.
 # ---------------------------------------------------------------------------
 UF_SCRIPT = 0x0001
 UF_ACCOUNTDISABLE = 0x0002
 UF_HOMEDIR_REQUIRED = 0x0008
 UF_PASSWD_CANT_CHANGE = 0x0040
-UF_DONT_EXPIRE_PASSWD = 0x0200
+UF_DONT_EXPIRE_PASSWD = 0x10000
 UF_NORMAL_ACCOUNT = 0x0200
 
 # 沙箱用户最终 flag: 脚本位 + 不改密码 + 不过期 + 普通账户. 不设 DISABLE.
-SANDBOX_USER_FLAGS = UF_SCRIPT | UF_PASSWD_CANT_CHANGE | UF_DONT_EXPIRE_PASSWD
+# 显式 OR UF_NORMAL_ACCOUNT: 旧值 UF_DONT_EXPIRE_PASSWD=0x0200 与 UF_NORMAL_ACCOUNT
+# 同值, 隐式带上了普通账户位; 改回 0x10000 后二者不再重叠, 必须显式列出
+# UF_NORMAL_ACCOUNT, 否则账户缺普通账户类型标记.
+SANDBOX_USER_FLAGS = (
+    UF_SCRIPT | UF_PASSWD_CANT_CHANGE | UF_DONT_EXPIRE_PASSWD | UF_NORMAL_ACCOUNT
+)
 
 # NetLocalGroupAddMembers 预定义级别.
 LOCALGROUP_MEMBERS_INFO_0 = 0
@@ -241,7 +249,9 @@ FWP_WEIGHT_PERMIT = 0xF  # Permit filter 权重最高, 覆盖 Block
 # 取值对齐 fwpmu.h DEFINE_GUID (真实 SDK 值, 非 DCE UUID 字面量需注意
 # Windows GUID 内存布局 little-endian, 见 win_wfp._guid_from_str).
 # FWPM_LAYER_ALE_AUTH_CONNECT_V4 / V6 - 出站连接授权层.
-FWPM_LAYER_ALE_AUTH_CONNECT_V4 = "C38D57D1-05A7-4C33-900F-7FBCEEE60E82"
+# S12 旧 bug: V4 的 GUID 第 4 段 904F 误写成 900F, BFE 返回
+# FWP_E_LAYER_NOT_FOUND (0x80320004). 对照 fwpmu.h DEFINE_GUID 修正.
+FWPM_LAYER_ALE_AUTH_CONNECT_V4 = "C38D57D1-05A7-4C33-904F-7FBCEEE60E82"
 FWPM_LAYER_ALE_AUTH_CONNECT_V6 = "4A72393B-319F-44BC-84C3-BA54DCB3B6B4"
 
 # Filter Condition 字段 (FWPM_CONDITION_...). 取值对齐 fwpmu.h DEFINE_GUID.

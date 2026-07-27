@@ -102,11 +102,12 @@ class EgressFilter:
 
         语义对齐 Linux supervisor/network.py 的 iptables 规则:
           1. blocked_domains / blocked_ips / blocked_ports 命中 -> 拒绝.
-          2. 若同时有 allowed_ips 和 allowed_ports: 必须两者都命中才放行 (AND).
-          3. 若只有 allowed_ports (无 allowed_ips/domains): 放行该端口所有 IP.
-          4. 若只有 allowed_ips/domains (无 allowed_ports): 放行这些 IP/域名的
-             所有端口.
-          5. 无任何 allow 规则: 按 default.
+          2. allow 规则按维度独立判定 (OR), 任一命中即放行:
+             - allowed_domains / allowed_ips 是一条 ACCEPT-by-host 规则;
+             - allowed_ports 是另一条 ACCEPT-by-port 规则.
+             对齐 Linux iptables 的独立 ACCEPT 链 (review MAJOR #10:
+             旧版在 IP+port 同时存在时做 AND, 比 Linux 严).
+          3. 无任何 allow 规则: 按 default.
         """
         if not host:
             return False, "empty host"

@@ -77,15 +77,31 @@ windows:
 
   filesystem:
     # 一次性预装读 ACL 的路径 (安装阶段, jbx-sandbox 用户默认读不了这些目录).
+    # 预装给合成 SID + jbx-sandbox 真实 SID (runner 第一跳用真实 SID token,
+    # 合成 SID 的 ACE 对它不生效). 补 node.exe / 工程仓库 / openjiuwen venv:
+    # skill 脚本调 node cli.js, runner 读不了 node 或 skills 目录 → exit=1
+    # 且 stderr 被吞 (日志只看到空 stderr), 必须预装读权限.
     read_acl_preinstall:
       - "%USERPROFILE%"
       - "%SystemRoot%"
       - "%ProgramFiles%"
       - "%ProgramData%"
+      # node.js 安装目录 (skill 脚本 node cli.js 依赖). 默认安装路径,
+      # 不存在时 apply_sandbox_acl 跳过 (os.path.exists 守护).
+      - "%ProgramFiles%/nodejs"
+      - "%APPDATA%/npm"
     # 沙箱可写路径 (合成 SID 授 Allow Write+Execute+Delete). 第一个路径作为
     # 沙箱 workspace 根.
     allow_write:
       - "{{ workspace }}"
+    # 沙箱可读路径 (合成 SID + 真实 SID 授 Allow Read+Execute). runner 第一跳
+    # 用真实 SID token, 合成 SID 的 ACE 不生效, apply_sandbox_acl 会给真实 SID
+    # 也 grant Read. skill 脚本所在目录 (office-claw-skills) 必须列出, 否则
+    # node cli.js 读不到 skill 模板.
+    allow_read:
+      # skill 脚本目录 (pptx-craft 等), 经 JIUWENBOX_SKILLS_DIR env 注入实际路径.
+      # 未注入时 expandvars 不展开 → apply_sandbox_acl 跳过 (os.path.exists 守护).
+      - "%JIUWENBOX_SKILLS_DIR%"
     # 在 allow 范围内精细化封锁 (Deny Write).
     deny_write:
       - "{{ workspace }}/.git"

@@ -782,6 +782,11 @@ class TestWinProxyEgressSemantics:
         allowed, _ = f.allow("10.1.2.3", 8443)
         assert allowed, "IP 命中 allow 应放行, 不与 port allow 做 AND"
 
+    # 别名: 设计文档 windows_sandbox_review_fix_design.md §4 要求的测试名.
+    # 与 test_ip_allow_and_port_allow_not_anded 同一断言 (IP-allow 与 port-allow
+    # 不做隐式 AND), 任一命名都能命中此 review MAJOR #10 修复点.
+    test_egress_allow_no_implicit_and = test_ip_allow_and_port_allow_not_anded
+
     def test_port_allow_only_still_works(self):
         f = self._filter(allowed_ports=[443], default="deny")
         allowed, _ = f.allow("10.1.2.3", 443)
