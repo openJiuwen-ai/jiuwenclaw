@@ -3,7 +3,10 @@ import './index.css';
 /**
  * 模型厂商图标组件
  *
- * 根据 model_name / model_provider / api_base 三字段加权模糊匹配，
+ * 仅根据 model_name 精确匹配厂商（不含 alias）：
+ * model_name 须等于 keyword，或以 keyword 为家族前缀并紧跟版本/分隔符
+ * （如 qwen-max、gpt-4、claude-3）；含空格的短语（如 "qwen claud"）不匹配，
+ * 回退到 model_provider，再回退到默认 OpenAI。
  * 优先使用本地静态图标；无匹配时退回首字母 fallback。
  *
  * 新增厂商只需：
@@ -13,7 +16,7 @@ import './index.css';
 
 interface ProviderSpec {
   key: string;       // 对应 assets/providers/{key}.png
-  keywords: string[]; // 命中任意 keyword 得 keyword.length 分，取最高分厂商
+  keywords: string[]; // 完整 model_name 或家族前缀
 }
 
 export const PROVIDER_SPECS: ProviderSpec[] = [
@@ -40,6 +43,9 @@ export const PROVIDER_SPECS: ProviderSpec[] = [
   { key: 'sensetime',   keywords: ['sensetime', 'sensenova', 'nova-ptc'] },
 ];
 
+const DEFAULT_PROVIDER =
+  PROVIDER_SPECS.find((spec) => spec.key === 'openai') ?? PROVIDER_SPECS[0];
+
 // 本地静态图标（Vite 打包时自动处理）
 const PROVIDER_ICONS_PNG = import.meta.glob<string>(
   '../../assets/providers/*.png',
@@ -57,33 +63,63 @@ export type ModelLike = {
   alias?: string;
 };
 
-/** 按 model_name → api_base → model_provider 三层优先级匹配，匹配上即返回 */
-export function findProvider(model: ModelLike): ProviderSpec | null {
-  const tiers = [
-    (model.model_name ?? '') + ' ' + (model.alias ?? ''),
-    model.api_base ?? '',
-    model.model_provider ?? '',
-  ];
+/**
+ * 精确匹配：model_name 整体等于 keyword，或以 keyword 为家族前缀
+ * 且下一位为版本/分隔符（数字、. _ / -）。
+ * "qwen claud" / "qwenclaude" 不会命中 qwen。
+ */
+function keywordMatchesModelName(text: string, keyword: string): boolean {
+  if (text === keyword) return true;
+  if (keyword.endsWith('-')) {
+    return text.startsWith(keyword);
+  }
+  if (!text.startsWith(keyword)) return false;
+  const next = text[keyword.length];
+  return next !== undefined && /[\d._/-]/.test(next);
+}
 
-  for (const tier of tiers) {
-    const text = tier.toLowerCase();
-    if (!text.trim()) continue;
+/**
+ * 仅当恰好一个厂商被精确命中时返回。
+ * "qwen claud" / "qwen claude" / "qwen gpt-4" 等均不匹配。
+ */
+function matchExactModelName(modelName: string): ProviderSpec | null {
+  const text = modelName.trim().toLowerCase();
+  if (!text) return null;
 
-    let bestScore = 0;
-    let best: ProviderSpec | null = null;
-    for (const spec of PROVIDER_SPECS) {
-      let score = 0;
-      for (const kw of spec.keywords) {
-        if (text.includes(kw)) score += kw.length;
-      }
-      if (score > bestScore) {
-        bestScore = score;
-        best = spec;
-      }
+  const matched: ProviderSpec[] = [];
+  for (const spec of PROVIDER_SPECS) {
+    if (spec.keywords.some((kw) => keywordMatchesModelName(text, kw))) {
+      matched.push(spec);
+      if (matched.length > 1) return null;
     }
-    if (best) return best;
+  }
+  return matched[0] ?? null;
+}
+
+/** 按 model_provider 字段做简单命中（用于 model_name 未精确匹配时的回退） */
+function matchProviderField(provider: string): ProviderSpec | null {
+  const text = provider.trim().toLowerCase();
+  if (!text) return null;
+
+  for (const spec of PROVIDER_SPECS) {
+    if (spec.keywords.some((kw) => text === kw || text.includes(kw))) {
+      return spec;
+    }
   }
   return null;
+}
+
+/**
+ * model_name 精确匹配优先；未命中时回退 model_provider；
+ * 仍未命中则默认 OpenAI（与配置表单默认值一致）。
+ * alias / api_base 不参与匹配。
+ */
+export function findProvider(model: ModelLike): ProviderSpec | null {
+  return (
+    matchExactModelName(model.model_name ?? '')
+    ?? matchProviderField(model.model_provider ?? '')
+    ?? DEFAULT_PROVIDER
+  );
 }
 
 /** 获取厂商图标 URL（本地静态资源），PNG 优先，SVG 兜底，未知厂商返回 undefined */
