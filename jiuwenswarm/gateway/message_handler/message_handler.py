@@ -997,7 +997,16 @@ class MessageHandler(ABC):
             await self._pop_stream_tracking_and_broadcast(rids_cancelled)
 
         if agent_notify == "fire_and_forget":
-            task = asyncio.create_task(self._send_interrupt_to_agent(env_interrupt))
+            # Still forward cancelled_tools once AgentServer responds — otherwise
+            # the UI keeps spinning until refresh (history was written, live push not).
+            task = asyncio.create_task(
+                self._send_interrupt_to_agent(
+                    env_interrupt,
+                    channel_id=msg.channel_id,
+                    session_id=sid_for_agent,
+                    metadata=cancel_metadata or None,
+                )
+            )
             self._fire_and_forget_tasks.add(task)
             task.add_done_callback(self._fire_and_forget_tasks.discard)
             logger.info(
@@ -4032,14 +4041,31 @@ class MessageHandler(ABC):
             stream_rid, msg.channel_id, len(self._stream_tasks),
         )
 
-    async def _send_interrupt_to_agent(self, env: "E2AEnvelope") -> None:
-        """Fire-and-forget: 发送中断请求到 AgentServer，不阻塞转发循环."""
+    async def _send_interrupt_to_agent(
+        self,
+        env: "E2AEnvelope",
+        *,
+        channel_id: str | None = None,
+        session_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        """Fire-and-forget: 发送中断到 AgentServer，不阻塞转发循环.
+
+        ``interrupt_result`` 已由调用方提前推送；此处仍要把响应里的
+        ``cancelled_tools`` 转成 ``chat.tool_result``，否则前端 tool 卡片会一直转圈，
+        直到刷新历史才看到 ``[Interrupted]``.
+        """
         try:
             resp = await self._send_non_stream_agent_request(env)
             logger.info(
-                "[MessageHandler] AgentServer 中断响应(已丢弃): request_id=%s ok=%s",
+                "[MessageHandler] AgentServer 中断响应: request_id=%s ok=%s",
                 resp.request_id, resp.ok,
             )
+            payload = resp.payload if isinstance(resp.payload, dict) else {}
+            ch = (channel_id or getattr(env, "channel", None) or "").strip()
+            sid = (session_id or getattr(env, "session_id", None) or "").strip()
+            if ch and sid and payload.get("cancelled_tools"):
+                await self._send_cancelled_tool_results(ch, sid, payload, metadata)
         except Exception as e:
             logger.warning("[MessageHandler] AgentServer 中断请求失败(忽略): %s", e)
 

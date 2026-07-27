@@ -255,8 +255,11 @@ react:
     reasoning_tool_loop_compact_config:
       enabled: true
       consecutive_threshold: 3
+      tool_args_consecutive_threshold: 5
       reasoning_min_chars: 4
       reasoning_preview_max_chars: 512
+      bailout_threshold: 3
+      tool_args_bailout_threshold: 2
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进

@@ -965,6 +965,53 @@ async def test_fire_and_forget_cancel_publishes_interrupt_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fire_and_forget_cancel_forwards_cancelled_tools() -> None:
+    """Background interrupt must still push chat.tool_result for cancelled tools."""
+    handler = _TestMessageHandler.create()
+    old_payload = dict(_FakeAgentClient.response_payload)
+    _FakeAgentClient.response_payload = {
+        "event_type": "chat.interrupt_result",
+        "intent": "cancel",
+        "success": True,
+        "message": "任务已取消",
+        "cancelled_tools": [
+            {
+                "tool_name": "task_tool",
+                "tool_call_id": "call_spin",
+                "result": "[Interrupted] Tool execution cancelled by user.",
+                "status": "error",
+            }
+        ],
+    }
+    try:
+        await handler.cancel_agent_work_for_session(
+            _control_message(),
+            "sess-1",
+            agent_notify="fire_and_forget",
+        )
+
+        interrupt_out = await handler.consume_robot_messages(timeout=0)
+        assert interrupt_out is not None
+        assert interrupt_out.payload["event_type"] == "chat.interrupt_result"
+
+        # Wait for fire-and-forget task to publish tool_result
+        tool_out = None
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while asyncio.get_running_loop().time() < deadline:
+            tool_out = await handler.consume_robot_messages(timeout=0.05)
+            if tool_out is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        assert tool_out is not None
+        assert tool_out.event_type.value == "chat.tool_result"
+        assert tool_out.payload["tool_result"]["tool_call_id"] == "call_spin"
+        assert "[Interrupted]" in tool_out.payload["tool_result"]["result"]
+    finally:
+        _FakeAgentClient.response_payload = old_payload
+
+
+@pytest.mark.asyncio
 async def test_forward_loop_cancel_intent_uses_fire_and_forget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
