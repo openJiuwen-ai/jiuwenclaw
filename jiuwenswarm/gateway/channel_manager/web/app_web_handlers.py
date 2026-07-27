@@ -2011,7 +2011,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """
         if max_tokens_bounds is None:
             max_tokens_bounds = {
-                "infimum_max_tokens": 1,
+                "infimum_max_tokens": 3,
                 "supremum_max_tokens": 16,
             }
 
@@ -2019,8 +2019,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             infimum_max_tokens = max_tokens_bounds.get("infimum_max_tokens")
             supremum_max_tokens = max_tokens_bounds.get("supremum_max_tokens")
         else:
-            infimum_max_tokens = 1
+            infimum_max_tokens = 3
             supremum_max_tokens = 16
+        infimum_max_tokens = max(infimum_max_tokens, 3)
 
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
