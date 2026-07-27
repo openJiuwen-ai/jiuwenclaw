@@ -3207,6 +3207,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        if project_dir and not os.path.isdir(project_dir):
+            await channel.send_response(
+                ws, req_id,
+                ok=False,
+                error="project directory does not exist",
+                code="PROJECT_DIR_MISSING",
+            )
+            return
         # 解析 work_mode(严格校验:非法值返回 BAD_REQUEST,不静默回落)
         from jiuwenswarm.server.runtime.session.work_mode import resolve_request_work_mode
         work_mode, mode_error = resolve_request_work_mode(params, channel.channel_id)

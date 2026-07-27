@@ -2171,7 +2171,8 @@
       "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
       "errors": {
         "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",
-        "nameExists": "该项目名已存在，请换个名称"
+        "nameExists": "该项目名已存在，请换个名称",
+        "pathMissing": "项目目录不存在，请选择已存在的目录"
       },
       "cancel": "取消",
       "confirm": "确定"
