@@ -333,3 +333,9 @@ def resolve_model_settings() -> Tuple[str, str, str]:
             "OPENAI_API_BASE",
         ) or "https://api.openai.com/v1"
     return provider, api_key, api_base
+
+
+def resolve_model_name() -> str:
+    """Resolve browser runtime model name with deepseek-compatible default."""
+
+    return _first_non_empty_env("LLM_MODEL_NAME", "MODEL_NAME") or "deepseek-v4-flash"

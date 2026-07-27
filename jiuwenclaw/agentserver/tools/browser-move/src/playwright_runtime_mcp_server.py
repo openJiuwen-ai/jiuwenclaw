@@ -40,6 +40,7 @@ from playwright_runtime.clients.streamable_http_client import BrowserMoveStreama
 from playwright_runtime.config import (
     BrowserRunGuardrails,
     build_playwright_mcp_config,
+    resolve_model_name,
     resolve_model_settings,
 )
 from playwright_runtime.controllers.action import (
@@ -70,7 +71,7 @@ def _build_runtime() -> "BrowserAgentRuntime":
     if not api_key:
         raise RuntimeError("Missing API key. Set OPENROUTER_API_KEY or OPENAI_API_KEY.")
 
-    model_name = (os.getenv("LLM_MODEL_NAME") or "anthropic/claude-sonnet-4.5").strip()
+    model_name = resolve_model_name()
     guardrails = BrowserRunGuardrails(
         max_steps=GUARDRAIL_MAX_STEPS,
         max_failures=GUARDRAIL_MAX_FAILURES,

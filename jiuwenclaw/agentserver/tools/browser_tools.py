@@ -195,6 +195,9 @@ def _build_browser_runtime_subprocess_env() -> dict[str, str]:
     # Keep full system env on Windows, then override/add the keys we need.
     env: dict[str, str] = dict(os.environ)
     passthrough_keys = [
+        "LLM_MODEL_NAME",
+        "LLM_MODEL_PROVIDER",
+        "LLM_API_BASE",
         "MODEL_NAME",
         "MODEL_PROVIDER",
         "API_KEY",
@@ -223,25 +226,46 @@ def _build_browser_runtime_subprocess_env() -> dict[str, str]:
         if value:
             env[key] = value
 
+    llm_model_name = (os.getenv("LLM_MODEL_NAME") or "").strip()
+    model_name = (os.getenv("MODEL_NAME") or "").strip()
+    llm_api_base = (os.getenv("LLM_API_BASE") or "").strip()
     api_key = (os.getenv("API_KEY") or "").strip()
     api_base = (os.getenv("API_BASE") or "").strip()
+    effective_api_base = llm_api_base or api_base
+    llm_model_provider = (os.getenv("LLM_MODEL_PROVIDER") or "").strip().lower()
     model_provider = (os.getenv("MODEL_PROVIDER") or "").strip().lower()
+    effective_model_provider = llm_model_provider or model_provider
+
+    if llm_model_name and not env.get("MODEL_NAME"):
+        env["MODEL_NAME"] = llm_model_name
+    if model_name and not env.get("LLM_MODEL_NAME"):
+        env["LLM_MODEL_NAME"] = model_name
+    if llm_api_base and not env.get("API_BASE"):
+        env["API_BASE"] = llm_api_base
+    if api_base and not env.get("LLM_API_BASE"):
+        env["LLM_API_BASE"] = api_base
+    if llm_model_provider and not env.get("MODEL_PROVIDER"):
+        env["MODEL_PROVIDER"] = llm_model_provider
+    if model_provider and not env.get("LLM_MODEL_PROVIDER"):
+        env["LLM_MODEL_PROVIDER"] = model_provider
 
     # 把本项目的 API_* 透传给浏览器运行时
-    if api_key and not env.get("OPENROUTER_API_KEY") and "openrouter.ai" in api_base:
+    if api_key and not env.get("OPENROUTER_API_KEY") and "openrouter.ai" in effective_api_base:
         env["OPENROUTER_API_KEY"] = api_key
-    if api_base and not env.get("OPENROUTER_BASE_URL") and "openrouter.ai" in api_base:
-        env["OPENROUTER_BASE_URL"] = api_base
+    if effective_api_base and not env.get("OPENROUTER_BASE_URL") and "openrouter.ai" in effective_api_base:
+        env["OPENROUTER_BASE_URL"] = effective_api_base
 
-    if api_key and not env.get("OPENAI_API_KEY") and "openrouter.ai" not in api_base:
+    if api_key and not env.get("OPENAI_API_KEY") and "openrouter.ai" not in effective_api_base:
         env["OPENAI_API_KEY"] = api_key
-    if api_base and not env.get("OPENAI_BASE_URL") and "openrouter.ai" not in api_base:
-        env["OPENAI_BASE_URL"] = api_base
+    if effective_api_base and not env.get("OPENAI_BASE_URL") and "openrouter.ai" not in effective_api_base:
+        env["OPENAI_BASE_URL"] = effective_api_base
 
-    if model_provider == "openrouter":
+    if effective_model_provider == "openrouter":
         env["MODEL_PROVIDER"] = "openrouter"
-    elif model_provider in {"openai", "siliconflow"}:
-        env["MODEL_PROVIDER"] = model_provider
+        env["LLM_MODEL_PROVIDER"] = "openrouter"
+    elif effective_model_provider in {"openai", "siliconflow", "dashscope"}:
+        env["MODEL_PROVIDER"] = effective_model_provider
+        env["LLM_MODEL_PROVIDER"] = effective_model_provider
 
     # Remove clearly invalid deny-proxy values that can break child processes.
     for proxy_key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
