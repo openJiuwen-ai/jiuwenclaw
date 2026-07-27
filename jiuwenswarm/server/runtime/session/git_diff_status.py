@@ -618,6 +618,31 @@ def _repo_context_from_status(project: Any, *, reject_transient: bool = False) -
     }
 
 
+def _repo_context_for_history(project: Any) -> dict[str, Any]:
+    """历史轮次回放专用:读取 Git 上下文,失败时降级为 project_dir 兜底。
+
+    与 ``_repo_context_from_status`` 的区别:
+      - 不抛 ``GIT_TRANSIENT_STATE``:历史轮次回放基于 file_ops + change_set
+        snapshot,不执行 git 命令,transient 状态不应阻断历史预览。
+      - 不抛其他 Git 错误:timeout/command_failed 等与历史 snapshot 无关。
+      - 失败时返回 ``{"repo_root": project_dir, "branch": None, "base_head": None}``,
+        让历史 turn 的 ``_historical_repo_context`` 仍可用(优先级高于 fallback)。
+
+    设计原则:历史轮次的 repo 上下文已持久化在 change_set entry,当前 git 状态
+    只是 fallback。fallback 失败时用 project_dir 兜底,而非阻断整个请求。
+    """
+    try:
+        return _repo_context_from_status(project, reject_transient=False)
+    except GitOperationError:
+        # transient / timeout / command_failed 等:用 project_dir 兜底
+        project_dir = str(getattr(project, "project_dir", "") or "") or None
+        return {
+            "repo_root": project_dir,
+            "branch": None,
+            "base_head": None,
+        }
+
+
 class DiffStatusService:
     """面向 Web 的 diff 状态聚合服务(设计文档 §2.4 / §4.1.16)。
 
@@ -760,7 +785,9 @@ class DiffStatusService:
         """返回历史轮次摘要列表。"""
         project_id = getattr(project, "project_id", "")
         project_dir = getattr(project, "project_dir", "")
-        repo_context = _repo_context_from_status(project, reject_transient=True)
+        # 历史轮次回放不依赖当前 git 状态:用 _repo_context_for_history 兜底,
+        # 避免 transient/timeout 等错误阻断 file_ops 历史预览。
+        repo_context = _repo_context_for_history(project)
         diff_service = get_diff_service()
         extra_history_roots = get_session_extra_history_roots(session_id)
         turns = diff_service.get_turn_diff_summaries(
@@ -806,7 +833,9 @@ class DiffStatusService:
         """返回指定轮次详情，优先按 ``change_set_id`` 查询。"""
         project_id = getattr(project, "project_id", "")
         project_dir = getattr(project, "project_dir", "")
-        repo_context = _repo_context_from_status(project, reject_transient=True)
+        # 历史轮次回放不依赖当前 git 状态:用 _repo_context_for_history 兜底,
+        # 避免 transient/timeout 等错误阻断 file_ops 历史预览。
+        repo_context = _repo_context_for_history(project)
         repo_root = repo_context.get("repo_root")
 
         diff_service = get_diff_service()
