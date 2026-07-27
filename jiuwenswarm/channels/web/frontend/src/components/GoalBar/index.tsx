@@ -19,7 +19,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
 import { useChatStore, useGoalStore, useSessionStore } from '../../stores';
-import type { GoalStatus } from '../../types';
+import type { GoalRecord, GoalStatus } from '../../types';
 import { EditGoalModal } from './EditGoalModal';
 import './GoalBar.css';
 
@@ -40,14 +40,31 @@ const STATUS_TONE: Record<string, DisplayTone> = {
   blocked: 'blocked',
 };
 
-function formatElapsed(createdAtIso: string | undefined, now: number): string {
-  if (!createdAtIso) return '0s';
-  const startMs = new Date(createdAtIso).getTime();
-  const seconds = Math.max(0, Math.floor((now - startMs) / 1000));
+function formatSeconds(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const remainSeconds = seconds % 60;
   return remainSeconds > 0 ? `${minutes}m ${remainSeconds}s` : `${minutes}m`;
+}
+
+// 旧口径兜底：后端没下发 time_used_seconds 时，退回"创建到现在"的总时长近似
+// （created_at 后端不下发，实际几乎总是走 localCreatedAt，见 goalStore.ts 里的说明）。
+function formatElapsedFallback(createdAtIso: string | undefined, now: number): string {
+  if (!createdAtIso) return '0s';
+  const startMs = new Date(createdAtIso).getTime();
+  return formatSeconds((now - startMs) / 1000);
+}
+
+// 新口径：time_used_seconds 是后端已结算的累计耗时，active_started_at 是当前 active 计时段
+// 的起点；只有 active 时才叠加"从 active_started_at 到浏览器当前时间"这段实时增量。
+// 见 Goal持续目标Web前端对接4.md「前端耗时展示对接」。
+function formatElapsedFromGoal(goal: GoalRecord, now: number): string {
+  const base = goal.time_used_seconds ?? 0;
+  if (goal.status !== 'active' || !goal.active_started_at) return formatSeconds(base);
+  const activeStartMs = Date.parse(goal.active_started_at);
+  const activeElapsed = Number.isNaN(activeStartMs) ? 0 : Math.max(0, Math.floor((now - activeStartMs) / 1000));
+  return formatSeconds(base + activeElapsed);
 }
 
 export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: GoalBarProps) {
@@ -73,8 +90,15 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   const [optimisticPausable, setOptimisticPausable] = useState<boolean | null>(null);
 
   useEffect(() => {
-    // completed/blocked 是终态，不再有新的 attempt，耗时不该继续跳字——冻结在跳变那一刻附近的值
-    if (!goal || goal.status === 'completed' || goal.status === 'blocked') return;
+    if (!goal) return;
+    // 有后端权威计时字段时，只有 active 才需要跳字（paused/blocked/completed 都固定展示
+    // time_used_seconds）；没有该字段时退回旧口径——非 completed/blocked 都继续跳（旧口径
+    // 算的是"创建到现在"的总时长，paused 期间也该继续走）。
+    const hasBackendTiming = goal.time_used_seconds !== undefined;
+    const shouldTick = hasBackendTiming
+      ? goal.status === 'active'
+      : goal.status !== 'completed' && goal.status !== 'blocked';
+    if (!shouldTick) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [goal]);
@@ -133,7 +157,12 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
           <span className="goal-bar__objective" title={goal.objective}>
             {goal.objective}
           </span>
-          <span className="goal-bar__elapsed">· {formatElapsed(goal.created_at ?? localCreatedAt, now)}</span>
+          <span className="goal-bar__elapsed">
+            ·{' '}
+            {goal.time_used_seconds !== undefined
+              ? formatElapsedFromGoal(goal, now)
+              : formatElapsedFallback(goal.created_at ?? localCreatedAt, now)}
+          </span>
         </div>
         <div className="goal-bar__actions">
           {goal.status !== 'completed' && (

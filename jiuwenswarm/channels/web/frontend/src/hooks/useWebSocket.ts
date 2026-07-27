@@ -2120,14 +2120,26 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
           useChatStore.getState().setExecutionError(sessionId, null);
           if (currentMode !== 'team') {
-            useChatStore.getState().setProcessing(sessionId, false);
-            // 正常情况下排空由 chat.processing_status(false) 负责；这里是它丢帧时的兜底
-            // 重置，同样可能是"目标这一轮真正结束"的那个信号，一并兜底排空一次排队消息
-            // （见问题3：目标完成后队列消息没有紧接着发出去）。已经排空过则是空操作，不会重复发送。
-            drainTaskQueueIfIdle(sessionId);
+            // 有 active Goal 时，普通问答轮和 Goal 后续执行走同一条流；这次 chat.final 可能只是
+            // 普通问答轮的收尾，Goal 紧接着还要继续跑。此时不能把它当"整段彻底结束"处理——
+            // 不能关 isProcessing、不能排空任务队列、不能清 thinking/subtasks，否则会误发下一条
+            // 排队消息、或短暂闪一下"空闲"。气泡本身的收尾（下面 stopStreaming）不受影响，
+            // 该收尾还是收尾。见 Goal持续目标Web前端对接4.md「普通问答与 Goal 续跑：前端气泡收尾」。
+            const goalStillActive =
+              useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
+            if (!goalStillActive) {
+              useChatStore.getState().setProcessing(sessionId, false);
+              // 正常情况下排空由 chat.processing_status(false) 负责；这里是它丢帧时的兜底
+              // 重置，同样可能是"目标这一轮真正结束"的那个信号，一并兜底排空一次排队消息
+              // （见问题3：目标完成后队列消息没有紧接着发出去）。已经排空过则是空操作，不会重复发送。
+              drainTaskQueueIfIdle(sessionId);
+              useChatStore.getState().setThinking(sessionId, false);
+              useChatStore.getState().clearSubtasks(sessionId);
+            }
+          } else {
+            useChatStore.getState().setThinking(sessionId, false);
+            useChatStore.getState().clearSubtasks(sessionId);
           }
-          useChatStore.getState().setThinking(sessionId, false);
-          useChatStore.getState().clearSubtasks(sessionId);
         }
         if (content) {
           revealPendingContextUsage(sessionId);
