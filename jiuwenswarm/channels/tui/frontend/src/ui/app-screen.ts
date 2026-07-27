@@ -2498,11 +2498,12 @@ export class AppScreen implements Component, Focusable {
         requestLocalInterrupt: () => {
           return this.state.requestLocalInterrupt();
         },
-        showCtrlCExitHint: () => {
+        showExitHint: (key: string) => {
           if (this.transientNoticeTimer) {
             clearTimeout(this.transientNoticeTimer);
           }
-          this.transientNotice = "Press Ctrl+C again to exit";
+          const keyLabel = key === "ctrl+c" ? "Ctrl+C" : "Ctrl+D";
+          this.transientNotice = `Press ${keyLabel} again to exit`;
           this.transientNoticeTimer = setTimeout(() => {
             this.transientNotice = null;
             this.transientNoticeTimer = null;
