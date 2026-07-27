@@ -46,15 +46,21 @@ def _is_regular_skill_evolution_rail(rail):
     ("raw_mode", "expected"),
     [
         ("team", ("team", None, "team")),
-        ("agent", ("agent", None, "agent")),
-        ("plan", ("agent", None, "agent")),
-        ("fast", ("agent", None, "agent")),
+        # MACRO lanes: manager mode stays "agent", canonical keeps plan/fast labels.
+        ("agent", ("agent", None, "agent.plan")),
+        ("plan", ("agent", None, "agent.plan")),
+        ("agent.plan", ("agent", None, "agent.plan")),
+        ("fast", ("agent", None, "agent.fast")),
+        ("agent.fast", ("agent", None, "agent.fast")),
         ("code", ("code", "normal", "code.normal")),
-        ("agent.fast", ("agent", None, "agent")),
         ("code.plan", ("code", "plan", "code.plan")),
         ("code.team", ("code", "team", "code.team")),
         ("team.plan", ("code", "team", "team.plan")),
-        (None, ("agent", None, "agent")),
+        # Auto aliases stay canonical "auto" so the adapter can schedule later.
+        ("auto", ("auto", None, "auto")),
+        ("agent.auto", ("auto", None, "auto")),
+        ("macro.auto", ("auto", None, "auto")),
+        (None, ("agent", None, "agent.plan")),
     ],
 )
 def test_resolve_agent_request_mode_accepts_primary_and_dotted_modes(raw_mode, expected):
@@ -79,6 +85,13 @@ def test_resolve_agent_request_mode_aligns_single_agent_with_work_mode(
         raw_mode,
         work_mode=work_mode,
     ) == expected
+
+
+def test_agent_manager_mode_maps_auto_to_agent_instance():
+    assert agent_ws_server_module._agent_manager_mode_for_request("auto") == "agent"
+    assert agent_ws_server_module._agent_manager_mode_for_request("auto_harness") == "agent"
+    assert agent_ws_server_module._agent_manager_mode_for_request("team") == "team"
+    assert agent_ws_server_module._agent_manager_mode_for_request("agent") == "agent"
 
 
 def test_team_plan_params_are_team_mode():
