@@ -361,6 +361,7 @@ class AgentOSRouterClient(AgentServerClient):
             self._run_ssh_relay(envelope, relay_session),
             name=f"agentos-ssh-relay-{session_id[:24]}",
         )
+        relay_session.relay_task = task
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return AgentResponse(
@@ -442,8 +443,12 @@ class AgentOSRouterClient(AgentServerClient):
         )
 
     async def _drain_background_tasks(self) -> None:
-        if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        if not self._background_tasks:
+            return
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
 
     async def _resolve_agent(self, envelope: E2AEnvelope) -> AgentRuntime:

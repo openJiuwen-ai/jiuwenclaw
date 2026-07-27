@@ -2426,8 +2426,24 @@ async def _run(
             if isinstance(ssh_conf, dict):
                 # 南向经 agent client（如 agentos_router -> yuanrong）动态解析。
                 enabled, reason = _is_channel_enabled(ssh_conf, ["listen_port"])
+                full_cfg = get_config()
+                gateway_cfg = full_cfg.get("gateway") if isinstance(full_cfg, dict) else {}
+                agent_client_cfg = (
+                    gateway_cfg.get("agent_client") if isinstance(gateway_cfg, dict) else {}
+                )
+                client_type = (
+                    str(agent_client_cfg.get("type") or "websocket").strip().lower()
+                    if isinstance(agent_client_cfg, dict)
+                    else "websocket"
+                )
                 if not enabled:
                     logger.info("[App] channels.ssh.%s, SshChannel disabled", reason)
+                elif client_type != "agentos_router":
+                    logger.warning(
+                        "[App] channels.ssh.enabled=true but gateway.agent_client.type=%s "
+                        "(require agentos_router); SshChannel will not start",
+                        client_type,
+                    )
                 else:
                     ssh_config = SshChannelConfig.from_dict({**ssh_conf, "enabled": True})
                     ssh_channel = SshChannel(ssh_config, _DummyBus())

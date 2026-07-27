@@ -150,10 +150,20 @@ class YuanrongSshRelay:
 
         Always resolves ``session.done`` and ``session.exit_code`` so the
         northbound channel waiting in ``_wait_relay_done`` is released.
+        Cancellation (northbound timeout / router disconnect) also releases
+        the waiter and tears down the southbound connection.
         """
         exit_code = 1
         try:
             exit_code = await self._relay(session, instance_id, user_id=user_id)
+        except asyncio.CancelledError:
+            logger.info(
+                "[YuanrongSshRelay] relay cancelled: session=%s instance=%s",
+                session.session_id,
+                instance_id,
+            )
+            exit_code = 130
+            raise
         except Exception as exc:  # noqa: BLE001 - report any relay failure to the client
             logger.exception(
                 "[YuanrongSshRelay] relay failed: session=%s instance=%s",
@@ -249,17 +259,77 @@ class YuanrongSshRelay:
         if term_size and term_size[0]:
             kwargs["term_size"] = term_size
         backend = await conn.create_process(**kwargs)
-        try:
-            await asyncio.gather(
+
+        # Either side dying must tear down the other: wait FIRST_COMPLETED,
+        # then cancel remaining pumps and close both ends.
+        pumps = [
+            asyncio.create_task(
                 self._pump_client_to_backend(session, backend),
+                name=f"ssh-pump-n2s-{session.session_id[:16]}",
+            ),
+            asyncio.create_task(
                 self._pump_backend_to_client(backend.stdout, process.stdout),
+                name=f"ssh-pump-s2n-out-{session.session_id[:16]}",
+            ),
+            asyncio.create_task(
                 self._pump_backend_to_client(backend.stderr, process.stderr),
+                name=f"ssh-pump-s2n-err-{session.session_id[:16]}",
+            ),
+        ]
+        try:
+            done, pending = await asyncio.wait(
+                pumps, return_when=asyncio.FIRST_COMPLETED
             )
-            await backend.wait_closed()
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                exc = task.exception() if not task.cancelled() else None
+                if exc is not None:
+                    logger.debug(
+                        "[YuanrongSshRelay] pump ended with error: %s",
+                        exc,
+                        exc_info=exc,
+                    )
+        except asyncio.CancelledError:
+            for task in pumps:
+                task.cancel()
+            await asyncio.gather(*pumps, return_exceptions=True)
+            raise
         finally:
-            backend.close()
+            await self._close_backend(backend)
+            self._exit_northbound(process, backend.exit_status)
+
         exit_status = backend.exit_status
         return int(exit_status) if exit_status is not None else 0
+
+    @staticmethod
+    async def _close_backend(backend: Any) -> None:
+        try:
+            backend.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("[YuanrongSshRelay] backend.close failed", exc_info=True)
+        try:
+            await backend.wait_closed()
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "[YuanrongSshRelay] backend.wait_closed failed", exc_info=True
+            )
+
+    @staticmethod
+    def _exit_northbound(process: Any, exit_status: Any) -> None:
+        """Force-close the northbound SSH process when the southbound ends."""
+        if process is None:
+            return
+        code = int(exit_status) if exit_status is not None else 0
+        try:
+            process.exit(code)
+        except Exception:  # noqa: BLE001 - channel may already be closed
+            logger.debug(
+                "[YuanrongSshRelay] northbound process.exit failed",
+                exc_info=True,
+            )
 
     @staticmethod
     async def _pump_client_to_backend(session: Any, backend: Any) -> None:
@@ -281,7 +351,10 @@ class YuanrongSshRelay:
                     )
                 continue
             except asyncssh.BreakReceived:
-                backend.stdin.write(b"\x03")
+                try:
+                    backend.stdin.write(b"\x03")
+                except (asyncssh.ConnectionLost, ConnectionError):
+                    break
                 continue
             except (asyncssh.ConnectionLost, ConnectionError):
                 break
@@ -293,8 +366,8 @@ class YuanrongSshRelay:
                         "[YuanrongSshRelay] write_eof failed", exc_info=True
                     )
                 break
-            backend.stdin.write(data)
             try:
+                backend.stdin.write(data)
                 await backend.stdin.drain()
             except (asyncssh.ConnectionLost, ConnectionError):
                 break

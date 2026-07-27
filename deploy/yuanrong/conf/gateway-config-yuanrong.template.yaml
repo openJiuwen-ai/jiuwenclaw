@@ -478,14 +478,40 @@ gateway:
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
   # type: websocket（默认） | yuanrong（直接函数调用） | agentos_router（AgentOS 扩展）
   agent_client:
-    type: yuanrong # websocket | yuanrong | agentos_router
-    # yuanrong 函数模式配置下面参数
+    type: agentos_router # websocket | yuanrong | agentos_router
+    # yuanrong / agentos_router 共用下面参数
     frontend_endpoint: http://<<MASTER_NODE_IP>>:<<FRONTEND_PORT>>
     function_version_urn: <<FUNCTION_ID>>
     concurrency: <<GATEWAY_CONCURRENCY>>
     invoke_timeout_s: <<GATEWAY_INVOKE_TIMEOUT>>
+    # POST/DELETE /api/agent 超时（秒）；create 含镜像拉取/容器启动，建议明显大于 invoke_timeout_s
     agent_timeout_s: 300
+    # create 请求的 namespace，默认 default
     agent_namespace: default
+
+  # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
+  # 默认 agent_type=jiuwenswarm 直走 YuanRong URN invoke（与 type=yuanrong 对齐）；
+  # opencode/claude 走 registry launch-spec + create_sandbox。
+  agentos:
+    creating_timeout_seconds: 60
+    # Agent 复用 key 字段，默认 user_id + agent_type。
+    # 可选字段：user_id、agent_type、session_id（必须包含前两项）。
+    agent_key_fields:
+      - user_id
+      - agent_type
+    registry:
+      # Agent OS 注册中心：host 来自 --hosts / CLUSTER_HOSTS 的 master IP
+      endpoint: http://<<MASTER_NODE_IP>>:<<REGISTRY_PORT>>
+      request_timeout_s: 10
+      # 本机 nodeIP，供 POST /api/nodes/{node}/heartbeat
+      node: <<MASTER_NODE_IP>>
+    # SSH 南向接入 YuanRong 实例（配合 channels.ssh 北向使用）：
+    # ssh -p <port> 'yr:instance:<instance_id>'@<frontend-host>
+    # 主机取自 agent_client.frontend_endpoint；<instance_id> 为 create agent 返回的实例 id。
+    ssh:
+      port: 2222
+      user_template: "yr:instance:{instance}"
+      connect_timeout_s: 30
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -644,6 +670,19 @@ channels:
     my_user_id: ""
     bot_name: ""
     enable_memory: false
+  ssh:
+    # SSH channel -> MessageHandler（北向）；南向经 gateway.agent_client
+    # （type=agentos_router 时由 AgentOS Router 创建 YuanRong 实例并
+    # 以 yr:instance:<instance_id> 中继到 frontend）。
+    # 启用前请安装可选依赖: pip install "jiuwenswarm[ssh]" 或 uv sync --extra ssh
+    # 客户端: ssh -p <listen_port> user@<gateway-host>
+    # 南向连接参数见 gateway.agentos.ssh；agent_type 跟随用户当前值（3rdagent.switch）。
+    enabled: true
+    # 监听 IP：host 来自 --hosts / CLUSTER_HOSTS 的 master IP
+    listen_host: <<MASTER_NODE_IP>>
+    listen_port: <<SSH_PORT>>
+    host_key_path: ~/.jiuwenswarm/config/ssh_host_key
+    relay_timeout_sec: 3600
 
 # ========== 细粒度权限管控（tiered_policy）==========
 #

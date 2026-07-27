@@ -47,6 +47,14 @@ declare -A DEPLOY_VARS=(
     ["FRONTEND_PORT"]=""
     ["FUNCTION_ID"]=""
     ["MASTER_NODE_IP"]=""
+    ["REGISTRY_PORT"]=""
+    ["SSH_PORT"]=""
+    # TUI GatewayServer bind host; empty → default to MASTER_NODE_IP at deploy check time
+    ["GATEWAY_HOST"]=""
+    ["GATEWAY_PORT"]=""
+    # WebChannel bind host; empty → default to MASTER_NODE_IP at deploy check time
+    ["WEB_HOST"]=""
+    ["WEB_PORT"]=""
     ["OS_TYPE"]=""
     ["EXTENSION_DIRS"]=""
 )
