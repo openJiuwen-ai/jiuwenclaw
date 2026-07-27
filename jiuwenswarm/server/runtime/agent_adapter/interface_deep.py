@@ -225,9 +225,6 @@ from jiuwenswarm.agents.harness.common.tools import (
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
-from jiuwenswarm.agents.harness.common.rails.tool_retrieval_prompt_rail import (
-    ToolRetrievalPromptRail,
-)
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
@@ -332,8 +329,6 @@ def get_runtime_tool_session_id() -> str | None:
     """Session id bound for the current agent tool invocation (ContextVar)."""
     return _CRON_TOOL_SESSION_ID.get()
 
-from jiuwenswarm.common.prompt_capture import set_request_context, clear_request_context
-
 
 def _set_prompt_capture_context(
     request: "AgentRequest",
@@ -342,13 +337,7 @@ def _set_prompt_capture_context(
     inputs: dict[str, Any],
 ) -> None:
     """Set prompt capture context from the current request."""
-    set_request_context(
-        session_id=session_id,
-        request_id=request.request_id or "",
-        query=str(inputs.get("query", "")),
-        channel_id=request.channel_id or "",
-        mode=mode,
-    )
+    pass
 
 
 logger = logging.getLogger(__name__)
@@ -3882,22 +3871,20 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
             return None
 
-    def _build_tool_retrieval_prompt_rail(self) -> ToolRetrievalPromptRail | None:
-        """Build lightweight progressive tool retrieval prompt guidance."""
-        try:
-            rail = ToolRetrievalPromptRail()
-            logger.info("[JiuWenSwarmDeepAdapter] ToolRetrievalPromptRail created")
-            return rail
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] ToolRetrievalPromptRail create failed: %s", exc)
-            return None
-
     def _build_progressive_tool_rail(self) -> ProgressiveToolRail | None:
         """Build agent-core ProgressiveToolRail (search-based, with always-visible tools).
-        Auto-load variant: search results are immediately marked as visible,
-        eliminating the separate load_tools step."""
+
+        search_tools returns full tool definitions (incl. JSON Schema) in the
+        result message. The LLM calls matched tools by name directly — they
+        are resolved by ability_manager regardless of the request tools[] list,
+        so inputs.tools (prefill) stays constant for prompt-cache stability.
+        load_tools is still available for explicit session-visible loading.
+        """
         try:
             from types import SimpleNamespace
+
+            react_cfg = (get_config().get("react", {}) or {})
+            tr_cfg = react_cfg.get("tool_retrieval", {}) or {}
 
             config = SimpleNamespace(
                 progressive_tool_enabled=True,
@@ -3909,15 +3896,17 @@ class JiuWenSwarmDeepAdapter:
                 # 注意：当前 27 个工具中无独立 web_search，
                 #       如需添加请确认工具已注册到 ability_manager
                 progressive_tool_default_visible_tools=[],
-                # 已 load（hidden 转 active）的工具数上限。超过则按 LRU 淘汰
-                # 最久未用的，inputs.tools 因此有界（7 always + 2 meta + ≤N active），
-                # 不再随对话线性增长。默认 8；可由 react.progressive_tool_max_loaded_tools 覆盖。
+                # v3.2 已删除 LRU/cap；此字段仅为基类 __init__ 读取（不再用于淘汰）。
                 progressive_tool_max_loaded_tools=int(
-                    (get_config().get("react", {}) or {}).get(
-                        "progressive_tool_max_loaded_tools", 8
-                    )
+                    react_cfg.get("progressive_tool_max_loaded_tools", 8)
                 ),
                 language="cn",
+                # 按需检索算法旋钮（react.tool_retrieval.*）
+                tool_retrieval_desc_cap=int(tr_cfg.get("desc_cap", 256)),
+                tool_retrieval_embedding_model=str(
+                    tr_cfg.get("embedding_model", "BAAI/bge-small-zh-v1.5")
+                ),
+                tool_retrieval_top_k_max=int(tr_cfg.get("top_k_max", 3)),
             )
 
             # ── JiuWen ProgressiveToolRail（全部 jiuwenswarm 改动在外部文件）──
@@ -4089,9 +4078,9 @@ class JiuWenSwarmDeepAdapter:
         #     _RailBuildInfo("_tool_retrieval_prompt_rail", self._build_tool_retrieval_prompt_rail),
         # )
         # ── agent-core ProgressiveToolRail（搜索方案，按需检索）──
-        # 由 config 的 progressive_tool_enabled 控制（默认 true）。关闭时不注册 →
+        # 由 config 的 progressive_tool_enabled 控制（默认 false = opt-in）。关闭时不注册 →
         # ContextAssembleRail 的 "# 可用工具" 全量列表正常保留（回到 show-all）。
-        if config.get("progressive_tool_enabled", True):
+        if config.get("progressive_tool_enabled", False):
             rail_infos.append(
                 _RailBuildInfo("_progressive_tool_rail", self._build_progressive_tool_rail),
             )

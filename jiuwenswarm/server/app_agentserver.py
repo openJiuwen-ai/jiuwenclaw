@@ -281,13 +281,6 @@ def main() -> None:
             port = 18092
 
     install_async_dump_handler("agentserver")
-
-    from jiuwenswarm.common.prompt_capture import setup_capture
-    setup_capture()
-
-    from jiuwenswarm.telemetry import init_telemetry
-    init_telemetry()
-
     asyncio.run(_run(host=host, port=port))
 
 

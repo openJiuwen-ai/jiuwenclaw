@@ -41,9 +41,6 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.agents.harness.common.rails.symphony_orchestration_prompt_rail import (
     SymphonyOrchestrationPromptRail,
 )
-from jiuwenswarm.agents.harness.common.rails.tool_retrieval_prompt_rail import (
-    ToolRetrievalPromptRail,
-)
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from jiuwenswarm.agents.harness.team.rails.team_skill_storage_policy_rail import (
     TeamSkillStoragePolicyRail,
@@ -139,10 +136,15 @@ def _build_symphony_orchestration_prompt_rail(
 def _build_tool_retrieval_prompt_rail(
     params: dict[str, Any],
     context: SwarmBuildContext,
-) -> ToolRetrievalPromptRail | None:
-    """Build the tool retrieval prompt rail (always on when the index exists)."""
-    # ── 树浏览（暂时禁用）──
-    # return ToolRetrievalPromptRail()
+) -> ProgressiveToolRail | None:
+    """Build the tool retrieval prompt rail (gated by progressive_tool_enabled)."""
+    try:
+        from jiuwenswarm.common.config import get_config
+        react_cfg = (get_config().get("react", {}) or {})
+        if not react_cfg.get("progressive_tool_enabled", False):
+            return None
+    except Exception:
+        return None
     # ── agent-core ProgressiveToolRail ──
     return _build_progressive_tool_rail()
 
@@ -165,23 +167,18 @@ def _build_progressive_tool_rail() -> ProgressiveToolRail | None:
         )
 
         class AutoLoadProgressiveToolRail(ProgressiveToolRail):
-            def __init__(self, config):
-                super().__init__(config)
-                self._auto_load_session = None
-
-            async def before_model_call(self, ctx):
-                self._auto_load_session = getattr(ctx, "session", None)
-                await super().before_model_call(ctx)
-
             async def _search_tools(self, query, limit=10, detail_level=1):
+                # Force detail_level>=3 so the LLM always gets full JSON Schema
+                # parameters and can call matched tools by name directly,
+                # without them being present in the request tools[] list.
+                detail_level = max(detail_level, 3)
                 results = await super()._search_tools(query, limit, detail_level)
-                session = self._auto_load_session
-                if session is not None and results:
-                    matched_names = [r.get("name", "") for r in results if r.get("name")]
-                    if matched_names:
-                        current = set(self._get_visible_tools(session))
-                        new_visible = list(dict.fromkeys(current | set(matched_names)))
-                        self._set_visible_tools(session, new_visible)
+                # NOTE: do NOT auto-load matched tools into session_visible.
+                # Doing so would inject them into inputs.tools on the next
+                # turn, changing the request prefill and breaking prompt-cache
+                # stability. The LLM calls matched tools by name directly —
+                # ability_manager._execute_single_tool_call resolves by name
+                # regardless of the tools[] parameter.
                 return results
 
         rail = AutoLoadProgressiveToolRail(config)

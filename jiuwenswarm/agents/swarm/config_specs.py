@@ -72,7 +72,6 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.PLUGIN_RAILS,
     registry.SKILL_RETRIEVAL_PROMPT,
     registry.SYMPHONY_ORCHESTRATION_PROMPT,
-    registry.TOOL_RETRIEVAL_PROMPT,
 )
 
 # Tools common to both roles. Each element self-gates on config, so all are
@@ -89,7 +88,6 @@ _COMMON_TOOL_NAMES: tuple[str, ...] = (
     # registers the same-named tools, logging a refresh + duplicate-ability
     # warning per tool every build; the rail is the sole registrar.
     registry.SKILL_RETRIEVAL,
-    registry.TOOL_RETRIEVAL,
     registry.SYMPHONY_TOOLKIT,
     registry.USER_TODOS,
     registry.VIDEO,
@@ -121,7 +119,6 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.CODE_SKILL_USE,
     registry.SKILL_RETRIEVAL_PROMPT,
     registry.SYMPHONY_ORCHESTRATION_PROMPT,
-    registry.TOOL_RETRIEVAL_PROMPT,
 )
 
 # Rails shared with the team profile, appended to the code profile.

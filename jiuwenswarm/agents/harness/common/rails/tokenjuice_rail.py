@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 _MIN_OUTPUT_BYTES = 512          # Skip outputs smaller than this
 _MAX_COMPRESSION_RATIO = 0.95   # Skip if compacted/raw > 0.95 (too little benefit)
 
+# Discovery/control meta tools whose output is structured JSON, not compressible
+# shell stdout. Middle-clipping their payload would corrupt the JSON structure
+# the LLM relies on (e.g. search_tools matches carry full JSON Schema), so they
+# bypass tokenjuice entirely and reach the model verbatim.
+_SKIP_TOOL_NAMES = {"search_tools"}
+
 
 class TokenJuiceRail(DeepAgentRail):
     """Compress tool outputs to reduce LLM context window usage.
@@ -87,6 +93,8 @@ class TokenJuiceRail(DeepAgentRail):
 
         # Extract tool info
         tool_name = getattr(ctx.inputs, "tool_name", "") or ""
+        if tool_name in _SKIP_TOOL_NAMES:
+            return
         tool_args = getattr(ctx.inputs, "tool_args", None)
         tool_result = getattr(ctx.inputs, "tool_result", None)
 
