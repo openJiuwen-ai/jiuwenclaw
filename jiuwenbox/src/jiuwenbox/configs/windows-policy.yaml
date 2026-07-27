@@ -11,13 +11,13 @@ name: "windows-default"
 # 无关地注入到子进程.
 environment: {}
 
-# Linux 字段在 Windows 下忽略 (保留以兼容策略合并逻辑).
+# Linux 字段在 Windows 下忽略. directories 留空而非 "/home" "/tmp":
+# validate_policy 会对这些路径过 _expand_path, 在 Windows 上 str(Path("/home"))
+# 变成 "\home" 被判非绝对路径, 导致 POST /sandboxes 返回 HTTP 400
+# "Filesystem policy paths must be absolute sandbox paths", 阻断所有工具.
+# Windows 实际可写路径走下方 windows.filesystem.allow_write.
 filesystem_policy:
-  directories:
-    - path: "/home"
-      permissions: "0777"
-    - path: "/tmp"
-      permissions: "1777"
+  directories: []
   read_only: []
   read_write: []
   bind_mounts: []

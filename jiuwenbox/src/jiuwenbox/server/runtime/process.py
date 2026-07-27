@@ -2776,11 +2776,13 @@ class ProcessRuntime(RuntimeAdapter):
 
     @staticmethod
     def _win_workspace_for(policy: SecurityPolicy, sandbox_id: str) -> str:
-        """从 policy.windows 解析沙箱 workspace 路径."""
-        allow_write = policy.windows.filesystem.allow_write
-        if allow_write:
-            return str(Path(os.path.expandvars(allow_write[0])))
-        # 兜底: ~/.jiuwenbox/workspace/<sandbox_id>
+        """沙箱 workspace 真实路径: ~/.jiuwenbox/workspace/<sandbox_id>.
+
+        policy 里 allow_write[0] 写的是 ``{{ workspace }}`` 占位 (静态语义,
+        不是本机路径), ``os.path.expandvars`` 只认 ``%VAR%`` 不认 Jinja 风格,
+        展不开. 占位语义留在配置, 真实路径代码算. _create_windows 会把
+        ``{{ workspace }}`` 模板替换成本方法返回值再传 apply_sandbox_acl.
+        """
         return str(SANDBOX_WORKSPACE / sandbox_id)
 
     async def _create_windows(
@@ -2824,20 +2826,32 @@ class ProcessRuntime(RuntimeAdapter):
         #   JIUWENBOX_VENV_DIR       = 宿主机 isolation_venv 目录, 授 allow_write
         #                               (pip 写 site-packages). 未注入则跳过。
         # shell 目录 (System32 / Git) 已在 read_acl_preinstall 预装, 此处不重复。
-        allow_read_paths = list(policy.windows.filesystem.allow_read or [])
-        allow_write_paths = list(policy.windows.filesystem.allow_write or [])
+        # policy 里 allow_write / deny_write 写的是 ``{{ workspace }}`` 占位,
+        # 这里展开成真实 workspace 路径 (os.path.expandvars 不认 Jinja 风格).
+        def _expand_ws(path: str) -> str:
+            return path.replace("{{ workspace }}", workspace)
+
+        allow_read_paths = [_expand_ws(p) for p in (policy.windows.filesystem.allow_read or [])]
+        allow_write_paths = [_expand_ws(p) for p in (policy.windows.filesystem.allow_write or [])]
+        deny_write_paths = [_expand_ws(p) for p in (policy.windows.filesystem.deny_write or [])]
+        deny_read_paths = [_expand_ws(p) for p in (policy.windows.filesystem.deny_read or [])]
         bundled_python = (os.environ.get("JIUWENBOX_BUNDLED_PYTHON") or "").strip()
         if bundled_python:
             allow_read_paths.append(bundled_python)
         venv_dir = (os.environ.get("JIUWENBOX_VENV_DIR") or "").strip()
         if venv_dir:
             allow_write_paths.append(venv_dir)
+        # jbx-sandbox 真实 SID: 第一跳 runner 进程用它且 token 未受限,
+        # 合成 SID 的 ACE 对它不生效, apply_sandbox_acl 会对 allow_read 路径
+        # 给真实 SID 也 grant Allow Read, 否则 runner 读不了 venv python.
+        sandbox_user_sid = win_setup.get_sandbox_user_sid()
         acl_paths = win_acl.apply_sandbox_acl(
             workspace,
             allow_write_paths,
-            policy.windows.filesystem.deny_write,
+            deny_write_paths,
             allow_read=allow_read_paths,
-            deny_read=policy.windows.filesystem.deny_read,
+            deny_read=deny_read_paths,
+            sandbox_user_sid=sandbox_user_sid,
         )
         self._win_acl_paths[sandbox_id] = acl_paths or [workspace]
         logger.info(

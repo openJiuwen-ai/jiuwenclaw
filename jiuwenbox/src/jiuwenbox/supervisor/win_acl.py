@@ -227,6 +227,7 @@ def apply_sandbox_acl(
     deny_read: list[str] | None = None,
     *,
     recursive: bool = True,
+    sandbox_user_sid: str | None = None,
 ) -> list[str]:
     """对沙箱工作区施加文件 ACL.
 
@@ -240,6 +241,10 @@ def apply_sandbox_acl(
          使独立用户身份的沙箱至少能读自己工作区 (review MAJOR #4: 读控制
          之前完全缺失; Windows 独立用户默认读不了用户 profile, 靠 install
          预装补, 但 workspace 仍需显式 Allow Read).
+      6. 若 sandbox_user_sid 给定, 对 allow_read 路径再给 jbx-sandbox 真实 SID
+         grant Allow Read ACE. 第一跳 runner 进程是 jbx-sandbox 真实 SID 且
+         token 未受限 (CreateProcessWithLogonW 拉起), 合成 SID 的 ACE 对它
+         不生效, 必须真实 SID 的 ACE 才能让 runner 读到 venv python / DLL.
 
     Returns: 施加过 ACE 的顶层路径列表 (含 workspace + allow/deny 各项),
         供 revoke_sandbox_acl 按清单撤销 (旧版只扫 workspace 树, 漏掉系统
@@ -309,6 +314,16 @@ def apply_sandbox_acl(
             mode="ALLOW",
             recursive=recursive,
         )
+        # 第一跳 runner (jbx-sandbox 真实 SID, token 未受限) 读不了合成 SID
+        # 授权的路径, 必须给真实 SID 也 grant Read (含 Execute, FILE_GENERIC_READ
+        # 已含). 否则 runner 读不了 venv python 及其依赖 DLL, 起不来.
+        if sandbox_user_sid:
+            grant_ace(
+                expanded, sandbox_user_sid,
+                rights=const.FILE_GENERIC_READ,
+                mode="ALLOW",
+                recursive=recursive,
+            )
         applied.append(expanded)
 
     logger.info(

@@ -254,8 +254,21 @@ def _build_runner_command(
     用 ``python -m jiuwenbox.supervisor.win_exec runner --sandbox-id ...``.
     control_port 经命令行参数传 (而非 env), 避开 CreateProcessWithLogonW
     传 env 块时 WinError 87 (ctypes 传 c_wchar_Array 给 c_void_p 参数报错).
+
+    runner python 用 isolation_venv 真实 venv python
+    (``$JIUWENBOX_VENV_DIR/Scripts/python.exe``), 不用 ``sys.executable``:
+    部署环境 box-server 常跑在 uv trampoline launcher 上, jbx-sandbox 对
+    trampoline 及其依赖路径无读/执行权限, trampoline 内部 spawn child 时
+    permission denied (os error 5), runner 起不来. isolation_venv 的 venv
+    python 是 virtualenv 创建的真实解释器 (非 trampoline), ACL 配好
+    isolation_venv + bundled_python 目录后 jbx-sandbox 可直接执行.
     """
+    venv_dir = (os.environ.get("JIUWENBOX_VENV_DIR") or "").strip()
     py = sys.executable or "python"
+    if venv_dir:
+        candidate = os.path.join(venv_dir, "Scripts", "python.exe")
+        if os.path.isfile(candidate):
+            py = candidate
     parts = [
         py,
         "-m", RUNNER_MODULE,
