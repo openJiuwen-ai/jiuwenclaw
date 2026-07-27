@@ -42,6 +42,10 @@ if TYPE_CHECKING:
 
 llm_logger = logging.getLogger("jiuwenclaw.app")
 
+_tool_finish_reason_var: ContextVar[Optional[str]] = ContextVar(
+    "_tool_finish_reason", default=None
+)
+
 _GLM_TOOL_XML_CLOSED_RE = re.compile(
     r"<(arg_value|arg_key|tool_call)[^>]*?>.*?</\1>",
     re.IGNORECASE | re.DOTALL,
@@ -1393,6 +1397,10 @@ def _patch_railed_model_call_session() -> None:
     around llm.invoke/stream calls so RetryMixin._notify_retry_start can reach the frontend."""
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 
+    if not hasattr(ReActAgent, "_railed_model_call"):
+        llm_logger.debug("ReActAgent._railed_model_call not found; retry session patch skipped")
+        return
+
     _orig_railed_model_call = ReActAgent._railed_model_call  # pylint: disable=protected-access
 
     async def _patched_railed_model_call(self, ctx):
@@ -1543,7 +1551,10 @@ def apply_tool_invoke_interface_log() -> None:
         tool_call_id = str(getattr(tool_call, "id", "") or "")
         sid = session_id_from_context(session) or None
         original_arguments = getattr(tool_call, "arguments", None)
-        validation = validate_tool_arguments(original_arguments)
+        validation = validate_tool_arguments(
+            original_arguments,
+            finish_reason=_tool_finish_reason_var.get(),
+        )
         if validation.ok:
             if hasattr(tool_call, "arguments"):
                 tool_call.arguments = validation.normalized
@@ -1586,3 +1597,38 @@ def apply_tool_invoke_interface_log() -> None:
 
     _patched_execute._jiuwen_interface_log_patched = True  # type: ignore[attr-defined]  # pylint: disable=protected-access
     AbilityManager._execute_single_tool_call = _patched_execute  # pylint: disable=protected-access
+    apply_react_agent_finish_reason_patch()
+
+
+def apply_react_agent_finish_reason_patch() -> None:
+    """Monkey-patch ``ReActAgent._call_llm`` to propagate ``finish_reason`` via ContextVar.
+
+    openjiuwen's ``ToolCall`` schema does not carry ``finish_reason``; the value lives on
+    the parent ``AssistantMessage`` and is dropped when ``ability_manager.execute()``
+    is called. This patch sets ``_tool_finish_reason_var`` right after the LLM returns,
+    so ``_patched_execute`` can pass it to ``validate_tool_arguments`` and reliably
+    distinguish ``finish_reason=="length"`` (genuine truncation) from JSON syntax errors.
+    """
+    try:
+        from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
+    except Exception:
+        llm_logger.debug("ReActAgent finish_reason patch skipped")
+        return
+
+    if not hasattr(ReActAgent, "_call_llm"):
+        llm_logger.debug("ReActAgent._call_llm not found; finish_reason patch skipped")
+        return
+
+    _orig_call_llm = ReActAgent._call_llm  # pylint: disable=protected-access
+    if getattr(_orig_call_llm, "_jiuwen_finish_reason_patched", False):
+        return
+
+    async def _patched_call_llm(self, messages, tools=None):
+        result = await _orig_call_llm(self, messages, tools)
+        finish_reason = getattr(result, "finish_reason", None)
+        if finish_reason is not None:
+            _tool_finish_reason_var.set(finish_reason)
+        return result
+
+    _patched_call_llm._jiuwen_finish_reason_patched = True  # type: ignore[attr-defined]  # pylint: disable=protected-access
+    ReActAgent._call_llm = _patched_call_llm  # pylint: disable=protected-access

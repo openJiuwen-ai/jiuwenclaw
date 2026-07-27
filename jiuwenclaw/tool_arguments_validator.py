@@ -32,13 +32,19 @@ def tool_arguments_failure_payload(
     tool_name: str,
     validation: ToolArgumentsValidation,
 ) -> dict[str, Any]:
+    if validation.kind == "truncated":
+        recovery_hint = _RECOVERY_HINT
+    elif validation.kind == "invalid_json":
+        recovery_hint = "fix_json_syntax"
+    else:
+        recovery_hint = "check_arguments_format"
     return {
         "success": False,
         "skipped": True,
         "reason": validation.reason,
         "kind": validation.kind,
         "tool_name": tool_name,
-        "recovery_hint": _RECOVERY_HINT,
+        "recovery_hint": recovery_hint,
     }
 
 
@@ -47,10 +53,31 @@ def tool_arguments_failure_message(
     tool_name: str,
     validation: ToolArgumentsValidation,
 ) -> str:
+    prefix = f"工具 {tool_name or 'unknown'} 的调用参数 JSON {validation.reason}，已跳过真实工具执行。"
+    if validation.kind == "truncated":
+        return (
+            prefix
+            + "参数疑似被截断（可能因内容过长被模型输出中断）。"
+            "不要原样重试本次超大工具调用；请将一次性的大工具执行拆分成多次、多段执行，"
+            "例如分批读取、分段写入，或按文件、章节、范围拆分，降低单次 tool arguments 长度。"
+        )
+    if validation.kind == "invalid_json":
+        return (
+            prefix
+            + "参数不是合法 JSON（语法错误，如缺少引号、多余逗号、非法字符等）。"
+            "请检查并确保：所有字符串值用双引号包裹（包括键名和值），"
+            "不要在 JSON 中使用裸文本或单引号，不要包含未转义的换行符。"
+            "修正 JSON 格式后重试，无需拆分参数。"
+        )
+    if validation.kind == "not_object":
+        return (
+            prefix
+            + "参数解析结果不是 JSON object（例如是数组或字符串）。"
+            "请确保 tool arguments 是一个 {...} 格式的 JSON 对象。"
+        )
     return (
-        f"工具 {tool_name or 'unknown'} 的调用参数 JSON {validation.reason}，已跳过真实工具执行。"
-        "不要原样重试本次超大工具调用；请将一次性的大工具执行拆分成多次、多段执行，"
-        "例如分批读取、分段写入，或按文件、章节、范围拆分，降低单次 tool arguments 长度。"
+        prefix
+        + "请检查参数格式并重试。"
     )
 
 
@@ -138,14 +165,15 @@ def _looks_truncated(
 ) -> bool:
     if finish_reason == "length":
         return True
-    if _has_unclosed_json_structure(text):
-        return True
+    message = error.msg.lower()
+    if "unterminated string" in message:
+        return _has_unclosed_json_structure(text)
     near_end = error.pos >= max(len(text) - 2, 0)
     if not near_end:
         return False
-    message = error.msg.lower()
+    if _has_unclosed_json_structure(text):
+        return True
     truncated_error_markers = (
-        "unterminated string",
         "expecting value",
         "expecting property name",
         "expecting ',' delimiter",
