@@ -696,7 +696,9 @@ async def _get_shared_gateway_db_engine():
 async def _build_mysql_handler_engine():
     """获取 checkpoint MySQL AsyncEngine，复用 GatewayDb 连接池.
 
-    未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
+    未配置 GATEWAY_DB_HOST 时返回 None，由调用方决定是否回退到 SQLite。
+    配置了 GATEWAY_DB_HOST 但连接/初始化失败时抛出异常，避免静默回退到 SQLite。
+    注意：SQLite不扛并发，并发时会报：(sqlite3.OperationalError) disk I/O error
     """
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
@@ -741,13 +743,15 @@ async def _build_mysql_handler_engine():
             "[JiuWenClawDeepAdapter] failed to create checkpoint MySQL engine: %s",
             exc,
         )
-        return None
+        raise
 
 
 async def _build_postgresql_handler_engine():
     """获取 checkpoint PostgreSQL AsyncEngine，复用 GatewayDb 连接池.
 
-    未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
+    未配置 GATEWAY_DB_HOST 时返回 None，由调用方决定是否回退到 SQLite。
+    配置了 GATEWAY_DB_HOST 但连接/初始化失败时抛出异常，避免静默回退到 SQLite。
+    注意：SQLite不扛并发，并发时会报：(sqlite3.OperationalError) disk I/O error
     """
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
@@ -793,7 +797,7 @@ async def _build_postgresql_handler_engine():
             "[JiuWenClawDeepAdapter] failed to create checkpoint PostgreSQL engine: %s",
             exc,
         )
-        return None
+        raise
 
 
 class _RuntimeCronToolContext:
@@ -1423,29 +1427,26 @@ class JiuWenClawDeepAdapter:
             if _shared_checkpoint_checkpointer is not None:
                 CheckpointerFactory.set_default_checkpointer(_shared_checkpoint_checkpointer)
                 return
-            try:
-                PersistenceCheckpointerProvider()
-                checkpoint_path = get_checkpoint_dir()
-                conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
+            PersistenceCheckpointerProvider()
+            checkpoint_path = get_checkpoint_dir()
+            conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
 
-                db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
-                if db_type == "mysql":
-                    mysql_engine = await _build_mysql_handler_engine()
-                    if mysql_engine is not None:
-                        conf["db_client"] = mysql_engine
-                        logger.info("[JiuWenClawDeepAdapter] use mysql db_client from SDK")
-                elif db_type in ("postgresql", "postgres", "pg"):
-                    postgresql_engine = await _build_postgresql_handler_engine()
-                    if postgresql_engine is not None:
-                        conf["db_client"] = postgresql_engine
-                        logger.info("[JiuWenClawDeepAdapter] use postgresql db_client from SDK")
-                checkpointer = await CheckpointerFactory.create(
-                    CheckpointerConfig(type="persistence", conf=conf)
-                )
-                _shared_checkpoint_checkpointer = checkpointer
-                CheckpointerFactory.set_default_checkpointer(checkpointer)
-            except Exception as e:
-                logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e)
+            db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
+            if db_type == "mysql":
+                mysql_engine = await _build_mysql_handler_engine()
+                if mysql_engine is not None:
+                    conf["db_client"] = mysql_engine
+                    logger.info("[JiuWenClawDeepAdapter] use mysql db_client from SDK")
+            elif db_type in ("postgresql", "postgres", "pg"):
+                postgresql_engine = await _build_postgresql_handler_engine()
+                if postgresql_engine is not None:
+                    conf["db_client"] = postgresql_engine
+                    logger.info("[JiuWenClawDeepAdapter] use postgresql db_client from SDK")
+            checkpointer = await CheckpointerFactory.create(
+                CheckpointerConfig(type="persistence", conf=conf)
+            )
+            _shared_checkpoint_checkpointer = checkpointer
+            CheckpointerFactory.set_default_checkpointer(checkpointer)
 
 
     @staticmethod
