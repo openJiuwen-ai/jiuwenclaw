@@ -9,7 +9,7 @@
  * 等待响应期间可按 Esc 取消请求。
  */
 import { addError, addInfo } from "../helpers.js";
-import { CommandKind, type CommandContext, type SlashCommand } from "../types.js";
+import { CommandKind, type SlashCommand } from "../types.js";
 
 interface BtwResponse {
   status: "ok" | "no_context" | "failed";
@@ -47,17 +47,7 @@ export function createBtwCommand(): SlashCommand {
       // 标记 BTW 活动状态，确保 Esc 优先消费（不干扰主会话）
       ctx.setBtwActive?.(true);
 
-      // Dim indicator while the side query is running — placed in transcript
-      const thinkingId = `btw-thinking-${Date.now()}`;
-      ctx.addItem({
-        kind: "info",
-        id: thinkingId,
-        sessionId: ctx.sessionId,
-        content: `Answering: ${question} (Esc to cancel)`,
-        icon: "💭",
-        at: new Date().toISOString(),
-        meta: { view: "dim" as const },
-      });
+      ctx.setBtwPendingQuestion?.(question);
 
       let overlayShown = false;
 
@@ -108,6 +98,7 @@ export function createBtwCommand(): SlashCommand {
         const message = error instanceof Error ? error.message : String(error);
         ctx.addItem(addError(ctx.sessionId, `btw failed: ${message}`));
       } finally {
+        ctx.setBtwPendingQuestion?.(null);
         // 只有在 overlay 未显示时才清除活动状态
         // overlay 显示时保持 btwActive = true，由 Esc 处理清除
         if (!overlayShown) {

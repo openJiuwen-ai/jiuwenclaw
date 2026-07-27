@@ -283,8 +283,31 @@ export const editorTheme: EditorTheme = {
   selectList: selectListTheme,
 };
 
+function stripAnsiSgr(value: string): string {
+  let visible = "";
+  let index = 0;
+  while (index < value.length) {
+    if (value.charCodeAt(index) === 27 && value[index + 1] === "[") {
+      const end = value.indexOf("m", index + 2);
+      if (end !== -1) {
+        index = end + 1;
+        continue;
+      }
+    }
+    visible += value[index];
+    index++;
+  }
+  return visible;
+}
+
 export const markdownTheme: MarkdownTheme = {
   heading: (value: string) => {
+    const visibleValue = stripAnsiSgr(value);
+    // pi-tui renders the prefix for level 3-6 headings as a separate,
+    // ANSI-styled theme call. Suppress only that prefix-only fragment.
+    if (/^#{3,6} $/.test(visibleValue)) {
+      return "";
+    }
     if (value.startsWith("# ")) {
       const text = value.slice(2);
       return chalk.bold(text);
@@ -324,7 +347,7 @@ export const markdownTheme: MarkdownTheme = {
   italic: (value: string) => chalk.italic(value),
   strikethrough: (value: string) => chalk.strikethrough(value),
   underline: (value: string) => chalk.underline(value),
-  highlightCode: (code: string, lang?: string): string[] => {
+  highlightCode: (code: string, _lang?: string): string[] => {
     return highlightCodeBlock(code);
   },
   codeBlockIndent: "  ",

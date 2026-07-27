@@ -8320,9 +8320,12 @@ export class AppScreen implements Component, Focusable {
       (workflow) => workflow.status === "running",
     );
     const hasRunningWorkflow = runningWorkflows.length > 0;
+    const hasBtwLoading = snapshot.btwPendingQuestion !== null;
     const runningWorkflow = runningWorkflows[0];
     const shouldAnimate =
-      !snapshot.isInterrupted && (snapshot.isProcessing || hasRunningTools || teamWorking || hasRunningWorkflow);
+      hasBtwLoading ||
+      (!snapshot.isInterrupted &&
+        (snapshot.isProcessing || hasRunningTools || teamWorking || hasRunningWorkflow));
     if (!shouldAnimate) {
       const nowMs = Date.now();
       if (this.runningStoppedAtMs === null) {
