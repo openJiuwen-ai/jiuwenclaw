@@ -78,6 +78,7 @@ import {
   isDesktopSaveOk,
 } from './utils/desktopSave';
 import type { DesktopSaveApiResult } from './utils/desktopSave';
+import { generateUuidV4 } from './utils/uuid';
 import {
   ModelSetupGuide,
   type ModelSetupGuideStep,
@@ -233,7 +234,7 @@ function ErrorFallback({ error }: { error: Error | null }) {
 
 function generateSessionId(): string {
   const ts = Date.now().toString(16);
-  const rand = crypto.randomUUID().replaceAll('-', '').slice(0, 12);
+  const rand = generateUuidV4().replaceAll('-', '').slice(0, 12);
   return `sess_${ts}_${rand}`;
 }
 
