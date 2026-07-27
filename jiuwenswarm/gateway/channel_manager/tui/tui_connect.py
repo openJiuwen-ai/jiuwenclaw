@@ -1288,20 +1288,23 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             else []
         )
         # 过滤掉 None/非 dict/无效 session_id，防止前端 SelectList.render() 崩溃
+        # 注意：循环内必须用独立局部变量，不可复用外层 session_id（当前会话），
+        # 否则循环结束后 session_id 被覆盖成 all_sessions 的最后一个 sid，
+        # 导致 current_sid 取到错误值，把并非当前会话的会话误当作"当前会话"过滤掉。
         normalized_sessions = []
         for s in all_sessions:
             if not s or not isinstance(s, dict):
                 continue
             raw_sid = s.get("session_id")
             if isinstance(raw_sid, str):
-                session_id = raw_sid.strip()
+                norm_sid = raw_sid.strip()
             elif raw_sid is not None:
-                session_id = str(raw_sid).strip()
+                norm_sid = str(raw_sid).strip()
             else:
-                session_id = ""
-            if not session_id:
+                norm_sid = ""
+            if not norm_sid:
                 continue
-            s["session_id"] = session_id
+            s["session_id"] = norm_sid
             normalized_sessions.append(s)
         all_sessions = normalized_sessions
         # 按项目目录过滤 + 排除当前会话（对齐 Claude Code /resume 行为）
@@ -1327,10 +1330,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 return True
             if not project_dir:
                 return True
+            # 优先取顶层 project_dir（init_session_metadata 写入的权威来源），
+            # channel_metadata.project_dir/cwd 仅作兜底（存量会话渠道元数据多为空）。
             ch_meta = s.get("channel_metadata") or {}
             session_project = (
-                ch_meta.get("project_dir") or ch_meta.get("cwd") or ""
-            ).strip()
+                str(s.get("project_dir") or "").strip()
+                or (ch_meta.get("project_dir") or ch_meta.get("cwd") or "").strip()
+            )
             if not session_project:
                 return False  # 无项目信息的会话无法匹配当前项目，排除
             try:
@@ -1360,7 +1366,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         # 附带每个会话的 project_dir / git_branch 供前端判断跨项目恢复 + 按分支过滤
         for s in cli_sessions:
             ch_meta = s.get("channel_metadata") or {}
-            sp = (ch_meta.get("project_dir") or ch_meta.get("cwd") or "").strip()
+            # 优先取顶层 project_dir（init_session_metadata 写入的权威来源），
+            # channel_metadata.project_dir/cwd 仅作兜底（存量会话渠道元数据多为空）。
+            sp = (
+                str(s.get("project_dir") or "").strip()
+                or (ch_meta.get("project_dir") or ch_meta.get("cwd") or "").strip()
+            )
             if sp:
                 try:
                     sp = os.path.realpath(sp)
