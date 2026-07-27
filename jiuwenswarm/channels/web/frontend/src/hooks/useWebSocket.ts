@@ -139,6 +139,10 @@ function scheduleAfterTurnSettles(sessionId: string, run: () => void): void {
  *    刷新页面最常见）一律直接不展示、不插消息——用户没看见"跳变过程"，硬展示一条早就完成的
  *    目标条没有意义，还可能重复插消息。
  * 3) 其余状态（active/paused/blocked）照常落状态，不做特殊处理，blocked 也不会自动隐藏。
+ * 4) time_used_seconds/active_started_at 兜底——pause 等一元 RPC 的 res.payload.goal 目前不一定
+ *    带这两个字段（真机验证只有 goal.updated 事件稳定带全，见 cjh/goal 对接文档 §8.2 demo 本身
+ *    也没有这两个字段），如果直接落库会让 GoalBar 从"有后端计时"退回旧的 fallback 计时口径，
+ *    暂停后又开始跳字。这里同一个 goal_id 下如果新数据缺这两个字段、旧数据有，就沿用旧值。
  */
 function applyIncomingGoal(
   sessionId: string,
@@ -168,6 +172,23 @@ function applyIncomingGoal(
     goalStore.setGoal(sessionId, null);
     goalStore.setPendingAction(sessionId, null);
     return;
+  }
+
+  // 见函数注释 4)：同一个 goal_id，新数据缺 time_used_seconds 但旧数据有时，沿用旧值，
+  // 避免一元 RPC 的不完整快照把 GoalBar 计时打回旧口径。active_started_at 跟着 status 走——
+  // 非 active 直接钉死 null（不管新数据有没有带），active 且新数据没带时才沿用旧值。
+  const prevGoalForTiming = goalStore.runtimes[sessionId]?.goal;
+  if (
+    goal.time_used_seconds === undefined &&
+    prevGoalForTiming?.goal_id === goal.goal_id &&
+    prevGoalForTiming.time_used_seconds !== undefined
+  ) {
+    goal = {
+      ...goal,
+      time_used_seconds: prevGoalForTiming.time_used_seconds,
+      active_started_at:
+        goal.status === 'active' ? (goal.active_started_at ?? prevGoalForTiming.active_started_at ?? null) : null,
+    };
   }
 
   // 未完成目标才需要参与"1 分钟无更新兜底 get"的巡检（见 useWebSocket 里的巡检 effect），
@@ -2120,14 +2141,26 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
           useChatStore.getState().setExecutionError(sessionId, null);
           if (currentMode !== 'team') {
-            useChatStore.getState().setProcessing(sessionId, false);
-            // 正常情况下排空由 chat.processing_status(false) 负责；这里是它丢帧时的兜底
-            // 重置，同样可能是"目标这一轮真正结束"的那个信号，一并兜底排空一次排队消息
-            // （见问题3：目标完成后队列消息没有紧接着发出去）。已经排空过则是空操作，不会重复发送。
-            drainTaskQueueIfIdle(sessionId);
+            // 有 active Goal 时，普通问答轮和 Goal 后续执行走同一条流；这次 chat.final 可能只是
+            // 普通问答轮的收尾，Goal 紧接着还要继续跑。此时不能把它当"整段彻底结束"处理——
+            // 不能关 isProcessing、不能排空任务队列、不能清 thinking/subtasks，否则会误发下一条
+            // 排队消息、或短暂闪一下"空闲"。气泡本身的收尾（下面 stopStreaming）不受影响，
+            // 该收尾还是收尾。见 Goal持续目标Web前端对接4.md「普通问答与 Goal 续跑：前端气泡收尾」。
+            const goalStillActive =
+              useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
+            if (!goalStillActive) {
+              useChatStore.getState().setProcessing(sessionId, false);
+              // 正常情况下排空由 chat.processing_status(false) 负责；这里是它丢帧时的兜底
+              // 重置，同样可能是"目标这一轮真正结束"的那个信号，一并兜底排空一次排队消息
+              // （见问题3：目标完成后队列消息没有紧接着发出去）。已经排空过则是空操作，不会重复发送。
+              drainTaskQueueIfIdle(sessionId);
+              useChatStore.getState().setThinking(sessionId, false);
+              useChatStore.getState().clearSubtasks(sessionId);
+            }
+          } else {
+            useChatStore.getState().setThinking(sessionId, false);
+            useChatStore.getState().clearSubtasks(sessionId);
           }
-          useChatStore.getState().setThinking(sessionId, false);
-          useChatStore.getState().clearSubtasks(sessionId);
         }
         if (content) {
           revealPendingContextUsage(sessionId);
