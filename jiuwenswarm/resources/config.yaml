@@ -1107,6 +1107,9 @@ modes:
       teammate_mode: build_mode
       spawn_mode: inprocess
       enable_swarmflow: false
+      # Per-teammate peer send_message ceiling for interactive debate (None/omit = off).
+      # Leader sends are not counted. Task-board P2P is excluded while open tasks exist.
+      max_debate_rounds: 2
 
       # SwarmFlow per-Leader concurrency caps (three-layer governor).
       # Only effective when enable_swarmflow is true.
