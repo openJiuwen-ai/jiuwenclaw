@@ -136,6 +136,12 @@ export interface CommandContext {
   hasServerTask?: () => boolean;
   /** TaskLifecyclePort：等待型取消；只供 /switch 等生命周期动作使用。 */
   cancelAndWaitForIdle?: (options?: CancelAndWaitOptions) => Promise<void>;
+  /** Start a TUI-side PR watch: re-run /autofix-pr on an interval until green. */
+  startPrWatch?: (config: { repo: string; prNumber: string; platform: string }) => void;
+  /** Stop the active PR watch; returns true if one was running. */
+  stopPrWatch?: () => boolean;
+  /** Whether a PR watch is currently active. */
+  isPrWatchActive?: () => boolean;
 }
 
 export interface SlashCommand {

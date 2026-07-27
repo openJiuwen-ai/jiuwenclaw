@@ -1,4 +1,5 @@
 import { addError, addInfo } from "./core/commands/helpers.js";
+import { PrWatchController } from "./core/commands/builtins/autofix-pr.watch.js";
 import type { CommandContext, PreferredLanguage } from "./core/commands/types.js";
 import type {
   HandoffPort,
@@ -431,6 +432,8 @@ export class CliPiAppState {
   private autoRecapState: "idle" | "pending" | "generated" = "idle";
   /** 周期检查空闲状态的定时器。 */
   private autoRecapTimer: ReturnType<typeof setInterval> | null = null;
+  /** Active TUI-side PR watch, if any (see startPrWatch). */
+  private prWatchController: PrWatchController | null = null;
   /** 是否启用自动回顾（从 config.yaml 读取，默认 true）。 */
   private autoRecapEnabled: boolean = true;
   private ripgrepAvailable: boolean | null = null;
@@ -1219,8 +1222,40 @@ export class CliPiAppState {
       cancelAndWaitForIdle: (opts) => this.taskLifecycle
         ? this.taskLifecycle.cancelAndWaitForIdle(opts)
         : Promise.reject(new Error("Task lifecycle port not available")),
+      startPrWatch: this.startPrWatch,
+      stopPrWatch: this.stopPrWatch,
+      isPrWatchActive: this.isPrWatchActive,
     };
   }
+
+  /** Start a TUI-side PR watch (replacing any existing one). */
+  readonly startPrWatch = (config: { repo: string; prNumber: string; platform: string }): void => {
+    this.prWatchController?.stop("被新的 watch 取代", { silent: true });
+    this.prWatchController = new PrWatchController(
+      {
+        sendMessage: (prompt) => this.sendMessage(prompt, undefined, this.mode, { logAsUser: false }),
+        isBusy: () => {
+          const s = this.getSnapshot();
+          return s.isProcessing || s.cancellableWork || Boolean(s.pendingQuestion);
+        },
+        isConnected: () => this.connectionStatus === "connected",
+        notify: (message, isError) =>
+          this.addItem((isError ? addError : addInfo)(this.sessionId, message, isError ? undefined : "i")),
+      },
+      config,
+    );
+    this.prWatchController.start();
+  };
+
+  /** Stop the active PR watch; returns true if one was running. */
+  readonly stopPrWatch = (): boolean => {
+    if (!this.prWatchController?.active) return false;
+    this.prWatchController.stop("用户手动停止");
+    this.prWatchController = null;
+    return true;
+  };
+
+  readonly isPrWatchActive = (): boolean => Boolean(this.prWatchController?.active);
 
   getUsageSummary(): SessionUsageSummary {
     const entries = Array.from(this.usageByModel.values());
@@ -1782,6 +1817,9 @@ export class CliPiAppState {
       this.localPendingQuestion.reject(new Error("input flow was interrupted"));
       this.localPendingQuestion = null;
     }
+    // A watch is tied to the current PR/session; a new/cleared session drops it.
+    this.prWatchController?.stop("会话已重置", { silent: true });
+    this.prWatchController = null;
     this.entries = [];
     this.pendingQuestion = null;
     this.lastError = null;

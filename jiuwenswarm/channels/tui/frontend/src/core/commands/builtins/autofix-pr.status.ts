@@ -191,6 +191,21 @@ function githubRollupStatus(rollup: unknown): ChecksVerdict {
 // PR context: which PR is this watch about?
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether the checkout has no uncommitted changes. A watch auto-commits and
+ * pushes unattended, so it must refuse to start on a dirty tree — otherwise it
+ * could sweep in or act on work the user has not committed. Returns true only
+ * when `git status --porcelain` is empty; any git failure returns false (refuse).
+ */
+export async function isWorkingTreeClean(projectDir: string): Promise<boolean> {
+  // Confirm a real git repo first: runCmd returns "" on failure too, so without
+  // this a git error would masquerade as an empty (clean) status.
+  const inRepo = await runCmd("git", ["-C", projectDir, "rev-parse", "--is-inside-work-tree"]);
+  if (inRepo !== "true") return false;
+  const out = await runCmd("git", ["-C", projectDir, "status", "--porcelain"]);
+  return out === "";
+}
+
 export async function resolvePrContext(projectDir: string, prArg = ""): Promise<PrContext> {
   const fromUrl = parsePrUrl(prArg);
   if (fromUrl.isComplete) return fromUrl;
