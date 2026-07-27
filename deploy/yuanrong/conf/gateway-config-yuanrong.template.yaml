@@ -499,6 +499,13 @@ gateway:
     agent_key_fields:
       - user_id
       - agent_type
+    # 空闲沙箱回收：agent 无持有任务（chat/SSH 均已结束）且空闲超过该时长后，
+    # 自动 DELETE /api/agent 释放 YuanRong 实例；<= 0 表示不回收。
+    # 存活的 SSH 连接（即使不发消息）全程持有任务计数，不会被回收。
+    # 也可通过环境变量 SANDBOX_IDLE_TIMEOUT_SECONDS 覆盖（优先于本配置）。
+    sandbox_idle_timeout_seconds: 600
+    # 空闲扫描周期（秒）
+    sandbox_idle_check_interval_seconds: 30
     registry:
       # Agent OS 注册中心：host 来自 --hosts / CLUSTER_HOSTS 的 master IP
       endpoint: http://<<MASTER_NODE_IP>>:<<REGISTRY_PORT>>

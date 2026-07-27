@@ -55,6 +55,7 @@ declare -A DEPLOY_VARS=(
     # WebChannel bind host; empty → default to MASTER_NODE_IP at deploy check time
     ["WEB_HOST"]=""
     ["WEB_PORT"]=""
+    ["SANDBOX_IDLE_TIMEOUT_SECONDS"]=""
     ["OS_TYPE"]=""
     ["EXTENSION_DIRS"]=""
 )
