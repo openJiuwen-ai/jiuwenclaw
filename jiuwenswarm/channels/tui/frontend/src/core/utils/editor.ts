@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type SpawnOptions, type SpawnSyncOptions, type SpawnSyncReturns } from "node:child_process";
+import { spawnSync, type SpawnSyncOptions, type SpawnSyncReturns } from "node:child_process";
 import { basename } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import type { TUI } from "@mariozechner/pi-tui";
@@ -73,25 +73,30 @@ function spawnFailed(result: SpawnSyncReturns<string | Buffer>): boolean {
 /**
  * Open a file in the user's external editor.
  *
- * For GUI editors (notepad, VS Code, Sublime, etc.): spawns the editor
- * detached and non-blocking — the TUI keeps running, no stop/start cycle.
- * This avoids the race condition where tui.stop()/tui.start() could leave
- * stdin in a bad state (Kitty protocol query interference, buffered data
- * from the editor process, etc.).
+ * GUI editors (notepad, VS Code, Sublime, etc.) AND terminal editors both
+ * use a synchronous blocking spawn (spawnSync). The TUI is stopped first —
+ * tui.stop() removes stdin 'data' listeners and pauses stdin, so the TUI
+ * is non-operable (frozen) while the editor holds the file open. This
+ * mirrors Claude Code's editFileInEditor, which pauses Ink + suspends stdin
+ * and runs execSync until the editor window closes.
  *
- * For terminal editors (vi, nano): uses spawnSync (blocking) with proper
- * alt-screen switching and tui.stop()/tui.start() — the TUI is suspended
- * while the editor takes over the terminal.
+ * Why synchronous (not the old detached-async spawn): GUI editor launchers
+ * like Windows code.cmd exit immediately when run WITHOUT a wait flag, so
+ * a detached spawn's child.on('exit') fires while the editor window is still
+ * open — the freeze is released prematurely (the bug with editor=code).
+ * Forcing -w/--wait (EDITOR_OVERRIDES, see spawnGuiEditorSync) plus a
+ * synchronous spawnSync makes onExit fire only after the window actually
+ * closes, exactly like CC's `code -w` + execSync.
  *
- * @param onExit Called when the editor process exits (GUI editors only).
- *               Terminal editors call onExit synchronously after tui.start().
+ * @param onExit Called synchronously after the editor exits and tui.start()
+ *               has restored input. Runs for both GUI and terminal editors.
  */
 export function openFileInEditor(tui: TUI, filePath: string, onExit?: () => void): void {
   const editor = getExternalEditor();
   const gui = isGuiEditor(editor);
 
   if (gui) {
-    spawnGuiEditorDetached(editor, filePath, onExit);
+    spawnGuiEditorSync(tui, editor, filePath, onExit);
     return;
   }
 
@@ -145,60 +150,60 @@ export function openFileInEditor(tui: TUI, filePath: string, onExit?: () => void
 }
 
 // ---------------------------------------------------------------------------
-// GUI editor: non-blocking detached spawn (TUI keeps running)
+// GUI editor: synchronous spawn (blocks until editor window closes)
 // ---------------------------------------------------------------------------
 
 /**
- * Spawn a GUI editor detached from the parent process.
+ * Spawn a GUI editor SYNCHRONOUSLY (blocking), mirroring Claude Code's
+ * editFileInEditor (execSync + Ink pause/suspendStdin).
  *
- * The editor runs in its own window/process. The TUI event loop keeps
- * running, so the user can interact with the TUI while editing.
+ * The editor runs in its own window/process. Before spawning we call
+ * tui.stop(), which removes stdin 'data' listeners and pauses stdin — so
+ * the TUI is non-operable (frozen) for as long as spawnSync blocks. The
+ * editor window closing is what unblocks spawnSync, so onExit fires exactly
+ * when the user is done editing. This is the fix for editor=code on Windows:
+ * code.cmd exits immediately without -w, so a detached-async spawn released
+ * the freeze prematurely; the synchronous path with the forced wait flag
+ * does not.
  *
- * On exit, the optional `onExit` callback is called (best-effort — for
- * editors launched via shell wrappers like `code.cmd` on Windows, the
- * exit event may fire immediately when the wrapper exits, not when the
- * actual editor window closes).
+ * Unlike terminal editors, GUI editors do NOT switch to the alt screen — the
+ * editor opens in a separate window, so there is nothing for us to hand the
+ * terminal off to. We only stop/restart stdin around the spawn, exactly as
+ * CC only pauses Ink + suspends stdin for GUI editors.
+ *
+ * Wait flags (EDITOR_OVERRIDES equivalent): for editors whose launcher exits
+ * immediately without a wait flag (code/cursor/windsurf/codium → -w,
+ * subl/atom → --wait), parseEditorCommand prepends the wait flag from
+ * GUI_EDITOR_WAIT_FLAGS unless the user already supplied it. This matches
+ * CC's EDITOR_OVERRIDES = { code: 'code -w', subl: 'subl --wait' }.
  */
-function spawnGuiEditorDetached(editor: string, filePath: string, onExit?: () => void): void {
-  const detachedOpts: SpawnOptions = { detached: true, stdio: "ignore" };
+function spawnGuiEditorSync(tui: TUI, editor: string, filePath: string, onExit?: () => void): void {
+  // Resolve cmd + args, forcing a wait flag for editors that need one.
+  const { cmd, args } = parseEditorCommand(editor);
 
-  let child;
+  tui.stop();
 
-  if (process.platform === "win32") {
-    // Windows: keep "start /wait" in the command.
-    // "start /wait" is a cmd.exe builtin that makes the shell wait for the
-    // GUI editor to close. Without it, cmd.exe would exit immediately after
-    // launching the GUI app, and child.on('exit') would fire prematurely.
-    // With it, the spawned cmd.exe process stays alive until the editor closes,
-    // so the exit event fires at the right time.
-    //
-    // We use shell: true because:
-    // - "start" is a cmd.exe builtin (not an executable)
-    // - .cmd/.bat editors like code.cmd need shell resolution
-    child = spawn(`${editor} "${filePath}"`, { ...detachedOpts, shell: true });
-  } else {
-    // POSIX: spawn the editor directly (no shell).
-    // Strip --wait/-w flags — they're for blocking spawnSync, not needed
-    // for non-blocking spawn. We detect exit via child.on('exit').
-    const parts = editor.split(/\s+/).filter((p) => p && p !== "-w" && p !== "--wait");
-    const cmd = parts[0];
-    const fullArgs = [...parts.slice(1), filePath];
-    child = spawn(cmd, fullArgs, detachedOpts);
+  try {
+    const result = spawnEditorSync(cmd, args, filePath);
+    if (spawnFailed(result)) {
+      // GUI editor failed to launch — fall back to notepad/vi (still blocking).
+      spawnFallbackSync(filePath);
+    }
+  } finally {
+    // Drain any stdin the editor may have left buffered (defensive — GUI
+    // editors shouldn't touch our stdin, but a shell-wrapped one might).
+    try {
+      while (process.stdin.read() !== null) {
+        // discard buffered data
+      }
+    } catch {
+      // stdin not readable — ignore
+    }
+
+    tui.start();
+    tui.requestRender(true);
+    onExit?.();
   }
-
-  child.on("error", () => {
-    // Spawn failed — try fallback
-    spawnFallbackAsync(filePath, onExit);
-  });
-
-  if (onExit) {
-    child.on("exit", () => {
-      onExit();
-    });
-  }
-
-  // unref() so the TUI process can exit without waiting for the editor
-  child.unref();
 }
 
 // ---------------------------------------------------------------------------
@@ -231,25 +236,6 @@ function spawnFallbackSync(filePath: string): SpawnSyncReturns<string | Buffer> 
   }
 
   return spawnSync("vi", [filePath], spawnOptions);
-}
-
-function spawnFallbackAsync(filePath: string, onExit?: () => void): void {
-  if (process.platform === "win32") {
-    // Use "start /wait" so cmd.exe waits for notepad to close
-    // (without /wait, cmd.exe exits immediately for GUI apps)
-    const child = spawn(`start /wait "" notepad "${filePath}"`, {
-      detached: true,
-      stdio: "ignore",
-      shell: true,
-    });
-    if (onExit) child.on("exit", onExit);
-    child.unref();
-    return;
-  }
-
-  const child = spawn("vi", [filePath], { detached: true, stdio: "ignore" });
-  if (onExit) child.on("exit", onExit);
-  child.unref();
 }
 
 // ---------------------------------------------------------------------------

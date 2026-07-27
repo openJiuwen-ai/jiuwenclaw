@@ -50,11 +50,15 @@ function openEditor(ctx: CommandContext): void {
     return;
   }
 
-  ctx.openInEditor(path);
-  applyAndReport(ctx);
-  ctx.addItem(
-    addInfo(ctx.sessionId, `${created ? "已创建并打开" : "已打开"} ${path}（保存后已重新加载）`, "k"),
-  );
+  // openInEditor blocks until the editor window closes (TUI frozen in the
+  // meantime). Reload keybindings + emit the "已打开…" line in onDone, AFTER
+  // the editor exits — so the reload picks up the user's saved changes.
+  ctx.openInEditor(path, () => {
+    applyAndReport(ctx);
+    ctx.addItem(
+      addInfo(ctx.sessionId, `${created ? "已创建并打开" : "已打开"} ${path}（保存后已重新加载）`, "k"),
+    );
+  });
 }
 
 function listBindings(ctx: CommandContext): void {

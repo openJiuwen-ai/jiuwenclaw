@@ -473,18 +473,22 @@ async function editMemoryByPath(
         writeFileSync(path, "");
       }
       if (ctx.openInEditor) {
-        ctx.openInEditor(path);
         const { source, value } = getEditorInfo();
         const editorHint = source !== "default"
           ? `(${source}="${value}")`
           : "(default: vi)";
-        ctx.addItem(
-          addInfo(
-            ctx.sessionId,
-            `Opened memory file at ${displayPath} ${editorHint}`,
-            "m",
-          ),
-        );
+        // openInEditor blocks until the editor window closes (TUI frozen in
+        // the meantime). Emit the "Opened…" line in onDone, i.e. AFTER the
+        // editor exits — matches CC's editFileInEditor → onDone("Opened…").
+        ctx.openInEditor(path, () => {
+          ctx.addItem(
+            addInfo(
+              ctx.sessionId,
+              `Opened memory file at ${displayPath} ${editorHint}`,
+              "m",
+            ),
+          );
+        });
       } else {
         ctx.addItem(
           addInfo(
@@ -510,8 +514,6 @@ async function editMemoryByPath(
     }
 
     if (ctx.openInEditor) {
-      ctx.openInEditor(payload.path);
-
       const projectDir = ctx.getCurrentProjectDir();
       const displayPath = getDisplayPath(payload.path, projectDir);
       const { source, value } = getEditorInfo();
@@ -519,13 +521,18 @@ async function editMemoryByPath(
         ? `(${source}="${value}")`
         : "(default: vi)";
 
-      ctx.addItem(
-        addInfo(
-          ctx.sessionId,
-          `Opened memory file at ${displayPath} ${editorHint}`,
-          "m",
-        ),
-      );
+      // openInEditor blocks until the editor window closes (TUI frozen in
+      // the meantime). Emit the "Opened…" line in onDone, AFTER the editor
+      // exits — matches CC's editFileInEditor → onDone("Opened…").
+      ctx.openInEditor(payload.path, () => {
+        ctx.addItem(
+          addInfo(
+            ctx.sessionId,
+            `Opened memory file at ${displayPath} ${editorHint}`,
+            "m",
+          ),
+        );
+      });
     } else {
       const projectDir = ctx.getCurrentProjectDir();
       const displayPath = getDisplayPath(payload.path, projectDir);
