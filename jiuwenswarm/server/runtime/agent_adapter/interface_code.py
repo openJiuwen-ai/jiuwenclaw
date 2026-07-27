@@ -48,9 +48,7 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
     _CRON_TOOL_CHANNEL_ID,
     _agent_def_to_subagent_config,
-    _build_subagent_context_processor_rail,
     _deep_agent_kv_cache_affinity_config,
-    _merge_subagent_rails_with_context_processor,
     parse_int,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
@@ -967,23 +965,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         workspace = self._workspace_dir or "./"
         subagents: list[Any] = []
         self._sync_browser_runtime_environment(config_base)
-        # TaskTool subagents: configured A-chain compression when enabled (MR-1147 intent).
-        # Fresh ContextProcessorRail per subagent.
 
         # ── 固定挂载：explore_agent（Code 模式核心子代理，始终启用）──
         if not self._subagent_list_has_name(subagents, "explore_agent"):
             explore_agent_cfg = subagents_cfg.get("explore_agent") if isinstance(subagents_cfg, dict) else None
-            explore_rails = None
-            explore_ce = _build_subagent_context_processor_rail(react_cfg)
-            if explore_ce is not None:
-                from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
-
-                explore_rails = [FileSystemRail(), explore_ce]
             explore_spec = build_explore_agent_config(
                 model=model,
                 workspace=workspace,
                 language=resolved_language,
-                rails=explore_rails,
                 max_iterations=parse_int(
                     explore_agent_cfg.get("max_iterations") if isinstance(explore_agent_cfg, dict) else None,
                     react_cfg.get("max_iterations", 15),
@@ -995,17 +984,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # ── 固定挂载：plan_agent（Code 模式核心子代理，始终启用）──
         if not self._subagent_list_has_name(subagents, "plan_agent"):
             plan_agent_cfg = subagents_cfg.get("plan_agent") if isinstance(subagents_cfg, dict) else None
-            plan_rails = None
-            plan_ce = _build_subagent_context_processor_rail(react_cfg)
-            if plan_ce is not None:
-                from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
-
-                plan_rails = [FileSystemRail(), plan_ce]
             plan_spec = build_plan_agent_config(
                 model=model,
                 workspace=workspace,
                 language=resolved_language,
-                rails=plan_rails,
                 max_iterations=parse_int(
                     plan_agent_cfg.get("max_iterations") if isinstance(plan_agent_cfg, dict) else None,
                     react_cfg.get("max_iterations", 15),
@@ -1025,9 +1007,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     # SysOperationRail is default rail for code_agent;
                     # passing rails overrides defaults, must include it explicitly
                     code_agent_rails = [SysOperationRail(), coding_memory_rail]
-                code_agent_rails = _merge_subagent_rails_with_context_processor(
-                    code_agent_rails, react_cfg
-                )
                 code_spec = build_code_agent_config(
                     model,
                     workspace=workspace,
@@ -1056,7 +1035,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     model,
                     workspace=workspace,
                     language=resolved_language,
-                    rails=_merge_subagent_rails_with_context_processor(None, react_cfg),
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
                         react_cfg.get("max_iterations", 15),
