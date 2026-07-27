@@ -307,13 +307,17 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             **result_payload,
         }
 
-    if chunk_type == "error":
-        error_msg = (
-            payload.get("error", str(payload))
-            if isinstance(payload, dict)
-            else str(payload)
-        )
-        return {"event_type": "chat.error", "error": error_msg}
+    if chunk_type in {"error", "execution.error"}:
+        if isinstance(payload, dict):
+            error_msg = (
+                payload.get("message")
+                or payload.get("error")
+                or payload.get("output")
+                or str(payload)
+            )
+        else:
+            error_msg = str(payload)
+        return {"event_type": "chat.error", "error": str(error_msg)}
 
     if chunk_type == "thinking":
         return {

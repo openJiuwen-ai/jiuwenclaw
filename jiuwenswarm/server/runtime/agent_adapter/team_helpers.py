@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -751,7 +752,7 @@ async def _wait_for_cron_team_round_events(
             continue
         evt_type = str(event.get("event_type") or "").strip()
         yield event
-        if evt_type == "team.error":
+        if evt_type in {"team.error", "chat.error"}:
             break
         apply_cron_team_round_event(round_state, event)
         if cron_team_round_should_end(round_state):
@@ -895,16 +896,83 @@ _TEAM_BUILDING_EVENT_TYPES = frozenset({
 })
 
 
-def _broadcast_event(
+def _extract_team_error_text(error: Any) -> str:
+    if error is None:
+        return ""
+    if isinstance(error, str):
+        return error.strip()
+    return str(error).strip()
+
+
+def _publish_team_event(
     channel_id: str | None, session_id: str, event: dict[str, Any]
 ) -> None:
-    """Broadcast an event to all request queues waiting on the same session."""
+    """Publish one parsed team event to session waiters."""
     tm = get_team_manager(channel_id)
     tm.broadcast_event(session_id, event)
     # Track team-building events so chat.final can be gated correctly.
     if (not tm.has_seen_team_events(session_id)) and event.get("event_type") in _TEAM_BUILDING_EVENT_TYPES:
         tm.mark_seen_team_events(session_id)
     _try_finish_cron_team_stream(channel_id, session_id, event)
+
+
+def _emit_team_chat_error(
+    channel_id: str | None,
+    session_id: str,
+    round_id: int | None,
+    error: Any,
+    *,
+    stop_processing: bool = True,
+) -> bool:
+    """Emit ``chat.error`` with the original upstream message for Web clients."""
+    message = _extract_team_error_text(error)
+    if not message:
+        return False
+    error_event: dict[str, Any] = {
+        "event_type": "chat.error",
+        "error": message,
+        "session_id": session_id,
+    }
+    if round_id is not None:
+        error_event["rid"] = round_id
+    _publish_team_event(channel_id, session_id, error_event)
+    if stop_processing:
+        status_event: dict[str, Any] = {
+            "event_type": "chat.processing_status",
+            "session_id": session_id,
+            "is_processing": False,
+            "is_complete": True,
+        }
+        if round_id is not None:
+            status_event["rid"] = round_id
+        _publish_team_event(channel_id, session_id, status_event)
+    return True
+
+
+def _broadcast_event(
+    channel_id: str | None, session_id: str, event: dict[str, Any]
+) -> None:
+    """Broadcast an event to all request queues waiting on the same session."""
+    if event.get("event_type") == "team.error":
+        error_text = _extract_team_error_text(
+            event.get("error") or event.get("message") or event.get("reason")
+        )
+        if not error_text:
+            logger.warning(
+                "[TeamHelpers] ignored team.error without message: "
+                "channel_id=%s session_id=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+            )
+            return
+        _emit_team_chat_error(
+            channel_id,
+            session_id,
+            event.get("rid"),
+            error_text,
+        )
+        return
+    _publish_team_event(channel_id, session_id, event)
 
 
 def _approval_chunk_from_event(evt: Any) -> dict[str, Any] | None:
@@ -1819,7 +1887,10 @@ async def process_team_message_stream(
                             metadata=_metadata,
                             is_complete=False,
                         )
-                        if isinstance(event, dict) and event.get("event_type") == "team.error":
+                        if isinstance(event, dict) and event.get("event_type") in {
+                            "team.error",
+                            "chat.error",
+                        }:
                             break
                     except asyncio.TimeoutError:
                         if not team_manager.has_stream_task(session_id):
@@ -1850,7 +1921,7 @@ async def process_team_message_stream(
                             is_complete=False,
                         )
                         if isinstance(event, dict):
-                            if event.get("event_type") == "team.error":
+                            if event.get("event_type") in {"team.error", "chat.error"}:
                                 break
                     if drained:
                         logger.info(
@@ -1907,6 +1978,160 @@ async def process_team_message_stream(
                 )
 
 
+def _extract_harness_round_error(result: Any) -> str:
+    """Extract the upstream failure text from a harness round ``result`` payload."""
+    if not isinstance(result, dict):
+        return ""
+    for key in ("error", "output", "message"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    nested = result.get("output")
+    if isinstance(nested, dict):
+        for key in ("error", "output", "message"):
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+async def _resolve_leader_harness(team_name: str) -> Any | None:
+    """Return the leader ``MemberRuntime`` harness for an active Runner team pool entry."""
+    try:
+        from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+        from jiuwenswarm.agents.harness.team.team_manager import (
+            _runner_team_runtime_manager,
+        )
+
+        runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
+        active_team = await runtime_mgr.pool.get(team_name)
+        if active_team is None:
+            return None
+        team_agent = getattr(active_team, "agent", None)
+        if team_agent is None:
+            return None
+        role = getattr(team_agent, "role", None)
+        role_value = getattr(role, "value", role)
+        if str(role_value or "").strip().lower() != TeamRole.LEADER.value:
+            return None
+        resources = getattr(team_agent, "resources", None)
+        harness = getattr(resources, "harness", None) if resources is not None else None
+        return harness
+    except Exception as exc:
+        logger.debug(
+            "[TeamHelpers] resolve leader harness failed: team_name=%s error=%s",
+            team_name,
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
+async def _watch_leader_harness_failures(
+    channel_id: str | None,
+    session_id: str,
+    round_id: int,
+    team_name: str,
+    *,
+    error_state: dict[str, bool],
+) -> None:
+    """Bridge leader harness round failures when ``task_failed`` never reaches the team stream."""
+    pending_error: str | None = None
+
+    async def _emit_failure(error_text: str) -> None:
+        if error_state["emitted"] or not error_text:
+            return
+        error_state["emitted"] = True
+        _emit_team_chat_error(
+            channel_id,
+            session_id,
+            round_id,
+            error_text,
+            stop_processing=False,
+        )
+        _publish_team_event(
+            channel_id,
+            session_id,
+            {
+                "event_type": "chat.final",
+                "content": "",
+                "session_id": session_id,
+                "rid": round_id,
+            },
+        )
+        _publish_team_event(
+            channel_id,
+            session_id,
+            {
+                "event_type": "chat.processing_status",
+                "session_id": session_id,
+                "rid": round_id,
+                "is_processing": False,
+                "is_complete": True,
+            },
+        )
+
+    async def on_round(
+        *,
+        kind: str,
+        round_id: int | None = None,
+        result: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        nonlocal pending_error
+        if kind == "started":
+            pending_error = None
+            return
+        if kind != "failed":
+            return
+        error_text = _extract_harness_round_error(result)
+        if error_text:
+            pending_error = error_text
+
+    async def on_state(*, new: Any = None, **_kwargs: Any) -> None:
+        from openjiuwen.agent_teams.harness.state import HarnessState
+
+        if new is not HarnessState.IDLE or not pending_error:
+            return
+        await _emit_failure(pending_error)
+
+    harness = None
+    for _ in range(100):
+        harness = await _resolve_leader_harness(team_name)
+        if harness is not None and getattr(harness, "session_id", None):
+            break
+        await asyncio.sleep(0.1)
+    if harness is None:
+        logger.debug(
+            "[TeamHelpers] leader failure bridge skipped: harness unavailable team=%s session=%s",
+            team_name,
+            session_id,
+        )
+        return
+
+    try:
+        await harness.subscribe(on_state=on_state, on_round=on_round)
+        logger.info(
+            "[TeamHelpers] leader failure bridge attached: channel_id=%s session_id=%s team=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            team_name,
+        )
+        while not error_state["emitted"]:
+            await asyncio.sleep(0.1)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "[TeamHelpers] leader failure bridge failed: channel_id=%s session_id=%s error=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            exc,
+            exc_info=True,
+        )
+
+
 async def _consume_stream_with_query(
     channel_id: str | None,
     session_id: str,
@@ -1921,6 +2146,8 @@ async def _consume_stream_with_query(
     hide_dm: bool = bool(_envs.get("hide_dm", False))
     received_chunks = 0
     emitted_ask_user_request_ids: set[str] = set()
+    failure_bridge_task: asyncio.Task | None = None
+    leader_error_state = {"emitted": False}
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
     tm_ = get_team_manager(channel_id)
@@ -2036,6 +2263,16 @@ async def _consume_stream_with_query(
                         session_id,
                         source="runtime_ready",
                     )
+                    if failure_bridge_task is None:
+                        failure_bridge_task = asyncio.create_task(
+                            _watch_leader_harness_failures(
+                                channel_id,
+                                session_id,
+                                round_id,
+                                ready_team_name,
+                                error_state=leader_error_state,
+                            )
+                        )
                 elif parsed.get("event_type") == "team.interact.failed":
                     reason = str(parsed.get("reason") or "").strip()
                     error_msg = _INTERACT_REASON_ERROR_MAP.get(
@@ -2090,9 +2327,18 @@ async def _consume_stream_with_query(
                     )
                     continue
                 elif parsed.get("event_type") == "chat.error":
-                    _broadcast_event(channel_id, session_id, parsed)
+                    error_text = _extract_team_error_text(parsed.get("error"))
                     if is_leader:
-                        _broadcast_event(
+                        leader_error_state["emitted"] = True
+                        if error_text:
+                            _emit_team_chat_error(
+                                channel_id,
+                                session_id,
+                                round_id,
+                                error_text,
+                                stop_processing=False,
+                            )
+                        _publish_team_event(
                             channel_id,
                             session_id,
                             {
@@ -2102,6 +2348,19 @@ async def _consume_stream_with_query(
                                 "rid": round_id,
                             },
                         )
+                        _publish_team_event(
+                            channel_id,
+                            session_id,
+                            {
+                                "event_type": "chat.processing_status",
+                                "session_id": session_id,
+                                "rid": round_id,
+                                "is_processing": False,
+                                "is_complete": True,
+                            },
+                        )
+                    elif error_text:
+                        _publish_team_event(channel_id, session_id, parsed)
                     continue
                 # chat.final: if team events (team.member / team.task /
                 # workflow.updated) have already been broadcast (tracked
@@ -2138,29 +2397,12 @@ async def _consume_stream_with_query(
                     continue
                 _broadcast_event(channel_id, session_id, parsed)
 
-        # If stream ended without any chunks, broadcast an error event
-        if received_chunks == 0:
-            logger.warning(
-                "[TeamHelpers] stream ended with no output: channel_id=%s session_id=%s",
-                _resolve_channel_id(channel_id),
-                session_id,
-            )
-            _broadcast_event(
-                channel_id,
-                session_id,
-                {
-                    "event_type": "team.error",
-                    "error": "Team stream ended with no output (possible pool/DB inconsistency or internal error)",
-                    "session_id": session_id,
-                },
-            )
-        else:
-            logger.info(
-                "[TeamHelpers] stream ended: channel_id=%s session_id=%s chunks=%s",
-                _resolve_channel_id(channel_id),
-                session_id,
-                received_chunks,
-            )
+        logger.info(
+            "[TeamHelpers] stream ended: channel_id=%s session_id=%s chunks=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            received_chunks,
+        )
     except asyncio.CancelledError:
         logger.info(
             "[TeamHelpers] stream cancelled: channel_id=%s session_id=%s",
@@ -2176,16 +2418,17 @@ async def _consume_stream_with_query(
             exc,
             exc_info=True,
         )
-        _broadcast_event(
+        _emit_team_chat_error(
             channel_id,
             session_id,
-            {
-                "event_type": "team.error",
-                "error": str(exc),
-                "session_id": session_id,
-            },
+            round_id,
+            str(exc),
         )
     finally:
+        if failure_bridge_task is not None:
+            failure_bridge_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await failure_bridge_task
         # Flush & close the stream trace logger if one was opened.
         if lg is not None:
             try:

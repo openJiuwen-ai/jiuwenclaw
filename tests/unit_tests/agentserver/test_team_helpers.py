@@ -2879,16 +2879,18 @@ async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_an
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
     fake_mgr = _FakeManager()
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
-    monkeypatch.setattr(
-        team_helpers,
-        "_broadcast_event",
-        lambda channel_id, session_id, event: (
-            broadcasted.append(event),
+
+    def _capture_event(channel_id, session_id, event):
+        broadcasted.append(event)
+        if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES:
             fake_mgr.mark_seen_team_events(session_id)
-            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
-            else None,
-        ),
-    )
+
+    async def _noop_snapshot(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(team_helpers, "_publish_team_event", _capture_event)
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _capture_event)
+    monkeypatch.setattr(team_helpers, "_broadcast_team_state_snapshot", _noop_snapshot)
 
     await _TeamHelpersTestApi.consume_stream_with_query(
         "web",
@@ -2901,6 +2903,7 @@ async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_an
         "chat.processing_status",
         "chat.error",
         "chat.final",
+        "chat.processing_status",
         "team.completed",
     ]
     assert "deepseek-v4-X" in broadcasted[1]["error"]
@@ -2912,8 +2915,148 @@ async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_an
         "session_id": "sess-leader-error",
         "rid": 1,
     }
-    assert not any(
-        event.get("event_type") == "chat.processing_status" and event.get("is_processing") is False
+    assert broadcasted[3]["event_type"] == "chat.processing_status"
+    assert broadcasted[3]["is_processing"] is False
+    assert broadcasted[3]["is_complete"] is True
+
+
+@pytest.mark.anyio
+async def test_broadcast_event_converts_team_error_to_chat_error_with_original_message(monkeypatch):
+    broadcasted: list[dict] = []
+    detail = (
+        "[181001] model call failed, reason: openAI API async stream error: "
+        "NotFoundError: Error code: 404 - {'detail': 'Not Found'}"
+    )
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
+            broadcasted.append(event)
+
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
+
+    team_helpers._broadcast_event("web", "sess-team-error", {
+        "event_type": "team.error",
+        "error": detail,
+        "session_id": "sess-team-error",
+        "rid": 3,
+    })
+
+    assert [event["event_type"] for event in broadcasted] == [
+        "chat.error",
+        "chat.processing_status",
+    ]
+    assert broadcasted[0]["error"] == detail
+    assert broadcasted[0]["rid"] == 3
+    assert broadcasted[1]["is_processing"] is False
+    assert broadcasted[1]["is_complete"] is True
+
+
+@pytest.mark.anyio
+async def test_consume_stream_with_query_bridges_leader_harness_failure_when_stream_has_no_task_failed(
+    monkeypatch,
+):
+    broadcasted: list[dict] = []
+    detail = (
+        "[181001] model call failed, reason: openAI API async stream error: "
+        "NotFoundError: Error code: 404 - {'detail': 'Not Found'}"
+    )
+    round_callbacks: dict[str, Any] = {}
+    state_callbacks: dict[str, Any] = {}
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="message",
+            payload={"event_type": "team.runtime_ready", "team_name": "demo-team"},
+            role=TeamRole.LEADER,
+        )
+        await asyncio.sleep(0.3)
+
+    class _FakeHarness:
+        session_id = "sess-bridge-error"
+
+        async def subscribe(self, *, on_state=None, on_round=None):
+            if on_round is not None:
+                round_callbacks["on_round"] = on_round
+            if on_state is not None:
+                state_callbacks["on_state"] = on_state
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def commit_runtime_ready(session_id: str, team_name: str) -> None:
+            pass
+
+        @staticmethod
+        async def attach_distributed_hooks_for_runner_runtime(**kwargs) -> None:
+            pass
+
+    async def _fake_resolve_leader_harness(team_name: str):
+        assert team_name == "demo-team"
+        return _FakeHarness()
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    monkeypatch.setattr(team_helpers, "_resolve_leader_harness", _fake_resolve_leader_harness)
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
+
+    def _capture_event(channel_id, session_id, event):
+        broadcasted.append(event)
+        if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES:
+            fake_mgr.mark_seen_team_events(session_id)
+
+    async def _noop_snapshot(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(team_helpers, "_publish_team_event", _capture_event)
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _capture_event)
+    monkeypatch.setattr(team_helpers, "_broadcast_team_state_snapshot", _noop_snapshot)
+    monkeypatch.setattr(team_helpers, "sync_team_identity_metadata", lambda **kwargs: None)
+    monkeypatch.setattr(
+        team_helpers,
+        "ensure_monitor_handlers_for_active_runtime",
+        _noop_snapshot,
+    )
+    monkeypatch.setattr(team_helpers, "ensure_team_evolution_watcher", lambda *args, **kwargs: None)
+
+    consume_task = asyncio.create_task(
+        _TeamHelpersTestApi.consume_stream_with_query(
+            "web",
+            "sess-bridge-error",
+            SimpleNamespace(team_name="demo-team"),
+            "hello",
+        )
+    )
+
+    for _ in range(50):
+        if "on_round" in round_callbacks:
+            break
+        await asyncio.sleep(0.05)
+    assert "on_round" in round_callbacks
+
+    from openjiuwen.agent_teams.harness.state import HarnessState
+
+    await round_callbacks["on_round"](kind="failed", round_id=1, result={"error": detail})
+    await state_callbacks["on_state"](new=HarnessState.IDLE)
+
+    await asyncio.wait_for(consume_task, timeout=2.0)
+
+    assert "chat.error" in [event["event_type"] for event in broadcasted]
+    error_event = next(event for event in broadcasted if event["event_type"] == "chat.error")
+    assert detail in error_event["error"]
+    assert any(
+        event.get("event_type") == "chat.processing_status"
+        and event.get("is_processing") is False
         for event in broadcasted
     )
 
@@ -2952,16 +3095,18 @@ async def test_consume_stream_with_query_does_not_final_teammate_task_failed(mon
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
     fake_mgr = _FakeManager()
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
-    monkeypatch.setattr(
-        team_helpers,
-        "_broadcast_event",
-        lambda channel_id, session_id, event: (
-            broadcasted.append(event),
+
+    def _capture_event(channel_id, session_id, event):
+        broadcasted.append(event)
+        if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES:
             fake_mgr.mark_seen_team_events(session_id)
-            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
-            else None,
-        ),
-    )
+
+    async def _noop_snapshot(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(team_helpers, "_publish_team_event", _capture_event)
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _capture_event)
+    monkeypatch.setattr(team_helpers, "_broadcast_team_state_snapshot", _noop_snapshot)
 
     await _TeamHelpersTestApi.consume_stream_with_query(
         "web",
