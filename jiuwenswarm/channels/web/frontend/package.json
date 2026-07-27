@@ -11,6 +11,7 @@
     "test:code-turn-diff-binding": "tsc src/features/code-mode/codeTurnDiffBinding.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/code-turn-diff-binding --skipLibCheck --noEmitOnError && node --test tests/codeTurnDiffBinding.test.mjs",
     "test:openai-account-model-state": "tsc src/components/ConfigPanel/openaiAccountModelState.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/openai-account-model-state --skipLibCheck && node --test tests/openaiAccountModelState.test.mjs",
     "test:tool-result-lifecycle": "tsc src/stores/toolResultLifecycle.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/tool-result-lifecycle --skipLibCheck --noEmitOnError && node --test tests/toolResultLifecycle.test.mjs",
+    "test:team-panel-state": "tsc src/features/teamPanelStateNormalize.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/team-panel-state --skipLibCheck --noEmitOnError && node --test tests/teamPanelState.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
