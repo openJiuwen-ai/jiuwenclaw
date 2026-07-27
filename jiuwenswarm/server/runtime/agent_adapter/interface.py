@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
 
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
+from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
@@ -342,7 +342,7 @@ def _split_a2ui_stream_content(previous_probe: str, content: str) -> tuple[str, 
     return content[:split_index], content[split_index:]
 
 
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
 

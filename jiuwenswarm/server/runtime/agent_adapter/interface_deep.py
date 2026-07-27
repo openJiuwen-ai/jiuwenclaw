@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
 
 import yaml
-from dotenv import load_dotenv
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
@@ -298,8 +297,9 @@ from jiuwenswarm.common.utils import (
     get_runtime_state_path,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 TodoModifyTool = CompatibleTodoModifyTool
 install_todo_modify_compat_patch()
@@ -4429,7 +4429,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._dreaming_mode = mode if mode and mode.startswith("agent") else "agent"
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
-        load_dotenv(dotenv_path=get_env_file(), override=True)
+        load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
         config_base = get_config()
         self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)

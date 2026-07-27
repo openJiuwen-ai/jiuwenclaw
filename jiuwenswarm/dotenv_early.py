@@ -65,6 +65,49 @@ def _early_error(component_name: str, message: str) -> None:
     _early_logger.error("[%s] %s", component_name, message)
 
 
+# Port / bind keys injected by jiuwenswarm-desktop for the current session.
+# When JIUWENSWARM_DESKTOP=1, load_dotenv(override=True) must not clobber them
+# with stale values from ~/.jiuwenswarm/config/.env (e.g. a prior CLI fallback).
+DESKTOP_PRESERVED_ENV_KEYS = (
+    "WEB_HOST",
+    "WEB_PORT",
+    "GATEWAY_PORT",
+    "AGENT_SERVER_PORT",
+    "AGENT_PORT",
+    "FRONTEND_PORT",
+)
+
+
+def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True) -> bool:
+    """load_dotenv wrapper that keeps desktop-injected port env vars.
+
+    Non-desktop processes behave exactly like ``load_dotenv``. Under
+    ``JIUWENSWARM_DESKTOP=1``, any of ``DESKTOP_PRESERVED_ENV_KEYS`` already
+    present in ``os.environ`` are restored after loading so a session-local
+    port remap survives ``override=True``.
+
+    Also drops ``AGENT_SERVER_URL`` in desktop mode: Gateway prefers that URL
+    over ``AGENT_SERVER_PORT``, so a stale value from .env/shell would bypass
+    the remapped agent port. Without the URL, Gateway builds
+    ``ws://{host}:{AGENT_SERVER_PORT}`` from the injected port.
+    """
+    from dotenv import load_dotenv
+
+    preserve = os.environ.get("JIUWENSWARM_DESKTOP") == "1"
+    saved = (
+        {k: os.environ[k] for k in DESKTOP_PRESERVED_ENV_KEYS if k in os.environ}
+        if preserve
+        else {}
+    )
+    loaded = load_dotenv(dotenv_path=dotenv_path, override=override)
+    if saved:
+        os.environ.update(saved)
+    if preserve:
+        # Prefer remapped AGENT_SERVER_PORT over any URL from .env/parent env.
+        os.environ.pop("AGENT_SERVER_URL", None)
+    return loaded
+
+
 def parse_dotenv_early(component_name: str = "jiuwenswarm") -> Path | None:
     """Parse --dotenv/--name arguments and load env before jiuwenswarm imports.
 
@@ -110,8 +153,7 @@ def parse_dotenv_early(component_name: str = "jiuwenswarm") -> Path | None:
         # --dotenv takes priority
         dotenv_file = Path(dotenv_path).expanduser().resolve()
         if dotenv_file.exists():
-            from dotenv import load_dotenv
-            load_dotenv(dotenv_file, override=True)
+            load_dotenv_runtime(dotenv_file, override=True)
             result = dotenv_file
         else:
             _early_warning(component_name, f"--dotenv file not found: {dotenv_file}")
@@ -188,8 +230,7 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
     # Load bootstrap .env
     bootstrap_env = workspace / ".env"
     if bootstrap_env.exists():
-        from dotenv import load_dotenv
-        load_dotenv(bootstrap_env, override=True)
+        load_dotenv_runtime(bootstrap_env, override=True)
         return bootstrap_env
     else:
         # Bootstrap .env doesn't exist - need to create it
@@ -197,8 +238,7 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
         from jiuwenswarm.instance_manager.bootstrap import _create_basic_bootstrap_env
         _create_basic_bootstrap_env(name, workspace, component_name)
         if bootstrap_env.exists():
-            from dotenv import load_dotenv
-            load_dotenv(bootstrap_env, override=True)
+            load_dotenv_runtime(bootstrap_env, override=True)
             return bootstrap_env
         return None
 
@@ -251,7 +291,9 @@ def load_instance_bootstrap_by_name(name: str) -> Path | None:
 
 
 __all__ = [
+    "DESKTOP_PRESERVED_ENV_KEYS",
     "parse_dotenv_early",
+    "load_dotenv_runtime",
     "get_parsed_dotenv",
     "set_component_name",
     "load_instance_bootstrap_by_name",

@@ -20,11 +20,10 @@ import logging.handlers
 import os
 import sys
 
-from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
-from jiuwenswarm.dotenv_early import parse_dotenv_early
+from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-agentserver")
 
 # --- Now safe to import jiuwenswarm modules ---
@@ -115,7 +114,7 @@ else:
     _perm_ns_logger.propagate = False
 
 # Load env from user workspace config/.env
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
 from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
