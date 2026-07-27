@@ -52,15 +52,15 @@ continue the task in the conversation.
 
 ### 2.4 Troubleshooting
 
-If the browser service fails to start, follow these steps to troubleshoot:
+If the browser task fails to execute, follow these steps to troubleshoot:
 
 | Issue | Possible Cause | Solution |
 |-------|---------------|----------|
-| No response after clicking "Start browser service" | Incorrect Chrome path configuration | Check if `CHROME_PATH` is correct, ensure the path points to the actual `chrome.exe` |
-| Chrome starts and immediately closes | Port is occupied | Check if port `9222` is occupied by other processes, or modify `remote_debugging_port` in `config.yaml` |
-| Chrome not installed | Chrome not installed or path error | Install Chrome browser and update `CHROME_PATH` configuration |
-| Frontend shows connection failed | Browser service not started properly | Check backend service logs, confirm `browser_start_client.py` executed successfully |
-| Cannot open specific webpage | Network or permission issues | Check network connectivity, ensure the target website is accessible, test manually in the popped-up Chrome if necessary |
+| First browser task has no response | Incorrect Chrome path configuration | Check `browser.chrome_path` in `config.yaml`, ensure the path points to an actual `chrome.exe` |
+| Chrome starts and immediately closes | Port is occupied | Check if port `9333` is occupied; the managed browser automatically allocates free ports |
+| Chrome not installed | Chrome not installed or path error | Install Chrome browser and update `browser.chrome_path` configuration |
+| Frontend shows connection failed | Browser runtime not started properly | Check backend service logs, confirm the browser agent started successfully |
+| Cannot open specific webpage | Network or permission issues | Check network connectivity, ensure the target website is accessible, test manually in the managed Chrome window if necessary |
 
 ## 3. Usage guidance
 
