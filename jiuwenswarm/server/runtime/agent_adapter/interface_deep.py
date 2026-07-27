@@ -3881,6 +3881,68 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] PrewarmRail create failed: %s", exc)
             return None
 
+    def _build_model_routing(self, config: dict[str, Any] | None = None) -> Any | None:
+        """构建 ModelRoutingRail（模型路由）。
+
+        - 使能：config.yaml ``model_routing.enabled`` = true。
+        - ``model_routing.apply=true``：apply_routing=True 真切换（默认 false 只推荐不切）。
+        - ``model_routing.privacy_check=true``：开隐私检查（默认关）。
+        - ``model_routing.classifier``：分类器专用模型（只有 api_base/api_key/model_name/temperature 四个字段）；
+          api_base 非空即生效；不配则用 agent 当前 LLM。
+        - 能力表来自 config.yaml ``models.defaults`` + ``models.vision``（后者作 model_type="vision"
+          候选，仅含图请求参与路由）；model_builder 传 _build_model_from_entry 使能力表带 Model 对象（真切换前置）。
+        """
+        mr_cfg = (config or {}).get("model_routing") or {}
+        if not (mr_cfg.get("enabled") is True):
+            return None
+
+        # （模板拷贝已在 classifier/capability/privacy 模块加载时完成，此处不再重复）
+
+        try:
+            from jiuwenswarm.agents.harness.common.rails.model_routing import (
+                ModelRoutingRail,
+                build_capability_table_from_config,
+                ensure_routing_state_files,
+                load_mapper_config,
+                load_classifier_impl,
+            )
+
+            apply_routing = bool(mr_cfg.get("apply", False))
+            stats_path = str(mr_cfg.get("stats_path") or "").strip() or None
+            caps = build_capability_table_from_config(
+                config,
+                model_builder=JiuWenSwarmDeepAdapter._build_model_from_entry,
+            )
+            # 分类器：从 classifier_mapper.json 加载（exec 注入）
+            ensure_routing_state_files()
+            classifier = None
+            mapper = {}
+            try:
+                mapper = load_mapper_config()
+                classifier, _ = load_classifier_impl(mapper)
+            except Exception as exc:
+                logger.debug("[JiuWenSwarmDeepAdapter] classifier load skipped: %s", exc)
+            rail = ModelRoutingRail(
+                caps,
+                apply_routing=apply_routing,
+                stats_path=stats_path,
+                classifier=classifier,
+                mapper=mapper,
+                privacy_check=bool(mr_cfg.get("privacy_check", False)),
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] ModelRoutingRail create success, "
+                "%d models, apply_routing=%s, stats_path=%s, classifier=%s",
+                len(caps),
+                apply_routing,
+                stats_path or "(default)",
+                "dedicated" if classifier is not None else "agent-llm",
+            )
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] ModelRoutingRail create failed: %s", exc)
+            return None
+
     async def refresh_skill_rails(self) -> None:
         """轻量刷新 skill 相关 rail，避免全量重建 agent 实例.
 
@@ -3974,6 +4036,7 @@ class JiuWenSwarmDeepAdapter:
                 {"config": self._config_cache},
             ),
             _RailBuildInfo("_prewarm_rail", self._build_prewarm_rail),
+            _RailBuildInfo("_model_routing_rail", self._build_model_routing, {"config": config_base}),
         ]
 
         # SkillEvolutionRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销

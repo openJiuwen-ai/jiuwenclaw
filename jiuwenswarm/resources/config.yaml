@@ -205,6 +205,10 @@ models:
       model_config_obj:
         temperature: 0.95
       is_default: true
+      is_trusted: false
+      model_score: null
+      model_expertise_category: []
+      model_type: ""
   video:
       model_client_config:
         api_base: ${VIDEO_API_BASE}
@@ -350,6 +354,13 @@ team_observability:
   langfuse_secret_key: ""           # Langfuse OTLP 认证 secret key（可选）
   traces_dir: ""                    # file exporter 输出目录，默认 ~/.jiuwenswarm/.trace
   file_retention_days: 7            # file exporter 文件保留天数
+
+# model_routing — 模型路由 Rail（按任务分类/隐私/能力表推荐或切换模型）
+model_routing:
+  enabled: true                    # 总开关：true 注册 rail（默认关，零影响）
+  apply: false                     # 真切换开关：true 调 set_llm 真切模型；false 只推荐不切
+  privacy_check: false             # 隐私检查开关：true 检查隐私；false 跳过（默认关）
+  stats_path: ""                    # per-model token 统计文件路径；空=默认 ~/.jiuwenswarm/config/routing_state/model_routing_list.json
 
 # ============================================================
 # 单 Agent / Coding Agent 可观测性配置

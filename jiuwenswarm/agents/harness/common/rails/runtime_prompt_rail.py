@@ -216,9 +216,27 @@ class RuntimePromptRail(DeepAgentRail):
         if not available_models:
             available_models = configured_models
         fallback_model = configured_models[0] if configured_models else ""
+        # 模型名优先级：
+        # ctx.extra["_model_routing_used_cap"] 存在 → 路由切了模型 → 读 _config.model_name
+        # 否则 → 用 self._model_name（前端传入值）
+        # 兜底：runtime_state 文件 > config fallback
+        routed_model = ""
+        routing_used_cap = (
+            ctx.extra.get("_model_routing_used_cap")
+            if isinstance(ctx.extra, dict)
+            else None
+        )
+        if routing_used_cap is not None:
+            try:
+                cfg = getattr(ctx.agent, "_config", None) or getattr(ctx.agent, "config", None)
+                if cfg is not None:
+                    routed_model = getattr(cfg, "model_name", "") or ""
+            except Exception:
+                pass
         model = str(
-            runtime_state.get("model")
+            routed_model
             or self._model_name
+            or runtime_state.get("model")
             or fallback_model
             or "unknown"
         ).strip()
