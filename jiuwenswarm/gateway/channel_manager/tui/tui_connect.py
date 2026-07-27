@@ -1194,10 +1194,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 response = await _probe(1)
             except Exception as first_exc:  # noqa: BLE001
                 logger.info(
-                    "[cli config.validate_model] max_tokens=1 failed, retrying with 16: %s",
+                    "[cli config.validate_model] max_tokens=1 failed, retrying with 256: %s",
                     first_exc,
                 )
-                response = await _probe(16)
+                response = await _probe(256)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[cli config.validate_model] LLM probe failed: %s", exc)
             await channel.send_response(
@@ -1215,6 +1215,18 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             content = response.get("content", "")
         else:
             content = str(response)
+
+        if not (isinstance(content, str) and content.strip()):
+            try:
+                response = await _probe(256)
+                if hasattr(response, "content"):
+                    content = response.content
+                elif isinstance(response, dict):
+                    content = response.get("content", "")
+                else:
+                    content = str(response)
+            except Exception:  # noqa: BLE001
+                pass
 
         if not (isinstance(content, str) and content.strip()):
             await channel.send_response(
