@@ -127,6 +127,151 @@ class TestLoggerSetup:
         assert handler_types.count("SafeRotatingFileHandler") == 5
 
 
+class TestSourceRecordMasking:
+    """Test install_source_record_masking (source-level LogRecord factory masking).
+
+    Covers the security-critical paths called out in review:
+    - third-party (non-jiuwenswarm) logger message masking,
+    - traceback-embedded secret masking,
+    - double-masking safety (_is_already_masked keeps fingerprint stable),
+    - idempotency.
+    """
+
+    PLAINTEXT_KEY = "sk-epignnbeppwjigp932ngefebnof"
+
+    @staticmethod
+    def _capture_logger(name):
+        """Build a logger with its own handler (no SensitiveDataFilter), so any
+        masking observed must come from the source record factory, not handler filter.
+        """
+        import io
+        import logging
+
+        lg = logging.getLogger(name)
+        for h in lg.handlers[:]:
+            lg.removeHandler(h)
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(logging.Formatter("%(name)s: %(message)s\n%(exc_text)s"))
+        lg.addHandler(handler)
+        lg.setLevel(logging.DEBUG)
+        lg.propagate = False
+        return lg, buf
+
+    @staticmethod
+    def _save_state():
+        """Snapshot the global LogRecord factory + install flag for later restore."""
+        import logging
+
+        return logging.getLogRecordFactory(), utils._source_record_masking_installed
+
+    @staticmethod
+    def _restore_state(state):
+        """Restore the global factory + install flag (avoid cross-test pollution)."""
+        import logging
+
+        factory, flag = state
+        logging.setLogRecordFactory(factory)
+        utils._source_record_masking_installed = flag
+
+    def test_third_party_logger_message_masked(self):
+        """Source factory masks messages from non-jiuwenswarm loggers (openjiuwen/
+        openai/httpx style) that bypass the jiuwenswarm handler-level filter."""
+        import logging
+
+        state = self._save_state()
+        try:
+            # Reset to plain factory, then install — proves masking comes from install.
+            logging.setLogRecordFactory(logging.LogRecord)
+            utils._source_record_masking_installed = False
+            utils.install_source_record_masking()
+
+            lg, buf = self._capture_logger("openjiuwen.harness.security")
+            key = self.PLAINTEXT_KEY
+            lg.info("config: api_key=%s, base=https://x.com", key)
+            out = buf.getvalue()
+            assert key not in out, "plaintext api_key leaked from third-party logger"
+            assert "******" in out, "api_key not masked"
+            assert "https://x.com" in out, "non-sensitive api_base should be preserved"
+        finally:
+            self._restore_state(state)
+
+    def test_traceback_embedded_secret_masked(self):
+        """logger.exception masks api_key embedded in the rendered traceback."""
+        import logging
+
+        state = self._save_state()
+        try:
+            logging.setLogRecordFactory(logging.LogRecord)
+            utils._source_record_masking_installed = False
+            utils.install_source_record_masking()
+
+            lg, buf = self._capture_logger("openai._base_client")
+            key = self.PLAINTEXT_KEY
+            try:
+                raise ValueError("build failed: api_key=" + key)
+            except ValueError:
+                lg.exception("init error")
+            out = buf.getvalue()
+            assert key not in out, "plaintext api_key leaked via traceback"
+            assert "Traceback" in out, "traceback should still be rendered"
+            assert "******" in out, "api_key in traceback not masked"
+        finally:
+            self._restore_state(state)
+
+    def test_double_masking_preserves_fingerprint(self):
+        """A record masked at source, then re-processed by _sanitize_log_text (handler
+        layer), keeps the same fingerprint — _is_already_masked prevents 'fingerprint
+        of fingerprint' corruption."""
+        import logging
+        import re
+
+        state = self._save_state()
+        try:
+            logging.setLogRecordFactory(logging.LogRecord)
+            utils._source_record_masking_installed = False
+            utils.install_source_record_masking()
+
+            lg, buf = self._capture_logger("httpx")
+            key = self.PLAINTEXT_KEY
+            lg.info("api_key=%s", key)
+            source_out = buf.getvalue()
+
+            # Re-run the handler-layer sanitizer on the already-masked text.
+            double_masked = utils._sanitize_log_text(source_out)
+
+            fp_source = re.search(r"fp:([0-9a-f]+)", source_out)
+            fp_double = re.search(r"fp:([0-9a-f]+)", double_masked)
+            assert fp_source, "source masking should produce a fingerprint"
+            assert fp_double, "double-masked text should still carry a fingerprint"
+            assert fp_source.group(1) == fp_double.group(1), (
+                "fingerprint changed after double masking — _is_already_masked not effective"
+            )
+            # True fingerprint of the plaintext key (cross-check).
+            assert fp_source.group(1) == utils._fingerprint(key)
+        finally:
+            self._restore_state(state)
+
+    def test_install_is_idempotent(self):
+        """Repeated install_source_record_masking calls are safe (no-op after first)."""
+        import logging
+
+        state = self._save_state()
+        try:
+            logging.setLogRecordFactory(logging.LogRecord)
+            utils._source_record_masking_installed = False
+            utils.install_source_record_masking()
+            factory_after_first = logging.getLogRecordFactory()
+            utils.install_source_record_masking()
+            factory_after_second = logging.getLogRecordFactory()
+            assert factory_after_first is factory_after_second, (
+                "second install should not replace the factory (idempotent)"
+            )
+            assert utils._source_record_masking_installed is True
+        finally:
+            self._restore_state(state)
+
+
 class TestUserWorkspace:
     """Test user workspace functions."""
 
