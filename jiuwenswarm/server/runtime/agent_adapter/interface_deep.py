@@ -3920,76 +3920,13 @@ class JiuWenSwarmDeepAdapter:
                 language="cn",
             )
 
-            # ── Auto-load 子类：search 后自动标记为可见 ──
-            class AutoLoadProgressiveToolRail(ProgressiveToolRail):
-                """ProgressiveToolRail variant that auto-loads search results."""
+            # ── JiuWen ProgressiveToolRail（全部 jiuwenswarm 改动在外部文件）──
+            from jiuwenswarm.agents.harness.common.rails.progressive_tool_rail_jiuwen import (
+                JiuWenProgressiveToolRail,
+            )
+            # ── 结束 ──
 
-                _navigation_extra_tools = {"code"}
-                # 只 auto-load top-N（base _search_tools 已按 score 降序返回）。
-                # 全量 auto-load 会把单 token 命中的弱匹配（score=3）也塞进 active 集，
-                # 污染 LRU、触发多余淘汰。LLM 仍看到完整 result 列表，长尾需要时
-                # 手动 load_tools cherry-pick。
-                _auto_load_top_n = 3
-
-                def __init__(self, config):
-                    super().__init__(config)
-                    self._auto_load_session = None
-                    self._ability_snapshot_done = False
-
-                async def before_invoke(self, ctx):
-                    await super().before_invoke(ctx)
-                    # 刷新 ability 快照（每个 rail 实例写一次）：
-                    # 此时 mode 切换已完成、_cached_all_tool_infos 已定型，快照反映
-                    # 真实注册集（含 fast 模式卸载 plan rail 之后的裁剪结果），
-                    # 供 analyze_capture.py 读取，替代已禁用的树检索 rail 的快照职责。
-                    if not self._ability_snapshot_done:
-                        self._ability_snapshot_done = True
-                        try:
-                            from jiuwenswarm.common.prompt_capture import (
-                                get_capture as _get_capture,
-                            )
-                            cap = _get_capture()
-                            if cap is not None:
-                                cap.snapshot_ability_manager(getattr(ctx, "agent", None))
-                        except Exception as exc:
-                            logger.warning(
-                                "[AutoLoadProgressiveToolRail] ability snapshot failed: %s",
-                                exc,
-                            )
-
-                async def before_model_call(self, ctx):
-                    # 保存 session 引用，search_tools 回调中用到
-                    self._auto_load_session = getattr(ctx, "session", None)
-                    await super().before_model_call(ctx)
-
-                async def _search_tools(self, query, limit=10, detail_level=1):
-                    results = await super()._search_tools(query, limit, detail_level)
-                    # ── 自动 load：搜完直接标记为可见，跳过 load_tools ──
-                    # 走基类 _add_loaded_tools，与显式 load_tools 共用同一套
-                    # max_loaded_tools cap + LRU 淘汰（之前这里只做 union、不守 cap，
-                    # 导致 inputs.tools 无界增长）。
-                    session = self._auto_load_session
-                    if session is not None and results:
-                        # 只 auto-load top-N（results 已按 score 降序），
-                        # 完整列表仍 return 给 LLM，长尾用 load_tools 手动装。
-                        top_n = results[: self._auto_load_top_n]
-                        matched_names = [
-                            r.get("name", "") for r in top_n if r.get("name")
-                        ]
-                        if matched_names:
-                            _next, added, evicted = self._add_loaded_tools(
-                                session, matched_names
-                            )
-                            logger.info(
-                                "[AutoLoadProgressiveToolRail] search '%s' → "
-                                "added %d: %s; evicted %d by LRU: %s",
-                                query, len(added), added,
-                                len(evicted), evicted,
-                            )
-                    return results
-            # ── Auto-load 子类结束 ──
-
-            rail = AutoLoadProgressiveToolRail(config)
+            rail = JiuWenProgressiveToolRail(config)
             logger.info(
                 "[JiuWenSwarmDeepAdapter] ProgressiveToolRail created | "
                 "always_visible=%d",
