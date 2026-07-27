@@ -6,11 +6,16 @@ from __future__ import annotations
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 
-from jiuwenclaw.agentserver.deep_agent.prompt_builder import _response_prompt
+from jiuwenclaw.agentserver.deep_agent.prompt_builder import (
+    _final_visible_reply_prompt,
+    _response_prompt,
+)
+
+_RESPONSE_SECTION_NAMES = ("response", "final_visible_reply")
 
 
 class ResponsePromptRail(DeepAgentRail):
-    """Inject the response section as an independent prompt section."""
+    """Inject response format and final-reply rules as independent prompt sections."""
 
     priority = 5
 
@@ -28,7 +33,8 @@ class ResponsePromptRail(DeepAgentRail):
         if _builder is not None:
             self.system_prompt_builder = _builder
         if self.system_prompt_builder is not None:
-            self.system_prompt_builder.remove_section("response")
+            for name in _RESPONSE_SECTION_NAMES:
+                self.system_prompt_builder.remove_section(name)
         self.system_prompt_builder = None
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
@@ -43,5 +49,6 @@ class ResponsePromptRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        section = _response_prompt(self.system_prompt_builder.language or "cn")
-        self.system_prompt_builder.add_section(section)
+        language = self.system_prompt_builder.language or "cn"
+        self.system_prompt_builder.add_section(_response_prompt(language))
+        self.system_prompt_builder.add_section(_final_visible_reply_prompt(language))
