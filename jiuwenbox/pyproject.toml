@@ -15,7 +15,7 @@ dependencies = [
     "httpx>=0.27",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
-    "python-multipart>=0.0.27",  # CVE-2026-42561 MultipartParser DoS
+    "python-multipart>=0.0.9",
     "mcp>=1.27.2,<2",
 ]
 
