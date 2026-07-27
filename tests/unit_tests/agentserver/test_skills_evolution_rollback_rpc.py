@@ -523,3 +523,88 @@ def test_rebuild_not_in_disk_only_evolution_methods():
     assert "skills.evolution.archives" in _DISK_ONLY_EVOLUTION_METHODS
     assert "skills.evolution.rollback" in _DISK_ONLY_EVOLUTION_METHODS
     assert "skills.evolution.rebuild" not in _DISK_ONLY_EVOLUTION_METHODS
+
+
+@pytest.mark.unit
+def test_handle_skills_evolution_rollback_with_skill_path(monkeypatch, tmp_path: Path):
+    """带 skill_path 时只回滚到指定目录，且成功响应包含 skill_path。"""
+    # 准备两个同名 skill 目录，内容不同
+    skills_a = tmp_path / "skills_a"
+    skills_b = tmp_path / "skills_b"
+    skills_a.mkdir()
+    skills_b.mkdir()
+    for base in (skills_a, skills_b):
+        skill_dir = base / "daily-weather"
+        archive_dir = skill_dir / "archive"
+        archive_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"# current body at {base.name}\n",
+            encoding="utf-8",
+        )
+        (archive_dir / "SKILL.v1.0.0.md").write_text(
+            f"# archived body at {base.name}\n",
+            encoding="utf-8",
+        )
+        (archive_dir / "evolutions.v1.0.0.json").write_text(
+            '{"version":"1.0.0","records":[]}',
+            encoding="utf-8",
+        )
+
+    adapter = _make_adapter()
+    adapter._registered_skill_dirs = [str(skills_a), str(skills_b)]
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_build_skill_evolution_rail",
+        lambda self, _config: (_ for _ in ()).throw(
+            AssertionError("rollback must not build EvolutionRail")
+        ),
+    )
+
+    # 指定 skills_b 下的 skill_path
+    skill_path = skills_b / "daily-weather" / "SKILL.md"
+    result = asyncio.run(
+        adapter.handle_skills_evolution_rollback({
+            "name": "daily-weather",
+            "version": "SKILL.v1.0.0.md",
+            "skill_path": str(skill_path),
+        })
+    )
+
+    assert result["success"] is True
+    assert result["rolled_back"] is True
+    assert result["skill_path"] == str(skill_path)
+    assert "SKILL.v1.0.0.md" in result["version"]
+    assert (skills_b / "daily-weather" / "SKILL.md").read_text(encoding="utf-8") == "# archived body at skills_b\n"
+    # 只有 skills_b 的目标版本被删除，skills_a 的保持不变
+    assert not (skills_b / "daily-weather" / "archive" / "SKILL.v1.0.0.md").exists()
+    assert (skills_a / "daily-weather" / "archive" / "SKILL.v1.0.0.md").exists()
+    assert (skills_a / "daily-weather" / "SKILL.md").read_text(encoding="utf-8") == "# current body at skills_a\n"
+
+
+@pytest.mark.unit
+def test_handle_skills_evolution_rollback_rejects_mismatched_skill_dir_name(monkeypatch, tmp_path: Path):
+    """skill_path 的目录名与 name 不一致时抛出错误。"""
+    skill_dir = tmp_path / "wrong-name"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# dummy\n", encoding="utf-8")
+    adapter = _make_adapter()
+    adapter._registered_skill_dirs = [str(tmp_path)]
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+
+    with pytest.raises(ValueError, match="目录名必须与 name 一致"):
+        asyncio.run(
+            adapter.handle_skills_evolution_rollback({
+                "name": "daily-weather",
+                "version": "latest",
+                "skill_path": str(skill_dir / "SKILL.md"),
+            })
+        )
