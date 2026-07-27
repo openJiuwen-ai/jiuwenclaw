@@ -470,6 +470,41 @@ class XiaoyiChannel(BaseChannel):
             self._team_tasks.add(team_task_key)
         is_team_session = team_task_key in self._team_tasks
 
+        # keepalive 是 jiuwenswarm 流空窗期(如 team 长任务后台执行工具)每 10s
+        # 发出的保活帧，payload 仅 {event_type: keepalive}，无 content。原本会漏到
+        # 下方 text 管道，被当成 text="\n" 的空内容 artifact-update 推给小艺——
+        # 小艺侧 120s 超时机制只认实质 content，收到一连串空帧判定超时，回
+        # "稍等，稍等片刻再试试"。这里改为转成一条 A2A status-update(state=working)
+        # 推给小艺：带实质状态文本、is_final=False，既保活又满足超时判定。
+        if event_name == "keepalive":
+            if session_id and self._is_session_active(session_id, task_id):
+                for url_key in list(self._ws_connections.keys()):
+                    await self._send_status_update_with_state(
+                        task_id,
+                        session_id,
+                        "正在处理中，请稍候~",
+                        "working",
+                        url_key,
+                    )
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_KEEPALIVE_TO_STATUS "
+                    "message_id=%s session_id=%s task_id=%s "
+                    "reason=keepalive_as_status_update_to_avait_peer_timeout",
+                    msg.id,
+                    session_id,
+                    task_id,
+                )
+            else:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_KEEPALIVE_SKIPPED "
+                    "message_id=%s session_id=%s task_id=%s "
+                    "reason=keepalive_no_active_session",
+                    msg.id,
+                    session_id,
+                    task_id,
+                )
+            return
+
         if event_name == "team.runtime_ready":
             return
 
