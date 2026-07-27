@@ -1334,6 +1334,7 @@ overflow: hidden;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.4;
 }
 
 .chat-mode-select__chevron,
