@@ -6354,6 +6354,8 @@ class JiuWenClawDeepAdapter:
 
     async def _do_evolve_rollback(
         self, skill_name: str, version: str | None,
+        store=None,
+        skill_path: str | None = None,
     ) -> dict[str, Any]:
         """Shared rollback used by slash command and skills.evolution.rollback RPC.
 
@@ -6361,10 +6363,11 @@ class JiuWenClawDeepAdapter:
 
         Returns a structured dict:
         - ``{ok, rolled_back: False, name, versions}`` when *version* is omitted (list only)
-        - ``{ok, rolled_back: True, name, version[, warning]}`` on successful rollback
+        - ``{ok, rolled_back: True, name, version[, warning][, skill_path]}`` on successful rollback
         - ``{ok: False, error}`` on failure
         """
-        store = self._get_disk_evolution_store()
+        if store is None:
+            store = self._get_disk_evolution_store()
 
         guard = self._guard_bootstrap_skill(skill_name)
         if guard:
@@ -6434,6 +6437,8 @@ class JiuWenClawDeepAdapter:
                 "name": skill_name,
                 "version": resolved,
             }
+            if skill_path:
+                result["skill_path"] = skill_path
             if not evo_ok:
                 result["warning"] = (
                     "Skill body 已回滚，但 evolution log 恢复失败，"
@@ -6472,7 +6477,22 @@ class JiuWenClawDeepAdapter:
         raw_version = params.get("version")
         version = str(raw_version).strip() if raw_version is not None and str(raw_version).strip() else None
 
-        result = await self._do_evolve_rollback(skill_name, version)
+        raw_path = params.get("skill_path") or params.get("path")
+        skill_path = str(raw_path).strip() if raw_path is not None and str(raw_path).strip() else None
+
+        store = None
+        if skill_path:
+            skill_path = self._validate_rebuild_skill_path(skill_path)
+            resolved_path = Path(skill_path).expanduser().resolve()
+            if resolved_path.name != "SKILL.md":
+                raise ValueError(f"skill_path 必须指向 SKILL.md，当前为：{skill_path}")
+            skill_dir = resolved_path.parent
+            if skill_dir.name != skill_name:
+                raise ValueError(f"skill_path 目录名必须与 name 一致：name={skill_name}，目录名={skill_dir.name}")
+            skills_base = skill_dir.parent
+            store = EvolutionStore([str(skills_base)])
+
+        result = await self._do_evolve_rollback(skill_name, version, store=store, skill_path=skill_path)
         if not result.get("ok"):
             raise ValueError(str(result.get("error") or "回滚失败"))
 
@@ -6483,6 +6503,8 @@ class JiuWenClawDeepAdapter:
                 "version": result["version"],
                 "rolled_back": True,
             }
+            if result.get("skill_path"):
+                payload["skill_path"] = result["skill_path"]
             if result.get("warning"):
                 payload["warning"] = result["warning"]
             return payload
