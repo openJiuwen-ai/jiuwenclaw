@@ -100,20 +100,6 @@ def get_xiaoyi_channel() -> Optional["XiaoyiChannel"]:
     return _xiaoyi_channel_instance
 
 
-def _is_invalid_id(value: Any) -> bool:
-    """判断一个 id/task_id 是否"无效"（用于空 message/stream 帧拦截 guard）.
-
-    无效 = None / 空串 / 纯空白 / 占位符字面量 "taskId"。端侧授权完成等事件帧
-    的顶层 id 与 params.id 缺失时，下游会 fallback 成占位符字面量 "taskId"，这种既非
-    真实请求 id、又非用户对话的帧应被 guard 拦截，不当 user 消息路由。真实请求
-    id 形如 "67b958ef-..." 或 "...&45&2de0&0"，本函数返回 False（有效，不拦）。
-    """
-    if value is None:
-        return True
-    text = str(value).strip()
-    return text == "" or text == "taskId"
-
-
 @dataclass
 class DataEvent:
     """Data-only 事件数据结构（工具执行结果）."""
@@ -1173,12 +1159,10 @@ class XiaoyiChannel(BaseChannel):
         text = ""
         file_attachments: list[str] = []
         media_files: list[dict[str, Any]] = []
-        has_content_part = False  # 是否出现过任何业务 part(text/file/data)
 
         for part in parts:
             kind = part.get("kind")
             if kind == "text" and part.get("text"):
-                has_content_part = True
                 text += part.get("text", "")
             elif kind == "file" and part.get("file"):
                 file_info = part["file"]
@@ -1211,7 +1195,6 @@ class XiaoyiChannel(BaseChannel):
                     logger.error(f"XiaoYi: Failed to process file {name}: {e}")
                     file_attachments.append(f"[文件处理失败: {name}]")
             elif kind == "data":
-                has_content_part = True
                 data = part.get("data", {})
                 if isinstance(data, dict):
                     push_id = data.get("variables", {}).get("systemVariables", {}).get("push_id", "")
@@ -1289,18 +1272,19 @@ class XiaoyiChannel(BaseChannel):
             logger.warning("XiaoyiChannel failed to update .xiaoyiruntime", exc_info=True)
 
         raw_msg_id = message.get("id")
-        # ── 空 message/stream 帧拦截（放宽版）───────────────────────────
-        # 端侧会通过同一条 WS 推一些 method=message/stream 的事件帧：它们没有真实
-        # 用户文本/文件，parts 为空或只含无 kind 的占位 part（顶层 id 可能真实也可能
-        # 是占位符 "taskId"）。若不拦截，这条空内容帧会被当成空 user 消息路由进对话流，
-        # 凭空起新 session 让模型对空 input 回无关寒暄（如"晚上好又见面了"/"又收到一条
-        # 空白消息啦"）。判定：无文本且无文件附件且无 media，且未出现任何业务 part
-        # （text/file/data）—— 直接 return，不构造 Message、不路由。
-        # 注：有 data part 的设备指令/事件帧（如 push_id 回写）仍放过，不误拦。
-        # 正常用户消息必有 text 或 file part（has_content_part=True），不会被拦。
-        if not text and not file_attachments and not media_files and not has_content_part:
+        # ── 空 message/stream 帧拦截 ───────────────────────────────────
+        # 端侧会通过同一条 WS 推一些 method=message/stream 的事件帧（切换到下一条
+        # 指令、文件更新通知 files_updated_by_user、push_id 回写等）：它们带一个
+        # data part 但没有真实用户文本/文件，顶层 id 与 task_id 却是有效真值。若
+        # 仅按 id 是否占位符判定（旧版 guard），这类帧因 id 有效而被放过，空内容
+        # 被当成空 user 消息路由进对话流，凭空起新 session 让模型对空 input 回无关
+        # 寒暄（如"看起来你发了一条空消息过来~是不是手滑了"/"内容好像有点空空的"）。
+        # 根治判定：无文本且无文件附件且无 media —— 直接 return，不构造 Message、
+        # 不路由。push_id 回写在上方 for 循环内已完成，此处 return 不影响它；正常
+        # 用户消息必有 text 或 file/media，不会被误拦。
+        if not text and not file_attachments and not media_files:
             logger.info(
-                "[XiaoyiChannel] 跳过空 message/stream 事件帧（无文本/文件/media 且无业务 part）"
+                "[XiaoyiChannel] 跳过空 message/stream 事件帧（无文本/文件/media）"
                 " session_id=%s method=message/stream msg_type=%s task_id=%r raw_msg_id=%r",
                 str(message.get("sessionId") or ""),
                 str(message.get("msgType")),
