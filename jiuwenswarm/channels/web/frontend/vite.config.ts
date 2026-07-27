@@ -3,6 +3,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import svgr from 'vite-plugin-svgr'
 import { spawnSync } from 'child_process'
+import { createHash } from 'node:crypto'
 import path from 'path'
 import fs from 'fs'
 
@@ -11,6 +12,140 @@ type ConfigWithLogger = { logger?: { error?: (msg: string, opts?: { error?: Erro
 interface ErrorWithCode {
   code?: string
 }
+
+/**
+ * 敏感字段键名判断：与后端 jiuwenswarm.common.utils._KV_SENSITIVE_PATTERN +
+ * _NAMED_SENSITIVE_KV_PATTERN 的并集语义保持一致。
+ *
+ * 后端用通用单词边界 ``(?<![A-Za-z0-9])...(?![A-Za-z0-9])``，可正确匹配连字符/
+ * 点号等分隔的键名（``my-api-key`` / ``my.token``）。这里采用与之等价的 token 化
+ * 方案：将键名按非字母数字切分，若 token 集合命中敏感词即判定为敏感键。该方案
+ * 与后端 ``stream_logger._looks_secret`` 思路一致，天然覆盖各种分隔符，且能排除
+ * ``context_window_tokens``（``tokens`` 复数 = 计数，非凭证）。
+ */
+const SECRET_TOKENS = new Set([
+  'token', 'password', 'passwd', 'pwd', 'secret', 'apikey', 'authorization',
+  'authorisation', 'credential', 'userid',
+])
+// 显式排除的非凭证键名（含敏感子串但语义非凭证）。
+const NON_SENSITIVE_KEY_OVERRIDES = new Set(['context_window_tokens', 'context_window_token'])
+
+function looksSecretKey(keyLower: string): boolean {
+  if (!keyLower || NON_SENSITIVE_KEY_OVERRIDES.has(keyLower)) return false
+  // 按非字母数字切分（与后端 _looks_secret 一致：_ - . / 等都是分隔符）。
+  const tokens = new Set(
+    keyLower.split(/[^a-z0-9]+/i).filter((t) => t.length > 0)
+  )
+  if (tokens.size === 0) return false
+  // "tokens" 复数 = 计数字段（tokens_used / total_tokens），非凭证，排除。
+  if (tokens.has('tokens')) return false
+  if (setIntersect(tokens, SECRET_TOKENS)) return true
+  // api_key / api-key → {api, key}；private_key → {private, key}；
+  // access_token → {access, token}（token 已覆盖，但显式列出双 token 防漏）；
+  // user_id → {user, id}；refresh_token → token 已覆盖。
+  if (tokens.has('api') && tokens.has('key')) return true
+  if (tokens.has('private') && tokens.has('key')) return true
+  if (tokens.has('user') && tokens.has('id')) return true
+  return false
+}
+
+function setIntersect(a: Set<string>, b: Set<string>): boolean {
+  // 用 Array.from 规避 Set 直接迭代在某些 TS target 下的 TS2802。
+  for (const x of Array.from(a)) if (b.has(x)) return true
+  return false
+}
+
+/**
+ * 凭证值形态：即便没有敏感键名上下文，值本身是已知前缀的凭证（OpenAI/Bearer/JWT/
+ * GitHub/GitLab token）也要脱敏。与后端 _SENSITIVE_PATTERNS 对齐。
+ *
+ * Bearer 用后行断言只捕获令牌值本体（不含 "Bearer " 前缀），使指纹与后端
+ * _BEARER_SENSITIVE_PATTERN 的 group(2)（token 本体）一致，跨端可关联。
+ */
+const SENSITIVE_VALUE_PATTERNS: { re: RegExp }[] = [
+  { re: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g }, // JWT
+  { re: /\bsk-[A-Za-z0-9]{8,}\b/g },                                 // OpenAI 风格
+  { re: /\bghp_[A-Za-z0-9]{20,}\b/g },                               // GitHub PAT
+  { re: /\bglpat-[A-Za-z0-9_-]{20,}\b/g },                           // GitLab PAT
+  { re: /(?<=\bBearer\s+)[A-Za-z0-9\-._~+/]+=*/gi },                // Authorization Bearer（仅 token 本体）
+]
+
+/**
+ * 对单个敏感值做带指纹的脱敏：``******(fp:xxxxxxxx)``。
+ * 指纹 = SHA256(值) 前 4 字节（8 位 hex），与后端 _fingerprint 算法一致，
+ * 同一 key 在前后端两套日志中指纹相同，便于跨端关联排查。不可逆。
+ *
+ * 若 value 本身已是脱敏产物（``******`` 或 ``******(fp:..)``），原样返回不重算，
+ * 与后端 _masked_with_fp 的 _is_already_masked 判断一致——避免对"指纹值"再算
+ * 指纹导致跨日志关联失效。
+ */
+const ALREADY_MASKED_RE = new RegExp(
+  '^' + '******'.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\(fp:[0-9a-f]{8}\\))?$'
+)
+
+function isAlreadyMasked(value: string): boolean {
+  return !!value && ALREADY_MASKED_RE.test(value)
+}
+
+function maskWithFp(value: string): string {
+  if (!value) return '******'
+  if (isAlreadyMasked(value)) return value
+  try {
+    const fp = createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 8)
+    return `******(fp:${fp})`
+  } catch {
+    return '******'
+  }
+}
+
+/**
+ * 对值做形态脱敏：把值中出现的凭证片段（sk-/Bearer/JWT 等）原地替换为带指纹掩码。
+ * 用于无敏感键名但值含凭证的场景（如一段日志文本里夹带 sk-xxx）。
+ */
+function maskValueShapes(value: string): string {
+  let out = value
+  for (const { re } of SENSITIVE_VALUE_PATTERNS) {
+    out = out.replace(re, (m) => maskWithFp(m))
+  }
+  return out
+}
+
+/**
+ * 递归脱敏任意结构（对象/数组/字符串）。键名命中敏感词的值整体替换为 ``******(fp:..)``；
+ * 字符串值再做形态脱敏兜底。与后端 SensitiveDataFilter 行为对齐。
+ */
+function maskSensitive(payload: unknown): unknown {
+  if (payload === null || payload === undefined) return payload
+  if (Array.isArray(payload)) {
+    return payload.map((item) => maskSensitive(item))
+  }
+  if (typeof payload === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+      if (looksSecretKey(k.toLowerCase())) {
+        // 敏感键：整体脱敏（保留指纹）。非字符串值先序列化再算指纹，便于关联。
+        const strVal = typeof v === 'string' ? v : safeStringify(v)
+        result[k] = maskWithFp(strVal)
+      } else {
+        result[k] = maskSensitive(v)
+      }
+    }
+    return result
+  }
+  if (typeof payload === 'string') {
+    return maskValueShapes(payload)
+  }
+  return payload
+}
+
+function safeStringify(v: unknown): string {
+  try {
+    return typeof v === 'string' ? v : JSON.stringify(v)
+  } catch {
+    return String(v)
+  }
+}
+
 
 /**
  * file-api 使用的项目根目录，需与后端 get_root_dir() 一致，前端编辑的 HEARTBEAT.md 才会被心跳读到。
@@ -197,7 +332,12 @@ function devWsTrafficLogger(): Plugin {
               payload = raw
             }
           }
-          const line = `${JSON.stringify({ ts: now, payload })}\n`
+          // 写盘前脱敏：前端会把 config.get/config.validate_model 等报文（含
+          // api_key/token/secret）原样上报给 vite dev server，vite 再 appendFile
+          // 写进 ws-dev.log。此处对 payload 递归脱敏，避免 api_key 明文落盘。
+          // 与后端 SensitiveDataFilter 行为/指纹算法一致，便于跨端关联排查。
+          const maskedPayload = maskSensitive(payload)
+          const line = `${JSON.stringify({ ts: now, payload: maskedPayload })}\n`
           fs.appendFile(logFile, line, (error) => {
             if (error) {
               server.config.logger.error(`[dev-ws-logger] write failed: ${error.message}`)

@@ -59,6 +59,8 @@ def _response_prompt(language: str) -> PromptSection:
 }
 ```
 
+- **preferred_response_language**：用户期望的回复语言。你必须使用该语言回复用户，无论用户消息本身使用的是什么语言。
+
 ## 系统消息
 
 ```json
@@ -97,6 +99,8 @@ You receive user messages and system messages; handle each by source and type.
   "source": "user"
 }
 ```
+
+- **preferred_response_language**: The user's preferred response language. You must respond in this language, regardless of the language used in the user's message.
 
 ## System Message
 

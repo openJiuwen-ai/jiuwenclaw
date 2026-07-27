@@ -84,7 +84,7 @@ const listSub = switchCmd.subCommands.find((s) => s.name === "list");
   const cancelCalls = [];
   const { ctx, addedItems, askedQuestions } = makeMockContext({
     checkHandoff: () => ({ ok: true }),
-    requestHandoff: async (target) => handoffCalls.push(target),
+    requestHandoff: async (target, switchContent) => handoffCalls.push({ target, switchContent }),
     hasServerTask: () => false,
     cancelAndWaitForIdle: async () => cancelCalls.push(true),
   });
@@ -92,7 +92,8 @@ const listSub = switchCmd.subCommands.find((s) => s.name === "list");
   assert.equal(askedQuestions.length, 0);  // 无任务不询问
   assert.equal(cancelCalls.length, 0);  // 无任务不取消
   assert.equal(handoffCalls.length, 1);
-  assert.equal(handoffCalls[0], HANDOFF_TARGET_CC_TUI);
+  assert.equal(handoffCalls[0].target, HANDOFF_TARGET_CC_TUI);
+  assert.equal(handoffCalls[0].switchContent, "switch claude");
 }
 
 // 6. /switch claude 有任务 + 用户取消：不发送 interrupt、不调用 requestHandoff
@@ -102,7 +103,7 @@ const listSub = switchCmd.subCommands.find((s) => s.name === "list");
   let askedCount = 0;
   const { ctx, addedItems } = makeMockContext({
     checkHandoff: () => ({ ok: true }),
-    requestHandoff: async (target) => handoffCalls.push(target),
+    requestHandoff: async (target, switchContent) => handoffCalls.push({ target, switchContent }),
     hasServerTask: () => true,
     cancelAndWaitForIdle: async () => cancelCalls.push(true),
     askQuestions: async (questions, id) => {
@@ -127,7 +128,7 @@ const listSub = switchCmd.subCommands.find((s) => s.name === "list");
   let askedCount = 0;
   const { ctx, addedItems } = makeMockContext({
     checkHandoff: () => ({ ok: true }),
-    requestHandoff: async (target) => handoffCalls.push(target),
+    requestHandoff: async (target, switchContent) => handoffCalls.push({ target, switchContent }),
     hasServerTask: () => true,
     cancelAndWaitForIdle: async (opts) => cancelCalls.push(opts),
     askQuestions: async () => {
@@ -139,7 +140,8 @@ const listSub = switchCmd.subCommands.find((s) => s.name === "list");
   assert.equal(askedCount, 1);
   assert.equal(cancelCalls.length, 1);
   assert.equal(handoffCalls.length, 1);
-  assert.equal(handoffCalls[0], HANDOFF_TARGET_CC_TUI);
+  assert.equal(handoffCalls[0].target, HANDOFF_TARGET_CC_TUI);
+  assert.equal(handoffCalls[0].switchContent, "switch claude");
 }
 
 // 8. /switch claude 有任务 + 用户确认 + 取消失败：保留 TUI，不调用 handoff
@@ -148,7 +150,7 @@ const listSub = switchCmd.subCommands.find((s) => s.name === "list");
   let askedCount = 0;
   const { ctx, addedItems } = makeMockContext({
     checkHandoff: () => ({ ok: true }),
-    requestHandoff: async (target) => handoffCalls.push(target),
+    requestHandoff: async (target, switchContent) => handoffCalls.push({ target, switchContent }),
     hasServerTask: () => true,
     cancelAndWaitForIdle: async () => {
       const err = new Error("CANCEL_TIMEOUT");

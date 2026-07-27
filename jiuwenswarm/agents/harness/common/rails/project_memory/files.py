@@ -238,7 +238,7 @@ def discover_and_load_memory_files(
         watch_paths=watch_paths,
     )
 
-    project_root = find_project_root(workspace_key)
+    project_root = find_project_root(workspace_key) or Path(workspace_key)
     if project_root is not None:
         try:
             cwd = Path(workspace_key)

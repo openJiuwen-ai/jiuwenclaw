@@ -139,6 +139,14 @@ export interface TeamTaskEvent {
   team_name?: string;
   title?: string;
   content?: string;
+  // Truncation observability flags — backend may set these on team.task.created/
+  // updated events when the title/content exceeded the wire limit. Purely
+  // passthrough: the store does not render a badge; the inline marker
+  // `…(truncated, total N chars)` already surfaces truncation to the user.
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
   updated_at?: number | string | null;
 }
 
@@ -161,6 +169,15 @@ export interface TeamTask {
   timestamp?: number;
   skills?: string[];
   files?: string[];
+  // Truncation observability flags — set by the backend on team.task.created/
+  // updated events when title/content exceeded the wire limit. Carried through
+  // the normalize/upsert pipeline; a status-only event MUST NOT reset these
+  // (upsertTeamTask uses `?? existing`). Not rendered as a badge — the inline
+  // marker `…(truncated, total N chars)` already shows truncation.
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
 }
 
 // Upsert input: a task event may omit status (e.g. a content-only update).
@@ -683,6 +700,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           team_id: task.team_id ?? existing.team_id,
           skills: task.skills ?? existing.skills,
           files: task.files ?? existing.files,
+          // Truncation flags: a status-only event carries none, so `?? existing`
+          // preserves whatever a prior created/updated event set. NEVER reset
+          // these to false/undefined on a status-only upsert.
+          title_truncated: task.title_truncated ?? existing.title_truncated,
+          title_original_size: task.title_original_size ?? existing.title_original_size,
+          content_truncated: task.content_truncated ?? existing.content_truncated,
+          content_original_size: task.content_original_size ?? existing.content_original_size,
         };
         return {
           runtimes: {
@@ -691,10 +715,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           },
         };
       }
+      // New card: a status-only event may arrive before the created event,
+      // leaving an empty title. Fall back to a placeholder built from the
+      // task_id tail so the card is not rendered with a bare empty title
+      // (matches the precedent in features/teamHistoryPanelRestore.ts upsertTask).
       return {
        runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, teamTasks: [{ ...task, status: task.status ?? 'pending' }, ...runtime.teamTasks],
+          [sessionId]: { ...runtime, teamTasks: [{
+            ...task,
+            status: task.status ?? 'pending',
+            title: task.title ?? `任务 ${String(task.task_id || '').slice(-6)}`,
+          }, ...runtime.teamTasks],
       },
         },
       };

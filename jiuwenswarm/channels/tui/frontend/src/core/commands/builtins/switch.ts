@@ -10,7 +10,10 @@
  *   2. checkHandoff 预检 — 失败时显示错误并返回（不询问、不取消任务）
  *   3. hasServerTask() — 有任务时询问用户；取消则直接返回（不发送 interrupt）
  *   4. 确认后 cancelAndWaitForIdle({ timeoutMs: 5000 }) — 失败则显示错误并返回
- *   5. requestHandoff — 二次校验 + 统一关闭路径
+ *   5. requestHandoff — 二次校验 + 统一关闭路径（输出 handoff JSON 到 stdout，以 88 退出）
+ *
+ * TUI 不直接发送 3rdagent.switch RPC；launcher 从 stdout 读取 handoff JSON 后，
+ * 由 launcher 连接 gateway 发起 RPC 并建立 SSH 隧道到三方 agentos。
  */
 import { makeItem } from "../helpers.js";
 import { HANDOFF_TARGET_CC_TUI } from "../../supervision/protocol.js";
@@ -125,8 +128,11 @@ async function performSwitch(
   }
 
   // 5. 请求 handoff（二次校验 + 统一关闭路径）
+  //    requestHandoff 会构造 handoff JSON 输出到 stdout（供 launcher 读取），
+  //    然后以动作退出码 88 退出。launcher 从 stdout 读取 JSON 后，
+  //    由 launcher 连接 gateway 发起 3rdagent.switch RPC 并建立 SSH 隧道。
   try {
-    await ctx.requestHandoff(target.handoffTarget);
+    await ctx.requestHandoff(target.handoffTarget, `switch ${target.name}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     ctx.addItem(makeItem(ctx.sessionId, "error", `Handoff failed: ${msg}`));

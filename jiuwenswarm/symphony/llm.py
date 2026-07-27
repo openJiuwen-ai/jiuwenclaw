@@ -6,11 +6,14 @@ import json
 from collections import defaultdict
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, Iterator, List, Optional
 
 from json_repair import repair_json
+
+from jiuwenswarm.common.reasoning_injector import inject_reasoning_params
 
 
 @dataclass(frozen=True)
@@ -57,8 +60,8 @@ class LLMConfig:
             client_config = {}
         if not isinstance(request_config, dict):
             request_config = {}
-        client_config = dict(client_config)
-        request_config = dict(request_config)
+        client_config = deepcopy(client_config)
+        request_config = deepcopy(request_config)
         model = str(
             request_config.get("model")
             or client_config.get("model_name")
@@ -73,6 +76,17 @@ class LLMConfig:
             raise RuntimeError("JiuwenSwarm default model is missing api_key.")
         if not str(client_config.get("client_provider") or "").strip():
             raise RuntimeError("JiuwenSwarm default model is missing client_provider.")
+        request_config = inject_reasoning_params(
+            model_client_config=client_config,
+            model_config_obj=request_config,
+        )
+        request_config.pop("reasoning_effort", None)
+        extra_body = request_config.get("extra_body")
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+        extra_body = deepcopy(extra_body)
+        extra_body.update(thinking_disabled_request_overrides()["extra_body"])
+        request_config["extra_body"] = extra_body
         request_config["model"] = model
         return cls(
             model=model,
@@ -90,13 +104,13 @@ class LLMConfig:
         return str(client_config.get("api_base") or "").strip().rstrip("/")
 
     def model_client_kwargs(self) -> Dict[str, Any]:
-        client_config = dict(self.model_client_config or {})
+        client_config = deepcopy(self.model_client_config or {})
         if self.base_url:
             client_config["api_base"] = self.base_url
         return client_config
 
     def model_request_kwargs(self) -> Dict[str, Any]:
-        request_config = dict(self.model_config_obj or {})
+        request_config = deepcopy(self.model_config_obj or {})
         request_config["model"] = self.model
         request_config["temperature"] = self.temperature
         request_config["top_p"] = self.top_p
@@ -216,6 +230,17 @@ def create_llm_client(config: LLMConfig) -> "JiuwenSwarmChatClient":
     if config is None:
         raise ValueError("create_llm_client requires LLMConfig.")
     return JiuwenSwarmChatClient(config)
+
+
+def thinking_disabled_request_overrides() -> Dict[str, Any]:
+    """Return isolated provider-compatible controls that disable thinking."""
+    return {
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    }
 
 
 class JiuwenSwarmChatClient:

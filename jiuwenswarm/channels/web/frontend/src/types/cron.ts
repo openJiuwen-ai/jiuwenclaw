@@ -45,6 +45,8 @@ export interface CronTaskUI {
   modelName: string | null;
   cronExpr: string;
   timezone: string;
+  /** 提前唤醒秒数：在计划推送时间前启动 Agent；0 表示到点执行 */
+  wakeOffsetSeconds: number;
   enabled: boolean;
   expired: boolean;
   deliveryChannel: string;

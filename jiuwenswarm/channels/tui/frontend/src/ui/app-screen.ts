@@ -12,6 +12,8 @@ import {
   matchesKey,
   decodeKittyPrintable,
   truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -121,6 +123,19 @@ const SWARM_WORKFLOW_LOG_PREVIEW_ROWS = 8;
 const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
+
+/**
+ * Terminal mouse reporting takes ownership of drag events, which prevents the
+ * terminal's native text selection and copy behaviour. Keep it scoped to UI
+ * states that actually need mouse events; a scrollable transcript can still be
+ * navigated with the keyboard without making the whole chat unselectable.
+ */
+export function shouldCaptureTerminalMouse(
+  pendingQuestionActive: boolean,
+  interactiveOverlayActive: boolean,
+): boolean {
+  return pendingQuestionActive || interactiveOverlayActive;
+}
 const CONFIRM_ACTION_RE = /\*\*(?:Agent wants to|Tool `[^`]+` requires your approval)([^*]*)\*\*/i;
 const PLAN_REJECT_INPUT_RE = /(\s+\[ .+ \])$/;
 const PERMISSION_RISK_RE = /安全风险评估：\**\s*([^\s*]+)?\s*\**([^*\n]+?风险)\**/m;
@@ -1206,33 +1221,114 @@ const swarmWorkflowSelectListTheme = {
   description: (value: string) => palette.text.secondary(value),
 };
 
-function wrapPlainText(text: string, width: number): string[] {
-  const maxWidth = Math.max(12, width - 1);
+export function wrapPlainText(text: string, width: number): string[] {
+  const maxWidth = Math.max(1, width - 1);
   const source = text.replace(/\r/g, "").split("\n");
   const lines: string[] = [];
   for (const rawLine of source) {
-    const words = rawLine.split(/\s+/).filter((word) => word.length > 0);
-    if (words.length === 0) {
-      lines.push("");
-      continue;
-    }
-    let current = "";
-    for (const word of words) {
-      const next = current ? `${current} ${word}` : word;
-      if (next.length <= maxWidth) {
-        current = next;
-        continue;
+    const wrapped = wrapTextWithAnsi(rawLine, maxWidth);
+    lines.push(...(wrapped.length > 0 ? wrapped : [""]));
+  }
+  return lines.length > 0 ? lines : [""];
+}
+
+export function renderWrappedQuestionOptions(
+  items: SelectItem[],
+  selectedIndex: number,
+  maxVisible: number,
+  width: number,
+): { lines: string[]; selectedEndIndex: number } {
+  const safeWidth = Math.max(1, width);
+  if (items.length === 0) {
+    return {
+      lines: [padToWidth(selectListTheme.noMatch("  No matching commands"), safeWidth)],
+      selectedEndIndex: 1,
+    };
+  }
+
+  const visibleCount = Math.max(1, maxVisible);
+  const startIndex = Math.max(
+    0,
+    Math.min(selectedIndex - Math.floor(visibleCount / 2), items.length - visibleCount),
+  );
+  const endIndex = Math.min(startIndex + visibleCount, items.length);
+  const lines: string[] = [];
+  let selectedEndIndex = 0;
+  const primaryColumnWidth = Math.max(
+    34,
+    Math.min(
+      42,
+      items.reduce(
+        (widest, item) => Math.max(widest, visibleWidth(item.label || item.value) + 2),
+        0,
+      ),
+    ),
+  );
+
+  for (let index = startIndex; index < endIndex; index++) {
+    const item = items[index];
+    if (!item) continue;
+    const selected = index === selectedIndex;
+    const marker = selected ? "→ " : "  ";
+    const continuationMarker = " ".repeat(visibleWidth(marker));
+    const bodyWidth = Math.max(1, safeWidth - visibleWidth(marker));
+    const label = item.label || item.value;
+    const description = item.description?.replace(/[\r\n]+/g, " ").trim() ?? "";
+    const labelWidth = visibleWidth(label);
+    const remainingDescriptionWidth =
+      safeWidth - visibleWidth(marker) - primaryColumnWidth - 2;
+
+    if (
+      description &&
+      safeWidth > 40 &&
+      labelWidth <= primaryColumnWidth - 2 &&
+      remainingDescriptionWidth > 10 &&
+      visibleWidth(description) <= remainingDescriptionWidth
+    ) {
+      const spacing = " ".repeat(primaryColumnWidth - labelWidth);
+      const content = `${label}${spacing}${description}`;
+      const styled = selected
+        ? selectListTheme.selectedText(`${marker}${content}`)
+        : `${marker}${label}${selectListTheme.description(`${spacing}${description}`)}`;
+      lines.push(padToWidth(styled, safeWidth));
+    } else {
+      const labelLines = wrapTextWithAnsi(label, bodyWidth);
+      for (let lineIndex = 0; lineIndex < labelLines.length; lineIndex++) {
+        const prefix = lineIndex === 0 ? marker : continuationMarker;
+        const content = `${prefix}${labelLines[lineIndex]}`;
+        lines.push(
+          padToWidth(selected ? selectListTheme.selectedText(content) : content, safeWidth),
+        );
       }
-      if (current) {
-        lines.push(current);
+
+      if (description) {
+        const descriptionPrefix = "    ";
+        const descriptionWidth = Math.max(1, safeWidth - visibleWidth(descriptionPrefix));
+        for (const descriptionLine of wrapTextWithAnsi(description, descriptionWidth)) {
+          lines.push(
+            padToWidth(
+              `${descriptionPrefix}${selectListTheme.description(descriptionLine)}`,
+              safeWidth,
+            ),
+          );
+        }
       }
-      current = word.length <= maxWidth ? word : word.slice(0, maxWidth);
     }
-    if (current) {
-      lines.push(current);
+
+    if (selected) {
+      selectedEndIndex = lines.length;
     }
   }
-  return lines.length > 0 ? lines : [text.slice(0, maxWidth)];
+
+  if (startIndex > 0 || endIndex < items.length) {
+    lines.push(
+      padToWidth(
+        selectListTheme.scrollInfo(`  (${selectedIndex + 1}/${items.length})`),
+        safeWidth,
+      ),
+    );
+  }
+  return { lines, selectedEndIndex };
 }
 
 /** Skip separator/blank lines when showing a compact human-question preview in lists. */
@@ -1446,6 +1542,7 @@ export class AppScreen implements Component, Focusable {
   private syncingComposerInput = false;
   private pendingQuestionAnswers = new Map<number, string>();
   private pendingMultiSelectAnswers = new Map<number, string[]>();
+  private pendingQuestionCustomInputs = new Map<number, string>();
   private questionList: SelectList | null = null;
   private questionCheckboxList: CheckboxList | null = null;
   private questionDetailsMap: Map<string, string[]> | null = null;
@@ -2498,11 +2595,12 @@ export class AppScreen implements Component, Focusable {
         requestLocalInterrupt: () => {
           return this.state.requestLocalInterrupt();
         },
-        showCtrlCExitHint: () => {
+        showExitHint: (key: string) => {
           if (this.transientNoticeTimer) {
             clearTimeout(this.transientNoticeTimer);
           }
-          this.transientNotice = "Press Ctrl+C again to exit";
+          const keyLabel = key === "ctrl+c" ? "Ctrl+C" : "Ctrl+D";
+          this.transientNotice = `Press ${keyLabel} again to exit`;
           this.transientNoticeTimer = setTimeout(() => {
             this.transientNotice = null;
             this.transientNoticeTimer = null;
@@ -2936,10 +3034,6 @@ export class AppScreen implements Component, Focusable {
       pendingInput,
       pendingInputBaseline,
     ).length;
-    const approximateFixedHeight =
-      questionLines.length + editorLines.length + composerPreviewLines.length + 2;
-    const transcriptMayScroll =
-      transcriptLineCount > Math.max(0, this.tui.terminal.rows - approximateFixedHeight);
     const interactiveOverlayActive =
       this.startupPromptList !== null ||
       this.resumeSessionList !== null ||
@@ -2954,9 +3048,7 @@ export class AppScreen implements Component, Focusable {
       this.configEditorState !== null ||
       this.questionList !== null;
     this.setMouseTrackingEnabled(
-      transcriptMayScroll ||
-        snapshot.pendingQuestion !== null ||
-        interactiveOverlayActive,
+      shouldCaptureTerminalMouse(snapshot.pendingQuestion !== null, interactiveOverlayActive),
     );
     if (
       this.transcriptScrollOffset > 0 &&
@@ -3063,11 +3155,14 @@ export class AppScreen implements Component, Focusable {
       if (this.otherInputMode) {
         const pendingQuestion = snapshot.pendingQuestion;
         const pickedLabel = this.pendingQuestionAnswers.get(this.activeQuestionIndex) ?? "";
+        this.pendingQuestionCustomInputs.set(this.activeQuestionIndex, text);
         this.otherInputMode = false;
         this.syncEditorSubmitState(this.state.getSnapshot());
 
         if (this.activeQuestionIndex < pendingQuestion.questions.length - 1) {
-          this.pendingQuestionAnswers.set(this.activeQuestionIndex, pickedLabel || text);
+          if (!pickedLabel && !this.pendingMultiSelectAnswers.has(this.activeQuestionIndex)) {
+            this.pendingQuestionAnswers.set(this.activeQuestionIndex, text);
+          }
           this.activeQuestionIndex += 1;
           this.syncQuestionList(this.state.getSnapshot());
           this.editor.setText("");
@@ -3077,24 +3172,23 @@ export class AppScreen implements Component, Focusable {
 
         const answers = pendingQuestion.questions.map((question, index) => {
           const label = this.pendingQuestionAnswers.get(index) ?? "";
+          const multi = this.pendingMultiSelectAnswers.get(index);
           const isPlanRejectFeedback = shouldAppendPlanRejectFeedback(
             pendingQuestion.source,
             label,
             pendingQuestion.planApprovalKind,
           );
-          if (label === "Other" || isPlanRejectFeedback) {
+          const customInput = this.pendingQuestionCustomInputs.get(index);
+          if (customInput || label === "Other" || isPlanRejectFeedback) {
             return {
               question: question.question,
-              selected_options: [label],
-              custom_input:
-                index === this.activeQuestionIndex && (label === "Other" || text)
-                  ? text
-                  : undefined,
+              selected_options: multi ?? [label],
+              custom_input: customInput,
             };
           }
           return {
             question: question.question,
-            selected_options: [label || text],
+            selected_options: multi ?? [label || text],
           };
         });
         this.state.submitQuestionAnswers(answers);
@@ -3391,6 +3485,7 @@ export class AppScreen implements Component, Focusable {
       this.activeQuestionIndex = 0;
       this.pendingQuestionAnswers.clear();
       this.pendingMultiSelectAnswers.clear();
+      this.pendingQuestionCustomInputs.clear();
       this.draftBeforeQuestion = this.editor.getText();
       this.editor.setText("");
       const pendingQuestion = snapshot.pendingQuestion;
@@ -3409,6 +3504,7 @@ export class AppScreen implements Component, Focusable {
       this.otherInputMode = false;
       this.pendingQuestionAnswers.clear();
       this.pendingMultiSelectAnswers.clear();
+      this.pendingQuestionCustomInputs.clear();
       this.questionList = null;
       this.questionCheckboxList = null;
       this.questionDetailsMap = null;
@@ -8622,7 +8718,11 @@ export class AppScreen implements Component, Focusable {
         lines.push("");
         for (const opt of question.options) {
           const optLine = `  ${opt.label}${opt.description ? ` - ${opt.description}` : ""}`;
-          lines.push(padToWidth(palette.text.dim(optLine), width));
+          lines.push(
+            ...wrapPlainText(optLine, width).map((line) =>
+              padToWidth(palette.text.dim(line), width),
+            ),
+          );
         }
       }
       lines.push("");
@@ -8654,7 +8754,16 @@ export class AppScreen implements Component, Focusable {
       const checkboxLines = this.questionCheckboxList.render(width);
       lines.push(...checkboxLines);
     } else if (this.questionList !== null) {
-      const listLines = this.questionList.render(width);
+      const wrappedOptions =
+        pendingQuestion.source === "ask_user_interrupt"
+          ? renderWrappedQuestionOptions(
+              this.questionList["filteredItems"] ?? [],
+              this.questionList["selectedIndex"] ?? 0,
+              this.questionList["maxVisible"] ?? 20,
+              width,
+            )
+          : null;
+      const listLines = wrappedOptions?.lines ?? this.questionList.render(width);
 
       // Insert preview / details sub-lines right after the currently selected item
       // instead of appending them after the entire list.
@@ -8697,7 +8806,9 @@ export class AppScreen implements Component, Focusable {
             0,
             Math.min(selectedIdx - Math.floor(maxVis / 2), filteredLen - maxVis),
           );
-          const insertAt = Math.max(0, Math.min(selectedIdx - scrollStart + 1, listLines.length));
+          const insertAt = wrappedOptions
+            ? wrappedOptions.selectedEndIndex
+            : Math.max(0, Math.min(selectedIdx - scrollStart + 1, listLines.length));
           listLines.splice(insertAt, 0, ...subLines);
         }
       }
@@ -9039,9 +9150,18 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
+    this.pendingMultiSelectAnswers.set(this.activeQuestionIndex, selectedValues);
+    if (selectedValues.includes("Other")) {
+      this.otherInputMode = true;
+      this.questionCheckboxList = null;
+      this.setMouseTrackingEnabled(false);
+      this.syncEditorSubmitState(snapshot);
+      this.tui.requestRender();
+      return;
+    }
+
     if (this.activeQuestionIndex < pendingQuestion.questions.length - 1) {
       // Multiple questions: advance to the next one
-      this.pendingMultiSelectAnswers.set(this.activeQuestionIndex, selectedValues);
       this.activeQuestionIndex += 1;
       this.syncQuestionList(this.state.getSnapshot());
       this.tui.requestRender();
@@ -9055,10 +9175,12 @@ export class AppScreen implements Component, Focusable {
         index === this.activeQuestionIndex
           ? selectedValues
           : this.pendingMultiSelectAnswers.get(index);
-      return {
+      const answer = {
         question: question.question,
         selected_options: multi ?? [this.pendingQuestionAnswers.get(index) ?? ""],
       };
+      const customInput = this.pendingQuestionCustomInputs.get(index);
+      return customInput ? { ...answer, custom_input: customInput } : answer;
     });
     this.state.submitQuestionAnswers(answers);
   }
@@ -9108,6 +9230,10 @@ export class AppScreen implements Component, Focusable {
         question: question.question,
         selected_options: multi ?? [answerValue],
       };
+      const customInput = this.pendingQuestionCustomInputs.get(index);
+      if (customInput) {
+        return { ...answer, custom_input: customInput };
+      }
       if (
         index === this.activeQuestionIndex &&
         collectPlanRejectFeedback &&

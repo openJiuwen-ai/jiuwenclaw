@@ -5,9 +5,12 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+
+import portalocker
 
 from jiuwenswarm.gateway.cron.models import (
     CronJob,
@@ -24,6 +27,9 @@ from jiuwenswarm.common.work_mode import (
 )
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+_FILE_LOCK_TIMEOUT_SEC = 10.0
 
 # proactive.tick 是由 proactive_cron_sync 自动注册、由 config 开关驱动的任务。
 # 其 name/enabled/description/wake_offset/targets/mode 均由系统/配置侧维护，
@@ -109,22 +115,49 @@ class _ProactiveJobProtected(RuntimeError):
 
 
 class CronJobStore:
-    """Persist cron jobs to ~/.jiuwenswarm/agent/home/cron_jobs.json."""
+    """Persist cron jobs to ~/.jiuwenswarm/agent/home/cron_jobs.json.
 
-    def __init__(self, path: Path | None = None) -> None:
+    并发安全:
+      - ``asyncio.Lock``：同进程协程互斥；
+      - ``portalocker`` 伴生 ``cron_jobs.json.lock``：跨进程（多 Gateway / Agent）互斥。
+      整个 read-modify-write 在双层锁内完成，避免 lost update。
+    """
+
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        file_lock_timeout: float = _FILE_LOCK_TIMEOUT_SEC,
+    ) -> None:
         self._path = path or get_cron_jobs_path()
         self._lock = asyncio.Lock()
+        self._file_lock_timeout = float(file_lock_timeout)
 
     @property
     def path(self) -> Path:
         return self._path
+
+    def _call_under_file_lock(self, fn: Callable[[], _T]) -> _T:
+        """在伴生 ``cron_jobs.json.lock`` 上拿跨进程锁后执行 fn（不被原子 replace 覆盖）。
+
+        须在进程内 ``asyncio.Lock`` 之内、经 ``to_thread`` 调用，避免阻塞事件循环。
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self._path.with_suffix(self._path.suffix + ".lock")
+        with portalocker.Lock(str(lock_path), timeout=self._file_lock_timeout):
+            return fn()
+
+    async def _run_locked(self, fn: Callable[[], _T]) -> _T:
+        """同进程协程串行 + 跨进程文件锁；文件锁等待放到线程池，避免阻塞事件循环。"""
+        async with self._lock:
+            return await asyncio.to_thread(self._call_under_file_lock, fn)
 
     async def list_jobs(self) -> list[CronJob]:
         # 惰性迁移:在同一个锁内 read + 推断缺 work_mode 的老 job + writeback,
         # 替代启动迁移 ``migrate_legacy_jobs_at_startup``。
         # 已迁移过的系统 jobs 全部 work_mode 合法,``needs_migration=False``
         # 直接跳过 lookup 与 writeback,零额外开销。
-        async with self._lock:
+        def _body() -> list[CronJob]:
             data = self._read_json_unlocked()
             jobs_raw = data.get("jobs") or []
             if not isinstance(jobs_raw, list):
@@ -176,6 +209,9 @@ class CronJobStore:
                 except Exception:
                     # Ignore invalid entries to keep system robust
                     continue
+            return jobs
+
+        jobs = await self._run_locked(_body)
         jobs.sort(key=lambda j: (j.updated_at or 0.0, j.created_at or 0.0), reverse=True)
         return jobs
 
@@ -372,7 +408,8 @@ class CronJobStore:
                 raise _ProactiveJobProtected(
                     "主动推荐定时任务由设置→主动推荐开关控制，不能删除；请到设置关闭开关。"
                 )
-        async with self._lock:
+
+        def _body() -> bool:
             data = self._read_json_unlocked()
             jobs_raw = data.get("jobs") or []
             if not isinstance(jobs_raw, list):
@@ -392,8 +429,10 @@ class CronJobStore:
                 self._write_json_unlocked(data)
             return deleted
 
+        return await self._run_locked(_body)
+
     async def _upsert_job(self, job: CronJob) -> None:
-        async with self._lock:
+        def _body() -> None:
             data = self._read_json_unlocked()
             jobs_raw = data.get("jobs") or []
             if not isinstance(jobs_raw, list):
@@ -414,9 +453,10 @@ class CronJobStore:
             data["jobs"] = out
             self._write_json_unlocked(data)
 
+        await self._run_locked(_body)
+
     async def _read_json(self) -> dict[str, Any]:
-        async with self._lock:
-            return self._read_json_unlocked()
+        return await self._run_locked(self._read_json_unlocked)
 
     def _read_json_unlocked(self) -> dict[str, Any]:
         path = self._path
