@@ -1126,6 +1126,16 @@ modes:
       # Team-specific permission control.
       enable_permissions: false
 
+      # Third-party CLI team members available to spawn_external_cli.
+      # Codex uses the openjiuwen Codex SDK backend and receives the team MCP
+      # tools required for task claiming, messaging, and lifecycle operations.
+      external_cli_agents:
+        - cli_agent: codex
+          inject_mcp: true
+          mcp_default_tools_approval_mode: approve
+          codex_turn_idle_timeout_s: 180
+          codex_turn_idle_retries: 1
+
       leader:
         member_name: team-leader
         display_name: 团队领导

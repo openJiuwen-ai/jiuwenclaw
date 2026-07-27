@@ -96,8 +96,14 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
   const id = resolveToolCallId(toolCallPayload, payload) || `tool-${Date.now()}`;
   const name =
     (typeof toolCallPayload.name === 'string' && toolCallPayload.name) ||
+    (typeof toolCallPayload.tool_name === 'string' && toolCallPayload.tool_name) ||
     (typeof payload.tool_name === 'string' && payload.tool_name) ||
     'unknown';
+  const rawArguments =
+    toolCallPayload.arguments ??
+    toolCallPayload.tool_args ??
+    payload.arguments ??
+    payload.tool_args;
   const description =
     typeof toolCallPayload.description === 'string'
       ? toolCallPayload.description
@@ -111,7 +117,7 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
   return {
     id,
     name,
-    arguments: parseArguments(toolCallPayload.arguments),
+    arguments: parseArguments(rawArguments),
     description,
     formatted_args,
     memberName,
