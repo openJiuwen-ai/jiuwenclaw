@@ -205,6 +205,17 @@ def rewind_session(
     # 在截断 history 之前，记录目标 turn 的时间戳（用于后续清理 file_ops）
     cut_timestamp = history[cut_index].get("timestamp")
 
+    # 同样必须在下面 update_session_metadata 之前解析项目目录：metadata.json 是
+    # 非原子的原地覆写且走后台线程，之后再让 truncate_file_ops 自己去推断，会撞上
+    # 半截文件 → JSONDecodeError → 静默返回 None → 扫不到 file_ops → 清理无声失效。
+    project_dir: str | None = None
+    try:
+        from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+        project_dir = get_diff_service().resolve_project_dir(session_id)
+    except Exception as exc:
+        logger.warning("rewind_session: failed to resolve project_dir: %s", exc)
+
     result = truncate_history_records(session_id=session_id, cut_index=cut_index)
 
     from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
@@ -289,6 +300,14 @@ def compact_partial_session(
     if direction == "from":
         cut_timestamp = history[target_user_index].get("timestamp")
         summarized_count = len(history) - target_user_index
+        # 在 update_session_metadata 之前解析（同 rewind_session，避免元数据写入竞态）
+        compact_project_dir: str | None = None
+        try:
+            from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+            compact_project_dir = get_diff_service().resolve_project_dir(session_id)
+        except Exception as exc:
+            logger.warning("compact_partial_session: failed to resolve project_dir: %s", exc)
 
         result = truncate_history_records(session_id=session_id, cut_index=target_user_index)
         remaining = result["remaining_records"]
