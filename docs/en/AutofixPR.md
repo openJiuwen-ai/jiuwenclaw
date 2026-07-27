@@ -85,7 +85,7 @@ The Agent detects the forge, identifies the PR, reads the failing checks, locate
 | Phase | Action |
 |------|------|
 | **Phase 0** | Reads `git remote` to detect the forge (GitHub / GitCode) — you never specify it |
-| **Phase 1** | Identifies the open PR for the current branch and runs safety checks (see [§6](#6-safety-constraints)) |
+| **Phase 1** | Identifies the open PR for the current branch and runs safety checks (see [§7](#7-safety-constraints)) |
 | **Phase 2** | Reads failing checks and review comments to get **concrete** failure evidence — which test, which error — not just "it's red" |
 | **Phase 3** | Finds the root cause and makes a minimal fix |
 | **Phase 4** | Runs the project's own checks locally to confirm the fix |
@@ -112,7 +112,61 @@ GitCode has no `gh`, so REST endpoints are used instead, with a few non-obvious 
 
 ---
 
-## 6. Safety constraints
+## 6. Watching a PR (`--watch`)
+
+A single run fixes one round: after the push, if checks are still running or go red again, you have to run it again by hand. `--watch` automates that too — it re-checks the PR every few minutes and, as long as it hasn't passed, sends another `/autofix-pr` round, until the PR is **green / merged / closed**.
+
+```
+/autofix-pr --watch                    # watch the current branch's PR
+/autofix-pr 123 --watch                # watch a specific PR
+/autofix-pr --watch --interval 3       # re-check every 3 minutes
+/autofix-pr --stop                     # stop a running watch
+```
+
+### How it runs
+
+- **Runs one round immediately**, then re-checks every `--interval`. Each round is a full `/autofix-pr` shown in the session, so you see what it read and what it changed.
+- **No overlap**: if the previous round (or any tool) is still running, that re-check is skipped and resumes once idle.
+- **Waits out disconnects**: it never fires while the WebSocket is down — it resumes on the next re-check after reconnecting, and the missed tick doesn't count against the round budget.
+
+### Flags
+
+| Flag | Notes |
+|------|------|
+| `--watch` | Turns on continuous watch mode |
+| `--interval <minutes>` | Re-check cadence, default **10 minutes**; accepts fractions (`0.5` = 30 s), floored at **10 s** |
+| `--stop` | Stops a running watch (works in any mode — no need to be in code mode) |
+
+### When it stops
+
+| Stop reason | How it's decided |
+|------|------|
+| **Green / merged / closed** | The command re-checks it itself via CLI/API (`gh` on GitHub, REST on GitCode). It does **not** take the Agent's word for it — the Agent saying "it's fixed" isn't enough; a signal must actually be read |
+| **12 rounds reached** (fuse) | Stops after 12 rounds still not passing, so it can't spin unbounded |
+| **Manual `--stop`** | You can cancel at any time |
+
+> "Can't read the status" is **never** treated as a stop signal (network down, no `gh`, empty response all count as "unknown"). Stopping a red PR whose status we couldn't read would silently abandon it — so unknown keeps watching, with the 12-round fuse as the backstop.
+
+### Guardrails before a watch starts
+
+- **code mode required**, same as a single round.
+- **Clean working tree required**: a watch commits and pushes unattended, so it refuses to start if **tracked** files have uncommitted changes — commit or stash first. Untracked files (build output, `__pycache__`, etc.) don't count and won't block it.
+- **A PR must be resolvable**: it won't start if no open PR is found for the current branch — pass `/autofix-pr <number> --watch` to specify one.
+
+> ⚠️ **GitCode personal repositories usually have no pipeline**, so the endpoint returns empty → "unknown" → the "green" signal never arrives, and only the 12-round fuse can stop it. Each round the Agent still falls back to running the project's checks locally, but the watch loop itself won't end on its own — watch the round cap on such repos, or `--stop` manually.
+
+### Auto-approve for the run (optional)
+
+Starting a watch (and a single round too) first asks once: **auto-approve all commands for this run?**
+
+- Choose "Auto-approve (this run)": no per-command permission prompts during the run — suited to unattended watching.
+- Choose "Ask each time": every command is approved manually as usual.
+
+The grant is **scoped to this run only**: it clears the moment the single round ends, the watch stops, or you Ctrl+C — the next run asks again. It never becomes a standing bypass.
+
+---
+
+## 7. Safety constraints
 
 Because this command changes code and pushes automatically, several rules are built in and cannot be bypassed:
 
@@ -142,7 +196,7 @@ The commit **author remains you** (`--author` is never rewritten), so CLA signin
 
 ---
 
-## 7. FAQ
+## 8. FAQ
 
 **Q: It says code mode is required.**
 Run `/mode code` first, then retry.
@@ -157,13 +211,19 @@ Not for public repositories. Reading pipeline status and PR comments needs no au
 No — that is one of the hard rules. If the problem cannot be solved by changing the implementation, it reports that honestly instead of faking green.
 
 **Q: Does one run always fix it?**
-Not necessarily. It fixes one round per run — if checks are still failing after the push, run it again.
+It fixes one round per run — if checks are still failing after the push, run it again. To have it keep going until the PR passes, use `--watch` (see [§6](#6-watching-a-pr---watch)).
+
+**Q: Does `--watch` run forever?**
+No. It stops on green / merged / closed, or after at most 12 rounds (the fuse). You can also `/autofix-pr --stop` at any time.
+
+**Q: The watch says the working tree has uncommitted changes.**
+A watch changes code and pushes unattended, so it requires a clean tree. Commit or stash your tracked-file changes first, then start it.
 
 ---
 
-## 8. Known limitations
+## 9. Known limitations
 
-- **One round per run.** Watching a PR until its checks pass would require a long-running task, which is not supported yet.
+- **`--watch` stopping depends on being able to read the PR status.** GitCode personal repositories have no pipeline and the endpoint returns empty, so status reads as "unknown", the "green" signal never arrives, and only the 12-round fuse can stop it (see [§6](#6-watching-a-pr---watch)).
 - **GitCode failure details depend on the CI bot's comment format**, which is an openJiuwen convention and may not apply to arbitrary GitCode repositories. Without that comment, the Agent falls back to running checks locally, as designed.
 
 ---
