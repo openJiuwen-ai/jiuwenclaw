@@ -107,14 +107,6 @@ def build_code_agent(factory_kwargs: dict[str, Any], ctx: SwarmBuildContext) -> 
         from openjiuwen.harness.rails import SysOperationRail
 
         rails = [SysOperationRail(), coding_memory_rail]
-    react_cfg = (ctx.config or {}).get("react", {}) if isinstance(ctx.config, dict) else {}
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-        _merge_subagent_rails_with_context_processor,
-    )
-
-    rails = _merge_subagent_rails_with_context_processor(
-        rails, react_cfg if isinstance(react_cfg, dict) else None
-    )
     spec = build_code_agent_config(
         model,
         rails=rails,
@@ -194,19 +186,10 @@ def build_swarm_browser_agent(factory_kwargs: dict[str, Any], ctx: SwarmBuildCon
         return None
 
     browser_key = _browser_key(inp.session_id, inp.member_name, inp.role)
-    react_cfg = (ctx.config or {}).get("react", {}) if isinstance(ctx.config, dict) else {}
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-        _merge_subagent_rails_with_context_processor,
-    )
-
-    browser_rails = _merge_subagent_rails_with_context_processor(
-        None, react_cfg if isinstance(react_cfg, dict) else None
-    )
     spec = build_browser_agent_config(
         model,
         workspace=str(inp.workspace_root or "./"),
         language=inp.language,
-        rails=browser_rails,
         max_iterations=inp.max_iterations,
         browser_key=browser_key,
     )

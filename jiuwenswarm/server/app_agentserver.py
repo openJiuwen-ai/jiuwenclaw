@@ -48,8 +48,6 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 
-from jiuwenswarm.openjiuwen_logging import configure_openjiuwen_logging_under_jiuwenswarm
-
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
     from openjiuwen.core.common.logging.log_config import configure_log
@@ -115,8 +113,6 @@ else:
         _perm_ns_logger.addHandler(_perm_fh)
         _perm_ns_logger.addHandler(_perm_sh)
     _perm_ns_logger.propagate = False
-
-configure_openjiuwen_logging_under_jiuwenswarm()
 
 # Load env from user workspace config/.env
 load_dotenv(dotenv_path=get_env_file(), override=True)
