@@ -671,6 +671,19 @@ async def test_disconnect_cancel_marks_request_as_client_disconnect() -> None:
 
 
 @pytest.mark.asyncio
+async def test_disconnect_cancel_forwards_user_id() -> None:
+    handler = _TestMessageHandler.create()
+
+    await handler.cancel_agent_sessions_on_disconnect(
+        [("tui", "sess-user")],
+        user_id="user-123",
+    )
+
+    assert len(_FakeAgentClient.sent_requests) == 1
+    assert _FakeAgentClient.sent_requests[0].user_id == "user-123"
+
+
+@pytest.mark.asyncio
 async def test_disconnect_cancel_reports_agent_cleanup_failure() -> None:
     handler = _TestMessageHandler.create_with_client(_FailedCancelAgentClient())
 
@@ -729,6 +742,21 @@ async def test_disconnect_cancel_can_be_delayed_until_grace_expires() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delayed_disconnect_cancel_forwards_user_id() -> None:
+    handler = _TestMessageHandler.create()
+
+    await handler.schedule_cancel_agent_sessions_on_disconnect(
+        [("tui", "sess-delayed-user")],
+        delay_seconds=0.01,
+        user_id="user-delayed",
+    )
+
+    await _wait_for_sent_request_count(1)
+    assert len(_FakeAgentClient.sent_requests) == 1
+    assert _FakeAgentClient.sent_requests[0].user_id == "user-delayed"
+
+
+@pytest.mark.asyncio
 async def test_reconnect_cancels_scheduled_disconnect_cancel() -> None:
     handler = _TestMessageHandler.create()
     _seed_stream_task(
@@ -784,6 +812,7 @@ async def test_disconnect_backward_compatible_without_request_keys_kwarg() -> No
 
     await asyncio.sleep(0)
     assert len(_FakeAgentClient.sent_requests) == 1
+    assert _FakeAgentClient.sent_requests[0].user_id is None
 
 
 # ---------- ChannelMode.is_team_mode ----------

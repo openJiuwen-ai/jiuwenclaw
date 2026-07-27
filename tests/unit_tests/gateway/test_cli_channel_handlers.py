@@ -47,13 +47,29 @@ class FakeMessageHandler:
         self.cancelled = []
         self.scheduled = []
         self.reconnected = []
+        self.cancel_user_ids = []
+        self.scheduled_user_ids = []
 
-    async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+    async def cancel_agent_sessions_on_disconnect(
+        self,
+        session_keys,
+        *,
+        stale_request_keys=None,
+        user_id=None,
+    ):
         self.cancelled.append((session_keys, stale_request_keys or []))
+        self.cancel_user_ids.append(user_id)
         return True
 
-    async def schedule_cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+    async def schedule_cancel_agent_sessions_on_disconnect(
+        self,
+        session_keys,
+        *,
+        stale_request_keys=None,
+        user_id=None,
+    ):
         self.scheduled.append((session_keys, stale_request_keys or []))
+        self.scheduled_user_ids.append(user_id)
 
     def cancel_scheduled_disconnect_cancel(self, channel_id, session_id):
         self.reconnected.append((channel_id, session_id))
@@ -65,14 +81,28 @@ class BlockingDisconnectMessageHandler(FakeMessageHandler):
         super().__init__()
         self.cancel_started = asyncio.Event()
 
-    async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+    async def cancel_agent_sessions_on_disconnect(
+        self,
+        session_keys,
+        *,
+        stale_request_keys=None,
+        user_id=None,
+    ):
+        self.cancel_user_ids.append(user_id)
         self.cancel_started.set()
         await asyncio.Future()
 
 
 class FailedDisconnectMessageHandler(FakeMessageHandler):
-    async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+    async def cancel_agent_sessions_on_disconnect(
+        self,
+        session_keys,
+        *,
+        stale_request_keys=None,
+        user_id=None,
+    ):
         self.cancelled.append((session_keys, stale_request_keys or []))
+        self.cancel_user_ids.append(user_id)
         return False
 
 
@@ -147,6 +177,34 @@ async def test_tui_disconnect_handler_cancels_session_immediately():
 
 
 @pytest.mark.asyncio
+async def test_tui_disconnect_handler_forwards_user_id():
+    server = FakeGatewayServer()
+    handler = FakeMessageHandler()
+
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=None,
+            message_handler=handler,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    ws = object()
+    server.bind_session_owner("tui", "sess-user-exit", ws)
+    await server.local_handlers["/tui"]["tui.disconnect"](
+        ws,
+        "req-user-exit",
+        {"reason": "user_exit"},
+        "sess-user-exit",
+        user_id="user-123",
+    )
+
+    assert handler.cancel_user_ids == ["user-123"]
+
+
+@pytest.mark.asyncio
 async def test_tui_disconnect_handler_does_not_cancel_session_owned_by_another_ws():
     server = FakeGatewayServer()
     handler = FakeMessageHandler()
@@ -213,6 +271,42 @@ async def test_tui_route_disconnect_schedules_cancel_for_transport_close():
 
     assert handler.scheduled == [([("tui", "sess-drop")], [("tui", "req-drop")])]
     assert handler.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_tui_route_disconnect_forwards_connection_user_id():
+    handler = FakeMessageHandler()
+    binding = build_cli_route_binding(
+        CliRouteBindParams(path="/tui", message_handler=handler)
+    )
+    ws = type("FakeWs", (), {})()
+    ws._gateway_user_id = "user-transport"  # pylint: disable=protected-access
+
+    await binding.disconnect_handler(
+        ws,
+        [("tui", "sess-transport-user")],
+        [],
+    )
+
+    assert handler.scheduled_user_ids == ["user-transport"]
+
+
+@pytest.mark.asyncio
+async def test_tui_route_disconnect_normalizes_blank_user_id():
+    handler = FakeMessageHandler()
+    binding = build_cli_route_binding(
+        CliRouteBindParams(path="/tui", message_handler=handler)
+    )
+    ws = type("FakeWs", (), {})()
+    ws._gateway_user_id = "   "  # pylint: disable=protected-access
+
+    await binding.disconnect_handler(
+        ws,
+        [("tui", "sess-blank-user")],
+        [],
+    )
+
+    assert handler.scheduled_user_ids == [None]
 
 
 @pytest.mark.asyncio
