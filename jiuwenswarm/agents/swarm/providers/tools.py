@@ -51,6 +51,9 @@ from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
     SkillRetrievalToolkit,
     is_skill_retrieval_enabled,
 )
+from jiuwenswarm.agents.harness.common.tools.tool_retrieval_toolkits import (
+    ToolRetrievalToolkit,
+)
 from jiuwenswarm.agents.harness.common.tools.skill_toolkits import SkillToolkit
 from jiuwenswarm.agents.harness.common.tools.symphony_toolkits import SymphonyToolkit
 from jiuwenswarm.agents.harness.common.tools.user_todo_tool import get_decorated_tools
@@ -99,6 +102,7 @@ VIDEO = "swarm.video"
 IMAGE_GEN = "swarm.image_gen"
 XIAOYI_PHONE = "swarm.xiaoyi_phone"
 SYMPHONY_TOOLKIT = "swarm.symphony_toolkit"
+TOOL_RETRIEVAL = "swarm.tool_retrieval"
 CODE_EXTRA_TOOLS = "swarm.code_extra_tools"
 _CODE_MODES = frozenset({"code.team", "team.plan"})
 
@@ -410,6 +414,16 @@ def _build_symphony_tools(ctx: SwarmBuildContext) -> list[Any]:
         return []
 
 
+def _build_tool_retrieval_tools() -> list[Any]:
+    """Build progressive tool retrieval tools against the runtime tool registry."""
+    try:
+        toolkit = ToolRetrievalToolkit()
+        return list(toolkit.get_tools())
+    except Exception as exc:
+        logger.warning("[swarm.tool_retrieval] construction failed: %s", exc)
+        return []
+
+
 class SkillToolkitInput(ConstructionInput):
     """Construction inputs for the skill-toolkit tool."""
 
@@ -515,6 +529,16 @@ class CodeExtraToolsInput(ConstructionInput):
 
 @harness_element(
     kind=ElementKind.TOOL,
+    name=TOOL_RETRIEVAL,
+    description="Progressive tool retrieval tools (tool_index_build / tool_branch_explore / tool_branch_peek).",
+)
+def build_tool_retrieval(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
+    """Build the whitelist-filtered tool retrieval tools."""
+    return _filter_whitelist(_build_tool_retrieval_tools())
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
     name=CODE_EXTRA_TOOLS,
     description="Code-mode-exclusive tools (currently acp_chat).",
     input_model=CodeExtraToolsInput,
@@ -541,6 +565,7 @@ __all__ = [
     "IMAGE_GEN",
     "XIAOYI_PHONE",
     "SYMPHONY_TOOLKIT",
+    "TOOL_RETRIEVAL",
     "CODE_EXTRA_TOOLS",
     "vision_model_config_params",
     "audio_dedicated_configured",

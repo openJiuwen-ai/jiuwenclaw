@@ -225,6 +225,10 @@ from jiuwenswarm.agents.harness.common.tools import (
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
+from jiuwenswarm.agents.harness.common.rails.tool_retrieval_prompt_rail import (
+    ToolRetrievalPromptRail,
+)
+from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
@@ -327,6 +331,25 @@ _CRON_TOOL_MODE: ContextVar[str | None] = ContextVar(
 def get_runtime_tool_session_id() -> str | None:
     """Session id bound for the current agent tool invocation (ContextVar)."""
     return _CRON_TOOL_SESSION_ID.get()
+
+from jiuwenswarm.common.prompt_capture import set_request_context, clear_request_context
+
+
+def _set_prompt_capture_context(
+    request: "AgentRequest",
+    session_id: str,
+    mode: str,
+    inputs: dict[str, Any],
+) -> None:
+    """Set prompt capture context from the current request."""
+    set_request_context(
+        session_id=session_id,
+        request_id=request.request_id or "",
+        query=str(inputs.get("query", "")),
+        channel_id=request.channel_id or "",
+        mode=mode,
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -3859,6 +3882,126 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
             return None
 
+    def _build_tool_retrieval_prompt_rail(self) -> ToolRetrievalPromptRail | None:
+        """Build lightweight progressive tool retrieval prompt guidance."""
+        try:
+            rail = ToolRetrievalPromptRail()
+            logger.info("[JiuWenSwarmDeepAdapter] ToolRetrievalPromptRail created")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] ToolRetrievalPromptRail create failed: %s", exc)
+            return None
+
+    def _build_progressive_tool_rail(self) -> ProgressiveToolRail | None:
+        """Build agent-core ProgressiveToolRail (search-based, with always-visible tools).
+        Auto-load variant: search results are immediately marked as visible,
+        eliminating the separate load_tools step."""
+        try:
+            from types import SimpleNamespace
+
+            config = SimpleNamespace(
+                progressive_tool_enabled=True,
+                progressive_tool_always_visible_tools=[
+                    "bash", "read_file", "write_file", "edit_file",
+                    "glob", "grep", "fetch_webpage",
+                ],
+                # list_files, code, task_tool, ask_user → 隐藏，有需要时 search
+                # 注意：当前 27 个工具中无独立 web_search，
+                #       如需添加请确认工具已注册到 ability_manager
+                progressive_tool_default_visible_tools=[],
+                # 已 load（hidden 转 active）的工具数上限。超过则按 LRU 淘汰
+                # 最久未用的，inputs.tools 因此有界（7 always + 2 meta + ≤N active），
+                # 不再随对话线性增长。默认 8；可由 react.progressive_tool_max_loaded_tools 覆盖。
+                progressive_tool_max_loaded_tools=int(
+                    (get_config().get("react", {}) or {}).get(
+                        "progressive_tool_max_loaded_tools", 8
+                    )
+                ),
+                language="cn",
+            )
+
+            # ── Auto-load 子类：search 后自动标记为可见 ──
+            class AutoLoadProgressiveToolRail(ProgressiveToolRail):
+                """ProgressiveToolRail variant that auto-loads search results."""
+
+                _navigation_extra_tools = {"code"}
+                # 只 auto-load top-N（base _search_tools 已按 score 降序返回）。
+                # 全量 auto-load 会把单 token 命中的弱匹配（score=3）也塞进 active 集，
+                # 污染 LRU、触发多余淘汰。LLM 仍看到完整 result 列表，长尾需要时
+                # 手动 load_tools cherry-pick。
+                _auto_load_top_n = 3
+
+                def __init__(self, config):
+                    super().__init__(config)
+                    self._auto_load_session = None
+                    self._ability_snapshot_done = False
+
+                async def before_invoke(self, ctx):
+                    await super().before_invoke(ctx)
+                    # 刷新 ability 快照（每个 rail 实例写一次）：
+                    # 此时 mode 切换已完成、_cached_all_tool_infos 已定型，快照反映
+                    # 真实注册集（含 fast 模式卸载 plan rail 之后的裁剪结果），
+                    # 供 analyze_capture.py 读取，替代已禁用的树检索 rail 的快照职责。
+                    if not self._ability_snapshot_done:
+                        self._ability_snapshot_done = True
+                        try:
+                            from jiuwenswarm.common.prompt_capture import (
+                                get_capture as _get_capture,
+                            )
+                            cap = _get_capture()
+                            if cap is not None:
+                                cap.snapshot_ability_manager(getattr(ctx, "agent", None))
+                        except Exception as exc:
+                            logger.warning(
+                                "[AutoLoadProgressiveToolRail] ability snapshot failed: %s",
+                                exc,
+                            )
+
+                async def before_model_call(self, ctx):
+                    # 保存 session 引用，search_tools 回调中用到
+                    self._auto_load_session = getattr(ctx, "session", None)
+                    await super().before_model_call(ctx)
+
+                async def _search_tools(self, query, limit=10, detail_level=1):
+                    results = await super()._search_tools(query, limit, detail_level)
+                    # ── 自动 load：搜完直接标记为可见，跳过 load_tools ──
+                    # 走基类 _add_loaded_tools，与显式 load_tools 共用同一套
+                    # max_loaded_tools cap + LRU 淘汰（之前这里只做 union、不守 cap，
+                    # 导致 inputs.tools 无界增长）。
+                    session = self._auto_load_session
+                    if session is not None and results:
+                        # 只 auto-load top-N（results 已按 score 降序），
+                        # 完整列表仍 return 给 LLM，长尾用 load_tools 手动装。
+                        top_n = results[: self._auto_load_top_n]
+                        matched_names = [
+                            r.get("name", "") for r in top_n if r.get("name")
+                        ]
+                        if matched_names:
+                            _next, added, evicted = self._add_loaded_tools(
+                                session, matched_names
+                            )
+                            logger.info(
+                                "[AutoLoadProgressiveToolRail] search '%s' → "
+                                "added %d: %s; evicted %d by LRU: %s",
+                                query, len(added), added,
+                                len(evicted), evicted,
+                            )
+                    return results
+            # ── Auto-load 子类结束 ──
+
+            rail = AutoLoadProgressiveToolRail(config)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] ProgressiveToolRail created | "
+                "always_visible=%d",
+                len(config.progressive_tool_always_visible_tools),
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ProgressiveToolRail create failed: %s", exc
+            )
+            return None
+
     def _build_prewarm_rail(self) -> PrewarmRail | None:
         """Build the KV-cache prewarm rail.
 
@@ -4004,6 +4147,19 @@ class JiuWenSwarmDeepAdapter:
                 self._build_symphony_orchestration_prompt_rail,
             ),
         )
+        # ── 树浏览（暂时禁用，测试 agent-core ProgressiveToolRail）──
+        # rail_infos.append(
+        #     _RailBuildInfo("_tool_retrieval_prompt_rail", self._build_tool_retrieval_prompt_rail),
+        # )
+        # ── agent-core ProgressiveToolRail（搜索方案，按需检索）──
+        # 由 config 的 progressive_tool_enabled 控制（默认 true）。关闭时不注册 →
+        # ContextAssembleRail 的 "# 可用工具" 全量列表正常保留（回到 show-all）。
+        if config.get("progressive_tool_enabled", True):
+            rail_infos.append(
+                _RailBuildInfo("_progressive_tool_rail", self._build_progressive_tool_rail),
+            )
+        else:
+            self._progressive_tool_rail = None
         if isinstance(mode, str) and mode.startswith("agent"):
             rail_infos.append(_RailBuildInfo("_ask_user_rail", self._build_structured_ask_user_rail))
 
@@ -4431,6 +4587,36 @@ class JiuWenSwarmDeepAdapter:
                 logger.info("[JiuWenSwarmDeepAdapter] acp_chat tool registered")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] acp_chat registration failed: %s", exc)
+
+        # ── 树浏览元工具（暂时禁用，改用 agent-core ProgressiveToolRail）──
+        # Tool progressive retrieval tools (tool_index_build / tool_branch_explore / tool_branch_peek)
+        # try:
+        #     from jiuwenswarm.agents.harness.common.tools.tool_retrieval_toolkits import (
+        #         ToolRetrievalToolkit,
+        #         set_runtime_tool_cards,
+        #     )
+        #     cards_dict = {
+        #         card.name: card for card in tool_cards if hasattr(card, 'name')
+        #     }
+        #     logger.info(
+        #         "[JiuWenSwarmDeepAdapter] caching %d tool_cards for progressive retrieval",
+        #         len(cards_dict),
+        #     )
+        #     set_runtime_tool_cards(cards_dict)
+        #     tr_toolkit = ToolRetrievalToolkit()
+        #     for tr_tool in tr_toolkit.get_tools():
+        #         if not Runner.resource_mgr.get_tool(tr_tool.card.id):
+        #             Runner.resource_mgr.add_tool(tr_tool)
+        #         tool_cards.append(tr_tool.card)
+        #     logger.info(
+        #         "[JiuWenSwarmDeepAdapter] tool retrieval tools registered: %d",
+        #         len(tr_toolkit.get_tools()),
+        #     )
+        # except Exception as exc:
+        #     logger.warning(
+        #         "[JiuWenSwarmDeepAdapter] tool retrieval tools registration failed: %s",
+        #         exc,
+        #     )
 
         return tool_cards
 
@@ -6984,6 +7170,7 @@ class JiuWenSwarmDeepAdapter:
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         self._set_telemetry_context_for_request(request)
+        _set_prompt_capture_context(request, session_id, mode, inputs)
         if self._stream_event_rail is not None:
             self._stream_event_rail.reset_abort(session_id)
         image_files_token = None
@@ -7416,6 +7603,7 @@ class JiuWenSwarmDeepAdapter:
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         self._set_telemetry_context_for_request(request)
+        _set_prompt_capture_context(request, session_id, mode, inputs)
         stream_consumer_cancelled = False
         image_files_token = None
         _run_span: Any = None

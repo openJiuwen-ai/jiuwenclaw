@@ -422,6 +422,8 @@ debug_trace:
 react:
   agent_name: main_agent
   enable_task_loop: true
+  progressive_tool_enabled: true       # 按需检索开关：true=启用 ProgressiveToolRail（search+AutoLoad，藏非必要工具、删 ContextAssembleRail 的"# 可用工具"全量列表）；false=关闭，回到全量工具列表（LLM 直接看到所有工具，不 search）
+  progressive_tool_max_loaded_tools: 8 # 已 load（hidden 转 active）的工具数上限。超过按 LRU 淘汰最久未用的，使 inputs.tools 有界（7 always + 2 meta + ≤N active），不随对话线性增长 token。被淘汰的工具需要时重 search 即可。
   max_iterations: 100
   model_name: ${MODEL_NAME:-deepseek-chat}
   skill_mode: all

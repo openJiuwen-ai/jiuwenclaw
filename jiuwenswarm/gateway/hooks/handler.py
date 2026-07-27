@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+    # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 """GatewayHookHandler —— 在 Gateway 层执行 session / 生命周期类 hooks."""
 

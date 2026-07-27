@@ -24,7 +24,7 @@ interface SkillTreePathProps {
   stepIntervalMs?: number;
 }
 
-type BrowseNodeKind = 'branch' | 'skill';
+type BrowseNodeKind = 'branch' | 'skill' | 'tool';
 
 interface BrowseNode {
   id: string;
@@ -49,6 +49,7 @@ interface BrowseGraph {
   exposedSkillCount: number;
   foldedBranchCount: number;
   queryLabel: string;
+  isTool: boolean;
 }
 
 const MAX_VISIBLE_CHILDREN = 8;
@@ -93,7 +94,15 @@ function isPeekTree(tree: SkillTreePathData): boolean {
 }
 
 function isExploreTree(tree: SkillTreePathData): boolean {
-  return tree.query.toLowerCase().includes('skill_branch_explore');
+  const q = tree.query.toLowerCase();
+  return q.includes('skill_branch_explore') || q.includes('tool_branch_explore');
+}
+
+function isToolTree(trees: SkillTreePathData[]): boolean {
+  return trees.some(t => {
+    const q = t.query.toLowerCase();
+    return q.includes('tool_branch_explore') || q.includes('tool_branch_peek');
+  });
 }
 
 function addCandidateLookup(
@@ -153,6 +162,7 @@ function buildBrowseGraph(trees: SkillTreePathData[]): BrowseGraph {
   const nodes = new Map<string, BrowseNode>();
   const candidateLookup = buildCandidateLookup(trees);
   const touchedBranchIds = buildTouchedBranchIds(trees);
+  const toolTree = isToolTree(trees);
   let sequence = 0;
   let exploreCount = 0;
   let peekCount = 0;
@@ -273,7 +283,7 @@ function buildBrowseGraph(trees: SkillTreePathData[]): BrowseGraph {
         const child = ensureNode(
           leafId,
           candidate?.label || displayLabel(leaf),
-          'skill',
+          toolTree ? 'tool' : 'skill',
           step.depth + 1,
           node.id,
           candidate
@@ -301,12 +311,16 @@ function buildBrowseGraph(trees: SkillTreePathData[]): BrowseGraph {
     exposedSkillCount,
     foldedBranchCount,
     queryLabel: formatQueryLabel(trees),
+    isTool: toolTree,
   };
 }
 
 function nodeStateLabel(node: BrowseNode): string {
   if (node.kind === 'skill') {
     return '已披露技能';
+  }
+  if (node.kind === 'tool') {
+    return '已披露工具';
   }
   if (node.exploreCount > 0) {
     return '已展开';
@@ -318,7 +332,7 @@ function nodeStateLabel(node: BrowseNode): string {
 }
 
 function nodeTitle(node: BrowseNode): string {
-  if (node.kind === 'skill') {
+  if (node.kind === 'skill' || node.kind === 'tool') {
     return node.candidate?.description || node.id;
   }
   return node.id;
@@ -386,7 +400,7 @@ function BrowseNodeView({
       >
         <div className="skill-path-tree__node-main">
           <span className="skill-path-tree__type">
-            {node.kind === 'skill' ? '技能' : '分支'}
+            {node.kind === 'skill' ? '技能' : node.kind === 'tool' ? '工具' : '分支'}
           </span>
           <span className="skill-path-tree__label">{node.label}</span>
           <span className="skill-path-tree__state">
@@ -516,7 +530,7 @@ export function SkillTreePath({
         aria-expanded={!collapsed}
       >
         <span className="skill-path__title">
-          <span className="skill-path__badge">技能检索树</span>
+          <span className="skill-path__badge">{graph.isTool ? '工具检索树' : '技能检索树'}</span>
           {graph.queryLabel && (
             <span className="skill-path__query" title={graph.queryLabel}>
               {graph.queryLabel}
@@ -526,7 +540,7 @@ export function SkillTreePath({
         <span className="skill-path__meta">
           <span>{graph.exploreCount} 次展开</span>
           <span>{graph.peekCount} 次窥探</span>
-          <span>{graph.exposedSkillCount} 个披露技能</span>
+          <span>{graph.exposedSkillCount} 个披露{graph.isTool ? '工具' : '技能'}</span>
           {graph.foldedBranchCount > 0 && <span>{graph.foldedBranchCount} 个分支折叠</span>}
           <span className={clsx('skill-path__chevron', !collapsed && 'is-open')} aria-hidden="true">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
