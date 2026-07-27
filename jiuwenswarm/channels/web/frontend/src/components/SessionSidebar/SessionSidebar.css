@@ -45,6 +45,28 @@
   }
 }
 
+.advanced-config-panel__guide {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 16px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border-default);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.advanced-config-panel__guide:hover {
+  background: var(--color-surface-hover);
+  border-color: var(--color-border-hover);
+}
+
 /* ============================================
    Config Row
    ============================================ */

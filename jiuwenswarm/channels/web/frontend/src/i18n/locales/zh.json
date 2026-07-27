@@ -507,7 +507,8 @@
     "connectionStatus": "连接状态",
     "version": "版本",
     "language": "语言",
-    "moreSettings": "更多设置"
+    "moreSettings": "更多设置",
+    "guide": "配置引导"
   },
   "offloadFiles": {
     "title": "离线文件",
@@ -2218,5 +2219,221 @@
   },
   "qaSummary": {
     "title": "问题澄清"
+  },
+  "onboarding": {
+    "title": "配置引导",
+    "stepCounter": "第 {{current}} / {{total}} 步",
+    "errSave": "保存失败，请稍后重试",
+    "loading": "正在读取已有配置…",
+    "badges": {
+      "required": "必填",
+      "optional": "可选",
+      "configured": "已配置",
+      "requiredNote": "这是运行 jiuwenswarm 的必要配置。",
+      "optionalNote": "此步骤为可选，可按需配置或直接跳过。"
+    },
+    "minimized": {
+      "resume": "返回配置引导",
+      "closeAria": "关闭配置引导",
+      "minimizeAria": "最小化配置引导"
+    },
+    "steps": {
+      "welcome": "开始",
+      "model": "模型配置",
+      "agent": "Agent 配置",
+      "security": "安全配置",
+      "other": "其他配置",
+      "done": "完成"
+    },
+    "actions": {
+      "start": "开始配置",
+      "saveNext": "保存并继续",
+      "next": "下一步",
+      "finish": "完成",
+      "back": "上一步",
+      "skip": "跳过"
+    },
+    "welcome": {
+      "desc": "欢迎使用 jiuwenswarm！我们将用几步帮你完成基础配置。请选择一种引导模式：",
+      "minimal": {
+        "title": "精简模式",
+        "desc": "只配置能让 jiuwenswarm 跑起来的最小项（模型），最快上手。"
+      },
+      "classic": {
+        "title": "经典模式",
+        "desc": "对齐配置中心的各页签，逐一介绍并配置模型、Agent、安全与其他常用能力。"
+      }
+    },
+    "model": {
+      "desc": "配置一个对话模型，这是运行 jiuwenswarm 的必要条件。填写模型服务商、模型名称与接口信息后即可开始使用。",
+      "sectionTitle": "默认对话模型",
+      "summary": "已配置：{{model}}",
+      "noKey": {
+        "title": "还没有大模型 API Key？",
+        "desc": "参考华为云 MaaS 服务指南，几步即可获取可用的 API Key 与接口地址。",
+        "link": "查看指南"
+      },
+      "fields": {
+        "model_provider": {
+          "label": "模型服务商",
+          "placeholder": "如 OpenAI、Anthropic、DeepSeek 等",
+          "hint": "选择你的模型来自哪个服务商，会影响接口协议的适配。"
+        },
+        "model_name": {
+          "label": "模型名称",
+          "placeholder": "如 gpt-4o、deepseek-chat",
+          "hint": "服务商提供的具体模型标识。"
+        },
+        "api_base": {
+          "label": "接口地址（API Base）",
+          "placeholder": "如 https://api.openai.com/v1",
+          "hint": "模型服务的接口基础地址，通常由服务商提供。"
+        },
+        "api_key": {
+          "label": "API 密钥",
+          "placeholder": "sk-...",
+          "hint": "用于访问模型服务的密钥，仅保存在你本地的服务配置中。"
+        },
+        "reasoning_level": {
+          "label": "推理强度（可选）",
+          "placeholder": "如 low / medium / high",
+          "hint": "部分推理模型支持，留空即使用默认值。"
+        }
+      },
+      "validate": "验证模型",
+      "validateOk": "连接正常",
+      "validateErr": "连接失败，请检查配置",
+      "errRequired": "请填写模型名称、接口地址与 API 密钥",
+      "errSave": "模型保存失败，请稍后重试",
+      "link": "前往配置中心的模型配置",
+      "note": "如需管理多个模型、Embed 或视觉/语音模型，可前往配置中心的模型配置。"
+    },
+    "agent": {
+      "desc": "对应配置中心的「Agent 配置」页签，用于设置智能体与团队——决定任务由谁完成、如何协作。此处仅作介绍，详细项可在配置中心编辑。",
+      "agent": {
+        "title": "智能体（Agent）",
+        "text": "为不同任务定制专属智能体，绑定模型与技能。"
+      },
+      "team": {
+        "title": "团队（Team）",
+        "text": "把多个智能体组成团队，按角色分工协作完成复杂任务。"
+      },
+      "link": "前往配置中心的 Agent 配置",
+      "note": "此步骤仅作介绍，可直接点击下一步跳过。"
+    },
+    "security": {
+      "desc": "安全配置用于控制智能体调用工具时的权限。开启后，敏感操作会先征求你的确认。",
+      "toggleTitle": "启用工具权限管控",
+      "toggleText": "开启后，读写文件、执行命令等操作会按权限策略进行询问或拦截。",
+      "noteEnabled": "已开启：更安全，敏感操作会先询问你。",
+      "noteDisabled": "已关闭：更顺畅，但智能体可直接执行各类操作。",
+      "link": "前往配置中心的安全配置"
+    },
+    "other": {
+      "desc": "对应配置中心的「其他配置」页签。为便于理解，这里按类别整理：先是第三方服务，再是 jiuwenswarm 的特性能力，均为可选，可按需配置。",
+      "thirdParty": {
+        "title": "第三方服务配置",
+        "hint": "常用第三方服务的 API Key，均为可选，用于增强联网搜索、代码检索等能力。"
+      },
+      "apiKeyTitle": "服务 API Key",
+      "configuredCount": "已配置 {{count}} 项",
+      "enabledSummary": "已开启",
+      "freeSearch": "免费搜索",
+      "features": {
+        "title": "高级功能配置",
+        "hint": "jiuwenswarm 的进阶能力，默认关闭；仅你手动改动过的开关会被保存，其余保持既有配置。",
+        "groups": {
+          "evolution": { "label": "自演进配置", "hint": "Skills 在线自演进参数" },
+          "context_engine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
+          "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
+          "swarmflow": { "label": "SwarmFlow", "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控" },
+          "symphony": { "label": "技能交响乐", "hint": "控制技能交响乐的调度与检索能力" },
+          "proactive": { "label": "主动推荐", "hint": "自动分析用户需求，主动提供建议" }
+        },
+        "items": {
+          "free_search_bing_enabled": {
+            "label": "Bing 免费搜索",
+            "text": "无需 API Key，通过 Bing 获取联网搜索结果。"
+          },
+          "free_search_ddg_enabled": {
+            "label": "DuckDuckGo 免费搜索",
+            "text": "无需 API Key 的隐私友好搜索引擎。"
+          },
+          "evolution_auto_scan": {
+            "label": "自动检测可演进信号",
+            "text": "定期扫描对话，自动发现可沉淀或优化的技能。"
+          },
+          "skill_create": {
+            "label": "自动建议创建新技能",
+            "text": "允许在任务执行中自动沉淀出新的技能。"
+          },
+          "context_engine_enabled": {
+            "label": "启用",
+            "text": "对话过长时自动压缩历史，降低 Token 消耗。"
+          },
+          "a2ui_enabled": {
+            "label": "启用",
+            "text": "让智能体动态渲染交互式界面。"
+          },
+          "swarmflow_enabled": {
+            "label": "启用",
+            "text": "团队模式下可视化协作流程与运行监控。"
+          },
+          "symphony_enabled": {
+            "label": "启用",
+            "text": "开启技能交响乐的整体调度能力。"
+          },
+          "symphony_dynamic_graph_enabled": {
+            "label": "启用动态图谱",
+            "text": "关闭后技能将按线性顺序执行。"
+          },
+          "skill_retrieval_enabled": {
+            "label": "启用技能检索",
+            "text": "构建并检索技能分类，提升技能命中率。"
+          },
+          "proactive_recommendation_enabled": {
+            "label": "启用主动推荐",
+            "text": "自动分析你的需求并主动给出建议。"
+          }
+        }
+      },
+      "fields": {
+        "jina_api_key": {
+          "label": "Jina API Key",
+          "placeholder": "可选",
+          "hint": "用于网页读取与内容解析。"
+        },
+        "bocha_api_key": {
+          "label": "博查 API Key",
+          "placeholder": "可选",
+          "hint": "用于中文网络搜索。"
+        },
+        "perplexity_api_key": {
+          "label": "Perplexity API Key",
+          "placeholder": "可选",
+          "hint": "用于联网问答式搜索。"
+        },
+        "serper_api_key": {
+          "label": "Serper API Key",
+          "placeholder": "可选",
+          "hint": "用于 Google 搜索结果获取。"
+        },
+        "github_token": {
+          "label": "GitHub Token",
+          "placeholder": "可选",
+          "hint": "用于访问 GitHub 仓库与代码检索。"
+        }
+      },
+      "link": "前往配置中心查看全部其他配置",
+      "note": "以上均为可选项，仅保存在本地服务配置中，可随时在配置中心修改。"
+    },
+    "done": {
+      "title": "配置完成！",
+      "descMinimal": "基础模型已配置，现在就可以开始与 jiuwenswarm 对话了。更多能力可在配置中心随时开启。",
+      "descClassic": "常用配置已完成，你可以随时在配置中心调整这些设置。",
+      "openConfig": "打开配置中心",
+      "reopenHint": "以后如需再次打开本引导，点击左下角设置图标，在弹出面板中选择「配置引导」即可。",
+      "dontShowAgain": "不再自动显示此引导"
+    }
   }
 }

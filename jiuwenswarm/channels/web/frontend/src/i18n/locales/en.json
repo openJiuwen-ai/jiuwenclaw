@@ -506,7 +506,8 @@
     "connectionStatus": "Connection Status",
     "version": "Version",
     "language": "Language",
-    "moreSettings": "More Settings"
+    "moreSettings": "More Settings",
+    "guide": "Setup Guide"
   },
   "offloadFiles": {
     "title": "Offload Files",
@@ -2214,5 +2215,221 @@
   },
   "qaSummary": {
     "title": "Clarifications"
+  },
+  "onboarding": {
+    "title": "Setup Guide",
+    "loading": "Reading your existing configuration…",
+    "badges": {
+      "required": "Required",
+      "optional": "Optional",
+      "configured": "Configured",
+      "requiredNote": "This is required to run jiuwenswarm.",
+      "optionalNote": "This step is optional — configure as needed or skip."
+    },
+    "stepCounter": "Step {{current}} / {{total}}",
+    "errSave": "Failed to save, please try again later",
+    "minimized": {
+      "resume": "Back to Setup Guide",
+      "closeAria": "Close setup guide",
+      "minimizeAria": "Minimize setup guide"
+    },
+    "steps": {
+      "welcome": "Start",
+      "model": "Model",
+      "agent": "Agent",
+      "security": "Security",
+      "other": "Other",
+      "done": "Done"
+    },
+    "actions": {
+      "start": "Get Started",
+      "saveNext": "Save & Continue",
+      "next": "Next",
+      "finish": "Finish",
+      "back": "Back",
+      "skip": "Skip"
+    },
+    "welcome": {
+      "desc": "Welcome to jiuwenswarm! We'll help you set up the basics in a few steps. Choose a guide mode:",
+      "minimal": {
+        "title": "Quick Setup",
+        "desc": "Configure only the minimum needed to run jiuwenswarm (a model). Fastest way to get started."
+      },
+      "classic": {
+        "title": "Classic Setup",
+        "desc": "Aligned with the config center tabs, walk through and configure Model, Agent, Security and Other capabilities."
+      }
+    },
+    "model": {
+      "desc": "Configure a chat model — this is required to run jiuwenswarm. Fill in the provider, model name and API details to get started.",
+      "sectionTitle": "Default chat model",
+      "summary": "Configured: {{model}}",
+      "noKey": {
+        "title": "Don't have a model API key yet?",
+        "desc": "Follow the Huawei Cloud MaaS guide to get an API key and endpoint in a few steps.",
+        "link": "View guide"
+      },
+      "fields": {
+        "model_provider": {
+          "label": "Model Provider",
+          "placeholder": "e.g. OpenAI, Anthropic, DeepSeek",
+          "hint": "Which provider your model comes from; affects protocol compatibility."
+        },
+        "model_name": {
+          "label": "Model Name",
+          "placeholder": "e.g. gpt-4o, deepseek-chat",
+          "hint": "The specific model identifier from your provider."
+        },
+        "api_base": {
+          "label": "API Base",
+          "placeholder": "e.g. https://api.openai.com/v1",
+          "hint": "The base URL of the model service, usually provided by the vendor."
+        },
+        "api_key": {
+          "label": "API Key",
+          "placeholder": "sk-...",
+          "hint": "The key used to access the model service; stored only in your local service config."
+        },
+        "reasoning_level": {
+          "label": "Reasoning Level (optional)",
+          "placeholder": "e.g. low / medium / high",
+          "hint": "Supported by some reasoning models; leave empty to use the default."
+        }
+      },
+      "validate": "Validate",
+      "validateOk": "Connection OK",
+      "validateErr": "Connection failed, check your settings",
+      "errRequired": "Please fill in the model name, API base and API key",
+      "errSave": "Failed to save the model, please try again later",
+      "link": "Open Model config in the config center",
+      "note": "To manage multiple models, embeddings, or vision/audio models, open the Model config in the config center."
+    },
+    "agent": {
+      "desc": "Corresponds to the \"Agent\" tab in the config center — for setting up agents and teams that decide who completes a task and how they collaborate. This is informational; edit the details in the config center.",
+      "agent": {
+        "title": "Agents",
+        "text": "Tailor dedicated agents for different tasks, bound to models and skills."
+      },
+      "team": {
+        "title": "Teams",
+        "text": "Compose multiple agents into a team that collaborates by role on complex tasks."
+      },
+      "link": "Open Agent config in the config center",
+      "note": "This step is informational — you can simply click Next to skip it."
+    },
+    "security": {
+      "desc": "Security settings control the permissions agents have when calling tools. When enabled, sensitive actions ask for your confirmation first.",
+      "toggleTitle": "Enable tool permission control",
+      "toggleText": "When on, actions like reading/writing files or running commands are asked or blocked by policy.",
+      "noteEnabled": "Enabled: safer — sensitive actions ask you first.",
+      "noteDisabled": "Disabled: smoother, but agents can run actions directly.",
+      "link": "Open Security config in the config center"
+    },
+    "other": {
+      "desc": "Corresponds to the \"Other\" tab in the config center. To keep things clear, items are grouped by category: third-party services first, then jiuwenswarm's own capabilities. All are optional.",
+      "thirdParty": {
+        "title": "Third-party services",
+        "hint": "API keys for common third-party services, all optional — used to enhance web search, code retrieval and more."
+      },
+      "apiKeyTitle": "Service API keys",
+      "configuredCount": "{{count}} configured",
+      "enabledSummary": "Enabled",
+      "freeSearch": "Free search",
+      "features": {
+        "title": "Advanced features",
+        "hint": "jiuwenswarm's advanced capabilities, off by default. Only switches you change are saved; the rest keep their existing config.",
+        "groups": {
+          "evolution": { "label": "Self-evolution", "hint": "Online self-evolution parameters for skills" },
+          "context_engine": { "label": "Context compression", "hint": "Whether conversation context is compressed" },
+          "a2ui": { "label": "A2UI", "hint": "Toggle generative UI rendering and A2UI runtime prompts" },
+          "swarmflow": { "label": "SwarmFlow", "hint": "Whether team mode enables the SwarmFlow view and monitoring" },
+          "symphony": { "label": "Skill Symphony", "hint": "Control skill symphony scheduling and retrieval" },
+          "proactive": { "label": "Proactive recommendations", "hint": "Analyze user needs and proactively offer suggestions" }
+        },
+        "items": {
+          "free_search_bing_enabled": {
+            "label": "Bing free search",
+            "text": "Get web search results via Bing, no API key required."
+          },
+          "free_search_ddg_enabled": {
+            "label": "DuckDuckGo free search",
+            "text": "A privacy-friendly search engine that needs no API key."
+          },
+          "evolution_auto_scan": {
+            "label": "Auto-detect evolvable signals",
+            "text": "Periodically scan conversations to find skills worth capturing or refining."
+          },
+          "skill_create": {
+            "label": "Auto-suggest new skills",
+            "text": "Allow new skills to be captured automatically during tasks."
+          },
+          "context_engine_enabled": {
+            "label": "Enable",
+            "text": "Automatically compress long histories to reduce token usage."
+          },
+          "a2ui_enabled": {
+            "label": "Enable",
+            "text": "Let agents dynamically render interactive interfaces."
+          },
+          "swarmflow_enabled": {
+            "label": "Enable",
+            "text": "Visualize collaboration flow and monitoring in team mode."
+          },
+          "symphony_enabled": {
+            "label": "Enable",
+            "text": "Turn on the overall skill symphony scheduling."
+          },
+          "symphony_dynamic_graph_enabled": {
+            "label": "Enable dynamic graph",
+            "text": "When off, skills run in linear order."
+          },
+          "skill_retrieval_enabled": {
+            "label": "Enable skill retrieval",
+            "text": "Build and retrieve skill categories to improve skill hit rate."
+          },
+          "proactive_recommendation_enabled": {
+            "label": "Enable proactive recommendations",
+            "text": "Analyze your needs and proactively offer suggestions."
+          }
+        }
+      },
+      "fields": {
+        "jina_api_key": {
+          "label": "Jina API Key",
+          "placeholder": "Optional",
+          "hint": "For web reading and content parsing."
+        },
+        "bocha_api_key": {
+          "label": "Bocha API Key",
+          "placeholder": "Optional",
+          "hint": "For Chinese web search."
+        },
+        "perplexity_api_key": {
+          "label": "Perplexity API Key",
+          "placeholder": "Optional",
+          "hint": "For online Q&A-style search."
+        },
+        "serper_api_key": {
+          "label": "Serper API Key",
+          "placeholder": "Optional",
+          "hint": "For fetching Google search results."
+        },
+        "github_token": {
+          "label": "GitHub Token",
+          "placeholder": "Optional",
+          "hint": "For accessing GitHub repositories and code retrieval."
+        }
+      },
+      "link": "Open all Other config in the config center",
+      "note": "All items are optional, stored only in your local service config, and can be changed anytime in the config center."
+    },
+    "done": {
+      "title": "Setup Complete!",
+      "descMinimal": "Your base model is configured — you can start chatting with jiuwenswarm now. Enable more capabilities anytime in the config center.",
+      "descClassic": "Common settings are done. You can adjust these anytime in the config center.",
+      "openConfig": "Open Config Center",
+      "reopenHint": "To reopen this guide later, click the settings icon at the bottom-left and choose \"Setup Guide\" in the panel.",
+      "dontShowAgain": "Don't show this guide automatically again"
+    }
   }
 }
