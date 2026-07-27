@@ -63,6 +63,7 @@ import {
   registerCreatedConversation,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
+import { createConversationSession } from './multi-session/state/createConversationSession';
 import { useTranslation } from 'react-i18next';
 import {
   normalizeA2UIEnabled,
@@ -77,12 +78,24 @@ import {
   isDesktopSaveOk,
 } from './utils/desktopSave';
 import type { DesktopSaveApiResult } from './utils/desktopSave';
+import { generateUuidV4 } from './utils/uuid';
+import {
+  ModelSetupGuide,
+  type ModelSetupGuideStep,
+} from './features/modelSetupGuide/ModelSetupGuide';
+import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
 import './App.css';
 
 const TEAM_SESSION_MODES = new Set(['team', 'team.plan', 'code.team']);
+const PREVIEW_MODEL_SETUP_GUIDE = import.meta.env.DEV
+  && new URLSearchParams(window.location.search).get('modelSetupGuide') === '1';
 
 function isTeamMode(mode: string): boolean {
   return TEAM_SESSION_MODES.has(mode);
+}
+
+function shouldPreviewModelSetupGuide(): boolean {
+  return PREVIEW_MODEL_SETUP_GUIDE;
 }
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
@@ -222,7 +235,7 @@ function ErrorFallback({ error }: { error: Error | null }) {
 
 function generateSessionId(): string {
   const ts = Date.now().toString(16);
-  const rand = crypto.randomUUID().replaceAll('-', '').slice(0, 12);
+  const rand = generateUuidV4().replaceAll('-', '').slice(0, 12);
   return `sess_${ts}_${rand}`;
 }
 
@@ -281,12 +294,15 @@ function AppContent() {
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
+  const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
+  const [modelSetupGuideManual, setModelSetupGuideManual] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const [missingSessionId, setMissingSessionId] = useState<string | null>(null);
   const startupUpdateCheckRef = useRef(false);
+  const modelSetupGuideEvaluatedRef = useRef(false);
   /** 从 SkillNet 等入口跳转配置页时，首次展开对应配置分组（如第三方服务） */
   const [configInitialExpandGroup, setConfigInitialExpandGroup] = useState<string | null>(null);
 
@@ -805,6 +821,12 @@ function AppContent() {
       upsertSessionMetadata(session, { setCurrent: sessionIdRef.current === targetSessionId });
       if (sessionIdRef.current === targetSessionId) {
         setMissingSessionId((current) => (current === targetSessionId ? null : current));
+        // 同 handleRestoreSession：拿到后端 metadata 里的 model 后还原 selectedModelName，
+        // 覆盖"targetSession 为空、走 loadSessionMetadata"这条恢复路径（如从 cron 触发
+        // 会话列表点进来的占位 session 之后补全元数据的场景，bug002）。
+        if (session?.model) {
+          useSessionStore.getState().setSelectedModelName(targetSessionId, session.model);
+        }
       }
       return session;
     } catch (error) {
@@ -823,6 +845,14 @@ function AppContent() {
       setA2UIFeatureEnabled(normalizeA2UIEnabled(config.a2ui_enabled));
       setServerConfig(config);
       setConfigError(null);
+      if (!modelSetupGuideEvaluatedRef.current) {
+        modelSetupGuideEvaluatedRef.current = true;
+        if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
+          setActiveNav('chat');
+          setModelSetupGuideManual(false);
+          setModelSetupGuideStep(1);
+        }
+      }
     } catch (error) {
       console.error('Failed to fetch config:', error);
       setServerConfig(null);
@@ -1622,18 +1652,16 @@ function AppContent() {
         if (workContext.project_dir) {
           createParams.project_dir = workContext.project_dir;
         }
-        const payload = await request<{ session_id?: string; sessionId?: string }>('session.create', createParams);
-        const createdSessionId = payload.session_id ?? payload.sessionId;
-        if (createdSessionId !== newSid) throw new Error('session.create returned an unexpected session id');
+        const created = await createConversationSession(request, createParams, newSid);
         const createdSession = registerCreatedConversation(
-          newSid,
+          created.session_id,
           runtimeSettings,
           Date.now(),
           content,
           {
-            project_id: workContext.project_id,
-            project_dir: workContext.project_dir,
-            work_mode: workContext.work_mode,
+            project_id: created.project_id || workContext.project_id,
+            project_dir: created.project_dir || workContext.project_dir,
+            work_mode: created.work_mode || workContext.work_mode,
           },
         );
         // 迁移 'new' 会话的已选技能到新会话
@@ -1856,6 +1884,12 @@ function AppContent() {
       setSessionId(targetSessionId);
       if (targetSession) {
         upsertSessionMetadata(targetSession, { setCurrent: true });
+        // 还原后端记录的会话模型：打开会话时若后端 metadata 带 model，写进
+        // runtime.selectedModelName，避免 selectedModelName 为空被全局默认兜底，
+        // 导致界面显示成默认模型（如定时任务选了非默认模型的会话，bug002）。
+        if (targetSession.model) {
+          useSessionStore.getState().setSelectedModelName(targetSessionId, targetSession.model);
+        }
       } else {
         setCurrentSession(null);
       }
@@ -1970,8 +2004,38 @@ function AppContent() {
 
   const handleNavigate = useCallback((nav: MainNavKey) => {
     setActiveNav(nav);
+    if (modelSetupGuideStep === 1 && nav === 'configpanel') {
+      setModelSetupGuideStep(2);
+    }
     if (nav === 'skills') setHasVisitedSkills(true);
     if (nav === 'channels') setHasVisitedChannels(true);
+  }, [modelSetupGuideStep]);
+
+  const skipModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
+  }, []);
+
+  const acknowledgeModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
+
+    void request('config.set', { setup_guide_enabled: 'false' })
+      .then(() => {
+        setServerConfig((current) => ({
+          ...(current ?? {}),
+          setup_guide_enabled: 'false',
+        }));
+      })
+      .catch((error) => {
+        console.error('Failed to disable setup guide:', error);
+      });
+  }, [request]);
+
+  const openModelSetupGuide = useCallback(() => {
+    setActiveNav('chat');
+    setModelSetupGuideManual(true);
+    setModelSetupGuideStep(1);
   }, []);
 
   const handleExportShare = useCallback(async () => {
@@ -2077,7 +2141,17 @@ function AppContent() {
         showNewSession={false}
         hiddenNavItems={['sessions']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
+        onSetupGuideRequest={openModelSetupGuide}
       />
+
+      {modelSetupGuideStep ? (
+        <ModelSetupGuide
+          step={modelSetupGuideStep}
+          manual={modelSetupGuideManual}
+          onAcknowledge={acknowledgeModelSetupGuide}
+          onSkip={skipModelSetupGuide}
+        />
+      ) : null}
 
       {/* Main Content */}
       <main className={`content ${activeNav === 'chat' ? 'content--chat' : ''} ${isTeamAreaExpanded ? 'content--team-expanded' : ''}`}>

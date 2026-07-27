@@ -60,6 +60,7 @@ from jiuwenswarm.common.config import (
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
+    update_setup_guide_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
     update_swarmflow_enabled_in_config,
@@ -193,7 +194,7 @@ class _ConfigChangeSet:
                 scopes.add("proactive")
             elif key_text.startswith("symphony") or key_text.startswith("skill_retrieval"):
                 scopes.add("agent_runtime")
-            elif key_text.startswith("a2ui_"):
+            elif key_text.startswith("a2ui_") or key_text == "setup_guide_enabled":
                 scopes.add("web_ui")
             else:
                 scopes.add("agent_runtime")
@@ -597,7 +598,6 @@ _FORWARD_REQ_METHODS = frozenset({
     "chat.resume",
     "chat.user_answer",
     "history.get",
-    "browser.start",
     # "tts.synthesize",
     "skills.marketplace.list",
     "skills.list",
@@ -685,7 +685,6 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "acp.tool_response",
     "team.delete",
     "command.goal",
-    "browser.start",
     "team.snapshot",
     "team.history.get",
     "team.mq.publish",
@@ -826,6 +825,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
+    "setup_guide_enabled",
 })
 
 # 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
@@ -1133,6 +1133,25 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
         pass
 
 
+async def _restart_agent_browser_runtime(agent_client=None) -> None:
+    """Stop active agent-side browser runtimes so the next task uses new config."""
+    if agent_client is None:
+        return
+
+    from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+    from jiuwenswarm.common.schema.message import ReqMethod
+
+    env = e2a_from_agent_fields(
+        request_id=f"browser-restart-{uuid.uuid4().hex[:8]}",
+        channel_id="",
+        req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+    )
+    response = await agent_client.send_request(env)
+    if not response.ok:
+        error = response.payload.get("error", "browser runtime restart failed")
+        raise RuntimeError(str(error))
+
+
 def _make_session_id() -> str:
     # 与前端 generateSessionId 保持一致：毫秒时间戳(16进制) + 6位随机16进制
     ts = format(int(time.time() * 1000), "x")
@@ -1389,7 +1408,7 @@ def _project_info_payload(
     """Serialize a project item consistently for project.list/info/create."""
     st = stats or {"session_count": 0, "last_message_at": None, "last_user_message_at": None}
     git = getattr(proj, "git", {}) if proj is not None else {}
-    git_payload = dict(git) if isinstance(git, dict) and git else {
+    git_defaults = {
         "enabled": False,
         "repo_root": "",
         "initialized_by_jiuwenswarm": False,
@@ -1397,8 +1416,11 @@ def _project_info_payload(
         "status": "disabled",
         "branch": "",
         "error": "",
+        "error_code": "",
+        "hint": "",
         "is_dirty": False,
     }
+    git_payload = {**git_defaults, **dict(git)} if isinstance(git, dict) and git else git_defaults
     if default_id is not None:
         work_mode = DEFAULT_TUI_WORK_MODE if default_id == DEFAULT_PROJECT_ID_CODE else DEFAULT_WEB_WORK_MODE
         return {
@@ -1434,6 +1456,68 @@ def _project_info_payload(
         "created_at": proj.created_at,
         "updated_at": getattr(proj, "updated_at", 0),
     }
+
+
+def _normalize_provider_value(value: str) -> str:
+    """把任意大小写的 provider 值归一化为可用 provider 的规范大小写。
+
+    与 TUI 侧 ``gateway/channel_manager/tui/tui_connect.py:_normalize_provider_value``
+    保持一致：TUI 在写入/校验 model_provider 时会做大小写归一化，Web 侧此前没有做，
+    导致同一份配置（例如历史数据里 model_provider 大小写不规范）在 TUI 能正常识别，
+    但 Web 的"测试"/"保存"因大小写敏感的精确匹配而被误判为非法值。
+    """
+    normalized = value.strip()
+    if not normalized:
+        return normalized
+
+    available_model_providers = available_model_provider_names()
+    lookup = {provider.lower(): provider for provider in available_model_providers}
+    return lookup.get(normalized.lower(), normalized)
+
+
+def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """从热更新后的配置中查找对应模型的 ``model_config_obj``。
+
+    按 ``model_name`` 或 ``alias`` 匹配 ``models.defaults`` 中的条目，
+    返回该条目的 ``model_config_obj``；找不到或读取失败时 fallback 到
+    空字典（让模型使用自身默认参数，避免 ``temperature=0`` 对部分
+    模型不兼容）。前端传入的 ``reasoning_level`` 可覆盖配置值。
+    """
+    model_config_obj: dict[str, Any] = {}
+    try:
+        _cfg = get_config()
+        _models = get_default_models(_cfg)
+        for entry in _models:
+            if not isinstance(entry, dict):
+                continue
+            mcc = entry.get("model_client_config") or {}
+            entry_model_name = str(mcc.get("model_name", "")).strip()
+            entry_alias = str(entry.get("alias", "")).strip()
+            if entry_model_name == model_name or entry_alias == model_name:
+                obj = entry.get("model_config_obj")
+                if isinstance(obj, dict):
+                    model_config_obj = dict(obj)
+                logger.info(
+                    "[config.validate_model] loaded model_config_obj for '%s' "
+                    "(matched_by=%s): %s",
+                    model_name,
+                    "model_name" if entry_model_name == model_name else "alias",
+                    model_config_obj,
+                )
+                break
+        else:
+            logger.info(
+                "[config.validate_model] no model_config_obj found for '%s', using empty default",
+                model_name,
+            )
+    except Exception as exc:
+        logger.warning(
+            "[config.validate_model] failed to read model_config_obj from config, using default. %s",
+            exc,
+        )
+    if "reasoning_level" in params:
+        model_config_obj["reasoning_level"] = params.get("reasoning_level")
+    return model_config_obj
 
 
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
@@ -1531,6 +1615,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # 合并 config.yaml 中的配置项
         try:
             raw = get_config_raw()
+            setup_guide_cfg = raw.get("setup_guide") or {}
+            payload["setup_guide_enabled"] = (
+                "true" if setup_guide_cfg.get("enabled", True) else "false"
+            )
             for key, val in payload.items():
                 from jiuwenswarm.extensions.registry import ExtensionRegistry
                 if (("api_key" in key.lower() or "token" in key.lower())
@@ -1585,6 +1673,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
+            payload.setdefault("setup_guide_enabled", "true")
             payload.setdefault("skill_create", "false")
             payload.setdefault("evolution_auto_scan", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
@@ -1754,6 +1843,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
                     update_permissions_enabled_in_config(parsed)
+                elif param_key == "setup_guide_enabled":
+                    update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_enabled":
                     update_memory_forbidden_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_description":
@@ -1873,21 +1964,23 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     origin_index = None
             api_key = str(item.get("api_key") or "").strip()
             api_base = str(item.get("api_base") or "").strip()
-            model_provider = str(item.get("model_provider") or "").strip()
-            capabilities = get_model_provider_capabilities(model_provider)
-            # New API-provider entries must carry a non-empty api_key. Existing entries may legitimately
-            # be empty when the source is ``${API_KEY:-}`` and the env var is unset; in that
-            # case origin_index lets replace_all preserve the original placeholder.
-            if capabilities.requires_api_key and not api_key and origin_index is None:
-                raise _ConfigBadRequest(f"models[{idx}].api_key is required")
+            model_provider = _normalize_provider_value(str(item.get("model_provider") or ""))
             if model_provider and model_provider not in available_model_providers:
                 raise _ConfigBadRequest(f"models[{idx}].model_provider must be one of: {available_model_providers}")
+            capabilities = get_model_provider_capabilities(model_provider)
+            if capabilities.requires_api_key and not api_key and origin_index is None:
+                raise _ConfigBadRequest(f"models[{idx}].api_key is required")
             missing = missing_model_fields(
                 model_name=model_name,
                 model_provider=model_provider,
                 api_base=api_base,
                 api_key=api_key,
             )
+            # Existing API-provider entries may use an unresolved ``${API_KEY:-}``
+            # placeholder. ``origin_index`` permits preserving only that key; every
+            # other capability requirement remains mandatory.
+            if origin_index is not None:
+                missing = [field for field in missing if field != "api_key"]
             if missing:
                 raise _ConfigBadRequest(f"models[{idx}] required fields missing: {', '.join(missing)}")
             if not validate_provider_model_name(model_provider, model_name):
@@ -1987,7 +2080,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """
         if max_tokens_bounds is None:
             max_tokens_bounds = {
-                "infimum_max_tokens": 1,
+                "infimum_max_tokens": 3,
                 "supremum_max_tokens": 16,
             }
 
@@ -1995,8 +2088,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             infimum_max_tokens = max_tokens_bounds.get("infimum_max_tokens")
             supremum_max_tokens = max_tokens_bounds.get("supremum_max_tokens")
         else:
-            infimum_max_tokens = 1
+            infimum_max_tokens = 3
             supremum_max_tokens = 16
+        infimum_max_tokens = max(infimum_max_tokens, 3)
 
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
@@ -2004,7 +2098,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         api_base = str(params.get("api_base") or "").strip()
         api_key = str(params.get("api_key") or "").strip()
         model = str(params.get("model") or "").strip()
-        model_provider = str(params.get("model_provider") or "").strip()
+        model_provider = _normalize_provider_value(str(params.get("model_provider") or ""))
         missing = missing_model_fields(
             model_name=model,
             model_provider=model_provider,
@@ -2045,8 +2139,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if api_base.endswith("/chat/completions"):
-            api_base = api_base.rsplit("/chat/completions", 1)[0]
         api_base = api_base.rstrip("/")
 
         if model_provider == CODEX_PROVIDER_NAME:
@@ -2252,9 +2344,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         verify_ssl = bool(params.get("verify_ssl", False))
 
-        model_config_obj = {"temperature": 0}
-        if "reasoning_level" in params:
-            model_config_obj["reasoning_level"] = params.get("reasoning_level")
+        model_config_obj = _resolve_model_config_obj_for_validate(model, params)
+
         reasoning_mcc = {
             "client_provider": model_provider,
             "api_base": api_base,
@@ -2265,6 +2356,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 model_config_obj=model_config_obj,
                 model_name=model,
             )
+        )
+        logger.info(
+            "[config.validate_model] final model_request_config for '%s': %s",
+            model,
+            model_request_config.model_dump(),
         )
         model_client_config = ModelClientConfig(
             client_id="config-validate",
@@ -2281,7 +2377,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return await llm.invoke(
                 [{"role": "user", "content": "Hi"}],
                 max_tokens=max_tokens,
-                temperature=0,
             )
 
         try:
@@ -3416,6 +3511,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        if project_dir and not os.path.isdir(project_dir):
+            await channel.send_response(
+                ws, req_id,
+                ok=False,
+                error="project directory does not exist",
+                code="PROJECT_DIR_MISSING",
+            )
+            return
         # 解析 work_mode(严格校验:非法值返回 BAD_REQUEST,不静默回落)
         from jiuwenswarm.server.runtime.session.work_mode import resolve_request_work_mode
         work_mode, mode_error = resolve_request_work_mode(params, channel.channel_id)
@@ -4529,26 +4632,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         try:
             update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
-            await _clear_agent_config_cache(_resolve(agent_client))
+            resolved_agent_client = _resolve(agent_client)
+            await _clear_agent_config_cache(resolved_agent_client)
         except Exception as e:  # noqa: BLE001
             logger.warning("[path.set] 写回 config.yaml 失败: %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
             return
 
-        # When switching to headless, purge any persisted headed-Chrome profile so the
-        # managed driver doesn't reuse an existing visible window on the next browser task.
-        if headless:
-            try:
-                from pathlib import Path as _Path
-                _profile_store = _Path(
-                    os.getenv("BROWSER_PROFILE_STORE_PATH", "").strip()
-                    or str(get_user_workspace_dir() / ".browser" / "profiles.json")
-                ).expanduser()
-                if _profile_store.exists():
-                    _profile_store.unlink()
-                    logger.info("[path.set] Cleared browser profile store for headless mode: %s", _profile_store)
-            except Exception as _e:
-                logger.debug("[path.set] Could not clear browser profile store: %s", _e)
+        try:
+            await _restart_agent_browser_runtime(resolved_agent_client)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[path.set] browser config saved but active runtime reset failed: %s",
+                e,
+            )
 
         await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
 
@@ -5172,6 +5269,57 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.exception("[channel.discord.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
+    async def _channel_slack_get_conf(ws, req_id, params, session_id):
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        try:
+            conf = cm.get_conf("slack")
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.slack.get_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _channel_slack_set_conf(ws, req_id, params, session_id):
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="params must be object",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            await cm.set_conf("slack", params)
+            conf = cm.get_conf("slack")
+            try:
+                update_channel_in_config("slack", conf)
+                await _clear_agent_config_cache(_resolve(agent_client))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[channel.slack.set_conf] failed to persist config.yaml: %s", e)
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.slack.set_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
     async def _channel_wecom_get_conf(ws, req_id, params, session_id):
         cm = _resolve(channel_manager)
         if cm is None:
@@ -5665,6 +5813,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("channel.whatsapp.set_conf", _channel_whatsapp_set_conf)
     channel.register_method("channel.discord.get_conf", _channel_discord_get_conf)
     channel.register_method("channel.discord.set_conf", _channel_discord_set_conf)
+    channel.register_method("channel.slack.get_conf", _channel_slack_get_conf)
+    channel.register_method("channel.slack.set_conf", _channel_slack_set_conf)
     channel.register_method("channel.wecom.get_conf", _channel_wecom_get_conf)
     channel.register_method("channel.wecom.set_conf", _channel_wecom_set_conf)
     channel.register_method("channel.wechat.get_conf", _channel_wechat_get_conf)

@@ -77,6 +77,7 @@ For detailed configuration instructions, see: [China Channels](ChinaChannels.md)
 |---------|-------------|
 | [Telegram](InternationalChannels.md#telegram) | International messaging tool, supports private and group chat |
 | [Discord](InternationalChannels.md#discord) | Gaming community platform, supports private and group chat |
+| [Slack](InternationalChannels.md#slack) | Enterprise collaboration platform, supports DMs and channel threads |
 | [WhatsApp](InternationalChannels.md#whatsapp) | Personal messaging tool, supports private chat |
 
 For detailed configuration instructions, see: [International Channels](InternationalChannels.md)

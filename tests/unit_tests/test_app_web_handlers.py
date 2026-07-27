@@ -190,6 +190,63 @@ class FakeHeartbeatService:
         return dict(self.config)
 
 
+@pytest.mark.asyncio
+async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = FakeWebChannel()
+    agent_client = object()
+    saved_configs: list[dict] = []
+    lifecycle_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_browser_in_config",
+        lambda config: saved_configs.append(config),
+    )
+
+    async def fake_clear(client):
+        lifecycle_calls.append(("reload", client))
+
+    async def fake_restart(client):
+        lifecycle_calls.append(("restart", client))
+
+    monkeypatch.setattr(app_web_handlers, "_clear_agent_config_cache", fake_clear)
+    monkeypatch.setattr(
+        app_web_handlers,
+        "_restart_agent_browser_runtime",
+        fake_restart,
+    )
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["path.set"](
+        object(),
+        "req-path",
+        {"chrome_path": " C:\\Chrome\\chrome.exe ", "headless": False},
+        "sess-1",
+    )
+
+    assert saved_configs == [
+        {"chrome_path": "C:\\Chrome\\chrome.exe", "headless": False}
+    ]
+    assert lifecycle_calls == [
+        ("reload", agent_client),
+        ("restart", agent_client),
+    ]
+    assert channel.responses[-1] == {
+        "id": "req-path",
+        "ok": True,
+        "payload": {
+            "chrome_path": "C:\\Chrome\\chrome.exe",
+            "headless": False,
+        },
+        "error": None,
+        "code": None,
+    }
+
+
 class FakeUpdaterService:
     def get_runtime_config(self):
         return {"release_api_type": "gitcode", "release_api_url": ""}
@@ -511,6 +568,83 @@ async def test_config_set_reports_saved_when_hot_reload_callback_fails(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_config_set_persists_setup_guide_without_runtime_reload(monkeypatch):
+    channel = FakeWebChannel()
+    persisted: list[bool] = []
+    reload_options_seen: list[dict] = []
+
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config_raw",
+        lambda: {"setup_guide": {"enabled": True}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"setup_guide": {"enabled": False}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_setup_guide_enabled_in_config",
+        lambda enabled: persisted.append(enabled),
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        del updated_keys, env_updates, config_payload
+        reload_options_seen.append(dict(reload_options))
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-setup-guide",
+        {"setup_guide_enabled": "false"},
+        "sess-setup-guide",
+    )
+
+    assert persisted == [False]
+    assert reload_options_seen == [{
+        "target_channel_id": "web",
+        "reload_scopes": ["web_ui"],
+    }]
+    assert channel.responses[-1]["payload"] == {
+        "updated": ["setup_guide_enabled"],
+        "applied_without_restart": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_config", "expected"),
+    [
+        ({}, "true"),
+        ({"setup_guide": {"enabled": False}}, "false"),
+    ],
+)
+async def test_config_get_returns_setup_guide_switch(monkeypatch, raw_config, expected):
+    channel = FakeWebChannel()
+    monkeypatch.setattr(app_web_handlers, "get_config_raw", lambda: raw_config)
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: raw_config)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["config.get"](
+        object(),
+        "req-get-setup-guide",
+        {},
+        "sess-get-setup-guide",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["setup_guide_enabled"] == expected
+
+
+@pytest.mark.asyncio
 async def test_models_replace_all_applies_scoped_reload_before_responding(monkeypatch):
     channel = FakeWebChannel()
     reload_started = asyncio.Event()
@@ -581,6 +715,218 @@ async def test_models_replace_all_applies_scoped_reload_before_responding(monkey
     assert channel.responses[-1]["id"] == "req-models"
     assert channel.responses[-1]["ok"] is True
     assert channel.responses[-1]["payload"]["applied_without_restart"] is True
+
+
+def _stub_model_replace_dependencies(monkeypatch, *, raw_defaults=None, resolved_defaults=None):
+    persisted: list[list[dict]] = []
+    raw_defaults = [] if raw_defaults is None else raw_defaults
+    resolved_defaults = [] if resolved_defaults is None else resolved_defaults
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config_raw",
+        lambda: {"models": {"defaults": raw_defaults}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_default_models",
+        lambda *args, **kwargs: resolved_defaults,
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_default_models_in_config",
+        lambda models: persisted.append(list(models)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.registry.ExtensionRegistry.get_instance",
+        lambda: type(
+            "Registry",
+            (),
+            {"get_crypto_provider": lambda self: type(
+                "Crypto", (), {"encrypt": lambda self, value: value}
+            )()},
+        )(),
+    )
+    return persisted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "api_base", "api_key", "expected_provider"),
+    (
+        ("openai", "gpt-4.1", "https://example.test/v1", "secret", "OpenAI"),
+        (CODEX_PROVIDER_NAME.lower(), CODEX_MODEL_ALIAS, "", "", CODEX_PROVIDER_NAME),
+        (CLAUDE_PROVIDER_NAME.lower(), CLAUDE_MODEL_ALIAS, "", "", CLAUDE_PROVIDER_NAME),
+    ),
+)
+async def test_models_replace_all_normalizes_all_provider_kinds(
+    monkeypatch,
+    provider,
+    model,
+    api_base,
+    api_key,
+    expected_provider,
+):
+    channel = FakeWebChannel()
+    persisted = _stub_model_replace_dependencies(monkeypatch)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-normalized-provider",
+        {"models": [{
+            "model_name": model,
+            "api_base": api_base,
+            "api_key": api_key,
+            "model_provider": provider,
+            "is_default": True,
+        }]},
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert persisted[-1][0]["model_client_config"]["client_provider"] == expected_provider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "field", "value"),
+    (
+        (CODEX_PROVIDER_NAME.lower(), CODEX_MODEL_ALIAS, "api_key", "forbidden"),
+        (CODEX_PROVIDER_NAME.lower(), CODEX_MODEL_ALIAS, "api_base", "https://forbidden.test"),
+        (CODEX_PROVIDER_NAME.lower(), "wrong-codex", "model_name", "wrong-codex"),
+        (CLAUDE_PROVIDER_NAME.lower(), CLAUDE_MODEL_ALIAS, "api_key", "forbidden"),
+        (CLAUDE_PROVIDER_NAME.lower(), CLAUDE_MODEL_ALIAS, "api_base", "https://forbidden.test"),
+        (CLAUDE_PROVIDER_NAME.lower(), "wrong-claude", "model_name", "wrong-claude"),
+    ),
+)
+async def test_models_replace_all_rejects_invalid_subscription_fields_after_normalization(
+    monkeypatch,
+    provider,
+    model,
+    field,
+    value,
+):
+    channel = FakeWebChannel()
+    _stub_model_replace_dependencies(monkeypatch)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    draft = {
+        "model_name": model,
+        "api_base": "",
+        "api_key": "",
+        "model_provider": provider,
+        "is_default": True,
+    }
+    draft[field] = value
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-invalid-subscription",
+        {"models": [draft]},
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_models_replace_all_origin_index_preserves_only_empty_api_key_placeholder(
+    monkeypatch,
+):
+    raw_entry = {
+        "model_client_config": {
+            "model_name": "gpt-4.1",
+            "api_base": "https://example.test/v1",
+            "api_key": "${OPENAI_API_KEY:-}",
+            "client_provider": "OpenAI",
+        },
+        "model_config_obj": {},
+        "is_default": True,
+    }
+    resolved_entry = {
+        "model_client_config": {
+            **raw_entry["model_client_config"],
+            "api_key": "",
+        },
+        "model_config_obj": {},
+        "is_default": True,
+    }
+    channel = FakeWebChannel()
+    persisted = _stub_model_replace_dependencies(
+        monkeypatch,
+        raw_defaults=[raw_entry],
+        resolved_defaults=[resolved_entry],
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-preserve-placeholder",
+        {"models": [{
+            "model_name": "gpt-4.1",
+            "api_base": "https://example.test/v1",
+            "api_key": "",
+            "model_provider": "openai",
+            "origin_index": 0,
+            "is_default": True,
+        }]},
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert persisted[-1][0]["model_client_config"]["api_key"] == "${OPENAI_API_KEY:-}"
+
+
+@pytest.mark.asyncio
+async def test_config_validate_ordinary_provider_preserves_endpoint_and_injects_reasoning(
+    monkeypatch,
+):
+    captured: dict[str, object] = {}
+
+    class RecordingModel:
+        def __init__(self, *, model_config, model_client_config):
+            captured["model_config"] = model_config.model_dump()
+            captured["client_config"] = model_client_config.model_dump()
+
+        async def invoke(self, *_args, **_kwargs):
+            return SimpleNamespace(content="ok", reasoning_content=None)
+
+    configured_entry = {
+        "model_client_config": {
+            "model_name": "deepseek-v4-flash",
+            "api_base": "https://api.deepseek.com/chat/completions/",
+            "api_key": "secret",
+            "client_provider": "DeepSeek",
+        },
+        "model_config_obj": {"reasoning_level": "high"},
+    }
+    monkeypatch.setattr(app_web_handlers, "Model", RecordingModel)
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: {})
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_default_models",
+        lambda *_args, **_kwargs: [configured_entry],
+    )
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["config.validate_model"](
+        object(),
+        "req-ordinary-validate",
+        {
+            "model_provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_base": "https://api.deepseek.com/chat/completions/",
+            "api_key": "secret",
+        },
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert captured["client_config"]["client_provider"] == "DeepSeek"
+    assert captured["client_config"]["api_base"] == "https://api.deepseek.com/chat/completions"
+    assert captured["model_config"]["reasoning_effort"] == "high"
+    assert captured["model_config"]["extra_body"]["thinking"] == {"type": "enabled"}
 
 
 @pytest.mark.asyncio

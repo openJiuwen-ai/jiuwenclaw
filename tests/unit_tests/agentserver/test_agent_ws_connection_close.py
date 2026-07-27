@@ -5,10 +5,13 @@ import os
 import re
 import time
 import textwrap
+import weakref
 from pathlib import Path
 
 import pytest
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 from openjiuwen.core.single_agent import AgentCard
 from websockets.exceptions import ConnectionClosedError
 
@@ -17,8 +20,10 @@ from jiuwenswarm.common.e2a.gateway_normalize import (
     e2a_from_agent_fields,
 )
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
+from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
 from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.integrations.ai4research_subscription.codex_process import (
     CodexProcessRunner,
@@ -122,6 +127,63 @@ class _NoCreateCleanupAgentManager:
     async def cleanup_session_runtime(self, *, channel_id: str, session_id: str) -> bool:
         self.cleaned.append((channel_id, session_id))
         return False
+
+
+async def _clear_non_team_react_agent_session(
+    deep_agent,
+    session_id: str,
+) -> None:
+    """Bound the real non-team cleanup path used by ``ReactAgent.clear_session``.
+
+    The merged OpenJiuwen ``Runner.release`` first restores a prospective team
+    session before deciding whether to use its non-team fallback.  These tests
+    construct direct ReAct agents and therefore cannot own team runtime state.
+    Exercise that fallback against the checkpointer captured by the real test
+    session.  The process-wide default can rotate to persistence during the
+    request, but this session was created on the in-memory checkpointer.  This
+    keeps teardown scoped to the state it actually owns, clears the real context
+    cache, and avoids an irrelevant team-checkpoint restore.
+    """
+
+    react_agent = deep_agent.react_agent
+    session = deep_agent._interaction_session
+    assert session is not None
+    assert session.get_session_id() == session_id
+    checkpointer = session._inner.checkpointer()
+
+    async def clear() -> None:
+        await checkpointer.release(session_id)
+        await react_agent.context_engine.clear_context(session_id=session_id)
+
+    await asyncio.wait_for(clear(), timeout=5)
+    assert not await asyncio.wait_for(
+        checkpointer.session_exists(session_id),
+        timeout=5,
+    )
+    assert all(
+        context.session_id() != session_id
+        for context in react_agent.context_engine._context_pool.values()
+    )
+
+
+def _isolate_non_team_test_checkpointer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give one heavyweight test a real, fresh session checkpointer.
+
+    The production request may replace the process-wide default with SQLite.
+    Restore both globals through ``monkeypatch`` after the test so collection
+    order cannot make the next direct-agent session inherit that backend.
+    """
+
+    monkeypatch.setattr(
+        CheckpointerFactory,
+        "_default_checkpointer",
+        InMemoryCheckpointer(),
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "_PERSISTENT_CHECKPOINTER_READY",
+        False,
+    )
 
 
 @pytest.mark.asyncio
@@ -287,6 +349,7 @@ async def test_cancel_barrier_crosses_real_production_stream_chain(
     not directly to the owner.  Its wire terminal is accepted only after the
     real leader and child are gone and DeepAdapter has released its turn owner.
     """
+    _isolate_non_team_test_checkpointer(monkeypatch)
     workspace = tmp_path / "instance"
     workspace.mkdir(mode=0o700)
     monkeypatch.setattr(
@@ -562,7 +625,7 @@ time.sleep(60)
         processor.cancel()
     await asyncio.gather(*processors, return_exceptions=True)
     await adapter.stop_interaction()
-    await deep_agent.react_agent.clear_session("sess")
+    await _clear_non_team_react_agent_session(deep_agent, "sess")
 
 
 @pytest.mark.asyncio
@@ -578,6 +641,7 @@ async def test_same_session_history_reaches_codex_prompt_through_real_ws_chain(
     DeepAgent/Runner -> call-bound model -> CodexSubscriptionModelClient ->
     real CodexProcessRunner child, capturing the exact stdin prompt.
     """
+    _isolate_non_team_test_checkpointer(monkeypatch)
     workspace = tmp_path / "instance"
     workspace.mkdir(mode=0o700)
     monkeypatch.setattr(
@@ -747,7 +811,7 @@ for event in (
             processor.cancel()
         await asyncio.gather(*processors, return_exceptions=True)
         await adapter.stop_interaction()
-        await deep_agent.react_agent.clear_session("history-sess")
+        await _clear_non_team_react_agent_session(deep_agent, "history-sess")
 
     captures = sorted(tmp_path.glob("prompt-capture-*.txt"))
     assert len(captures) == 2, f"expected 2 provider prompts, saw {len(captures)}"
@@ -816,6 +880,7 @@ async def test_codex_timeout_error_reaches_wire_with_typed_route_receipts(
     """The r12b live failure: OpenJiuwen converts the model-call timeout into a
     stream error chunk, so the wire chat.error lost its typed code and
     provider/consumer route receipts. The turn owner must restore them."""
+    _isolate_non_team_test_checkpointer(monkeypatch)
     workspace = tmp_path / "instance"
     workspace.mkdir(mode=0o700)
     monkeypatch.setattr(
@@ -963,7 +1028,7 @@ time.sleep(60)
             processor.cancel()
         await asyncio.gather(*processors, return_exceptions=True)
         await adapter.stop_interaction()
-        await deep_agent.react_agent.clear_session("timeout-sess")
+        await _clear_non_team_react_agent_session(deep_agent, "timeout-sess")
 
     encoded_frames = [json.dumps(frame) for frame in ws.sent]
     error_frames = [
@@ -1009,6 +1074,7 @@ async def test_claude_login_error_reaches_wire_with_typed_provider_receipt(
     The request-local Claude model proxy must retain the original typed error so
     the production AgentServer stream emits its stable code/provider receipt.
     """
+    _isolate_non_team_test_checkpointer(monkeypatch)
     workspace = tmp_path / "instance"
     workspace.mkdir(mode=0o700)
     monkeypatch.setattr(
@@ -1161,7 +1227,7 @@ raise SystemExit(99)
             processor.cancel()
         await asyncio.gather(*processors, return_exceptions=True)
         await adapter.stop_interaction()
-        await deep_agent.react_agent.clear_session("claude-login-sess")
+        await _clear_non_team_react_agent_session(deep_agent, "claude-login-sess")
 
     encoded_frames = [json.dumps(frame) for frame in ws.sent]
     error_payloads = [
@@ -1185,6 +1251,38 @@ raise SystemExit(99)
     assert typed[0].get("provider") == CLAUDE_PROVIDER_NAME
     assert not any('"chat.final"' in frame for frame in encoded_frames)
     assert not any('"chat.tool_' in frame for frame in encoded_frames)
+
+
+class _BlockingCleanupAgentManager(_CleanupRecordingAgentManager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleanup_started = asyncio.Event()
+        self.allow_cleanup = asyncio.Event()
+
+    async def cleanup_session_runtime(self, *, channel_id: str, session_id: str) -> bool:
+        self.cleanup_started.set()
+        await self.allow_cleanup.wait()
+        return await super().cleanup_session_runtime(
+            channel_id=channel_id,
+            session_id=session_id,
+        )
+
+
+class _FailedCleanupAgentManager(_CleanupRecordingAgentManager):
+    async def cleanup_session_runtime(self, *, channel_id: str, session_id: str) -> bool:
+        raise RuntimeError("cleanup failed")
+
+
+class _PinRecordingAgentManager:
+    def __init__(self) -> None:
+        self.pinned: list[object] = []
+        self.unpinned: list[object] = []
+
+    def pin_agent(self, agent: object) -> None:
+        self.pinned.append(agent)
+
+    def unpin_agent(self, agent: object) -> None:
+        self.unpinned.append(agent)
 
 
 async def _handle_cancel_cleanup_case(env) -> list[tuple[str, str]]:
@@ -1259,25 +1357,132 @@ async def test_handle_message_reports_json_error_when_peer_is_open() -> None:
 
 @pytest.mark.asyncio
 async def test_disconnect_cancel_cleans_session_runtime_after_cancel() -> None:
+    session_id = "sess-exit"
     env = e2a_from_agent_fields(
         request_id="req-disconnect-cancel",
         channel_id="tui",
-        session_id="sess-exit",
+        session_id=session_id,
         req_method=ReqMethod.CHAT_CANCEL,
         params={
             "intent": "cancel",
-            "session_id": "sess-exit",
+            "session_id": session_id,
         },
         is_stream=False,
         timestamp=0.0,
     )
     env.channel_context["_jiuwenswarm_cancel_source"] = "client_disconnect"
+    agent_ws_server_module._plan_exited_sessions.add(session_id)
 
-    assert await _handle_cancel_cleanup_case(env) == [("tui", "sess-exit")]
+    try:
+        assert await _handle_cancel_cleanup_case(env) == [("tui", session_id)]
+        assert session_id not in agent_ws_server_module._plan_exited_sessions
+    finally:
+        agent_ws_server_module._plan_exited_sessions.discard(session_id)
 
 
 @pytest.mark.asyncio
-async def test_disconnect_cancel_does_not_create_agent_or_send_terminal_when_runtime_missing() -> None:
+async def test_disconnect_cancel_response_waits_for_runtime_cleanup() -> None:
+    session_id = "sess-cleanup-order"
+    env = e2a_from_agent_fields(
+        request_id="req-cleanup-order",
+        channel_id="tui",
+        session_id=session_id,
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "session_id": session_id},
+        is_stream=False,
+        timestamp=0.0,
+    )
+    env.channel_context["_jiuwenswarm_cancel_source"] = "client_disconnect"
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    manager = _BlockingCleanupAgentManager()
+    server._agent_manager = manager
+    server._session_stream_tasks = {}
+    ws = FakeWebSocket()
+
+    request_task = asyncio.create_task(
+        server.handle_message_for_test(
+            ws,
+            json.dumps(env.to_dict(), ensure_ascii=False),
+            asyncio.Lock(),
+        )
+    )
+    await manager.cleanup_started.wait()
+
+    assert ws.sent == []
+
+    manager.allow_cleanup.set()
+    await request_task
+
+    assert manager.cleaned == [("tui", session_id)]
+    assert len(ws.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancel_response_reports_runtime_cleanup_failure() -> None:
+    session_id = "sess-cleanup-failed"
+    env = e2a_from_agent_fields(
+        request_id="req-cleanup-failed",
+        channel_id="tui",
+        session_id=session_id,
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "session_id": session_id},
+        is_stream=False,
+        timestamp=0.0,
+    )
+    env.channel_context["_jiuwenswarm_cancel_source"] = "client_disconnect"
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    server._agent_manager = _FailedCleanupAgentManager()
+    server._session_stream_tasks = {}
+    ws = FakeWebSocket()
+
+    await server.handle_message_for_test(
+        ws,
+        json.dumps(env.to_dict(), ensure_ascii=False),
+        asyncio.Lock(),
+    )
+
+    assert len(ws.sent) == 1
+    response = parse_agent_server_wire_unary(ws.sent[0])
+    assert response.ok is False
+    assert response.payload == {
+        "event_type": "chat.interrupt_result",
+        "success": False,
+        "error": "session runtime cleanup failed",
+    }
+
+
+def test_session_mode_sync_lock_cache_does_not_retain_idle_sessions() -> None:
+    session_id = "sess-weak-lock"
+    lock = AgentWebSocketServer._session_mode_sync_lock(session_id)
+    lock_ref = weakref.ref(lock)
+
+    assert agent_ws_server_module._session_mode_sync_locks.get(session_id) is lock
+
+    del lock
+
+    assert lock_ref() is None
+    assert session_id not in agent_ws_server_module._session_mode_sync_locks
+
+
+def test_scheduler_agent_pin_moves_with_persistent_owner() -> None:
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    manager = _PinRecordingAgentManager()
+    first = object()
+    second = object()
+    server._agent_manager = manager
+    server._scheduler_agent = None
+
+    server._set_scheduler_agent(first)
+    server._set_scheduler_agent(second)
+    server._set_scheduler_agent(second)
+
+    assert manager.pinned == [first, second]
+    assert manager.unpinned == [first]
+    assert server._scheduler_agent is second
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancel_does_not_create_agent_when_runtime_missing() -> None:
     server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
     manager = _NoCreateCleanupAgentManager()
     server._agent_manager = manager
@@ -1301,7 +1506,63 @@ async def test_disconnect_cancel_does_not_create_agent_or_send_terminal_when_run
     )
 
     assert manager.cleaned == [("tui", "sess-no-agent")]
-    assert ws.sent == []
+    assert len(ws.sent) == 1
+    assert parse_agent_server_wire_unary(ws.sent[0]).ok is True
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancel_runtime_cleanup_is_bounded_and_sends_one_terminal(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_CANCEL_CLEANUP_TIMEOUT_SECONDS",
+        0.02,
+    )
+    session_id = "sess-bounded-disconnect-cleanup"
+    env = e2a_from_agent_fields(
+        request_id="req-bounded-disconnect-cleanup",
+        channel_id="tui",
+        session_id=session_id,
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "session_id": session_id},
+        is_stream=False,
+        timestamp=0.0,
+    )
+    env.channel_context["_jiuwenswarm_cancel_source"] = "client_disconnect"
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    manager = _BlockingCleanupAgentManager()
+    server._agent_manager = manager
+    server._session_stream_tasks = {}
+    server._cancel_cleanup_tasks = set()
+    ws = FakeWebSocket()
+
+    await asyncio.wait_for(
+        server.handle_message_for_test(
+            ws,
+            json.dumps(env.to_dict(), ensure_ascii=False),
+            asyncio.Lock(),
+        ),
+        timeout=0.5,
+    )
+
+    assert manager.cleanup_started.is_set()
+    assert len(ws.sent) == 1
+    response = parse_agent_server_wire_unary(ws.sent[0])
+    assert response.ok is False
+    assert response.payload == {
+        "event_type": "chat.interrupt_result",
+        "success": False,
+        "error": "session runtime cleanup failed",
+    }
+    assert len(server._cancel_cleanup_tasks) == 1
+    cleanup_task = next(iter(server._cancel_cleanup_tasks))
+    assert cleanup_task.cancelled() is False
+
+    manager.allow_cleanup.set()
+    await asyncio.wait_for(cleanup_task, timeout=0.5)
+    await asyncio.sleep(0)
+    assert server._cancel_cleanup_tasks == set()
 
 
 @pytest.mark.asyncio

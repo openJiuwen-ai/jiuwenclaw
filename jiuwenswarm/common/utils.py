@@ -28,6 +28,7 @@ Runtime layout:
 """
 
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -1717,12 +1718,13 @@ _DATA_IMAGE_PATTERN = re.compile(
 # - api_key: sk-xxx
 # - authorization = Bearer ...
 # 分组说明：
-# 1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3/4) 可选引号（当前替换逻辑未直接使用）
+# 1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3) 可选起始引号；
+# 4) 值本体（用于脱敏后附指纹）；5) 可选结束引号。
 _KV_SENSITIVE_PATTERN = re.compile(
     r"(?i)(?<![A-Za-z0-9])"
     r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
     r"refresh[_-]?token|authorization|user[_-]?id|userid)"
-    r"(?![A-Za-z0-9])(\s*[:=]\s*)([\"']?)[^,\s\"'\]\}]+([\"']?)"
+    r"(?![A-Za-z0-9])(\s*[:=]\s*)([\"']?)([^,\s\"'\]\}]+)([\"']?)"
 )
 # 匹配“键名包含敏感关键词”且“值被引号包裹”的场景，覆盖:
 # - 'CAT_CAFE_CALLBACK_TOKEN': 'xxxx'
@@ -1740,7 +1742,8 @@ _NAMED_SENSITIVE_KV_PATTERN = re.compile(
     r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
 )
 # 匹配 Authorization Bearer 令牌，保留 "Bearer " 前缀，仅掩码后面的令牌值。
-_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9\-._~+/]+=*")
+# 分组：1) "Bearer " 前缀；2) 令牌值本体（用于算指纹）。
+_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)([A-Za-z0-9\-._~+/]+=*)")
 _SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
     # 匹配 JWT（header.payload.signature 三段式，常见以 eyJ 开头）。
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
@@ -1757,6 +1760,54 @@ _SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
     # 匹配中国身份证号（18 位，最后一位可为 X/x）。
     re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),
 ]
+# PII / 非凭证类 pattern：掩码但不附指纹（关联意义不大，且避免引入额外可逆性顾虑）。
+_SENSITIVE_PII_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_SENSITIVE_PATTERNS[-3:])
+# 凭证类 prefix pattern：掩码并附指纹（同 key 指纹一致可关联、不可逆）。
+_SENSITIVE_CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_SENSITIVE_PATTERNS[:4])
+
+
+def _fingerprint(value: str) -> str:
+    """返回 value 的 SHA256 前 4 字节（8 位 hex）指纹，用于脱敏后的关联。
+
+    不可逆：拿到 ``fp:7f3a2c19`` 无法还原原值。同一 key 每次指纹一致，
+    可在日志中把同一账号/会话的多次请求串起来排查；key 轮换后指纹自然变化。
+    """
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:8]
+
+
+# 已脱敏产物形态：纯 ****** 或 ******(fp:xxxxxxxx)。
+# 用于在二次脱敏时识别"已是脱敏值"，跳过重算指纹，避免产生"指纹的指纹"
+# 导致跨日志关联失效（如 stream_logger._mask_secrets 先脱敏，_write_raw 再脱敏）。
+_ALREADY_MASKED_PATTERN = re.compile(rf"^{re.escape(_SENSITIVE_MASK)}(\(fp:[0-9a-f]{{8}}\))?$")
+
+
+def _is_already_masked(value: Any) -> bool:
+    """判断 value 是否已是脱敏产物（纯掩码或带指纹），避免重复脱敏。"""
+    try:
+        v = str(value) if value is not None else ""
+    except Exception:
+        return False
+    return bool(v) and bool(_ALREADY_MASKED_PATTERN.match(v))
+
+
+def _masked_with_fp(value: Any) -> str:
+    """脱敏并附指纹：``******(fp:xxxxxxxx)``。value 为空或失败时退化为纯掩码。
+
+    若 value 本身已是脱敏产物（``******`` 或 ``******(fp:..)``），原样返回，
+    不重算指纹——避免对"指纹值"再算指纹导致跨日志关联失效。
+    """
+    try:
+        v = str(value) if value is not None else ""
+    except Exception:
+        return _SENSITIVE_MASK
+    if _is_already_masked(v):
+        return v
+    fp = _fingerprint(v)
+    if not fp:
+        return _SENSITIVE_MASK
+    return f"{_SENSITIVE_MASK}(fp:{fp})"
 
 
 def _sanitize_log_text(text: str) -> str:
@@ -1765,16 +1816,41 @@ def _sanitize_log_text(text: str) -> str:
 
     masked = text
     masked = _DATA_IMAGE_PATTERN.sub("data:image/*;base64,******", masked)
-    masked = _KV_SENSITIVE_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}", masked)
-    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}" r"\2", masked)
-    masked = _BEARER_SENSITIVE_PATTERN.sub(r"\1" f"{_SENSITIVE_MASK}", masked)
-    for pattern in _SENSITIVE_PATTERNS:
+    # _KV_SENSITIVE_PATTERN: 组1=键名, 组2=分隔符, 组4=值（组3/5 为可选引号）。
+    masked = _KV_SENSITIVE_PATTERN.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{_masked_with_fp(m.group(4))}", masked
+    )
+    # _NAMED_SENSITIVE_KV_PATTERN: 组1=键+分隔符, 组2=起始引号, 组3=值, 组4=结束引号。
+    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{_masked_with_fp(m.group(3))}{m.group(4)}", masked
+    )
+    # _BEARER_SENSITIVE_PATTERN: 组1=Bearer 前缀, 组2=令牌值。
+    masked = _BEARER_SENSITIVE_PATTERN.sub(
+        lambda m: f"{m.group(1)}{_masked_with_fp(m.group(2))}", masked
+    )
+    # 凭证类 prefix key（JWT/sk-/ghp_/glpat-）：掩码并附指纹。
+    for pattern in _SENSITIVE_CREDENTIAL_PATTERNS:
+        masked = pattern.sub(lambda m, _p=pattern: _masked_with_fp(m.group(0)), masked)
+    # PII（邮箱/手机/身份证）：纯掩码，不附指纹。
+    for pattern in _SENSITIVE_PII_PATTERNS:
         masked = pattern.sub(_SENSITIVE_MASK, masked)
     return masked
 
 
+def mask_sensitive(text: Any) -> str:
+    """对任意文本做敏感信息脱敏，返回脱敏后的字符串。
+
+    作为对外稳定接口：调用方（如 ``agent_ws_server`` 打印模型配置/环境变量）
+    应统一走本函数，避免各自硬编码键名匹配（例如只命中 ``API_KEY``、漏掉
+    ``OPENAI_API_KEY`` / ``VISION_API_KEY`` 等带前缀变体）造成明文泄露。
+    """
+    if text is None:
+        return ""
+    return _sanitize_log_text(str(text))
+
+
 class SensitiveDataFilter(logging.Filter):
-    """Mask sensitive data in all log messages."""
+    """Mask sensitive data in all log messages and tracebacks."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -1784,6 +1860,30 @@ class SensitiveDataFilter(logging.Filter):
         except Exception:
             # Never block logging because of desensitization failure.
             pass
+
+        # Traceback 由 Formatter.formatException() 在 record.exc_text 中单独渲染，
+        # 不经过 record.getMessage()，因此 message 脱敏覆盖不到。这里提前把
+        # traceback 文本脱敏写入 record.exc_text 并清空 record.exc_info，
+        # 使 logger.exception()/exc_info=True 的异常栈也不会泄露 api_key 等。
+        try:
+            exc_info = record.exc_info
+            if exc_info and not record.exc_text:
+                import traceback as _traceback
+
+                # exc_info 是 (type, value, tb) 三元组。Python 3.10+ 的
+                # traceback.format_exception 新签名只接受单个异常实例：
+                # format_exception(exc, /, limit=None, chain=True)。
+                # 旧的 format_exception(*exc_info)（拆包成 3 个位置参数）依赖
+                # 兼容层，未来版本可能移除；改用 exc_info[1]（异常实例）是
+                # 官方推荐写法，面向未来且行为等价（None 时输出 "NoneType: None"）。
+                formatted = "".join(_traceback.format_exception(exc_info[1]))
+                record.exc_text = _sanitize_log_text(formatted)
+                record.exc_info = None
+            elif record.exc_text:
+                record.exc_text = _sanitize_log_text(record.exc_text)
+        except Exception:
+            # 同样不因脱敏失败而阻断日志输出。
+            pass
         return True
 
 
@@ -1792,6 +1892,75 @@ class JsonOnlyFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         return record.getMessage()
+
+
+# 源头脱敏是否已安装（全局，避免重复设置 LogRecordFactory）。
+_source_record_masking_installed = False
+# 源头脱敏失败计数（脱敏异常时递增；运维可通过此值监控脱敏失效，避免静默泄露）。
+_source_masking_failures = 0
+
+
+def install_source_record_masking() -> None:
+    """在 LogRecord 创建层（``logging.setLogRecordFactory``）安装源头脱敏。
+
+    这是比 handler 上挂 ``SensitiveDataFilter`` 更彻底的兜底层：无论哪个 logger
+    发出的 record——包括 **jiuwenswarm 命名空间之外**的第三方库（openjiuwen /
+    openai / httpx / urllib3 等，它们自带 handler、不 propagate 到 jiuwenswarm
+    根 logger），在 LogRecord **创建瞬间**就被脱敏 message 与 traceback，
+    保证任何来源的 api_key 都不明文落盘。
+
+    覆盖场景：
+    - ``app_agentserver.py`` 用 ``logging.getLogger("openjiuwen.harness.security")``
+      等 openjiuwen 命名空间 logger；
+    - clawee（yuanrong faas）拉起的 AgentServer 内 openjiuwen SDK 自有 logger；
+    - httpx/openai SDK 在 DEBUG 级别打印请求头（含 Authorization）。
+
+    复用带指纹的 ``_sanitize_log_text``，与 handler 层 ``SensitiveDataFilter``
+    共存为双保险：若 record 已在源头脱敏，handler 层的 ``_is_already_masked``
+    会跳过重算，不破坏指纹。幂等，重复调用安全。
+    """
+    global _source_record_masking_installed
+    if _source_record_masking_installed:
+        return
+
+    old_factory = logging.getLogRecordFactory()
+
+    def _sanitizing_record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = old_factory(*args, **kwargs)
+        try:
+            # message 脱敏（含 %s/format 格式化后的最终文本）。
+            msg = record.getMessage()
+            record.msg = _sanitize_log_text(msg)
+            record.args = ()
+            # traceback 脱敏：traceback 由 Formatter.formatException 从
+            # record.exc_text 单独渲染，getMessage 覆盖不到。此处提前渲染并脱敏，
+            # 清空 exc_info 使 Formatter 复用已脱敏的 exc_text。
+            exc_info = record.exc_info
+            if exc_info and not record.exc_text:
+                import traceback as _tb
+
+                formatted = "".join(_tb.format_exception(exc_info[1]))
+                record.exc_text = _sanitize_log_text(formatted)
+                record.exc_info = None
+            elif record.exc_text:
+                record.exc_text = _sanitize_log_text(record.exc_text)
+        except Exception:
+            # 永不因脱敏失败而阻断日志输出。但记录失败（计数 + 首次 stderr 提示），
+            # 避免静默吞掉异常导致 api_key 在无感知下明文泄露。
+            global _source_masking_failures
+            _source_masking_failures += 1
+            if _source_masking_failures == 1:
+                # 仅首次打 stderr（不用 logging，避免自循环），提示运维脱敏失效。
+                # 后续仅靠计数器累积，避免高频失败刷屏。
+                print(
+                    "[jiuwenswarm] source record masking failed — secrets may be "
+                    "exposed in logs; check _source_masking_failures counter",
+                    file=sys.stderr,
+                )
+        return record
+
+    logging.setLogRecordFactory(_sanitizing_record_factory)
+    _source_record_masking_installed = True
 
 
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
@@ -1857,6 +2026,10 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     stream_handler.setFormatter(formatter)
     stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
+
+    # 源头脱敏：覆盖 jiuwenswarm 命名空间之外的第三方 logger（openjiuwen/openai/
+    # httpx 等），在 LogRecord 创建时统一脱敏，保证任何来源的 api_key 都不明文落盘。
+    install_source_record_masking()
     return root
 
 

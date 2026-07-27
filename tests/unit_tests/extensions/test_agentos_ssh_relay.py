@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,13 +13,19 @@ import pytest
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import AgentManager
-from jiuwenswarm.extensions.agentos.agentos_router.config import load_router_config
+from jiuwenswarm.extensions.agentos.agentos_router.config import (
+    SshChannelEndpoint,
+    load_router_config,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
 from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
+    DEFAULT_CLIENT_KEYS_DIR,
     DEFAULT_SSH_USER_TEMPLATE,
     YuanrongSshRelay,
     YuanrongSshSettings,
+    list_client_key_paths,
     load_yuanrong_ssh_settings,
+    resolve_client_keys_dir,
 )
 from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshRelaySession
 
@@ -59,15 +66,28 @@ def _ssh_envelope(
 class StubSshRelay:
     """Records relay invocations and resolves the session like the real relay."""
 
-    def __init__(self) -> None:
-        self.ran: list[tuple[str, str]] = []
+    def __init__(
+        self,
+        *,
+        backend_host: str = "frontend.yuanrong.test",
+        backend_port: int = 2222,
+    ) -> None:
+        self.ran: list[tuple[str, str, str]] = []
         self.failed: list[tuple[str, str]] = []
+        self.backend_host = backend_host
+        self.backend_port = backend_port
 
     def backend_username(self, instance_id: str) -> str:
         return DEFAULT_SSH_USER_TEMPLATE.format(instance=instance_id)
 
-    async def run(self, session: Any, instance_id: str) -> int:
-        self.ran.append((session.session_id, instance_id))
+    async def run(
+        self,
+        session: Any,
+        instance_id: str,
+        *,
+        user_id: str = "",
+    ) -> int:
+        self.ran.append((session.session_id, instance_id, user_id))
         session.exit_code = 0
         session.done.set()
         return 0
@@ -88,7 +108,7 @@ def test_backend_username_uses_yr_instance_template() -> None:
     )
     assert (
         relay.backend_username("inst-42")
-        == "yr:instance:inst-42:user=agentos"
+        == "yr:instance:inst-42"
     )
     assert relay.backend_host == "frontend.yuanrong.test"
     assert relay.backend_port == 2222
@@ -114,12 +134,52 @@ def test_load_yuanrong_ssh_settings_defaults() -> None:
     assert settings.port == 2222
     assert settings.user_template == DEFAULT_SSH_USER_TEMPLATE
     assert settings.connect_timeout_s == 30.0
+    assert settings.client_keys_dir == DEFAULT_CLIENT_KEYS_DIR
 
     custom = load_yuanrong_ssh_settings(
-        {"port": 2223, "user_template": "yr:{instance}"}
+        {
+            "port": 2223,
+            "user_template": "yr:{instance}",
+            "client_keys_dir": "/data/{user_id}/keys",
+        }
     )
     assert custom.port == 2223
     assert custom.user_template == "yr:{instance}"
+    assert custom.client_keys_dir == "/data/{user_id}/keys"
+
+
+def test_resolve_client_keys_dir_defaults_to_root_ssh() -> None:
+    assert resolve_client_keys_dir(DEFAULT_CLIENT_KEYS_DIR, "alice") == Path(
+        "/root/.ssh"
+    )
+    assert resolve_client_keys_dir(
+        "/home/{user_id}/.ssh", "alice/../bob"
+    ) == Path("/home/alice_.._bob/.ssh")
+
+
+def test_list_client_key_paths_reads_default_names(tmp_path: Path) -> None:
+    (tmp_path / "id_ed25519").write_text("key-ed", encoding="utf-8")
+    (tmp_path / "id_rsa").write_text("key-rsa", encoding="utf-8")
+    (tmp_path / "id_rsa.pub").write_text("pub", encoding="utf-8")
+    (tmp_path / "known_hosts").write_text("h", encoding="utf-8")
+    assert list_client_key_paths(tmp_path) == [
+        str(tmp_path / "id_ed25519"),
+        str(tmp_path / "id_rsa"),
+    ]
+    assert list_client_key_paths(tmp_path / "missing") == []
+
+
+def test_resolve_client_keys_requires_private_key(tmp_path: Path) -> None:
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(client_keys_dir=str(tmp_path / "{user_id}")),
+    )
+    with pytest.raises(ValueError, match="no SSH private keys found"):
+        relay._resolve_client_keys("alice")
+
+    key_dir = tmp_path / "alice"
+    key_dir.mkdir()
+    (key_dir / "id_ed25519").write_text("k", encoding="utf-8")
+    assert relay._resolve_client_keys("alice") == [str(key_dir / "id_ed25519")]
 
 
 def test_import_asyncssh_raises_actionable_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,11 +209,42 @@ def test_load_router_config_parses_ssh_block() -> None:
             "agentos": {
                 "ssh": {"port": 2222},
             },
-        }
+        },
+        "channels": {
+            "ssh": {
+                "enabled": True,
+                "listen_host": "192.168.1.10",
+                "listen_port": 2222,
+            }
+        },
     }
     loaded = load_router_config(config)
     assert loaded.ssh.port == 2222
     assert loaded.ssh.user_template == DEFAULT_SSH_USER_TEMPLATE
+    assert loaded.ssh_channel == SshChannelEndpoint(ip="192.168.1.10", port=2222)
+    assert loaded.ssh.client_keys_dir == DEFAULT_CLIENT_KEYS_DIR
+    assert loaded.workspace_root == "/home/agentos/users"
+
+
+def test_load_router_config_ssh_channel_requires_enabled() -> None:
+    config = {
+        "gateway": {
+            "agent_client": {
+                "type": "agentos_router",
+                "frontend_endpoint": "http://yuanrong.test",
+                "function_version_urn": "urn:test",
+            },
+        },
+        "channels": {
+            "ssh": {
+                "enabled": False,
+                "listen_host": "0.0.0.0",
+                "listen_port": 2222,
+            }
+        },
+    }
+    loaded = load_router_config(config)
+    assert loaded.ssh_channel is None
 
 
 # ---------- router dispatch ----------
@@ -171,18 +262,21 @@ async def test_ssh_relay_creates_instance_and_starts_relay() -> None:
         ssh_relay=stub_relay,
     )
     try:
-        response = await client.send_request(_ssh_envelope(session))
+        response = await client.send_request(
+            _ssh_envelope(session, agent_type="opencode")
+        )
         assert response.ok
         assert response.payload["status"] == "relay_started"
 
         await asyncio.wait_for(session.done.wait(), timeout=5)
-        assert stub_relay.ran == [("ssh_alice_1234", "sbx-1")]
+        assert stub_relay.ran == [("ssh_alice_1234", "sbx-1", "alice")]
         assert stub_relay.failed == []
         assert session.exit_code == 0
 
         agents = await agent_manager.list_user_agents("alice")
         assert len(agents) == 1
         assert agents[0].info.sandbox_id == "sbx-1"
+        assert agents[0].info.agent_type == "opencode"
     finally:
         await client.shutdown()
 
@@ -200,9 +294,9 @@ async def test_ssh_relay_reuses_existing_instance() -> None:
     first = _relay_session("ssh_alice_a")
     second = _relay_session("ssh_alice_b")
     try:
-        await client.send_request(_ssh_envelope(first))
+        await client.send_request(_ssh_envelope(first, agent_type="opencode"))
         await asyncio.wait_for(first.done.wait(), timeout=5)
-        await client.send_request(_ssh_envelope(second))
+        await client.send_request(_ssh_envelope(second, agent_type="opencode"))
         await asyncio.wait_for(second.done.wait(), timeout=5)
 
         assert yuanrong.create_calls == 1
@@ -222,12 +316,16 @@ async def test_ssh_relay_follows_user_current_agent_type() -> None:
         FakeRegistryClient(),
         agent_manager,
         ssh_relay=stub_relay,
+        ssh_channel_endpoint=SshChannelEndpoint(ip="0.0.0.0", port=2222),
     )
     session = _relay_session("ssh_alice_switch")
     try:
         # 用户切换到 opencode
         result = await client.thirdagent_switch(user_id="alice", agent_type="opencode")
         assert result["ok"]
+        assert result["payload"]["ssh_ip"] == "0.0.0.0"
+        assert result["payload"]["ssh_port"] == 2222
+        assert "ssh_user" not in result["payload"]
         assert client.get_current_agent_type("alice") == "opencode"
 
         # SSH 接入不带 agent_type -> 复用 opencode 实例（不新建）
@@ -235,7 +333,7 @@ async def test_ssh_relay_follows_user_current_agent_type() -> None:
         await asyncio.wait_for(session.done.wait(), timeout=5)
 
         assert yuanrong.create_calls == 1  # switch 已创建，SSH 复用
-        assert stub_relay.ran == [("ssh_alice_switch", "sbx-1")]
+        assert stub_relay.ran == [("ssh_alice_switch", "sbx-1", "alice")]
         agents = await agent_manager.list_user_agents("alice")
         assert [a.info.agent_type for a in agents] == ["opencode"]
     finally:
@@ -244,11 +342,12 @@ async def test_ssh_relay_follows_user_current_agent_type() -> None:
 
 @pytest.mark.asyncio
 async def test_ssh_relay_defaults_to_jiuwenswarm_without_switch() -> None:
-    """未切换过的用户，SSH 不带 agent_type 时默认 jiuwenswarm。"""
+    """未切换过的用户，SSH 默认 jiuwenswarm：无 AgentOS sandbox，应失败。"""
+    yuanrong = FakeYuanRongClient()
     stub_relay = StubSshRelay()
     agent_manager = AgentManager()
     client = AgentOSRouterClient(
-        FakeYuanRongClient(),
+        yuanrong,
         FakeRegistryClient(),
         agent_manager,
         ssh_relay=stub_relay,
@@ -259,8 +358,12 @@ async def test_ssh_relay_defaults_to_jiuwenswarm_without_switch() -> None:
         await client.send_request(_ssh_envelope(session, agent_type=None))
         await asyncio.wait_for(session.done.wait(), timeout=5)
 
-        agents = await agent_manager.list_user_agents("alice")
-        assert [a.info.agent_type for a in agents] == ["jiuwenswarm"]
+        assert yuanrong.create_calls == 0
+        assert stub_relay.ran == []
+        assert len(stub_relay.failed) == 1
+        assert "no AgentOS sandbox for SSH" in stub_relay.failed[0][1]
+        assert await agent_manager.list_user_agents("alice") == []
+        assert session.exit_code == 1
     finally:
         await client.shutdown()
 
@@ -313,11 +416,376 @@ async def test_ssh_relay_agent_creation_failure_releases_session() -> None:
         ssh_relay=stub_relay,
     )
     try:
-        response = await client.send_request(_ssh_envelope(session))
+        response = await client.send_request(
+            _ssh_envelope(session, agent_type="opencode")
+        )
         assert response.ok  # relay task started; failure is reported via session
         await asyncio.wait_for(session.done.wait(), timeout=5)
         assert session.exit_code == 1
         assert stub_relay.ran == []
         assert len(stub_relay.failed) == 1
+        assert "create failed" in stub_relay.failed[0][1]
     finally:
         await client.shutdown()
+
+
+# ---------- bidirectional disconnect ----------
+
+
+class _FakeStream:
+    """Minimal async stream used by disconnect tests."""
+
+    def __init__(
+        self,
+        chunks: list[bytes] | None = None,
+        *,
+        raise_on_read: BaseException | None = None,
+        block_read: bool = False,
+    ) -> None:
+        self._chunks = list(chunks or [])
+        self._raise_on_read = raise_on_read
+        self._block_read = block_read
+        self.writes: list[bytes] = []
+        self.eof_written = False
+        self._read_event = asyncio.Event()
+
+    async def read(self, _n: int) -> bytes:
+        if self._raise_on_read is not None:
+            raise self._raise_on_read
+        if self._block_read:
+            await self._read_event.wait()
+            return b""
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def write_eof(self) -> None:
+        self.eof_written = True
+
+    def unblock(self) -> None:
+        self._read_event.set()
+
+
+class _FakeProcess:
+    def __init__(self, stdin: _FakeStream, stdout: _FakeStream, stderr: _FakeStream) -> None:
+        self.stdin = stdin
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exit_codes: list[int] = []
+
+    def get_terminal_type(self) -> str:
+        return "xterm"
+
+    def get_terminal_size(self) -> tuple[int, int]:
+        return (80, 24)
+
+    def exit(self, code: int) -> None:
+        self.exit_codes.append(code)
+
+
+class _FakeBackend:
+    def __init__(
+        self,
+        stdout: _FakeStream,
+        stderr: _FakeStream,
+        stdin: _FakeStream | None = None,
+        *,
+        exit_status: int | None = 0,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.stdin = stdin or _FakeStream()
+        self.exit_status = exit_status
+        self.closed = False
+        self.wait_closed_called = False
+
+    def close(self) -> None:
+        self.closed = True
+        self.stdout.unblock()
+        self.stderr.unblock()
+        self.stdin.unblock()
+
+    async def wait_closed(self) -> None:
+        self.wait_closed_called = True
+
+
+class _FakeConn:
+    def __init__(self, backend: _FakeBackend) -> None:
+        self._backend = backend
+        self.create_calls = 0
+
+    async def create_process(self, *args: Any, **kwargs: Any) -> _FakeBackend:
+        del args, kwargs
+        self.create_calls += 1
+        return self._backend
+
+
+def _install_fake_asyncssh(modules: dict[str, Any]) -> type[BaseException]:
+    from types import ModuleType
+
+    fake_asyncssh = ModuleType("asyncssh")
+
+    class ConnectionLost(Exception):
+        pass
+
+    class TerminalSizeChanged(Exception):
+        pass
+
+    class BreakReceived(Exception):
+        pass
+
+    fake_asyncssh.ConnectionLost = ConnectionLost  # type: ignore[attr-defined]
+    fake_asyncssh.TerminalSizeChanged = TerminalSizeChanged  # type: ignore[attr-defined]
+    fake_asyncssh.BreakReceived = BreakReceived  # type: ignore[attr-defined]
+    modules["asyncssh"] = fake_asyncssh
+    return ConnectionLost
+
+
+@pytest.mark.asyncio
+async def test_southbound_eof_closes_northbound_and_cancels_pumps() -> None:
+    """Southbound stdout EOF must exit the northbound process and stop other pumps."""
+    import sys
+    from unittest.mock import patch
+
+    modules: dict[str, Any] = dict(sys.modules)
+    _install_fake_asyncssh(modules)
+
+    north_stdin = _FakeStream(block_read=True)
+    north_stdout = _FakeStream()
+    north_stderr = _FakeStream()
+    process = _FakeProcess(north_stdin, north_stdout, north_stderr)
+
+    backend_stdout = _FakeStream(chunks=[b"bye"])  # one chunk then EOF
+    backend_stderr = _FakeStream(block_read=True)
+    backend = _FakeBackend(backend_stdout, backend_stderr, exit_status=7)
+    conn = _FakeConn(backend)
+
+    session = _relay_session("ssh_s2n")
+    session.process = process
+
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(),
+        frontend_endpoint="http://127.0.0.1:31220",
+    )
+    with patch.dict(sys.modules, modules):
+        code = await asyncio.wait_for(
+            relay._relay_over_connection(session, conn),
+            timeout=5,
+        )
+
+    assert code == 7
+    assert backend.closed is True
+    assert process.exit_codes == [7]
+    assert north_stdout.writes == [b"bye"]
+
+
+@pytest.mark.asyncio
+async def test_northbound_disconnect_closes_southbound() -> None:
+    """Northbound ConnectionLost must close the southbound backend."""
+    import sys
+    from unittest.mock import patch
+
+    modules: dict[str, Any] = dict(sys.modules)
+    ConnectionLost = _install_fake_asyncssh(modules)
+
+    north_stdin = _FakeStream(raise_on_read=ConnectionLost())
+    process = _FakeProcess(north_stdin, _FakeStream(), _FakeStream())
+
+    backend_stdout = _FakeStream(block_read=True)
+    backend_stderr = _FakeStream(block_read=True)
+    backend = _FakeBackend(backend_stdout, backend_stderr, exit_status=None)
+    conn = _FakeConn(backend)
+
+    session = _relay_session("ssh_n2s")
+    session.process = process
+
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(),
+        frontend_endpoint="http://127.0.0.1:31220",
+    )
+    with patch.dict(sys.modules, modules):
+        code = await asyncio.wait_for(
+            relay._relay_over_connection(session, conn),
+            timeout=5,
+        )
+
+    assert code == 0
+    assert backend.closed is True
+    assert process.exit_codes == [0]
+
+
+@pytest.mark.asyncio
+async def test_relay_run_cancelled_releases_session_done() -> None:
+    """Cancelling the relay task must still set session.done for the northbound waiter."""
+    session = _relay_session("ssh_cancel")
+    session.process = _FakeProcess(_FakeStream(), _FakeStream(), _FakeStream())
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(),
+        frontend_endpoint="http://127.0.0.1:31220",
+    )
+
+    async def _hang(
+        _session: Any, _instance_id: str, *, user_id: str = ""
+    ) -> int:
+        del user_id
+        await asyncio.Event().wait()
+        return 0
+
+    relay._relay = _hang  # type: ignore[method-assign]
+    task = asyncio.create_task(relay.run(session, "inst-1"))
+    await asyncio.sleep(0)
+    assert not session.done.is_set()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert session.done.is_set()
+    assert session.exit_code == 130
+
+
+@pytest.mark.asyncio
+async def test_router_disconnect_cancels_background_ssh_relay() -> None:
+    """Router disconnect must cancel in-flight SSH relay background tasks."""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class HangingRelay(StubSshRelay):
+        async def run(
+            self,
+            session: Any,
+            instance_id: str,
+            *,
+            user_id: str = "",
+        ) -> int:
+            del instance_id, user_id
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                session.exit_code = 130
+                session.done.set()
+                raise
+            return 0
+
+    session = _relay_session("ssh_drain")
+    client = AgentOSRouterClient(
+        FakeYuanRongClient(),
+        FakeRegistryClient(),
+        AgentManager(),
+        ssh_relay=HangingRelay(),
+    )
+    try:
+        await client.send_request(_ssh_envelope(session, agent_type="opencode"))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert session.relay_task is not None
+        assert not session.relay_task.done()
+        await client.disconnect()
+        await asyncio.wait_for(cancelled.wait(), timeout=5)
+        assert session.done.is_set()
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_wait_relay_done_timeout_cancels_southbound_task() -> None:
+    """Northbound relay timeout must cancel the southbound relay_task."""
+    from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import (
+        SshChannel,
+        SshChannelConfig,
+    )
+
+    cancelled = asyncio.Event()
+
+    async def _hanging_relay() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            session.exit_code = 130
+            session.done.set()
+            raise
+
+    session = _relay_session("ssh_timeout")
+    session.relay_task = asyncio.create_task(_hanging_relay())
+
+    channel = SshChannel(
+        SshChannelConfig(enabled=False, relay_timeout_sec=0.05),
+        router=None,  # type: ignore[arg-type]
+    )
+    await channel._register_session(
+        session_id="ssh_timeout",
+        process=object(),
+        username="alice",
+        client_addr="127.0.0.1:1",
+    )
+    channel._sessions["ssh_timeout"].relay = session
+    try:
+        code = await channel._wait_relay_done("ssh_timeout")
+        assert code == 124
+        await asyncio.wait_for(cancelled.wait(), timeout=5)
+        assert session.done.is_set()
+    finally:
+        await channel._unregister_session("ssh_timeout")
+        if session.relay_task and not session.relay_task.done():
+            session.relay_task.cancel()
+            try:
+                await session.relay_task
+            except asyncio.CancelledError:
+                pass
+
+
+@pytest.mark.asyncio
+async def test_unregister_session_cancels_southbound_task() -> None:
+    """Northbound session teardown must cancel a still-running southbound
+    relay, even when the pumps never notice the dead client (stdin blocked)."""
+    from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import (
+        SshChannel,
+        SshChannelConfig,
+    )
+
+    cancelled = asyncio.Event()
+
+    async def _hanging_relay() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            session.exit_code = 130
+            session.done.set()
+            raise
+
+    session = _relay_session("ssh_unreg")
+    session.relay_task = asyncio.create_task(_hanging_relay())
+    # Let the relay task start; cancelling a never-started task would skip
+    # its CancelledError handler.
+    await asyncio.sleep(0)
+
+    channel = SshChannel(
+        SshChannelConfig(enabled=False),
+        router=None,  # type: ignore[arg-type]
+    )
+    await channel._register_session(
+        session_id="ssh_unreg",
+        process=object(),
+        username="alice",
+        client_addr="127.0.0.1:1",
+    )
+    channel._sessions["ssh_unreg"].relay = session
+    try:
+        await channel._unregister_session("ssh_unreg")
+        await asyncio.wait_for(cancelled.wait(), timeout=5)
+        assert session.done.is_set()
+        assert "ssh_unreg" not in channel._sessions
+    finally:
+        if session.relay_task and not session.relay_task.done():
+            session.relay_task.cancel()
+            try:
+                await session.relay_task
+            except asyncio.CancelledError:
+                pass

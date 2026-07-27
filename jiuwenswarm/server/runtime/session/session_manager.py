@@ -371,6 +371,25 @@ class SessionManager:
             and not self._session_processors[session_id].done()
         )
 
+    def has_session_runtime(self, session_id: str | None = None) -> bool:
+        """Return whether session-owned queue or task state is retained."""
+        if session_id is not None:
+            return bool(
+                session_id in self._session_tasks
+                or session_id in self._session_priorities
+                or session_id in self._session_queues
+                or session_id in self._session_processors
+                or session_id in self._closing_tasks
+            )
+        return bool(
+            self._session_tasks
+            or self._session_priorities
+            or self._session_queues
+            or self._session_processors
+            or self._task_result_futures
+            or self._closing_tasks
+        )
+
     def has_active_tasks(self) -> bool:
         """是否有活跃的 session 任务（供 dreaming busy_checker 使用）。"""
         return any(t is not None and not t.done() for t in self._session_tasks.values())

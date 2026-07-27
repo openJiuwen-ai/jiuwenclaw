@@ -23,7 +23,7 @@ export default function ConfirmDialog({ title, message, onConfirm, onCancel, loa
             <X size={20} />
           </button>
         </div>
-        <p className="mb-6 text-sm text-text">{message}</p>
+        <p className="mb-6 break-words text-sm text-text">{message}</p>
         <div className="flex justify-center gap-3">
           <button
             onClick={onConfirm}

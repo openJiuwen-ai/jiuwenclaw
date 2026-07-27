@@ -35,7 +35,8 @@ from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
+    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, \
+    wait_for_tcp_port, SensitiveDataFilter
 from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
 
 configure_agent_teams_home()
@@ -1162,8 +1163,15 @@ def _setup_logger(logs_root: Path, log_level: str) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    # ws-dev.log 会原样记录前端↔后端业务报文（含 config.validate 等 method 的
+    # model_params，其中带 api_key/api_base 等敏感字段），必须挂脱敏 filter，
+    # 否则 api_key 明文落盘。propagate 到根 logger 的 handler 虽已脱敏，
+    # 但本 handler 自身需独立挂载，才能保证 ws-dev.log 也脱敏。
+    privacy_filter = SensitiveDataFilter()
+
     file_handler = logging.FileHandler(logs_root / "ws-dev.log", mode="w", encoding="utf-8")
     file_handler.setFormatter(formatter)
+    file_handler.addFilter(privacy_filter)
     lg.addHandler(file_handler)
     return lg
 
