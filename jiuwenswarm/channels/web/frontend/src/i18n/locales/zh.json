@@ -629,6 +629,8 @@
       "whatsappJids": "每行一个 WhatsApp JID（也支持逗号分隔）",
       "wecomDefaultChatId": "userid 或 chatid（群聊）",
       "wecomDefaultChatIdHint": "心跳/定时推送目标。不填则自动使用最近一次聊天的 chatid",
+      "xiaoyiApiIdHint": "定时任务推送到小艺需要配置 api_id；未配置时无法在定时任务中选择小艺作为推送渠道。",
+      "xiaoyiApiIdRequiredForCron": "未配置 api_id：定时任务中无法选择小艺作为推送渠道。",
       "discordGuildId": "请填入Discord的服务器ID（留空则仅接收私信）",
       "discordChannelId": "请填入Discord服务器的频道ID（留空则仅接收私信）",
       "slackBotToken": "请输入 xoxb Bot Token",

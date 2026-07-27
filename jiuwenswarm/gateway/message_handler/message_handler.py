@@ -340,8 +340,8 @@ class MessageHandler(ABC):
         result = self._session_sharing.resolve_member_by_user(
             msg.channel_id,
             MessageHandler.resolve_app_id(msg),
-            msg.user_id or msg.metadata.get("im_sender_user_id", ""),
-            chat_id=msg.metadata.get("im_thread_id", "") if isinstance(msg.metadata, dict) else "",
+            msg.user_id or (msg.metadata or {}).get("im_sender_user_id", ""),
+            chat_id=(msg.metadata or {}).get("im_thread_id", "") if isinstance(msg.metadata, dict) else "",
         )
         if result:
             sid, mname = result

@@ -9,6 +9,7 @@ from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import AgentManager
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
+    SshChannelEndpoint,
     agentos_router_selected,
     load_router_config,
 )
@@ -20,6 +21,14 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import (
 )
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
 from jiuwenswarm.extensions.yuanrong_frontend_client import SandboxInfo
+
+
+def _ssh_channel(
+    *,
+    ip: str = "0.0.0.0",
+    port: int = 2222,
+) -> SshChannelEndpoint:
+    return SshChannelEndpoint(ip=ip, port=port)
 
 
 class FakeYuanRongClient:
@@ -223,7 +232,9 @@ async def test_third_party_type_creates_via_yuanrong() -> None:
 async def test_agent_switch_creates_without_forwarding_chat() -> None:
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
-    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
 
     response = await client.thirdagent_switch(
         user_id="u1",
@@ -237,9 +248,30 @@ async def test_agent_switch_creates_without_forwarding_chat() -> None:
     assert yuanrong.send_calls == 0
     assert response["payload"]["agent_type"] == "claude"
     assert response["payload"]["sandbox_id"] == "sbx-1"
+    assert response["payload"]["ssh_ip"] == "0.0.0.0"
+    assert response["payload"]["ssh_port"] == 2222
     agents = await agent_manager.list_user_agents("u1")
     assert len(agents) == 1
     assert agents[0].info.agent_type == "claude"
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_fails_without_ssh_endpoint() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="claude",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is False
+    assert response["code"] == "SSH_ENDPOINT_UNAVAILABLE"
+    assert "ssh" in response["error"].lower()
+    assert yuanrong.create_calls == 0
 
 
 @pytest.mark.asyncio
@@ -272,7 +304,9 @@ async def test_agent_list_returns_registry_images_without_creating() -> None:
 async def test_agent_switch_reuses_existing_agent() -> None:
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
-    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
 
     first = await client.thirdagent_switch(
         user_id="u1",
@@ -290,13 +324,17 @@ async def test_agent_switch_reuses_existing_agent() -> None:
     assert yuanrong.create_calls == 1
     assert yuanrong.send_calls == 0
     assert first["payload"]["agent_id"] == second["payload"]["agent_id"]
+    assert first["payload"]["ssh_ip"] == second["payload"]["ssh_ip"]
+    assert first["payload"]["ssh_port"] == second["payload"]["ssh_port"]
 
 
 @pytest.mark.asyncio
 async def test_chat_after_switch_reuses_agent() -> None:
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
-    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
 
     switch_resp = await client.thirdagent_switch(
         user_id="u1",
@@ -318,7 +356,9 @@ async def test_chat_after_switch_reuses_agent() -> None:
 async def test_switch_to_jiuwenswarm_is_direct_without_create() -> None:
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
-    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
 
     response = await client.thirdagent_switch(
         user_id="u1",
@@ -332,6 +372,8 @@ async def test_switch_to_jiuwenswarm_is_direct_without_create() -> None:
     assert yuanrong.send_calls == 0
     assert response["payload"]["agent_type"] == "jiuwenswarm"
     assert response["payload"]["sandbox_id"] == ""
+    assert response["payload"]["ssh_ip"] == "0.0.0.0"
+    assert response["payload"]["ssh_port"] == 2222
     assert client.get_current_agent_type("u1") == "jiuwenswarm"
     assert await agent_manager.list_user_agents("u1") == []
 
@@ -377,7 +419,9 @@ async def test_agentos_third_agent_list_and_switch() -> None:
     yuanrong = FakeYuanRongClient()
     registry = FakeRegistryClient()
     agent_manager = AgentManager()
-    client = AgentOSRouterClient(yuanrong, registry, agent_manager)
+    client = AgentOSRouterClient(
+        yuanrong, registry, agent_manager, ssh_channel_endpoint=_ssh_channel(port=2223)
+    )
     third = AgentOSThirdAgent(client)
 
     listed = await third.thirdagent_list(user_id="u1", current_agent_type="jiuwenswarm")
@@ -393,6 +437,8 @@ async def test_agentos_third_agent_list_and_switch() -> None:
     ]
     assert switched["ok"] is True
     assert switched["payload"]["agent_type"] == "claude"
+    assert switched["payload"]["ssh_ip"] == "0.0.0.0"
+    assert switched["payload"]["ssh_port"] == 2223
     assert yuanrong.create_calls == 1
     assert yuanrong.send_calls == 0
 

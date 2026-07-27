@@ -629,6 +629,8 @@
       "whatsappJids": "One WhatsApp JID per line (comma-separated is also supported)",
       "wecomDefaultChatId": "userid or chatid (group)",
       "wecomDefaultChatIdHint": "Target for heartbeat/scheduled push. Leave empty to use last chatid",
+      "xiaoyiApiIdHint": "Scheduled task push to Xiaoyi requires api_id. Without it, Xiaoyi cannot be selected as a cron push channel.",
+      "xiaoyiApiIdRequiredForCron": "api_id is not configured: Xiaoyi cannot be selected as a cron push channel.",
       "discordGuildId": "Enter the Discord server ID (direct message still works without this)",
       "discordChannelId": "Enter the Discord server's channel ID (direct message still works without this)",
       "slackBotToken": "Enter the xoxb bot token",

@@ -1946,13 +1946,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
             useChatStore.getState().updateMessage(sessionId, existingMsg.id, updatePayload);
           } else {
+            // 点击"停止"（team 模式走 pause）之后，本轮 LLM 生成往往不会被后端立即掐断，
+            // 还会有若干个迟到的 chat.delta 补投过来。此时 currentStreamId/team-leader
+            // 收尾逻辑已经跑过一轮（见 chat.interrupt_result 的 pause 分支），这些迟到内容
+            // 找不到 existingMsg，会重新起一条新气泡；如果还标 isStreaming:true，光标会
+            // 因为再也等不到后续 chat.final 收尾而永久闪烁（bug001）。paused 状态下新起的
+            // 气泡直接落地为非 streaming，內容仍然展示，只是不再挂一个不会消失的光标。
+            const isPaused = Boolean(useChatStore.getState().getRuntime(sessionId)?.isPaused);
             const msgId = `team-leader-${Date.now()}`;
             useChatStore.getState().addMessage(sessionId, {
               id: msgId,
               role: 'system',
               content: content,
               timestamp: new Date().toISOString(),
-              isStreaming: true,
+              isStreaming: !isPaused,
             });
           }
           return;
@@ -2801,6 +2808,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           useChatStore.getState().setProcessing(sessionId, false);
           useChatStore.getState().setThinking(sessionId, false);
+          // 集群模式下输入框的"停止"按钮走的是 pause（不是 cancel，见 App.tsx
+          // handleCancel：mode==='team' 时调用 pause）。team-leader 消息的
+          // isStreaming 不经过 currentStreamId 收尾，这里同 cancel 分支一样显式
+          // 关闭还在 streaming 的 team-leader 消息，避免光标永久闪烁（bug001）。
+          closeActiveTeamLeaderMessages(sessionId);
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             // 直接设置所有状态值
@@ -2835,6 +2847,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           // 用户主动点了停止/删除就该让当前气泡收尾，不再等一个可能被误判、永远不会来的
           // 真正 chat.final。
           useChatStore.getState().stopStreaming(sessionId);
+          // 集群模式下 team-leader 消息的 isStreaming 不经过 currentStreamId 收尾，
+          // stopStreaming 对它无效；取消后本该到来的 chat.final 也不会再来兜底，
+          // 这里显式收尾，避免 team-leader 气泡的光标永久闪烁（bug001）。
+          closeActiveTeamLeaderMessages(sessionId);
         } else if (resultPayload.intent === 'supplement') {
           useChatStore.getState().setPaused(sessionId, false);
         }
@@ -3327,6 +3343,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setContextCompressionStats,
     clearThinkingForVisibleOutput,
     findActiveTeamLeaderMessage,
+    closeActiveTeamLeaderMessages,
     updateSession,
     resolveEventSessionId,
     shouldDropDuplicatedEvent,

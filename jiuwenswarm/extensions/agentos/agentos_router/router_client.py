@@ -20,6 +20,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentRuntime,
     THIRD_PARTY_AGENT_TYPES,
 )
+from jiuwenswarm.extensions.agentos.agentos_router.config import SshChannelEndpoint
 from jiuwenswarm.extensions.agentos.agentos_router.models import (
     AgentInfo,
     AgentStatus,
@@ -90,11 +91,13 @@ class AgentOSRouterClient(AgentServerClient):
         registry: RegistryClient,
         agent_manager: AgentManager,
         ssh_relay: YuanrongSshRelay | None = None,
+        ssh_channel_endpoint: SshChannelEndpoint | None = None,
     ) -> None:
         self._yuanrong = yuanrong
         self._registry = registry
         self._agent_manager = agent_manager
         self._ssh_relay = ssh_relay
+        self._ssh_channel_endpoint = ssh_channel_endpoint
         self._server_ready = False
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._closed = False
@@ -223,6 +226,28 @@ class AgentOSRouterClient(AgentServerClient):
             },
         }
 
+    def _ssh_endpoint_fields(self) -> dict[str, Any] | None:
+        """Northbound ``channels.ssh`` listen ip/port, or None if unavailable."""
+        endpoint = self._ssh_channel_endpoint
+        if endpoint is None:
+            return None
+        ip = str(endpoint.ip or "").strip()
+        port = int(endpoint.port or 0)
+        if not ip or port <= 0:
+            return None
+        return {"ssh_ip": ip, "ssh_port": port}
+
+    @staticmethod
+    def _missing_ssh_endpoint_error() -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": (
+                "ssh channel endpoint is unavailable: enable channels.ssh "
+                "and set listen_host / listen_port"
+            ),
+            "code": "SSH_ENDPOINT_UNAVAILABLE",
+        }
+
     async def thirdagent_switch(
         self,
         *,
@@ -230,7 +255,11 @@ class AgentOSRouterClient(AgentServerClient):
         agent_type: str,
         session_id: str = "",
     ) -> dict[str, Any]:
-        """Handle ``3rdagent.switch``: ensure agent exists without forwarding chat."""
+        """Handle ``3rdagent.switch``: ensure agent exists without forwarding chat.
+
+        Success payload includes northbound SSH channel ``ssh_ip``/``ssh_port``
+        (``channels.ssh.listen_host`` / ``listen_port``). Missing values fail.
+        """
         uid = str(user_id or "").strip()
         if not uid:
             return {
@@ -246,6 +275,10 @@ class AgentOSRouterClient(AgentServerClient):
                 "error": str(exc),
                 "code": "UNSUPPORTED_AGENT_TYPE",
             }
+        # Fail fast before create when northbound SSH channel is not configured.
+        ssh_fields = self._ssh_endpoint_fields()
+        if ssh_fields is None:
+            return self._missing_ssh_endpoint_error()
         # Builtin swarm: no registry / create_sandbox; mark current type only.
         if self._uses_direct_yuanrong(normalized):
             self._current_agent_types[uid] = normalized
@@ -256,6 +289,7 @@ class AgentOSRouterClient(AgentServerClient):
                     "agent_type": normalized,
                     "sandbox_id": "",
                     "status": AgentStatus.READY.value,
+                    **ssh_fields,
                 },
             }
         try:
@@ -283,6 +317,7 @@ class AgentOSRouterClient(AgentServerClient):
                 "agent_type": info.agent_type,
                 "sandbox_id": info.sandbox_id,
                 "status": status,
+                **ssh_fields,
             },
         }
 

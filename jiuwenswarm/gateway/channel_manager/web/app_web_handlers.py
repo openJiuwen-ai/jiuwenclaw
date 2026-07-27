@@ -108,6 +108,9 @@ from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     root_categories_to_text,
 )
 
+from jiuwenswarm.openjiuwen_logging import configure_openjiuwen_logging_under_jiuwenswarm
+
+configure_openjiuwen_logging_under_jiuwenswarm()
 for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.INFO)
 
@@ -1425,6 +1428,23 @@ def _project_info_payload(
     }
 
 
+def _normalize_provider_value(value: str) -> str:
+    """把任意大小写的 provider 值归一化为 ``ProviderType`` 规范大小写。
+
+    与 TUI 侧 ``gateway/channel_manager/tui/tui_connect.py:_normalize_provider_value``
+    保持一致：TUI 在写入/校验 model_provider 时会做大小写归一化，Web 侧此前没有做，
+    导致同一份配置（例如历史数据里 model_provider 大小写不规范）在 TUI 能正常识别，
+    但 Web 的"测试"/"保存"因大小写敏感的精确匹配而被误判为非法值。
+    """
+    normalized = value.strip()
+    if not normalized:
+        return normalized
+
+    available_model_providers = [provider.value for provider in ProviderType]
+    lookup = {provider.lower(): provider for provider in available_model_providers}
+    return lookup.get(normalized.lower(), normalized)
+
+
 def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
     """从热更新后的配置中查找对应模型的 ``model_config_obj``。
 
@@ -1887,7 +1907,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     origin_index = None
             api_key = str(item.get("api_key") or "").strip()
             api_base = str(item.get("api_base") or "").strip()
-            model_provider = str(item.get("model_provider") or "").strip()
+            model_provider = _normalize_provider_value(str(item.get("model_provider") or ""))
             # OpenAIAccount uses the token store managed by core OAuth, so it does not
             # carry a user-entered api_key in config.
             if not api_key and origin_index is None and not is_openai_account_provider(model_provider):
@@ -2002,7 +2022,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         api_base = str(params.get("api_base") or "").strip()
         api_key = str(params.get("api_key") or "").strip()
         model = str(params.get("model") or "").strip()
-        model_provider = str(params.get("model_provider") or "").strip()
+        model_provider = _normalize_provider_value(str(params.get("model_provider") or ""))
         needs_api_key = not is_openai_account_provider(model_provider)
         if not all([api_base, model, model_provider]) or (needs_api_key and not api_key):
             await channel.send_response(

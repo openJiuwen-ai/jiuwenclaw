@@ -586,7 +586,9 @@ def restore_session_files(
             if info["action"] == "write":
                 # 文件在目标 turn 前已有内容，写回 old_content
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(info["restore_content"], encoding="utf-8")
+                path.write_text(
+                    info["restore_content"], encoding="utf-8", newline=""
+                )
                 restored.append(file_path)
             elif info["action"] == "delete":
                 # 文件由 agent 在目标 turn 后创建，删除

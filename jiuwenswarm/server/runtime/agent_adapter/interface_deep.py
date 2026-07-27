@@ -298,6 +298,13 @@ from jiuwenswarm.common.utils import (
     get_runtime_state_path,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.server.runtime.llm_io_trace import (
+    LLM_TRACE_ITERATION,
+    LLM_TRACE_MODEL_NAME,
+    LLM_TRACE_REQUEST_ID,
+    LLM_TRACE_SESSION_ID,
+    log_chat_final,
+)
 
 load_dotenv(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -613,6 +620,41 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
     except Exception as exc:
         logger.warning("[JiuWenSwarmDeepAdapter] ContextProcessorRail create failed: %s", exc)
         return None
+
+
+def _build_subagent_context_processor_rail(
+    config: dict[str, Any] | None,
+) -> ContextProcessorRail | None:
+    """Build configured ContextProcessorRail for TaskTool/spawn/fork subagents.
+
+    A-chain counterpart of enterprise ``minimal=True`` context rail: follow
+    ``react.context_engine_config`` thresholds when enabled, without mounting
+    ContextAssembleRail (tools/context section injection).
+    """
+    if not isinstance(config, dict):
+        return None
+    raw_ctx = config.get("context_engine_config", {})
+    if not isinstance(raw_ctx, dict) or not raw_ctx.get("enabled", False):
+        return None
+    return _build_context_processor_rail(config)
+
+
+def _merge_subagent_rails_with_context_processor(
+    base_rails: list[Any] | None,
+    config: dict[str, Any] | None,
+) -> list[Any] | None:
+    """Append configured ContextProcessorRail to *base_rails* when compression is on.
+
+    Returns *base_rails* unchanged (including ``None``) when disabled / unavailable.
+    """
+    ce_rail = _build_subagent_context_processor_rail(config)
+    if ce_rail is None:
+        return base_rails
+    merged = list(base_rails or [])
+    if any(isinstance(rail, ContextProcessorRail) for rail in merged):
+        return merged
+    merged.append(ce_rail)
+    return merged
 
 
 async def ensure_persistent_checkpointer() -> None:
@@ -1748,6 +1790,10 @@ class JiuWenSwarmDeepAdapter:
         subagents: list[Any] = []
         should_add_general_purpose = False
 
+        # TaskTool/spawn subagents: mount configured A-chain compression when enabled
+        # (enterprise MR-1147 intent; no ContextAssembleRail ≈ minimal).
+        # Fresh ContextProcessorRail per subagent (rail may hold per-agent state).
+
         if isinstance(subagents_cfg, dict):
             general_agent_cfg = subagents_cfg.get("general_agent")
             if self._is_subagent_enabled(general_agent_cfg):
@@ -1755,11 +1801,19 @@ class JiuWenSwarmDeepAdapter:
 
             research_agent_cfg = subagents_cfg.get("research_agent")
             if self._is_subagent_enabled(research_agent_cfg):
+                research_rails = None
+                research_ce = _build_subagent_context_processor_rail(react_cfg)
+                if research_ce is not None:
+                    # Preserve research_agent factory default FileSystemRail when overriding rails.
+                    from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+
+                    research_rails = [FileSystemRail(), research_ce]
                 subagents.append(
                     build_research_agent_config(
                         model,
                         workspace=workspace,
                         language=resolved_language,
+                        rails=research_rails,
                         max_iterations=parse_int(
                             research_agent_cfg.get("max_iterations"),
                             react_cfg.get("max_iterations", 15),
@@ -1783,11 +1837,13 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
                     "defaulting to managed mode"
                 )
+            browser_rails = _merge_subagent_rails_with_context_processor(None, react_cfg)
             subagents.append(
                 build_browser_agent_config(
                     model,
                     workspace=workspace,
                     language=resolved_language,
+                    rails=browser_rails,
                     max_iterations=parse_int(
                         (
                             browser_agent_cfg.get("max_iterations")
@@ -1814,6 +1870,7 @@ class JiuWenSwarmDeepAdapter:
                 _load_custom_subagents(
                     self._workspace_dir, subagents_cfg, model, workspace,
                     __name__, model_cache=self._model_cache,
+                    react_config=react_cfg,
                 )
             )
         except Exception:
@@ -2713,13 +2770,18 @@ class JiuWenSwarmDeepAdapter:
         requested = (requested_model_name or "").strip()
         if not requested:
             return self._model
-        # 精确匹配（#index 格式或纯 model_name key）
+        # 精确匹配（#index 格式，或已注册纯 model_name key 的默认模型）
         if requested in self._model_cache:
             return self._model_cache[requested]
-        # 回退：按纯 model_name 查找 is_default=true 的条目
-        name_to_keys = self._model_name_to_keys
-        if requested in name_to_keys and requested in self._model_cache:
-            return self._model_cache[requested]
+        # 回退：非默认模型只以 {model_name}#{index} 注册在 _model_cache 里，没有纯
+        # model_name 的 key；这里按 _model_name_to_keys 里登记的真实 cache key 去查，
+        # 而不是重复判断上面已知为 False 的 `requested in self._model_cache`
+        # （旧代码在此处写重了，导致非默认模型永远查不到，静默 fallback 回默认模型）。
+        keys = self._model_name_to_keys.get(requested)
+        if keys:
+            resolved = self._model_cache.get(keys[0])
+            if resolved is not None:
+                return resolved
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
@@ -7594,6 +7656,12 @@ class JiuWenSwarmDeepAdapter:
                     )
                 else:
                     content = slash_result.get("output", str(slash_result))
+                    log_chat_final(
+                        session_id=session_id,
+                        request_id=rid or "",
+                        iteration=LLM_TRACE_ITERATION.get(),
+                        model_name=LLM_TRACE_MODEL_NAME.get() or self._resolve_model_name(),
+                    )
                     yield AgentResponseChunk(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
@@ -7657,6 +7725,10 @@ class JiuWenSwarmDeepAdapter:
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
         interaction_stream_abort = True
+        token_trace_sid = LLM_TRACE_SESSION_ID.set(session_id)
+        token_trace_rid = LLM_TRACE_REQUEST_ID.set(rid or "")
+        token_trace_iter = LLM_TRACE_ITERATION.set(0)
+        token_trace_model = LLM_TRACE_MODEL_NAME.set(self._resolve_model_name())
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -8104,6 +8176,13 @@ class JiuWenSwarmDeepAdapter:
                     if self._goal_record_is_active()
                     else "chat.final"
                 )
+                if final_event_type == "chat.final":
+                    log_chat_final(
+                        session_id=session_id,
+                        request_id=rid or "",
+                        iteration=LLM_TRACE_ITERATION.get(),
+                        model_name=LLM_TRACE_MODEL_NAME.get(),
+                    )
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -8182,6 +8261,10 @@ class JiuWenSwarmDeepAdapter:
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
+            LLM_TRACE_SESSION_ID.reset(token_trace_sid)
+            LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
+            LLM_TRACE_ITERATION.reset(token_trace_iter)
+            LLM_TRACE_MODEL_NAME.reset(token_trace_model)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
             # Always clean up rail state — process_interrupt's
@@ -8362,9 +8445,23 @@ class JiuWenSwarmDeepAdapter:
                         return None
 
                     if _has_streamed_content and not is_chunked:
+                        # When llm_output has already streamed the full user-facing text,
+                        # keep chat.final as a completion marker; still record the boundary.
+                        log_chat_final(
+                            session_id=LLM_TRACE_SESSION_ID.get(),
+                            request_id=LLM_TRACE_REQUEST_ID.get(),
+                            iteration=LLM_TRACE_ITERATION.get(),
+                            model_name=LLM_TRACE_MODEL_NAME.get(),
+                        )
                         return {"event_type": "chat.final", "content": content}
                     if is_chunked:
                         return {"event_type": "chat.delta", "content": content}
+                    log_chat_final(
+                        session_id=LLM_TRACE_SESSION_ID.get(),
+                        request_id=LLM_TRACE_REQUEST_ID.get(),
+                        iteration=LLM_TRACE_ITERATION.get(),
+                        model_name=LLM_TRACE_MODEL_NAME.get(),
+                    )
                     return {"event_type": "chat.final", "content": content}
 
                 if chunk_type == "tool_call":
@@ -9785,6 +9882,7 @@ def _agent_def_to_subagent_config(
     model: Any,
     workspace: str,
     model_cache: dict[str, Any] | None = None,
+    react_config: dict[str, Any] | None = None,
 ) -> SubAgentConfig:
     """将 AgentDefinition 转换为 SubAgentConfig，用于 SubagentRail 注册。
 
@@ -9793,6 +9891,7 @@ def _agent_def_to_subagent_config(
         model: 父 agent 的 Model 实例（作为默认模型）
         workspace: 工作空间路径
         model_cache: 模型缓存字典（用于按名称查找指定模型）
+        react_config: react 配置段；启用上下文压缩时挂载 ContextProcessorRail
     """
     from openjiuwen.harness.schema.config import SubAgentConfig
 
@@ -9819,6 +9918,7 @@ def _agent_def_to_subagent_config(
         skills=agent_def.skills,
         max_iterations=agent_def.max_iterations,
         enable_task_loop=True,
+        rails=_merge_subagent_rails_with_context_processor(None, react_config),
     )
 
 
@@ -9840,13 +9940,14 @@ def _load_custom_subagents(
         model: 模型配置
         workspace: 工作空间路径
         logger_name: 日志记录器名称
-        **kwargs: 额外参数，支持 model_cache 等
+        **kwargs: 额外参数，支持 model_cache / react_config 等
     """
     from jiuwenswarm.server.runtime.agent_config_service import AgentConfigService
 
     _logger = logging.getLogger(logger_name)
     agent_service = AgentConfigService(workspace_dir)
     model_cache: dict | None = kwargs.get("model_cache")
+    react_config: dict | None = kwargs.get("react_config")
     result: list[Any] = []
     for agent_def in agent_service.list_agents():
         if agent_def.source == "builtin":
@@ -9855,7 +9956,9 @@ def _load_custom_subagents(
         # 只有显式 enabled: true 才加载
         if not (isinstance(subagent_cfg, dict) and bool(subagent_cfg.get("enabled", False))):
             continue
-        custom_spec = _agent_def_to_subagent_config(agent_def, model, workspace, model_cache)
+        custom_spec = _agent_def_to_subagent_config(
+            agent_def, model, workspace, model_cache, react_config=react_config
+        )
         custom_spec.factory_kwargs = {"auto_create_workspace": False}
         result.append(custom_spec)
         _logger.info("loaded custom agent '%s' from %s", agent_def.name, agent_def.source)
