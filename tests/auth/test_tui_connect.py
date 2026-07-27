@@ -1,50 +1,110 @@
-"""测试 tui_connect.py 中的 _handle_connect 认证流程"""
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
-import sys
 
-# 在导入任何 jiuwenswarm 模块之前，先 mock 掉循环导入
-import jiuwenswarm.gateway
-jiuwenswarm.gateway.AgentServerClient = MagicMock()
-
+from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext, AuthResult
 from jiuwenswarm.gateway.channel_manager.tui.tui_connect import _handle_connect
-from jiuwenswarm.gateway.auth.credential_authenticator import AuthResult
 
 
-class TestHandleConnect:
+class FakeWebSocket:
+    def __init__(self):
+        self.closed = False
 
-    @pytest.fixture
-    def mock_ws(self):
-        """创建一个模拟的 WebSocket 对象"""
-        ws = MagicMock()
-        ws.path = "/ws?token=test-token-123"
-        ws.request_headers = {"Authorization": "Bearer test-token-123"}
-        ws.remote_address = ("192.168.1.100", 54321)
-        return ws
+    async def close(self):
+        self.closed = True
 
-    @pytest.fixture
-    def mock_auth_success(self):
-        """创建一个返回成功的认证器"""
-        auth = AsyncMock()
-        auth.authenticate.return_value = AuthResult(
-            success=True, user_id="user-123",
-            extensions={"auth_method": "token"},
-        )
-        return auth
 
-    @pytest.fixture
-    def mock_auth_failure(self):
-        """创建一个返回失败的认证器"""
-        auth = AsyncMock()
-        auth.authenticate.return_value = AuthResult(
-            success=False, error="Invalid token",
-        )
-        return auth @pytest.mark.asyncio
+_MOCK_MODULE = "jiuwenswarm.gateway.channel_manager.tui.tui_connect"
 
-    async def test_auth_success_does_not_close(self, mock_ws, mock_auth_success):
-        """认证成功时不应关闭连接"""
-        with patch("jiuwenswarm.gateway.channel_manager.tui.tui_connect.get_auth_handler",
-                   return_value=mock_auth_success):
-            result = await _handle_connect(self, mock_ws, "/ws")
-            assert result is None # 函数没有返回值
-            mock_ws.close.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_handle_connect_success():
+    ws = FakeWebSocket()
+    mock_authenticator = AsyncMock()
+    mock_authenticator.authenticate.return_value = AuthResult(
+        success=True, user_id="user-1"
+    )
+
+    with (
+        patch(f"{_MOCK_MODULE}.extract_token", return_value="valid-token"),
+        patch(f"{_MOCK_MODULE}.extract_headers", return_value={"Authorization": "Bearer valid-token"}),
+        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value="127.0.0.1:9000"),
+        patch(f"{_MOCK_MODULE}.get_auth_handler", return_value=mock_authenticator),
+    ):
+        await _handle_connect(None, ws, "/tui")
+
+    assert not ws.closed
+    mock_authenticator.authenticate.assert_awaited_once()
+    ctx = mock_authenticator.authenticate.call_args[0][0]
+    assert isinstance(ctx, AuthContext)
+    assert ctx.channel_type == "tui"
+    assert ctx.credentials == {"token": "valid-token"}
+    assert ctx.headers == {"Authorization": "Bearer valid-token"}
+    assert ctx.remote_addr == "127.0.0.1:9000"
+
+
+@pytest.mark.asyncio
+async def test_handle_connect_auth_failure_closes_ws():
+    ws = FakeWebSocket()
+    mock_authenticator = AsyncMock()
+    mock_authenticator.authenticate.return_value = AuthResult(
+        success=False, error="Invalid token"
+    )
+
+    with (
+        patch(f"{_MOCK_MODULE}.extract_token", return_value="bad-token"),
+        patch(f"{_MOCK_MODULE}.extract_headers", return_value={}),
+        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value="10.0.0.1:1234"),
+        patch(f"{_MOCK_MODULE}.get_auth_handler", return_value=mock_authenticator),
+    ):
+        await _handle_connect(None, ws, "/tui")
+
+    assert ws.closed
+
+
+@pytest.mark.asyncio
+async def test_handle_connect_exception_closes_ws_and_reraises():
+    ws = FakeWebSocket()
+    mock_authenticator = AsyncMock()
+    mock_authenticator.authenticate.side_effect = RuntimeError("auth service down")
+
+    with (
+        patch(f"{_MOCK_MODULE}.extract_token", return_value="token"),
+        patch(f"{_MOCK_MODULE}.extract_headers", return_value={}),
+        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value=""),
+        patch(f"{_MOCK_MODULE}.get_auth_handler", return_value=mock_authenticator),
+    ):
+        with pytest.raises(RuntimeError, match="auth service down"):
+            await _handle_connect(None, ws, "/tui")
+
+    assert ws.closed
+
+
+@pytest.mark.asyncio
+async def test_handle_connect_builds_auth_context_correctly():
+    ws = FakeWebSocket()
+    captured_context = None
+
+    async def _capture_authenticate(context):
+        nonlocal captured_context
+        captured_context = context
+        return AuthResult(success=True, user_id="user-ctx")
+
+    mock_authenticator = MagicMock()
+    mock_authenticator.authenticate = _capture_authenticate
+
+    with (
+        patch(f"{_MOCK_MODULE}.extract_token", return_value="ctx-token"),
+        patch(f"{_MOCK_MODULE}.extract_headers", return_value={"X-Token": "ctx-token", "X-Custom": "value"}),
+        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value="192.168.1.1:8080"),
+        patch(f"{_MOCK_MODULE}.get_auth_handler", return_value=mock_authenticator),
+    ):
+        await _handle_connect(None, ws, "/tui")
+
+    assert captured_context is not None
+    assert captured_context.channel_type == "tui"
+    assert captured_context.credentials == {"token": "ctx-token"}
+    assert captured_context.headers == {"X-Token": "ctx-token", "X-Custom": "value"}
+    assert captured_context.remote_addr == "192.168.1.1:8080"

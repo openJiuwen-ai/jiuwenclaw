@@ -289,6 +289,200 @@ class TestAuthenticate:
         assert result.user_id == "user-123"
 
 
+class TestAuthenticateApiKey:
+
+    @pytest.fixture
+    def auth(self):
+        return AgentOSAuthenticator(
+            auth_service_url="http://localhost:8000",
+            gateway_secret_key="test-secret",
+        )
+
+    def test_api_key_no_secret_key_returns_config_error(self):
+        auth = AgentOSAuthenticator(
+            auth_service_url="http://localhost:8000",
+            gateway_secret_key="",
+        )
+        result = auth._authenticate_api_key("some-key")
+        assert result.success is False
+        assert result.error == "API Key 认证未配置 gateway_secret_key"
+        assert result.extensions.get("error_code") == "CONFIG_ERROR"
+
+    def test_api_key_lookup_hit(self, auth):
+        auth.compute_api_key_hmac = MagicMock(return_value="hash-abc")
+        auth._api_key_map = {"hash-abc": "agent-001"}
+        result = auth._authenticate_api_key("some-key")
+        assert result.success is True
+        assert result.user_id == "agent-001"
+        assert result.extensions["auth_method"] == "api_key"
+
+    def test_api_key_lookup_miss(self, auth):
+        auth.compute_api_key_hmac = MagicMock(return_value="hash-xyz")
+        auth._api_key_map = {}
+        result = auth._authenticate_api_key("unknown-key")
+        assert result.success is False
+        assert result.error == "Invalid API-KEY"
+        assert result.extensions.get("error_code") == "AUTH_FAILED"
+
+    def test_api_key_hmac_returns_none(self, auth):
+        auth.compute_api_key_hmac = MagicMock(return_value=None)
+        result = auth._authenticate_api_key("any-key")
+        assert result.success is False
+
+
+class TestAuthenticateCertificate:
+
+    @pytest.fixture
+    def auth(self):
+        return AgentOSAuthenticator(
+            auth_service_url="http://localhost:8000",
+            gateway_secret_key="test-secret",
+        )
+
+    def test_certificate_verify_returns_none(self, auth):
+        result = auth._authenticate_certificate("ssh-cert-xxx")
+        assert result.success is False
+        assert result.error == "Invalid certificate"
+
+
+class TestAuthenticatePublicKey:
+
+    @pytest.fixture
+    def auth(self):
+        return AgentOSAuthenticator(
+            auth_service_url="http://localhost:8000",
+            gateway_secret_key="test-secret",
+        )
+
+    def test_public_key_lookup_hit(self, auth):
+        auth._public_key_map = {"ssh-rsa AAA...": "agent-002"}
+        result = auth._authenticate_public_key("ssh-rsa AAA...")
+        assert result.success is True
+        assert result.user_id == "agent-002"
+
+    def test_public_key_lookup_miss(self, auth):
+        auth._public_key_map = {}
+        result = auth._authenticate_public_key("ssh-rsa UNKNOWN")
+        assert result.success is False
+        assert result.error == "Unknown public key"
+
+    def test_public_key_no_map_returns_failure(self, auth):
+        result = auth._authenticate_public_key("ssh-rsa AAA...")
+        assert result.success is False
+
+
+class TestAuthenticateDispatch:
+
+    @pytest.fixture
+    def auth(self):
+        return AgentOSAuthenticator(
+            auth_service_url="http://localhost:8000",
+            gateway_secret_key="test-secret",
+        )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_token(self, auth):
+        token = create_test_token(secret="test-secret")
+        context = AuthContext(channel_type="web", credentials={"token": token})
+        result = await auth.authenticate(context)
+        assert result.success is True
+        assert result.extensions["auth_method"] == "token"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_api_key(self, auth):
+        auth._api_key_map = {}
+        context = AuthContext(channel_type="tui", credentials={"api_key": "some-key"})
+        result = await auth.authenticate(context)
+        assert result.success is False
+        assert result.error == "Invalid API-KEY"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_certificate(self, auth):
+        context = AuthContext(channel_type="ssh", credentials={"certificate": "ssh-cert"})
+        result = await auth.authenticate(context)
+        assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_dispatch_public_key(self, auth):
+        auth._public_key_map = {"pk-1": "agent-002"}
+        context = AuthContext(channel_type="ssh", credentials={"public_key": "pk-1"})
+        result = await auth.authenticate(context)
+        assert result.success is True
+        assert result.user_id == "agent-002"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_no_credentials(self, auth):
+        context = AuthContext(channel_type="web", credentials={})
+        result = await auth.authenticate(context)
+        assert result.success is False
+        assert result.error == "No valid credentials"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_none_credentials(self, auth):
+        context = AuthContext(channel_type="web", credentials=None)
+        result = await auth.authenticate(context)
+        assert result.success is False
+        assert result.error == "No valid credentials"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_token_priority_over_api_key(self, auth):
+        token = create_test_token(secret="test-secret")
+        context = AuthContext(
+            channel_type="web",
+            credentials={"token": token, "api_key": "some-key"},
+        )
+        result = await auth.authenticate(context)
+        assert result.success is True
+        assert result.extensions["auth_method"] == "token"
+
+
+class TestAuthenticateTokenHttpExtra:
+
+    @pytest.fixture
+    def auth(self):
+        return AgentOSAuthenticator(
+            auth_service_url="http://test-auth:8000",
+            gateway_secret_key="",
+        )
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_http_extra_headers_merged(self, auth):
+        route = respx.post("http://test-auth:8000/api/v1/auth/verify").mock(
+            return_value=httpx.Response(
+                200, json={
+                    "data": {"valid": True, "user_id": "u1", "username": "u1", "role": "user"},
+                },
+            )
+        )
+        await auth._authenticate_token(
+            "tok", extra_headers={"X-Custom": "val"},
+        )
+        assert route.called
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_http_unknown_status_code(self, auth):
+        respx.post("http://test-auth:8000/api/v1/auth/verify").mock(
+            return_value=httpx.Response(418),
+        )
+        result = await auth._authenticate_token("tok")
+        assert result.success is False
+        assert "异常状态码" in result.error
+        assert result.extensions.get("error_code") == "UNKNOWN_HTTP_ERROR"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_http_request_error(self, auth):
+        respx.post("http://test-auth:8000/api/v1/auth/verify").mock(
+            side_effect=httpx.RequestError("network error"),
+        )
+        result = await auth._authenticate_token("tok")
+        assert result.success is False
+        assert "不可达" in result.error
+        assert result.extensions.get("error_code") == "REQUEST_ERROR"
+
+
 class TestCredentialManager:
 
     @pytest.mark.xfail(reason="CredentialManager is stubbed, returns None instead of proper values")

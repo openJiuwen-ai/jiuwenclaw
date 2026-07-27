@@ -1,136 +1,231 @@
 """
-端到端调测：模拟从 gateway.yaml 加载配置到认证的完整流程
-
-服务启动 → registry.py → app_gateway.py → web_connect.py → authenticate()
-使用 PassthroughAuthenticator
+模拟从启动层调用 PassthroughAuthenticator 的完整流程
+1. 启动 → ExtensionRegistry 初始化（默认注册 PassthroughAuthenticator）
+2. 网关 → get_auth_handler() 获取认证器
+3. 连接 → Web/TUI Channel 调用 authenticate()
+4. 凭证管理 → generate_api_key / generate_user_keypair / generate_ssh_certificate / compute_api_key_hmac
 """
-import asyncio
-import os
 import sys
-import yaml
+import asyncio
+from pathlib import Path
+from datetime import timedelta
 
-# ── 在导入任何 jiuwenswarm 模块之前，先 mock 掉循环导入 ──
-from unittest.mock import MagicMock
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import jiuwenswarm.gateway
-jiuwenswarm.gateway.AgentServerClient = MagicMock()
-
-import jiuwenswarm.gateway.channel_manager.web.web_connect
-jiuwenswarm.gateway.channel_manager.web.web_connect.get_auth_handler = MagicMock()
-
-# 然后再导入测试目标
+from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext, AuthResult, KeyPair
 from jiuwenswarm.gateway.auth.passthrough_authenticator import PassthroughAuthenticator
-from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext
+from jiuwenswarm.extensions.registry import ExtensionRegistry
 
 
-def load_auth_config():
-    """模拟 registry.py 加载 gateway.yaml 的过程"""
-    _gateway_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "gateway.yaml"
+class FakeCallbackFramework:
+    async def trigger(self, *a, **kw):
+        pass
+    def register_sync(self, *a, **kw):
+        pass
+
+
+def step_1_registry_init():
+    print("=" * 60)
+    print("1. 启动：ExtensionRegistry 初始化，默认注册 PassthroughAuthenticator")
+    print("=" * 60)
+
+    ExtensionRegistry.reset_instance()
+    registry = ExtensionRegistry.create_instance(
+        callback_framework=FakeCallbackFramework(),
+        config={"extensions": {"auth": {"type": "passthrough"}}},
+        logger=None,
     )
-    print(f"[1] 查找 gateway.yaml: {os.path.abspath(_gateway_path)}")
-    print(f"    文件存在: {os.path.exists(_gateway_path)}")
-
-    if os.path.exists(_gateway_path):
-        with open(_gateway_path, "r", encoding="utf-8") as f:
-            _gateway_cfg = yaml.safe_load(f) or {}
-        config = _gateway_cfg.get("extensions", {})
-        print(f"[2] 加载配置: {config}")
-        return config
-    return {}
+    auth = registry.get_authenticator()
+    print(f"  认证器类型    = {type(auth).__name__}")
+    print(f"  是否 Passthrough = {isinstance(auth, PassthroughAuthenticator)}")
+    print()
+    return registry
 
 
-async def test_full_flow():
+def step_2_get_auth_handler(registry):
     print("=" * 60)
-    print("端到端认证流程调测（PassthroughAuthenticator）")
+    print("2. 网关：通过 registry.get_authenticator() 获取全局认证器")
     print("=" * 60)
 
-    # ── 步骤 1: 加载配置（模拟 registry.py） ──
-    config = load_auth_config()
-    auth_config = config.get("auth", {})
-    auth_type = auth_config.get("type", "passthrough")
-    print(f"[3] 认证类型: {auth_type}")
+    auth = registry.get_authenticator()
+    print(f"  认证器实例    = {auth}")
+    print(f"  认证器类型    = {type(auth).__name__}")
+    print()
+    return auth
 
-    # ── 步骤 2: 创建认证器（模拟 registry.py 注册认证器） ──
-    auth = PassthroughAuthenticator()
-    print("[4] PassthroughAuthenticator 创建成功")
 
-    # ── 步骤 3: 模拟 app_gateway.py 缓存认证器 ──
-    _auth_handler = auth
-    print("[5] 认证器已缓存到 _auth_handler")
-
-    # ── 步骤 4: 模拟 web_connect.py 的 _handle_connect ──
-    print("\n" + "=" * 60)
-    print("模拟 WebSocket 连接认证（web_connect.py → authenticate()）")
+async def step_3_web_authenticate(auth):
+    print("=" * 60)
+    print("3. Web Channel：调用 authenticate() —— 任意凭证直接放行")
     print("=" * 60)
 
-    # 模拟 extract_token(ws)
-    extracted_token = "test-token-123"
-    print(f"[6] extract_token: 提取到 Token")
-
-    # 模拟 extract_headers(ws)
-    extracted_headers = {
-        "User-Agent": "Mozilla/5.0",
-        "X-Forwarded-For": "192.168.1.100",
-    }
-    print(f"[7] extract_headers: 提取到 {len(extracted_headers)} 个请求头")
-
-    # 模拟 get_remote_addr(ws)
-    remote_addr = "192.168.1.100"
-    print(f"[8] get_remote_addr: {remote_addr}")
-
-    # 构造 AuthContext
     context = AuthContext(
         channel_type="web",
-        credentials={"token": extracted_token},
-        headers=extracted_headers,
-        remote_addr=remote_addr,
+        credentials={"token": "any-token-will-do"},
+        headers={"Authorization": "Bearer any-token-will-do"},
+        remote_addr="192.168.1.100",
     )
-    print(f"[9] AuthContext 构造完成")
+    result = await auth.authenticate(context)
+    print(f"  success  = {result.success}")
+    print(f"  user_id  = {result.user_id}")
+    print()
 
-    # 调用 authenticate
-    result = await _auth_handler.authenticate(context)
 
-    print(f"\n[10] 认证结果:")
-    print(f"    success: {result.success}")
-    print(f"    user_id: {result.user_id}")
-    print(f"    error: {result.error}")
-    print(f"    extensions: {result.extensions}")
-
-    # ── 步骤 5: 测试无凭证场景 ──
-    print("\n" + "=" * 60)
-    print("测试无凭证场景")
+async def step_4_tui_authenticate(auth):
+    print("=" * 60)
+    print("4. TUI Channel：调用 authenticate() —— 无凭证也放行")
     print("=" * 60)
 
-    result2 = await _auth_handler.authenticate(AuthContext(channel_type="web"))
-    print(f"[11] 无凭证: success={result2.success}, user_id={result2.user_id}")
+    context = AuthContext(
+        channel_type="tui",
+        credentials={},
+        headers={},
+        remote_addr="10.0.0.5",
+    )
+    result = await auth.authenticate(context)
+    print(f"  success  = {result.success}")
+    print(f"  user_id  = {result.user_id}")
+    print()
 
-    # ── 步骤 6: 测试凭证管理功能 ──
-    print("\n" + "=" * 60)
-    print("测试凭证管理功能")
+
+async def step_5_ssh_authenticate(auth):
+    print("=" * 60)
+    print("5. SSH Channel：调用 authenticate() —— 公钥也放行")
+    print("=" * 60)
+
+    context = AuthContext(
+        channel_type="ssh",
+        credentials={"public_key": "ssh-rsa AAAA...arbitrary-key"},
+        remote_addr="10.0.0.99",
+    )
+    result = await auth.authenticate(context)
+    print(f"  success  = {result.success}")
+    print(f"  user_id  = {result.user_id}")
+    print()
+
+
+def step_6_generate_api_key(auth):
+    print("=" * 60)
+    print("6. 凭证管理：generate_api_key()")
     print("=" * 60)
 
     api_key = auth.generate_api_key()
-    print(f"[12] generate_api_key: {api_key[:20]}...")
+    print(f"  api_key      = {api_key}")
+    print(f"  prefix       = {api_key[:3]}")
+    print(f"  length       = {len(api_key)}")
+    print()
+
+
+def step_7_generate_user_keypair(auth):
+    print("=" * 60)
+    print("7. 凭证管理：generate_user_keypair()")
+    print("=" * 60)
 
     keypair = auth.generate_user_keypair()
-    print(f"[13] generate_user_keypair: 公钥长度={len(keypair.public_key)}")
+    print(f"  public_key 类型  = OpenSSH")
+    print(f"  public_key 前缀  = {keypair.public_key[:7]}...")
+    print(f"  private_key 前缀 = {keypair.private_key[:27]}...")
+    print(f"  KeyPair 实例     = {isinstance(keypair, KeyPair)}")
+    print()
 
-    hmac_value = auth.compute_api_key_hmac("test-key", "test-secret")
-    print(f"[14] compute_api_key_hmac: {hmac_value[:20]}...")
 
-    # ── 步骤 7: 验证结果 ──
-    print("\n" + "=" * 60)
-    print("验证结果")
+def step_8_compute_api_key_hmac(auth):
     print("=" * 60)
-    assert result.success is True, "Passthrough 认证应该总是成功"
-    assert result.user_id == "test-token-123", "user_id 应该等于 token 值"
-    assert result2.success is True, "无凭证也应该成功（透传模式）"
-    assert result2.user_id == "anonymous", "无凭证时 user_id 应为 anonymous"
-    assert api_key.startswith("ak-"), "API Key 应以 ak- 开头"
-    assert keypair.public_key.startswith("-----BEGIN"), "公钥应为 PEM 格式"
-    print("✅ 所有断言通过！")
+    print("8. 凭证管理：compute_api_key_hmac()")
+    print("=" * 60)
+
+    api_key = auth.generate_api_key()
+    secret = "my-secret-key"
+    hmac_value = auth.compute_api_key_hmac(api_key, secret)
+    print(f"  api_key    = {api_key}")
+    print(f"  secret_key = {secret}")
+    print(f"  hmac       = {hmac_value}")
+    print(f"  hmac 长度   = {len(hmac_value)} (SHA-256 hex = 64 chars)")
+    print()
+
+
+def step_9_generate_ssh_certificate(auth):
+    print("=" * 60)
+    print("9. 凭证管理：generate_ssh_certificate()（需要 CA 私钥）")
+    print("=" * 60)
+
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.backends import default_backend
+
+    ca_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    ca_pem = ca_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    auth_with_ca = PassthroughAuthenticator(ca_private_key_pem=ca_pem)
+    keypair = auth_with_ca.generate_user_keypair()
+
+    cert = auth_with_ca.generate_ssh_certificate(
+        public_key=keypair.public_key,
+        user_id="user-ssh-001",
+        validity=timedelta(hours=1),
+    )
+    print(f"  certificate 前缀 = {cert.certificate[:30]}...")
+    print(f"  public_key       = {cert.public_key[:30]}...")
+    print(f"  expires_at       = {cert.expires_at}")
+    print()
+
+
+def step_10_ssh_cert_no_ca():
+    print("=" * 60)
+    print("10. 凭证管理：generate_ssh_certificate() —— 无 CA 私钥抛异常")
+    print("=" * 60)
+
+    auth = PassthroughAuthenticator(ca_private_key_pem=None)
+    try:
+        auth.generate_ssh_certificate("ssh-rsa AAAA...", "user", timedelta(hours=1))
+    except Exception as e:
+        print(f"  异常类型 = {type(e).__name__}")
+        print(f"  异常信息 = {e}")
+    print()
+
+
+def step_11_register_authenticator_replace():
+    print("=" * 60)
+    print("11. 启动：register_authenticator() 替换默认认证器")
+    print("=" * 60)
+
+    ExtensionRegistry.reset_instance()
+    registry = ExtensionRegistry.create_instance(
+        callback_framework=FakeCallbackFramework(),
+        config={},
+        logger=None,
+    )
+    default_auth = registry.get_authenticator()
+    print(f"  默认认证器 = {type(default_auth).__name__}")
+
+    new_auth = PassthroughAuthenticator()
+    registry.register_authenticator(new_auth)
+    replaced_auth = registry.get_authenticator()
+    print(f"  替换后     = {type(replaced_auth).__name__}")
+    print(f"  是否同一实例 = {replaced_auth is new_auth}")
+    print()
+
+
+async def main():
+    registry = step_1_registry_init()
+    auth = step_2_get_auth_handler(registry)
+    await step_3_web_authenticate(auth)
+    await step_4_tui_authenticate(auth)
+    await step_5_ssh_authenticate(auth)
+    step_6_generate_api_key(auth)
+    step_7_generate_user_keypair(auth)
+    step_8_compute_api_key_hmac(auth)
+    step_9_generate_ssh_certificate(auth)
+    step_10_ssh_cert_no_ca()
+    step_11_register_authenticator_replace()
+    print("Done.")
 
 
 if __name__ == "__main__":
-    asyncio.run(test_full_flow())
+    asyncio.run(main())

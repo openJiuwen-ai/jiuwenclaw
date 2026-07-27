@@ -16,7 +16,6 @@ ExtensionRegistry.create_instance(
     logger=MagicMock(),
 )
 
-# 确保使用 PassthroughAuthenticator（防止 gateway.yaml 覆盖为 AgentOSAuthenticator）
 from jiuwenswarm.gateway.auth.passthrough_authenticator import PassthroughAuthenticator
 registry = ExtensionRegistry.get_instance()
 registry.register_authenticator(PassthroughAuthenticator())

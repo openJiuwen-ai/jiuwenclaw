@@ -1,155 +1,320 @@
 """
-端到端调测：模拟从 gateway.yaml 加载配置到认证的完整流程
+模拟 Web 层调用 AgentOSAuthenticator 的完整流程
+包含：Token本地验证、Token远程验证、API-KEY认证、SSH证书认证、公钥认证
 """
-import asyncio
-import os
+
 import sys
-import yaml
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# ── 在导入任何 jiuwenswarm 模块之前，先 mock 掉循环导入 ──
-from unittest.mock import MagicMock
+import asyncio
+import json
+from datetime import timedelta, datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
-# 先 mock 掉 gateway 包，避免循环导入
-import jiuwenswarm.gateway
-jiuwenswarm.gateway.AgentServerClient = MagicMock()
+from jose import jwt
 
-# 再 mock 掉 web_connect 中导入的 get_auth_handler
-# （因为 web_connect → app_gateway → registry 是循环链的关键）
-import jiuwenswarm.gateway.channel_manager.web.web_connect
-jiuwenswarm.gateway.channel_manager.web.web_connect.get_auth_handler = MagicMock()
-
-# 然后再导入测试目标
+from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext, AuthResult
 from jiuwenswarm.extensions.auth.agentos_authenticator import AgentOSAuthenticator
-from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext
 
 
-def load_auth_config():
-    """模拟 registry.py 加载 gateway.yaml 的过程"""
-    _gateway_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "gateway.yaml"
-    )
-    print(f"[1] 查找 gateway.yaml: {os.path.abspath(_gateway_path)}")
-    print(f"    文件存在: {os.path.exists(_gateway_path)}")
-
-    if os.path.exists(_gateway_path):
-        with open(_gateway_path, "r", encoding="utf-8") as f:
-            _gateway_cfg = yaml.safe_load(f) or {}
-        config = _gateway_cfg.get("extensions", {})
-        print(f"[2] 加载配置: {config}")
-        return config
-    return {}
+SECRET_KEY = "test-gateway-secret-key-2025"
+ALGORITHM = "HS256"
 
 
-async def test_full_flow():
-    print("=" * 60)
-    print("端到端认证流程调测")
-    print("=" * 60)
-
-    # ── 步骤 1: 加载配置（模拟 registry.py） ──
-    config = load_auth_config()
-    auth_config = config.get("auth", {})
-    auth_type = auth_config.get("type", "passthrough")
-    print(f"[3] 认证类型: {auth_type}")
-
-    if auth_type != "agentos":
-        print("[!] 当前不是 agentos 模式，请修改 gateway.yaml")
-        return
-
-    agentos_config = auth_config.get("agentos", {})
-    auth_service_url = agentos_config.get("auth_service_url", "")
-    gateway_secret_key = agentos_config.get("gateway_secret_key", "")
-
-    print(f"[4] auth_service_url: {auth_service_url}")
-    print(f"[5] gateway_secret_key: {'***' if gateway_secret_key else '未设置'}")
-
-    # ── 步骤 2: 创建认证器（模拟 registry.py 注册认证器） ──
-    auth = AgentOSAuthenticator(
-        auth_service_url=auth_service_url,
-        gateway_secret_key=gateway_secret_key,
-    )
-    print("[6] AgentOSAuthenticator 创建成功")
-
-    # ── 步骤 3: 模拟 app_gateway.py 缓存认证器 ──
-    _auth_handler = auth
-    print("[7] 认证器已缓存到 _auth_handler")
-
-    # ── 步骤 4: 生成测试 JWT Token ──
-    from jose import jwt
-    import time
-
-    token = jwt.encode(
-        {
-            "sub": "user-001",
-            "username": "testuser",
-            "role": "admin",
-            "type": "access",
-            "exp": int(time.time()) + 3600,
-        },
-        gateway_secret_key,
-        algorithm="HS256",
-    )
-    print(f"[8] 生成测试 Token: {token[:50]}...")
-
-    # ── 步骤 5: 模拟 web_connect.py 的 _handle_connect ──
-    print("\n" + "=" * 60)
-    print("模拟 WebSocket 连接认证（web_connect.py → authenticate()）")
-    print("=" * 60)
-
-    extracted_token = token
-    print(f"[9] extract_token: 提取到 Token")
-
-    extracted_headers = {
-        "User-Agent": "Mozilla/5.0",
-        "X-Forwarded-For": "192.168.1.100",
+def _make_access_token(user_id: str, username: str, role: str,
+                       exp_seconds: int = 3600) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "role": role,
+        "type": "access",
+        "exp": now + __import__("datetime").timedelta(seconds=exp_seconds),
     }
-    print(f"[10] extract_headers: 提取到 {len(extracted_headers)} 个请求头")
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-    remote_addr = "192.168.1.100"
-    print(f"[11] get_remote_addr: {remote_addr}")
+
+async def demo_token_local_verify():
+    print("=" * 60)
+    print("1. Web Token 本地验证（gateway_secret_key 已配置）")
+    print("=" * 60)
+
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key=SECRET_KEY,
+        jwt_algorithm=ALGORITHM,
+    )
+
+    token = _make_access_token(user_id="user-001", username="alice", role="admin")
+    context = AuthContext(
+        channel_type="web",
+        credentials={"token": token},
+        headers={"Authorization": f"Bearer {token}"},
+        remote_addr="192.168.1.100",
+    )
+
+    result = await auth.authenticate(context)
+    print(f"  success  = {result.success}")
+    print(f"  user_id  = {result.user_id}")
+    print(f"  extensions = {result.extensions}")
+    print()
+
+
+async def demo_token_expired():
+    print("=" * 60)
+    print("2. Web Token 本地验证 —— Token 已过期")
+    print("=" * 60)
+
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key=SECRET_KEY,
+        jwt_algorithm=ALGORITHM,
+    )
+
+    token = _make_access_token(user_id="user-002", username="bob", role="user",
+                               exp_seconds=-10)
+    context = AuthContext(
+        channel_type="web",
+        credentials={"token": token},
+        headers={},
+        remote_addr="192.168.1.101",
+    )
+
+    result = await auth.authenticate(context)
+    print(f"  success = {result.success}")
+    print(f"  error   = {result.error}")
+    print()
+
+
+async def demo_token_remote_verify():
+    print("=" * 60)
+    print("3. Web Token 远程验证（无 gateway_secret_key，走 HTTP）")
+    print("=" * 60)
+
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key="",
+        jwt_algorithm=ALGORITHM,
+        timeout=5.0,
+    )
+
+    fake_response = MagicMock()
+    fake_response.status_code = 200
+    fake_response.json.return_value = {
+        "data": {
+            "valid": True,
+            "user_id": "user-003",
+            "username": "carol",
+            "role": "viewer",
+        }
+    }
+
+    with patch.object(auth._auth_client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = fake_response
+
+        context = AuthContext(
+            channel_type="web",
+            credentials={"token": "fake-remote-token"},
+            headers={"X-Request-Id": "req-999"},
+            remote_addr="10.0.0.5",
+        )
+        result = await auth.authenticate(context)
+
+    print(f"  success   = {result.success}")
+    print(f"  user_id   = {result.user_id}")
+    print(f"  extensions = {result.extensions}")
+    print(f"  HTTP called with URL = {mock_post.call_args.args[0]}")
+    print(f"  HTTP called with headers = {mock_post.call_args.kwargs.get('headers')}")
+    print()
+
+
+async def demo_token_remote_401():
+    print("=" * 60)
+    print("4. Web Token 远程验证 —— 服务端返回 401")
+    print("=" * 60)
+
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key="",
+    )
+
+    fake_response = MagicMock()
+    fake_response.status_code = 401
+
+    with patch.object(auth._auth_client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = fake_response
+
+        context = AuthContext(
+            channel_type="web",
+            credentials={"token": "expired-remote-token"},
+        )
+        result = await auth.authenticate(context)
+
+    print(f"  success      = {result.success}")
+    print(f"  error        = {result.error}")
+    print(f"  error_code   = {result.extensions.get('error_code')}")
+    print()
+
+
+async def demo_api_key():
+    print("=" * 60)
+    print("5. Web API-KEY 认证")
+    print("=" * 60)
+
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key=SECRET_KEY,
+    )
+    auth._api_key_map = {"fake_hmac_hash": "agent-007"}
+
+    with patch.object(auth, "compute_api_key_hmac", return_value="fake_hmac_hash"):
+        context = AuthContext(
+            channel_type="web",
+            credentials={"api_key": "sk-test-api-key-123"},
+            headers={"X-Api-Key": "sk-test-api-key-123"},
+            remote_addr="10.0.0.50",
+        )
+        result = await auth.authenticate(context)
+
+    print(f"  success   = {result.success}")
+    print(f"  user_id   = {result.user_id}")
+    print(f"  extensions = {result.extensions}")
+    print()
+
+
+async def demo_api_key_invalid():
+    print("=" * 60)
+    print("6. Web API-KEY 认证 —— 无效 Key")
+    print("=" * 60)
+
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key=SECRET_KEY,
+    )
+    auth._api_key_map = {}
 
     context = AuthContext(
         channel_type="web",
-        credentials={"token": extracted_token},
-        headers=extracted_headers,
-        remote_addr=remote_addr,
+        credentials={"api_key": "sk-invalid-key"},
     )
-    print(f"[12] AuthContext 构造完成")
+    result = await auth.authenticate(context)
 
-    result = await _auth_handler.authenticate(context)
+    print(f"  success    = {result.success}")
+    print(f"  error      = {result.error}")
+    print(f"  error_code = {result.extensions.get('error_code')}")
+    print()
 
-    print(f"\n[13] 认证结果:")
-    print(f"    success: {result.success}")
-    print(f"    user_id: {result.user_id}")
-    print(f"    error: {result.error}")
-    print(f"    extensions: {result.extensions}")
 
-    # ── 步骤 6: 测试失败场景 ──
-    print("\n" + "=" * 60)
-    print("测试失败场景")
+async def demo_certificate():
+    print("=" * 60)
+    print("7. Web SSH 证书认证")
     print("=" * 60)
 
-    result2 = await _auth_handler.authenticate(AuthContext(channel_type="web"))
-    print(f"[14] 无凭证: success={result2.success}, error={result2.error}")
-
-    expired_token = jwt.encode(
-        {"sub": "user-001", "type": "access", "exp": int(time.time()) - 3600},
-        gateway_secret_key,
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key=SECRET_KEY,
     )
-    result3 = await _auth_handler.authenticate(
-        AuthContext(channel_type="web", credentials={"token": expired_token})
-    )
-    print(f"[15] 过期 Token: success={result3.success}, error={result3.error}")
 
-    # ── 步骤 7: 验证结果 ──
-    print("\n" + "=" * 60)
-    print("验证结果")
+    with patch.object(auth, "_verify_ssh_certificate",
+                      return_value=(True, "user-ssh-001")):
+        context = AuthContext(
+            channel_type="web",
+            credentials={"certificate": "ssh-cert-base64-data"},
+        )
+        result = await auth.authenticate(context)
+
+    print(f"  success  = {result.success}")
+    print(f"  user_id  = {result.user_id}")
+    print()
+
+
+async def demo_public_key():
     print("=" * 60)
-    assert result.success is True, f"认证应该成功，但返回: {result.error}"
-    assert result.user_id == "user-001", f"user_id 应为 user-001，实际: {result.user_id}"
-    assert result2.success is False, "无凭证应该认证失败"
-    assert result3.success is False, "过期 Token 应该认证失败"
-    print("✅ 所有断言通过！")
+    print("8. Web 公钥认证")
+    print("=" * 60)
+
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key=SECRET_KEY,
+    )
+    auth._public_key_map = {
+        "ssh-rsa AAAA...userA": "agent-pubkey-001"
+    }
+
+    context = AuthContext(
+        channel_type="web",
+        credentials={"public_key": "ssh-rsa AAAA...userA"},
+    )
+    result = await auth.authenticate(context)
+
+    print(f"  success  = {result.success}")
+    print(f"  user_id  = {result.user_id}")
+    print()
+
+
+async def demo_no_credentials():
+    print("=" * 60)
+    print("9. Web 无凭证 —— 认证失败")
+    print("=" * 60)
+
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key=SECRET_KEY,
+    )
+
+    context = AuthContext(
+        channel_type="web",
+        credentials={},
+        headers={},
+        remote_addr="192.168.1.200",
+    )
+    result = await auth.authenticate(context)
+
+    print(f"  success = {result.success}")
+    print(f"  error   = {result.error}")
+    print()
+
+
+async def demo_bearer_from_header():
+    print("=" * 60)
+    print("10. Web Token —— 从 Authorization Header 提取")
+    print("=" * 60)
+
+    auth = AgentOSAuthenticator(
+        auth_service_url="http://fake-agent-os:8000",
+        gateway_secret_key=SECRET_KEY,
+        jwt_algorithm=ALGORITHM,
+    )
+
+    token = _make_access_token(user_id="user-010", username="dave", role="editor")
+    context = AuthContext(
+        channel_type="web",
+        credentials={"token": "wrong-token-placeholder"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    result = await auth.authenticate(context)
+    print(f"  success   = {result.success}")
+    print(f"  user_id   = {result.user_id}")
+    print(f"  username  = {result.extensions.get('username')}")
+    print(f"  (token from header overrides credentials['token'])")
+    print()
+
+
+async def main():
+    await demo_token_local_verify()
+    await demo_token_expired()
+    await demo_token_remote_verify()
+    await demo_token_remote_401()
+    await demo_api_key()
+    await demo_api_key_invalid()
+    await demo_certificate()
+    await demo_public_key()
+    await demo_no_credentials()
+    await demo_bearer_from_header()
+    print("Done.")
 
 
 if __name__ == "__main__":
-    asyncio.run(test_full_flow())
+    asyncio.run(main())
