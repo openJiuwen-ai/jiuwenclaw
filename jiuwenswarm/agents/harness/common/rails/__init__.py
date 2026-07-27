@@ -17,10 +17,14 @@ from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import
     MemberSkillToolkitRail,
 )
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
+from jiuwenswarm.agents.harness.common.rails.context_overflow_recovery_rail import (
+    ContextOverflowRecoveryRail,
+)
 from jiuwenswarm.agents.harness.common.rails.multimodal_image_rail import MultimodalImageRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 
 __all__ = [
+    "ContextOverflowRecoveryRail",
     "JiuSwarmStreamEventRail",
     "MultimodalImageRail",
     "PermissionInterruptRail",

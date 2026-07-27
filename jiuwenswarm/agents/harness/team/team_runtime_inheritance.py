@@ -28,6 +28,9 @@ from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
+from jiuwenswarm.agents.harness.common.rails.context_overflow_recovery_rail import (
+    ContextOverflowRecoveryRail,
+)
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
@@ -75,6 +78,7 @@ RAIL_WHITELIST = frozenset({
     "RuntimePromptRail",
     "ResponsePromptRail",
     "JiuSwarmStreamEventRail",
+    "ContextOverflowRecoveryRail",
     "TaskPlanningRail",
     "SecurityRail",
     "HeartbeatRail",
@@ -203,6 +207,13 @@ def build_member_rails(
         logger.info("[TeamRuntime] JiuSwarmStreamEventRail created")
     except Exception as exc:
         logger.warning("[TeamRuntime] JiuSwarmStreamEventRail failed: %s", exc)
+
+    try:
+        rail = ContextOverflowRecoveryRail()
+        rails_list.append(rail)
+        logger.info("[TeamRuntime] ContextOverflowRecoveryRail created")
+    except Exception as exc:
+        logger.warning("[TeamRuntime] ContextOverflowRecoveryRail failed: %s", exc)
 
     if role == "leader":
         try:

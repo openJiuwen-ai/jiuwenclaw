@@ -363,6 +363,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "JiuSwarmStreamEventRail", "SecurityRail",
         "LspRail", "ProjectMemoryRail", "PermissionInterruptRail",
         "ContextProcessorRail",
+        "ContextOverflowRecoveryRail",
         "SysOperationRail", "CodingMemoryRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名
@@ -580,6 +581,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
+            _RailBuildInfo(
+                "_context_overflow_recovery_rail",
+                self._build_context_overflow_recovery_rail,
+            ),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_lsp_rail", self._build_lsp_rail_via_config),

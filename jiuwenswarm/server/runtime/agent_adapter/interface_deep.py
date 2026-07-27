@@ -138,6 +138,7 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
 )
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
+    ContextOverflowRecoveryRail,
     JiuSwarmStreamEventRail,
     MultimodalImageRail,
     ResponsePromptRail,
@@ -836,6 +837,7 @@ class JiuWenSwarmDeepAdapter:
         self._filesystem_rail: SysOperationRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
+        self._context_overflow_recovery_rail: ContextOverflowRecoveryRail | None = None
         # Track session IDs currently executing on this adapter instance.
         # Used by process_interrupt to avoid aborting sessions that are not
         # the target of the interrupt request (cross-session contamination).
@@ -3648,6 +3650,21 @@ class JiuWenSwarmDeepAdapter:
         return stream_event_rail
 
     @staticmethod
+    def _build_context_overflow_recovery_rail() -> ContextOverflowRecoveryRail | None:
+        """Build ContextOverflowRecoveryRail (reactive 413 + proactive FullCompact bridge)."""
+        try:
+            # 3021 intent: max_recovery_attempts default 2 (threshold_override path).
+            recovery_rail = ContextOverflowRecoveryRail()
+            logger.info("[JiuWenSwarmDeepAdapter] ContextOverflowRecoveryRail create success")
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ContextOverflowRecoveryRail create failed: %s",
+                exc,
+            )
+            recovery_rail = None
+        return recovery_rail
+
+    @staticmethod
     def _build_multimodal_image_rail(
         enable_image_multimodal: bool | None = None,
     ) -> MultimodalImageRail | None:
@@ -3984,6 +4001,10 @@ class JiuWenSwarmDeepAdapter:
                 {
                     "enable_image_multimodal": self._resolve_enable_read_image_multimodal(config),
                 },
+            ),
+            _RailBuildInfo(
+                "_context_overflow_recovery_rail",
+                self._build_context_overflow_recovery_rail,
             ),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),

@@ -106,6 +106,7 @@ _COMMON_RAIL_NAMES: frozenset[str] = frozenset(
         registry.RESPONSE_PROMPT,
         registry.SYS_OPERATION,
         registry.STREAM_EVENT,
+        registry.CONTEXT_OVERFLOW_RECOVERY,
         registry.TASK_PLANNING,
         registry.SECURITY,
         registry.HEARTBEAT,
@@ -410,9 +411,9 @@ def test_build_member_capability_specs_rail_names(
 
     assert _COMMON_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    # The common set has exactly 16 entries; the role adds only its explicit
+    # The common set has exactly 17 entries; the role adds only its explicit
     # extra rails on top.
-    assert len(_COMMON_RAIL_NAMES) == 16
+    assert len(_COMMON_RAIL_NAMES) == 17
     assert rail_names == _COMMON_RAIL_NAMES | extra_rails
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -1370,6 +1371,7 @@ _EXPECTED_CODE_RAIL_NAMES: frozenset[str] = frozenset(
         registry.CODE_RUNTIME_PROMPT,
         registry.RESPONSE_PROMPT,
         registry.STREAM_EVENT,
+        registry.CONTEXT_OVERFLOW_RECOVERY,
         registry.SECURITY,
         registry.CODE_LSP,
         registry.CODE_PROJECT_MEMORY,

@@ -23,7 +23,9 @@ def temp_home() -> Generator[Path, None, None]:
     This fixture creates a temporary directory that can be used as HOME
     for testing initialization without affecting the user's actual home directory.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
+    # ignore_cleanup_errors: on Windows, stopped agent/gateway processes may briefly
+    # keep FileHandlers open under the temp home (e.g. agent_server.log).
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         home = Path(tmpdir)
         yield home
 

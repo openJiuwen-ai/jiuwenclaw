@@ -15,6 +15,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,35 @@ def _pick_free_port() -> int:
     port = sock.getsockname()[1]
     sock.close()
     return port
+
+
+def _make_service_env(
+    temp_home: Path,
+    *,
+    agent_port: int,
+    web_port: int,
+    gateway_port: int,
+) -> dict[str, str]:
+    """Build subprocess env isolated from the developer's real home config.
+
+    On Windows ``Path.home()`` follows ``USERPROFILE``, not ``HOME``. Gateway and
+    agent server both call ``load_dotenv(get_env_file(), override=True)``; if
+    USERPROFILE still points at the real profile, ``~/.jiuwenswarm/config/.env``
+    overwrites the test ports (e.g. AgentServer -> :18092) and the gateway never
+    binds ``GATEWAY_PORT``.
+    """
+    env = os.environ.copy()
+    home = str(temp_home)
+    env["HOME"] = home
+    env["USERPROFILE"] = home
+    env["AGENT_SERVER_HOST"] = "127.0.0.1"
+    env["AGENT_SERVER_PORT"] = str(agent_port)
+    env["WEB_HOST"] = "127.0.0.1"
+    env["WEB_PORT"] = str(web_port)
+    env["GATEWAY_HOST"] = "127.0.0.1"
+    env["GATEWAY_PORT"] = str(gateway_port)
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
 
 
 def _start_process(
@@ -67,13 +97,14 @@ def _stop_process(proc: subprocess.Popen | None) -> None:
     proc.terminate()
     try:
         proc.wait(timeout=10)
-        return
     except subprocess.TimeoutExpired:
         proc.kill()
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             pass
+    # Give Windows a moment to release FileHandlers under the temp USERPROFILE.
+    time.sleep(0.3)
 
 
 async def _wait_for_log(
@@ -147,14 +178,12 @@ async def test_btw_command_system_roundtrip(
     web_port = _pick_free_port()
     gateway_port = _pick_free_port()
 
-    env = os.environ.copy()
-    env["HOME"] = str(temp_home)
-    env["AGENT_SERVER_HOST"] = "127.0.0.1"
-    env["AGENT_SERVER_PORT"] = str(agent_port)
-    env["WEB_HOST"] = "127.0.0.1"
-    env["WEB_PORT"] = str(web_port)
-    env["GATEWAY_HOST"] = "127.0.0.1"
-    env["GATEWAY_PORT"] = str(gateway_port)
+    env = _make_service_env(
+        temp_home,
+        agent_port=agent_port,
+        web_port=web_port,
+        gateway_port=gateway_port,
+    )
 
     agent_log = temp_home / "agentserver_btw.log"
     gateway_log = temp_home / "gateway_btw.log"
@@ -233,14 +262,12 @@ async def test_btw_command_empty_question(
     web_port = _pick_free_port()
     gateway_port = _pick_free_port()
 
-    env = os.environ.copy()
-    env["HOME"] = str(temp_home)
-    env["AGENT_SERVER_HOST"] = "127.0.0.1"
-    env["AGENT_SERVER_PORT"] = str(agent_port)
-    env["WEB_HOST"] = "127.0.0.1"
-    env["WEB_PORT"] = str(web_port)
-    env["GATEWAY_HOST"] = "127.0.0.1"
-    env["GATEWAY_PORT"] = str(gateway_port)
+    env = _make_service_env(
+        temp_home,
+        agent_port=agent_port,
+        web_port=web_port,
+        gateway_port=gateway_port,
+    )
 
     agent_log = temp_home / "agentserver_btw2.log"
     gateway_log = temp_home / "gateway_btw2.log"
@@ -321,14 +348,12 @@ async def test_btw_no_context_when_no_session(
     web_port = _pick_free_port()
     gateway_port = _pick_free_port()
 
-    env = os.environ.copy()
-    env["HOME"] = str(temp_home)
-    env["AGENT_SERVER_HOST"] = "127.0.0.1"
-    env["AGENT_SERVER_PORT"] = str(agent_port)
-    env["WEB_HOST"] = "127.0.0.1"
-    env["WEB_PORT"] = str(web_port)
-    env["GATEWAY_HOST"] = "127.0.0.1"
-    env["GATEWAY_PORT"] = str(gateway_port)
+    env = _make_service_env(
+        temp_home,
+        agent_port=agent_port,
+        web_port=web_port,
+        gateway_port=gateway_port,
+    )
 
     agent_log = temp_home / "agentserver_btw3.log"
     gateway_log = temp_home / "gateway_btw3.log"
