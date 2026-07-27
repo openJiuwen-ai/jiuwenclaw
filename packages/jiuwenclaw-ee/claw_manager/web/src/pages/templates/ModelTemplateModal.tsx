@@ -189,7 +189,7 @@ export function ModelTemplateModal({ open, template, onClose, onSaved }: Props) 
       { label: t('modelTemplate.templateDescription'), value: form.description },
       { label: t('modelTemplate.modelProvider'), value: form.model_provider },
       { label: t('modelTemplate.modelId'), value: form.model_id },
-      ...fromCommaList(form.model_tags).map((tag) => ({
+      ...(fromCommaList(form.model_tags) ?? []).map((tag) => ({
         label: t('modelTemplate.modelTags'),
         value: tag,
       })),
