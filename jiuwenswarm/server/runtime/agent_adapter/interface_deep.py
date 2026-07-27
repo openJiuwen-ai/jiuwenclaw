@@ -5512,17 +5512,11 @@ class JiuWenSwarmDeepAdapter:
     ) -> list[dict[str, Any]]:
         """Per-session teardown: rail abort, shell kill, cancelled tool collection."""
         sid = self._resolve_interrupt_session_id(session_id)
-        cancelled_tool_results: list[dict[str, Any]] = []
         cancelled_tasks = await self._cancel_session_agent_tasks(sid)
-        if self._stream_event_rail is not None:
-            self._stream_event_rail.abort(session_id or sid)
-            self._stream_event_rail.collect_cancelled_tool_updates(session_id or sid)
-            cancelled_tool_results = self._stream_event_rail.get_cancelled_tool_results(
-                session_id or sid,
-            )
-            self._stream_event_rail.clear_cancelled_tool_results(session_id or sid)
-            if reset_for_new_task:
-                self._stream_event_rail.reset_for_new_task(session_id or sid)
+        cancelled_tool_results = self._collect_cancelled_tools_for_session(
+            session_id,
+            reset_for_new_task=reset_for_new_task,
+        )
         try:
             from openjiuwen.core.sys_operation.shell_process_registry import (
                 kill_shell_processes_for_session_tree,
@@ -5550,6 +5544,63 @@ class JiuWenSwarmDeepAdapter:
                 sid,
             )
         return cancelled_tool_results
+
+    def _collect_cancelled_tools_for_session(
+        self,
+        session_id: str | None,
+        *,
+        reset_for_new_task: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Abort rail checkpoints and collect in-flight tools for *session_id*.
+
+        Does not cancel asyncio stream producer tasks — safe for interaction
+        cancel, which must keep owning the round via ``cancel_round``.
+        """
+        if self._stream_event_rail is None:
+            return []
+        sid = self._resolve_interrupt_session_id(session_id)
+        self._stream_event_rail.abort(session_id or sid)
+        self._stream_event_rail.collect_cancelled_tool_updates(session_id or sid)
+        cancelled_tool_results = self._stream_event_rail.get_cancelled_tool_results(
+            session_id or sid,
+        )
+        self._stream_event_rail.clear_cancelled_tool_results(session_id or sid)
+        if reset_for_new_task:
+            self._stream_event_rail.reset_for_new_task(session_id or sid)
+        return cancelled_tool_results
+
+    @staticmethod
+    def _append_cancelled_tools_to_history(
+        request: AgentRequest,
+        cancelled_tool_results: list[dict[str, Any]],
+    ) -> None:
+        """Persist cancelled tool results so refresh does not leave spinners."""
+        if not cancelled_tool_results:
+            return
+        mode = (
+            request.params.get("mode", "unknown")
+            if isinstance(request.params, dict)
+            else "unknown"
+        )
+        for tool_info in cancelled_tool_results:
+            append_history_record(
+                session_id=request.session_id,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                role="assistant",
+                event_type="chat.tool_result",
+                content=tool_info.get("result", ""),
+                timestamp=time.time(),
+                extra={
+                    "tool_result": {
+                        "tool_name": tool_info.get("tool_name", ""),
+                        "tool_call_id": tool_info.get("tool_call_id", ""),
+                        "result": tool_info.get("result", ""),
+                        "status": tool_info.get("status", "error"),
+                    },
+                },
+                mode=mode,
+            )
 
     def _has_active_goal_round(self) -> bool:
         """Whether DeepAgent is currently executing a goal round.
@@ -5989,25 +6040,7 @@ class JiuWenSwarmDeepAdapter:
         if cancelled_tool_results:
             payload["cancelled_tools"] = cancelled_tool_results
             # 写入历史记录，确保刷新网页后工具状态正确显示
-            for tool_info in cancelled_tool_results:
-                append_history_record(
-                    session_id=request.session_id,
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    role="assistant",
-                    event_type="chat.tool_result",
-                    content=tool_info.get("result", ""),
-                    timestamp=time.time(),
-                    extra={
-                        "tool_result": {
-                            "tool_name": tool_info.get("tool_name", ""),
-                            "tool_call_id": tool_info.get("tool_call_id", ""),
-                            "result": tool_info.get("result", ""),
-                            "status": tool_info.get("status", "error"),
-                        },
-                    },
-                    mode=request.params.get("mode", "unknown") if isinstance(request.params, dict) else "unknown",
-                )
+            self._append_cancelled_tools_to_history(request, cancelled_tool_results)
 
         return AgentResponse(
             request_id=request.request_id,
@@ -6054,6 +6087,12 @@ class JiuWenSwarmDeepAdapter:
                 )
 
         cancelled = False
+        # Collect in-flight tools without cancelling the stream producer task —
+        # interaction cancel must keep round ownership in cancel_round().
+        cancelled_tool_results = self._collect_cancelled_tools_for_session(
+            request.session_id,
+            reset_for_new_task=(intent == "cancel"),
+        )
         try:
             cancelled = await self._instance.cancel_round(
                 reason="user_cancel",
@@ -6085,6 +6124,9 @@ class JiuWenSwarmDeepAdapter:
             # Web/TUI can refresh GoalBar even when no output lease remains
             # to receive goal.updated.
             payload["goal"] = paused_goal_payload
+        if cancelled_tool_results:
+            payload["cancelled_tools"] = cancelled_tool_results
+            self._append_cancelled_tools_to_history(request, cancelled_tool_results)
 
         # Best-effort todo cancellation for user cancel (does not touch runtime).
         if cancelled and intent == "cancel" and request.session_id:

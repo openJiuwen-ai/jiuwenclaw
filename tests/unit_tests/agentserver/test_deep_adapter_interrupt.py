@@ -99,9 +99,11 @@ async def test_interaction_cancel_pauses_active_goal_before_cancel_round() -> No
     instance.goal_manager = goal_manager
     instance.cancel_round = AsyncMock(return_value=True)
 
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
     adapter = _make_adapter(
         _active_session_ids={"sess-goal": 1},
-        _stream_event_rail=MagicMock(),
+        _stream_event_rail=rail,
         _instance=instance,
     )
     adapter._cancel_pending_todos = AsyncMock(return_value=None)
@@ -118,6 +120,9 @@ async def test_interaction_cancel_pauses_active_goal_before_cancel_round() -> No
 
     goal_manager.pause.assert_awaited_once()
     instance.cancel_round.assert_awaited_once_with(reason="user_cancel")
+    rail.abort.assert_called_once_with("sess-goal")
+    rail.collect_cancelled_tool_updates.assert_called_once_with("sess-goal")
+    rail.reset_for_new_task.assert_called_once_with("sess-goal")
     assert response.payload["event_type"] == "chat.interrupt_result"
     assert response.payload["goal"]["status"] == "paused"
     assert response.payload["goal"]["objective"] == "keep going"
@@ -134,9 +139,11 @@ async def test_interaction_cancel_skips_pause_when_no_goal() -> None:
     instance.goal_manager = goal_manager
     instance.cancel_round = AsyncMock(return_value=True)
 
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
     adapter = _make_adapter(
         _active_session_ids={"sess-x": 1},
-        _stream_event_rail=MagicMock(),
+        _stream_event_rail=rail,
         _instance=instance,
     )
     adapter._cancel_pending_todos = AsyncMock(return_value=None)
@@ -145,7 +152,56 @@ async def test_interaction_cancel_skips_pause_when_no_goal() -> None:
 
     goal_manager.pause.assert_not_awaited()
     instance.cancel_round.assert_awaited_once()
+    rail.abort.assert_called_once_with("sess-x")
     assert "goal" not in response.payload
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_appends_cancelled_tools_to_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interaction cancel must close in_progress tools in history (no spinner on refresh)."""
+    cancelled_tools = [
+        {
+            "tool_name": "task_tool",
+            "tool_call_id": "call_1",
+            "result": "cancelled by user",
+            "status": "error",
+        }
+    ]
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = cancelled_tools
+
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance.goal_manager = None
+    instance.cancel_round = AsyncMock(return_value=True)
+
+    adapter = _make_adapter(
+        _active_session_ids={"sess-tools": 1},
+        _stream_event_rail=rail,
+        _instance=instance,
+        _session_agent_tasks={},
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+    adapter._cancel_session_agent_tasks = AsyncMock(return_value=0)
+
+    append_mock = MagicMock()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.append_history_record",
+        append_mock,
+    )
+
+    response = await adapter.process_interrupt(_build_cancel_request("sess-tools"))
+
+    # Must not cancel stream producer tasks on interaction path
+    adapter._cancel_session_agent_tasks.assert_not_awaited()
+    instance.cancel_round.assert_awaited_once_with(reason="user_cancel")
+    rail.abort.assert_called_once_with("sess-tools")
+    assert response.payload["cancelled_tools"] == cancelled_tools
+    append_mock.assert_called_once()
+    assert append_mock.call_args.kwargs["event_type"] == "chat.tool_result"
+    assert append_mock.call_args.kwargs["extra"]["tool_result"]["tool_call_id"] == "call_1"
 
 
 @pytest.mark.asyncio
