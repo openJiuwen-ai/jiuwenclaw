@@ -489,6 +489,7 @@
       "wecom": "企业微信",
       "wechat": "微信",
       "discord": "Discord",
+      "slack": "Slack",
       "heartbeat": "心跳",
       "tui": "TUI",
       "unknown": "未知"
@@ -568,6 +569,7 @@
       "dingtalk": "钉钉",
       "telegram": "Telegram",
       "discord": "Discord",
+      "slack": "Slack",
       "whatsapp": "WhatsApp",
       "wecom": "企业微信",
       "wechat": "微信"
@@ -592,6 +594,9 @@
       "discordTitle": "Discord 频道参数配置",
       "discordSubtitle": "配置 Discord Bot 服务相关参数",
       "discordHint": "支持 Discord Bot 消息收发，请确保已在开发者后台开启 Message Content Intent 并配置目标频道，可使用block_dm开关屏蔽私信。",
+      "slackTitle": "Slack 频道参数配置",
+      "slackSubtitle": "配置 Slack Socket Mode 机器人服务参数",
+      "slackHint": "请创建并启用 Socket Mode 的 Slack App，配置 xoxb Bot Token 和 xapp App Token，并订阅 app_mention 与 message.im 事件。",
       "telegramTitle": "Telegram 频道参数配置",
       "telegramSubtitle": "配置 Telegram Bot 服务相关参数",
       "whatsappTitle": "WhatsApp 频道参数配置",
@@ -607,6 +612,7 @@
       "feishu": "正在加载飞书配置...",
       "telegram": "正在加载 Telegram 配置...",
       "discord": "正在加载 Discord 配置...",
+      "slack": "正在加载 Slack 配置...",
       "whatsapp": "正在加载 WhatsApp 配置...",
       "wecom": "正在加载企业微信配置...",
       "wechat": "正在加载微信配置..."
@@ -623,8 +629,15 @@
       "whatsappJids": "每行一个 WhatsApp JID（也支持逗号分隔）",
       "wecomDefaultChatId": "userid 或 chatid（群聊）",
       "wecomDefaultChatIdHint": "心跳/定时推送目标。不填则自动使用最近一次聊天的 chatid",
+      "xiaoyiApiIdHint": "定时任务推送到小艺需要配置 api_id；未配置时无法在定时任务中选择小艺作为推送渠道。",
+      "xiaoyiApiIdRequiredForCron": "未配置 api_id：定时任务中无法选择小艺作为推送渠道。",
       "discordGuildId": "请填入Discord的服务器ID（留空则仅接收私信）",
       "discordChannelId": "请填入Discord服务器的频道ID（留空则仅接收私信）",
+      "slackBotToken": "请输入 xoxb Bot Token",
+      "slackAppToken": "请输入 xapp App Token",
+      "slackChannelId": "请输入备用 Slack 频道 ID",
+      "slackUserIds": "每行一个 Slack 用户 ID（留空允许所有用户）",
+      "slackChannelIds": "每行一个 Slack 频道 ID（留空允许所有频道）",
       "allowFrom": "每行一个 chatid/userid（也支持逗号分隔）"
     },
     "saved": {
@@ -633,6 +646,7 @@
       "dingtalk": "钉钉配置已保存",
       "telegram": "Telegram 配置已保存",
       "discord": "Discord 配置已保存",
+      "slack": "Slack 配置已保存",
       "whatsapp": "WhatsApp 配置已保存",
       "wecom": "企业微信配置已保存",
       "wechat": "微信配置已保存"
@@ -668,6 +682,7 @@
       "loadDingtalk": "获取钉钉配置失败",
       "loadTelegram": "获取 Telegram 配置失败",
       "loadDiscord": "获取 Discord 配置失败",
+      "loadSlack": "获取 Slack 配置失败",
       "loadWhatsApp": "获取 WhatsApp 配置失败",
       "loadWecom": "获取企业微信配置失败",
       "loadWechat": "获取微信配置失败",
@@ -690,6 +705,23 @@
       "appIdNotConfigured": "未配置 app_id",
       "deleteApp": "删除应用",
       "addApp": "添加应用"
+    }
+  },
+  "modelSetupGuide": {
+    "progress": "第 {{current}} 步，共 {{total}} 步",
+    "clickMore": "点击“更多”继续",
+    "acknowledge": "我知道了",
+    "skip": "跳过",
+    "open": "配置指引",
+    "steps": {
+      "1": {
+        "title": "配置你的首个模型",
+        "description": "模型配置位于“更多”中的“配置信息”。"
+      },
+      "2": {
+        "title": "完成模型配置",
+        "description": "在默认模型区域填写模型名称、API 地址、API Key 和模型提供商，然后点击保存。"
+      }
     }
   },
   "config": {
@@ -1177,7 +1209,10 @@
         "3": "第三周",
         "4": "第四周",
         "last": "最后一周"
-      }
+      },
+      "wakeOffset": "提前唤醒",
+      "wakeOffsetUnit": "分钟",
+      "wakeOffsetHelp": "在计划推送时间前启动 Agent 准备结果；0 表示到点执行"
     },
     "modelPicker": {
       "configured": "已配置",
@@ -1595,7 +1630,7 @@
     "evolution": {
       "closeAria": "关闭技能经验弹窗",
       "title": "技能经验：{{name}}",
-      "subtitle": "可编辑经验内容（change.content），并支持删除条目后保存。",
+      "subtitle": "可编辑或删除经验，保存后生效。",
       "empty": "暂无经验条目",
       "deleteConfirm": "确认删除该条经验吗？",
       "actions": {
@@ -1604,12 +1639,29 @@
       "fields": {
         "id": "ID",
         "source": "来源",
-        "section": "Section",
-        "target": "Target",
+        "section": "类型",
+        "target": "改进对象",
         "applied": "已应用",
-        "timestamp": "时间",
+        "timestamp": "生成时间",
         "context": "上下文",
         "content": "经验内容"
+      },
+      "values": {
+        "section": {
+          "instructions": "使用说明",
+          "examples": "使用示例",
+          "troubleshooting": "问题排查",
+          "workflow": "工作流程",
+          "constraints": "约束条件",
+          "roles": "角色定义",
+          "collaboration": "协作方式",
+          "scripts": "脚本"
+        },
+        "target": {
+          "description": "技能简介",
+          "body": "技能正文",
+          "script": "技能脚本"
+        }
       },
       "messages": {
         "saved": "保存成功"
@@ -2139,7 +2191,8 @@
       "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
       "errors": {
         "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",
-        "nameExists": "该项目名已存在，请换个名称"
+        "nameExists": "该项目名已存在，请换个名称",
+        "pathMissing": "项目目录不存在，请选择已存在的目录"
       },
       "cancel": "取消",
       "confirm": "确定"

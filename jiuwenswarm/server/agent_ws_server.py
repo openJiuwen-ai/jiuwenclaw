@@ -14,6 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any, ClassVar, Optional
+from weakref import WeakValueDictionary
 
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
@@ -117,6 +118,9 @@ logger = logging.getLogger(__name__)
 # task 完成后自动从集合移除(Python 官方推荐模式)。
 _background_permission_reload_tasks: set[asyncio.Task] = set()
 
+# session.create 在 team prepare 完成后回包；可选 KVC 信号异步执行，避免拖慢超时窗口。
+_background_session_create_kvc_tasks: set[asyncio.Task] = set()
+
 
 async def _reset_active_browser_runtimes_if_available(browser_move: Any) -> int:
     """Reset active browser runtimes when supported by the installed SDK."""
@@ -144,8 +148,23 @@ def _log_permission_reload_failure(task: asyncio.Task) -> None:
             exc_info=exc,
         )
 
+
+def _log_session_create_kvc_failure(task: asyncio.Task) -> None:
+    """session.create 异步 KVC 失败时记 warning，不影响已成功回包的会话。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "[AgentWebSocketServer] session.create KVC failed after ack: %s",
+            exc,
+            exc_info=exc,
+        )
+
 # Serialize plan-mode restore per session to avoid checkpoint races.
-_session_mode_sync_locks: dict[str, asyncio.Lock] = {}
+_session_mode_sync_locks: WeakValueDictionary[str, asyncio.Lock] = (
+    WeakValueDictionary()
+)
 
 # Sessions that have successfully exited plan mode via exit_plan_mode tool.
 # Set by _check_post_process_plan_exit, consumed by _ensure_code_mode_state
@@ -773,12 +792,16 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
+        # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
+        # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
+        self._stateless_fallback_agents: dict[str, Any] = {}
         # session_id → all live stream tasks. This is host lifecycle tracking
         # for interrupt/connection cleanup only; it never decides interaction
         # output ownership.
         self._session_stream_tasks: dict[str, dict[asyncio.Task, asyncio.Event]] = {}
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
+        self._scheduler_agent: Any = None
         # Model cache for scheduled task execution (same approach as interface_deep)
         self._model_cache: dict[str, Any] = {}
         self._default_model: Optional[Any] = None
@@ -1066,13 +1089,34 @@ class AgentWebSocketServer:
 
     async def _stop_scheduler(self) -> None:
         """Stop the auto_harness scheduler."""
-        if self._scheduler_service is not None:
-            try:
+        try:
+            if self._scheduler_service is not None:
                 await self._scheduler_service.stop_scheduler()
                 logger.info("[AgentWebSocketServer] Scheduler stopped")
-            except Exception as e:
-                logger.warning("[AgentWebSocketServer] Failed to stop scheduler: %s", e)
+        except Exception as e:
+            logger.warning("[AgentWebSocketServer] Failed to stop scheduler: %s", e)
+        finally:
             self._scheduler_service = None
+            scheduler_agent = getattr(self, "_scheduler_agent", None)
+            if scheduler_agent is not None:
+                unpin = getattr(self._agent_manager, "unpin_agent", None)
+                if callable(unpin):
+                    unpin(scheduler_agent)
+            self._scheduler_agent = None
+
+    def _set_scheduler_agent(self, agent: Any) -> None:
+        """Pin the facade whose DeepAgent is retained by the scheduler."""
+        previous = getattr(self, "_scheduler_agent", None)
+        if previous is agent:
+            return
+        pin = getattr(self._agent_manager, "pin_agent", None)
+        if callable(pin):
+            pin(agent)
+        self._scheduler_agent = agent
+        if previous is not None:
+            unpin = getattr(self._agent_manager, "unpin_agent", None)
+            if callable(unpin):
+                unpin(previous)
 
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
@@ -1517,14 +1561,16 @@ class AgentWebSocketServer:
                         stream_task.cancel()
                         stream_tasks.append(stream_task)
 
+                cancel_response: AgentResponse | None = None
                 try:
                     # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
                     # allow_create=False：找不到已有 agent 时不 fallback 新建（见 _handle_cancel docstring）。
-                    await self._handle_cancel(
+                    cancel_response = await self._handle_cancel(
                         ws,
                         request,
                         send_lock,
                         allow_create=False,
+                        send_response=not cleanup_after_cancel,
                     )
                 finally:
                     if stream_tasks:
@@ -1539,7 +1585,25 @@ class AgentWebSocketServer:
                                     result,
                                 )
                     if cleanup_after_cancel and intent in ("cancel", "supplement"):
-                        await self._cleanup_client_disconnect_session_runtime(request)
+                        cleanup_succeeded = (
+                            await self._cleanup_client_disconnect_session_runtime(
+                                request
+                            )
+                        )
+                        if cancel_response is not None:
+                            if not cleanup_succeeded:
+                                cancel_response.ok = False
+                                cancel_response.payload = {
+                                    "event_type": "chat.interrupt_result",
+                                    "success": False,
+                                    "error": "session runtime cleanup failed",
+                                }
+                            wire = encode_agent_response_for_wire(
+                                cancel_response,
+                                response_id=request.request_id,
+                            )
+                            async with send_lock:
+                                await send_wire_payload(ws, wire)
                 return
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
@@ -1615,11 +1679,11 @@ class AgentWebSocketServer:
             == E2A_CANCEL_SOURCE_CLIENT_DISCONNECT
         )
 
-    async def _cleanup_client_disconnect_session_runtime(self, request: AgentRequest) -> None:
+    async def _cleanup_client_disconnect_session_runtime(self, request: AgentRequest) -> bool:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = str(request.session_id or params.get("session_id") or "").strip()
         if not session_id:
-            return
+            return False
         channel_id = request.channel_id or "default"
         try:
             cleaned = await self._agent_manager.cleanup_session_runtime(
@@ -1633,6 +1697,7 @@ class AgentWebSocketServer:
                 session_id,
                 cleaned,
             )
+            return True
         except Exception as exc:
             logger.warning(
                 "[AgentWebSocketServer] client disconnect session runtime cleanup failed: "
@@ -1641,6 +1706,13 @@ class AgentWebSocketServer:
                 session_id,
                 exc,
             )
+            return False
+        finally:
+            # Persisted history remains on disk, but this connection-scoped
+            # marker must not grow with every short-lived TUI process. Mode
+            # locks are weakly cached and disappear automatically after their
+            # last active/waiting user releases them.
+            _plan_exited_sessions.discard(session_id)
 
     async def _trigger_before_chat_request_hook(self, request: AgentRequest) -> None:
         if not self._should_trigger_before_chat_request_hook(request):
@@ -1668,7 +1740,8 @@ class AgentWebSocketServer:
         send_lock: asyncio.Lock,
         *,
         allow_create: bool = False,
-    ) -> None:
+        send_response: bool = True,
+    ) -> AgentResponse:
         """处理 CHAT_CANCEL 中断请求：复用已有 agent 实例，避免创建新实例。
 
         cancel 请求的 params 中可能没有 mode 信息，如果走 _handle_unary 的 get_agent(mode) 路径
@@ -1749,9 +1822,14 @@ class AgentWebSocketServer:
         if resp is None:
             resp = await agent.process_message(request)
 
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
+        if send_response:
+            wire = encode_agent_response_for_wire(
+                resp,
+                response_id=request.request_id,
+            )
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+        return resp
 
     @staticmethod
     def _resolve_code_language() -> str:
@@ -1884,22 +1962,29 @@ class AgentWebSocketServer:
         """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
 
         优先用 AgentManager 已缓存的 agent 模式 agent（get_agent_nowait 命中即返回，
-        不命中返回 None，绝不创建）；都没缓存时现场构造一个轻量 JiuWenSwarm()
-        （**不调 create_instance**，_adapter 保持 None）——其 process_message 内部对
-        skills/skilldev/plugins/symphony 的无状态短路会在 _ensure_adapter 之前 return，
-        碰不到 adapter。真正的 adapter 重建留给 chat.send。
+        不命中返回 None，绝不创建）；都没缓存时复用（或首次构造）本 server 上按
+        channel 缓存的轻量 JiuWenSwarm()（**不调 create_instance**，_adapter 保持
+        None）——其 process_message 内部对 skills/skilldev/plugins/symphony 的无状态
+        短路会在 _ensure_adapter 之前 return，碰不到 adapter。真正的 adapter 重建
+        留给 chat.send。
 
         相比 5084467df 原版用 get_agent(mode="agent") 作 fallback（会触发 agent 模式
-        adapter 重建，治标不治本），此处彻底解耦。JiuWenSwarm.__init__ 仅 4 个赋值 +
-        一个只读目录的 SkillManager，现场 new 开销可忽略，无需额外缓存态。
+        adapter 重建，治标不治本），此处彻底解耦。Fallback 必须按 channel 复用，
+        否则每次 cache miss 新建 SkillManager，SkillNet install/install_status 会
+        落到不同实例并误报「安装会话已过期」。
         """
         cached = self._agent_manager.get_agent_nowait(
             channel_id=channel_id, mode="agent"
         )
         if cached is not None:
             return cached
+        agent = self._stateless_fallback_agents.get(channel_id)
+        if agent is not None:
+            return agent
         from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
-        return JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+        agent = JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+        self._stateless_fallback_agents[channel_id] = agent
+        return agent
 
     async def _prepare_code_mode_chat_turn(
         self,
@@ -2395,7 +2480,7 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _apply_session_switch_lifecycle(
+    async def _prepare_session_switch_owner(
         self,
         *,
         channel_id: str,
@@ -2403,8 +2488,13 @@ class AgentWebSocketServer:
         previous_session_id: str,
         params: dict[str, Any],
         reason: str,
-    ) -> tuple[bool, str]:
-        """Keep the product runtime owner independent from optional KVC signals."""
+    ) -> tuple[bool, str, Any, Any, Any]:
+        """Resolve switch context and run product-owner prepare (team switch).
+
+        Returns:
+            ``(target_is_team, resolved_mode, context, team_manager, dispatch_signals)``.
+            ``dispatch_signals`` may be ``None`` when KVC hooks are unavailable.
+        """
         target_is_team = is_team_params(params)
         _, _, resolved_mode = resolve_agent_request_mode(
             params.get("mode", "agent.plan")
@@ -2446,17 +2536,64 @@ class AgentWebSocketServer:
                 ),
                 reason=reason,
             )
+        return target_is_team, resolved_mode, context, team_manager, dispatch_signals
 
-        if context is not None and dispatch_signals is not None:
-            await dispatch_signals(
-                context=context,
-                agent_manager=self._agent_manager,
-                channel_id=channel_id,
-                team_manager=team_manager,
-                target_session_id=target_session_id,
-                previous_session_id=previous_session_id,
-                reason=reason,
-            )
+    async def _dispatch_session_switch_kvc(
+        self,
+        *,
+        channel_id: str,
+        target_session_id: str,
+        previous_session_id: str,
+        reason: str,
+        context: Any,
+        team_manager: Any,
+        dispatch_signals: Any,
+    ) -> None:
+        """Optional KVC signals after the product owner has prepared the switch."""
+        if context is None or dispatch_signals is None:
+            return
+        await dispatch_signals(
+            context=context,
+            agent_manager=self._agent_manager,
+            channel_id=channel_id,
+            team_manager=team_manager,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            reason=reason,
+        )
+
+    async def _apply_session_switch_lifecycle(
+        self,
+        *,
+        channel_id: str,
+        target_session_id: str,
+        previous_session_id: str,
+        params: dict[str, Any],
+        reason: str,
+    ) -> tuple[bool, str]:
+        """Keep the product runtime owner independent from optional KVC signals."""
+        (
+            target_is_team,
+            resolved_mode,
+            context,
+            team_manager,
+            dispatch_signals,
+        ) = await self._prepare_session_switch_owner(
+            channel_id=channel_id,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            params=params,
+            reason=reason,
+        )
+        await self._dispatch_session_switch_kvc(
+            channel_id=channel_id,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            reason=reason,
+            context=context,
+            team_manager=team_manager,
+            dispatch_signals=dispatch_signals,
+        )
         return target_is_team, resolved_mode
 
     async def _handle_session_switch(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
@@ -6635,9 +6772,17 @@ class AgentWebSocketServer:
                 work_mode=final_work_mode,
             )
 
+            # team prepare 必须在 ack 前完成，避免首条 chat.send 与分布式切换竞态；
+            # 可选 KVC 信号放到回包后异步，避免拖慢 create RPC。
             lifecycle_params = dict(params)
             lifecycle_params["mode"] = mode
-            await self._apply_session_switch_lifecycle(
+            (
+                _target_is_team,
+                _resolved_mode,
+                switch_context,
+                team_manager,
+                dispatch_signals,
+            ) = await self._prepare_session_switch_owner(
                 channel_id=channel_id,
                 target_session_id=session_id,
                 previous_session_id=previous_session_id,
@@ -6661,6 +6806,23 @@ class AgentWebSocketServer:
                 await send_wire_payload(ws, wire)
 
             logger.info("[AgentServer] session.create completed: session_id=%s", session_id)
+
+            if switch_context is not None and dispatch_signals is not None:
+                kvc_task = asyncio.create_task(
+                    self._dispatch_session_switch_kvc(
+                        channel_id=channel_id,
+                        target_session_id=session_id,
+                        previous_session_id=previous_session_id,
+                        reason="session.create switch: ",
+                        context=switch_context,
+                        team_manager=team_manager,
+                        dispatch_signals=dispatch_signals,
+                    ),
+                    name=f"session-create-kvc-{session_id}",
+                )
+                _background_session_create_kvc_tasks.add(kvc_task)
+                kvc_task.add_done_callback(_background_session_create_kvc_tasks.discard)
+                kvc_task.add_done_callback(_log_session_create_kvc_failure)
 
         except Exception as e:
             logger.exception("[AgentServer] session.create failed: %s", e)
@@ -7208,6 +7370,7 @@ class AgentWebSocketServer:
                     raise ValueError("Failed to get agent for schedule request")
                 # Set agent on service (service will use it for execution)
                 self._scheduler_service.update_agent_instance(agent)
+                self._set_scheduler_agent(agent)
                 logger.info("[AgentServer] Set agent for schedule action %s: %s", action, agent is not None)
 
             if action == "check_config":

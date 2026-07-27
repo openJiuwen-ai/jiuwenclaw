@@ -1213,6 +1213,27 @@ class JiuWenSwarmDeepAdapter:
     def is_session_active(self, session_id: str) -> bool:
         return self._is_session_active(session_id)
 
+    def has_session_runtime(self, session_id: str | None = None) -> bool:
+        """Return whether this adapter still owns session runtime."""
+        if session_id is not None:
+            sid = self._session_adapter_key(session_id)
+            if self._is_session_scoped_adapter:
+                return self._session_adapter_key(self._parent_session_id) == sid
+            return bool(
+                sid in self._session_adapters
+                or sid in self._session_adapter_locks
+                or self._active_session_ids.get(sid, 0) > 0
+                or sid in self._session_agent_tasks
+            )
+        if self._is_session_scoped_adapter:
+            return True
+        return bool(
+            self._session_adapters
+            or self._session_adapter_locks
+            or self._active_session_ids
+            or self._session_agent_tasks
+        )
+
     def _session_has_registered_tasks(self, session_id: str) -> bool:
         tasks = getattr(self, "_session_agent_tasks", {}).get(session_id)
         return bool(tasks and any(not task.done() for task in tasks))
@@ -2713,13 +2734,18 @@ class JiuWenSwarmDeepAdapter:
         requested = (requested_model_name or "").strip()
         if not requested:
             return self._model
-        # 精确匹配（#index 格式或纯 model_name key）
+        # 精确匹配（#index 格式，或已注册纯 model_name key 的默认模型）
         if requested in self._model_cache:
             return self._model_cache[requested]
-        # 回退：按纯 model_name 查找 is_default=true 的条目
-        name_to_keys = self._model_name_to_keys
-        if requested in name_to_keys and requested in self._model_cache:
-            return self._model_cache[requested]
+        # 回退：非默认模型只以 {model_name}#{index} 注册在 _model_cache 里，没有纯
+        # model_name 的 key；这里按 _model_name_to_keys 里登记的真实 cache key 去查，
+        # 而不是重复判断上面已知为 False 的 `requested in self._model_cache`
+        # （旧代码在此处写重了，导致非默认模型永远查不到，静默 fallback 回默认模型）。
+        keys = self._model_name_to_keys.get(requested)
+        if keys:
+            resolved = self._model_cache.get(keys[0])
+            if resolved is not None:
+                return resolved
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
@@ -7984,12 +8010,15 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
-                    if not content or not content.strip():
+                    reasoning_payload = self._stream_text_payload(
+                        "chat.reasoning", content
+                    )
+                    if reasoning_payload is None:
                         continue
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.reasoning", "content": content},
+                        payload=reasoning_payload,
                         is_complete=False,
                     )
                     continue
@@ -8000,7 +8029,8 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
-                    if not content or not content.strip():
+                    delta_payload = self._stream_text_payload("chat.delta", content)
+                    if delta_payload is None:
                         continue
                     has_streamed_content = True
                     if accumulated_reasoning:
@@ -8017,7 +8047,7 @@ class JiuWenSwarmDeepAdapter:
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.delta", "content": content},
+                        payload=delta_payload,
                         is_complete=False,
                     )
                     continue
@@ -8269,6 +8299,16 @@ class JiuWenSwarmDeepAdapter:
         )
 
     @staticmethod
+    def _stream_text_payload(
+        event_type: str,
+        content: Any,
+    ) -> dict[str, Any] | None:
+        """Build a text event without discarding formatting-only chunks."""
+        if content is None or content == "":
+            return None
+        return {"event_type": event_type, "content": content}
+
+    @staticmethod
     def _parse_stream_chunk(
         chunk,
         *,
@@ -8318,9 +8358,9 @@ class JiuWenSwarmDeepAdapter:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    if not content or not content.strip():
-                        return None
-                    return {"event_type": "chat.delta", "content": content}
+                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                        "chat.delta", content
+                    )
 
                 if chunk_type == "llm_reasoning":
                     content = (
@@ -8328,17 +8368,17 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(payload, dict)
                         else str(payload)
                     )
-                    if not content or not content.strip():
-                        return None
-                    return {"event_type": "chat.reasoning", "content": content}
+                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                        "chat.reasoning", content
+                    )
 
                 if chunk_type == "content_chunk":
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    if not content or not content.strip():
-                        return None
-                    return {"event_type": "chat.delta", "content": content}
+                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                        "chat.delta", content
+                    )
 
                 if chunk_type == "answer":
                     if isinstance(payload, dict):
@@ -8613,9 +8653,9 @@ class JiuWenSwarmDeepAdapter:
                     content = payload.get("content") or payload.get("output")
                 else:
                     content = str(payload)
-                if not content or not content.strip():
-                    return None
-                return {"event_type": "chat.delta", "content": content}
+                return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    "chat.delta", content
+                )
 
             if isinstance(chunk, dict):
                 if "traceId" in chunk or "invokeId" in chunk:

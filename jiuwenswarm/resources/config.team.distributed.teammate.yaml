@@ -413,6 +413,15 @@ channels:
     # 是否关闭私信功能
     block_dm: false
     enabled: false
+  slack:
+    # Slack Bot via Socket Mode. Tokens are created in the Slack app settings.
+    bot_token:
+    app_token:
+    allow_from: []
+    allowed_channel_ids: []
+    default_channel_id:
+    reply_in_thread: true
+    enabled: false
   whatsapp:
     # WhatsApp 配置（通过本地 Baileys bridge）
     bridge_ws_url: ws://127.0.0.1:19600/ws

@@ -10,6 +10,7 @@ import logging
 import os
 import uuid
 from typing import Any, TYPE_CHECKING
+from weakref import WeakValueDictionary
 
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
@@ -90,6 +91,231 @@ class AgentManager:
         # reload 串行锁: 防止并发 reload 叠加导致内存爆炸
         self._reload_lock: asyncio.Lock = asyncio.Lock()
         self._last_reload_fingerprint: str | None = None
+        # A cached root may be returned before its first session processor or
+        # child adapter exists. Track the request task that borrowed it so
+        # disconnect cleanup cannot tear it down in that gap.
+        self._agent_borrowers: dict[int, set[asyncio.Task]] = {}
+        self._agent_pins: dict[int, int] = {}
+        self._pending_tui_retirements: set[int] = set()
+        self._retirement_tasks: dict[int, asyncio.Task] = {}
+        self._agent_create_locks: WeakValueDictionary[
+            tuple[str, str], asyncio.Lock
+        ] = WeakValueDictionary()
+
+    def _get_agent_create_lock(
+        self,
+        channel_key: str,
+        cache_key: str,
+    ) -> asyncio.Lock:
+        lock_key = (channel_key, cache_key)
+        create_lock = self._agent_create_locks.get(lock_key)
+        if create_lock is None:
+            create_lock = asyncio.Lock()
+            self._agent_create_locks[lock_key] = create_lock
+        return create_lock
+
+    def _borrow_agent(self, agent: "JiuWenSwarm") -> "JiuWenSwarm":
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        if task is None:
+            return agent
+        agent_id = id(agent)
+        borrowers = self._agent_borrowers.setdefault(agent_id, set())
+        if task in borrowers:
+            return agent
+        borrowers.add(task)
+        task.add_done_callback(
+            lambda completed, aid=agent_id: self._release_agent_borrower(
+                aid, completed
+            )
+        )
+        return agent
+
+    def _release_agent_borrower(
+        self,
+        agent_id: int,
+        task: asyncio.Task,
+    ) -> None:
+        borrowers = self._agent_borrowers.get(agent_id)
+        if borrowers is None:
+            return
+        borrowers.discard(task)
+        if borrowers:
+            return
+        self._agent_borrowers.pop(agent_id, None)
+        self._schedule_pending_tui_retirement(agent_id)
+
+    def pin_agent(self, agent: "JiuWenSwarm") -> None:
+        """Keep a cached agent alive for a persistent background owner."""
+        agent_id = id(agent)
+        self._agent_pins[agent_id] = self._agent_pins.get(agent_id, 0) + 1
+
+    def unpin_agent(self, agent: "JiuWenSwarm") -> None:
+        """Release one persistent background ownership reference."""
+        agent_id = id(agent)
+        remaining = self._agent_pins.get(agent_id, 0) - 1
+        if remaining > 0:
+            self._agent_pins[agent_id] = remaining
+            return
+        self._agent_pins.pop(agent_id, None)
+        self._schedule_pending_tui_retirement(agent_id)
+
+    def _has_agent_borrowers(
+        self,
+        agent: "JiuWenSwarm",
+        *,
+        exclude: asyncio.Task | None = None,
+    ) -> bool:
+        agent_id = id(agent)
+        borrowers = self._agent_borrowers.get(agent_id)
+        if not borrowers:
+            return False
+        live = {task for task in borrowers if not task.done()}
+        if live:
+            self._agent_borrowers[agent_id] = live
+        else:
+            self._agent_borrowers.pop(agent_id, None)
+        return any(task is not exclude for task in live)
+
+    def _schedule_pending_tui_retirement(self, agent_id: int) -> None:
+        if agent_id not in self._pending_tui_retirements:
+            return
+        if agent_id in self._agent_pins or self._agent_borrowers.get(agent_id):
+            return
+        existing = self._retirement_tasks.get(agent_id)
+        if existing is not None and not existing.done():
+            return
+        try:
+            task = asyncio.create_task(
+                self._retire_pending_tui_agent(agent_id)
+            )
+        except RuntimeError:
+            return
+        self._retirement_tasks[agent_id] = task
+        task.add_done_callback(
+            lambda completed, aid=agent_id: self._finish_retirement_task(
+                aid, completed
+            )
+        )
+
+    def _finish_retirement_task(
+        self,
+        agent_id: int,
+        task: asyncio.Task,
+    ) -> None:
+        if self._retirement_tasks.get(agent_id) is task:
+            self._retirement_tasks.pop(agent_id, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception(
+                "[AgentManager] deferred TUI root retirement failed: agent_id=%s",
+                agent_id,
+            )
+
+    async def _retire_pending_tui_agent(self, agent_id: int) -> None:
+        channel_agents = self.agents.get("tui")
+        if not isinstance(channel_agents, dict):
+            self._pending_tui_retirements.discard(agent_id)
+            return
+        for cache_key, agent in list(channel_agents.items()):
+            if id(agent) != agent_id:
+                continue
+            await self._retire_tui_agent_if_idle(
+                cache_key,
+                agent,
+                channel_agents,
+            )
+            return
+        self._pending_tui_retirements.discard(agent_id)
+
+    async def _retire_tui_agent_if_idle(
+        self,
+        cache_key: str,
+        agent: "JiuWenSwarm",
+        channel_agents: dict[str, "JiuWenSwarm"],
+        *,
+        exclude_borrower: asyncio.Task | None = None,
+    ) -> bool:
+        create_lock = self._get_agent_create_lock("tui", cache_key)
+        async with create_lock:
+            return await self._retire_tui_agent_if_idle_locked(
+                cache_key,
+                agent,
+                channel_agents,
+                exclude_borrower=exclude_borrower,
+            )
+
+    async def _retire_tui_agent_if_idle_locked(
+        self,
+        cache_key: str,
+        agent: "JiuWenSwarm",
+        channel_agents: dict[str, "JiuWenSwarm"],
+        *,
+        exclude_borrower: asyncio.Task | None = None,
+    ) -> bool:
+        agent_id = id(agent)
+        if (
+            self._agent_pins.get(agent_id, 0) > 0
+            or self._has_agent_borrowers(agent, exclude=exclude_borrower)
+        ):
+            self._pending_tui_retirements.add(agent_id)
+            return False
+
+        has_runtime = getattr(agent, "has_session_runtime", None)
+        if not callable(has_runtime):
+            return False
+        try:
+            if bool(has_runtime()):
+                self._pending_tui_retirements.discard(agent_id)
+                return False
+        except Exception:
+            logger.exception(
+                "[AgentManager] has_session_runtime failed: cache_key=%s",
+                cache_key,
+            )
+            raise
+        if channel_agents.get(cache_key) is not agent:
+            self._pending_tui_retirements.discard(agent_id)
+            return False
+
+        # Detach before awaiting cleanup so a new request creates a fresh
+        # root rather than receiving one that is being torn down.
+        channel_agents.pop(cache_key, None)
+        channel_params = self._agent_create_params.get("tui")
+        create_params = None
+        if isinstance(channel_params, dict):
+            create_params = channel_params.pop(cache_key, None)
+        self._pending_tui_retirements.discard(agent_id)
+        try:
+            await agent.cleanup()
+        except Exception:
+            logger.exception(
+                "[AgentManager] idle TUI root agent cleanup failed: cache_key=%s",
+                cache_key,
+            )
+            restored_agents = self.agents.setdefault("tui", channel_agents)
+            if cache_key not in restored_agents:
+                restored_agents[cache_key] = agent
+                if create_params is not None:
+                    self._agent_create_params.setdefault("tui", {})[
+                        cache_key
+                    ] = create_params
+            raise
+        else:
+            logger.info(
+                "[AgentManager] idle TUI root agent removed: cache_key=%s",
+                cache_key,
+            )
+        if not channel_agents and self.agents.get("tui") is channel_agents:
+            self.agents.pop("tui", None)
+        if isinstance(channel_params, dict) and not channel_params:
+            self._agent_create_params.pop("tui", None)
+        return True
 
     @staticmethod
     def _reload_fingerprint(
@@ -230,7 +456,27 @@ class AgentManager:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 
     async def cleanup_session_runtime(self, *, channel_id: str = "", session_id: str) -> bool:
-        """Release in-memory runtime for one session across existing channel agents."""
+        """Release in-memory runtime for one session across existing channel agents.
+
+        Iterates every cached agent on the channel and calls its
+        ``cleanup_session_runtime(session_id)``. For ``tui`` channel agents that
+        become idle after cleanup (no pins, no borrowers, no remaining session
+        runtime), the cached root agent itself is retired so short-lived TUI
+        processes do not accumulate one root per project.
+
+        Returns:
+            ``True`` if at least one agent reported cleanup, ``False`` when the
+            channel has no matching agents or none exposes a cleanup hook.
+
+        Raises:
+            RuntimeError: if one or more agents failed to clean up -- an agent's
+                ``cleanup_session_runtime`` raised, the post-cleanup
+                ``has_session_runtime`` check raised, or runtime was still
+                retained after cleanup. Failures are aggregated across all
+                agents and raised once after the loop; partial successes are not
+                rolled back. Callers needing best-effort semantics must wrap the
+                call in try/except.
+        """
         sid = str(session_id or "").strip()
         if not sid:
             return False
@@ -240,18 +486,70 @@ class AgentManager:
             return False
 
         cleaned = False
-        for agent in list(channel_agents.values()):
+        failed_agents = 0
+        for cache_key, agent in list(channel_agents.items()):
             cleanup_fn = getattr(agent, "cleanup_session_runtime", None)
             if not callable(cleanup_fn):
                 continue
             try:
-                cleaned = bool(await cleanup_fn(sid)) or cleaned
+                session_cleaned = bool(await cleanup_fn(sid))
+                cleaned = session_cleaned or cleaned
             except Exception:
+                failed_agents += 1
                 logger.exception(
                     "[AgentManager] cleanup_session_runtime failed: channel_id=%s session_id=%s",
                     channel_key,
                     sid,
                 )
+                continue
+
+            has_runtime = getattr(agent, "has_session_runtime", None)
+            try:
+                session_retained = bool(has_runtime(sid)) if callable(has_runtime) else False
+            except Exception:
+                failed_agents += 1
+                logger.exception(
+                    "[AgentManager] session runtime state check failed: "
+                    "channel_id=%s session_id=%s",
+                    channel_key,
+                    sid,
+                )
+                continue
+            if session_retained:
+                failed_agents += 1
+                logger.warning(
+                    "[AgentManager] session runtime remains after cleanup: "
+                    "channel_id=%s session_id=%s cache_key=%s",
+                    channel_key,
+                    sid,
+                    cache_key,
+                )
+                continue
+
+            if channel_key != "tui":
+                continue
+            try:
+                await self._retire_tui_agent_if_idle(
+                    cache_key,
+                    agent,
+                    channel_agents,
+                    exclude_borrower=asyncio.current_task(),
+                )
+            except Exception:
+                failed_agents += 1
+                continue
+
+        if not channel_agents and self.agents.get(channel_key) is channel_agents:
+            self.agents.pop(channel_key, None)
+        channel_params = self._agent_create_params.get(channel_key)
+        if isinstance(channel_params, dict) and not channel_params:
+            self._agent_create_params.pop(channel_key, None)
+        if failed_agents:
+            raise RuntimeError(
+                "cleanup_session_runtime failed for "
+                f"{failed_agents} agent(s): channel_id={channel_key} "
+                f"session_id={sid}"
+            )
         return cleaned
 
     def get_client_capabilities(self, channel_id: str = "") -> dict[str, Any]:
@@ -306,23 +604,30 @@ class AgentManager:
         cache_key = _make_agent_cache_key(mode_key, sub_mode_key, project_key)
         channel_agents = self.agents.get(channel_key, {})
         if cache_key in channel_agents:
-            return channel_agents[cache_key]
+            return self._borrow_agent(channel_agents[cache_key])
 
-        config = {}
-        if project_key:
-            config["project_dir"] = project_key
-        if channel_key == "acp":
-            config = {
-                **config,
-                **_build_acp_agent_config()
-            }
-        return await self._create_agent(
-            channel_key,
-            mode_key,
-            config,
-            sub_mode_key or None,
-            cache_key=cache_key,
-        )
+        create_lock = self._get_agent_create_lock(channel_key, cache_key)
+        async with create_lock:
+            existing = self.agents.get(channel_key, {}).get(cache_key)
+            if existing is not None:
+                return self._borrow_agent(existing)
+
+            config = {}
+            if project_key:
+                config["project_dir"] = project_key
+            if channel_key == "acp":
+                config = {
+                    **config,
+                    **_build_acp_agent_config()
+                }
+            agent = await self._create_agent(
+                channel_key,
+                mode_key,
+                config,
+                sub_mode_key or None,
+                cache_key=cache_key,
+            )
+            return self._borrow_agent(agent)
 
     def get_agent_nowait(
         self,
@@ -348,7 +653,7 @@ class AgentManager:
             cache_key = _make_agent_cache_key(mode, sub_mode, project_dir)
             agent = channel_agents.get(cache_key)
             if agent is not None:
-                return agent
+                return self._borrow_agent(agent)
 
         requested_mode = _normalize_mode(mode) if mode is not None else ""
         requested_sub_mode = _normalize_sub_mode(sub_mode) if sub_mode is not None else ""
@@ -360,13 +665,14 @@ class AgentManager:
                 continue
             if requested_project_dir and getattr(agent, "_jiuwenswarm_agent_project_dir", "") != requested_project_dir:
                 continue
-            return agent
+            return self._borrow_agent(agent)
 
         if mode is None and project_dir is None and sub_mode is None:
             for agent in channel_agents.values():
                 if getattr(agent, "_jiuwenswarm_agent_mode", "") == "agent":
-                    return agent
-            return next(iter(channel_agents.values()), None)
+                    return self._borrow_agent(agent)
+            agent = next(iter(channel_agents.values()), None)
+            return self._borrow_agent(agent) if agent is not None else None
         return None
 
     async def broadcast_package_change_to_single_agents(
@@ -705,6 +1011,13 @@ class AgentManager:
 
     async def cleanup(self) -> None:
         """清理所有 agent 实例."""
+        retirement_tasks = [
+            task
+            for task in self._retirement_tasks.values()
+            if task is not asyncio.current_task() and not task.done()
+        ]
+        if retirement_tasks:
+            await asyncio.gather(*retirement_tasks, return_exceptions=True)
         for key, agents in list(self.agents.items()):
             for agent in agents.values():
                 if hasattr(agent, "cleanup"):
@@ -715,4 +1028,9 @@ class AgentManager:
             del self.agents[key]
         self._agent_create_params.clear()
         self._client_capabilities_by_channel.clear()
+        self._agent_borrowers.clear()
+        self._agent_pins.clear()
+        self._pending_tui_retirements.clear()
+        self._retirement_tasks.clear()
+        self._agent_create_locks.clear()
         logger.info("[AgentManager] All agents cleaned up")

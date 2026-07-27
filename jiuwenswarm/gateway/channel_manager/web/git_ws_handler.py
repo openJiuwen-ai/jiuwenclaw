@@ -172,10 +172,15 @@ class GitDiffWebSocketHandler:
                 get_diff_status_service,
             )
             service = get_diff_status_service()
+            # 与轮询路径(_compute_and_push)对齐:只在 include_last_turn 时
+            # 传 session_id,避免 current-only 订阅因 file_ops 历史读取异常
+            # 而首次订阅失败。get_project_diff_status 内只要有 session_id
+            # 就会调 get_turn_diff_summaries 且异常向上抛,破坏订阅。
+            session_id_for_status = session_id if include_last_turn else None
             status = await asyncio.to_thread(
                 service.get_project_diff_status,
                 project=proj,
-                session_id=session_id or None,
+                session_id=session_id_for_status or None,
                 include_files=False,
                 include_hunks=False,
             )
@@ -236,6 +241,8 @@ class GitDiffWebSocketHandler:
                 "project_id": status_dict.get("project_id", ""),
                 "session_id": status_dict.get("session_id"),
                 "repo": {
+                    "is_git": repo.get("is_git", False),
+                    "repo_root": repo.get("repo_root"),
                     "branch": repo.get("branch"),
                     "head": repo.get("head"),
                     "transient": repo.get("transient", False),
@@ -284,10 +291,14 @@ class GitDiffWebSocketHandler:
                 get_diff_status_service,
             )
             service = get_diff_status_service()
+            # 与轮询路径(_compute_and_push)对齐:只在 source="last_turn"
+            # 时传 session_id;source="current" 不需要 last_turn,传 session_id
+            # 会因 file_ops 历史读取异常导致首次订阅失败。
+            session_id_for_status = session_id if source == "last_turn" else None
             status = await asyncio.to_thread(
                 service.get_project_diff_status,
                 project=proj,
-                session_id=session_id or None,
+                session_id=session_id_for_status or None,
                 include_files=True,
                 include_hunks=False,
             )
@@ -377,10 +388,14 @@ class GitDiffWebSocketHandler:
                 get_diff_status_service,
             )
             service = get_diff_status_service()
+            # 与轮询路径(_compute_and_push)对齐:只在 source="last_turn"
+            # 时传 session_id;source="current" 不需要 last_turn,传 session_id
+            # 会因 file_ops 历史读取异常导致首次订阅失败。
+            session_id_for_status = session_id if source == "last_turn" else None
             status = await asyncio.to_thread(
                 service.get_project_diff_status,
                 project=proj,
-                session_id=session_id or None,
+                session_id=session_id_for_status or None,
                 include_files=True,
                 include_hunks=True,
             )
@@ -576,13 +591,26 @@ class GitDiffWebSocketHandler:
             get_session_extra_history_roots,
         )
         extra_history_roots = get_session_extra_history_roots(session_id)
-        restore_result = await asyncio.to_thread(
-            restore_session_files,
-            session_id=session_id,
-            turn_index=turn_index,
-            project_dir=proj.project_dir,
-            extra_history_roots=extra_history_roots,
-        )
+        try:
+            restore_result = await asyncio.to_thread(
+                restore_session_files,
+                session_id=session_id,
+                turn_index=turn_index,
+                project_dir=proj.project_dir,
+                extra_history_roots=extra_history_roots,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[GitWS] discard_turn_changes: restore failed "
+                "(session=%s project=%s): %s",
+                session_id, project_id, exc,
+            )
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error=f"failed to restore session files: {exc}",
+                code="INTERNAL_ERROR",
+            )
+            return
 
         # 清理本轮的 file_ops 日志,使 git 监控的 last_turn diff 与实际工作区一致。
         # 注意 1:仅清理 session-specific file_ops;全局 file_ops 缺少 session 归属字段,

@@ -26,6 +26,7 @@ import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector';
+import { generateUuidV4 } from '../../utils/uuid';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -157,10 +158,7 @@ function formatAttachmentSize(size: number): string {
 }
 
 function makeAttachmentId(file: File): string {
-  const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${file.name || 'image'}-${file.size}-${random}`;
+  return `${file.name || 'image'}-${file.size}-${generateUuidV4()}`;
 }
 
 function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {

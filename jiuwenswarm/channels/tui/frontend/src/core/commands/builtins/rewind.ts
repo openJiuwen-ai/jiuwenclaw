@@ -46,6 +46,10 @@ const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
 
+// 本地问题对话框（askQuestions）被 ESC/Ctrl+C 中断时，app-state.cancel() reject 的文案。
+// 属于用户主动取消，不应作为 rewind 失败上报。
+const LOCAL_QUESTION_CANCEL = "interrupted by Ctrl+C";
+
 function toRelativePath(absPath: string, workspaceDir?: string): string {
   if (!workspaceDir) return absPath;
   // Normalize separators to / for cross-platform comparison
@@ -147,16 +151,24 @@ export function createRewindCommand(): SlashCommand {
             });
           }
 
-          const answers = await ctx.askQuestions(
-            [
-              {
-                header: "Turn",
-                question: "Which turn do you want to rewind to? (this turn and all after will be removed)",
-                options: turnOptions,
-              },
-            ],
-            "rewind",
-          );
+          let answers: Awaited<ReturnType<typeof ctx.askQuestions>>;
+          try {
+            answers = await ctx.askQuestions(
+              [
+                {
+                  header: "Turn",
+                  question: "Which turn do you want to rewind to? (this turn and all after will be removed)",
+                  options: turnOptions,
+                },
+              ],
+              "rewind",
+            );
+          } catch (error) {
+            // ESC/Ctrl+C 取消本地问题对话框：静默退出，不报 failed。
+            const message = error instanceof Error ? error.message : String(error);
+            if (message === LOCAL_QUESTION_CANCEL) return;
+            throw error;
+          }
 
           const userInput = answers[0]?.selected_options?.[0] || answers[0]?.custom_input || "";
           if (userInput === "current" || !userInput) {
@@ -215,18 +227,26 @@ export function createRewindCommand(): SlashCommand {
         const limitationNote =
           "\nNote: Rewinding does not affect files edited manually or via bash commands.";
 
-        const confirmAnswers = await ctx.askQuestions(
-          [
-            {
-              header: "Confirm Rewind",
-              question:
-                `Rewind to before turn ${selectedTurnIndex}: "${selectedTurn.content_preview}"?` +
-                limitationNote,
-              options: restoreOptions,
-            },
-          ],
-          "rewind_confirm",
-        );
+        let confirmAnswers: Awaited<ReturnType<typeof ctx.askQuestions>>;
+        try {
+          confirmAnswers = await ctx.askQuestions(
+            [
+              {
+                header: "Confirm Rewind",
+                question:
+                  `Rewind to before turn ${selectedTurnIndex}: "${selectedTurn.content_preview}"?` +
+                  limitationNote,
+                options: restoreOptions,
+              },
+            ],
+            "rewind_confirm",
+          );
+        } catch (error) {
+          // ESC/Ctrl+C 取消本地问题对话框：静默退出，不报 failed。
+          const message = error instanceof Error ? error.message : String(error);
+          if (message === LOCAL_QUESTION_CANCEL) return;
+          throw error;
+        }
 
         const selectedOption = confirmAnswers[0]?.selected_options?.[0] as RestoreOption | undefined;
         // 从选项 label 反推 value（askQuestions 返回的是 label）

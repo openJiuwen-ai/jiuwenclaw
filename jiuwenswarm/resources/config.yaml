@@ -1,6 +1,10 @@
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
+# Web 首次模型配置引导；用户确认完成后会自动关闭，可通过侧栏问号再次打开
+setup_guide:
+  enabled: true
+
 # auto-recap：用户空闲5分钟后自动生成会话摘要（TUI 端）
 auto_recap:
   enabled: true
@@ -580,6 +584,8 @@ gateway:
   # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
   agentos:
     creating_timeout_seconds: 60
+    # Agent create 时宿主机 workspace 父目录；实际路径为 {workspace_root}/{user_id}
+    workspace_root: "/home/agentos/users"
     # Agent 复用 key 字段，默认 user_id + agent_type。
     # 可选字段：user_id、agent_type、session_id（必须包含前两项）。
     # 示例：加入 session_id 后同一用户每个会话独立 Agent。
@@ -595,10 +601,12 @@ gateway:
     # SSH 南向接入 YuanRong 实例（配合 channels.ssh 北向使用）：
     # ssh -p <port> 'yr:instance:<instance_id>'@<frontend-host>
     # 主机取自 agent_client.frontend_endpoint；<instance_id> 为 create agent 返回的实例 id。
+    # 客户端私钥目录（默认 /root/.ssh；若模板含 {user_id} 则按用户替换）。
     ssh:
       port: 2222
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
+      client_keys_dir: "/root/.ssh"
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -731,6 +739,18 @@ channels:
     allow_from: []
     # 是否关闭私信功能
     block_dm: false
+    enabled: false
+  slack:
+    # Slack Bot via Socket Mode. Tokens are created in the Slack app settings.
+    bot_token:
+    app_token:
+    # Slack user IDs allowed to use the bot. Empty allows all users.
+    allow_from: []
+    # Channel IDs allowed to mention the bot. Empty allows all channels.
+    allowed_channel_ids: []
+    # Optional fallback channel for messages without request metadata.
+    default_channel_id:
+    reply_in_thread: true
     enabled: false
   whatsapp:
     # WhatsApp 配置（通过本地 Baileys bridge）

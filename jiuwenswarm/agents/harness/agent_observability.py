@@ -219,6 +219,8 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
 
         if not is_initialized():
             return None
+        if not _agent_observability_active:
+            return None
 
         tracer = get_tracer("jiuwenswarm.agent")
         name = _build_run_span_name(mode=mode, session_id=session_id)

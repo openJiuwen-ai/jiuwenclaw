@@ -14,10 +14,15 @@ from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 class _CleanupAdapter:
     def __init__(self) -> None:
         self.cleaned_sessions: list[str] = []
+        self.active_sessions: set[str] = set()
 
     async def cleanup_session_adapter(self, session_id: str) -> bool:
         self.cleaned_sessions.append(session_id)
+        self.active_sessions.discard(session_id)
         return True
+
+    def has_session_runtime(self) -> bool:
+        return bool(self.active_sessions)
 
 
 async def _submit_quick_task(swarm: JiuWenSwarm, session_id: str) -> None:
@@ -40,12 +45,15 @@ async def test_cleanup_session_runtime_closes_processor_and_adapter() -> None:
     swarm = JiuWenSwarm()
     adapter = _CleanupAdapter()
     swarm._adapter = adapter
+    adapter.active_sessions.add("tui_exit")
     await _submit_quick_task(swarm, "tui_exit")
 
     try:
+        assert swarm.has_session_runtime() is True
         assert await swarm.cleanup_session_runtime("tui_exit") is True
         assert adapter.cleaned_sessions == ["tui_exit"]
         assert swarm._session_manager.has_active_processor("tui_exit") is False
+        assert swarm.has_session_runtime() is False
     finally:
         await swarm._session_manager.close_all_sessions()
 

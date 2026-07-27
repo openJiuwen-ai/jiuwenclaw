@@ -9,6 +9,7 @@ from jiuwenswarm.symphony.llm import (
     LLMConfig,
     create_llm_client,
     llm_usage_context,
+    thinking_disabled_request_overrides,
 )
 from jiuwenswarm.symphony.fingerprint.models import (
     ArtifactSpec,
@@ -16,10 +17,11 @@ from jiuwenswarm.symphony.fingerprint.models import (
     ParameterSpec,
     RawSkillManifest,
 )
+from jiuwenswarm.symphony.shared.llm_payload import compact_json, prune_empty
 
-_LOW_REASONING_REQUEST_OVERRIDES = {
-    "extra_body": {"thinking": {"type": "disabled"}},
-}
+SCHEMA_EXTRACTION_PROTOCOL_VERSION = "symphony-schema-extraction-v2"
+_MAX_WARNING_COUNT = 3
+_MAX_REASON_LENGTH = 160
 
 
 class LLMSchemaExtractor:
@@ -42,13 +44,11 @@ class LLMSchemaExtractor:
         with llm_usage_context("fingerprint_extraction", "schema_extraction"):
             content = await self.client.complete_json_async(
                 system_prompt=_SCHEMA_EXTRACTION_PROMPT,
-                user_content=json.dumps(
-                    _build_llm_context(manifest, body_limit=self.body_limit),
-                    ensure_ascii=False,
-                    indent=2,
+                user_content=compact_json(
+                    _build_llm_context(manifest, body_limit=self.body_limit)
                 ),
                 error_context="LLM schema extraction",
-                request_overrides=_LOW_REASONING_REQUEST_OVERRIDES,
+                request_overrides=thinking_disabled_request_overrides(),
             )
         try:
             payload = json.loads(content)
@@ -71,16 +71,14 @@ class LLMSchemaExtractor:
                 [
                     {
                         "system_prompt": _SCHEMA_EXTRACTION_PROMPT,
-                        "user_content": json.dumps(
+                        "user_content": compact_json(
                             _build_llm_context(manifest, body_limit=self.body_limit),
-                            ensure_ascii=False,
-                            indent=2,
                         ),
                     }
                     for manifest in manifests
                 ],
                 error_context="LLM schema extraction batch",
-                request_overrides=_LOW_REASONING_REQUEST_OVERRIDES,
+                request_overrides=thinking_disabled_request_overrides(),
             )
         schemas: List[ExtractedSkillSchema] = []
         for index, content in enumerate(contents, start=1):
@@ -118,27 +116,24 @@ class LLMSchemaExtractor:
         self,
         manifests: List[RawSkillManifest],
     ) -> List[ExtractedSkillSchema]:
+        expected_refs = [f"s{index}" for index in range(1, len(manifests) + 1)]
+        contexts = [
+            _build_llm_context(
+                manifest,
+                body_limit=self.body_limit,
+                skill_ref=skill_ref,
+            )
+            for manifest, skill_ref in zip(manifests, expected_refs)
+        ]
         with llm_usage_context(
             "fingerprint_extraction",
             "schema_extraction_prompt_batch",
         ):
             content = await self.client.complete_json_async(
                 system_prompt=_SCHEMA_EXTRACTION_BATCH_PROMPT,
-                user_content=json.dumps(
-                    {
-                        "skills": [
-                            _build_llm_context(
-                                manifest,
-                                body_limit=self.body_limit,
-                            )
-                            for manifest in manifests
-                        ],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
+                user_content=compact_json({"skills": contexts}),
                 error_context="LLM schema extraction prompt batch",
-                request_overrides=_LOW_REASONING_REQUEST_OVERRIDES,
+                request_overrides=thinking_disabled_request_overrides(),
             )
         try:
             payload = json.loads(content)
@@ -152,7 +147,6 @@ class LLMSchemaExtractor:
         if not isinstance(schemas_payload, list):
             raise RuntimeError("LLM prompt batch response must contain schemas array.")
 
-        expected_refs = [manifest.folder.relative_path for manifest in manifests]
         by_ref: Dict[str, Dict[str, Any]] = {}
         for item in schemas_payload:
             if not isinstance(item, dict):
@@ -180,11 +174,12 @@ class LLMSchemaExtractor:
 def schema_from_llm_payload(payload: Dict[str, Any]) -> ExtractedSkillSchema:
     """Convert a raw LLM JSON payload into ExtractedSkillSchema."""
 
-    warnings = [str(item) for item in payload.get("warnings", [])]
+    warnings = _short_texts(payload.get("warnings", []))
     raw_output_notes = payload.get("raw_output_notes", [])
     if isinstance(raw_output_notes, str):
         raw_output_notes = [raw_output_notes]
-    warnings.extend(str(item) for item in raw_output_notes if str(item).strip())
+    warnings.extend(_short_texts(raw_output_notes))
+    warnings = warnings[:_MAX_WARNING_COUNT]
 
     return ExtractedSkillSchema(
         description=str(payload.get("description") or ""),
@@ -221,18 +216,29 @@ def _build_llm_context(
     manifest: RawSkillManifest,
     *,
     body_limit: int | None = None,
+    skill_ref: str | None = None,
 ) -> Dict[str, Any]:
     body_limit = _normalize_body_limit(body_limit)
     body = manifest.body if body_limit is None else manifest.body[:body_limit]
-    return {
-        "source": {
-            "relative_path": manifest.folder.relative_path,
-            "entry": "SKILL.md",
-        },
+    return prune_empty({
+        "skill_ref": skill_ref,
         "frontmatter": manifest.frontmatter,
         "body": body,
-        "body_truncated": body_limit is not None and len(manifest.body) > body_limit,
-    }
+        "body_truncated": (
+            True if body_limit is not None and len(manifest.body) > body_limit else None
+        ),
+    })
+
+
+def _short_texts(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    texts: List[str] = []
+    for item in values:
+        text = str(item).strip()
+        if text:
+            texts.append(text[:_MAX_REASON_LENGTH])
+    return texts
 
 
 def _normalize_body_limit(body_limit: int | None) -> int | None:
@@ -241,112 +247,40 @@ def _normalize_body_limit(body_limit: int | None) -> int | None:
     parsed = int(body_limit)
     return parsed if parsed > 0 else None
 
-_SCHEMA_EXTRACTION_PROMPT = """You extract structured Skill IO fingerprints from SKILL.md files.
+_SCHEMA_EXTRACTION_PROMPT = """Extract a normalized Skill I/O fingerprint from the supplied SKILL.md.
 
-Return only a valid JSON object. Do not include markdown fences, explanations,
-analysis, or reasoning text.
+Return JSON only:
+{
+  "description": "concise capability summary",
+  "inputs": [{"name": "semantic_role", "type": "type", "required": true,
+              "description": "short description"}],
+  "outputs": [{"name": "semantic_deliverable", "type": "type",
+               "description": "short description"}],
+  "confidence": 0.0,
+  "warnings": []
+}
 
-Required JSON object fields:
-- description: concise string
-- inputs: array of {name, type, required, description}
-- outputs: array of {name, type, description}
-- confidence: number between 0 and 1
-- warnings: array of strings
-Optional JSON object fields:
-- raw_output_notes: array of strings describing raw API or script return fields
-  that helped your reasoning but should not be recorded as output artifacts.
-
-Read the entire SKILL.md content provided in this request, not only
-input/output tables. Sections such as
-"when to use", "output example", "return format", "notes", "summary", and final
-instructions may enrich or override formal API field tables.
-If body_truncated is true and important sections appear missing, add a warning
-instead of inventing missing inputs or outputs.
-
-Extract only capabilities, inputs, and outputs supported by the provided
-SKILL.md/frontmatter. Do not infer tools, formats, or deliverables that are not
-stated or strongly implied by the document.
-
-Outputs must represent user-facing/downstream deliverables: artifacts the Skill
-promises to hand to the user or to another Skill. Do not emit raw API/control fields as outputs.
-This includes errorCode, errorMsg, status, logs, debug fields, or internal JSON
-containers such as raw result, imageResult, or textResult, unless the document
-says that raw structure is the actual deliverable.
-
-If a raw API response contains a useful deliverable inside a nested field,
-extract the deliverable as a semantic output instead of the raw container. For
-example, textResult[].translateText may become translated_text with type text.
-If the document says to send, show, return, or provide something in markdown,
-markdown delivery instructions must be represented as markdown outputs.
-
-Use name for the semantic role and type for the artifact kind or concrete
-format that is passed between Skills. For media resources, prefer the media
-artifact type even when the runtime value is a URL, local path, file reference,
-base64 string, or bytes string. For example, imageUrl, translated_image_url,
-and image base64 should use type=image. audio_url, audioUrl, audio_file_path,
-and audio base64 should use type=audio. video_url, videoUrl, video_path, and
-mp4_url should use type=video. Use type=url for ordinary links, webpages,
-download links, or non-media remote references.
-
-Prefer these type values:
-text, markdown, json, csv, table, yaml, xml, pdf, html, docx, pptx, xlsx,
-image, png, jpg, svg, webp, gif, audio, video, file, path, url, code,
-archive, unknown.
-
-For example, a PDF paper should use name=paper and type=pdf. A markdown
-summary should use name=summary and type=markdown. A generated image URL should
-use name=image or translated_image_url and type=image, with URL details in the
-description. Generated audio/video URLs should similarly use type=audio or
-type=video, not type=url.
-
-Use input and output names as canonical semantic vocab terms for graph linking. Prefer
-short noun roles such as query, topic, url, paper, summary, report, table,
-image, code, file, path, or result when they fit. Put details in description
-instead of making highly specific parameter names.
-
-Inputs are runtime caller-provided values. Include content inputs and explicit
-control/configuration inputs such as target_language, output_format, limit, or
-command when the caller must provide them for normal execution. Do not turn
-environment setup, API keys, permissions, installed tools, caches, or persistent
-local configuration into inputs; mention them in warnings when relevant.
-
-If an input is a user's natural-language task, request, instruction, topic, or
-free-form text to be interpreted by the Skill, name it text, query, or topic
-instead of command. Reserve command for true control commands such as CLI
-subcommands, action enums, command-line flags, execution switches, or a closed
-set of operation names.
-
-Set required=true only when the caller must provide the value for normal
-execution. Use required=false for optional preferences, limits, defaults, or
-output format choices that the Skill can infer or default.
-
-Do not emit duplicate inputs for the same caller-provided value. Omit logging,
-analytics, telemetry, statistics, tracing, debug evidence, or original-copy
-fields unless the Skill truly consumes that value as a separate runtime input.
-
-If unsure, use unknown and add a warning.
+Rules:
+1. Use only capabilities and runtime I/O supported by all supplied content.
+   If body_truncated is true, report uncertainty instead of inventing fields.
+2. Inputs are caller-provided runtime values. Exclude credentials, environment
+   setup, permissions, caches, telemetry and internal state.
+3. Outputs are user-facing or downstream deliverables. Extract the semantic
+   artifact, not API wrappers, status fields, logs, debug data or containers.
+4. Use short canonical semantic names and put details in descriptions.
+5. Classify by artifact semantics rather than transport: image/audio/video
+   URLs, paths or base64 remain image/audio/video. Use url for ordinary links.
+6. Preferred types: text, markdown, json, csv, table, yaml, xml, pdf, html,
+   docx, pptx, xlsx, image, audio, video, file, path, url, code, archive, unknown.
+7. Set required=true only when normal execution requires caller input.
+8. Treat free-form tasks as query, text or topic; reserve command for explicit
+   control operations. Do not emit duplicate semantic inputs or outputs.
+9. Keep warnings factual and brief. Return at most three.
 """
 
 _SCHEMA_EXTRACTION_BATCH_PROMPT = f"""{_SCHEMA_EXTRACTION_PROMPT}
 
-You will receive a JSON object with a skills array. Each item is one independent
-Skill context and includes source.relative_path.
-
-Return only a valid JSON object with this shape:
-{{
-  "schemas": [
-    {{
-      "skill_ref": "the exact source.relative_path from the input skill",
-      "description": "concise string",
-      "inputs": [],
-      "outputs": [],
-      "confidence": 0.0,
-      "warnings": []
-    }}
-  ]
-}}
-
-Return exactly one schema object for each input skill. Do not merge Skills, copy
-inputs or outputs across Skills, or add schemas for Skills not present in the
-request. Preserve skill_ref exactly so the caller can match results.
+Input is {{"skills": [...]}}. Return {{"schemas": [...]}} with exactly one
+schema per input Skill. Preserve each short skill_ref exactly, keep Skills
+independent, and return no additional Skills.
 """

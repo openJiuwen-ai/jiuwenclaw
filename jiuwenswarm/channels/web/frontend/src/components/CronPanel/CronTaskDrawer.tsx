@@ -7,6 +7,7 @@ import DatePicker from './DatePicker';
 import SimpleSelect from './SimpleSelect';
 import TemplateClusterIcon from './TemplateClusterIcon';
 import { validateCronExpr } from './cronExprValidation';
+import { normalizeWakeOffsetSeconds } from './cronWakeOffset';
 import { cronExprToSchedule, isOnceScheduleExpired } from './scheduleConvert';
 import { TIMEZONE_OPTIONS } from './constants';
 import type { CronTaskUI, CronTemplateUI } from '../../types/cron';
@@ -31,6 +32,8 @@ export interface CronTaskFormValue {
   description: string;
   targets: string; // 推送频道，对应后端 CronJob.targets
   cronExpr: string;
+  /** 提前唤醒秒数，对应后端 CronJob.wake_offset_seconds；0 表示到点执行 */
+  wakeOffsetSeconds: number;
   timezone: string;
   effectiveDate: string | null; // 【backend-requests.md #3】仅前端展示，不下发
   enabled: boolean;
@@ -44,6 +47,7 @@ function emptyForm(): CronTaskFormValue {
     description: '',
     targets: 'web',
     cronExpr: '',
+    wakeOffsetSeconds: 0,
     timezone: 'Asia/Shanghai',
     effectiveDate: null,
     enabled: true,
@@ -58,6 +62,7 @@ export function jobToForm(job: CronTaskUI): CronTaskFormValue {
     description: job.description,
     targets: job.deliveryChannel,
     cronExpr: job.cronExpr,
+    wakeOffsetSeconds: normalizeWakeOffsetSeconds(job.wakeOffsetSeconds),
     timezone: job.timezone,
     effectiveDate: null,
     enabled: job.enabled,
@@ -72,6 +77,7 @@ export function templateToForm(tpl: CronTemplateUI, title: string, description: 
     description,
     targets: 'web',
     cronExpr: tpl.cronExpr,
+    wakeOffsetSeconds: 0,
     timezone: 'Asia/Shanghai',
     effectiveDate: null,
     enabled: true,
@@ -258,7 +264,14 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
             />
           </div>
 
-          <ScheduleEditor value={form.cronExpr} onChange={(cronExpr) => setForm({ ...form, cronExpr })} timezone={form.timezone} />
+          <ScheduleEditor
+            value={form.cronExpr}
+            onChange={(cronExpr) => setForm({ ...form, cronExpr })}
+            timezone={form.timezone}
+            wakeOffsetSeconds={form.wakeOffsetSeconds}
+            onWakeOffsetSecondsChange={(wakeOffsetSeconds) => setForm({ ...form, wakeOffsetSeconds })}
+            wakeOffsetDisabled={proactiveLocked}
+          />
 
           <div>
             <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldTimezone')}</label>

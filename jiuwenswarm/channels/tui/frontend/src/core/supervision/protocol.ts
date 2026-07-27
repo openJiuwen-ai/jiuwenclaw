@@ -68,9 +68,11 @@ export interface HandoffPort {
   checkHandoff(target: HandoffTarget): HandoffCheckResult;
   /**
    * 请求 handoff：二次校验后调用统一顶层关闭路径，以 launcher 注入的动作退出码退出。
+   * switchContent 是原始命令文本（如 "switch claude"），会在退出前以 handoff JSON
+   * 输出到 stdout，供 launcher 读取并解析后发起 3rdagent.switch RPC。
    * 成功路径不会返回（process.exit）。
    */
-  requestHandoff(target: HandoffTarget): Promise<void>;
+  requestHandoff(target: HandoffTarget, switchContent: string): Promise<void>;
 }
 
 /** 重新认证触发原因。 */
@@ -94,9 +96,14 @@ export type UiExitReason =
 
 /**
  * 统一顶层关闭路径：串行完成退出通知 → screen.dispose → appState.stop →
- * wsClient.disconnect → tui.stop → process.exit。
+ * wsClient.disconnect → tui.stop → stdout handoff JSON（如有）→ process.exit。
  * 任一时刻只允许一次关闭调用；重复调用直接返回已存在的 Promise。
  */
 export interface UiLifecyclePort {
-  closeUi(options: { reason: UiExitReason; exitCode: number }): Promise<void>;
+  closeUi(options: {
+    reason: UiExitReason;
+    exitCode: number;
+    /** 退出前输出到 stdout 的 handoff JSON，供 launcher 读取。仅 switch reason 使用。 */
+    handoffMessage?: string;
+  }): Promise<void>;
 }

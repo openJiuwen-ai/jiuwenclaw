@@ -61,6 +61,7 @@ from jiuwenswarm.common.config import (
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
+    update_setup_guide_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
     update_swarmflow_enabled_in_config,
@@ -166,7 +167,7 @@ class _ConfigChangeSet:
                 scopes.add("proactive")
             elif key_text.startswith("symphony") or key_text.startswith("skill_retrieval"):
                 scopes.add("agent_runtime")
-            elif key_text.startswith("a2ui_"):
+            elif key_text.startswith("a2ui_") or key_text == "setup_guide_enabled":
                 scopes.add("web_ui")
             else:
                 scopes.add("agent_runtime")
@@ -797,6 +798,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
+    "setup_guide_enabled",
 })
 
 # 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
@@ -1375,7 +1377,7 @@ def _project_info_payload(
     """Serialize a project item consistently for project.list/info/create."""
     st = stats or {"session_count": 0, "last_message_at": None, "last_user_message_at": None}
     git = getattr(proj, "git", {}) if proj is not None else {}
-    git_payload = dict(git) if isinstance(git, dict) and git else {
+    git_defaults = {
         "enabled": False,
         "repo_root": "",
         "initialized_by_jiuwenswarm": False,
@@ -1383,8 +1385,11 @@ def _project_info_payload(
         "status": "disabled",
         "branch": "",
         "error": "",
+        "error_code": "",
+        "hint": "",
         "is_dirty": False,
     }
+    git_payload = {**git_defaults, **dict(git)} if isinstance(git, dict) and git else git_defaults
     if default_id is not None:
         work_mode = DEFAULT_TUI_WORK_MODE if default_id == DEFAULT_PROJECT_ID_CODE else DEFAULT_WEB_WORK_MODE
         return {
@@ -1420,6 +1425,23 @@ def _project_info_payload(
         "created_at": proj.created_at,
         "updated_at": getattr(proj, "updated_at", 0),
     }
+
+
+def _normalize_provider_value(value: str) -> str:
+    """把任意大小写的 provider 值归一化为 ``ProviderType`` 规范大小写。
+
+    与 TUI 侧 ``gateway/channel_manager/tui/tui_connect.py:_normalize_provider_value``
+    保持一致：TUI 在写入/校验 model_provider 时会做大小写归一化，Web 侧此前没有做，
+    导致同一份配置（例如历史数据里 model_provider 大小写不规范）在 TUI 能正常识别，
+    但 Web 的"测试"/"保存"因大小写敏感的精确匹配而被误判为非法值。
+    """
+    normalized = value.strip()
+    if not normalized:
+        return normalized
+
+    available_model_providers = [provider.value for provider in ProviderType]
+    lookup = {provider.lower(): provider for provider in available_model_providers}
+    return lookup.get(normalized.lower(), normalized)
 
 
 def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -1562,6 +1584,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # 合并 config.yaml 中的配置项
         try:
             raw = get_config_raw()
+            setup_guide_cfg = raw.get("setup_guide") or {}
+            payload["setup_guide_enabled"] = (
+                "true" if setup_guide_cfg.get("enabled", True) else "false"
+            )
             for key, val in payload.items():
                 from jiuwenswarm.extensions.registry import ExtensionRegistry
                 if (("api_key" in key.lower() or "token" in key.lower())
@@ -1616,6 +1642,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
+            payload.setdefault("setup_guide_enabled", "true")
             payload.setdefault("skill_create", "false")
             payload.setdefault("evolution_auto_scan", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
@@ -1765,6 +1792,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
                     update_permissions_enabled_in_config(parsed)
+                elif param_key == "setup_guide_enabled":
+                    update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_enabled":
                     update_memory_forbidden_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_description":
@@ -1884,7 +1913,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     origin_index = None
             api_key = str(item.get("api_key") or "").strip()
             api_base = str(item.get("api_base") or "").strip()
-            model_provider = str(item.get("model_provider") or "").strip()
+            model_provider = _normalize_provider_value(str(item.get("model_provider") or ""))
             # OpenAIAccount uses the token store managed by core OAuth, so it does not
             # carry a user-entered api_key in config.
             if not api_key and origin_index is None and not is_openai_account_provider(model_provider):
@@ -1999,7 +2028,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         api_base = str(params.get("api_base") or "").strip()
         api_key = str(params.get("api_key") or "").strip()
         model = str(params.get("model") or "").strip()
-        model_provider = str(params.get("model_provider") or "").strip()
+        model_provider = _normalize_provider_value(str(params.get("model_provider") or ""))
         needs_api_key = not is_openai_account_provider(model_provider)
         if not all([api_base, model, model_provider]) or (needs_api_key and not api_key):
             await channel.send_response(
@@ -3185,6 +3214,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ok=False,
                 error="project_dir must be an absolute path",
                 code="BAD_REQUEST",
+            )
+            return
+        if project_dir and not os.path.isdir(project_dir):
+            await channel.send_response(
+                ws, req_id,
+                ok=False,
+                error="project directory does not exist",
+                code="PROJECT_DIR_MISSING",
             )
             return
         # 解析 work_mode(严格校验:非法值返回 BAD_REQUEST,不静默回落)
@@ -4937,6 +4974,57 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.exception("[channel.discord.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
+    async def _channel_slack_get_conf(ws, req_id, params, session_id):
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        try:
+            conf = cm.get_conf("slack")
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.slack.get_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _channel_slack_set_conf(ws, req_id, params, session_id):
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="params must be object",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            await cm.set_conf("slack", params)
+            conf = cm.get_conf("slack")
+            try:
+                update_channel_in_config("slack", conf)
+                await _clear_agent_config_cache(_resolve(agent_client))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[channel.slack.set_conf] failed to persist config.yaml: %s", e)
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.slack.set_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
     async def _channel_wecom_get_conf(ws, req_id, params, session_id):
         cm = _resolve(channel_manager)
         if cm is None:
@@ -5430,6 +5518,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("channel.whatsapp.set_conf", _channel_whatsapp_set_conf)
     channel.register_method("channel.discord.get_conf", _channel_discord_get_conf)
     channel.register_method("channel.discord.set_conf", _channel_discord_set_conf)
+    channel.register_method("channel.slack.get_conf", _channel_slack_get_conf)
+    channel.register_method("channel.slack.set_conf", _channel_slack_set_conf)
     channel.register_method("channel.wecom.get_conf", _channel_wecom_get_conf)
     channel.register_method("channel.wecom.set_conf", _channel_wecom_set_conf)
     channel.register_method("channel.wechat.get_conf", _channel_wechat_get_conf)

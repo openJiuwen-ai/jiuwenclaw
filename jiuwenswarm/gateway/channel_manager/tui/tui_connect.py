@@ -2198,11 +2198,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _tui_disconnect_request(ws, req_id, params, session_id):
-        try:
-            setattr(ws, "_jiuwenswarm_tui_user_exit", True)
-        except Exception:
-            logger.debug("[tui.disconnect] mark user exit flag failed", exc_info=True)
-
         payload = {"accepted": True, "session_id": session_id}
         try:
             await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -2216,7 +2211,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if callable(is_bound_to_client):
             owns_session = bool(is_bound_to_client("tui", sid, ws))
         if mh is not None and sid and owns_session:
-            await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+            cleaned = await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+            if not cleaned:
+                logger.warning(
+                    "[tui.disconnect] immediate cleanup failed; "
+                    "transport-close fallback remains enabled: session_id=%s",
+                    sid,
+                )
+                return
+            # Only suppress the transport-close fallback after the immediate
+            # cleanup has completed.  The TUI process can disappear after the
+            # acknowledgement and cancel this handler; marking the websocket
+            # earlier would make _tui_disconnect skip the only remaining
+            # cleanup path and leak the session runtime.
+            try:
+                setattr(ws, "_jiuwenswarm_tui_user_exit", True)
+            except Exception:
+                logger.debug(
+                    "[tui.disconnect] mark completed user exit failed",
+                    exc_info=True,
+                )
 
     async def _chat_user_answer(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
