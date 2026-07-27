@@ -1229,7 +1229,12 @@ export class CliPiAppState {
   }
 
   /** Start a TUI-side PR watch (replacing any existing one). */
-  readonly startPrWatch = (config: { repo: string; prNumber: string; platform: string }): void => {
+  readonly startPrWatch = (config: {
+    repo: string;
+    prNumber: string;
+    platform: string;
+    intervalMs?: number;
+  }): void => {
     this.prWatchController?.stop("被新的 watch 取代", { silent: true });
     this.prWatchController = new PrWatchController(
       {

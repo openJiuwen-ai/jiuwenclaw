@@ -21,9 +21,10 @@ export function createAutofixPrCommand(): SlashCommand {
     name: "autofix-pr",
     description:
       "Fix the open PR for the current branch until CI passes and review comments are addressed",
-    usage: "/autofix-pr [PR number or URL] [--watch] [--stop]",
+    usage: "/autofix-pr [PR number or URL] [--watch] [--interval <min>] [--stop]",
     example: "/autofix-pr --watch",
-    argGuide: "[optional: PR number or URL; --watch to keep fixing until green; --stop to cancel]",
+    argGuide:
+      "[optional: PR number or URL; --watch keeps fixing until green; --interval <min> poll cadence; --stop cancels]",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
     action: async (ctx, args) => {
@@ -57,7 +58,18 @@ export function createAutofixPrCommand(): SlashCommand {
       }
 
       const watch = /(^|\s)--watch(\s|$)/.test(args);
-      const prArg = args.replace(/(^|\s)--watch(\s|$)/g, " ").replace(/(^|\s)--stop(\s|$)/g, " ").trim();
+      // --interval <minutes> (accepts fractions, e.g. 0.5 = 30s); floored at 10s.
+      const intervalMatch = args.match(/(^|\s)--interval[=\s]+([\d.]+)/);
+      const intervalMin = intervalMatch ? Number(intervalMatch[2]) : NaN;
+      const intervalMs =
+        Number.isFinite(intervalMin) && intervalMin > 0
+          ? Math.max(10_000, Math.round(intervalMin * 60_000))
+          : undefined;
+      const prArg = args
+        .replace(/(^|\s)--watch(\s|$)/g, " ")
+        .replace(/(^|\s)--stop(\s|$)/g, " ")
+        .replace(/(^|\s)--interval[=\s]+[\d.]+/g, " ")
+        .trim();
 
       if (!watch) {
         // Single round: build the prompt locally and send it once.
@@ -123,13 +135,16 @@ export function createAutofixPrCommand(): SlashCommand {
         return;
       }
 
-      ctx.startPrWatch({ repo: prCtx.repo, prNumber: prCtx.prNumber, platform: prCtx.platform });
+      ctx.startPrWatch({ repo: prCtx.repo, prNumber: prCtx.prNumber, platform: prCtx.platform, intervalMs });
+      const everyText = intervalMs
+        ? zh ? `每 ${intervalMs / 60_000} 分钟` : `every ${intervalMs / 60_000} min`
+        : zh ? "每 5 分钟" : "every 5 min";
       ctx.addItem(
         addInfo(
           ctx.sessionId,
           zh
-            ? `已开始盯 PR ${prCtx.prNumber}（${prCtx.repo}）：每 5 分钟复查一轮，绿/合并/关闭即停（最多 12 轮，可 /autofix-pr --stop 中止）。`
-            : `Watching PR ${prCtx.prNumber} (${prCtx.repo}): re-checks every 5 min, stops on green/merged/closed (max 12 rounds; /autofix-pr --stop to cancel).`,
+            ? `已开始盯 PR ${prCtx.prNumber}（${prCtx.repo}）：${everyText}复查一轮，绿/合并/关闭即停（最多 12 轮，可 /autofix-pr --stop 中止）。`
+            : `Watching PR ${prCtx.prNumber} (${prCtx.repo}): re-checks ${everyText}, stops on green/merged/closed (max 12 rounds; /autofix-pr --stop to cancel).`,
           "i",
         ),
       );
