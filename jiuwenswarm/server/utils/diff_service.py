@@ -40,6 +40,10 @@ WORKTREE_HISTORY_CONTAINERS: tuple[tuple[str, ...], ...] = (
 # change_sets.json 写入锁:保证同一进程内多线程惰性回填时不互相覆盖。
 _CHANGE_SET_LOCK = threading.Lock()
 
+# file_ops 条目上的软删除标记。被 conversation 回退"截断"掉的快照打上此标记后
+# 对 turn diff 显示层不可见，但仍保留 old_content，从而不丢失文件回滚能力。
+_REWOUND_KEY = "rewound_out"
+
 
 class DiffHistoryExpiredError(RuntimeError):
     """历史 diff 索引仍存在但详情已无法重建。"""
@@ -570,6 +574,18 @@ class DiffService:
             return []
 
     @staticmethod
+    def resolve_project_dir(session_id: str) -> str | None:
+        """解析 session 的项目目录(``_get_project_dir_from_metadata`` 的公开入口).
+
+        调用方若随后会写 ``metadata.json``(如 ``rewind_session`` 调
+        ``update_session_metadata``)，**必须在写之前**调用本函数并把结果显式
+        传给下游，不要让下游自己去推断：``metadata.json`` 是非原子的原地覆写
+        且由后台线程执行，下游读到半截文件会 ``JSONDecodeError`` → 静默返回
+        ``None`` → 扫不到项目目录下的 file_ops → 整个清理变成无声的空操作。
+        """
+        return DiffService._get_project_dir_from_metadata(session_id)
+
+    @staticmethod
     def _get_project_dir_from_metadata(session_id: str) -> str | None:
         """从 session metadata.json 中读取项目目录.
 
@@ -761,6 +777,7 @@ class DiffService:
         project_dir: str | None = None,
         *,
         extra_history_roots: list[str] | None = None,
+        include_rewound: bool = False
     ) -> dict[str, Any]:
         """读取 .agent_history（同时读取全局与 session-specific 文件并合并）.
 
@@ -768,6 +785,11 @@ class DiffService:
             session_id: 若提供，额外扫描匹配该 session 的 file_ops 文件。
             project_dir: 项目目录路径，若提供则也从项目目录读取 .agent_history。
             extra_history_roots: 额外写入根目录，例如 team/member workspace。
+            include_rewound: 是否包含被标记为 ``rewound_out`` 的条目(软删除快照)。
+                默认 ``False``——**显示层**(turn diff)不应看到它们,否则会展示
+                已被回退掉的 turn 的改动。**还原层**(``get_files_to_restore``)
+                必须传 ``True``:这些快照仍持有文件的原始内容,是回滚能力的唯一
+                来源。详见 ``truncate_file_ops_by_timestamp`` 的 ``soft`` 参数。
         """
         result: dict[str, Any] = {}
         history_file_priorities: dict[str, int] = {}
@@ -891,6 +913,9 @@ class DiffService:
                             result_entry_priorities[normalized_path] = []
                         # 合并条目，避免时间戳相近的重复记录
                         for entry in entries:
+                            # 软删除的快照默认对显示层不可见（见 include_rewound）
+                            if not include_rewound and entry.get(_REWOUND_KEY):
+                                continue
                             # 检查是否已存在相同时间戳（±1秒）的相同操作
                             ts = entry.get("timestamp", "")
                             action = entry.get("action", "")
@@ -1829,10 +1854,11 @@ class DiffService:
             return {}
 
         # 2. 读取 file_ops 日志
+        #    include_rewound=True: 之前的 conversation 回退只截断了对话、没有动
+        #    工作区，那些被软删除的快照仍是对应文件唯一的原始内容来源，必须纳入，
+        #    否则文件会永久失去回滚能力。
         agent_history = self._read_agent_history(
-            session_id,
-            project_dir,
-            extra_history_roots=extra_history_roots,
+            session_id, project_dir, include_rewound=True,
         )
 
         # 3. 对于每个文件，找到第一条 timestamp >= target_timestamp 的 entry
@@ -1864,10 +1890,23 @@ class DiffService:
         session_id: str,
         cutoff_ts: float,
         project_dir: str | None = None,
+        soft: bool = False,
         *,
         extra_history_roots: list[str] | None = None,
     ) -> None:
         """截断 file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
+
+        ``soft`` 决定"截断"的含义，取值应与调用方**是否同时还原了工作区文件**一致:
+
+           - ``soft=False``(硬删除,默认): 条目被物理移除。仅当调用方已经把这些
+             文件写回原始内容时才正确(如 ``discard_turn_changes``)——文件已回到
+             旧状态，快照失去意义。
+           - ``soft=True``(软删除): 条目保留 ``old_content``，只打上 ``rewound_out``
+             标记。用于**只回退对话、不动文件**的场景(``rewind_session`` 的
+             conversation 模式、``compact_partial_session``)。此时硬删除会让文件
+             陷入"已被修改、但系统不再持有其原始内容"的状态，后续任何 /rewind 都
+             无法还原它，且不会报错(issue #2241)。标记后显示层照旧看不到这些条目，
+             还原层仍可用——显示一致性与回滚能力各取所需。
 
         在 rewind / discard_turn_changes 操作后调用，确保 file_ops 日志与
         截断后的 history.json / 实际工作区一致。
@@ -1889,6 +1928,7 @@ class DiffService:
                 覆盖 ``channel_metadata.cwd`` 缺失的场景(如 Web/code 模式新会话)。
                 为 ``None`` 时底层从 session metadata 推断(读取顺序见
                 ``_get_project_dir_from_metadata``)。
+            soft: 见上文。调用方未还原工作区文件时必须传 ``True``。
         """
 
         # 收集所有 session-specific file_ops 文件
@@ -1946,6 +1986,14 @@ class DiffService:
                             continue
                         if entry_ts < cutoff_ts:
                             filtered.append(e)
+                        elif soft:
+                            # 保留快照(old_content)，仅对显示层隐藏
+                            if not e.get(_REWOUND_KEY):
+                                e[_REWOUND_KEY] = True
+                                truncated = True
+                            filtered.append(e)
+                        else:
+                            truncated = True
                     if len(filtered) != len(entries):
                         truncated = True
                     if filtered:
@@ -1957,8 +2005,8 @@ class DiffService:
                         encoding="utf-8",
                     )
                     logger.info(
-                        "truncate_file_ops: cleaned %s (cutoff_ts=%s)",
-                        file_ops_path.name, cutoff_ts,
+                        "truncate_file_ops: cleaned %s (cutoff_ts=%s, soft=%s)",
+                        file_ops_path.name, cutoff_ts, soft,
                     )
             except Exception as exc:
                 logger.warning(
