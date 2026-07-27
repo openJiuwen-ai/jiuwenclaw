@@ -520,8 +520,8 @@ heartbeat:
   target: web
   # 心跳生效时间段（本地时间），start <= now < end 时心跳生效
   active_hours:
-    start: 08:00
-    end: 22:00
+    start: 00:00
+    end: 00:00
 
 # 执行护栏：工具循环检测与主动中断
 execution_guard:
