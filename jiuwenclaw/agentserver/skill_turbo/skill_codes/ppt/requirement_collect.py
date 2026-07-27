@@ -21,7 +21,7 @@ _DEFAULT_PAGE_COUNT = 6
 _MAX_PAGE_COUNT = 30
 
 _VALID_STYLE_IDS = frozenset(
-    {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech", "free", "custom"}
+    {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech", "custom"}
 )
 _VALID_SEARCH_MODES = frozenset({"auto", "no_search", "force_search"})
 _VALID_SOURCE_TYPES = frozenset({"topic", "outline", "description"})
@@ -34,7 +34,7 @@ _STYLE_LABEL_TO_ID: dict[str, str] = {
     "科技极简": "tech-minimal",
     "典雅叙事": "elegant-narrative",
     "工业科技": "industrial-tech",
-    "自由发挥": "free",
+    "自由发挥": "custom",
 }
 
 _PAGE_LABEL_TO_COUNT: dict[str, int] = {
@@ -65,7 +65,7 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
   示例："10页以内"→8, "总页数严格为8页"→6, "8页"→8, "做8页PPT"→8
 - audience: 目标受众（字符串；未知则 ""）
 - presentation_purpose: 汇报目的，如「工作汇报」「产品展示」「教学分享」「auto」；未知则 ""
-- style_id: 用户明确提及风格时填写：business-classic / tech-minimal / elegant-narrative / industrial-tech / free / custom；未知则 ""
+- style_id: 用户明确提及风格时填写：business-classic / tech-minimal / elegant-narrative / industrial-tech / custom；“自由发挥”统一填写 custom；未知则 ""
 - style_description: style_id 为 custom 时的描述；否则 ""
 - pack_dir: 用户提供的模板包目录绝对路径（字符串；未知则 ""）。
   当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。
@@ -183,8 +183,9 @@ def _normalize_style_id(value: Any) -> str:
         "典雅叙事": "elegant-narrative",
         "industrial-tech": "industrial-tech",
         "工业科技": "industrial-tech",
-        "free": "free",
-        "自由发挥": "free",
+        # 兼容历史输入，但下游只保留新版 canonical custom 状态。
+        "free": "custom",
+        "自由发挥": "custom",
         "custom": "custom",
     }
     if lowered in alias_map:
@@ -806,13 +807,13 @@ _TOPIC_FALLBACK_SYSTEM_PROMPT = """你是 PPT 主题兜底选择助手。用户�
 
 _STYLE_FALLBACK_SYSTEM_PROMPT = """你是 PPT 风格兜底选择助手。用户未在限时内作答风格选择，请基于用户消息与主题，从给定 style_id 中挑选最合适的一项。
 
-style_id 候选：business-classic / tech-minimal / elegant-narrative / industrial-tech / free
+style_id 候选：business-classic / tech-minimal / elegant-narrative / industrial-tech / custom
 含义：
 - business-classic: 企业汇报、红色主题、严谨专业
 - tech-minimal: 产品发布、黑白调性、极简设计
 - elegant-narrative: 文化主题、温暖质感
 - industrial-tech: 硬核科技、高对比度
-- free: 由 AI 根据主题自动设计
+- custom: 由 AI 根据主题自动设计
 
 规则：
 1. style_id 必须取上述五者之一。
@@ -958,7 +959,7 @@ async def _llm_default_style(node: PlanNode, inputs: dict[str, Any]) -> str:
         payload = _parse_json_payload(response)
         if isinstance(payload, dict):
             normalized = _resolve_style_id(payload.get("style_id"), payload.get("style_description"))
-            if normalized and normalized != "custom":
+            if normalized:
                 return normalized
     except Exception as exc:
         if isinstance(exc, AbortError):
@@ -1231,7 +1232,7 @@ class P23AskStyleNode(PlanNode):
                 "## P2.3 风格收集\n"
                 "\n"
                 "### 节点职责\n"
-                "确保 style_id 已收集；P2.1 标记 need_ask_style 或 style_id 缺失时 ask 用户，否则隐式 free。\n"
+                "确保 style_id 已收集；P2.1 标记 need_ask_style 或 style_id 缺失时 ask 用户，否则隐式 custom。\n"
                 "\n"
                 "### 前置条件\n"
                 "- P2.1 / P2.2 已完成，topic / batch 字段已齐备\n"
@@ -1242,30 +1243,30 @@ class P23AskStyleNode(PlanNode):
                 "- `need_ask_style`（可选）: P2.1 标记是否需要 ask\n"
                 "\n"
                 "### 输出\n"
-                "- `style_id`:str - 风格标识（business-classic/tech-minimal/elegant-narrative/industrial-tech/free/custom）\n"
+                "- `style_id`:str - 风格标识（business-classic/tech-minimal/elegant-narrative/industrial-tech/custom）\n"
                 "- `style_description`: str — custom 模式下用户自描述（其他模式为空）\n"
                 "- `additional_notes`: str — 补充说明（通常为空，custom 时可能有值）\n"
                 "\n"
                 "### 执行流程\n"
                 "1. 检查 need_ask_style 标记与 style_id 是否缺失\n"
                 "2. 需要询问时: ask_user_question 提供风格选项\n"
-                "3. 不需要询问时: 隐式设 style_id='free'\n"
+                "3. 不需要询问时: 隐式设 style_id='custom'\n"
                 "4. finalize style_slot（补 style_description / additional_notes）\n"
                 "\n"
                 "### 失败兜底\n"
-                "- 用户未回复风格选择: 隐式 free\n"
+                "- 用户未回复风格选择: 隐式 custom\n"
             ),
         )
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        use_implicit_free = False
+        use_implicit_custom = False
         if not _style_id_resolved(inputs):
             if _style_needs_user_ask(inputs):
                 await _ask_missing_style(self, inputs)
             else:
-                use_implicit_free = True
+                use_implicit_custom = True
 
-        _finalize_style_slot(inputs, fallback="free" if use_implicit_free else None)
+        _finalize_style_slot(inputs, fallback="custom" if use_implicit_custom else None)
         return inputs
 
 
@@ -1376,7 +1377,7 @@ class RequirementCollectNode(PlanNode):
     子步骤保证:
         P2.1 — 槽位识别；topic 缺失时 ask + 二次 LLM 提炼
         P2.2 — page_count / audience / presentation_purpose 缺一不可
-        P2.3 — 仅收集 style_id（P2.1 判定无需 ask 时可隐式 free）
+        P2.3 — 仅收集 style_id（P2.1 判定无需 ask 时可隐式 custom）
         P2.4 — LLM 推断三项派生参数，解析/校验失败即报错
 
     快捷路径:
@@ -1412,7 +1413,7 @@ class RequirementCollectNode(PlanNode):
                 "- `page_count`: int/str — 页数\n"
                 "- `audience`: str — 受众\n"
                 "- `presentation_purpose`: str — 演示目的\n"
-                "- `style_id`:str — 风格标识（business-classic/tech-minimal/elegant-narrative/industrial-tech/free/custom）\n"
+                "- `style_id`:str — 风格标识（business-classic/tech-minimal/elegant-narrative/industrial-tech/custom）\n"
                 "- `style_description`: str — custom 模式下用户自描述；其他模式通常为空\n"
                 "- `additional_notes`: str — 补充说明（style_id=custom 时可能有值）\n"
                 "- `search_mode`: str — 搜索策略（no_search / auto / force_search）\n"
@@ -1424,7 +1425,7 @@ class RequirementCollectNode(PlanNode):
                 "1. 快捷路径判定：slots_from_query_complete=True → 直接填入预提取值，跳过 P2.1–P2.3\n"
                 "2. P2.1: LLM 槽位识别 + missing_fields 标记；topic 缺失时 ask 用户选择\n"
                 "3. P2.2: 确保 page_count / audience / presentation_purpose 三项齐备\n"
-                "4. P2.3: 确保 style_id 已收集（缺省隐式 free）\n"
+                "4. P2.3: 确保 style_id 已收集（缺省隐式 custom）\n"
                 "5. P2.4: LLM 推断 search_mode / source_type / research_depth\n"
                 "\n"
                 "### 失败兜底\n"
@@ -1451,8 +1452,12 @@ class RequirementCollectNode(PlanNode):
 
     def _set_style_mode(self, ctx: dict[str, Any]) -> None:
         """根据 style_id / pack_dir 设置 style_mode（供下游 P3.5/P7/P8/P9 分支判断）。"""
-        if ctx.get("style_mode"):
-            return  # 已显式设置，不覆盖
+        existing_mode = str(ctx.get("style_mode") or "").strip()
+        if existing_mode:
+            if existing_mode == "free":
+                ctx["style_id"] = "custom"
+                ctx["style_mode"] = "custom"
+            return  # 已显式设置，不覆盖；仅归一化历史 free 状态
         pack_dir = str(ctx.get("pack_dir") or "").strip()
         if pack_dir:
             # prod 版模板包用 template-spec.json，不再依赖 template-manifest.json
@@ -1469,12 +1474,13 @@ class RequirementCollectNode(PlanNode):
             ctx["style_mode"] = "template_canvas"
             return
         style_id = str(ctx.get("style_id") or "").strip()
-        if style_id in _VALID_STYLE_IDS - {"free", "custom"}:
+        if style_id in _VALID_STYLE_IDS - {"custom"}:
             ctx["style_mode"] = "preset"
-        elif style_id == "custom":
-            ctx["style_mode"] = "custom"
         else:
-            ctx["style_mode"] = "free"
+            if style_id and style_id not in {"custom", "free"} and not ctx.get("style_description"):
+                ctx["style_description"] = style_id
+            ctx["style_id"] = "custom"
+            ctx["style_mode"] = "custom"
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         ctx = inputs

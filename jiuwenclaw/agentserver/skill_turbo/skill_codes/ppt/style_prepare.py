@@ -30,14 +30,14 @@ class StylePrepareNode(PlanNode):
                 "### 前置条件\n"
                 "- `read_file` / `write_file` 工具可用（skill_codes/ 内禁止直接 IO，必须走工具）\n"
                 "- `output_dir` 已由 P0 写入上下文\n"
-                "- `style_id` 来自上游 P2 需求收集（缺省时按 `free` 处理）\n"
+                "- `style_id` 来自上游 P2 需求收集（缺省时按 `custom` 处理）\n"
                 "\n"
                 "### 输入\n"
-                "- `style_id`（必填）: 取值范围 business-classic/tech-minimal/elegant-narrative/industrial-tech/free/custom；"
-                "空值按 `free` 处理\n"
+                "- `style_id`（必填）: 取值范围 business-classic/tech-minimal/elegant-narrative/industrial-tech/custom；"
+                "历史 `free` 输入与空值均归一化为 `custom`\n"
                 "- `output_dir`（必填）: 工作目录绝对路径（落盘 style 文件用）\n"
                 "- `topic`（可选）: PPT 主题，LLM 自定义生成时作为推断依据\n"
-                "- `style_description`（可选）: `custom` 模式下用户自描述；`free` 模式下通常为空\n"
+                "- `style_description`（可选）: `custom` 模式下用户自描述；自由发挥时通常为空\n"
                 "\n"
                 "### 输出\n"
                 "```json\n"
@@ -49,17 +49,19 @@ class StylePrepareNode(PlanNode):
                 "1. **校验 output_dir**：为空直接返回空 style_file_path（记录 error）\n"
                 "2. **模板画布分支**（`style_mode == template_canvas`）：跳过风格文件生成，校验 `pack_dir` 非空后透传给下游 P8\n"
                 "3. **预设风格分支**（`style_id` ∈ {business-classic/tech-minimal/elegant-narrative/industrial-tech}）：\n"
-                "   - 优先从 `pptx_root/styles/{style_id}.md` 读取（外部 skill 目录），兜底 `__file__` 同级 styles 目录\n"
+                "   - 从 `pptx_root/references/styles/{style_id}/style.md` 读取外部新版 skill 风格定义\n"
                 "   - 读取成功且非空 → 跳到步骤 5\n"
                 "   - 读取失败/为空 → 落入步骤 4（降级）\n"
-                "4. **自定义风格分支**（free/custom 或预设降级）：\n"
-                "   - 调用 LLM 生成包含 5 段结构的风格规范 Markdown：\n"
+                "4. **自定义风格分支**（custom 或预设降级）：\n"
+                "   - 调用 LLM 生成符合新版 `style-custom.md` 契约的风格规范 Markdown：\n"
+                "     - 合法 YAML `font-family` frontmatter\n"
                 "     - 整体风格描述\n"
                 "     - 配色方案（主色/辅色/背景色/文字色/强调色，HEX）\n"
                 "     - 字体（标题字体 + 正文字体）\n"
                 "     - 排版与组件规范（页面尺寸 1280×720px、字号、卡片风格）\n"
+                "     - CSS 主题变量和图表约束\n"
                 "     - 设计禁忌（禁止未定义颜色/字体、禁止动画）\n"
-                "   - free：仅靠 `topic` 推断；custom：参考 `style_description`\n"
+                "   - 自由发挥时仅靠 `topic` 推断；有用户描述时参考 `style_description`\n"
                 "5. **统一落盘**：调用 `write_file(file_path={output_dir}/style-{style_id}.md, content=...)`\n"
                 "6. **返回**：`style_file_path` = `{output_dir}/style-{style_id}.md`\n"
                 "\n"
@@ -74,9 +76,21 @@ class StylePrepareNode(PlanNode):
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         style_mode = str(inputs.get("style_mode") or "").strip()
-        style_id = str(inputs.get("style_id", "")).strip() or "free"
-        topic = str(inputs.get("topic", "")).strip()
+        style_id = str(inputs.get("style_id", "")).strip() or "custom"
         style_description = str(inputs.get("style_description", "")).strip()
+        if style_id.casefold() == "free":
+            style_id = "custom"
+        elif style_id not in _PRESET_STYLES and style_id != "custom":
+            style_description = style_description or style_id
+            style_id = "custom"
+        inputs["style_id"] = style_id
+        if style_description:
+            inputs["style_description"] = style_description
+        if style_mode == "free":
+            style_mode = "custom"
+            inputs["style_mode"] = style_mode
+        topic = str(inputs.get("topic", "")).strip()
+        audience = str(inputs.get("audience", "")).strip()
         output_dir = str(inputs.get("output_dir", "")).strip()
         user_query = PptCommon.collect_user_text(inputs)
 
@@ -115,7 +129,13 @@ class StylePrepareNode(PlanNode):
         if not style_content:
             if style_id in _PRESET_STYLES:
                 logger.warning("[P7] 预设风格 %s 加载失败，降级为自定义生成", style_id)
-            style_content = await self._generate_custom_style(topic, style_id, style_description, user_query)
+            style_content = await self._generate_custom_style(
+                topic,
+                audience,
+                style_id,
+                style_description,
+                user_query,
+            )
 
         if not style_content:
             logger.error(
@@ -184,6 +204,7 @@ class StylePrepareNode(PlanNode):
     async def _generate_custom_style(
         self,
         topic: str,
+        audience: str,
         style_id: str,
         style_description: str,
         user_query: str = "",
@@ -195,11 +216,16 @@ class StylePrepareNode(PlanNode):
             "你是 PPT 视觉设计师。请根据主题和风格描述生成一份风格规范 Markdown 文件，"
             "供后续 HTML 幻灯片生成使用。\n\n"
             f"PPT 主题：{topic or '（未提供）'}\n"
+            f"目标受众：{audience or '（未提供）'}\n"
             f"风格标识：{style_id}\n"
             f"用户风格描述：{style_description or '（未提供，请根据主题自由发挥）'}\n"
             f"{user_query_clause}\n"
-            "### 输出要求（严格按以下结构生成）\n"
-            "```markdown\n"
+            "### 输出要求（严格按以下结构生成，不得省略 frontmatter 或 CSS 变量）\n"
+            "---\n"
+            "font-family:\n"
+            "  - Noto Sans SC\n"
+            "  - sans-serif\n"
+            "---\n"
             f"# 风格规范：{style_id}\n"
             "\n"
             "## 整体风格描述\n"
@@ -213,11 +239,12 @@ class StylePrepareNode(PlanNode):
             "- 强调色：#XXXXXX\n"
             "\n"
             "## 字体\n"
-            "- 标题字体：{字体族名称}\n"
-            "- 正文字体：{字体族名称}\n"
-            "（注意：仅可使用以下环境可用字体：`WenYuan Sans SC`、`Arial`、`Noto Sans SC`；"
-            "中文用 WenYuan Sans SC / Noto Sans SC，英文和数字用 Arial。"
-            "禁止使用 HarmonyOS Sans、PingFang、Microsoft YaHei 等环境未安装的字体）\n"
+            "- 标题字体：{从 frontmatter 完整字体栈中选择}\n"
+            "- 正文字体：{与 frontmatter 使用同一完整字体栈}\n"
+            "（仅可使用 `Noto Sans SC`、`WenYuan Sans SC`/`文源黑体`、"
+            "`NanxiXinyuanti`/`南西新圆体`、`WenJin Mincho Plane 0`/`文津宋体 第0平面`、"
+            "`Frex Sans GB`/`械黑 GB`，以及置于最后的 CSS 通用回退字体；"
+            "禁止 Arial、Microsoft YaHei、PingFang SC、Noto Serif SC 等白名单外字体。）\n"
             "\n"
             "## 排版与组件规范\n"
             "- 页面尺寸：1280×720px\n"
@@ -225,11 +252,32 @@ class StylePrepareNode(PlanNode):
             "- 正文字号：{px}\n"
             "- 卡片/分隔/图表风格：{描述}\n"
             "\n"
+            "## CSS 主题变量\n"
+            "```css\n"
+            ":root {\n"
+            "  --color-primary: #XXXXXX;\n"
+            "  --color-secondary: #XXXXXX;\n"
+            "  --color-background: #XXXXXX;\n"
+            "  --color-surface: #XXXXXX;\n"
+            "  --color-text: #XXXXXX;\n"
+            "  --color-muted: #XXXXXX;\n"
+            "  --color-accent: #XXXXXX;\n"
+            '  --font-family: "Noto Sans SC", sans-serif;\n'
+            "  --radius-card: 12px;\n"
+            "  --shadow-card: 0 6px 20px rgba(23, 32, 51, 0.08);\n"
+            "  --content-density: comfortable;\n"
+            "}\n"
+            "```\n"
+            "`--font-family` 必须与 frontmatter 数组序列化后的完整字体栈完全一致。\n"
+            "\n"
+            "## 图表约束\n"
+            "- 图表字体、颜色、标签和背景必须复用上述字体栈与 CSS 主题变量\n"
+            "- 禁止动画和渐变填充，保证 PPTX 矢量导出\n"
+            "\n"
             "## 设计禁忌\n"
             "- 禁止使用本文件未定义的颜色或字体\n"
             "- 禁止动画\n"
             "- 其他禁忌（如有）\n"
-            "```\n"
             "\n"
             "直接输出 Markdown 内容，不要输出解释或代码块包裹。"
         )

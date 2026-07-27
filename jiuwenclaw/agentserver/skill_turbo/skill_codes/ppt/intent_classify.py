@@ -54,7 +54,8 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
   ②用户仅说页数（"N页"/"做N页PPT"）→ page_count = N；
   ③用户明确说内容页/正文（"内容页N页"/"正文N页"）→ page_count = N。
   示例："10页以内"→8, "总页数8页"→6, "8页"→8
-- style_id 可选值：business-classic / tech-minimal / elegant-narrative / industrial-tech / free / 其他风格名
+- style_id 可选值：business-classic / tech-minimal / elegant-narrative / industrial-tech / custom / 其他风格名
+  用户要求“自由发挥”时填写 custom
 - audience 可选值：公司高管 / 技术团队 / 投资人 / 普通受众 / 其他
 - presentation_purpose 可选值：工作汇报 / 产品展示 / 教学分享 / auto / 其他
 - pack_dir: 用户提供的模板包目录绝对路径（字符串；未知则 ""）。
