@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import threading
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -35,6 +36,30 @@ class PromptMemory(ABC):
     def search_similar(self, task: TaskSpec, top_k: int = 3) -> list[PromptRecord]:
         ...
 
+    @abstractmethod
+    def best_for_objective(self, objective: str) -> PromptRecord | None:
+        """The best-scoring record for the exact same objective, if any.
+
+        Used to stamp a new record's ``baseline_reward`` so its ``gain`` is
+        computable without a second lookup.
+        """
+
+    @abstractmethod
+    def pending(self, threshold: float = 0.0) -> list[PromptRecord]:
+        """Records not yet marked ``applied`` whose gain exceeds *threshold*.
+
+        This is the "review queue": optimization results that improved on
+        their baseline but that nobody has confirmed installing anywhere yet.
+        Sorted by gain, descending.
+        """
+
+    @abstractmethod
+    def mark_applied(self, record_id: str) -> bool:
+        """Flag a record as applied so it stops showing up in ``pending``.
+
+        Returns whether a matching record was found.
+        """
+
 
 class NullPromptMemory(PromptMemory):
     """No-op memory (used when ``memory_enabled=false``)."""
@@ -44,6 +69,15 @@ class NullPromptMemory(PromptMemory):
 
     def search_similar(self, task: TaskSpec, top_k: int = 3) -> list[PromptRecord]:
         return []
+
+    def best_for_objective(self, objective: str) -> PromptRecord | None:
+        return None
+
+    def pending(self, threshold: float = 0.0) -> list[PromptRecord]:
+        return []
+
+    def mark_applied(self, record_id: str) -> bool:
+        return False
 
 
 class JsonlPromptMemory(PromptMemory):
@@ -93,6 +127,36 @@ class JsonlPromptMemory(PromptMemory):
                 scored.append((overlap * (0.5 + 0.5 * record.reward), record))
         scored.sort(key=lambda x: x[0], reverse=True)
         return [r for _, r in scored[:top_k]]
+
+    def best_for_objective(self, objective: str) -> PromptRecord | None:
+        matches = [r for r in self._records if r.objective == objective]
+        return max(matches, key=lambda r: r.reward, default=None)
+
+    def pending(self, threshold: float = 0.0) -> list[PromptRecord]:
+        candidates = [
+            r for r in self._records if not r.applied and r.gain > threshold
+        ]
+        candidates.sort(key=lambda r: r.gain, reverse=True)
+        return candidates
+
+    def mark_applied(self, record_id: str) -> bool:
+        with self._lock:
+            found = False
+            for record in self._records:
+                if record.record_id == record_id:
+                    record.applied = True
+                    record.applied_at = time.time()
+                    found = True
+                    break
+            if found:
+                self._rewrite()
+            return found
+
+    def _rewrite(self) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with self._path.open("w", encoding="utf-8") as handle:
+            for record in self._records:
+                handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
 
 
 def _tokens(text: str) -> set[str]:

@@ -262,7 +262,16 @@ class OptimizationResult:
 
 @dataclass
 class PromptRecord:
-    """A persisted optimization outcome for the prompt memory."""
+    """A persisted optimization outcome for the prompt memory.
+
+    ``baseline_reward`` is the best reward previously known for the same
+    ``objective`` at the time this record was created (``None`` if this was the
+    first optimization for that objective) — it's what lets a reviewer see the
+    *gain* a record represents, not just its absolute score. ``applied`` tracks
+    whether a human has actually installed this prompt as a teammate's live
+    system prompt; the optimizer never sets it itself, only ``mark_applied``
+    (called once someone confirms they used it) does.
+    """
 
     prompt: str
     reward: float
@@ -273,6 +282,15 @@ class PromptRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     record_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     created_at: float = field(default_factory=time.time)
+    baseline_reward: float | None = None
+    applied: bool = False
+    applied_at: float | None = None
+
+    @property
+    def gain(self) -> float:
+        """Reward improvement over the baseline (or the full reward if there was none)."""
+        baseline = self.baseline_reward if self.baseline_reward is not None else 0.0
+        return self.reward - baseline
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -285,10 +303,15 @@ class PromptRecord:
             "observations": list(self.observations),
             "metadata": self.metadata,
             "created_at": self.created_at,
+            "baseline_reward": self.baseline_reward,
+            "applied": self.applied,
+            "applied_at": self.applied_at,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PromptRecord":
+        baseline = data.get("baseline_reward")
+        applied_at = data.get("applied_at")
         return cls(
             prompt=str(data.get("prompt", "")),
             reward=float(data.get("reward", 0.0)),
@@ -299,6 +322,9 @@ class PromptRecord:
             metadata=dict(data.get("metadata", {})),
             record_id=str(data.get("record_id", uuid.uuid4().hex[:12])),
             created_at=float(data.get("created_at", 0.0)),
+            baseline_reward=float(baseline) if baseline is not None else None,
+            applied=bool(data.get("applied", False)),
+            applied_at=float(applied_at) if applied_at is not None else None,
         )
 
 

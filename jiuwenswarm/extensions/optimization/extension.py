@@ -28,6 +28,12 @@ from jiuwenswarm.symphony.optimization.service import (
 OPTIMIZER_OPTIMIZE = "optimizer.optimize"
 OPTIMIZER_STATUS = "optimizer.status"
 OPTIMIZER_BEST_PROMPT = "optimizer.best_prompt"
+OPTIMIZER_PENDING_IMPROVEMENTS = "optimizer.pending_improvements"
+OPTIMIZER_MARK_APPLIED = "optimizer.mark_applied"
+
+# How much text of a pending prompt to surface in list responses — enough to
+# recognize the candidate without dumping the full prompt into a tool result.
+_PROMPT_PREVIEW_CHARS = 240
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +57,10 @@ class PromptOptimizerExtension(BaseExtension):
         registry.register_rpc_handler(OPTIMIZER_OPTIMIZE, self.optimize)
         registry.register_rpc_handler(OPTIMIZER_STATUS, self.status)
         registry.register_rpc_handler(OPTIMIZER_BEST_PROMPT, self.best_prompt)
+        registry.register_rpc_handler(
+            OPTIMIZER_PENDING_IMPROVEMENTS, self.pending_improvements
+        )
+        registry.register_rpc_handler(OPTIMIZER_MARK_APPLIED, self.mark_applied)
 
     async def optimize(
         self,
@@ -147,6 +157,59 @@ class PromptOptimizerExtension(BaseExtension):
 
         return await asyncio.to_thread(search)
 
+    async def pending_improvements(
+        self,
+        params: dict[str, Any] | None = None,
+        request: Any = None,
+    ) -> dict[str, Any]:
+        del request
+        params = params or {}
+        config = load_optimization_config()
+        if not config.enabled:
+            return _disabled_payload()
+        threshold = params.get("threshold")
+        try:
+            threshold = float(threshold) if threshold is not None else config.convergence_threshold
+        except (TypeError, ValueError):
+            threshold = config.convergence_threshold
+
+        def load() -> dict[str, Any]:
+            memory = OptimizerRuntimeFactory(config).memory()
+            records = memory.pending(threshold)
+            return {
+                "success": True,
+                "count": len(records),
+                "improvements": [_pending_summary(r) for r in records],
+            }
+
+        return await asyncio.to_thread(load)
+
+    async def mark_applied(
+        self,
+        params: dict[str, Any] | None = None,
+        request: Any = None,
+    ) -> dict[str, Any]:
+        del request
+        params = params or {}
+        config = load_optimization_config()
+        if not config.enabled:
+            return _disabled_payload()
+        record_id = str(params.get("record_id") or "").strip()
+        if not record_id:
+            return {"success": False, "detail": "record_id is required"}
+
+        def apply() -> dict[str, Any]:
+            memory = OptimizerRuntimeFactory(config).memory()
+            found = memory.mark_applied(record_id)
+            if not found:
+                return {
+                    "success": False,
+                    "detail": f"no pending improvement found with record_id={record_id}",
+                }
+            return {"success": True, "record_id": record_id}
+
+        return await asyncio.to_thread(apply)
+
 
 async def register_extensions(registry):
     extension = PromptOptimizerExtension()
@@ -174,6 +237,22 @@ def _task_from_params(params: dict[str, Any]) -> TaskSpec:
             "metadata": params.get("metadata", {}),
         }
     )
+
+
+def _pending_summary(record) -> dict[str, Any]:
+    prompt = record.prompt
+    preview = prompt if len(prompt) <= _PROMPT_PREVIEW_CHARS else prompt[:_PROMPT_PREVIEW_CHARS] + "…"
+    return {
+        "record_id": record.record_id,
+        "objective": record.objective,
+        "prompt_preview": preview,
+        "reward": round(record.reward, 4),
+        "baseline_reward": round(record.baseline_reward, 4)
+        if record.baseline_reward is not None
+        else None,
+        "gain": round(record.gain, 4),
+        "created_at": record.created_at,
+    }
 
 
 def _apply_overrides(config, params: dict[str, Any]):

@@ -93,3 +93,25 @@ async def test_parallel_and_sequential_agree(tmp_path):
     seq = await _make_optimizer(tmp_path / "s", parallel_execution=False).optimize(task)
     assert par.best_prompt == seq.best_prompt
     assert par.best_score == seq.best_score
+
+
+async def test_second_run_on_same_objective_records_prior_best_as_baseline(tmp_path):
+    task = TaskSpec(objective="produce a 4-item list", cases=[TaskCase(input="x")])
+
+    first = await _make_optimizer(tmp_path).optimize(task)
+
+    memory = JsonlPromptMemory(tmp_path)
+    first_record = memory.best_for_objective(task.objective)
+    assert first_record is not None
+    assert first_record.baseline_reward is None  # nothing existed before this run
+    assert first_record.reward == first.best_score
+
+    second = await _make_optimizer(tmp_path).optimize(task)
+
+    memory = JsonlPromptMemory(tmp_path)
+    pending = memory.pending(threshold=-1.0)  # include even non-improving records
+    # only the second run's record carries a baseline (the first run had none to
+    # compare against), so this disambiguates the two even if rewards tie.
+    second_record = next(r for r in pending if r.baseline_reward is not None)
+    assert second_record.baseline_reward == first.best_score
+    assert second_record.reward == second.best_score

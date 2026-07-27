@@ -44,6 +44,9 @@ from jiuwenswarm.agents.harness.common.rails.symphony import (
 from jiuwenswarm.agents.harness.common.rails.prompt_optimizer_prompt_rail import (
     PromptOptimizerPromptRail,
 )
+from jiuwenswarm.agents.harness.common.rails.prompt_optimizer_review_rail import (
+    PromptOptimizerReviewRail,
+)
 from jiuwenswarm.agents.harness.team.rails.team_skill_storage_policy_rail import (
     TeamSkillStoragePolicyRail,
 )
@@ -69,6 +72,7 @@ PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
 SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
 PROMPT_OPTIMIZER_PROMPT = "swarm.prompt_optimizer_prompt"
+PROMPT_OPTIMIZER_REVIEW = "swarm.prompt_optimizer_review"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
 
 
@@ -144,6 +148,22 @@ def _build_prompt_optimizer_prompt_rail(
     if getattr(context, "role", "") != "leader":
         return None
     return PromptOptimizerPromptRail()
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=PROMPT_OPTIMIZER_REVIEW,
+    description="Leader-only surfacing of unreviewed RLAF-P prompt-optimization results.",
+)
+def _build_prompt_optimizer_review_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> PromptOptimizerReviewRail | None:
+    """Build the prompt-optimizer review-queue rail for the team leader."""
+    _ = params
+    if getattr(context, "role", "") != "leader":
+        return None
+    return PromptOptimizerReviewRail()
 
 
 class RuntimePromptInput(ConstructionInput):
@@ -462,6 +482,7 @@ __all__ = [
     "SKILL_RETRIEVAL_PROMPT",
     "SYMPHONY_ORCHESTRATION_PROMPT",
     "PROMPT_OPTIMIZER_PROMPT",
+    "PROMPT_OPTIMIZER_REVIEW",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
 ]

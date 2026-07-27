@@ -10,7 +10,8 @@ instead of skill selections.
 
 - Package: [`jiuwenswarm/symphony/optimization/`](../../jiuwenswarm/symphony/optimization/)
 - Extension: [`jiuwenswarm/extensions/optimization/`](../../jiuwenswarm/extensions/optimization/)
-- Tool: `optimize_prompt` · Rail: `PromptOptimizerPromptRail`
+- Tools: `optimize_prompt`, `list_pending_prompt_improvements`, `mark_prompt_improvement_applied`
+- Rails: `PromptOptimizerPromptRail` (how to start one), `PromptOptimizerReviewRail` (surfaces unreviewed results)
 - Config: `symphony.optimization` in `config.yaml`
 
 ---
@@ -88,7 +89,41 @@ the `optimizer.optimize` extension RPC and returns the best prompt + reward. Thi
 the requested flow — *Task → optimizer → candidates → parallel execution → reward →
 prompt update → best prompt → continue workflow* — as native JiuwenSwarm pieces.
 
-RPC methods: `optimizer.optimize`, `optimizer.status`, `optimizer.best_prompt`.
+RPC methods: `optimizer.optimize`, `optimizer.status`, `optimizer.best_prompt`,
+`optimizer.pending_improvements`, `optimizer.mark_applied`.
+
+---
+
+## Review queue: closing the discovery gap
+
+A finished optimization only ever produces a *record* — nothing installs the
+winning prompt as a teammate's live system prompt automatically. Left there,
+a result found without a human watching (the leader decided on its own, or a
+developer ran a batch optimization) is easy to lose track of.
+
+Two pieces close that gap:
+
+- **`PromptRecord.baseline_reward` / `.gain`** — every persisted record now
+  remembers the best reward previously known for the same `objective` (`None`
+  the first time), so `gain` (`reward - baseline_reward`) shows the actual
+  improvement, not just an absolute score.
+- **`PromptOptimizerReviewRail`** — a leader-only rail (mirrors
+  `PromptOptimizerPromptRail`) that checks `PromptMemory.pending()` — records
+  with a positive gain that nobody has confirmed applying yet — and, when any
+  exist, injects a short summary into the leader's own context so it can
+  proactively mention them to the user instead of the user needing to already
+  know to ask.
+
+Two more agent tools close the loop:
+
+- `list_pending_prompt_improvements(threshold?)` — the same "review queue"
+  the rail surfaces, callable on demand.
+- `mark_prompt_improvement_applied(record_id)` — call once a human confirms a
+  suggested prompt was actually installed somewhere; the record then drops out
+  of `pending()` and stops being surfaced.
+
+Nothing here auto-applies a prompt — the reward is a proxy signal, not a
+substitute for a human reviewing the actual prompt text before it goes live.
 
 ---
 
