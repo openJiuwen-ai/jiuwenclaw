@@ -1890,7 +1890,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
         try:
             result = restore_session_files(session_id=target_sid, turn_index=turn_index)
-            await channel.send_response(ws, req_id, ok=True, payload=result)
+            # 对齐 _session_rewind_and_restore 与 agent_ws_server 的字段名:
+            # restore_session_files 返回 "errors", 但前端 rewind.ts 读 "restore_errors".
+            payload = {
+                **result,
+                "restore_errors": result.get("errors", []),
+            }
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
         except ValueError as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
         except Exception as e:
