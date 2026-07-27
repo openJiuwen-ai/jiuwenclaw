@@ -246,19 +246,14 @@ class _CaptureJSONClient:
         self.calls.append(kwargs)
         return """
         {
-          "skills": [
+          "resolutions": [
             {
-              "skill_ref": "0:text",
-              "resolutions": [
-                {
-                  "token": "text",
-                  "action": "alias_existing",
-                  "target": "content",
-                  "confidence": 0.9,
-                  "reason": "same content role",
-                  "definition": "Text content alias"
-                }
-              ]
+              "id": "i1",
+              "action": "alias_existing",
+              "target": "content",
+              "confidence": 0.9,
+              "reason": "same content role",
+              "definition": "Text content alias"
             }
           ]
         }
@@ -277,7 +272,7 @@ class _CaptureSchemaClient:
                 {
                     "schemas": [
                         {
-                            "skill_ref": item["source"]["relative_path"],
+                            "skill_ref": item["skill_ref"],
                             "description": "Schema",
                             "inputs": [{"name": "input", "type": "text"}],
                             "outputs": [{"name": "result", "type": "text"}],
@@ -324,23 +319,10 @@ class _CaptureMatchClient:
             {
                 "matches": [
                     {
-                        "candidate_id": "source->target",
-                        "source_id": "source",
-                        "target_id": "target",
-                        "relation_type": "can_feed",
+                        "id": "c1",
+                        "direction": "forward",
                         "confidence": 0.95,
-                        "method": "llm_ontology_match",
-                        "reasons": ["result satisfies input"],
-                        "supporting_fields": {
-                            "port_mappings": [
-                                {
-                                    "source_output": "result",
-                                    "target_input": "input",
-                                }
-                            ],
-                            "source_outputs": ["result"],
-                            "target_inputs": ["input"],
-                        },
+                        "reason": "result satisfies input",
                     }
                 ]
             }
@@ -424,12 +406,16 @@ def _raw_manifest(tmp_path, folder_name):
 
 def _expected_thinking_disabled_overrides():
     return {
-        "extra_body": {"thinking": {"type": "disabled"}},
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
     }
 
 
 @pytest.mark.asyncio
-async def test_schema_extractor_uses_low_reasoning_for_single_extract(monkeypatch, tmp_path):
+async def test_schema_extractor_disables_thinking_for_single_extract(monkeypatch, tmp_path):
     client = _CaptureSchemaClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.fingerprint.extract.extractor.create_llm_client",
@@ -450,11 +436,11 @@ async def test_schema_extractor_uses_low_reasoning_for_single_extract(monkeypatc
 
     assert result.outputs[0].name == "result"
     assert client.calls[0]["request_overrides"] == _expected_thinking_disabled_overrides()
-    assert "reasoning text" in client.calls[0]["system_prompt"]
+    assert "Return JSON only" in client.calls[0]["system_prompt"]
 
 
 @pytest.mark.asyncio
-async def test_schema_extractor_uses_low_reasoning_for_many_paths(monkeypatch, tmp_path):
+async def test_schema_extractor_disables_thinking_for_many_paths(monkeypatch, tmp_path):
     client = _CaptureSchemaClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.fingerprint.extract.extractor.create_llm_client",
@@ -483,11 +469,11 @@ async def test_schema_extractor_uses_low_reasoning_for_many_paths(monkeypatch, t
     assert client.calls[0]["request_overrides"] == _expected_thinking_disabled_overrides()
     assert client.calls[1]["method"] == "one"
     assert client.calls[1]["request_overrides"] == _expected_thinking_disabled_overrides()
-    assert "reasoning text" in client.calls[1]["system_prompt"]
+    assert "Return JSON only" in client.calls[1]["system_prompt"]
 
 
 @pytest.mark.asyncio
-async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypatch):
+async def test_graph_matcher_disables_thinking_for_forward_and_reverse(monkeypatch):
     client = _CaptureMatchClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.graph.matcher.openai.create_llm_client",
@@ -560,7 +546,7 @@ async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypa
         _expected_thinking_disabled_overrides(),
         _expected_thinking_disabled_overrides(),
     ]
-    assert all("reasoning text" in call["system_prompt"] for call in client.calls)
+    assert all("Return JSON only" in call["system_prompt"] for call in client.calls)
 
 
 @pytest.mark.asyncio
@@ -1593,7 +1579,7 @@ async def test_normalizer_can_exclude_candidate_from_io_name_vocab(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_llm_io_name_resolver_uses_low_reasoning_and_compact_vocab(monkeypatch):
+async def test_llm_io_name_resolver_disables_thinking_and_uses_compact_vocab(monkeypatch):
     client = _CaptureJSONClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.fingerprint.normalize.io_name_resolver.create_llm_client",
@@ -1638,20 +1624,18 @@ async def test_llm_io_name_resolver_uses_low_reasoning_and_compact_vocab(monkeyp
 
     assert result["text"].normalized_value == "content"
     call = client.calls[0]
-    assert call["request_overrides"] == {
-        "extra_body": {"thinking": {"type": "disabled"}},
-    }
+    assert call["request_overrides"] == _expected_thinking_disabled_overrides()
     payload = json.loads(call["user_content"])
     assert "rules" not in payload
-    assert payload["vocabulary"]["terms"] == [
+    assert payload["vocabulary"] == [
         {
             "name": "content",
             "definition": "Generated written content",
             "aliases": ["body"],
         }
     ]
-    assert "examples" not in payload["vocabulary"]["terms"][0]
-    assert "count" not in payload["vocabulary"]["terms"][0]
+    assert "examples" not in payload["vocabulary"][0]
+    assert "count" not in payload["vocabulary"][0]
 
 
 @pytest.mark.asyncio

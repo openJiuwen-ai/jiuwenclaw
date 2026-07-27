@@ -296,8 +296,14 @@ from jiuwenswarm.common.utils import (
     get_env_file,
     get_prompt_attachment_dir,
     get_runtime_state_path,
-    get_user_workspace_dir,
     reset_free_search_runtime_flags,
+)
+from jiuwenswarm.server.runtime.llm_io_trace import (
+    LLM_TRACE_ITERATION,
+    LLM_TRACE_MODEL_NAME,
+    LLM_TRACE_REQUEST_ID,
+    LLM_TRACE_SESSION_ID,
+    log_chat_final,
 )
 
 load_dotenv(dotenv_path=get_env_file(), override=True)
@@ -616,6 +622,41 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         return None
 
 
+def _build_subagent_context_processor_rail(
+    config: dict[str, Any] | None,
+) -> ContextProcessorRail | None:
+    """Build configured ContextProcessorRail for TaskTool/spawn/fork subagents.
+
+    A-chain counterpart of enterprise ``minimal=True`` context rail: follow
+    ``react.context_engine_config`` thresholds when enabled, without mounting
+    ContextAssembleRail (tools/context section injection).
+    """
+    if not isinstance(config, dict):
+        return None
+    raw_ctx = config.get("context_engine_config", {})
+    if not isinstance(raw_ctx, dict) or not raw_ctx.get("enabled", False):
+        return None
+    return _build_context_processor_rail(config)
+
+
+def _merge_subagent_rails_with_context_processor(
+    base_rails: list[Any] | None,
+    config: dict[str, Any] | None,
+) -> list[Any] | None:
+    """Append configured ContextProcessorRail to *base_rails* when compression is on.
+
+    Returns *base_rails* unchanged (including ``None``) when disabled / unavailable.
+    """
+    ce_rail = _build_subagent_context_processor_rail(config)
+    if ce_rail is None:
+        return base_rails
+    merged = list(base_rails or [])
+    if any(isinstance(rail, ContextProcessorRail) for rail in merged):
+        return merged
+    merged.append(ce_rail)
+    return merged
+
+
 async def ensure_persistent_checkpointer() -> None:
     """Ensure the process-wide default checkpointer uses sqlite persistence."""
     global _PERSISTENT_CHECKPOINTER_READY
@@ -886,7 +927,6 @@ class JiuWenSwarmDeepAdapter:
         self._last_models_config_fingerprint: str | None = None
         self._registered_mcp_server_ids: set[str] = set()
         self._registered_mcp_servers: dict[str, McpServerConfig] = {}
-        self._browser_headless_setting: bool | None = None
         self._auto_harness_service: Optional[AutoHarnessService] = None
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
@@ -1640,9 +1680,12 @@ class JiuWenSwarmDeepAdapter:
         return value in {"1", "true", "yes", "on"}
 
     @staticmethod
-    def _resolve_managed_browser_binary_from_config() -> str:
+    def _resolve_managed_browser_binary_from_config(
+        config_base: dict[str, Any] | None = None,
+    ) -> str:
         """Resolve managed-browser binary from saved browser config."""
-        config_base = get_config()
+        if config_base is None:
+            config_base = get_config()
         if not isinstance(config_base, dict):
             return ""
         config = resolve_env_vars(config_base)
@@ -1669,10 +1712,13 @@ class JiuWenSwarmDeepAdapter:
         return ""
 
     @staticmethod
-    def _resolve_headless_from_config() -> bool:
+    def _resolve_headless_from_config(
+        config_base: dict[str, Any] | None = None,
+    ) -> bool:
         """Read browser.headless from config (default True = headless)."""
         try:
-            config_base = get_config()
+            if config_base is None:
+                config_base = get_config()
             if not isinstance(config_base, dict):
                 return True
             browser_cfg = config_base.get("browser", {})
@@ -1682,6 +1728,40 @@ class JiuWenSwarmDeepAdapter:
             return bool(headless) if isinstance(headless, bool) else True
         except Exception:
             return True
+
+    def _sync_browser_runtime_environment(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> None:
+        """Synchronize browser launch settings before browser runtimes are built."""
+        headless = self._resolve_headless_from_config(config_base)
+        mcp_args_raw = (
+            os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest"
+        ).strip()
+        mcp_args = (
+            mcp_args_raw.split()
+            if mcp_args_raw
+            else ["-y", "@playwright/mcp@latest"]
+        )
+        mcp_args = [arg for arg in mcp_args if arg != "--headless"]
+        if headless:
+            mcp_args.append("--headless")
+            os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
+        else:
+            os.environ.pop("BROWSER_MANAGED_ARGS", None)
+        os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(mcp_args)
+        chrome_path = self._resolve_managed_browser_binary_from_config(config_base)
+        if chrome_path:
+            os.environ["BROWSER_MANAGED_BINARY"] = chrome_path
+        else:
+            os.environ.pop("BROWSER_MANAGED_BINARY", None)
+
+        logger.info(
+            "[%s] browser runtime config: headless=%s, chrome_path=%s",
+            type(self).__name__,
+            headless,
+            chrome_path or "<auto>",
+        )
 
     @staticmethod
     def _is_subagent_enabled(subagent_cfg: Any) -> bool:
@@ -1710,6 +1790,10 @@ class JiuWenSwarmDeepAdapter:
         subagents: list[Any] = []
         should_add_general_purpose = False
 
+        # TaskTool/spawn subagents: mount configured A-chain compression when enabled
+        # (enterprise MR-1147 intent; no ContextAssembleRail ≈ minimal).
+        # Fresh ContextProcessorRail per subagent (rail may hold per-agent state).
+
         if isinstance(subagents_cfg, dict):
             general_agent_cfg = subagents_cfg.get("general_agent")
             if self._is_subagent_enabled(general_agent_cfg):
@@ -1717,11 +1801,19 @@ class JiuWenSwarmDeepAdapter:
 
             research_agent_cfg = subagents_cfg.get("research_agent")
             if self._is_subagent_enabled(research_agent_cfg):
+                research_rails = None
+                research_ce = _build_subagent_context_processor_rail(react_cfg)
+                if research_ce is not None:
+                    # Preserve research_agent factory default FileSystemRail when overriding rails.
+                    from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+
+                    research_rails = [FileSystemRail(), research_ce]
                 subagents.append(
                     build_research_agent_config(
                         model,
                         workspace=workspace,
                         language=resolved_language,
+                        rails=research_rails,
                         max_iterations=parse_int(
                             research_agent_cfg.get("max_iterations"),
                             react_cfg.get("max_iterations", 15),
@@ -1733,53 +1825,9 @@ class JiuWenSwarmDeepAdapter:
             subagents_cfg.get("browser_agent") if isinstance(subagents_cfg, dict) else {}
         )
 
-        # Apply headless setting unconditionally — PLAYWRIGHT_MCP_ARGS must be set
-        # even when the main-agent browser subagent is disabled, because swarm members
-        # also spawn @playwright/mcp subprocesses that read this env var at spec-build time.
-        headless = self._resolve_headless_from_config()
-        # @playwright/mcp@latest uses --headless CLI flag (not an env var).
-        # Rebuild PLAYWRIGHT_MCP_ARGS to add or strip --headless as needed.
-        _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
-        _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
-        _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
-        if headless:
-            _mcp_args_list.append("--headless")
-            os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
-            # Purge any stale managed-browser profile whose extra_args lack
-            # --headless=new. The managed driver reuses a persisted profile
-            # by name and would inherit its stale extra_args=[] otherwise.
-            try:
-                from pathlib import Path as _Path
-                from jiuwenswarm.common.utils import get_user_workspace_dir as _get_ws
-                _profile_store = _Path(
-                    os.getenv("BROWSER_PROFILE_STORE_PATH", "").strip()
-                    or str(_get_ws() / ".browser" / "profiles.json")
-                ).expanduser()
-                if _profile_store.exists():
-                    _profile_store.unlink()
-                    logger.info(
-                        "[JiuWenSwarmDeepAdapter] cleared stale browser profile store "
-                        "for headless mode: %s",
-                        _profile_store,
-                    )
-            except Exception as _e:
-                logger.debug(
-                    "[JiuWenSwarmDeepAdapter] could not clear browser profile store: %s", _e
-                )
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] browser headless=True → "
-                "BROWSER_MANAGED_ARGS=--headless=new, PLAYWRIGHT_MCP_ARGS=%s",
-                " ".join(_mcp_args_list),
-            )
-        else:
-            os.environ.pop("BROWSER_MANAGED_ARGS", None)
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] browser headless=False → "
-                "headed mode (BROWSER_MANAGED_ARGS cleared, PLAYWRIGHT_MCP_ARGS=%s)",
-                " ".join(_mcp_args_list),
-            )
-        os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
-        self._browser_headless_setting = headless
+        # Swarm members and the main browser subagent read these variables when
+        # their browser runtimes are built.
+        self._sync_browser_runtime_environment(config_base)
 
         browser_enabled = self._browser_runtime_enabled()
         if browser_enabled:
@@ -1789,62 +1837,13 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
                     "defaulting to managed mode"
                 )
-            if not str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip():
-                chrome_path = self._resolve_managed_browser_binary_from_config()
-                if chrome_path:
-                    os.environ["BROWSER_MANAGED_BINARY"] = chrome_path
-                    logger.info(
-                        "[JiuWenSwarmDeepAdapter] using browser.chrome_path for managed browser: %s",
-                        chrome_path,
-                    )
-            headless = self._resolve_headless_from_config()
-            # @playwright/mcp@latest uses --headless CLI flag (not an env var).
-            # Rebuild PLAYWRIGHT_MCP_ARGS to add or strip --headless as needed.
-            _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
-            _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
-            _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
-            if headless:
-                os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
-                _mcp_args_list.append("--headless")
-                # Purge any stale managed-browser profile that was persisted without
-                # --headless=new. If the profile store exists it will be read by the
-                # managed driver and its extra_args (empty []) will override
-                # BROWSER_MANAGED_ARGS, causing Chrome to launch headed regardless.
-                try:
-                    _profile_store = Path(
-                        os.getenv("BROWSER_PROFILE_STORE_PATH", "").strip()
-                        or str(get_user_workspace_dir() / ".browser" / "profiles.json")
-                    ).expanduser()
-                    if _profile_store.exists():
-                        _profile_store.unlink()
-                        logger.info(
-                            "[JiuWenSwarmDeepAdapter] cleared stale browser profile store "
-                            "for headless mode: %s",
-                            _profile_store,
-                        )
-                except Exception as _e:
-                    logger.debug(
-                        "[JiuWenSwarmDeepAdapter] could not clear browser profile store: %s", _e
-                    )
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] browser headless=True → "
-                    "BROWSER_MANAGED_ARGS=--headless=new, PLAYWRIGHT_MCP_ARGS=%s",
-                    " ".join(_mcp_args_list),
-                )
-            else:
-                os.environ.pop("BROWSER_MANAGED_ARGS", None)
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] browser headless=False → "
-                    "headed mode (BROWSER_MANAGED_ARGS cleared, PLAYWRIGHT_MCP_ARGS=%s)",
-                    " ".join(_mcp_args_list),
-                )
-            os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
-            self._browser_headless_setting = headless
+            browser_rails = _merge_subagent_rails_with_context_processor(None, react_cfg)
             subagents.append(
                 build_browser_agent_config(
                     model,
                     workspace=workspace,
                     language=resolved_language,
+                    rails=browser_rails,
                     max_iterations=parse_int(
                         (
                             browser_agent_cfg.get("max_iterations")
@@ -1871,6 +1870,7 @@ class JiuWenSwarmDeepAdapter:
                 _load_custom_subagents(
                     self._workspace_dir, subagents_cfg, model, workspace,
                     __name__, model_cache=self._model_cache,
+                    react_config=react_cfg,
                 )
             )
         except Exception:
@@ -2770,13 +2770,18 @@ class JiuWenSwarmDeepAdapter:
         requested = (requested_model_name or "").strip()
         if not requested:
             return self._model
-        # 精确匹配（#index 格式或纯 model_name key）
+        # 精确匹配（#index 格式，或已注册纯 model_name key 的默认模型）
         if requested in self._model_cache:
             return self._model_cache[requested]
-        # 回退：按纯 model_name 查找 is_default=true 的条目
-        name_to_keys = self._model_name_to_keys
-        if requested in name_to_keys and requested in self._model_cache:
-            return self._model_cache[requested]
+        # 回退：非默认模型只以 {model_name}#{index} 注册在 _model_cache 里，没有纯
+        # model_name 的 key；这里按 _model_name_to_keys 里登记的真实 cache key 去查，
+        # 而不是重复判断上面已知为 False 的 `requested in self._model_cache`
+        # （旧代码在此处写重了，导致非默认模型永远查不到，静默 fallback 回默认模型）。
+        keys = self._model_name_to_keys.get(requested)
+        if keys:
+            resolved = self._model_cache.get(keys[0])
+            if resolved is not None:
+                return resolved
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
@@ -4792,18 +4797,6 @@ class JiuWenSwarmDeepAdapter:
         # 加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
-        # Detect headless mode change before rebuilding subagents (which updates the env).
-        # _build_configured_subagents (called below) also sets self._browser_headless_setting,
-        # so capture the OLD value now.
-        _old_headless = self._browser_headless_setting
-        _new_browser_cfg = config_base.get("browser", {}) if isinstance(config_base, dict) else {}
-        _raw_headless = _new_browser_cfg.get("headless", True) if isinstance(_new_browser_cfg, dict) else True
-        _new_headless = bool(_raw_headless) if isinstance(_raw_headless, bool) else True
-        _headless_changed = (
-            _old_headless is not None
-            and _old_headless != _new_headless
-        )
-
         deep_cfg = self._make_deep_agent_config(
             model=model,
             config=config,
@@ -4819,89 +4812,6 @@ class JiuWenSwarmDeepAdapter:
             self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
         self._commit_reload_fingerprints(reload_fingerprints)
         self._sync_active_evolution_review_agent_after_reload()
-
-        if _headless_changed:
-            # The running playwright_official_stdio subprocess was started with the old
-            # headless args. Kill it so the next browser task spawns a fresh one with
-            # the updated PLAYWRIGHT_MCP_ARGS (set by _build_configured_subagents above).
-            await self._unregister_mcp_server("playwright_official_stdio")
-            # Kill the managed Chrome process so ManagedBrowserDriver.start() doesn't
-            # reuse it. start() checks _is_endpoint_ready() BEFORE kill_existing, so if
-            # Chrome is alive on port 9333 it returns the stale endpoint immediately,
-            # ignoring the new headless/headed args entirely.
-            _managed_port = int((os.getenv("BROWSER_MANAGED_PORT") or "9333").strip() or "9333")
-            try:
-                if os.name == "nt":
-                    _netstat_exe = which("netstat") or r"C:\Windows\System32\netstat.exe"
-                    _netstat = subprocess.run(
-                        [_netstat_exe, "-ano"],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    for _line in _netstat.stdout.splitlines():
-                        _parts = _line.split()
-                        if (
-                            len(_parts) >= 5
-                            and _parts[3] == "LISTENING"
-                            and _parts[1].endswith(f":{_managed_port}")
-                        ):
-                            _pid = _parts[4]
-                            if _pid.isdigit() and int(_pid) > 0:
-                                _taskkill_exe = which("taskkill") or r"C:\Windows\System32\taskkill.exe"
-                                subprocess.run(
-                                    [_taskkill_exe, "/F", "/PID", _pid],
-                                    capture_output=True, timeout=5,
-                                )
-                                logger.info(
-                                    "[JiuWenSwarmDeepAdapter] killed managed Chrome "
-                                    "PID=%s on port %s (headless %s→%s)",
-                                    _pid, _managed_port, _old_headless, _new_headless,
-                                )
-                else:
-                    _lsof_exe = which("lsof") or "/usr/bin/lsof"
-                    _lsof = subprocess.run(
-                        [_lsof_exe, "-ti", f"tcp:{_managed_port}"],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    for _pid_str in _lsof.stdout.strip().splitlines():
-                        if _pid_str.strip().isdigit():
-                            _kill_exe = which("kill") or "/bin/kill"
-                            subprocess.run(
-                                [_kill_exe, "-9", _pid_str.strip()],
-                                capture_output=True, timeout=5,
-                            )
-                            logger.info(
-                                "[JiuWenSwarmDeepAdapter] killed managed Chrome "
-                                "PID=%s on port %s (headless %s→%s)",
-                                _pid_str.strip(), _managed_port, _old_headless, _new_headless,
-                            )
-            except Exception as _kill_err:
-                logger.debug(
-                    "[JiuWenSwarmDeepAdapter] could not kill managed Chrome on port %s: %s",
-                    _managed_port, _kill_err,
-                )
-            # Also purge any stale managed-browser profile whose extra_args may still
-            # encode the old headless=new flag (or lack it).
-            try:
-                _profile_store = Path(
-                    os.getenv("BROWSER_PROFILE_STORE_PATH", "").strip()
-                    or str(get_user_workspace_dir() / ".browser" / "profiles.json")
-                ).expanduser()
-                if _profile_store.exists():
-                    _profile_store.unlink()
-                    logger.info(
-                        "[JiuWenSwarmDeepAdapter] cleared stale browser profile store "
-                        "on headless mode change (%s→%s): %s",
-                        _old_headless, _new_headless, _profile_store,
-                    )
-            except Exception as _e:
-                logger.debug(
-                    "[JiuWenSwarmDeepAdapter] could not clear browser profile store: %s", _e
-                )
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] browser headless changed %s→%s; "
-                "playwright_official_stdio subprocess will restart on next browser task",
-                _old_headless, _new_headless,
-            )
 
         await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
 
@@ -7746,6 +7656,12 @@ class JiuWenSwarmDeepAdapter:
                     )
                 else:
                     content = slash_result.get("output", str(slash_result))
+                    log_chat_final(
+                        session_id=session_id,
+                        request_id=rid or "",
+                        iteration=LLM_TRACE_ITERATION.get(),
+                        model_name=LLM_TRACE_MODEL_NAME.get() or self._resolve_model_name(),
+                    )
                     yield AgentResponseChunk(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
@@ -7809,6 +7725,10 @@ class JiuWenSwarmDeepAdapter:
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
         interaction_stream_abort = True
+        token_trace_sid = LLM_TRACE_SESSION_ID.set(session_id)
+        token_trace_rid = LLM_TRACE_REQUEST_ID.set(rid or "")
+        token_trace_iter = LLM_TRACE_ITERATION.set(0)
+        token_trace_model = LLM_TRACE_MODEL_NAME.set(self._resolve_model_name())
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -8256,6 +8176,13 @@ class JiuWenSwarmDeepAdapter:
                     if self._goal_record_is_active()
                     else "chat.final"
                 )
+                if final_event_type == "chat.final":
+                    log_chat_final(
+                        session_id=session_id,
+                        request_id=rid or "",
+                        iteration=LLM_TRACE_ITERATION.get(),
+                        model_name=LLM_TRACE_MODEL_NAME.get(),
+                    )
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -8334,6 +8261,10 @@ class JiuWenSwarmDeepAdapter:
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
+            LLM_TRACE_SESSION_ID.reset(token_trace_sid)
+            LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
+            LLM_TRACE_ITERATION.reset(token_trace_iter)
+            LLM_TRACE_MODEL_NAME.reset(token_trace_model)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
             # Always clean up rail state — process_interrupt's
@@ -8514,9 +8445,23 @@ class JiuWenSwarmDeepAdapter:
                         return None
 
                     if _has_streamed_content and not is_chunked:
+                        # When llm_output has already streamed the full user-facing text,
+                        # keep chat.final as a completion marker; still record the boundary.
+                        log_chat_final(
+                            session_id=LLM_TRACE_SESSION_ID.get(),
+                            request_id=LLM_TRACE_REQUEST_ID.get(),
+                            iteration=LLM_TRACE_ITERATION.get(),
+                            model_name=LLM_TRACE_MODEL_NAME.get(),
+                        )
                         return {"event_type": "chat.final", "content": content}
                     if is_chunked:
                         return {"event_type": "chat.delta", "content": content}
+                    log_chat_final(
+                        session_id=LLM_TRACE_SESSION_ID.get(),
+                        request_id=LLM_TRACE_REQUEST_ID.get(),
+                        iteration=LLM_TRACE_ITERATION.get(),
+                        model_name=LLM_TRACE_MODEL_NAME.get(),
+                    )
                     return {"event_type": "chat.final", "content": content}
 
                 if chunk_type == "tool_call":
@@ -9937,6 +9882,7 @@ def _agent_def_to_subagent_config(
     model: Any,
     workspace: str,
     model_cache: dict[str, Any] | None = None,
+    react_config: dict[str, Any] | None = None,
 ) -> SubAgentConfig:
     """将 AgentDefinition 转换为 SubAgentConfig，用于 SubagentRail 注册。
 
@@ -9945,6 +9891,7 @@ def _agent_def_to_subagent_config(
         model: 父 agent 的 Model 实例（作为默认模型）
         workspace: 工作空间路径
         model_cache: 模型缓存字典（用于按名称查找指定模型）
+        react_config: react 配置段；启用上下文压缩时挂载 ContextProcessorRail
     """
     from openjiuwen.harness.schema.config import SubAgentConfig
 
@@ -9971,6 +9918,7 @@ def _agent_def_to_subagent_config(
         skills=agent_def.skills,
         max_iterations=agent_def.max_iterations,
         enable_task_loop=True,
+        rails=_merge_subagent_rails_with_context_processor(None, react_config),
     )
 
 
@@ -9992,13 +9940,14 @@ def _load_custom_subagents(
         model: 模型配置
         workspace: 工作空间路径
         logger_name: 日志记录器名称
-        **kwargs: 额外参数，支持 model_cache 等
+        **kwargs: 额外参数，支持 model_cache / react_config 等
     """
     from jiuwenswarm.server.runtime.agent_config_service import AgentConfigService
 
     _logger = logging.getLogger(logger_name)
     agent_service = AgentConfigService(workspace_dir)
     model_cache: dict | None = kwargs.get("model_cache")
+    react_config: dict | None = kwargs.get("react_config")
     result: list[Any] = []
     for agent_def in agent_service.list_agents():
         if agent_def.source == "builtin":
@@ -10007,7 +9956,9 @@ def _load_custom_subagents(
         # 只有显式 enabled: true 才加载
         if not (isinstance(subagent_cfg, dict) and bool(subagent_cfg.get("enabled", False))):
             continue
-        custom_spec = _agent_def_to_subagent_config(agent_def, model, workspace, model_cache)
+        custom_spec = _agent_def_to_subagent_config(
+            agent_def, model, workspace, model_cache, react_config=react_config
+        )
         custom_spec.factory_kwargs = {"auto_create_workspace": False}
         result.append(custom_spec)
         _logger.info("loaded custom agent '%s' from %s", agent_def.name, agent_def.source)

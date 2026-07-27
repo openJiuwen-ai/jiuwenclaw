@@ -48,7 +48,9 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
     _CRON_TOOL_CHANNEL_ID,
     _agent_def_to_subagent_config,
+    _build_subagent_context_processor_rail,
     _deep_agent_kv_cache_affinity_config,
+    _merge_subagent_rails_with_context_processor,
     parse_int,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
@@ -392,21 +394,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     def _resolve_runtime_language(self) -> str:
         """Resolve runtime prompt language for code profile rails."""
         return self._runtime_language_override or "en"
-
-    def _resolve_output_language(self) -> str:
-        """Resolve user's preferred output language for runtime_state display.
-
-        Distinct from prompt/runtime language, which defaults to "en" in code mode.
-        Returns the normalized language code ("cn"/"en") based on
-        config.yaml preferred_language, so the Language section injected
-        by RuntimePromptRail can instruct the LLM to respond in the
-        user's chosen language.
-        """
-        config_base = get_config()
-        raw = str(config_base.get("preferred_language", "zh")).strip().lower()
-        if raw == "zh":
-            raw = "cn"
-        return resolve_language(raw)
 
     def _resolve_output_language(self) -> str:
         """Resolve user's preferred output language for runtime_state display.
@@ -979,14 +966,24 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         resolved_language = self._resolve_runtime_language()
         workspace = self._workspace_dir or "./"
         subagents: list[Any] = []
+        self._sync_browser_runtime_environment(config_base)
+        # TaskTool subagents: configured A-chain compression when enabled (MR-1147 intent).
+        # Fresh ContextProcessorRail per subagent.
 
         # ── 固定挂载：explore_agent（Code 模式核心子代理，始终启用）──
         if not self._subagent_list_has_name(subagents, "explore_agent"):
             explore_agent_cfg = subagents_cfg.get("explore_agent") if isinstance(subagents_cfg, dict) else None
+            explore_rails = None
+            explore_ce = _build_subagent_context_processor_rail(react_cfg)
+            if explore_ce is not None:
+                from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+
+                explore_rails = [FileSystemRail(), explore_ce]
             explore_spec = build_explore_agent_config(
                 model=model,
                 workspace=workspace,
                 language=resolved_language,
+                rails=explore_rails,
                 max_iterations=parse_int(
                     explore_agent_cfg.get("max_iterations") if isinstance(explore_agent_cfg, dict) else None,
                     react_cfg.get("max_iterations", 15),
@@ -998,10 +995,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # ── 固定挂载：plan_agent（Code 模式核心子代理，始终启用）──
         if not self._subagent_list_has_name(subagents, "plan_agent"):
             plan_agent_cfg = subagents_cfg.get("plan_agent") if isinstance(subagents_cfg, dict) else None
+            plan_rails = None
+            plan_ce = _build_subagent_context_processor_rail(react_cfg)
+            if plan_ce is not None:
+                from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+
+                plan_rails = [FileSystemRail(), plan_ce]
             plan_spec = build_plan_agent_config(
                 model=model,
                 workspace=workspace,
                 language=resolved_language,
+                rails=plan_rails,
                 max_iterations=parse_int(
                     plan_agent_cfg.get("max_iterations") if isinstance(plan_agent_cfg, dict) else None,
                     react_cfg.get("max_iterations", 15),
@@ -1021,6 +1025,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     # SysOperationRail is default rail for code_agent;
                     # passing rails overrides defaults, must include it explicitly
                     code_agent_rails = [SysOperationRail(), coding_memory_rail]
+                code_agent_rails = _merge_subagent_rails_with_context_processor(
+                    code_agent_rails, react_cfg
+                )
                 code_spec = build_code_agent_config(
                     model,
                     workspace=workspace,
@@ -1037,30 +1044,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             # browser_agent
             browser_agent_cfg = subagents_cfg.get("browser_agent")
 
-            # Headless setup is unconditional: swarm members also spawn @playwright/mcp
-            # subprocesses and ManagedBrowserDriver both read BROWSER_MANAGED_ARGS.
-            # This must run regardless of whether the main-agent browser subagent is enabled.
-            headless = self._resolve_headless_from_config()
-            _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
-            _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
-            _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
-            if headless:
-                _mcp_args_list.append("--headless")
-                os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] browser headless=True → "
-                    "BROWSER_MANAGED_ARGS=--headless=new, PLAYWRIGHT_MCP_ARGS=%s",
-                    " ".join(_mcp_args_list),
-                )
-            else:
-                os.environ.pop("BROWSER_MANAGED_ARGS", None)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] browser headless=False → "
-                    "headed mode (BROWSER_MANAGED_ARGS cleared)",
-                )
-            os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
-            self._browser_headless_setting = headless
-
             browser_enabled = self._browser_runtime_enabled()
             if browser_enabled:
                 if not str(os.getenv("BROWSER_DRIVER") or "").strip():
@@ -1069,18 +1052,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                         "[JiuwenSwarmCodeAdapter] browser subagent enabled without BROWSER_DRIVER; "
                         "defaulting to managed mode"
                     )
-                if not str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip():
-                    chrome_path = self._resolve_managed_browser_binary_from_config()
-                    if chrome_path:
-                        os.environ["BROWSER_MANAGED_BINARY"] = chrome_path
-                        logger.info(
-                            "[JiuwenSwarmCodeAdapter] using browser.chrome_path for managed browser: %s",
-                            chrome_path,
-                        )
                 browser_spec = build_browser_agent_config(
                     model,
                     workspace=workspace,
                     language=resolved_language,
+                    rails=_merge_subagent_rails_with_context_processor(None, react_cfg),
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
                         react_cfg.get("max_iterations", 15),
@@ -1214,7 +1190,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         resolved_channel = str(runtime_config.channel_id or
                                self._resolve_prompt_channel(runtime_config.session_id) or "web").strip() or "web"
         if self._runtime_prompt_rail:
-            self._runtime_prompt_rail.set_language(resolved_language)
+            # Language section (response language) must follow the user's
+            # preferred language, not the code-mode "en" which only governs
+            # system-prompt scaffolding (time/runtime/env sections).
+            self._runtime_prompt_rail.set_language(self._resolve_output_language())
             self._runtime_prompt_rail.set_force_english(self._force_english_runtime_prompt)
             self._runtime_prompt_rail.set_channel(resolved_channel)
             self._runtime_prompt_rail.set_model_name(self._resolve_model_name())

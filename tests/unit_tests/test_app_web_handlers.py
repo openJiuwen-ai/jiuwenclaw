@@ -87,6 +87,63 @@ class FakeHeartbeatService:
         return dict(self.config)
 
 
+@pytest.mark.asyncio
+async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = FakeWebChannel()
+    agent_client = object()
+    saved_configs: list[dict] = []
+    lifecycle_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_browser_in_config",
+        lambda config: saved_configs.append(config),
+    )
+
+    async def fake_clear(client):
+        lifecycle_calls.append(("reload", client))
+
+    async def fake_restart(client):
+        lifecycle_calls.append(("restart", client))
+
+    monkeypatch.setattr(app_web_handlers, "_clear_agent_config_cache", fake_clear)
+    monkeypatch.setattr(
+        app_web_handlers,
+        "_restart_agent_browser_runtime",
+        fake_restart,
+    )
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["path.set"](
+        object(),
+        "req-path",
+        {"chrome_path": " C:\\Chrome\\chrome.exe ", "headless": False},
+        "sess-1",
+    )
+
+    assert saved_configs == [
+        {"chrome_path": "C:\\Chrome\\chrome.exe", "headless": False}
+    ]
+    assert lifecycle_calls == [
+        ("reload", agent_client),
+        ("restart", agent_client),
+    ]
+    assert channel.responses[-1] == {
+        "id": "req-path",
+        "ok": True,
+        "payload": {
+            "chrome_path": "C:\\Chrome\\chrome.exe",
+            "headless": False,
+        },
+        "error": None,
+        "code": None,
+    }
+
+
 class FakeUpdaterService:
     def get_runtime_config(self):
         return {"release_api_type": "gitcode", "release_api_url": ""}

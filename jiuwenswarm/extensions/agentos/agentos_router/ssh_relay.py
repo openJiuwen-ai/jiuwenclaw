@@ -6,7 +6,7 @@ Bridges a northbound ``SshRelaySession`` (accepted by the gateway
 ``SshChannel`` as an interactive shell) to the YuanRong frontend SSH
 endpoint::
 
-    ssh -p 2222 'yr:instance:<instance_id>:user=agentos'@<frontend-host>
+    ssh -p 2222 'yr:instance:<instance_id>'@<frontend-host>
 
 ``<instance_id>`` is the instance id returned by the YuanRong agent
 create API (``POST /api/agent``), resolved by the AgentOS Router.
@@ -23,7 +23,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEFAULT_SSH_PORT = 2222
-DEFAULT_SSH_USER_TEMPLATE = "yr:instance:{instance}:user=agentos"
+DEFAULT_SSH_USER_TEMPLATE = "yr:instance:{instance}"
 _RELAY_BUFFER_SIZE = 32768
 
 

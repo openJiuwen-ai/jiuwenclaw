@@ -214,16 +214,12 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
   }, [isLast, submit, goNextPage]);
 
   const handleSkip = useCallback(() => {
-    // 若当前页已经有选择/自定义输入（哪怕选的就是"跳过"这个选项），跳过按钮
-    // 等价于确定：原样提交/翻页，绝不能清空用户已经做出的选择（这正是本次要修的 bug）。
-    const hasAnswer = st.selected.length > 0 || st.custom.trim().length > 0;
-    if (hasAnswer) {
-      if (isLast) submit(true);
-      else goNextPage();
-      return;
-    }
-    // 当前页确实什么都没选：显式标记为"已跳过"，后续 answerFor/buildSummary 会用
-    // SKIPPED_ANSWER_TEXT 如实告知后端，而不是套用"默认选第一项"的兜底逻辑。
+    // 跳过：无论当前页此前是否已经选中过某个选项/填过自定义输入，点击"跳过"
+    // 都必须视为"这道题被跳过了"，绝不能把之前的选择原样带出去（bug011）。
+    // 显式标记为"已跳过"，后续 answerFor/buildSummary 会用 SKIPPED_ANSWER_TEXT
+    // 如实告知后端，而不是套用"默认选第一项"的兜底逻辑——这一点是本次修复的核心，
+    // 务必确保 skippedNoSelection 分支在 answerFor 里排在"默认选第一项"兜底之前
+    // （见 answerFor 实现），不会被兜底逻辑抢先命中。
     // patch() 触发的 setStates 是异步的，若末页直接 submit 会读到旧值，
     // 因此显式构造覆盖态传给 submit，避免依赖尚未生效的 state。
     const skippedState: PageState = { ...emptyPage(), skippedNoSelection: true };
@@ -231,7 +227,7 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
     patch(() => skippedState);
     if (isLast) submit(true, overridden);
     else goNextPage();
-  }, [st, states, page, patch, isLast, submit, goNextPage]);
+  }, [states, page, patch, isLast, submit, goNextPage]);
 
   const handleCancel = useCallback(() => {
     // 取消整轮：不管当前页/其它页有没有选择、选了什么，统一对每道题回传明确的

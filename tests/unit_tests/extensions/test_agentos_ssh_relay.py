@@ -12,7 +12,10 @@ import pytest
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import AgentManager
-from jiuwenswarm.extensions.agentos.agentos_router.config import load_router_config
+from jiuwenswarm.extensions.agentos.agentos_router.config import (
+    SshChannelEndpoint,
+    load_router_config,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
 from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
     DEFAULT_SSH_USER_TEMPLATE,
@@ -59,9 +62,16 @@ def _ssh_envelope(
 class StubSshRelay:
     """Records relay invocations and resolves the session like the real relay."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        backend_host: str = "frontend.yuanrong.test",
+        backend_port: int = 2222,
+    ) -> None:
         self.ran: list[tuple[str, str]] = []
         self.failed: list[tuple[str, str]] = []
+        self.backend_host = backend_host
+        self.backend_port = backend_port
 
     def backend_username(self, instance_id: str) -> str:
         return DEFAULT_SSH_USER_TEMPLATE.format(instance=instance_id)
@@ -88,7 +98,7 @@ def test_backend_username_uses_yr_instance_template() -> None:
     )
     assert (
         relay.backend_username("inst-42")
-        == "yr:instance:inst-42:user=agentos"
+        == "yr:instance:inst-42"
     )
     assert relay.backend_host == "frontend.yuanrong.test"
     assert relay.backend_port == 2222
@@ -149,11 +159,40 @@ def test_load_router_config_parses_ssh_block() -> None:
             "agentos": {
                 "ssh": {"port": 2222},
             },
-        }
+        },
+        "channels": {
+            "ssh": {
+                "enabled": True,
+                "listen_host": "192.168.1.10",
+                "listen_port": 2222,
+            }
+        },
     }
     loaded = load_router_config(config)
     assert loaded.ssh.port == 2222
     assert loaded.ssh.user_template == DEFAULT_SSH_USER_TEMPLATE
+    assert loaded.ssh_channel == SshChannelEndpoint(ip="192.168.1.10", port=2222)
+
+
+def test_load_router_config_ssh_channel_requires_enabled() -> None:
+    config = {
+        "gateway": {
+            "agent_client": {
+                "type": "agentos_router",
+                "frontend_endpoint": "http://yuanrong.test",
+                "function_version_urn": "urn:test",
+            },
+        },
+        "channels": {
+            "ssh": {
+                "enabled": False,
+                "listen_host": "0.0.0.0",
+                "listen_port": 2222,
+            }
+        },
+    }
+    loaded = load_router_config(config)
+    assert loaded.ssh_channel is None
 
 
 # ---------- router dispatch ----------
@@ -171,7 +210,9 @@ async def test_ssh_relay_creates_instance_and_starts_relay() -> None:
         ssh_relay=stub_relay,
     )
     try:
-        response = await client.send_request(_ssh_envelope(session))
+        response = await client.send_request(
+            _ssh_envelope(session, agent_type="opencode")
+        )
         assert response.ok
         assert response.payload["status"] == "relay_started"
 
@@ -183,6 +224,7 @@ async def test_ssh_relay_creates_instance_and_starts_relay() -> None:
         agents = await agent_manager.list_user_agents("alice")
         assert len(agents) == 1
         assert agents[0].info.sandbox_id == "sbx-1"
+        assert agents[0].info.agent_type == "opencode"
     finally:
         await client.shutdown()
 
@@ -200,9 +242,9 @@ async def test_ssh_relay_reuses_existing_instance() -> None:
     first = _relay_session("ssh_alice_a")
     second = _relay_session("ssh_alice_b")
     try:
-        await client.send_request(_ssh_envelope(first))
+        await client.send_request(_ssh_envelope(first, agent_type="opencode"))
         await asyncio.wait_for(first.done.wait(), timeout=5)
-        await client.send_request(_ssh_envelope(second))
+        await client.send_request(_ssh_envelope(second, agent_type="opencode"))
         await asyncio.wait_for(second.done.wait(), timeout=5)
 
         assert yuanrong.create_calls == 1
@@ -222,12 +264,16 @@ async def test_ssh_relay_follows_user_current_agent_type() -> None:
         FakeRegistryClient(),
         agent_manager,
         ssh_relay=stub_relay,
+        ssh_channel_endpoint=SshChannelEndpoint(ip="0.0.0.0", port=2222),
     )
     session = _relay_session("ssh_alice_switch")
     try:
         # 用户切换到 opencode
         result = await client.thirdagent_switch(user_id="alice", agent_type="opencode")
         assert result["ok"]
+        assert result["payload"]["ssh_ip"] == "0.0.0.0"
+        assert result["payload"]["ssh_port"] == 2222
+        assert "ssh_user" not in result["payload"]
         assert client.get_current_agent_type("alice") == "opencode"
 
         # SSH 接入不带 agent_type -> 复用 opencode 实例（不新建）
@@ -244,11 +290,12 @@ async def test_ssh_relay_follows_user_current_agent_type() -> None:
 
 @pytest.mark.asyncio
 async def test_ssh_relay_defaults_to_jiuwenswarm_without_switch() -> None:
-    """未切换过的用户，SSH 不带 agent_type 时默认 jiuwenswarm。"""
+    """未切换过的用户，SSH 默认 jiuwenswarm：无 AgentOS sandbox，应失败。"""
+    yuanrong = FakeYuanRongClient()
     stub_relay = StubSshRelay()
     agent_manager = AgentManager()
     client = AgentOSRouterClient(
-        FakeYuanRongClient(),
+        yuanrong,
         FakeRegistryClient(),
         agent_manager,
         ssh_relay=stub_relay,
@@ -259,8 +306,12 @@ async def test_ssh_relay_defaults_to_jiuwenswarm_without_switch() -> None:
         await client.send_request(_ssh_envelope(session, agent_type=None))
         await asyncio.wait_for(session.done.wait(), timeout=5)
 
-        agents = await agent_manager.list_user_agents("alice")
-        assert [a.info.agent_type for a in agents] == ["jiuwenswarm"]
+        assert yuanrong.create_calls == 0
+        assert stub_relay.ran == []
+        assert len(stub_relay.failed) == 1
+        assert "no AgentOS sandbox for SSH" in stub_relay.failed[0][1]
+        assert await agent_manager.list_user_agents("alice") == []
+        assert session.exit_code == 1
     finally:
         await client.shutdown()
 
@@ -313,11 +364,14 @@ async def test_ssh_relay_agent_creation_failure_releases_session() -> None:
         ssh_relay=stub_relay,
     )
     try:
-        response = await client.send_request(_ssh_envelope(session))
+        response = await client.send_request(
+            _ssh_envelope(session, agent_type="opencode")
+        )
         assert response.ok  # relay task started; failure is reported via session
         await asyncio.wait_for(session.done.wait(), timeout=5)
         assert session.exit_code == 1
         assert stub_relay.ran == []
         assert len(stub_relay.failed) == 1
+        assert "create failed" in stub_relay.failed[0][1]
     finally:
         await client.shutdown()

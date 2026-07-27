@@ -21,7 +21,7 @@ from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, r
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
-from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file
+from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file, mask_sensitive
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
@@ -117,6 +117,26 @@ logger = logging.getLogger(__name__)
 # task 完成后自动从集合移除(Python 官方推荐模式)。
 _background_permission_reload_tasks: set[asyncio.Task] = set()
 
+# session.create 在 team prepare 完成后回包；可选 KVC 信号异步执行，避免拖慢超时窗口。
+_background_session_create_kvc_tasks: set[asyncio.Task] = set()
+
+
+async def _reset_active_browser_runtimes_if_available(browser_move: Any) -> int:
+    """Reset active browser runtimes when supported by the installed SDK."""
+    reset_runtimes = getattr(
+        browser_move,
+        "reset_active_browser_runtimes",
+        None,
+    )
+    if not callable(reset_runtimes):
+        logger.warning(
+            "[AgentWebSocketServer] installed openjiuwen does not support "
+            "reset_active_browser_runtimes; restarting the local browser "
+            "runtime server only"
+        )
+        return 0
+    return await reset_runtimes()
+
 
 def _log_permission_reload_failure(task: asyncio.Task) -> None:
     """后台权限重载任务完成回调: 仅在异常时记 debug(与原同步 try/except 语义一致)。"""
@@ -124,6 +144,19 @@ def _log_permission_reload_failure(task: asyncio.Task) -> None:
     if exc is not None:
         logger.debug(
             "[AgentWebSocketServer] post-permissions reload failed (non-critical)",
+            exc_info=exc,
+        )
+
+
+def _log_session_create_kvc_failure(task: asyncio.Task) -> None:
+    """session.create 异步 KVC 失败时记 warning，不影响已成功回包的会话。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "[AgentWebSocketServer] session.create KVC failed after ack: %s",
+            exc,
             exc_info=exc,
         )
 
@@ -756,6 +789,9 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
+        # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
+        # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
+        self._stateless_fallback_agents: dict[str, Any] = {}
         # session_id → all live stream tasks. This is host lifecycle tracking
         # for interrupt/connection cleanup only; it never decides interaction
         # output ownership.
@@ -1374,9 +1410,6 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.COMMAND_STATUS:
                 await self._handle_command_status(ws, request, send_lock)
                 return
-            if request.req_method == ReqMethod.BROWSER_START:
-                await self._handle_browser_start(ws, request, send_lock)
-                return
             if request.req_method == ReqMethod.BROWSER_RUNTIME_RESTART:
                 await self._handle_browser_runtime_restart(ws, request, send_lock)
                 return
@@ -1870,22 +1903,29 @@ class AgentWebSocketServer:
         """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
 
         优先用 AgentManager 已缓存的 agent 模式 agent（get_agent_nowait 命中即返回，
-        不命中返回 None，绝不创建）；都没缓存时现场构造一个轻量 JiuWenSwarm()
-        （**不调 create_instance**，_adapter 保持 None）——其 process_message 内部对
-        skills/skilldev/plugins/symphony 的无状态短路会在 _ensure_adapter 之前 return，
-        碰不到 adapter。真正的 adapter 重建留给 chat.send。
+        不命中返回 None，绝不创建）；都没缓存时复用（或首次构造）本 server 上按
+        channel 缓存的轻量 JiuWenSwarm()（**不调 create_instance**，_adapter 保持
+        None）——其 process_message 内部对 skills/skilldev/plugins/symphony 的无状态
+        短路会在 _ensure_adapter 之前 return，碰不到 adapter。真正的 adapter 重建
+        留给 chat.send。
 
         相比 5084467df 原版用 get_agent(mode="agent") 作 fallback（会触发 agent 模式
-        adapter 重建，治标不治本），此处彻底解耦。JiuWenSwarm.__init__ 仅 4 个赋值 +
-        一个只读目录的 SkillManager，现场 new 开销可忽略，无需额外缓存态。
+        adapter 重建，治标不治本），此处彻底解耦。Fallback 必须按 channel 复用，
+        否则每次 cache miss 新建 SkillManager，SkillNet install/install_status 会
+        落到不同实例并误报「安装会话已过期」。
         """
         cached = self._agent_manager.get_agent_nowait(
             channel_id=channel_id, mode="agent"
         )
         if cached is not None:
             return cached
+        agent = self._stateless_fallback_agents.get(channel_id)
+        if agent is not None:
+            return agent
         from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
-        return JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+        agent = JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+        self._stateless_fallback_agents[channel_id] = agent
+        return agent
 
     async def _prepare_code_mode_chat_turn(
         self,
@@ -2381,7 +2421,7 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _apply_session_switch_lifecycle(
+    async def _prepare_session_switch_owner(
         self,
         *,
         channel_id: str,
@@ -2389,8 +2429,13 @@ class AgentWebSocketServer:
         previous_session_id: str,
         params: dict[str, Any],
         reason: str,
-    ) -> tuple[bool, str]:
-        """Keep the product runtime owner independent from optional KVC signals."""
+    ) -> tuple[bool, str, Any, Any, Any]:
+        """Resolve switch context and run product-owner prepare (team switch).
+
+        Returns:
+            ``(target_is_team, resolved_mode, context, team_manager, dispatch_signals)``.
+            ``dispatch_signals`` may be ``None`` when KVC hooks are unavailable.
+        """
         target_is_team = is_team_params(params)
         _, _, resolved_mode = resolve_agent_request_mode(
             params.get("mode", "agent.plan")
@@ -2432,17 +2477,64 @@ class AgentWebSocketServer:
                 ),
                 reason=reason,
             )
+        return target_is_team, resolved_mode, context, team_manager, dispatch_signals
 
-        if context is not None and dispatch_signals is not None:
-            await dispatch_signals(
-                context=context,
-                agent_manager=self._agent_manager,
-                channel_id=channel_id,
-                team_manager=team_manager,
-                target_session_id=target_session_id,
-                previous_session_id=previous_session_id,
-                reason=reason,
-            )
+    async def _dispatch_session_switch_kvc(
+        self,
+        *,
+        channel_id: str,
+        target_session_id: str,
+        previous_session_id: str,
+        reason: str,
+        context: Any,
+        team_manager: Any,
+        dispatch_signals: Any,
+    ) -> None:
+        """Optional KVC signals after the product owner has prepared the switch."""
+        if context is None or dispatch_signals is None:
+            return
+        await dispatch_signals(
+            context=context,
+            agent_manager=self._agent_manager,
+            channel_id=channel_id,
+            team_manager=team_manager,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            reason=reason,
+        )
+
+    async def _apply_session_switch_lifecycle(
+        self,
+        *,
+        channel_id: str,
+        target_session_id: str,
+        previous_session_id: str,
+        params: dict[str, Any],
+        reason: str,
+    ) -> tuple[bool, str]:
+        """Keep the product runtime owner independent from optional KVC signals."""
+        (
+            target_is_team,
+            resolved_mode,
+            context,
+            team_manager,
+            dispatch_signals,
+        ) = await self._prepare_session_switch_owner(
+            channel_id=channel_id,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            params=params,
+            reason=reason,
+        )
+        await self._dispatch_session_switch_kvc(
+            channel_id=channel_id,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            reason=reason,
+            context=context,
+            team_manager=team_manager,
+            dispatch_signals=dispatch_signals,
+        )
         return target_is_team, resolved_mode
 
     async def _handle_session_switch(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
@@ -4125,7 +4217,7 @@ class AgentWebSocketServer:
                 logger.info(
                     "[command.model] switch_model: target=%s, env_updates=%s",
                     target,
-                    {k: (v if k != "API_KEY" else "***") for k, v in env_updates.items()},
+                    mask_sensitive(env_updates),
                 )
 
                 if not env_updates:
@@ -5661,42 +5753,22 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _handle_browser_start(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """启动浏览器并返回执行结果（returncode）。"""
-        try:
-            from jiuwenswarm.agents.harness.common.tools.browser_start_client import start_browser
-
-            config_path = str(get_config_file())
-            returncode = start_browser(dry_run=False, config_file=config_path)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload={"returncode": returncode},
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("[AgentWebSocketServer] browser.start failed: %s", e)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"error": str(e)},
-            )
-
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
-
     async def _handle_browser_runtime_restart(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
-            from openjiuwen.harness.tools.browser_move import restart_local_browser_runtime_server
+            from openjiuwen.harness.tools import browser_move
 
-            result = restart_local_browser_runtime_server()
+            reset_runtimes = await _reset_active_browser_runtimes_if_available(
+                browser_move
+            )
+            result = browser_move.restart_local_browser_runtime_server()
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=True,
-                payload={"result": result},
+                payload={
+                    "result": result,
+                    "reset_runtimes": reset_runtimes,
+                },
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] browser.runtime_restart failed: %s", e)
@@ -6641,9 +6713,17 @@ class AgentWebSocketServer:
                 work_mode=final_work_mode,
             )
 
+            # team prepare 必须在 ack 前完成，避免首条 chat.send 与分布式切换竞态；
+            # 可选 KVC 信号放到回包后异步，避免拖慢 create RPC。
             lifecycle_params = dict(params)
             lifecycle_params["mode"] = mode
-            await self._apply_session_switch_lifecycle(
+            (
+                _target_is_team,
+                _resolved_mode,
+                switch_context,
+                team_manager,
+                dispatch_signals,
+            ) = await self._prepare_session_switch_owner(
                 channel_id=channel_id,
                 target_session_id=session_id,
                 previous_session_id=previous_session_id,
@@ -6667,6 +6747,23 @@ class AgentWebSocketServer:
                 await send_wire_payload(ws, wire)
 
             logger.info("[AgentServer] session.create completed: session_id=%s", session_id)
+
+            if switch_context is not None and dispatch_signals is not None:
+                kvc_task = asyncio.create_task(
+                    self._dispatch_session_switch_kvc(
+                        channel_id=channel_id,
+                        target_session_id=session_id,
+                        previous_session_id=previous_session_id,
+                        reason="session.create switch: ",
+                        context=switch_context,
+                        team_manager=team_manager,
+                        dispatch_signals=dispatch_signals,
+                    ),
+                    name=f"session-create-kvc-{session_id}",
+                )
+                _background_session_create_kvc_tasks.add(kvc_task)
+                kvc_task.add_done_callback(_background_session_create_kvc_tasks.discard)
+                kvc_task.add_done_callback(_log_session_create_kvc_failure)
 
         except Exception as e:
             logger.exception("[AgentServer] session.create failed: %s", e)

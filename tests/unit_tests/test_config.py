@@ -20,6 +20,7 @@ from jiuwenswarm.common.config import (
     resolve_env_vars,
     update_skill_retrieval_in_config,
     update_setup_guide_enabled_in_config,
+    update_xiaoyi_runtime_in_config,
 )
 
 
@@ -780,3 +781,112 @@ modes:
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert "team" not in raw["modes"]
+
+
+class TestUpdateXiaoyiRuntimeInConfig:
+    """push_id 需同时写入顶层与 apps[]，供 cron 与频道重启共用。"""
+
+    @staticmethod
+    def test_writes_top_level_and_matching_app_push_id(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  xiaoyi:
+    apps:
+      - name: 默认应用
+        is_default: true
+        api_id: webhook_api_1
+        agent_id: agent_abc
+        push_id: ""
+      - name: 其他
+        api_id: webhook_api_2
+        agent_id: agent_other
+        push_id: ""
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_xiaoyi_runtime_in_config(
+            {
+                "last_session_id": "sess-1",
+                "last_task_id": "task-1",
+                "last_message_id": "msg-1",
+                "push_id": "push-token-xyz",
+            },
+            api_id="webhook_api_1",
+            agent_id="agent_abc",
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        xy = raw["channels"]["xiaoyi"]
+        assert xy["push_id"] == "push-token-xyz"
+        assert xy["last_session_id"] == "sess-1"
+        assert xy["apps"][0]["push_id"] == "push-token-xyz"
+        assert xy["apps"][1]["push_id"] == ""
+
+    @staticmethod
+    def test_without_push_id_does_not_touch_apps(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  xiaoyi:
+    apps:
+      - name: 默认应用
+        is_default: true
+        api_id: webhook_api_1
+        push_id: keep-me
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_xiaoyi_runtime_in_config(
+            {"last_session_id": "sess-2"},
+            api_id="webhook_api_1",
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        xy = raw["channels"]["xiaoyi"]
+        assert xy["last_session_id"] == "sess-2"
+        assert "push_id" not in xy
+        assert xy["apps"][0]["push_id"] == "keep-me"
+
+    @staticmethod
+    def test_push_id_dumped_without_quotes_even_if_old_app_value_quoted(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        # apps 旧值为单引号空串时，覆盖后顶层与 apps 均应无引号
+        temp_config_file.write_text(
+            """
+channels:
+  xiaoyi:
+    apps:
+      - name: 默认应用
+        is_default: true
+        api_id: webhook_api_1
+        agent_id: agent_abc
+        push_id: ''
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        token = "88062548d4436ba6b6bfb573c641ad5d2a3f10a649dae5f52ad6f31f851cad64"
+        update_xiaoyi_runtime_in_config(
+            {"push_id": token},
+            api_id="webhook_api_1",
+            agent_id="agent_abc",
+        )
+
+        text = temp_config_file.read_text(encoding="utf-8")
+        assert f"push_id: {token}" in text
+        assert f"push_id: '{token}'" not in text
+        assert f'push_id: "{token}"' not in text

@@ -74,6 +74,7 @@ _KNOWN_JIUWENSWARM_SESSION_PREFIXES = (
     "wecom_",
     "telegram_",
     "discord_",
+    "slack_",
     "whatsapp_",
 )
 _INTERRUPT_RESUME_SOURCES = frozenset({
@@ -339,8 +340,8 @@ class MessageHandler(ABC):
         result = self._session_sharing.resolve_member_by_user(
             msg.channel_id,
             MessageHandler.resolve_app_id(msg),
-            msg.user_id or msg.metadata.get("im_sender_user_id", ""),
-            chat_id=msg.metadata.get("im_thread_id", "") if isinstance(msg.metadata, dict) else "",
+            msg.user_id or (msg.metadata or {}).get("im_sender_user_id", ""),
+            chat_id=(msg.metadata or {}).get("im_thread_id", "") if isinstance(msg.metadata, dict) else "",
         )
         if result:
             sid, mname = result
@@ -427,6 +428,8 @@ class MessageHandler(ABC):
             _ch,
             chat_id=getattr(msg, "chat_id", None) or "",
             ws_id=_ws_id if _kind == "ws" else "",
+            thread_ts=(msg.metadata or {}).get("slack_thread_ts", ""),
+            chat_type=(msg.metadata or {}).get("slack_channel_type", "group"),
         )
         await self._session_sharing.register(msg.session_id, SubRole.GODVIEW, rk, dt)
         logger.info(
@@ -3511,10 +3514,12 @@ class MessageHandler(ABC):
                         )
 
                     elif intent == "cancel":
-                        # 使用 await 模式，若cancel过长时间可能导致session残余
-                        # 导致后续 session.create 等请求在队列中等待超时
+                        # fire_and_forget：避免慢 cancel 阻塞 _forward_loop，
+                        # 导致后续 session.create 等请求在队列中等待、前端超时。
                         await self._cancel_agent_work_for_session(
-                            msg, msg.session_id
+                            msg,
+                            msg.session_id,
+                            agent_notify="fire_and_forget",
                         )
 
                     elif intent in ("pause", "resume"):
