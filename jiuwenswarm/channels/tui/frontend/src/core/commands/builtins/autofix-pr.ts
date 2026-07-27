@@ -72,11 +72,48 @@ export function createAutofixPrCommand(): SlashCommand {
         .replace(/(^|\s)--interval[=\s]+[\d.]+/g, " ")
         .trim();
 
+      // One-time blanket-permission prompt for this run. If granted, tool-permission
+      // prompts are auto-approved ("allow once") until the run ends (single-round
+      // turn end / watch stop) or is interrupted (Ctrl+C). If declined, every command
+      // still requires manual approval as usual.
+      const grantLabel = zh ? "自动批准（本次运行）" : "Auto-approve (this run)";
+      let autoApprove = false;
+      try {
+        const [ans] = await ctx.askQuestions(
+          [
+            {
+              header: zh ? "命令权限" : "Permissions",
+              question: zh
+                ? "本次 /autofix-pr 运行期间自动批准所有命令？（运行完成或 Ctrl+C 后会重新询问）"
+                : "Auto-approve all commands for this /autofix-pr run? (asks again after it finishes or you Ctrl+C)",
+              options: [
+                {
+                  label: grantLabel,
+                  description: zh ? "运行期间不再逐条询问命令权限" : "No per-command prompts during this run",
+                },
+                {
+                  label: zh ? "仍逐条询问" : "Ask each time",
+                  description: zh ? "每条命令仍需手动批准" : "Approve each command manually",
+                },
+              ],
+            },
+          ],
+          "autofix_pr_permission",
+        );
+        autoApprove = ans?.selected_options?.[0] === grantLabel;
+      } catch {
+        autoApprove = false; // ask cancelled/failed → default to per-command approval
+      }
+
       if (!watch) {
-        // Single round: build the prompt locally and send it once.
+        // Single round: build the prompt locally and send it once. Grant is set
+        // before sending so the round's permission prompts are auto-approved;
+        // it clears when the turn goes idle (see app-state).
+        if (autoApprove) ctx.setAutofixAutoApprove?.(true);
         const prompt = buildAutofixPrPrompt({ prArg });
         const requestId = ctx.sendMessage(prompt, undefined, ctx.mode, { logAsUser: false });
         if (!requestId) {
+          ctx.setAutofixAutoApprove?.(false); // run never started
           ctx.addItem(
             addInfo(
               ctx.sessionId,
@@ -137,6 +174,9 @@ export function createAutofixPrCommand(): SlashCommand {
       }
 
       ctx.startPrWatch({ repo: prCtx.repo, prNumber: prCtx.prNumber, platform: prCtx.platform, intervalMs });
+      // Set after startPrWatch: creating the watch may stop a prior one (which
+      // clears the grant via onStopped), so grant last to keep it for this watch.
+      if (autoApprove) ctx.setAutofixAutoApprove?.(true);
       const everyMin = (intervalMs ?? DEFAULT_WATCH_INTERVAL_MS) / 60_000;
       const everyText = zh ? `每 ${everyMin} 分钟` : `every ${everyMin} min`;
       ctx.addItem(

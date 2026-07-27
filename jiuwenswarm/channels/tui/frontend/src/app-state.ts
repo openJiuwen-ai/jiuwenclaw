@@ -434,6 +434,10 @@ export class CliPiAppState {
   private autoRecapTimer: ReturnType<typeof setInterval> | null = null;
   /** Active TUI-side PR watch, if any (see startPrWatch). */
   private prWatchController: PrWatchController | null = null;
+  /** Run-scoped grant: auto-approve tool-permission prompts during a /autofix-pr
+   *  run. Set when the user grants it at the start; cleared when the run ends
+   *  (single-round turn end, watch stop) or is interrupted (Ctrl+C, session reset). */
+  private autofixAutoApprove = false;
   /** 是否启用自动回顾（从 config.yaml 读取，默认 true）。 */
   private autoRecapEnabled: boolean = true;
   private ripgrepAvailable: boolean | null = null;
@@ -483,6 +487,11 @@ export class CliPiAppState {
       this.emitChange();
     },
     setPendingQuestion: (question) => {
+      // Run-scoped auto-approve: during a /autofix-pr run the user pre-authorized,
+      // silently approve tool-permission prompts instead of surfacing the card.
+      if (question && this.autofixAutoApprove && this.tryAutoApprovePermission(question)) {
+        return;
+      }
       this.pendingQuestion = question;
     },
     setLastError: (error) => {
@@ -823,6 +832,16 @@ export class CliPiAppState {
     const wasActiveResponseStream = this.hasActiveResponseStream();
     this.streamingState = state;
     this.handleStreamingStateChanged(wasActiveResponseStream);
+    // Single-round /autofix-pr: the run ends when the turn goes idle, so drop the
+    // auto-approve grant. A watch owns the grant across its rounds' idle gaps, so
+    // skip while a watch is active (it clears via onStopped instead).
+    if (
+      state === StreamingState.Idle &&
+      this.autofixAutoApprove &&
+      !this.prWatchController?.active
+    ) {
+      this.autofixAutoApprove = false;
+    }
   }
 
   private noteStreamActivity(): void {
@@ -1225,6 +1244,7 @@ export class CliPiAppState {
       startPrWatch: this.startPrWatch,
       stopPrWatch: this.stopPrWatch,
       isPrWatchActive: this.isPrWatchActive,
+      setAutofixAutoApprove: this.setAutofixAutoApprove,
     };
   }
 
@@ -1246,6 +1266,11 @@ export class CliPiAppState {
         isConnected: () => this.connectionStatus === "connected",
         notify: (message, isError) =>
           this.addItem((isError ? addError : addInfo)(this.sessionId, message, isError ? undefined : "i")),
+        onStopped: () => {
+          // Watch ended (green / merged / closed / fuse / replaced) → drop the
+          // run-scoped auto-approve grant so the next run asks again.
+          this.autofixAutoApprove = false;
+        },
       },
       config,
     );
@@ -1261,6 +1286,40 @@ export class CliPiAppState {
   };
 
   readonly isPrWatchActive = (): boolean => Boolean(this.prWatchController?.active);
+
+  /** Grant/revoke run-scoped auto-approval of tool-permission prompts. */
+  readonly setAutofixAutoApprove = (on: boolean): void => {
+    this.autofixAutoApprove = on;
+  };
+
+  /**
+   * If this is a tool-permission prompt and we can confidently identify its
+   * "allow once" option, approve it automatically (the user pre-authorized) and
+   * return true. Scoped to permission_interrupt only — ask_user / confirm / plan
+   * prompts are genuine decisions and must still reach the user. If the option
+   * shape is not what we expect, return false so the card renders normally
+   * (fail toward asking, never toward a blind wrong answer).
+   */
+  private tryAutoApprovePermission(question: PendingQuestion): boolean {
+    if (question.source !== "permission_interrupt") return false;
+    const options = question.questions?.[0]?.options;
+    if (!Array.isArray(options) || options.length === 0) return false;
+    // "Allow once" = an allow option that is NOT "always allow" (which would
+    // persist beyond the run). zh: 本次允许 / 总是允许; en: Allow once / Always allow.
+    const isAllow = (l: string) => l.includes("允许") || /^allow\b/i.test(l.trim());
+    const isAlwaysAllow = (l: string) =>
+      l.includes("总是允许") || /^always allow\b/i.test(l.trim());
+    const allowOnce = options.find((o) => isAllow(o.label) && !isAlwaysAllow(o.label));
+    if (!allowOnce) return false;
+    this.pendingQuestion = question; // submitQuestionAnswers reads this
+    this.addItem(
+      addInfo(this.sessionId, `※ /autofix-pr 自动批准命令：${allowOnce.label}`, "※"),
+    );
+    this.submitQuestionAnswers([
+      { selected_options: [allowOnce.label], custom_input: allowOnce.label },
+    ]);
+    return true;
+  }
 
   getUsageSummary(): SessionUsageSummary {
     const entries = Array.from(this.usageByModel.values());
@@ -1825,6 +1884,7 @@ export class CliPiAppState {
     // A watch is tied to the current PR/session; a new/cleared session drops it.
     this.prWatchController?.stop("会话已重置", { silent: true });
     this.prWatchController = null;
+    this.autofixAutoApprove = false;
     this.entries = [];
     this.pendingQuestion = null;
     this.lastError = null;
@@ -2061,6 +2121,9 @@ export class CliPiAppState {
 
   /** 向服务端请求中断当前 session 的任务；成功发送前不宣称"已中断"。 */
   cancel(options?: { showNotice?: boolean }): boolean {
+    // User intervention (Ctrl+C / other) revokes the run-scoped auto-approve
+    // grant — subsequent tool prompts must reach the user again.
+    this.autofixAutoApprove = false;
     if (this.connectionStatus !== "connected") {
       if (options?.showNotice !== false) {
         this.addItem(addError(this.sessionId, "Unable to interrupt task while disconnected"));

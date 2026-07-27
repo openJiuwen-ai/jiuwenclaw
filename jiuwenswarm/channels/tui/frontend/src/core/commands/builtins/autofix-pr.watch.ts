@@ -31,6 +31,9 @@ export interface PrWatchDeps {
   notify: (message: string, isError?: boolean) => void;
   /** Read the PR's status; defaults to the real checkPrStatus. Injectable for tests. */
   checkStatus?: (repo: string, prNumber: string, platform: string) => Promise<PrStatus>;
+  /** Called once when the watch stops (any reason) — lets the owner clean up
+   *  (e.g. drop the run-scoped auto-approve grant). */
+  onStopped?: () => void;
 }
 
 export interface PrWatchConfig {
@@ -86,6 +89,7 @@ export class PrWatchController {
     if (!opts?.silent) {
       this.deps.notify(`⏹ PR watch 已停止：${reason}`);
     }
+    this.deps.onStopped?.();
   }
 
   private async tick(): Promise<void> {

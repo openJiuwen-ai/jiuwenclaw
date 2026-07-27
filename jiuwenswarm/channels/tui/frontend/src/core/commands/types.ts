@@ -142,6 +142,9 @@ export interface CommandContext {
   stopPrWatch?: () => boolean;
   /** Whether a PR watch is currently active. */
   isPrWatchActive?: () => boolean;
+  /** Grant/revoke run-scoped auto-approval of tool-permission prompts (used by
+   *  /autofix-pr to auto-approve commands for the duration of a run). */
+  setAutofixAutoApprove?: (on: boolean) => void;
 }
 
 export interface SlashCommand {
