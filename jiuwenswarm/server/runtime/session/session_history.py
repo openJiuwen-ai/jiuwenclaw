@@ -21,6 +21,44 @@ _WORKER_LOCK = threading.Lock()
 _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
+_HEARTBEAT_OK = "HEARTBEAT_OK"
+
+
+def _is_ephemeral_heartbeat_session(session_id: str) -> bool:
+    """Heartbeat sessions are one-shot and should not pollute history.json(l)."""
+    return (session_id or "").startswith("heartbeat")
+
+
+def _has_persistable_assistant_payload(
+    *,
+    content_text: str,
+    event_type: str | None,
+    extra: dict[str, Any] | None,
+) -> bool:
+    """Return False for blank assistant shells that would show as empty history rows."""
+    content = (content_text or "").strip()
+    if content.upper() == _HEARTBEAT_OK:
+        return False
+
+    et = str(event_type or "").strip()
+    payload = extra if isinstance(extra, dict) else {}
+    if content:
+        return True
+    if str(payload.get("reasoning_content") or "").strip():
+        return True
+    if et == "chat.file" and payload.get("files"):
+        return True
+    if et == "chat.tool_call" and (payload.get("tool_call") or payload.get("tool_calls")):
+        return True
+    if payload.get("error") or payload.get("files"):
+        return True
+    if payload.get("tool_call") or payload.get("tool_calls"):
+        return True
+    # Empty chat.final / chat.* status shells and other blank assistants: skip.
+    if et.startswith("chat.") or et in {"", "chat.final"}:
+        return False
+    # team.* / context.* monitor events may carry structured extras without content.
+    return bool(payload)
 
 
 def _serialize_value_with_flag(obj: Any) -> tuple[Any, bool]:
@@ -428,10 +466,24 @@ def append_history_record(
 ) -> None:
     """向指定 session 的当前激活历史文件异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
+    if _is_ephemeral_heartbeat_session(sid):
+        logger.debug("skip heartbeat session history: session_id=%s event_type=%s", sid, event_type)
+        return
     rid = str(request_id or "").strip()
     cid = str(channel_id or "").strip()
     role_norm = "assistant" if role == "assistant" else "user"
     content_text = content if isinstance(content, str) else str(content)
+    if role_norm == "assistant" and not _has_persistable_assistant_payload(
+        content_text=content_text,
+        event_type=event_type,
+        extra=extra,
+    ):
+        logger.debug(
+            "skip empty assistant history: session_id=%s event_type=%s",
+            sid,
+            event_type or "",
+        )
+        return
 
     item: dict[str, Any] = {
         "id": f"{rid}:{role_norm}",
