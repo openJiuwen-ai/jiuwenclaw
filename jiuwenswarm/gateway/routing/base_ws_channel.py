@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from abc import abstractmethod
@@ -31,7 +32,7 @@ class BaseWsChannel(BaseChannel):
     以及 register_ws / unregister_ws / send 的默认实现。
 
     子类（WebChannel / TuiChannel）需覆写：
-    - _serialize_frame() — 将 Message 转为 wire frame（str/bytes）
+    - _serialize_frame() — 将 Message 转为出站帧（dict 或 str/bytes，writer 统一序列化）
     - 可覆写 _broadcast_fallback_enabled — 控制是否启用查找失败时广播兜底（默认关闭）
     """
 
@@ -198,16 +199,19 @@ class BaseWsChannel(BaseChannel):
             return
 
         frame = self._serialize_frame(msg, routing_target, member_names=member_names)
-        # 非阻塞入队：dispatch loop 不 await IO，背压隔离在 writer 协程内
+        # 非阻塞入队：dispatch loop 不 await IO，背压隔离在 writer 协程内。
+        # frame 可为 dict（writer 统一序列化）或 str/bytes，_enqueue_send 两者皆收。
         for w in ws_set:
             self._enqueue_send(w, frame)
 
     # ── per-ws writer：出站背压隔离 ──
 
-    def _enqueue_send(self, ws: Any, data: str | bytes) -> None:
+    def _enqueue_send(self, ws: Any, data: Any) -> None:
         """非阻塞入队一帧到 ws 的出站队列，立即返回。
 
-        ws 已关闭或队列缺失时静默丢弃（与旧 _safe_send 忽略 closed ws 语义一致）。
+        ``data`` 可为 dict（由 writer 统一序列化一次，省去入队前预 dumps
+        与 ``_coalesce`` 解析回 dict 的往返）、str/bytes（原样发送）或 None
+        哨兵。ws 已关闭或队列缺失时静默丢弃（与旧 _safe_send 语义一致）。
         """
         if getattr(ws, "closed", False):
             return
@@ -235,16 +239,30 @@ class BaseWsChannel(BaseChannel):
             data = await q.get()
             if data is None:  # 收尾哨兵
                 return
-            # 默认 _coalesce 只取刚 get 的这 1 帧；子类可覆写批量合并流式 chunk
-            frames = [data] + self._coalesce(q)
+            # 默认只发送刚 get 的帧；子类可覆写并安全合并连续流式 chunk。
+            frames = self._coalesce(data, q)
             if getattr(ws, "closed", False):
                 logger.debug("[%s] writer skip on closed ws ws_id=%s", self.channel_id, ws_id)
                 return
             for frame in frames:
                 if frame is None:
-                    continue
+                    return
+                # dict 帧在出口处序列化一次；str/bytes 原样发送。避免入队前
+                # 预 dumps 与 _coalesce 解析回 dict 的二次编解码往返。序列化
+                # 与 send 共用下方兜底：任一失败都只丢这一帧，不杀 writer。
+                if isinstance(frame, dict):
+                    try:
+                        wire = json.dumps(frame, ensure_ascii=False)
+                    except (TypeError, ValueError) as e:
+                        logger.warning(
+                            "[%s] frame serialize failed, dropping ws_id=%s err=%s",
+                            self.channel_id, ws_id, e,
+                        )
+                        continue
+                else:
+                    wire = frame
                 try:
-                    await asyncio.wait_for(ws.send(frame), timeout=10.0)
+                    await asyncio.wait_for(ws.send(wire), timeout=10.0)
                 except asyncio.TimeoutError:
                     # Drop only this frame. Killing the writer leaves an unbounded
                     # queue with nobody draining it — later unary res frames
@@ -268,17 +286,13 @@ class BaseWsChannel(BaseChannel):
                         )
                     return
 
-    def _coalesce(self, q: "asyncio.Queue") -> list:
-        """chunk 合并扩展点：从队列取若干帧合并为一帧，减小 ws.send 次数。
+    def _coalesce(self, first_frame: Any, _queue: "asyncio.Queue") -> list:
+        """chunk 合并扩展点，默认保持单帧发送。
 
-        默认实现：只取 1 帧（不合并）。子类可覆写对 chat.delta/chat.reasoning
-        批量 get_nowait 合并 content，缓解高频流式 chunk 的背压。
-        队列为空时返回 []，不阻塞（writer 已 get 主帧）。
+        子类可从队列头继续取帧并合并，但必须返回包含 ``first_frame``
+        语义的有序帧列表，且不能跨控制帧重排。
         """
-        try:
-            return [q.get_nowait()]
-        except asyncio.QueueEmpty:
-            return []
+        return [first_frame]
 
     async def _drain_and_cleanup_writer(self, ws: Any, ws_id: str) -> None:
         """收尾：flush 残余帧 → 取消 writer → 移除队列。
@@ -347,8 +361,13 @@ class BaseWsChannel(BaseChannel):
         routing_target: RoutingTarget | None,
         *,
         member_names: list[str] | None = None,
-    ) -> str | bytes:
-        """将 Message 序列化为 wire frame。子类必须实现."""
+    ) -> Any:
+        """将 Message 转为出站帧。子类必须实现.
+
+        返回 dict 时由 ``_writer_loop`` 在 ``ws.send`` 前统一序列化一次
+        （避免入队前预 dumps 与 ``_coalesce`` 解析回 dict 的往返）；
+        返回 str/bytes 时原样发送。
+        """
 
     # ── 内部工具 ──
 

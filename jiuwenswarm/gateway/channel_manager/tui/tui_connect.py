@@ -215,7 +215,6 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "chat.user_answer",
         "chat.swarmflow_reply",
         "history.get",
-        "browser.start",
         "skills.marketplace.list",
         "skills.list",
         "skills.installed",
@@ -314,7 +313,6 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "command.workflows",
         "command.status",
         "command.goal",
-        "browser.start",
         "skills.marketplace.list",
         "skills.list",
         "skills.installed",
@@ -1097,17 +1095,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         if env_updates or yaml_updated:
             if on_config_saved:
-                try:
-                    config_payload = get_config()
-                    callback_result = on_config_saved(
-                        set(env_updates.keys()) | set(yaml_updated),
-                        env_updates=dict(env_updates),
-                        config_payload=config_payload,
-                    )
-                    if inspect.isawaitable(callback_result):
-                        await callback_result
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[cli config.set] on_config_saved failed: %s", e)
+                # on_config_saved 内部会 await agent.reload_config（app_gateway._on_config_saved），
+                # reload 在 AgentServer 端要重建全部 agent + session adapter（全量并发下可达 25~34s）。
+                # 若同步 await 会阻塞当前 WebSocket 连接的 `async for raw in ws` 串行循环，
+                # 导致后续 config.get 等本地帧排队等满，前端 30s 超时报 request timeout: config.get。
+                # 故丢后台 fire-and-forget，与上面 _config_set_reload_background 对齐。
+                # 写盘已完成且已回包，reload 仅用于 AgentServer 内存热更新，本就尽力而为。
+                async def _config_set_on_saved_background() -> None:
+                    try:
+                        config_payload = get_config()
+                        callback_result = on_config_saved(
+                            set(env_updates.keys()) | set(yaml_updated),
+                            env_updates=dict(env_updates),
+                            config_payload=config_payload,
+                        )
+                        if inspect.isawaitable(callback_result):
+                            await callback_result
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[cli config.set] on_config_saved failed: %s", e)
+
+                asyncio.create_task(_config_set_on_saved_background())
 
     async def _config_validate_model(ws, req_id, params, session_id):
         if not isinstance(params, dict):
@@ -2191,11 +2198,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _tui_disconnect_request(ws, req_id, params, session_id):
-        try:
-            setattr(ws, "_jiuwenswarm_tui_user_exit", True)
-        except Exception:
-            logger.debug("[tui.disconnect] mark user exit flag failed", exc_info=True)
-
         payload = {"accepted": True, "session_id": session_id}
         try:
             await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -2209,7 +2211,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if callable(is_bound_to_client):
             owns_session = bool(is_bound_to_client("tui", sid, ws))
         if mh is not None and sid and owns_session:
-            await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+            cleaned = await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+            if not cleaned:
+                logger.warning(
+                    "[tui.disconnect] immediate cleanup failed; "
+                    "transport-close fallback remains enabled: session_id=%s",
+                    sid,
+                )
+                return
+            # Only suppress the transport-close fallback after the immediate
+            # cleanup has completed.  The TUI process can disappear after the
+            # acknowledgement and cancel this handler; marking the websocket
+            # earlier would make _tui_disconnect skip the only remaining
+            # cleanup path and leak the session runtime.
+            try:
+                setattr(ws, "_jiuwenswarm_tui_user_exit", True)
+            except Exception:
+                logger.debug(
+                    "[tui.disconnect] mark completed user exit failed",
+                    exc_info=True,
+                )
 
     async def _chat_user_answer(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}

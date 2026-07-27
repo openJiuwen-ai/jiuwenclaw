@@ -262,6 +262,25 @@ class DiscordDeliveryTarget(DeliveryTarget):
 
 
 @dataclass(frozen=True)
+class SlackDeliveryTarget(DeliveryTarget):
+    """Slack delivery target."""
+    channel_id: str = "slack"
+    chat_type: str = "group"
+    target_channel_id: str = ""
+    thread_ts: str = ""
+    physical_user_id: str = ""
+
+    @property
+    def container_kind(self) -> str:
+        return self.chat_type
+
+    def get_container_id(self) -> str:
+        if self.thread_ts:
+            return f"{self.target_channel_id}:{self.thread_ts}"
+        return self.target_channel_id
+
+
+@dataclass(frozen=True)
 class WhatsAppDeliveryTarget(DeliveryTarget):
     """WhatsApp 投递地址."""
     channel_id: str = "whatsapp"
@@ -351,6 +370,14 @@ def make_delivery_target(
     if _ch in ("discord",):
         return DiscordDeliveryTarget(
             channel_id=_ch,
+            physical_user_id=physical_user_id,
+        )
+    if _ch in ("slack",):
+        return SlackDeliveryTarget(
+            channel_id=_ch,
+            chat_type=kwargs.get("chat_type", "group"),
+            target_channel_id=chat_id or receive_id,
+            thread_ts=kwargs.get("thread_ts", ""),
             physical_user_id=physical_user_id,
         )
     if _ch in ("whatsapp",):

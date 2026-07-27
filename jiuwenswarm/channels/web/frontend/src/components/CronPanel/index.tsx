@@ -1,20 +1,124 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, Search, TrendingUp, Newspaper, Briefcase } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Search, TrendingUp, Newspaper, Briefcase } from 'lucide-react';
 import { webRequest, webClient } from '../../services/webClient';
 import { useSessionStore } from '../../stores/sessionStore';
-import { useCronStore, isWebChannelJob } from '../../stores';
+import { useCronStore } from '../../stores';
 import { projectRegistryClient } from '../../features/workspace/projectRegistryClient';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
 import type { Session } from '../../types';
 import type { CronJobDTO, CronTaskUI, CronTemplateUI } from '../../types/cron';
 import { CRON_TEMPLATES } from './constants';
+import { normalizeWakeOffsetSeconds } from './cronWakeOffset';
 import { cronExprToSchedule, summarizeSchedule } from './scheduleConvert';
 import StatusBadge, { BoldRingIcon, RunningIcon } from './StatusBadge';
 import ConfirmDialog from './ConfirmDialog';
-import CronTaskDrawer, { jobToForm, templateToForm, type CronTaskFormValue } from './CronTaskDrawer';
+import CronTaskDrawer, { jobToForm, templateToForm, isDefaultLikeProject, type CronTaskFormValue } from './CronTaskDrawer';
 import { useClickOutside } from './useClickOutside';
+import SimpleSelect from './SimpleSelect';
+import { hasXiaoyiPushApiId, isCronTargetOptionDisabled } from './xiaoyiCronTarget';
 import emptyIllustration from '../../assets/cron-empty.svg';
+
+// 任务列表分页：每页条数可选项（默认 20），纯前端本地分页——后端 cron.job.list 目前
+// 一次性返回全部任务、不支持 offset/limit，见 bug002 progress.md 的方案说明
+const PAGE_SIZE_OPTIONS = [10, 20, 50];
+const DEFAULT_PAGE_SIZE = 20;
+
+// 页码按钮列表：页数不多时全部展示，页数较多时只展示首页/尾页/当前页前后一页，其余用省略号折叠，
+// 避免页数很多时（比如上百页）把一整行按钮撑爆
+function buildPageList(current: number, total: number): (number | 'ellipsis')[] {
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, i) => i + 1);
+  }
+  const pages: (number | 'ellipsis')[] = [1];
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+  if (start > 2) pages.push('ellipsis');
+  for (let p = start; p <= end; p++) pages.push(p);
+  if (end < total - 1) pages.push('ellipsis');
+  pages.push(total);
+  return pages;
+}
+
+interface PaginationBarProps {
+  currentPage: number;
+  totalPages: number;
+  pageSize: number;
+  totalCount: number;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (size: number) => void;
+}
+
+// 任务列表下方的分页条：每页条数下拉（10/20/50） + 当前范围提示 + 页码翻页。
+// 下拉的弹出方向朝上（menuPlacement="up"）——分页条紧贴表格下方、离页面底部很近，向下弹出
+// 经常需要用户再往下滚一屏才能看到选项，向上弹出正好贴着分页条本身展开，不用滚动。
+// "每页显示"下拉始终展示（哪怕当前只有一页），因为它是用户对"每页看几条"的持久偏好，任务数
+// 从多变少（比如筛出结果变少、任务被删除）不应该让这个控件也跟着消失，否则用户切到 50
+// 条/页后任务数又降回一页以内，就再也切不回 20 条了；只有"上一页/页码/下一页"这组纯粹为翻页
+// 服务的控件，在只有一页（或没有数据）时才没有意义，按 totalPages > 1 单独控制显示。
+function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageChange, onPageSizeChange }: PaginationBarProps) {
+  const { t } = useTranslation();
+  const pageSizeOptions = useMemo(() => PAGE_SIZE_OPTIONS.map((n) => ({ value: String(n), label: String(n) })), []);
+  const pages = useMemo(() => buildPageList(currentPage, totalPages), [currentPage, totalPages]);
+  const rangeStart = totalCount === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const rangeEnd = Math.min(currentPage * pageSize, totalCount);
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-text-muted" data-testid="cron-pagination">
+      <div className="flex items-center gap-2">
+        <span>{t('cron.pagination.pageSize')}</span>
+        <SimpleSelect
+          value={String(pageSize)}
+          onChange={(v) => onPageSizeChange(Number(v))}
+          options={pageSizeOptions}
+          className="w-20"
+          menuPlacement="up"
+        />
+        <span>{t('cron.pagination.rangeInfo', { start: rangeStart, end: rangeEnd, total: totalCount })}</span>
+      </div>
+      {totalPages > 1 && (
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={currentPage <= 1}
+            onClick={() => onPageChange(currentPage - 1)}
+            aria-label={t('cron.pagination.prev') ?? undefined}
+            className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <ChevronLeft size={14} />
+          </button>
+          {pages.map((p, idx) =>
+            p === 'ellipsis' ? (
+              <span key={`ellipsis-${idx}`} className="px-1.5 text-text-muted">
+                …
+              </span>
+            ) : (
+              <button
+                key={p}
+                type="button"
+                onClick={() => onPageChange(p)}
+                className={`flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-sm ${
+                  p === currentPage ? 'bg-cron-action font-bold text-cron-action-foreground' : 'text-text hover:bg-bg-hover'
+                }`}
+              >
+                {p}
+              </button>
+            ),
+          )}
+          <button
+            type="button"
+            disabled={currentPage >= totalPages}
+            onClick={() => onPageChange(currentPage + 1)}
+            aria-label={t('cron.pagination.next') ?? undefined}
+            className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <ChevronRight size={14} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // 主动推荐自动维护的 job id（与后端 proactive_cron_sync.PROACTIVE_JOB_ID 一致）。
 // 该 job 的整体开关由 config 的 proactive_recommendation.enabled 驱动（关则删除，不在列表里）；
@@ -74,21 +178,46 @@ function Th({ children, first }: { children: React.ReactNode; first?: boolean })
 }
 
 function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
+  // 会话本身锁定在默认项目下时，后端 resolve_cron_project_binding 会把 job.project_id 原样存成
+  // 'default'/'default_code'（不是空串），这里如果只判断"非空"就会在 projects 里查到那条
+  // "默认项目"记录并显示出来，跟下拉框/其他地方"未选=用 -"的口径不一致（bug009 第 5 轮）。
+  // 用跟 CronTaskDrawer/ConversationSidebar/projectSelection 一致的 isDefaultLikeProject 口径，
+  // 把默认类项目也当"未选项目"处理，统一显示"-"。
   const project = job.project_id ? projects.find((p) => p.project_id === job.project_id) ?? null : null;
+  const projectName = project && !isDefaultLikeProject(project) ? project.name : null;
   return {
     id: job.id,
     name: job.name,
     projectId: job.project_id,
-    projectName: project ? project.name : null,
+    projectName,
     description: job.description,
     modelName: job.model_name ?? null,
     cronExpr: job.cron_expr,
     timezone: job.timezone,
+    wakeOffsetSeconds: normalizeWakeOffsetSeconds(job.wake_offset_seconds),
     enabled: job.enabled,
     expired: job.expired,
     deliveryChannel: job.targets,
   };
 }
+
+type StatusFilterKey = 'running' | 'paused' | 'expired';
+
+// 判断某个 job 属于"运行中/已暂停/过期"哪一态，跟顶部统计 StatPill 的口径保持一致（expired 优先于
+// enabled）；"运行状态"筛选下拉和统计计数共用这一个函数，避免筛选结果跟顶部数字对不上
+function jobStatusKey(job: CronTaskUI): StatusFilterKey {
+  if (job.expired) return 'expired';
+  return job.enabled ? 'running' : 'paused';
+}
+
+// "运行状态"筛选下拉里每个选项要显示的视觉标志，直接复用表格"运行状态"列本来就在用的
+// StatusBadge（同一份图标/颜色），不重新发明一套新样式；enabled/expired 这两个 props 反推自
+// jobStatusKey 的三态定义，跟表格里的展示口径保持一致
+const STATUS_FILTER_BADGE_PROPS: Record<StatusFilterKey, { enabled: boolean; expired: boolean }> = {
+  running: { enabled: true, expired: false },
+  paused: { enabled: false, expired: false },
+  expired: { enabled: false, expired: true },
+};
 
 export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession }: CronPanelProps) {
   const { t } = useTranslation();
@@ -102,12 +231,26 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   const [jobs, setJobs] = useState<CronTaskUI[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [enabledChannels, setEnabledChannels] = useState<Set<string>>(new Set());
+  // 小艺推送依赖 api_id；频道已注册但未配 api_id 时仍应置灰（Issue #2497）
+  const [xiaoyiPushReady, setXiaoyiPushReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<TabKey>('list');
   const [search, setSearch] = useState('');
+
+  // 任务列表分页状态：纯前端本地分页（见文件顶部 PAGE_SIZE_OPTIONS 注释）
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [currentPage, setCurrentPage] = useState(1);
+  const tableWrapperRef = useRef<HTMLDivElement>(null);
+
+  // "运行状态"筛选（下拉多选）：空集合 = 不筛选（显示全部），跟名称搜索是 AND 关系，
+  // 只在任务列表 tab 展示这个筛选器（模板/执行历史没有"运行状态"这个概念）
+  const [selectedStatuses, setSelectedStatuses] = useState<Set<StatusFilterKey>>(new Set());
+  const [statusFilterOpen, setStatusFilterOpen] = useState(false);
+  const statusFilterRef = useRef<HTMLDivElement>(null);
+  useClickOutside(statusFilterRef, statusFilterOpen, () => setStatusFilterOpen(false));
 
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const createMenuRef = useRef<HTMLDivElement>(null);
@@ -158,20 +301,33 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     [t],
   );
 
-  const loadJobs = useCallback(async (projectList: ProjectInfo[]) => {
-    setLoading(true);
-    setError(null);
+  // silent=true 用于轮询/可见性刷新等后台静默拉取：不切 loading 态、失败时不清空现有列表、
+  // 不弹错误提示，避免偶发网络抖动打断用户正在看的内容（见 bug007/bug008/bug009 progress.md）
+  const loadJobs = useCallback(async (projectList: ProjectInfo[], options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const payload = await webRequest<{ jobs: CronJobDTO[] }>('cron.job.list');
-      // Web 端工作区只展示 targets 含 "web" 的定时任务(targets 为空按后端 normalize 默认 web)
-      const webJobs = (payload.jobs || []).filter((j) => isWebChannelJob(j.targets));
-      setJobs(webJobs.map((j) => cronJobToUI(j, projectList)));
+      // 展示所有渠道的定时任务（含飞书/钉钉等非 web 渠道创建的），不再按 targets 过滤隐藏；
+      // 来源渠道由列表"渠道"列的 channelLabel 用 badge 形式标明，让用户一眼区分任务归属哪个渠道
+      // （见 bug007/bug008/bug009 progress.md：此前 isWebChannelJob 过滤把非 web 任务藏掉，
+      // 导致飞书建的任务在 web 列表永不出现，轮询再勤也无济于事）
+      const allJobs = payload.jobs || [];
+      setJobs(allJobs.map((j) => cronJobToUI(j, projectList)));
     } catch (loadError) {
+      if (silent) {
+        return;
+      }
       const message = loadError instanceof Error ? loadError.message : t('cron.errors.loadJobs');
       setError(message);
       setJobs([]);
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [t]);
 
@@ -186,7 +342,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     }
   }, []);
 
-  // 沿用旧 CronPanel 的做法：按已启用的推送频道决定"推送频道"下拉里哪些选项可选
+  // 按已启用频道决定推送下拉可选项；小艺额外要求 api_id 已配置（Issue #2497）
   const loadChannels = useCallback(async () => {
     try {
       const payload = await webRequest<{ channels?: unknown[] }>('channel.get');
@@ -203,12 +359,26 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       setEnabledChannels(enabled);
     } catch {
       // 忽略错误，保持空集合（下拉里全部选项禁用，用户仍可看到但选不了，不阻塞其他功能）
+      setEnabledChannels(new Set());
+    }
+
+    try {
+      const xiaoyiPayload = await webRequest<{ config?: unknown }>('channel.xiaoyi.get_conf');
+      setXiaoyiPushReady(hasXiaoyiPushApiId(xiaoyiPayload?.config));
+    } catch {
+      // 拉不到小艺配置时保守置为不可用，避免无 api_id 仍可选
+      setXiaoyiPushReady(false);
     }
   }, []);
 
   const targetOptions = useMemo(
-    () => SELECTABLE_TARGET_KEYS.map((id) => ({ value: id, label: t(`cron.targets.${id}`), disabled: !enabledChannels.has(id) })),
-    [enabledChannels, t],
+    () =>
+      SELECTABLE_TARGET_KEYS.map((id) => ({
+        value: id,
+        label: t(`cron.targets.${id}`),
+        disabled: isCronTargetOptionDisabled(id, enabledChannels, xiaoyiPushReady),
+      })),
+    [enabledChannels, t, xiaoyiPushReady],
   );
 
   useEffect(() => {
@@ -218,6 +388,35 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       await loadChannels();
     })();
   }, [loadChannels, loadJobs, loadProjects]);
+
+  // 供轮询/可见性刷新的静默重拉使用：始终指向最新的 projects，避免定时器闭包拿到挂载时
+  // 的旧值（projects 是异步加载的，轮询早于它变化时也不该被锁死在空数组上）
+  const projectsRef = useRef<ProjectInfo[]>(projects);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+
+  // 定时任务列表除了"挂载时拉一次"、"本页面自己发起的创建/编辑/启停/删除"、"同一 web 会话内
+  // cron_ 前缀工具调用完成"这三种触发方式外，没有别的刷新入口——跨渠道（飞书/钉钉等）创建的
+  // 任务，以及纯粹随时间推移产生的"过期"状态变化，都覆盖不到，只能等用户手动切页重新挂载
+  // 才会看到最新数据（见 bug007/bug008/bug009 的根因分析，progress.md）。这里加一个 5 秒
+  // 轮询兜底 + 页面重新可见时立即刷新一次，两者都走 silent 静默拉取，不影响 loading/error 展示。
+  useEffect(() => {
+    const silentReload = () => {
+      void loadJobs(projectsRef.current, { silent: true });
+    };
+    const intervalId = window.setInterval(silentReload, 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        silentReload();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [loadJobs]);
 
   // 监听 Agent 工具调用结果：cron_ 前缀的工具（比如通过聊天创建/改动定时任务）执行完后
   // 自动刷新任务列表，不用用户手动刷新页面（复用的是 upstream 同款监听逻辑，见 progress.md）
@@ -248,20 +447,64 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   }, [error]);
 
   const filteredJobs = useMemo(
-    () => jobs.filter((j) => j.name.toLowerCase().includes(search.trim().toLowerCase())),
-    [jobs, search],
+    () =>
+      jobs.filter(
+        (j) =>
+          j.name.toLowerCase().includes(search.trim().toLowerCase()) &&
+          (selectedStatuses.size === 0 || selectedStatuses.has(jobStatusKey(j))),
+      ),
+    [jobs, search, selectedStatuses],
   );
+
+  // 搜索内容变化时重置回第 1 页，避免搜索结果变少后停留在一个已经越界的页码上看到空白
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredJobs.length / pageSize)), [filteredJobs.length, pageSize]);
+
+  // 任务被删除/停止等操作导致 filteredJobs 变短时，当前页码也可能越界，钳制回合法范围
+  useEffect(() => {
+    setCurrentPage((p) => (p > totalPages ? totalPages : p));
+  }, [totalPages]);
+
+  const paginatedJobs = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredJobs.slice(start, start + pageSize);
+  }, [filteredJobs, currentPage, pageSize]);
+
+  // 翻页后把表格滚动回可视区域顶部，避免用户翻页后还停留在上次的滚动位置看不到新一页内容
+  const goToPage = useCallback((page: number) => {
+    setCurrentPage(page);
+    tableWrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
+  const changePageSize = useCallback((size: number) => {
+    setPageSize(size);
+    setCurrentPage(1);
+  }, []);
+
   const filteredTemplates = useMemo(
     () => CRON_TEMPLATES.filter((tpl) => t(tpl.titleKey).toLowerCase().includes(search.trim().toLowerCase())),
     [search, t],
   );
 
-  // 任务总数统计行旁边的分类计数：跟 StatusBadge 的判断逻辑保持一致（expired 优先于 enabled）。
-  // 运行中/已暂停/过期是任务本身状态的完整三态，不依赖后端；"运行失败"是执行历史维度的概念
-  // （某一次执行的结果），不属于这里，见 StatusBadge.tsx 顶部注释
-  const runningCount = useMemo(() => jobs.filter((j) => !j.expired && j.enabled).length, [jobs]);
-  const pausedCount = useMemo(() => jobs.filter((j) => !j.expired && !j.enabled).length, [jobs]);
-  const expiredCount = useMemo(() => jobs.filter((j) => j.expired).length, [jobs]);
+  function toggleStatusFilter(key: StatusFilterKey) {
+    setSelectedStatuses((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  // 任务总数统计行旁边的分类计数：跟 StatusBadge 的判断逻辑保持一致（expired 优先于 enabled），
+  // 也是"运行状态"筛选下拉复用的同一套口径（jobStatusKey）。运行中/已暂停/过期是任务本身状态的
+  // 完整三态，不依赖后端；"运行失败"是执行历史维度的概念（某一次执行的结果），不属于这里，见
+  // StatusBadge.tsx 顶部注释
+  const runningCount = useMemo(() => jobs.filter((j) => jobStatusKey(j) === 'running').length, [jobs]);
+  const pausedCount = useMemo(() => jobs.filter((j) => jobStatusKey(j) === 'paused').length, [jobs]);
+  const expiredCount = useMemo(() => jobs.filter((j) => jobStatusKey(j) === 'expired').length, [jobs]);
 
   async function handleCreateSubmit(value: CronTaskFormValue) {
     try {
@@ -272,7 +515,14 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         timezone: value.timezone,
         targets: value.targets.trim() || 'web',
         enabled: value.enabled,
-        ...(value.projectDir ? { project_dir: value.projectDir } : {}),
+        wake_offset_seconds: normalizeWakeOffsetSeconds(value.wakeOffsetSeconds),
+        // 始终显式带上 project_dir（未选项目传空串），不能省略这个 key——后端
+        // gateway/channel_manager/web/app_web_handlers.py 的 _cron_job_create 用
+        // "key 是否存在"区分"用户显式选了默认项目"（key 存在、值为空串，不可覆盖）和
+        // "调用方未表达项目意图"（key 缺失，会从当前 WebSocket 会话的 project_dir 兜底填充）。
+        // 手动创建抽屉这条链路用户明确看到并操作了"项目"下拉框，属于前一种情况；
+        // 之前省略 key 会命中后端的会话兜底，导致"不选项目"被错误绑定成当前会话所在项目（bug003）。
+        project_dir: value.projectDir ?? '',
         ...(value.modelName ? { model_name: value.modelName } : {}),
         mode,
         session_id: sessionId,
@@ -281,9 +531,19 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       setDrawer(null);
       setActiveTab('list');
       await loadJobs(projects);
+      // 新任务按 updated_at 倒序会排到列表最前面（见 gateway/cron/store.py:179 的排序规则），
+      // 跳回第 1 页并滚到表格顶部，让用户直接看到刚创建的任务，不用自己翻页去找
+      goToPage(1);
       void reloadCronStore();
     } catch (createError) {
-      const message = createError instanceof Error ? createError.message : t('cron.errors.createFailed');
+      // 前端 cronExprValidation.ts 是逐字段本地校验，理论上仍可能漏判后端 croniter 实际支持/
+      // 不支持的某种写法（见 bugfix 2026072401/bug010 第2轮分析：两边校验规则天然可能不同步）。
+      // 这里把后端 cron.job.create 失败时返回的具体原因（webClient 已经把 WS 响应里的
+      // error 字段原样放进 Error.message，见 services/webClient.ts resolvePending）拼进提示里，
+      // 而不是只显示一句笼统的"创建任务失败"，这样即使前端校验漏放行了一条非法表达式，用户在
+      // 提交时也能看到后端到底为什么拒绝，而不是无从下手。
+      const reason = createError instanceof Error ? createError.message.trim() : '';
+      const message = reason ? t('cron.errors.createFailedWithReason', { reason }) : t('cron.errors.createFailed');
       setError(message);
     }
   }
@@ -303,6 +563,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             timezone: value.timezone,
             targets: value.targets.trim() || 'web',
             enabled: value.enabled,
+            wake_offset_seconds: normalizeWakeOffsetSeconds(value.wakeOffsetSeconds),
             ...(value.modelName ? { model_name: value.modelName } : {}),
             mode,
           };
@@ -314,9 +575,14 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       setSuccess(t('cron.success.updated'));
       setDrawer(null);
       await loadJobs(projects);
+      // 编辑保存同样会刷新 updated_at、把任务顶到列表最前面，跳回第 1 页保持跟"新建"一致的体验
+      goToPage(1);
       void reloadCronStore();
     } catch (updateError) {
-      const message = updateError instanceof Error ? updateError.message : t('cron.errors.updateFailed');
+      // 同 handleCreateSubmit：把后端 cron.job.update 失败时的具体原因透出，而不是只显示笼统的
+      // "更新任务失败"（见 bugfix 2026072401/bug010 第2轮分析）。
+      const reason = updateError instanceof Error ? updateError.message.trim() : '';
+      const message = reason ? t('cron.errors.updateFailedWithReason', { reason }) : t('cron.errors.updateFailed');
       setError(message);
     }
   }
@@ -328,6 +594,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       await webRequest<{ job: CronJobDTO }>('cron.job.toggle', { id: confirmState.job.id, enabled: false });
       setSuccess(t('cron.success.statusUpdated'));
       await loadJobs(projects);
+      // 停止也会经 store.update_job 刷新 updated_at、把任务顶到列表最前面，同"新建/编辑"一样跳回第 1 页
+      goToPage(1);
       void reloadCronStore();
     } catch (toggleError) {
       const message = toggleError instanceof Error ? toggleError.message : t('cron.errors.toggleFailed');
@@ -344,6 +612,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       await webRequest<{ job: CronJobDTO }>('cron.job.toggle', { id: job.id, enabled: true });
       setSuccess(t('cron.success.statusUpdated'));
       await loadJobs(projects);
+      // 同上：启动也会把任务顶到列表最前面，跳回第 1 页
+      goToPage(1);
       void reloadCronStore();
     } catch (toggleError) {
       const message = toggleError instanceof Error ? toggleError.message : t('cron.errors.toggleFailed');
@@ -395,6 +665,11 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   }
 
   function openTemplateDrawer(tpl: CronTemplateUI) {
+    // 抽屉打开瞬间主动重拉一次项目列表：CronPanel 的 projects 只在挂载时拉取一次，
+    // 停留页面期间新建的项目不会自动同步进来（bug003），这里保证每次打开抽屉都是最新数据
+    void loadProjects();
+    // 同步刷新推送频道可用性（含小艺 api_id），避免刚改完频道配置仍用旧置灰状态
+    void loadChannels();
     setDrawer({ mode: 'template', initial: templateToForm(tpl, t(tpl.titleKey), t(tpl.descriptionKey)) });
   }
 
@@ -482,6 +757,9 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                 <button
                   onClick={() => {
                     setCreateMenuOpen(false);
+                    // 同 openTemplateDrawer：打开抽屉瞬间重拉一次项目列表，避免拿到挂载时的旧快照
+                    void loadProjects();
+                    void loadChannels();
                     setDrawer({ mode: 'create' });
                   }}
                   className="block w-full px-3 py-2 text-left text-sm font-semibold text-text hover:bg-bg-hover"
@@ -540,10 +818,10 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
           </div>
         )}
 
-        {/* 搜索框 */}
+        {/* 搜索框 + 运行状态筛选（筛选下拉只在任务列表 tab 展示，模板/执行历史没有"运行状态"这个概念） */}
         {!(activeTab === 'list' && jobs.length === 0) && activeTab !== 'history' && (
-          <div className="mb-4">
-            <div className="relative w-full">
+          <div className="mb-4 flex items-center gap-2">
+            <div className="relative flex-1">
               <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
               <input
                 value={search}
@@ -552,6 +830,54 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                 className="w-full rounded-md border border-border bg-card py-1.5 pl-9 pr-3 text-sm text-text outline-none focus:border-accent"
               />
             </div>
+            {activeTab === 'list' && (
+              <div className="relative shrink-0" ref={statusFilterRef}>
+                <button
+                  onClick={() => setStatusFilterOpen((v) => !v)}
+                  className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm ${
+                    selectedStatuses.size > 0 ? 'border-accent text-accent' : 'border-border text-text'
+                  } bg-card hover:border-accent`}
+                  data-testid="cron-status-filter-toggle"
+                >
+                  {t('cron.table.status')}
+                  {selectedStatuses.size > 0 && (
+                    <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-text-inverse">
+                      {selectedStatuses.size}
+                    </span>
+                  )}
+                  <ChevronDown size={14} />
+                </button>
+                {statusFilterOpen && (
+                  <div
+                    className="absolute right-0 top-[calc(100%+6px)] z-20 w-40 rounded-lg border border-border bg-card py-1.5 shadow-lg"
+                    data-testid="cron-status-filter-menu"
+                  >
+                    {(['running', 'paused', 'expired'] as const).map((key) => (
+                      <label
+                        key={key}
+                        className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm text-text hover:bg-bg-hover"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedStatuses.has(key)}
+                          onChange={() => toggleStatusFilter(key)}
+                          className="h-3.5 w-3.5 rounded border-border"
+                        />
+                        <StatusBadge enabled={STATUS_FILTER_BADGE_PROPS[key].enabled} expired={STATUS_FILTER_BADGE_PROPS[key].expired} />
+                      </label>
+                    ))}
+                    {selectedStatuses.size > 0 && (
+                      <button
+                        onClick={() => setSelectedStatuses(new Set())}
+                        className="mt-1 block w-full border-t border-border px-3 pt-2 text-left text-xs text-text-muted hover:text-text"
+                      >
+                        {t('cron.filter.reset')}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -566,7 +892,15 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             {/* 创建定时任务模块保持在可视区域垂直居中 */}
             <div className="flex flex-1 flex-col items-center justify-center gap-4">
               <img src={emptyIllustration} alt="" className="h-20 w-20" />
-              <button onClick={() => setDrawer({ mode: 'create' })} className="btn !px-4 !py-2">
+              <button
+                onClick={() => {
+                  // 同上：打开抽屉瞬间重拉一次项目列表与频道可用性
+                  void loadProjects();
+                  void loadChannels();
+                  setDrawer({ mode: 'create' });
+                }}
+                className="btn !px-4 !py-2"
+              >
                 {t('cron.empty.createButton')}
               </button>
             </div>
@@ -602,7 +936,8 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
           </div>
         )}
         {activeTab === 'list' && !loading && jobs.length > 0 && filteredJobs.length > 0 && (
-          <div className="overflow-visible rounded-lg border border-border">
+          <>
+          <div ref={tableWrapperRef} className="overflow-visible rounded-lg border border-border">
             <table className="w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-border bg-bg-muted text-left text-text">
@@ -616,13 +951,19 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                 </tr>
               </thead>
               <tbody>
-                {filteredJobs.map((job) => {
+                {paginatedJobs.map((job) => {
                   const isProactive = job.id === PROACTIVE_AUTO_JOB_ID;
                   return (
                     <tr key={job.id} className="border-b border-border last:border-0">
                       <td className="px-4 py-3 text-text">
                         <div className="flex items-center gap-1">
-                          {job.name}
+                          {/* 名称过长（超过 maxLength=64 加限制前的存量任务可能更长）会撑宽整列/整张表
+                              （bug004 追加问题）；这里用 CSS truncate + title 纯展示层截断，不改
+                              job.name 本身，hover 仍可看到全名。max-w 限制只加在文本节点自己身上，
+                              不包住徽标，避免徽标被一起裁掉——徽标始终 shrink-0 独立展示。 */}
+                          <span className="max-w-[200px] truncate" title={job.name}>
+                            {job.name}
+                          </span>
                           {isProactive && (
                             <span
                               className="inline-flex shrink-0 items-center rounded-full bg-cron-auto-managed-surface px-1.5 py-0.5 text-[10px] font-medium text-cron-auto-managed-text"
@@ -663,7 +1004,10 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                             </button>
                           )}
                           <button
-                            onClick={() => setDrawer({ mode: 'edit', initial: jobToForm(job), jobId: job.id })}
+                            onClick={() => {
+                              void loadChannels();
+                              setDrawer({ mode: 'edit', initial: jobToForm(job), jobId: job.id });
+                            }}
                             className="text-sm text-cron-action-link hover:opacity-80"
                           >
                             {t('cron.table.edit')}
@@ -812,6 +1156,15 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
               </tbody>
             </table>
           </div>
+          <PaginationBar
+            currentPage={currentPage}
+            totalPages={totalPages}
+            pageSize={pageSize}
+            totalCount={filteredJobs.length}
+            onPageChange={goToPage}
+            onPageSizeChange={changePageSize}
+          />
+          </>
         )}
 
         {/* tab: 任务模板 */}

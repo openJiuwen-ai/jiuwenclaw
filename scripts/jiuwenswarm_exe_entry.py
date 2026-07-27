@@ -357,13 +357,6 @@ def _dispatch() -> None:
         from jiuwenswarm.channels.desktop.desktop_app import main as desktop_main
         desktop_main()
         return
-    # 子命令：浏览器启动（供主进程 subprocess 调用）
-    if "--browser-start-client" in sys.argv:
-        idx = sys.argv.index("--browser-start-client")
-        sys.argv.pop(idx)
-        from jiuwenswarm.agents.harness.common.tools.browser_start_client import main as browser_main
-        raise SystemExit(browser_main())
-
     # 子进程模式：argv 有任何参数（.py 脚本或 -m 等），不检查单实例锁
     if getattr(sys, "frozen", False) and len(sys.argv) >= 2:
         script_path = next((arg for arg in sys.argv[1:] if arg.endswith(".py") or arg.endswith(".pyw")), None)

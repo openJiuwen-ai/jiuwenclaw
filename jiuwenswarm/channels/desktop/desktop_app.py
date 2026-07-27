@@ -159,6 +159,46 @@ def _start_process(name: str, command: list[str]) -> subprocess.Popen[bytes]:
     return subprocess.Popen(command, **kwargs)
 
 
+# frozen exe 冷启动时, C 扩展 (.pyd) 与大量 .py 首次从 _MEIPASS 读盘很慢.
+# 桌面主进程在拉起 agent/gateway/web 子进程前, 起后台线程预读关键包入 OS page
+# cache, 子进程 import 时命中内存而非闪存/磁盘, 显著降低冷启动 import 耗时.
+# 只读首页 (4096B) 触发预读, 零执行零副作用; 非冻结模式 (dev) 无 _MEIPASS 直接跳过.
+_WARMUP_PACKAGES = (
+    "openjiuwen", "faiss", "pymilvus", "google", "a2ui",
+    "sqlite_vec", "tree_sitter", "tiktoken", "tiktoken_ext",
+)
+
+
+def _warmup_page_cache_background() -> None:
+    """frozen exe 冷启动后台预读关键包入 OS page cache, 不阻塞 start_services."""
+    if not getattr(sys, "frozen", False):
+        return  # dev 模式无 _MEIPASS, 跳过 (uv run 已有 pyc + OS cache 暖)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass or not os.path.isdir(meipass):
+        return
+
+    def _read_all(pkg_dir):
+        try:
+            for root, _dirs, files in os.walk(pkg_dir):
+                for f in files:
+                    p = os.path.join(root, f)
+                    try:
+                        with open(p, "rb") as fh:
+                            _ = fh.read(4096)
+                    except OSError:
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _worker():
+        for pkg in _WARMUP_PACKAGES:
+            d = os.path.join(meipass, pkg)
+            if os.path.isdir(d):
+                _read_all(d)
+
+    threading.Thread(target=_worker, name="exe-page-cache-warmup", daemon=True).start()
+
+
 def _wait_for_tcp(
     host: str,
     port: int,
@@ -300,6 +340,8 @@ class DesktopRuntime:
         return f"http://{self.frontend_host}:{self.frontend_port}"
 
     def start_services(self) -> None:
+        # 先起后台预读, 与后续子进程拉起/端口等待并行, 不阻塞 start_services.
+        _warmup_page_cache_background()
         self.processes["app"] = _start_process("app", _build_child_command("app"))
         _ensure_process_running("app", self.processes["app"])
         _wait_for_tcp(

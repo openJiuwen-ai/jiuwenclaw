@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,9 @@ class FakeWebSocket:
 
 
 class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
+    async def handle_browser_runtime_restart_for_test(self, ws, request, send_lock):
+        await self._handle_browser_runtime_restart(ws, request, send_lock)
+
     async def handle_command_add_dir_for_test(self, ws, request, send_lock):
         await self._handle_command_add_dir(ws, request, send_lock)
 
@@ -73,6 +77,63 @@ def patch_wire_encoder(monkeypatch):
         "encode_agent_response_for_wire",
         fake_encode_agent_response_for_wire,
     )
+
+
+@pytest.mark.asyncio
+async def test_browser_runtime_restart_resets_active_agent_runtimes(
+    server,
+    fake_ws,
+    monkeypatch,
+):
+    from openjiuwen.harness.tools import browser_move
+
+    async def fake_reset_active_browser_runtimes():
+        return 2
+
+    monkeypatch.setattr(
+        browser_move,
+        "reset_active_browser_runtimes",
+        fake_reset_active_browser_runtimes,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        browser_move,
+        "restart_local_browser_runtime_server",
+        lambda: {"status": "restarted"},
+    )
+    request = AgentRequest(
+        request_id="req-browser-restart",
+        channel_id="web",
+        req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+    )
+
+    await server.handle_browser_runtime_restart_for_test(
+        fake_ws,
+        request,
+        asyncio.Lock(),
+    )
+
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-browser-restart",
+            "payload": {
+                "result": {"status": "restarted"},
+                "reset_runtimes": 2,
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_browser_runtime_restart_supports_sdk_without_runtime_reset():
+    reset_runtimes = (
+        await agent_ws_server_module._reset_active_browser_runtimes_if_available(
+            SimpleNamespace()
+        )
+    )
+
+    assert reset_runtimes == 0
 
 
 @pytest.mark.asyncio

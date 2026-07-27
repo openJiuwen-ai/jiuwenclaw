@@ -1,4 +1,4 @@
-﻿﻿﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
+﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { AtSign, CircleX, FileImage, Loader2, Plus, Square, Target, X } from 'lucide-react';
@@ -26,6 +26,7 @@ import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector';
+import { generateUuidV4 } from '../../utils/uuid';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -157,10 +158,7 @@ function formatAttachmentSize(size: number): string {
 }
 
 function makeAttachmentId(file: File): string {
-  const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${file.name || 'image'}-${file.size}-${random}`;
+  return `${file.name || 'image'}-${file.size}-${generateUuidV4()}`;
 }
 
 function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
@@ -267,6 +265,13 @@ export function InputArea({
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectDirError || workDialogOpen) return;
+    const timeoutId = window.setTimeout(() => setProjectDirError(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [projectDirError, workDialogOpen]);
+
   const [composerSuggestion, setComposerSuggestion] = useState<ComposerSuggestionState | null>(null);
   const [composerSuggestionIndex, setComposerSuggestionIndex] = useState(0);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
@@ -1949,7 +1954,11 @@ export function InputArea({
             <CodeBranchSelector project={displayedProject} disabled={isProcessing} compact />
           ) : null}
           {projectDirError && !workDialogOpen ? (
-            <div className="chat-work-select__error" role="alert">{projectDirError}</div>
+            <div className="app-toast-wrapper app-toast-wrapper--top-center">
+              <div className="app-session-toast" role="status" aria-live="polite">
+                {projectDirError}
+              </div>
+            </div>
           ) : null}
         </div>
       ) : null}

@@ -14,6 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any, ClassVar, Optional
+from weakref import WeakValueDictionary
 
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
@@ -21,7 +22,7 @@ from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, r
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
-from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file
+from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file, mask_sensitive
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
@@ -117,6 +118,26 @@ logger = logging.getLogger(__name__)
 # task 完成后自动从集合移除(Python 官方推荐模式)。
 _background_permission_reload_tasks: set[asyncio.Task] = set()
 
+# session.create 在 team prepare 完成后回包；可选 KVC 信号异步执行，避免拖慢超时窗口。
+_background_session_create_kvc_tasks: set[asyncio.Task] = set()
+
+
+async def _reset_active_browser_runtimes_if_available(browser_move: Any) -> int:
+    """Reset active browser runtimes when supported by the installed SDK."""
+    reset_runtimes = getattr(
+        browser_move,
+        "reset_active_browser_runtimes",
+        None,
+    )
+    if not callable(reset_runtimes):
+        logger.warning(
+            "[AgentWebSocketServer] installed openjiuwen does not support "
+            "reset_active_browser_runtimes; restarting the local browser "
+            "runtime server only"
+        )
+        return 0
+    return await reset_runtimes()
+
 
 def _log_permission_reload_failure(task: asyncio.Task) -> None:
     """后台权限重载任务完成回调: 仅在异常时记 debug(与原同步 try/except 语义一致)。"""
@@ -127,8 +148,23 @@ def _log_permission_reload_failure(task: asyncio.Task) -> None:
             exc_info=exc,
         )
 
+
+def _log_session_create_kvc_failure(task: asyncio.Task) -> None:
+    """session.create 异步 KVC 失败时记 warning，不影响已成功回包的会话。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "[AgentWebSocketServer] session.create KVC failed after ack: %s",
+            exc,
+            exc_info=exc,
+        )
+
 # Serialize plan-mode restore per session to avoid checkpoint races.
-_session_mode_sync_locks: dict[str, asyncio.Lock] = {}
+_session_mode_sync_locks: WeakValueDictionary[str, asyncio.Lock] = (
+    WeakValueDictionary()
+)
 
 # Sessions that have successfully exited plan mode via exit_plan_mode tool.
 # Set by _check_post_process_plan_exit, consumed by _ensure_code_mode_state
@@ -756,17 +792,23 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
+        # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
+        # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
+        self._stateless_fallback_agents: dict[str, Any] = {}
         # session_id → all live stream tasks. This is host lifecycle tracking
         # for interrupt/connection cleanup only; it never decides interaction
         # output ownership.
         self._session_stream_tasks: dict[str, dict[asyncio.Task, asyncio.Event]] = {}
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
+        self._scheduler_agent: Any = None
         # Model cache for scheduled task execution (same approach as interface_deep)
         self._model_cache: dict[str, Any] = {}
         self._default_model: Optional[Any] = None
         # 本地 jiuwenbox 子进程管理器 (lazy 启动, 在 /sandbox enable 时 ensure_running)
         self._jiuwenbox_runner = JiuwenBoxRunner.instance()
+        # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
+        self._checkpointer_warmup_task: Optional[asyncio.Task] = None
         # Proactive recommendation engine (set by app_agentserver for debug trigger)
         self._proactive_engine: Any = None
         get_acp_output_manager().set_send_push_callback(
@@ -835,16 +877,20 @@ class AgentWebSocketServer:
     # ---------- 生命周期 ----------
 
     async def start(self) -> None:
-        """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
+        """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容.
+
+        注: persistent checkpointer 的初始化历史在 ``legacy_serve`` 之前同步 await,
+        首次约耗时 ~14s (sqlite 文件 + openjiuwen 工厂反射), 期间 WS 端口未 listen,
+        是 Gateway connect 重试 (头两次必失败, 白等 ~6s) 的元凶。现改为 ``legacy_serve``
+        之后后台预热 (fire-and-forget), 让端口尽快开放; 首条 chat 请求若赶在预热完成前
+        到达, 走 ``_ensure_persistent_checkpointer_response`` 兜底等待, 不影响握手.
+        """
         if self._server is not None:
             logger.warning("[AgentWebSocketServer] 服务端已在运行")
             return
 
         # Reset harness package state to native on service startup
         reset_harness_packages_state()
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
-
-        await ensure_persistent_checkpointer()
 
         try:
             from websockets.legacy.server import serve as legacy_serve
@@ -870,6 +916,22 @@ class AgentWebSocketServer:
             )
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
+        )
+
+        # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
+        # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
+
+        async def _warmup_checkpointer() -> None:
+            try:
+                await ensure_persistent_checkpointer()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] checkpointer 预热失败 (首请求将兜底重试): %s", exc
+                )
+
+        self._checkpointer_warmup_task = asyncio.create_task(
+            _warmup_checkpointer(), name="checkpointer-warmup"
         )
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
@@ -1027,13 +1089,34 @@ class AgentWebSocketServer:
 
     async def _stop_scheduler(self) -> None:
         """Stop the auto_harness scheduler."""
-        if self._scheduler_service is not None:
-            try:
+        try:
+            if self._scheduler_service is not None:
                 await self._scheduler_service.stop_scheduler()
                 logger.info("[AgentWebSocketServer] Scheduler stopped")
-            except Exception as e:
-                logger.warning("[AgentWebSocketServer] Failed to stop scheduler: %s", e)
+        except Exception as e:
+            logger.warning("[AgentWebSocketServer] Failed to stop scheduler: %s", e)
+        finally:
             self._scheduler_service = None
+            scheduler_agent = getattr(self, "_scheduler_agent", None)
+            if scheduler_agent is not None:
+                unpin = getattr(self._agent_manager, "unpin_agent", None)
+                if callable(unpin):
+                    unpin(scheduler_agent)
+            self._scheduler_agent = None
+
+    def _set_scheduler_agent(self, agent: Any) -> None:
+        """Pin the facade whose DeepAgent is retained by the scheduler."""
+        previous = getattr(self, "_scheduler_agent", None)
+        if previous is agent:
+            return
+        pin = getattr(self._agent_manager, "pin_agent", None)
+        if callable(pin):
+            pin(agent)
+        self._scheduler_agent = agent
+        if previous is not None:
+            unpin = getattr(self._agent_manager, "unpin_agent", None)
+            if callable(unpin):
+                unpin(previous)
 
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
@@ -1070,6 +1153,17 @@ class AgentWebSocketServer:
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
+        # 先取消 checkpointer 预热任务, 避免在 server 关闭后仍在后台跑.
+        warmup = self._checkpointer_warmup_task
+        self._checkpointer_warmup_task = None
+        if warmup is not None and not warmup.done():
+            warmup.cancel()
+            try:
+                await warmup
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
         had_server = self._server is not None
         if had_server:
             self._server.close()
@@ -1281,6 +1375,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.TEAM_SNAPSHOT:
                 await self._handle_team_snapshot(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.TEAM_MQ_PUBLISH:
+                await self._handle_team_mq_publish(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.PROACTIVE_TICK:
                 await self._handle_proactive_tick(ws, request, send_lock)
                 return
@@ -1337,9 +1434,6 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.COMMAND_STATUS:
                 await self._handle_command_status(ws, request, send_lock)
-                return
-            if request.req_method == ReqMethod.BROWSER_START:
-                await self._handle_browser_start(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.BROWSER_RUNTIME_RESTART:
                 await self._handle_browser_runtime_restart(ws, request, send_lock)
@@ -1467,14 +1561,16 @@ class AgentWebSocketServer:
                         stream_task.cancel()
                         stream_tasks.append(stream_task)
 
+                cancel_response: AgentResponse | None = None
                 try:
                     # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
                     # allow_create=False：找不到已有 agent 时不 fallback 新建（见 _handle_cancel docstring）。
-                    await self._handle_cancel(
+                    cancel_response = await self._handle_cancel(
                         ws,
                         request,
                         send_lock,
                         allow_create=False,
+                        send_response=not cleanup_after_cancel,
                     )
                 finally:
                     if stream_tasks:
@@ -1489,7 +1585,25 @@ class AgentWebSocketServer:
                                     result,
                                 )
                     if cleanup_after_cancel and intent in ("cancel", "supplement"):
-                        await self._cleanup_client_disconnect_session_runtime(request)
+                        cleanup_succeeded = (
+                            await self._cleanup_client_disconnect_session_runtime(
+                                request
+                            )
+                        )
+                        if cancel_response is not None:
+                            if not cleanup_succeeded:
+                                cancel_response.ok = False
+                                cancel_response.payload = {
+                                    "event_type": "chat.interrupt_result",
+                                    "success": False,
+                                    "error": "session runtime cleanup failed",
+                                }
+                            wire = encode_agent_response_for_wire(
+                                cancel_response,
+                                response_id=request.request_id,
+                            )
+                            async with send_lock:
+                                await send_wire_payload(ws, wire)
                 return
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
@@ -1565,11 +1679,11 @@ class AgentWebSocketServer:
             == E2A_CANCEL_SOURCE_CLIENT_DISCONNECT
         )
 
-    async def _cleanup_client_disconnect_session_runtime(self, request: AgentRequest) -> None:
+    async def _cleanup_client_disconnect_session_runtime(self, request: AgentRequest) -> bool:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = str(request.session_id or params.get("session_id") or "").strip()
         if not session_id:
-            return
+            return False
         channel_id = request.channel_id or "default"
         try:
             cleaned = await self._agent_manager.cleanup_session_runtime(
@@ -1583,6 +1697,7 @@ class AgentWebSocketServer:
                 session_id,
                 cleaned,
             )
+            return True
         except Exception as exc:
             logger.warning(
                 "[AgentWebSocketServer] client disconnect session runtime cleanup failed: "
@@ -1591,6 +1706,13 @@ class AgentWebSocketServer:
                 session_id,
                 exc,
             )
+            return False
+        finally:
+            # Persisted history remains on disk, but this connection-scoped
+            # marker must not grow with every short-lived TUI process. Mode
+            # locks are weakly cached and disappear automatically after their
+            # last active/waiting user releases them.
+            _plan_exited_sessions.discard(session_id)
 
     async def _trigger_before_chat_request_hook(self, request: AgentRequest) -> None:
         if not self._should_trigger_before_chat_request_hook(request):
@@ -1618,7 +1740,8 @@ class AgentWebSocketServer:
         send_lock: asyncio.Lock,
         *,
         allow_create: bool = False,
-    ) -> None:
+        send_response: bool = True,
+    ) -> AgentResponse:
         """处理 CHAT_CANCEL 中断请求：复用已有 agent 实例，避免创建新实例。
 
         cancel 请求的 params 中可能没有 mode 信息，如果走 _handle_unary 的 get_agent(mode) 路径
@@ -1699,9 +1822,14 @@ class AgentWebSocketServer:
         if resp is None:
             resp = await agent.process_message(request)
 
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
+        if send_response:
+            wire = encode_agent_response_for_wire(
+                resp,
+                response_id=request.request_id,
+            )
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+        return resp
 
     @staticmethod
     def _resolve_code_language() -> str:
@@ -1815,31 +1943,55 @@ class AgentWebSocketServer:
             )
         )
 
+    @staticmethod
+    def _is_readonly_goal_get_request(request: AgentRequest) -> bool:
+        """``command.goal`` + ``action=get``：只读查询，不得兜底新建 session metadata.
+
+        与 skills.list 同类问题：走 ``_prepare_code_mode_chat_turn`` 会触发
+        ``sync_session_request_metadata`` 在无 metadata 时写出
+        ``metadata.json``。get 仍需要真实 agent（可能从 checkpointer 读已有
+        Goal），故不能整段塞进 ``_is_stateless_method_request``。
+        """
+        if request.req_method != ReqMethod.COMMAND_GOAL:
+            return False
+        params = request.params if isinstance(request.params, dict) else {}
+        action = str(params.get("action") or "get").strip().lower()
+        return action == "get"
+
     async def _get_stateless_agent(self, channel_id: str) -> Any:
         """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
 
         优先用 AgentManager 已缓存的 agent 模式 agent（get_agent_nowait 命中即返回，
-        不命中返回 None，绝不创建）；都没缓存时现场构造一个轻量 JiuWenSwarm()
-        （**不调 create_instance**，_adapter 保持 None）——其 process_message 内部对
-        skills/skilldev/plugins/symphony 的无状态短路会在 _ensure_adapter 之前 return，
-        碰不到 adapter。真正的 adapter 重建留给 chat.send。
+        不命中返回 None，绝不创建）；都没缓存时复用（或首次构造）本 server 上按
+        channel 缓存的轻量 JiuWenSwarm()（**不调 create_instance**，_adapter 保持
+        None）——其 process_message 内部对 skills/skilldev/plugins/symphony 的无状态
+        短路会在 _ensure_adapter 之前 return，碰不到 adapter。真正的 adapter 重建
+        留给 chat.send。
 
         相比 5084467df 原版用 get_agent(mode="agent") 作 fallback（会触发 agent 模式
-        adapter 重建，治标不治本），此处彻底解耦。JiuWenSwarm.__init__ 仅 4 个赋值 +
-        一个只读目录的 SkillManager，现场 new 开销可忽略，无需额外缓存态。
+        adapter 重建，治标不治本），此处彻底解耦。Fallback 必须按 channel 复用，
+        否则每次 cache miss 新建 SkillManager，SkillNet install/install_status 会
+        落到不同实例并误报「安装会话已过期」。
         """
         cached = self._agent_manager.get_agent_nowait(
             channel_id=channel_id, mode="agent"
         )
         if cached is not None:
             return cached
+        agent = self._stateless_fallback_agents.get(channel_id)
+        if agent is not None:
+            return agent
         from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
-        return JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+        agent = JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+        self._stateless_fallback_agents[channel_id] = agent
+        return agent
 
     async def _prepare_code_mode_chat_turn(
         self,
         request: AgentRequest,
         channel_id: str,
+        *,
+        sync_metadata: bool = True,
     ) -> tuple[str, str | None, Any]:
         """Mode resolution and correct agent instance selection."""
         # [新增] 在 _apply_resolved_mode_to_request 把 canonical mode 写回 params 之前，
@@ -1860,12 +2012,30 @@ class AgentWebSocketServer:
         canonical_mode = (
             request.params.get("mode") if isinstance(request.params, dict) else None
         )
-        project_dir = _sync_chat_request_metadata(
-            request,
-            requested_project_dir,
-            canonical_mode if canonical_mode else mode,
-            explicit_mode_provided=explicit_mode_provided,
-        )
+        if sync_metadata:
+            project_dir = _sync_chat_request_metadata(
+                request,
+                requested_project_dir,
+                canonical_mode if canonical_mode else mode,
+                explicit_mode_provided=explicit_mode_provided,
+            )
+        else:
+            # Read-only path (e.g. command.goal get): never create/update
+            # metadata.json. Prefer request project_dir, else locked disk value.
+            project_dir = requested_project_dir
+            if not (isinstance(project_dir, str) and project_dir.strip()):
+                sid = str(request.session_id or "").strip()
+                if sid:
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+
+                    meta = get_session_metadata(
+                        sid, cache_bust=True, enable_writeback=False
+                    )
+                    locked = meta.get("project_dir") if isinstance(meta, dict) else None
+                    if isinstance(locked, str) and locked.strip():
+                        project_dir = locked.strip()
         if isinstance(project_dir, str) and project_dir.strip():
             project_dir = project_dir.strip()
             request.params["project_dir"] = project_dir
@@ -1996,6 +2166,12 @@ class AgentWebSocketServer:
 
     async def _handle_unary(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """非流式处理：调用 process_message，返回一条 E2AResponse 线 JSON。"""
+        # 兜底确保 checkpointer 就绪: start() 里改为后台预热后, 首条请求可能赶在
+        # 预热完成前到达。ensure_persistent_checkpointer 内部 lock+ready 幂等, 预热
+        # 完成时秒过; 未完成则阻塞至完成 (避免用到未就绪的 checkpointer)。
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
+
+        await ensure_persistent_checkpointer()
         channel_id = request.channel_id or "default"
 
         if request.req_method == ReqMethod.INITIALIZE:
@@ -2031,20 +2207,27 @@ class AgentWebSocketServer:
             )
             return
 
+        readonly_goal_get = self._is_readonly_goal_get_request(request)
         mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-            request, channel_id
+            request,
+            channel_id,
+            sync_metadata=not readonly_goal_get,
         )
 
-        restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
-        if restored_plan:
-            await self._push_plan_mode_exited(request)
+        if not readonly_goal_get:
+            restored_plan = await self._ensure_code_mode_state(
+                request, mode, sub_mode, agent
+            )
+            if restored_plan:
+                await self._push_plan_mode_exited(request)
 
         resp = None
         try:
             resp = await agent.process_message(request)
         finally:
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
-            await self._check_post_process_plan_exit(request, agent)
+            if not readonly_goal_get:
+                await self._check_post_process_plan_exit(request, agent)
 
         # V2: 非流式响应回带请求侧 agent_ref，供 gateway 3 元组路由（设计 §6.3）。
         # is None 守卫：保留 agent 层显式设置的 agent_ref（如 team 模式由事件派生）。
@@ -2062,6 +2245,10 @@ class AgentWebSocketServer:
 
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
+        # 兜底确保 checkpointer 就绪 (见 _handle_unary 同名注释)。
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
+
+        await ensure_persistent_checkpointer()
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
@@ -2072,16 +2259,22 @@ class AgentWebSocketServer:
         # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
         # 不触发 adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
+        readonly_goal_get = self._is_readonly_goal_get_request(request)
         if self._is_stateless_method_request(request):
             agent = await self._get_stateless_agent(channel_id)
         else:
             mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-                request, channel_id
+                request,
+                channel_id,
+                sync_metadata=not readonly_goal_get,
             )
 
-            restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
-            if restored_plan:
-                await self._push_plan_mode_exited(request)
+            if not readonly_goal_get:
+                restored_plan = await self._ensure_code_mode_state(
+                    request, mode, sub_mode, agent
+                )
+                if restored_plan:
+                    await self._push_plan_mode_exited(request)
 
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
@@ -2195,7 +2388,8 @@ class AgentWebSocketServer:
                 if not entries:
                     self._session_stream_tasks.pop(session_id, None)
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
-            await self._check_post_process_plan_exit(request, agent)
+            if not readonly_goal_get:
+                await self._check_post_process_plan_exit(request, agent)
 
         logger.info(
             "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
@@ -2286,7 +2480,7 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _apply_session_switch_lifecycle(
+    async def _prepare_session_switch_owner(
         self,
         *,
         channel_id: str,
@@ -2294,8 +2488,13 @@ class AgentWebSocketServer:
         previous_session_id: str,
         params: dict[str, Any],
         reason: str,
-    ) -> tuple[bool, str]:
-        """Keep the product runtime owner independent from optional KVC signals."""
+    ) -> tuple[bool, str, Any, Any, Any]:
+        """Resolve switch context and run product-owner prepare (team switch).
+
+        Returns:
+            ``(target_is_team, resolved_mode, context, team_manager, dispatch_signals)``.
+            ``dispatch_signals`` may be ``None`` when KVC hooks are unavailable.
+        """
         target_is_team = is_team_params(params)
         _, _, resolved_mode = resolve_agent_request_mode(
             params.get("mode", "agent.plan")
@@ -2337,17 +2536,64 @@ class AgentWebSocketServer:
                 ),
                 reason=reason,
             )
+        return target_is_team, resolved_mode, context, team_manager, dispatch_signals
 
-        if context is not None and dispatch_signals is not None:
-            await dispatch_signals(
-                context=context,
-                agent_manager=self._agent_manager,
-                channel_id=channel_id,
-                team_manager=team_manager,
-                target_session_id=target_session_id,
-                previous_session_id=previous_session_id,
-                reason=reason,
-            )
+    async def _dispatch_session_switch_kvc(
+        self,
+        *,
+        channel_id: str,
+        target_session_id: str,
+        previous_session_id: str,
+        reason: str,
+        context: Any,
+        team_manager: Any,
+        dispatch_signals: Any,
+    ) -> None:
+        """Optional KVC signals after the product owner has prepared the switch."""
+        if context is None or dispatch_signals is None:
+            return
+        await dispatch_signals(
+            context=context,
+            agent_manager=self._agent_manager,
+            channel_id=channel_id,
+            team_manager=team_manager,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            reason=reason,
+        )
+
+    async def _apply_session_switch_lifecycle(
+        self,
+        *,
+        channel_id: str,
+        target_session_id: str,
+        previous_session_id: str,
+        params: dict[str, Any],
+        reason: str,
+    ) -> tuple[bool, str]:
+        """Keep the product runtime owner independent from optional KVC signals."""
+        (
+            target_is_team,
+            resolved_mode,
+            context,
+            team_manager,
+            dispatch_signals,
+        ) = await self._prepare_session_switch_owner(
+            channel_id=channel_id,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            params=params,
+            reason=reason,
+        )
+        await self._dispatch_session_switch_kvc(
+            channel_id=channel_id,
+            target_session_id=target_session_id,
+            previous_session_id=previous_session_id,
+            reason=reason,
+            context=context,
+            team_manager=team_manager,
+            dispatch_signals=dispatch_signals,
+        )
         return target_is_team, resolved_mode
 
     async def _handle_session_switch(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
@@ -3035,42 +3281,124 @@ class AgentWebSocketServer:
 
     async def _handle_team_snapshot(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.agents.harness.team import get_team_manager
+        from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import (
+            TeamMonitorHandler,
+        )
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(params.get("session_id") or request.session_id or "").strip()
+        channel_id = request.channel_id or "web"
+        empty_payload = {"members": [], "tasks": [], "team_id": None}
+
+        team_manager = get_team_manager(channel_id)
+        monitor_handler = team_manager.get_monitor_handler(session_id) if session_id else None
+
+        snapshot: dict[str, Any] | None = None
+        source = "empty"
+        if monitor_handler is not None and monitor_handler.is_running:
+            try:
+                snapshot = await monitor_handler.get_team_snapshot()
+                if snapshot is not None:
+                    source = "live"
+            except Exception as e:
+                logger.warning("[AgentWebSocketServer] team.snapshot (live) failed: %s", e)
+
+        def _snapshot_tasks(payload: dict[str, Any] | None) -> list[Any]:
+            if not isinstance(payload, dict):
+                return []
+            tasks = payload.get("tasks")
+            return tasks if isinstance(tasks, list) else []
+
+        # History restore often hits this RPC after the monitor has stopped, OR
+        # while a live handler is still registered but already returns a truthy
+        # empty board ({tasks: [], members: [], team_id: ...}). `if not snapshot`
+        # alone would skip DB in that case and leave the frontend with no
+        # title/content. Fall back whenever live has no tasks.
+        needs_db = snapshot is None or not _snapshot_tasks(snapshot)
+        if needs_db and session_id:
+            team_name = str(params.get("team_name") or "").strip()
+            if not team_name:
+                team_name = str(
+                    team_manager.get_active_team_name(session_id) or ""
+                ).strip()
+            if not team_name:
+                team_name = str(
+                    (get_session_metadata(session_id) or {}).get("team_name") or ""
+                ).strip()
+            if team_name:
+                try:
+                    db_snapshot = await TeamMonitorHandler.get_team_snapshot_from_db(
+                        session_id, team_name
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[AgentWebSocketServer] team.snapshot (db) failed: "
+                        "session_id=%s team_name=%s error=%s",
+                        session_id,
+                        team_name,
+                        e,
+                    )
+                    db_snapshot = None
+                # Prefer DB when it has tasks, or when live was missing entirely.
+                # If both boards have empty tasks, keep live so in-memory
+                # members (if any) are not wiped by an empty DB read.
+                if db_snapshot is not None and (
+                    snapshot is None or _snapshot_tasks(db_snapshot)
+                ):
+                    snapshot = db_snapshot
+                    source = "db"
+
+        payload = snapshot or empty_payload
+        members = payload.get("members") if isinstance(payload, dict) else []
+        tasks = _snapshot_tasks(payload if isinstance(payload, dict) else None)
+        logger.info(
+            "[AgentWebSocketServer] team.snapshot session_id=%s source=%s "
+            "tasks_count=%s members_count=%s",
+            session_id or "-",
+            source if snapshot is not None else "empty",
+            len(tasks),
+            len(members) if isinstance(members, list) else 0,
+        )
+
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=channel_id,
+            ok=True,
+            payload=payload,
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_team_mq_publish(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Relay one external team event into the active core team runtime."""
+        from jiuwenswarm.agents.harness.team import get_team_manager
 
         session_id = request.session_id or ""
         channel_id = request.channel_id or "web"
+        payload = request.params.get("payload")
 
-        team_manager = get_team_manager(channel_id)
-        monitor_handler = team_manager.get_monitor_handler(session_id)
+        if not session_id:
+            success, reason = False, "session_id is required"
+        elif payload is None:
+            success, reason = False, "payload is required"
+        elif not isinstance(payload, dict) or payload.get("type") != "team.external_event":
+            success, reason = False, "invalid_external_event"
+        else:
+            success, reason = await get_team_manager(channel_id).interact(session_id, payload)
 
-        if monitor_handler is None or not monitor_handler.is_running:
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload={"members": [], "tasks": [], "team_id": None},
-            )
-            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await send_wire_payload(ws, wire)
-            return
-
-        try:
-            snapshot = await monitor_handler.get_team_snapshot()
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload=snapshot or {"members": [], "tasks": [], "team_id": None},
-            )
-        except Exception as e:
-            logger.warning("[AgentWebSocketServer] team.snapshot failed: %s", e)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload={"members": [], "tasks": [], "team_id": None},
-            )
-
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=channel_id,
+            ok=success,
+            payload={"published": True} if success else {"error": reason},
+        )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
@@ -3948,7 +4276,7 @@ class AgentWebSocketServer:
                 logger.info(
                     "[command.model] switch_model: target=%s, env_updates=%s",
                     target,
-                    {k: (v if k != "API_KEY" else "***") for k, v in env_updates.items()},
+                    mask_sensitive(env_updates),
                 )
 
                 if not env_updates:
@@ -5484,42 +5812,22 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _handle_browser_start(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """启动浏览器并返回执行结果（returncode）。"""
-        try:
-            from jiuwenswarm.agents.harness.common.tools.browser_start_client import start_browser
-
-            config_path = str(get_config_file())
-            returncode = start_browser(dry_run=False, config_file=config_path)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload={"returncode": returncode},
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("[AgentWebSocketServer] browser.start failed: %s", e)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"error": str(e)},
-            )
-
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
-
     async def _handle_browser_runtime_restart(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
-            from openjiuwen.harness.tools.browser_move import restart_local_browser_runtime_server
+            from openjiuwen.harness.tools import browser_move
 
-            result = restart_local_browser_runtime_server()
+            reset_runtimes = await _reset_active_browser_runtimes_if_available(
+                browser_move
+            )
+            result = browser_move.restart_local_browser_runtime_server()
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=True,
-                payload={"result": result},
+                payload={
+                    "result": result,
+                    "reset_runtimes": reset_runtimes,
+                },
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] browser.runtime_restart failed: %s", e)
@@ -6464,9 +6772,17 @@ class AgentWebSocketServer:
                 work_mode=final_work_mode,
             )
 
+            # team prepare 必须在 ack 前完成，避免首条 chat.send 与分布式切换竞态；
+            # 可选 KVC 信号放到回包后异步，避免拖慢 create RPC。
             lifecycle_params = dict(params)
             lifecycle_params["mode"] = mode
-            await self._apply_session_switch_lifecycle(
+            (
+                _target_is_team,
+                _resolved_mode,
+                switch_context,
+                team_manager,
+                dispatch_signals,
+            ) = await self._prepare_session_switch_owner(
                 channel_id=channel_id,
                 target_session_id=session_id,
                 previous_session_id=previous_session_id,
@@ -6490,6 +6806,23 @@ class AgentWebSocketServer:
                 await send_wire_payload(ws, wire)
 
             logger.info("[AgentServer] session.create completed: session_id=%s", session_id)
+
+            if switch_context is not None and dispatch_signals is not None:
+                kvc_task = asyncio.create_task(
+                    self._dispatch_session_switch_kvc(
+                        channel_id=channel_id,
+                        target_session_id=session_id,
+                        previous_session_id=previous_session_id,
+                        reason="session.create switch: ",
+                        context=switch_context,
+                        team_manager=team_manager,
+                        dispatch_signals=dispatch_signals,
+                    ),
+                    name=f"session-create-kvc-{session_id}",
+                )
+                _background_session_create_kvc_tasks.add(kvc_task)
+                kvc_task.add_done_callback(_background_session_create_kvc_tasks.discard)
+                kvc_task.add_done_callback(_log_session_create_kvc_failure)
 
         except Exception as e:
             logger.exception("[AgentServer] session.create failed: %s", e)
@@ -7037,6 +7370,7 @@ class AgentWebSocketServer:
                     raise ValueError("Failed to get agent for schedule request")
                 # Set agent on service (service will use it for execution)
                 self._scheduler_service.update_agent_instance(agent)
+                self._set_scheduler_agent(agent)
                 logger.info("[AgentServer] Set agent for schedule action %s: %s", action, agent is not None)
 
             if action == "check_config":

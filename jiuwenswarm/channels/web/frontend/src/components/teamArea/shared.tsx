@@ -33,6 +33,13 @@ export interface TeamTaskEvent {
   team_name?: string;
   title?: string;
   content?: string;
+  // Truncation observability flags — kept aligned with TeamTaskEvent in
+  // stores/sessionStore.ts and components/TeamTaskEvents.tsx so the event
+  // panel can surface them if needed (currently passthrough/observability only).
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
   updated_at?: number | string | null;
 }
 

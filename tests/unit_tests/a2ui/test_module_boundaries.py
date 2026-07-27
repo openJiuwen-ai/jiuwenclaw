@@ -1,6 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import json
+import runpy
+import sys
 import tomllib
 from pathlib import Path
 
@@ -58,3 +60,22 @@ def test_pyinstaller_bundle_includes_only_a2ui_v08_schema_assets():
 
     assert 'includes=["assets/0.8/*.json"]' in spec
     assert 'collect_data_files("a2ui", include_py_files=False)' not in spec
+
+
+def test_a2ui_bundle_verifier_accepts_v08_source_assets(monkeypatch):
+    verifier = runpy.run_path(str(ROOT / "scripts/verify_a2ui_bundle.py"))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    verifier["verify_a2ui_bundle"]()
+
+
+def test_all_desktop_builds_run_frozen_a2ui_verifier():
+    build_scripts = (
+        ROOT / "scripts/build-exe.ps1",
+        ROOT / "scripts/build-exe.bat",
+        ROOT / "scripts/build-macos.sh",
+    )
+
+    for build_script in build_scripts:
+        source = build_script.read_text(encoding="utf-8")
+        assert "verify_a2ui_bundle.py" in source

@@ -105,7 +105,6 @@ def main() -> None:
     agent = subprocess.Popen(agent_cmd, **_popen_kwargs)
     gateway = None
     try:
-        time.sleep(0.4)
         gateway = subprocess.Popen(gateway_cmd, **_popen_kwargs)
     except Exception:
         if agent.poll() is None:

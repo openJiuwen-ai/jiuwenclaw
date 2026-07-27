@@ -29,9 +29,7 @@ from jiuwenswarm.common.utils import (
     logger,
 )
 
-_LANGUAGE_NAMES = {"cn": "Chinese", "zh": "Chinese", "en": "English"}
-
-_LANGUAGE_NAMES = {"cn": "Chinese", "zh": "Chinese", "en": "English"}
+_LANGUAGE_NAMES = {"cn": "Chinese (Simplified)", "zh": "Chinese (Simplified)", "en": "English"}
 
 
 class RuntimePromptRail(DeepAgentRail):
@@ -114,7 +112,11 @@ class RuntimePromptRail(DeepAgentRail):
         )
 
     def set_force_english(self, force: bool) -> None:
-        """Force English-only injected sections regardless of language (code mode)."""
+        """Force English for scaffolding sections (time/runtime/env) in code mode.
+
+        Does NOT affect the Language section (response language), which always
+        follows the user's preferred language set via :meth:`set_language`.
+        """
         self._force_english = force
 
     @staticmethod
@@ -224,10 +226,16 @@ class RuntimePromptRail(DeepAgentRail):
         ).strip()
         available_models_str = ", ".join(available_models) if available_models else model
         mode = (runtime_state.get("mode") or self._mode or "unknown").strip()
+        # Language section controls the model's *response* language and must
+        # follow the user's preferred language.  ``_force_english`` only
+        # affects system-prompt scaffolding (time / runtime / env sections),
+        # NOT the response language, so that code mode (which sets
+        # _force_english=True for English scaffolding) still replies in the
+        # user's chosen language.
         language_val = (
-            "en"
-            if self._force_english
-            else self._language or runtime_state.get("language") or "unknown"
+            self._language
+            or runtime_state.get("language")
+            or "unknown"
         ).strip()
         channel = (runtime_state.get("channel") or self._channel or "unknown").strip()
 
@@ -283,24 +291,9 @@ class RuntimePromptRail(DeepAgentRail):
         language_name = _LANGUAGE_NAMES.get(language_val, language_val)
         language_output_content = (
             "# Language\n\n"
-            f"Always respond in {language_name}. "
-            f"Use {language_name} for all explanations, comments, "
-            f"and communications with the user. "
-            f"Technical terms and code identifiers should remain "
-            f"in their original form."
-        )
-        self.system_prompt_builder.add_section(PromptSection(
-            name="language_output",
-            content={"cn": language_output_content, "en": language_output_content},
-            priority=93,
-        ))
-
-        # ── Language output constraint (injected near end) ──
-        self.system_prompt_builder.remove_section("language_output")
-        language_name = _LANGUAGE_NAMES.get(language_val, language_val)
-        language_output_content = (
-            "# Language\n\n"
-            f"Always respond in {language_name}. "
+            f"Always respond in {language_name}, regardless of the language "
+            f"used in the user's message. Even if the user writes in another "
+            f"language, you must still respond in {language_name}. "
             f"Use {language_name} for all explanations, comments, "
             f"and communications with the user. "
             f"Technical terms and code identifiers should remain "
