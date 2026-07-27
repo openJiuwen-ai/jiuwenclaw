@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from abc import abstractmethod
@@ -31,7 +32,7 @@ class BaseWsChannel(BaseChannel):
     以及 register_ws / unregister_ws / send 的默认实现。
 
     子类（WebChannel / TuiChannel）需覆写：
-    - _serialize_frame() — 将 Message 转为 wire frame（str/bytes）
+    - _serialize_frame() — 将 Message 转为出站帧（dict 或 str/bytes，writer 统一序列化）
     - 可覆写 _broadcast_fallback_enabled — 控制是否启用查找失败时广播兜底（默认关闭）
     """
 
@@ -198,16 +199,19 @@ class BaseWsChannel(BaseChannel):
             return
 
         frame = self._serialize_frame(msg, routing_target, member_names=member_names)
-        # 非阻塞入队：dispatch loop 不 await IO，背压隔离在 writer 协程内
+        # 非阻塞入队：dispatch loop 不 await IO，背压隔离在 writer 协程内。
+        # frame 可为 dict（writer 统一序列化）或 str/bytes，_enqueue_send 两者皆收。
         for w in ws_set:
             self._enqueue_send(w, frame)
 
     # ── per-ws writer：出站背压隔离 ──
 
-    def _enqueue_send(self, ws: Any, data: str | bytes) -> None:
+    def _enqueue_send(self, ws: Any, data: Any) -> None:
         """非阻塞入队一帧到 ws 的出站队列，立即返回。
 
-        ws 已关闭或队列缺失时静默丢弃（与旧 _safe_send 忽略 closed ws 语义一致）。
+        ``data`` 可为 dict（由 writer 统一序列化一次，省去入队前预 dumps
+        与 ``_coalesce`` 解析回 dict 的往返）、str/bytes（原样发送）或 None
+        哨兵。ws 已关闭或队列缺失时静默丢弃（与旧 _safe_send 语义一致）。
         """
         if getattr(ws, "closed", False):
             return
@@ -243,8 +247,22 @@ class BaseWsChannel(BaseChannel):
             for frame in frames:
                 if frame is None:
                     return
+                # dict 帧在出口处序列化一次；str/bytes 原样发送。避免入队前
+                # 预 dumps 与 _coalesce 解析回 dict 的二次编解码往返。序列化
+                # 与 send 共用下方兜底：任一失败都只丢这一帧，不杀 writer。
+                if isinstance(frame, dict):
+                    try:
+                        wire = json.dumps(frame, ensure_ascii=False)
+                    except (TypeError, ValueError) as e:
+                        logger.warning(
+                            "[%s] frame serialize failed, dropping ws_id=%s err=%s",
+                            self.channel_id, ws_id, e,
+                        )
+                        continue
+                else:
+                    wire = frame
                 try:
-                    await asyncio.wait_for(ws.send(frame), timeout=10.0)
+                    await asyncio.wait_for(ws.send(wire), timeout=10.0)
                 except asyncio.TimeoutError:
                     # Drop only this frame. Killing the writer leaves an unbounded
                     # queue with nobody draining it — later unary res frames
@@ -343,8 +361,13 @@ class BaseWsChannel(BaseChannel):
         routing_target: RoutingTarget | None,
         *,
         member_names: list[str] | None = None,
-    ) -> str | bytes:
-        """将 Message 序列化为 wire frame。子类必须实现."""
+    ) -> Any:
+        """将 Message 转为出站帧。子类必须实现.
+
+        返回 dict 时由 ``_writer_loop`` 在 ``ws.send`` 前统一序列化一次
+        （避免入队前预 dumps 与 ``_coalesce`` 解析回 dict 的往返）；
+        返回 str/bytes 时原样发送。
+        """
 
     # ── 内部工具 ──
 

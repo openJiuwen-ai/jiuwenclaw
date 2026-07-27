@@ -30,18 +30,17 @@ def _channel() -> WebChannel:
     return WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
 
 
-def _frame(event: str, content: str, **metadata: Any) -> str:
-    return json.dumps(
-        {
-            "type": "event",
-            "event": event,
-            "payload": {**metadata, "content": content},
-        },
-        ensure_ascii=False,
-    )
+def _frame(event: str, content: str, **metadata: Any) -> dict[str, Any]:
+    """Build a coalescible stream frame as a dict (what _enqueue_send now stores)."""
+    return {
+        "type": "event",
+        "event": event,
+        "payload": {**metadata, "content": content},
+    }
 
 
 def _decoded(frame: str) -> dict[str, Any]:
+    """Decode a wire frame the writer serialized before ws.send."""
     return json.loads(frame)
 
 
@@ -56,8 +55,8 @@ def test_coalesce_merges_contiguous_delta_with_identical_metadata() -> None:
         queue,
     )
 
-    assert _decoded(frames[0])["payload"]["content"] == "AB"
-    assert _decoded(frames[1])["event"] == "chat.final"
+    assert frames[0]["payload"]["content"] == "AB"
+    assert frames[1]["event"] == "chat.final"
 
 
 def test_coalesce_preserves_whitespace_exactly() -> None:
@@ -71,7 +70,7 @@ def test_coalesce_preserves_whitespace_exactly() -> None:
         queue,
     )
 
-    assert _decoded(frames[0])["payload"]["content"] == "A \n"
+    assert frames[0]["payload"]["content"] == "A \n"
 
 
 @pytest.mark.parametrize(
@@ -138,7 +137,7 @@ def test_coalesce_limits_each_batch_to_32_frames() -> None:
         queue,
     )
 
-    assert _decoded(frames[0])["payload"]["content"] == "x" * 32
+    assert frames[0]["payload"]["content"] == "x" * 32
     assert queue.qsize() == 9
 
 

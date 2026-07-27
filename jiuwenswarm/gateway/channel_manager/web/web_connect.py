@@ -146,33 +146,46 @@ class WebChannel(BaseWsChannel):
     @staticmethod
     def _coalescible_stream_frame(
         frame: Any,
-    ) -> tuple[dict[str, Any], dict[str, Any], str] | None:
-        """Return decoded/comparable/content parts for a merge-safe stream frame."""
-        if not isinstance(frame, str):
+    ) -> tuple[dict[str, Any], str] | None:
+        """Return (decoded frame, content) for a merge-safe stream frame.
+
+        帧已是 dict（入队时不预序列化），故无需 json.loads；返回 decoded 与
+        content 供 _coalesce 直接在 dict 层合并，省去 str↔dict 往返。
+        """
+        if not isinstance(frame, dict) or frame.get("type") != "event":
             return None
-        try:
-            decoded = json.loads(frame)
-        except (TypeError, ValueError):
+        if frame.get("event") not in _STREAM_COALESCE_EVENT_TYPES:
             return None
-        if not isinstance(decoded, dict) or decoded.get("type") != "event":
-            return None
-        if decoded.get("event") not in _STREAM_COALESCE_EVENT_TYPES:
-            return None
-        payload = decoded.get("payload")
+        payload = frame.get("payload")
         if not isinstance(payload, dict):
             return None
         content = payload.get("content")
         if not isinstance(content, str):
             return None
-        comparable = {
-            **decoded,
-            "payload": {
-                key: value
-                for key, value in payload.items()
-                if key != "content"
-            },
-        }
-        return decoded, comparable, content
+        return frame, content
+
+    @staticmethod
+    def _same_stream_identity(
+        a: dict[str, Any],
+        b: dict[str, Any],
+    ) -> bool:
+        """两帧除 payload.content 外是否同流（可合并）。
+
+        逐键比对 payload 非 content 字段 + 外层 event 等键，避免构造 comparable
+        dict 副本与整 dict 哈希比对的开销。
+        """
+        a_payload = a["payload"]
+        b_payload = b["payload"]
+        if a.get("event") != b.get("event"):
+            return False
+        if a.get("type") != b.get("type"):
+            return False
+        for key in set(a_payload) | set(b_payload):
+            if key == "content":
+                continue
+            if a_payload.get(key) != b_payload.get(key):
+                return False
+        return True
 
     def _coalesce(
         self,
@@ -184,7 +197,7 @@ class WebChannel(BaseWsChannel):
         if parsed is None:
             return [first_frame]
 
-        decoded, comparable, merged_content = parsed
+        decoded, merged_content = parsed
         merged_count = 1
         trailing: list[Any] = []
 
@@ -197,21 +210,20 @@ class WebChannel(BaseWsChannel):
                 trailing.append(None)
                 break
             candidate_parsed = self._coalescible_stream_frame(candidate)
-            if candidate_parsed is None or candidate_parsed[1] != comparable:
+            if (
+                candidate_parsed is None
+                or not self._same_stream_identity(decoded, candidate_parsed[0])
+            ):
                 trailing.append(candidate)
                 break
-            merged_content += candidate_parsed[2]
+            merged_content += candidate_parsed[1]
             merged_count += 1
 
         if merged_count == 1:
             return [first_frame, *trailing]
 
         merged_payload = {**decoded["payload"], "content": merged_content}
-        merged_frame = json.dumps(
-            {**decoded, "payload": merged_payload},
-            ensure_ascii=False,
-        )
-        return [merged_frame, *trailing]
+        return [{**decoded, "payload": merged_payload}, *trailing]
 
     # ── 公共属性 ──────────────────────────────────────────
 
@@ -285,7 +297,7 @@ class WebChannel(BaseWsChannel):
             if code:
                 frame["code"] = code
         try:
-            self._enqueue_send(ws, json.dumps(frame, ensure_ascii=False))
+            self._enqueue_send(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug(
@@ -315,7 +327,7 @@ class WebChannel(BaseWsChannel):
         if stream_id is not None:
             frame["stream_id"] = stream_id
         try:
-            self._enqueue_send(ws, json.dumps(frame, ensure_ascii=False))
+            self._enqueue_send(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug(
@@ -690,7 +702,7 @@ class WebChannel(BaseWsChannel):
         # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
         # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
         if msg.event_type == EventType.HEARTBEAT_RELAY:
-            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
@@ -709,7 +721,7 @@ class WebChannel(BaseWsChannel):
             and isinstance(msg.payload, dict)
             and isinstance(msg.payload.get("cron"), dict)
         ):
-            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
@@ -730,7 +742,7 @@ class WebChannel(BaseWsChannel):
             and isinstance(msg.payload, dict)
             and msg.payload.get("source") == "proactive_notification"
         ):
-            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
@@ -1278,12 +1290,14 @@ class WebChannel(BaseWsChannel):
             )
 
     async def _broadcast_to(self, frame: dict[str, Any], clients: set[Any]) -> None:
-        """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）."""
-        data = json.dumps(frame, ensure_ascii=False)
+        """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）.
+
+        入队 dict，由 writer 统一序列化一次，避免此处预 dumps。
+        """
         if not clients:
             return
         for client in clients:
-            self._enqueue_send(client, data)
+            self._enqueue_send(client, frame)
 
     # ── BaseWsChannel 抽象方法 ──
 
@@ -1293,8 +1307,8 @@ class WebChannel(BaseWsChannel):
         routing_target: RoutingTarget | None = None,
         *,
         member_names: list[str] | None = None,
-    ) -> str:
-        """将 Message 序列化为 Web 前端 JSON 帧."""
+    ) -> dict[str, Any]:
+        """将 Message 转为 Web 前端帧 dict（由 writer 统一序列化）."""
         event_name = "chat.final"
         if getattr(msg, "event_type", None) is not None:
             event_name = msg.event_type.value
@@ -1325,7 +1339,7 @@ class WebChannel(BaseWsChannel):
             "event": event_name,
             "payload": payload,
         }
-        return json.dumps(frame, ensure_ascii=False)
+        return frame
 
     @staticmethod
     def _parse_req_method(method: str) -> ReqMethod | None:
