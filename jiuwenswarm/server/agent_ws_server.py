@@ -3310,6 +3310,12 @@ class AgentWebSocketServer:
             tasks = payload.get("tasks")
             return tasks if isinstance(tasks, list) else []
 
+        def _snapshot_members(payload: dict[str, Any] | None) -> list[Any]:
+            if not isinstance(payload, dict):
+                return []
+            members = payload.get("members")
+            return members if isinstance(members, list) else []
+
         # History restore often hits this RPC after the monitor has stopped, OR
         # while a live handler is still registered but already returns a truthy
         # empty board ({tasks: [], members: [], team_id: ...}). `if not snapshot`
@@ -3342,10 +3348,19 @@ class AgentWebSocketServer:
                     db_snapshot = None
                 # Prefer DB when it has tasks, or when live was missing entirely.
                 # If both boards have empty tasks, keep live so in-memory
-                # members (if any) are not wiped by an empty DB read.
-                if db_snapshot is not None and (
-                    snapshot is None or _snapshot_tasks(db_snapshot)
-                ):
+                # members (if any) are not wiped by an empty DB read — UNLESS
+                # live is completely empty (no tasks AND no members, e.g. a
+                # stalled monitor during the spawn phase) and the DB already
+                # has members: then the DB board is strictly more informative.
+                live_is_empty = (
+                    not _snapshot_tasks(snapshot) and not _snapshot_members(snapshot)
+                )
+                db_is_more_informative = (
+                    snapshot is None
+                    or _snapshot_tasks(db_snapshot)
+                    or (live_is_empty and _snapshot_members(db_snapshot))
+                )
+                if db_snapshot is not None and db_is_more_informative:
                     snapshot = db_snapshot
                     source = "db"
 

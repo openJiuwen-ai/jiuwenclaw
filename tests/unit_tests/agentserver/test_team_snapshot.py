@@ -189,3 +189,27 @@ async def test_empty_live_keeps_live_when_db_also_empty() -> None:
     assert db_calls == [("sess-1", "team-sess-1")]
     assert resp.payload["members"][0]["member_id"] == "w1"
     assert resp.payload["tasks"] == []
+
+
+@pytest.mark.anyio
+async def test_fully_empty_live_adopts_db_members_without_tasks() -> None:
+    """Stalled monitor during the spawn phase: live is truthy but completely
+    empty while the DB already has spawned members (no tasks yet) → the DB
+    board must win so the sidebar can show the members."""
+    live = {"members": [], "tasks": [], "team_id": "team-sess-1"}
+    db = {
+        "members": [
+            {"member_id": "w1", "name": "W1", "status": "idle"},
+            {"member_id": "w2", "name": "W2", "status": "idle"},
+        ],
+        "tasks": [],
+        "team_id": "team-sess-1",
+    }
+    resp, db_calls = await _invoke(
+        monitor=_FakeMonitorHandler(live),
+        db_snapshot=db,
+    )
+
+    assert db_calls == [("sess-1", "team-sess-1")]
+    assert [m["member_id"] for m in resp.payload["members"]] == ["w1", "w2"]
+    assert resp.payload["tasks"] == []

@@ -299,6 +299,15 @@ export function ToolPanel({
 
     const controller = new AbortController();
     loadingTeamHistorySessionRef.current = sessionId;
+    // Restore race guard: live team.task events may arrive while the (multi-
+    // second) history/snapshot RPC is in flight. Snapshot the task_ids that
+    // exist BEFORE the RPC starts — only those are eligible for orphan
+    // pruning below; tasks that appear during the restore window are kept.
+    const preRestoreTaskIds = new Set(
+      (useSessionStore.getState().runtimes[sessionId]?.teamTasks ?? []).map(
+        (task) => task.task_id
+      )
+    );
     void loadTeamHistoryPanelState(sessionId, controller.signal)
       .then((historyState) => {
         loadingTeamHistorySessionRef.current = null;
@@ -326,9 +335,15 @@ export function ToolPanel({
         // a prior optimistic upsert). Always setTeamTasks — including [] — so
         // an empty restore actually clears those orphans instead of leaving
         // the previous store contents untouched.
+        //
+        // Orphan pruning only applies to tasks that already existed before the
+        // restore RPC started (preRestoreTaskIds): tasks pushed by live events
+        // during the RPC window are real DB tasks the restore result simply
+        // hasn't seen yet, and must not be wiped.
         const restoredTaskIds = new Set(historyState.tasks.map((task) => task.task_id));
-        const liveTasksForMerge = (current?.teamTasks ?? []).filter((task) =>
-          restoredTaskIds.has(task.task_id)
+        const liveTasksForMerge = (current?.teamTasks ?? []).filter(
+          (task) =>
+            restoredTaskIds.has(task.task_id) || !preRestoreTaskIds.has(task.task_id)
         );
         const mergedTasks = mergeById(
           historyState.tasks,

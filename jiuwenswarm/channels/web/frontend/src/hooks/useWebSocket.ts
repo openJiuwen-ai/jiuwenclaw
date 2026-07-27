@@ -58,6 +58,11 @@ import {
   normalizeToolUpdatePayload,
 } from '../features/tool-events/toolEventNormalizer';
 import { findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn } from '../features/teamLeaderMessages';
+import {
+  noteTeamActivity,
+  startTeamSnapshotReconcile,
+  stopTeamSnapshotReconcile,
+} from '../features/teamSnapshotReconcile';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
@@ -663,6 +668,26 @@ function getAgentRefId(payload: Record<string, unknown>): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * 判断一条 team.member 状态类事件（status_changed / execution_changed）能否
+ * 用于"补建"一个前端从未见过的成员。spawn 事件在 monitor 停滞窗口丢失时，
+ * 后续状态事件是成员存在的直接证据；但 shut_down 状态、虚拟 user 与 leader
+ * 不允许由此路径创建，避免复活已关停成员或污染成员面板。
+ */
+function canCreateMemberFromStatusEvent(e: {
+  member_id?: string;
+  status?: string;
+  new_status?: string;
+}): boolean {
+  return Boolean(
+    e.member_id &&
+    e.member_id !== 'user' &&
+    e.member_id !== 'team_leader' &&
+    e.status !== 'shut_down' &&
+    e.new_status !== 'shut_down'
+  );
 }
 
 function upsertHumanShareCommandFromEvent(
@@ -2600,6 +2625,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           flushPendingStreamDelta(sessionId);
         }
         useChatStore.getState().setProcessing(sessionId, isProcessingNow);
+        // 集群侧栏自愈对账：轮内周期性把 team.snapshot（后端有 DB 直查降级）
+        // merge 进侧栏，轮末再补一次——即使 monitor 事件流停滞，看板最多滞后
+        // 一个对账周期，而不是整轮空白。
+        if (useSessionStore.getState().getRuntime(sessionId)?.mode === 'team') {
+          if (isProcessingNow) {
+            startTeamSnapshotReconcile(sessionId);
+          } else {
+            stopTeamSnapshotReconcile(sessionId, { finalReconcile: true });
+          }
+        }
         const sessionPatch: Partial<Session> = {
           is_processing: isProcessingNow,
           updated_at: new Date().toISOString(),
@@ -3068,12 +3103,26 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('team.task', payload)) {
           return;
         }
-        if (isTeamPanelClearedForPayload(payload)) {
-          return;
-        }
-        clearThinkingForVisibleOutput(sessionId);
+        noteTeamActivity(sessionId);
         const p = payload as { payload?: { event?: unknown }; event?: unknown };
         const event = p.payload?.event || p.event;
+        const incomingTaskEventType =
+          event && typeof (event as { type?: unknown }).type === 'string'
+            ? (event as { type: string }).type
+            : '';
+        if (isTeamPanelClearedForPayload(payload)) {
+          // 自愈：全员 shutdown 清空面板后，新任务创建说明团队已复活。
+          // 解除 cleared 标志并继续处理，否则该 session 后续所有侧栏事件
+          // 都会被吞掉，直到用户下一次 sendMessage。
+          if (incomingTaskEventType !== 'team.task.created') {
+            return;
+          }
+          const clearedSessionId = getPayloadSessionId(payload);
+          if (clearedSessionId) {
+            clearedTeamPanelSessionRef.current.delete(clearedSessionId);
+          }
+        }
+        clearThinkingForVisibleOutput(sessionId);
         if (event) {
           const e = event as {
             type?: string;
@@ -3119,6 +3168,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('team.member', payload)) {
           return;
         }
+        noteTeamActivity(sessionId);
         const p = payload as { payload?: { event?: unknown }; event?: unknown };
         const event = p.payload?.event || p.event;
         if (event) {
@@ -3134,22 +3184,51 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           };
           const activeSessionId = getPayloadSessionId(payload) || undefined;
           upsertHumanShareCommandFromEvent(payload, e);
+          // 自愈：spawn/restart（以及后端补快照的无 type upsert 形状）说明团队
+          // 重新活跃，解除 cleared 标志，让本事件与后续侧栏事件正常落库。
+          const isMemberRevivalEvent =
+            !e.type || e.type === 'team.member.spawned' || e.type === 'team.member.restarted';
+          if (
+            activeSessionId &&
+            isMemberRevivalEvent &&
+            clearedTeamPanelSessionRef.current.has(activeSessionId)
+          ) {
+            clearedTeamPanelSessionRef.current.delete(activeSessionId);
+          }
           if (e.type === 'team.member.shutdown' && e.member_id) {
             applyTeamMemberShutdown(e.member_id, activeSessionId);
           } else if (activeSessionId && clearedTeamPanelSessionRef.current.has(activeSessionId)) {
             return;
           } else if (e.type === 'team.member.status_changed' && e.member_id && e.new_status) {
-            useSessionStore.getState().updateTeamMemberStatus(
-              sessionId,
-              e.member_id,
-              e.new_status,
-              e.timestamp
+            const hasMember = useSessionStore.getState().getRuntime(sessionId)?.teamMembers.some(
+              (member) => member.member_id === e.member_id
             );
+            if (hasMember) {
+              useSessionStore.getState().updateTeamMemberStatus(
+                sessionId,
+                e.member_id,
+                e.new_status,
+                e.timestamp
+              );
+            } else if (canCreateMemberFromStatusEvent(e)) {
+              // 自愈：spawn 事件在 monitor 停滞窗口丢失时，后续状态事件就是
+              // 成员存在的直接证据——补建成员而不是静默丢弃（原逻辑对未知
+              // 成员 no-op，导致任务面板恢复了而团队面板一直空着）。
+              useSessionStore.getState().addTeamMember(sessionId, {
+                id: `member-${Date.now()}`,
+                member_id: e.member_id,
+                status: e.new_status,
+                timestamp: e.timestamp || Date.now(),
+                name: e.name,
+                execution_status: e.execution_status,
+                mode: e.mode,
+              });
+            }
           } else if (e.type === 'team.member.execution_changed' && e.member_id) {
             const existingMember = useSessionStore.getState().getRuntime(sessionId)?.teamMembers.some(
               (member) => member.member_id === e.member_id
             );
-            if (existingMember) {
+            if (existingMember || canCreateMemberFromStatusEvent(e)) {
               useSessionStore.getState().addTeamMember(sessionId, {
                 id: `member-${Date.now()}`,
                 member_id: e.member_id,

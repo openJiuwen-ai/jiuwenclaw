@@ -797,7 +797,7 @@ function readSnapshotSize(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function snapshotItemToTask(item: Record<string, unknown>, fallbackTimestamp: number): TeamTask | null {
+export function snapshotItemToTask(item: Record<string, unknown>, fallbackTimestamp: number): TeamTask | null {
   const taskId = pickString(item, ['task_id']);
   if (!taskId) {
     return null;

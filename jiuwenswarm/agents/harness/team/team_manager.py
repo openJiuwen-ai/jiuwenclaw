@@ -10,6 +10,7 @@ import logging
 import re
 import time
 import weakref
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,23 @@ _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
 _TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC = 1.5
+
+# ── Undelivered sidebar-event buffering ─────────────────────
+# Waiter queues live only for the duration of a stream round, while the
+# monitor consumer task survives across rounds. Sidebar-relevant events
+# broadcast in the gap (no registered waiter) used to be silently dropped,
+# leaving the frontend team/task panel stale until a manual refresh.
+# They are now buffered per session and flushed to the next waiter.
+# chat.* control events are intentionally NOT buffered — replaying them
+# across rounds would corrupt round state.
+_UNDELIVERED_EVENT_TYPES = frozenset({
+    "team.member",
+    "team.task",
+    "workflow.updated",
+    "todo.updated",
+})
+_UNDELIVERED_EVENT_BUFFER_MAX = 200
+_UNDELIVERED_EVENT_TTL_SEC = 300.0
 
 # ── Team Observability ──────────────────────────────────────
 # Tracks whether observability is currently active so we can
@@ -222,6 +240,9 @@ class TeamManager:
         self._pending_team_names: dict[str, str] = {}
         # session_id → list of (request_id, asyncio.Queue) waiters
         self._pending_waiters: dict[str, list[tuple[str, asyncio.Queue]]] = {}
+        # session_id → buffered (monotonic_ts, event) pairs broadcast while no
+        # waiter was registered; flushed to the next waiter by add_waiter.
+        self._undelivered_events: dict[str, deque[tuple[float, dict[str, Any]]]] = {}
         # session_id → cron team round completion state. Lifetime-coupled to
         # _pending_waiters: set by _try_finish_cron_team_stream, popped by the
         # finisher coroutines once the cron stream ends.
@@ -276,8 +297,43 @@ class TeamManager:
         return bool(self._pending_waiters.get(session_id))
 
     def add_waiter(self, session_id: str, request_id: str, queue: asyncio.Queue) -> None:
-        """Register a waiter queue for a session's event stream."""
+        """Register a waiter queue for a session's event stream.
+
+        Events buffered while the session had no waiter are flushed into the
+        new queue first so they precede any live events of the new round.
+        """
+        self._flush_undelivered_events(session_id, queue)
         self._pending_waiters.setdefault(session_id, []).append((request_id, queue))
+
+    def _flush_undelivered_events(self, session_id: str, queue: asyncio.Queue) -> None:
+        """Move non-expired buffered events for the session into the queue."""
+        buffered = self._undelivered_events.pop(session_id, None)
+        if not buffered:
+            return
+        now = time.monotonic()
+        flushed = 0
+        for enqueued_at, event in buffered:
+            if now - enqueued_at > _UNDELIVERED_EVENT_TTL_SEC:
+                continue
+            try:
+                queue.put_nowait(dict(event))
+                flushed += 1
+            except Exception:
+                logger.debug(
+                    "[TeamManager] flush of undelivered event failed: session_id=%s",
+                    session_id,
+                )
+        if flushed:
+            logger.info(
+                "[TeamManager] flushed %d undelivered event(s) to new waiter: "
+                "session_id=%s",
+                flushed,
+                session_id,
+            )
+
+    def clear_undelivered_events(self, session_id: str) -> None:
+        """Drop buffered undelivered events for a session (on teardown)."""
+        self._undelivered_events.pop(session_id, None)
 
     def remove_waiter(self, session_id: str, request_id: str) -> None:
         """Remove a waiter by request_id; clean up empty lists."""
@@ -291,7 +347,13 @@ class TeamManager:
             self._pending_waiters.pop(session_id, None)
 
     def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
-        """Broadcast an event to all request queues waiting on the same session."""
+        """Broadcast an event to all request queues waiting on the same session.
+
+        When no waiter is registered, sidebar-relevant events (team.member /
+        team.task / workflow.updated / todo.updated) are buffered and flushed
+        to the next waiter instead of being silently dropped; other events
+        are dropped with a warning for observability.
+        """
         waiters = self._pending_waiters.get(session_id)
         if waiters:
             for request_id, queue in waiters:
@@ -303,6 +365,27 @@ class TeamManager:
                         session_id,
                         request_id,
                     )
+            return
+
+        event_type = str(event.get("event_type") or "")
+        if event_type in _UNDELIVERED_EVENT_TYPES:
+            buffered = self._undelivered_events.setdefault(
+                session_id, deque(maxlen=_UNDELIVERED_EVENT_BUFFER_MAX)
+            )
+            buffered.append((time.monotonic(), dict(event)))
+            logger.warning(
+                "[TeamManager] no waiter, buffered event for next waiter: "
+                "session_id=%s event_type=%s buffered=%d",
+                session_id,
+                event_type,
+                len(buffered),
+            )
+        else:
+            logger.warning(
+                "[TeamManager] no waiter, event dropped: session_id=%s event_type=%s",
+                session_id,
+                event_type,
+            )
 
     # --- seen_team_events tracking ---
     # A session enters "team" mode once any team-building event (team.member,
@@ -1693,6 +1776,7 @@ class TeamManager:
                 )
 
         self._clear_team_rail_registries(session_id)
+        self.clear_undelivered_events(session_id)
 
     async def _stop_runner_team_runtime(
         self, session_id: str, team_name: str, caller: str
