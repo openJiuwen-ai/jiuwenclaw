@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { X, Pencil } from 'lucide-react';
 import ScheduleEditor from './ScheduleEditor';
 import ModelPicker from './ModelPicker';
+import ModeSelector from './ModeSelector';
 import DatePicker from './DatePicker';
 import SimpleSelect from './SimpleSelect';
 import TemplateClusterIcon from './TemplateClusterIcon';
@@ -13,6 +14,11 @@ import { TIMEZONE_OPTIONS } from './constants';
 import type { CronTaskUI, CronTemplateUI } from '../../types/cron';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
 import { getProjectDisplayName } from '../../stores/workspaceStore';
+import type { AgentMode } from '../../types';
+// 会话输入框工具栏那一套 .chat-mode-select pill 下拉组件（模式/模型选择器）的 CSS，
+// 抽屉里的模式/模型选择器直接复用同一套 class，跟会话界面视觉/交互完全一致。
+// 这份 CSS 是普通全局样式（非 CSS Module），AgentPanel/FileViewer.tsx 已有同样 import 先例。
+import '../ChatPanel/ChatPanel.css';
 
 // "生效周期"依赖后端 effective_from/effective_until（见 backend-requests.md 需求3），目前后端还
 // 没有这个概念，选了也不下发。之前的方案是保留字段但标注"即将上线"，用户后来觉得不如先整个隐藏，
@@ -28,8 +34,15 @@ const CRON_DESCRIPTION_MAX_LENGTH = 500;
 export interface CronTaskFormValue {
   name: string;
   projectDir: string | null; // 仅创建/模板创建模式使用；编辑模式不展示项目字段，不参与提交
+  // 与 projectDir 配套的 project_id，下拉框选中时一并反查写入（见 projectOptions/onChange）。
+  // 后端 controller.py resolve_cron_project_binding 优先信任显式 project_id，其次才按
+  // project_dir 反查可见项目——只传 project_dir 会多走一层查找，带上 projectId 更直接、更可靠
+  // （与会话内 cron_create_job 工具调用那条链路天然自带 project_id 的行为对齐）。
+  projectId: string | null;
   modelName: string | null;
   description: string;
+  /** 执行模式：单Agent('agent')/集群('team')，下发到后端 CronJob.mode（见 index.tsx handleCreateSubmit/handleEditSubmit） */
+  mode: AgentMode;
   targets: string; // 推送频道，对应后端 CronJob.targets
   cronExpr: string;
   /** 提前唤醒秒数，对应后端 CronJob.wake_offset_seconds；0 表示到点执行 */
@@ -43,8 +56,10 @@ function emptyForm(): CronTaskFormValue {
   return {
     name: '',
     projectDir: null,
+    projectId: null,
     modelName: null,
     description: '',
+    mode: 'agent',
     targets: 'web',
     cronExpr: '',
     wakeOffsetSeconds: 0,
@@ -58,8 +73,10 @@ export function jobToForm(job: CronTaskUI): CronTaskFormValue {
   return {
     name: job.name,
     projectDir: null,
+    projectId: null,
     modelName: job.modelName,
     description: job.description,
+    mode: job.mode,
     targets: job.deliveryChannel,
     cronExpr: job.cronExpr,
     wakeOffsetSeconds: normalizeWakeOffsetSeconds(job.wakeOffsetSeconds),
@@ -73,8 +90,10 @@ export function templateToForm(tpl: CronTemplateUI, title: string, description: 
   return {
     name: title,
     projectDir: null,
+    projectId: null,
     modelName: null,
     description,
+    mode: 'agent',
     targets: 'web',
     cronExpr: tpl.cronExpr,
     wakeOffsetSeconds: 0,
@@ -218,17 +237,17 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
               <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldProject')}</label>
               <SimpleSelect
                 value={form.projectDir ?? ''}
-                onChange={(v) => setForm({ ...form, projectDir: v || null })}
+                onChange={(v) => {
+                  // SimpleSelect 只回传 value（即 project_dir），这里按 project_dir 反查出
+                  // 对应的 project_id 一并写入表单，提交时两者一起下发（见 CronTaskFormValue.projectId 注释）
+                  const matched = v ? filterNonDefaultProjects(projects).find((p) => p.project_dir === v) : undefined;
+                  setForm({ ...form, projectDir: v || null, projectId: matched?.project_id ?? null });
+                }}
                 options={projectOptions}
                 placeholder={t('cron.drawer.placeholderProject') ?? undefined}
               />
             </div>
           )}
-
-          <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldModel')}</label>
-            <ModelPicker value={form.modelName} onChange={(modelName) => setForm({ ...form, modelName })} disabled={proactiveLocked} />
-          </div>
 
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -239,16 +258,30 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
                 {t('cron.drawer.charCount', { count: form.description.length, max: CRON_DESCRIPTION_MAX_LENGTH })}
               </span>
             </div>
-            <textarea
-              value={form.description}
-              onChange={(e) => setForm({ ...form, description: e.target.value })}
-              placeholder={t('cron.drawer.placeholderInput') ?? undefined}
-              rows={4}
-              maxLength={CRON_DESCRIPTION_MAX_LENGTH}
-              disabled={proactiveLocked}
-              title={lockedTitle}
-              className={`${fieldClass} resize-none`}
-            />
+            {/* 描述框 + 底部内嵌工具栏（模式/模型 pill）做成一体式容器，参考会话界面
+                输入框那种"输入区 + 底部工具栏"结构——pill 直接贴在 textarea 下沿，
+                不再是独立一块浮在描述框下方、中间留一大段空隙。容器用 fieldClass 的
+                边框/背景，textarea 去掉自己的边框只保留内边距，视觉上连成一片。 */}
+            <div className={`${fieldClass} flex flex-col gap-2 p-0`}>
+              <textarea
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                placeholder={t('cron.drawer.placeholderInput') ?? undefined}
+                rows={4}
+                maxLength={CRON_DESCRIPTION_MAX_LENGTH}
+                disabled={proactiveLocked}
+                title={lockedTitle}
+                className="w-full resize-none border-0 bg-transparent px-3 py-1.5 text-sm text-text outline-none placeholder:text-text-muted disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <div className="cron-drawer-mode-model-row flex items-center gap-1.5 border-t border-border/60 px-1 py-1">
+                <ModeSelector
+                  value={form.mode}
+                  onChange={(m) => setForm({ ...form, mode: m })}
+                  disabled={proactiveLocked}
+                />
+                <ModelPicker value={form.modelName} onChange={(modelName) => setForm({ ...form, modelName })} disabled={proactiveLocked} />
+              </div>
+            </div>
             {form.description.length >= CRON_DESCRIPTION_MAX_LENGTH && (
               <p className="mt-1 text-xs text-danger">{t('cron.drawer.maxLengthReachedHint', { max: CRON_DESCRIPTION_MAX_LENGTH })}</p>
             )}

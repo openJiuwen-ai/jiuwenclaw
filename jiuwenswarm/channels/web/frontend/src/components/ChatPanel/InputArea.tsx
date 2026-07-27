@@ -2148,7 +2148,11 @@ function ModelSelector({
 
   if (chatAvailableModels.length === 0) return null;
 
-  const displayedModelName = lockedToDefault ? defaultModelName : selectedModelName;
+  // 集群模式下 UI 禁止手动改模型（见下方 disabled/tooltip），但显示仍应优先反映
+  // 该会话实际记录的模型（如定时任务在集群模式下显式指定了非默认模型，后端也确实
+  // 按该模型执行——见 bug002 回归），而不是不管三七二十一恒显示全局默认模型；
+  // 从未指定过模型的会话 selectedModelName 本就兜底等于默认模型，行为不变。
+  const displayedModelName = selectedModelName || defaultModelName;
   const selectedModel =
     chatAvailableModels.find((m) => (m.alias || m.model_name) === displayedModelName) ??
     chatAvailableModels[0];
