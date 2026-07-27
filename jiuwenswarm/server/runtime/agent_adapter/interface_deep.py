@@ -801,6 +801,10 @@ class JiuWenSwarmDeepAdapter:
         # (e.g., supplement while previous task still winding down) don't
         # prematurely remove the entry when the first task finishes.
         self._active_session_ids: Counter[str] = Counter()
+        # Provenance of assistant text currently forwarded on the shared
+        # interaction stream. A late user-round chat.final must not be demoted
+        # just because a goal round already became active.
+        self._stream_content_run_kind: str | None = None
         # In-flight asyncio tasks per session (stream/non-stream agent runs).
         self._session_agent_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._task_planning_rail: TaskPlanningRail | None = None
@@ -5611,21 +5615,87 @@ class JiuWenSwarmDeepAdapter:
             return True
         return self._goal_record_is_active()
 
+    def _should_demote_goal_intermediate_final(self) -> bool:
+        """Whether an attempt-boundary ``chat.final`` must become intermediate.
+
+        Demote only when GoalRecord is still ACTIVE **and** the text being
+        closed belonged to a **goal** round.
+
+        Prefer ``_stream_content_run_kind`` (stamped while forwarding deltas)
+        over the live ``active_round``: a user-round final can still be in the
+        queue after the scheduler has already started the next goal round.
+        Falling back to ``_has_active_goal_round()`` covers goal attempts that
+        emit a final with no prior delta on this consumer.
+        """
+        if not self._goal_record_is_active():
+            return False
+        content_kind = self._stream_content_run_kind
+        if content_kind is not None:
+            return content_kind == "goal"
+        return self._has_active_goal_round()
+
+    def _current_interaction_run_kind(self) -> str | None:
+        if self._instance is None or not self._instance_interaction_started():
+            return None
+        active = self._instance.active_round
+        if active is None:
+            return None
+        kind = getattr(active, "run_kind", None)
+        if kind is None:
+            return None
+        return str(getattr(kind, "value", kind))
+
+    def _begin_visible_chat_content(self) -> dict[str, Any] | None:
+        """Stamp content provenance; inject a bubble-split final on user→goal.
+
+        When the shared stream switches from user-round text to goal-round text
+        without a terminal ``chat.final`` in between, emit an empty final so the
+        frontend can ``stopStreaming`` and open a new bubble.
+        """
+        kind = self._current_interaction_run_kind()
+        prev = self._stream_content_run_kind
+        boundary: dict[str, Any] | None = None
+        if prev == "user" and kind == "goal":
+            boundary = {"event_type": "chat.final", "content": ""}
+            self._stream_content_run_kind = None
+        if kind is not None:
+            self._stream_content_run_kind = kind
+        return boundary
+
     def _adapt_goal_intermediate_final(self, parsed: dict | None) -> dict | None:
         if not isinstance(parsed, dict):
             return parsed
         if parsed.get("event_type") != "chat.final":
             return parsed
-        # Demote only while the GoalRecord remains ACTIVE.  Do not key off an
-        # in-flight goal round: user cancel pauses the record first, then
-        # aborts the round — finals during unwind must stay terminal so the
-        # frontend can close the dialog.
-        if not self._goal_record_is_active():
+        if not self._should_demote_goal_intermediate_final():
             return parsed
         adapted = dict(parsed)
         adapted["event_type"] = "chat.delta"
         adapted["goal_intermediate"] = True
         return adapted
+
+    def _should_emit_stream_end_chat_final(
+        self,
+        *,
+        had_assistant_output: bool,
+        emitted_terminal_chat_final: bool,
+    ) -> bool:
+        """Whether the host must synthesize a terminal ``chat.final``.
+
+        pause→clear (and similar) cancels the in-flight goal round so the
+        interaction iterator ends normally, but often without a model
+        ``chat.final``. Gateway Goal streams also skip
+        ``processing_status=false``.
+
+        Emit even when no assistant tokens were forwarded yet: the frontend
+        may already be ``isProcessing`` from goal.set before the first
+        delta/reasoning arrives; without a final the stop control stays stuck.
+        ``had_assistant_output`` is retained for call-site/tests but ignored.
+        """
+        del had_assistant_output  # intentionally unused; see docstring
+        if emitted_terminal_chat_final:
+            return False
+        return not self._goal_record_is_active()
 
     @staticmethod
     def _resolve_input_dispatch_mode(params: Any) -> InputDispatchMode | None:
@@ -7691,6 +7761,8 @@ class JiuWenSwarmDeepAdapter:
         has_streamed_content = False
         accumulated_text = ""
         accumulated_reasoning = ""
+        had_assistant_output = False
+        emitted_terminal_chat_final = False
         usage_accumulator = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -7713,6 +7785,15 @@ class JiuWenSwarmDeepAdapter:
                 return True
             emitted_ask_user_request_ids.add(request_id)
             return False
+
+        def note_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal had_assistant_output, emitted_terminal_chat_final
+            event_type = payload.get("event_type")
+            if event_type in ("chat.delta", "chat.reasoning", "chat.final"):
+                had_assistant_output = True
+            if event_type == "chat.final":
+                emitted_terminal_chat_final = True
+            return payload
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -8001,6 +8082,19 @@ class JiuWenSwarmDeepAdapter:
                     _debug_logger.feed(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
+                    # Only stamp provenance / inject split on new visible deltas.
+                    # A late user-round chat.final must keep the prior content kind.
+                    if isinstance(parsed, dict) and parsed.get("event_type") == "chat.delta":
+                        boundary = self._begin_visible_chat_content()
+                        if boundary is not None:
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=cid,
+                                payload=note_chat_payload(boundary),
+                                is_complete=False,
+                            )
+                            # Boundary closes the user bubble only; goal segment follows.
+                            emitted_terminal_chat_final = False
                     parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
@@ -8009,7 +8103,7 @@ class JiuWenSwarmDeepAdapter:
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=cid,
-                                payload={"event_type": "chat.delta", "content": accumulated_text},
+                                payload=note_chat_payload({"event_type": "chat.delta", "content": accumulated_text}),
                                 is_complete=False,
                             )
                             accumulated_text = ""
@@ -8017,17 +8111,19 @@ class JiuWenSwarmDeepAdapter:
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=cid,
-                                payload={
+                                payload=note_chat_payload({
                                     "event_type": "chat.reasoning",
                                     "content": accumulated_reasoning,
-                                },
+                                }),
                                 is_complete=False,
                             )
                             accumulated_reasoning = ""
+                        if parsed.get("event_type") == "chat.final":
+                            self._stream_content_run_kind = None
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload=parsed,
+                            payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
                     continue
@@ -8069,10 +8165,19 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if reasoning_payload is None:
                         continue
+                    boundary = self._begin_visible_chat_content()
+                    if boundary is not None:
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload=note_chat_payload(boundary),
+                            is_complete=False,
+                        )
+                        emitted_terminal_chat_final = False
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload=reasoning_payload,
+                        payload=note_chat_payload(reasoning_payload),
                         is_complete=False,
                     )
                     continue
@@ -8091,17 +8196,26 @@ class JiuWenSwarmDeepAdapter:
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={
+                            payload=note_chat_payload({
                                 "event_type": "chat.reasoning",
                                 "content": accumulated_reasoning,
-                            },
+                            }),
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
+                    boundary = self._begin_visible_chat_content()
+                    if boundary is not None:
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload=note_chat_payload(boundary),
+                            is_complete=False,
+                        )
+                        emitted_terminal_chat_final = False
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload=delta_payload,
+                        payload=note_chat_payload(delta_payload),
                         is_complete=False,
                     )
                     continue
@@ -8111,7 +8225,7 @@ class JiuWenSwarmDeepAdapter:
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={"event_type": "chat.delta", "content": accumulated_text},
+                            payload=note_chat_payload({"event_type": "chat.delta", "content": accumulated_text}),
                             is_complete=False,
                         )
                         accumulated_text = ""
@@ -8119,10 +8233,10 @@ class JiuWenSwarmDeepAdapter:
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={
+                            payload=note_chat_payload({
                                 "event_type": "chat.reasoning",
                                 "content": accumulated_reasoning,
-                            },
+                            }),
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
@@ -8132,10 +8246,12 @@ class JiuWenSwarmDeepAdapter:
                         if parsed is not None:
                             if should_skip_duplicate_ask_user(parsed):
                                 continue
+                            if parsed.get("event_type") == "chat.final":
+                                self._stream_content_run_kind = None
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=cid,
-                                payload=parsed,
+                                payload=note_chat_payload(parsed),
                                 is_complete=False,
                             )
                         continue
@@ -8144,10 +8260,12 @@ class JiuWenSwarmDeepAdapter:
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
                             continue
+                        if parsed.get("event_type") == "chat.final":
+                            self._stream_content_run_kind = None
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload=parsed,
+                            payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
                     continue
@@ -8156,7 +8274,7 @@ class JiuWenSwarmDeepAdapter:
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.delta", "content": accumulated_text},
+                        payload=note_chat_payload({"event_type": "chat.delta", "content": accumulated_text}),
                         is_complete=False,
                     )
                     accumulated_text = ""
@@ -8164,7 +8282,7 @@ class JiuWenSwarmDeepAdapter:
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
+                        payload=note_chat_payload({"event_type": "chat.reasoning", "content": accumulated_reasoning}),
                         is_complete=False,
                     )
                     accumulated_reasoning = ""
@@ -8173,32 +8291,59 @@ class JiuWenSwarmDeepAdapter:
                 if parsed is not None:
                     if should_skip_duplicate_ask_user(parsed):
                         continue
+                    if parsed.get("event_type") == "chat.final":
+                        self._stream_content_run_kind = None
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload=parsed,
+                        payload=note_chat_payload(parsed),
                         is_complete=False,
                     )
 
             if accumulated_text:
-                # Same rule as _adapt_goal_intermediate_final: only keep the
-                # host flush as delta while GoalRecord is still ACTIVE.
-                final_event_type = (
-                    "chat.delta"
-                    if self._goal_record_is_active()
-                    else "chat.final"
-                )
+                # Same rule as _adapt_goal_intermediate_final: demote host
+                # flush only when the flushed text belonged to a goal round.
+                if self._should_demote_goal_intermediate_final():
+                    flush_payload: dict[str, Any] = {
+                        "event_type": "chat.delta",
+                        "content": accumulated_text,
+                        "goal_intermediate": True,
+                    }
+                else:
+                    flush_payload = {
+                        "event_type": "chat.final",
+                        "content": accumulated_text,
+                    }
+                    self._stream_content_run_kind = None
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
-                    payload={"event_type": final_event_type, "content": accumulated_text},
+                    payload=note_chat_payload(flush_payload),
                     is_complete=False,
                 )
             if accumulated_reasoning:
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
-                    payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
+                    payload=note_chat_payload({"event_type": "chat.reasoning", "content": accumulated_reasoning}),
+                    is_complete=False,
+                )
+
+            # pause→clear (and similar): round cancelled, iterator ends without
+            # a model chat.final. Synthesize a real final so the frontend can
+            # stopStreaming; do not demote.
+            if self._should_emit_stream_end_chat_final(
+                had_assistant_output=had_assistant_output,
+                emitted_terminal_chat_final=emitted_terminal_chat_final,
+            ):
+                self._stream_content_run_kind = None
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=note_chat_payload({
+                        "event_type": "chat.final",
+                        "content": "",
+                    }),
                     is_complete=False,
                 )
 
