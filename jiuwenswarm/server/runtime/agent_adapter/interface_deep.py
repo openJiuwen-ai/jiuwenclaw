@@ -100,6 +100,8 @@ from openjiuwen.harness.schema.interaction import (
     InputDispatchMode,
     SendInputRequest,
 )
+from openjiuwen.harness.schema.task import TodoStatus
+from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 from jiuwenswarm.common.model_route import (
     ActualModelRouteReceipt,
     ModelRouteCandidate,
@@ -155,9 +157,6 @@ except ImportError:  # Compatibility with older agent-core versions.
                     return True
             return False
 
-
-from openjiuwen.harness.schema.task import TodoStatus
-from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
 from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
     init_a2x_client,
@@ -674,7 +673,7 @@ class _CallBoundCodexModel:
         _CODEX_MODEL_CALL_ARM_CAPABILITIES.pop(self, None)
         self.revoke_unconsumed_arm()
 
-    def _arm_current_task_once(self, capability: bytes) -> bool:
+    def arm_current_task_once(self, capability: bytes) -> bool:
         """Arm the current producer task only with the bridge-owned capability."""
 
         if not self._active:
@@ -699,6 +698,24 @@ class _CallBoundCodexModel:
         self._active_arm = _CodexModelCallArm(task=task, scope=self._call_scope)
         return True
 
+    def unwrap_delegate(self) -> Model:
+        """Return the exact configured model without exposing wrapper state."""
+
+        return self._delegate
+
+    def register_turn_owner(
+        self,
+        callback: Callable[[_CodexTurnOwner], None],
+    ) -> None:
+        """Register this wrapper's exact turn owner through one trusted callback."""
+
+        callback(self._turn_owner)
+
+    def finish_turn(self, error: BaseException | None = None) -> None:
+        """Publish turn cleanup completion without exposing ownership internals."""
+
+        self._turn_owner.finish(error)
+
     def revoke_unconsumed_arm(self) -> None:
         arm = self._active_arm
         self._active_arm = None
@@ -707,13 +724,27 @@ class _CallBoundCodexModel:
 
     def _authorized_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         arm = self._active_arm
-        if (
-            not self._active
-            or arm is None
-            or not arm.active
-            or arm.scope is not self._call_scope
-            or arm.task is not asyncio.current_task()
-        ):
+        if not self._active:
+            raise CodexProviderError(
+                "missing_call_permit",
+                "Codex subscription requires a call-bound consumer authorization.",
+            )
+        if arm is None:
+            raise CodexProviderError(
+                "missing_call_permit",
+                "Codex subscription requires a call-bound consumer authorization.",
+            )
+        if not arm.active:
+            raise CodexProviderError(
+                "missing_call_permit",
+                "Codex subscription requires a call-bound consumer authorization.",
+            )
+        if arm.scope is not self._call_scope:
+            raise CodexProviderError(
+                "missing_call_permit",
+                "Codex subscription requires a call-bound consumer authorization.",
+            )
+        if arm.task is not asyncio.current_task():
             raise CodexProviderError(
                 "missing_call_permit",
                 "Codex subscription requires a call-bound consumer authorization.",
@@ -782,6 +813,11 @@ class _ClaudeErrorReceiptModel:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)
 
+    def unwrap_delegate(self) -> Model:
+        """Return the exact configured model without exposing receipt state."""
+
+        return self._delegate
+
     @property
     def provider_failure(self) -> ClaudeProviderError | None:
         return self._provider_failure
@@ -840,7 +876,7 @@ class _CodexModelCallArmRail(AgentRail):
     async def before_model_call(self, _ctx: AgentCallbackContext) -> None:
         if self._agent is not None:
             _validate_codex_model_call_arm_position(self._agent, self)
-        self._model._arm_current_task_once(self._capability)
+        self._model.arm_current_task_once(self._capability)
 
     def uninit(self, _agent: Any) -> None:
         self._model.revoke_unconsumed_arm()
@@ -968,7 +1004,18 @@ class _ModelTurnPermit:
         if self._released:
             return
         self._released = True
-        self._gate._release(self)
+        self._gate.release_permit(self)
+
+    @property
+    def exclusive(self) -> bool:
+        """Expose the immutable permit class to its issuing gate."""
+
+        return self._exclusive
+
+    def belongs_to(self, gate: "_ModelTurnGate") -> bool:
+        """Return whether this exact permit was issued by ``gate``."""
+
+        return self._gate is gate
 
 
 class _ModelTurnGate:
@@ -1001,17 +1048,16 @@ class _ModelTurnGate:
         else:
             if shared_key is None:
                 raise ValueError("Shared model turns require a model identity key")
-            can_start_cohort = self._active_readers == 0 and not self._waiting_readers
-            can_join_cohort = (
+            no_reader_waiters = not self._waiting_readers
+            can_start_cohort = self._active_readers == 0 and no_reader_waiters
+            active_cohort_matches = (
                 self._active_readers > 0
                 and self._active_reader_key == shared_key
-                and not self._waiting_readers
             )
-            if (
-                not self._writer_active
-                and not self._waiting_writers
-                and (can_start_cohort or can_join_cohort)
-            ):
+            can_join_cohort = active_cohort_matches and no_reader_waiters
+            writer_has_priority = self._writer_active or bool(self._waiting_writers)
+            cohort_is_available = can_start_cohort or can_join_cohort
+            if not writer_has_priority and cohort_is_available:
                 self._active_reader_key = shared_key
                 self._active_readers += 1
                 return _ModelTurnPermit(self, exclusive=False)
@@ -1035,8 +1081,12 @@ class _ModelTurnGate:
                 self._wake_waiters()
             raise
 
-    def _release(self, permit: _ModelTurnPermit) -> None:
-        if permit._exclusive:
+    def release_permit(self, permit: _ModelTurnPermit) -> None:
+        """Release the immutable class carried by one exact issued permit."""
+
+        if not isinstance(permit, _ModelTurnPermit) or not permit.belongs_to(self):
+            raise RuntimeError("Model turn permit belongs to a different gate")
+        if permit.exclusive:
             if not self._writer_active:
                 raise RuntimeError("Model turn writer permit is not active")
             self._writer_active = False
@@ -3523,13 +3573,27 @@ class JiuWenSwarmDeepAdapter:
                     None,
                 )
             )
-            if (
-                expected is None
-                or requested != expected.canonical_model_key
-                or requested_mode != expected.mode
-                or model is None
-                or actual_provider != expected.provider
-            ):
+            if expected is None:
+                raise CodexProviderError(
+                    "route_unavailable",
+                    "The model route used by this pending request is no longer available.",
+                )
+            if requested != expected.canonical_model_key:
+                raise CodexProviderError(
+                    "route_unavailable",
+                    "The model route used by this pending request is no longer available.",
+                )
+            if requested_mode != expected.mode:
+                raise CodexProviderError(
+                    "route_unavailable",
+                    "The model route used by this pending request is no longer available.",
+                )
+            if model is None:
+                raise CodexProviderError(
+                    "route_unavailable",
+                    "The model route used by this pending request is no longer available.",
+                )
+            if actual_provider != expected.provider:
                 raise CodexProviderError(
                     "route_unavailable",
                     "The model route used by this pending request is no longer available.",
@@ -3603,26 +3667,30 @@ class JiuWenSwarmDeepAdapter:
         has_multimodal_input = bool(extract_multimodal_image_files(params))
         attachments = params.get("attachments")
         if not has_multimodal_input and isinstance(attachments, list):
-            has_multimodal_input = any(
-                isinstance(item, dict)
-                and (
-                    str(item.get("type") or "").strip().lower()
-                    in {"image", "image_url", "input_image"}
-                    or str(item.get("mime_type") or item.get("mimeType") or "")
-                    .strip()
-                    .lower()
-                    .startswith("image/")
-                )
-                for item in attachments
-            )
+            for item in attachments:
+                if not isinstance(item, dict):
+                    continue
+                attachment_type = str(item.get("type") or "").strip().lower()
+                if attachment_type in {"image", "image_url", "input_image"}:
+                    has_multimodal_input = True
+                    break
+                mime_type = str(
+                    item.get("mime_type") or item.get("mimeType") or ""
+                ).strip().lower()
+                if mime_type.startswith("image/"):
+                    has_multimodal_input = True
+                    break
         if not has_multimodal_input:
-            has_multimodal_input = any(
-                is_image_content_block(part)
-                for key in ("query", "content")
-                for part in (
-                    params.get(key) if isinstance(params.get(key), list) else []
-                )
-            )
+            for key in ("query", "content"):
+                parts = params.get(key)
+                if not isinstance(parts, list):
+                    continue
+                for part in parts:
+                    if is_image_content_block(part):
+                        has_multimodal_input = True
+                        break
+                if has_multimodal_input:
+                    break
         if has_multimodal_input:
             raise CodexProviderError(
                 "unsupported_modality",
@@ -3701,7 +3769,7 @@ class JiuWenSwarmDeepAdapter:
             if request is not None and resolved_model is not None:
                 current_model = self._resolve_model_for_request(request)
                 expected_model = (
-                    resolved_model._delegate
+                    resolved_model.unwrap_delegate()
                     if isinstance(
                         resolved_model,
                         (_CallBoundCodexModel, _ClaudeErrorReceiptModel),
@@ -3744,7 +3812,7 @@ class JiuWenSwarmDeepAdapter:
                 )
                 for call_rail in call_rails:
                     await self._instance.register_rail(call_rail)
-                self._register_codex_turn_owner(resolved_model._turn_owner)
+                resolved_model.register_turn_owner(self._register_codex_turn_owner)
             return _ModelTurnState(
                 permit=permit,
                 processor_state=processor_state,
@@ -3773,9 +3841,7 @@ class JiuWenSwarmDeepAdapter:
                 finally:
                     permit.release()
                     if isinstance(resolved_model, _CallBoundCodexModel):
-                        resolved_model._turn_owner.finish(
-                            cleanup_error or start_error
-                        )
+                        resolved_model.finish_turn(cleanup_error or start_error)
             if cleanup_error is not None:
                 raise cleanup_error from start_error
             raise
@@ -3844,7 +3910,7 @@ class JiuWenSwarmDeepAdapter:
                 raise
             finally:
                 if isinstance(turn_model, _CallBoundCodexModel):
-                    turn_model._turn_owner.finish(cleanup_error)
+                    turn_model.finish_turn(cleanup_error)
 
     async def _finish_model_turn_resilient(
         self,

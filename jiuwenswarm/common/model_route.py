@@ -166,13 +166,10 @@ def parse_actual_model_route_receipt(
     if not isinstance(raw, dict):
         return None
     fields = {
-        key: str(raw.get(key) or "").strip()
-        for key in (
-            "canonical_model_key",
-            "provider",
-            "source_request_id",
-            "mode",
-        )
+        "canonical_model_key": str(raw.get("canonical_model_key") or "").strip(),
+        "provider": str(raw.get("provider") or "").strip(),
+        "source_request_id": str(raw.get("source_request_id") or "").strip(),
+        "mode": str(raw.get("mode") or "").strip(),
     }
     if not all(fields.values()):
         return None

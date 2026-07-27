@@ -20,6 +20,9 @@ from openjiuwen.core.foundation.llm.schema.config import (
 from jiuwenswarm.integrations.ai4research_subscription.auth_controller import (
     CodexAuthController,
 )
+from jiuwenswarm.integrations.ai4research_subscription import (
+    auth_controller as auth_controller_module,
+)
 from jiuwenswarm.integrations.ai4research_subscription.codex_jsonl import (
     parse_codex_jsonl,
 )
@@ -1063,6 +1066,74 @@ for line in sys.stdin:
     assert status["connected"] is True
     assert (await controller.logout())["connected"] is False
     await controller.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("loginId", None),
+        ("loginId", ""),
+        ("userCode", None),
+        ("userCode", ""),
+        ("verificationUrl", None),
+        ("verificationUrl", "http://auth.openai.com/codex/device"),
+        ("verificationUrl", "https://evil.example/codex/device"),
+    ),
+)
+async def test_auth_controller_rejects_each_invalid_device_handoff_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    invalid_value: object,
+) -> None:
+    result = {
+        "type": "chatgptDeviceCode",
+        "loginId": "private-login-id",
+        "verificationUrl": "https://auth.openai.com/codex/device",
+        "userCode": "ABCD-EFGH",
+    }
+    result[field] = invalid_value
+
+    class FakeClient:
+        profile = object()
+
+        def __init__(self) -> None:
+            self.methods: list[str] = []
+
+        async def request(self, method, _params, **_kwargs):
+            self.methods.append(method)
+            if method == "account/read":
+                return {"account": None, "requiresOpenaiAuth": True}
+            return result
+
+    client = FakeClient()
+    lock_handle = object()
+    cleanup_calls = []
+    controller = CodexAuthController()
+
+    async def new_client_with_lock():
+        return client, lock_handle
+
+    async def close_client_and_release_lock(actual_client, actual_lock, **_kwargs):
+        cleanup_calls.append((actual_client, actual_lock))
+
+    monkeypatch.setattr(controller, "_new_client_with_lock", new_client_with_lock)
+    monkeypatch.setattr(
+        auth_controller_module,
+        "_close_client_and_release_lock",
+        close_client_and_release_lock,
+    )
+
+    with pytest.raises(CodexProviderError) as caught:
+        await controller.start_device_login()
+
+    assert caught.value.code == "auth_protocol_error"
+    assert str(caught.value) == (
+        "auth_protocol_error: Codex returned an invalid login response."
+    )
+    assert client.methods == ["account/read", "account/login/start"]
+    assert cleanup_calls == [(client, lock_handle)]
+    assert controller._operation is None
 
 
 @pytest.mark.asyncio

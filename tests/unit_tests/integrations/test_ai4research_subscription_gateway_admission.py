@@ -514,6 +514,111 @@ async def test_request_local_wrapper_requires_one_exact_task_arm_per_call(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arm_state",
+    ("inactive_wrapper", "missing", "inactive_arm", "wrong_scope", "wrong_task"),
+)
+async def test_request_local_wrapper_rejects_invalid_arm_before_permit_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+    arm_state: str,
+) -> None:
+    model, _client = _real_codex_model()
+    wrapped = interface_deep_module._CallBoundCodexModel(
+        model,
+        interface_deep_module.CodexConsumer.DIRECT_AGENT_FAST,
+    )
+    permit_calls = 0
+
+    def unexpected_permit(*_args, **_kwargs):
+        nonlocal permit_calls
+        permit_calls += 1
+        return object()
+
+    monkeypatch.setattr(
+        interface_deep_module,
+        "issue_codex_call_permit",
+        unexpected_permit,
+    )
+    if arm_state == "inactive_wrapper":
+        wrapped.deactivate()
+    elif arm_state == "missing":
+        wrapped._active_arm = None
+    else:
+        arm = interface_deep_module._CodexModelCallArm(
+            task=asyncio.current_task(),
+            scope=wrapped._call_scope,
+        )
+        if arm_state == "inactive_arm":
+            arm.active = False
+        elif arm_state == "wrong_scope":
+            arm.scope = object()
+        else:
+            arm.task = object()
+        wrapped._active_arm = arm
+
+    with pytest.raises(CodexProviderError) as caught:
+        wrapped._authorized_kwargs({})
+
+    assert caught.value.code == "missing_call_permit"
+    assert permit_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_request_local_wrapper_narrow_operations_preserve_turn_ownership() -> None:
+    model, _client = _real_codex_model()
+    completed: list[interface_deep_module._CodexTurnOwner] = []
+    identity = interface_deep_module._CodexTurnIdentity(
+        session_id="narrow-operations",
+        request_id="request-1",
+        generation=1,
+    )
+    owner = interface_deep_module._CodexTurnOwner(identity, completed.append)
+    wrapped = interface_deep_module._CallBoundCodexModel(
+        model,
+        interface_deep_module.CodexConsumer.DIRECT_AGENT_FAST,
+        owner,
+    )
+    registered: list[interface_deep_module._CodexTurnIdentity] = []
+
+    def register(candidate: interface_deep_module._CodexTurnOwner) -> None:
+        registered.append(candidate.identity)
+        candidate.mark_registered()
+
+    assert wrapped.unwrap_delegate() is model
+    wrapped.register_turn_owner(register)
+    assert registered == [identity]
+    assert owner.registered is True
+
+    wrapped.finish_turn()
+    assert (await owner.completion).clean is True
+    assert completed == [owner]
+
+    claude_receipt = interface_deep_module._ClaudeErrorReceiptModel(model)
+    assert claude_receipt.unwrap_delegate() is model
+
+
+@pytest.mark.asyncio
+async def test_model_turn_permit_narrow_release_remains_one_use() -> None:
+    gate = interface_deep_module._ModelTurnGate()
+    other_gate = interface_deep_module._ModelTurnGate()
+
+    writer = await gate.acquire()
+    assert gate.locked() is True
+    with pytest.raises(RuntimeError, match="different gate"):
+        other_gate.release_permit(writer)
+    assert gate.locked() is True
+    writer.release()
+    writer.release()
+    assert gate.locked() is False
+
+    reader = await gate.acquire(exclusive=False, shared_key=1)
+    assert gate.locked() is True
+    reader.release()
+    reader.release()
+    assert gate.locked() is False
+
+
+@pytest.mark.asyncio
 async def test_exact_task_arm_denies_sibling_child_and_retained_tasks(
     monkeypatch,
 ) -> None:
@@ -895,7 +1000,7 @@ async def test_real_openjiuwen_runner_react_tool_continuation_uses_two_one_shot_
             except CodexProviderError as exc:
                 attack_codes.append(f"before:{exc.code}")
             try:
-                wrapped._arm_current_task_once(b"forged capability")
+                wrapped.arm_current_task_once(b"forged capability")
             except CodexProviderError as exc:
                 attack_codes.append(f"self-arm:{exc.code}")
             try:
@@ -948,7 +1053,7 @@ async def test_real_openjiuwen_runner_react_tool_continuation_uses_two_one_shot_
             ),
             (
                 "tool-self-arm",
-                lambda: wrapped._arm_current_task_once(b"forged capability"),
+                lambda: wrapped.arm_current_task_once(b"forged capability"),
             ),
             (
                 "tool-post-arm",

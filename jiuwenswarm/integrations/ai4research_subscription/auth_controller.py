@@ -7,7 +7,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 from .app_server import CodexAppServerClient
 from .consumer_policy import codex_subscription_enabled, require_codex_enabled
@@ -25,6 +25,26 @@ from .quarantine import (
 _LOGIN_TIMEOUT_SECONDS = 10 * 60.0
 _DEVICE_LOGIN_HOSTS = {"auth.openai.com", "chatgpt.com"}
 _RECONCILIATION_DELAYS_SECONDS = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0)
+
+
+def _is_valid_device_login_handoff(
+    provider_login_id: Any,
+    user_code: Any,
+    parsed_url: ParseResult | None,
+) -> bool:
+    if not isinstance(provider_login_id, str):
+        return False
+    if not provider_login_id:
+        return False
+    if not isinstance(user_code, str):
+        return False
+    if not user_code:
+        return False
+    if parsed_url is None:
+        return False
+    if parsed_url.scheme != "https":
+        return False
+    return parsed_url.hostname in _DEVICE_LOGIN_HOSTS
 
 
 async def _close_client_and_release_lock(
@@ -235,14 +255,10 @@ class CodexAuthController:
                 verification_url = result.get("verificationUrl")
                 user_code = result.get("userCode")
                 parsed_url = urlparse(verification_url) if isinstance(verification_url, str) else None
-                if (
-                    not isinstance(provider_login_id, str)
-                    or not provider_login_id
-                    or not isinstance(user_code, str)
-                    or not user_code
-                    or parsed_url is None
-                    or parsed_url.scheme != "https"
-                    or parsed_url.hostname not in _DEVICE_LOGIN_HOSTS
+                if not _is_valid_device_login_handoff(
+                    provider_login_id,
+                    user_code,
+                    parsed_url,
                 ):
                     raise CodexProviderError("auth_protocol_error", "Codex returned an invalid login response.")
                 operation = _LoginOperation(

@@ -100,6 +100,28 @@ async def _send_tui_agent_request(real_client: Any, env: Any, *, label: str) -> 
     )
 
 
+def _validated_subscription_response_content(
+    payload: dict[str, Any],
+    *,
+    expected_provider: str,
+    expected_model: str,
+) -> str | None:
+    """Return normalized content only for the exact validated provider route."""
+    content = payload.get("response")
+    if payload.get("validated") is not True:
+        return None
+    if payload.get("model_provider") != expected_provider:
+        return None
+    if payload.get("model") != expected_model:
+        return None
+    if not isinstance(content, str):
+        return None
+    normalized_content = content.strip()
+    if not normalized_content:
+        return None
+    return normalized_content
+
+
 def _get_auto_harness_config() -> dict[str, Any]:
     """Load auto-harness config.yaml with auto-fill for ci_gate defaults."""
     config: dict[str, Any] = {}
@@ -625,7 +647,6 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
     try:
         if agent_client is not None:
             from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-            from jiuwenswarm.common.schema.message import ReqMethod
             import uuid
 
             env = e2a_from_agent_fields(
@@ -1296,14 +1317,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     code=str(payload.get("code") or "LLM_ERROR"),
                 )
                 return
-            content = payload.get("response")
-            if (
-                payload.get("validated") is not True
-                or payload.get("model_provider") != CODEX_PROVIDER_NAME
-                or payload.get("model") != CODEX_MODEL_ALIAS
-                or not isinstance(content, str)
-                or not content.strip()
-            ):
+            content = _validated_subscription_response_content(
+                payload,
+                expected_provider=CODEX_PROVIDER_NAME,
+                expected_model=CODEX_MODEL_ALIAS,
+            )
+            if content is None:
                 await channel.send_response(
                     ws,
                     req_id,
@@ -1319,7 +1338,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 payload={
                     "provider": model_provider,
                     "model": model,
-                    "response": content.strip(),
+                    "response": content,
                 },
             )
             return
@@ -1397,14 +1416,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     code=str(payload.get("code") or "LLM_ERROR"),
                 )
                 return
-            content = payload.get("response")
-            if (
-                payload.get("validated") is not True
-                or payload.get("model_provider") != CLAUDE_PROVIDER_NAME
-                or payload.get("model") != CLAUDE_MODEL_ALIAS
-                or not isinstance(content, str)
-                or not content.strip()
-            ):
+            content = _validated_subscription_response_content(
+                payload,
+                expected_provider=CLAUDE_PROVIDER_NAME,
+                expected_model=CLAUDE_MODEL_ALIAS,
+            )
+            if content is None:
                 await channel.send_response(
                     ws,
                     req_id,
@@ -1420,7 +1437,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 payload={
                     "provider": model_provider,
                     "model": model,
-                    "response": content.strip(),
+                    "response": content,
                 },
             )
             return
@@ -1510,7 +1527,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     async def _session_list(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         limit = 20
         if isinstance(params, dict):
@@ -1744,7 +1760,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if real_client is not None:
             try:
                 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-                from jiuwenswarm.common.schema.message import ReqMethod
 
                 lifecycle_params = dict(params)
                 lifecycle_params["session_id"] = target
@@ -1822,7 +1837,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         from jiuwenswarm.common.utils import get_agent_sessions_dir
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1967,7 +1981,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     ) -> tuple[Optional[str], int]:
         """通过 E2A 转发 LLM 摘要请求到 AgentServer。返回 (summary, summarized_count)。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         real_client = _resolve_agent_client(agent_client)
         if real_client is None:
@@ -2005,7 +2018,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     async def _session_rewind(ws, req_id, params, session_id, user_id=None):
         """session.rewind: E2A → AgentServer（权威写入者），fallback 本地."""
         from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(params, dict):
             await channel.send_response(
@@ -2076,7 +2088,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             restore_session_files,
             rewind_session,
         )
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(params, dict):
             await channel.send_response(
@@ -2211,7 +2222,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         # Step 2: Send rewind to AgentServer (truncation + agent-internal record writing)
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         real_client = (
             agent_client.get("value")
@@ -2271,7 +2281,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         """优先经 E2A 转发至 AgentWebSocketServer._handle_session_rename；无 agent 或转发失败时本地回退。"""
         from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         real_client = _resolve_agent_client(agent_client)
         if real_client is not None:
@@ -2644,7 +2653,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     async def _command_model(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(params, dict):
             params = {}

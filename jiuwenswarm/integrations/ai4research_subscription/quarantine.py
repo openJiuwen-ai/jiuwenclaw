@@ -97,7 +97,11 @@ def _write_marker(record: _QuarantinedOwnership) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
         os.chmod(path, 0o600)
-        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        directory_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            0o700,
+        )
         try:
             os.fsync(directory_fd)
         finally:
@@ -115,7 +119,7 @@ def _read_marker(profile: CodexProfile) -> dict[str, Any] | None:
         return None
     _validate_marker_file(path)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    descriptor = os.open(path, flags, 0o600)
     try:
         info = os.fstat(descriptor)
         if info.st_size > 16 * 1024:
@@ -138,7 +142,11 @@ def _remove_marker(profile: CodexProfile) -> None:
         return
     _validate_marker_file(path)
     path.unlink()
-    directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    directory_fd = os.open(
+        path.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        0o700,
+    )
     try:
         os.fsync(directory_fd)
     finally:
@@ -180,7 +188,11 @@ def quarantine_ownership(
 
 
 def profile_is_quarantined(profile: CodexProfile) -> bool:
-    return _key(profile) in _QUARANTINES or profile.quarantine_path.exists() or profile.quarantine_path.is_symlink()
+    if _key(profile) in _QUARANTINES:
+        return True
+    if profile.quarantine_path.exists():
+        return True
+    return profile.quarantine_path.is_symlink()
 
 
 def _marker_identity(marker: dict[str, Any]) -> tuple[str | None, int | None, set[tuple[int, int]], str | None]:
@@ -192,21 +204,22 @@ def _marker_identity(marker: dict[str, Any]) -> tuple[str | None, int | None, se
         raise _safe_error()
     if pgid is not None and (not isinstance(pgid, int) or pgid <= 0):
         raise _safe_error()
-    if turn_name is not None and (
-        not isinstance(turn_name, str)
-        or not turn_name.startswith("turn-")
-        or Path(turn_name).name != turn_name
-    ):
-        raise _safe_error()
+    if turn_name is not None:
+        if not isinstance(turn_name, str):
+            raise _safe_error()
+        if not turn_name.startswith("turn-"):
+            raise _safe_error()
+        if Path(turn_name).name != turn_name:
+            raise _safe_error()
     if not isinstance(members, list):
         raise _safe_error()
     identities: set[tuple[int, int]] = set()
     for item in members:
-        if (
-            not isinstance(item, list)
-            or len(item) != 2
-            or not all(isinstance(value, int) and value >= 0 for value in item)
-        ):
+        if not isinstance(item, list):
+            raise _safe_error()
+        if len(item) != 2:
+            raise _safe_error()
+        if not all(isinstance(value, int) and value >= 0 for value in item):
             raise _safe_error()
         identities.add((item[0], item[1]))
     return boot_id, pgid, identities, turn_name

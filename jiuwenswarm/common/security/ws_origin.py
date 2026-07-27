@@ -64,16 +64,21 @@ def is_sensitive_browser_origin_allowed(origin: str | None, host: str | None) ->
 
     origin_hostname = (parsed_origin.hostname or "").lower()
     host_hostname = (parsed_host.hostname or "").lower()
-    if (
-        parsed_origin.scheme not in {"http", "https"}
-        or not origin_hostname
-        or not host_hostname
-        or parsed_origin.username is not None
-        or parsed_origin.password is not None
-        or parsed_origin.path not in {"", "/"}
-        or parsed_origin.query
-        or parsed_origin.fragment
-    ):
+    if parsed_origin.scheme not in {"http", "https"}:
+        return False
+    if not origin_hostname:
+        return False
+    if not host_hostname:
+        return False
+    if parsed_origin.username is not None:
+        return False
+    if parsed_origin.password is not None:
+        return False
+    if parsed_origin.path not in {"", "/"}:
+        return False
+    if parsed_origin.query:
+        return False
+    if parsed_origin.fragment:
         return False
 
     if origin_hostname in get_allowed_origin_hosts():

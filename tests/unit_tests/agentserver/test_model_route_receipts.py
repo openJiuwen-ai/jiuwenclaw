@@ -236,6 +236,21 @@ def test_bound_continuation_rejects_invalid_expected_route_before_invocation(
     assert all(model.invocation_count == 0 for model in built)
 
 
+def test_bound_continuation_rejects_wrong_mode_before_invocation(monkeypatch) -> None:
+    adapter, built = _build_adapter_with_models(
+        monkeypatch,
+        [_entry("same", "OpenAI", is_default=True)],
+    )
+    request = _bound_request(model_key="same#0", provider="OpenAI")
+    request.params["mode"] = "agent.plan"
+
+    with pytest.raises(CodexProviderError) as exc_info:
+        adapter.preflight_subscription_request(request)
+
+    assert exc_info.value.code == "route_unavailable"
+    assert all(model.invocation_count == 0 for model in built)
+
+
 def test_stream_facade_copies_actual_receipt_without_overwriting_chunk_metadata() -> None:
     receipt = ActualModelRouteReceipt(
         canonical_model_key="working#0",

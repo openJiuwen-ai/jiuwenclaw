@@ -38,6 +38,9 @@ from jiuwenswarm.integrations.ai4research_subscription.quarantine import (
     reconcile_profile_quarantine,
     reset_quarantines_for_tests,
 )
+from jiuwenswarm.integrations.ai4research_subscription import (
+    quarantine as quarantine_module,
+)
 from jiuwenswarm.integrations.ai4research_subscription.turn_directory import (
     TurnDirectoryCleanupError,
     cleanup_owned_turn_directory,
@@ -391,6 +394,38 @@ async def test_quarantine_marker_symlink_and_stale_boot_fail_closed(
     with pytest.raises(CodexProviderError, match="provider_quarantined"):
         await reconcile_profile_quarantine(profile)
     assert profile.quarantine_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("turn_name", "members"),
+    (
+        (1, []),
+        ("unexpected", []),
+        ("turn-owned/child", []),
+        (None, [(1, 2)]),
+        (None, [[1]]),
+        (None, [[1, -1]]),
+    ),
+)
+def test_quarantine_marker_identity_rejects_each_invalid_owned_field(
+    turn_name: object,
+    members: object,
+) -> None:
+    marker = {
+        "boot_id": "boot-id",
+        "pgid": 123,
+        "members": members,
+        "turn_name": turn_name,
+    }
+
+    with pytest.raises(CodexProviderError) as caught:
+        quarantine_module._marker_identity(marker)
+
+    assert caught.value.code == "provider_quarantined"
+    assert str(caught.value) == (
+        "provider_quarantined: Codex is unavailable until uncertain process "
+        "ownership is safely reconciled."
+    )
 
 
 @pytest.mark.asyncio

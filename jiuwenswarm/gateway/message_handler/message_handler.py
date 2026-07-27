@@ -109,6 +109,17 @@ _DELIVERY_IDENTITY_METADATA_KEYS = frozenset({
 })
 
 
+def _filter_merged_metadata(
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    filtered: dict[str, Any] = {}
+    for key, value in (metadata or {}).items():
+        if key in E2A_WIRE_INTERNAL_METADATA_KEYS or key == E2A_INTERNAL_CONTEXT_KEY:
+            continue
+        filtered[key] = value
+    return filtered
+
+
 def _configured_model_route(
     requested_model: str,
     model_entries: list[dict[str, Any]] | None = None,
@@ -2810,18 +2821,8 @@ class MessageHandler(ABC):
         send_push / 工具链返回的响应常不带 metadata，通道（如钉钉 batchSend）需要
         请求侧的 dingtalk_sender_id、conversation_type 等；响应中有同名字段时优先响应。
         """
-        req_md = {
-            key: value
-            for key, value in (request_metadata or {}).items()
-            if key not in E2A_WIRE_INTERNAL_METADATA_KEYS
-            and key != E2A_INTERNAL_CONTEXT_KEY
-        }
-        resp_md = {
-            key: value
-            for key, value in (response_metadata or {}).items()
-            if key not in E2A_WIRE_INTERNAL_METADATA_KEYS
-            and key != E2A_INTERNAL_CONTEXT_KEY
-        }
+        req_md = _filter_merged_metadata(request_metadata)
+        resp_md = _filter_merged_metadata(response_metadata)
         if not req_md and not resp_md:
             return None
         merged: dict[str, Any] = {**req_md, **resp_md}

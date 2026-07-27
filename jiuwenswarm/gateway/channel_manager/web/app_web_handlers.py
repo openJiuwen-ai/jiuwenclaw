@@ -148,6 +148,20 @@ _MODEL_RELOAD_ENV_KEYS = {
 }
 
 
+def _is_expected_subscription_validation_response(
+    payload: dict[str, Any],
+    *,
+    expected_provider: str,
+    expected_model: str,
+) -> bool:
+    """Validate the exact provider route acknowledged by AgentServer."""
+    if payload.get("validated") is not True:
+        return False
+    if payload.get("model_provider") != expected_provider:
+        return False
+    return payload.get("model") == expected_model
+
+
 @dataclass(frozen=True)
 class _ConfigChangeSet:
     env_updates: dict[str, str]
@@ -1362,6 +1376,10 @@ def _attribute_session_project(
     return DEFAULT_PROJECT_ID_WORK
 
 
+def _is_disallowed_credential(required: bool, value: str) -> bool:
+    return not required and bool(value)
+
+
 def _project_info_payload(
     proj: Any | None,
     *,
@@ -2016,8 +2034,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         capabilities = get_model_provider_capabilities(model_provider)
-        if (not capabilities.requires_api_base and api_base) or (
-            not capabilities.requires_api_key and api_key
+        if _is_disallowed_credential(
+            capabilities.requires_api_base, api_base
+        ) or _is_disallowed_credential(
+            capabilities.requires_api_key, api_key
         ):
             await channel.send_response(
                 ws, req_id, ok=False,
@@ -2107,10 +2127,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     code=str(payload.get("code") or "LLM_ERROR"),
                 )
                 return
-            if (
-                payload.get("validated") is not True
-                or payload.get("model_provider") != CODEX_PROVIDER_NAME
-                or payload.get("model") != CODEX_MODEL_ALIAS
+            if not _is_expected_subscription_validation_response(
+                payload,
+                expected_provider=CODEX_PROVIDER_NAME,
+                expected_model=CODEX_MODEL_ALIAS,
             ):
                 await channel.send_response(
                     ws,
@@ -2209,10 +2229,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     code=str(payload.get("code") or "LLM_ERROR"),
                 )
                 return
-            if (
-                payload.get("validated") is not True
-                or payload.get("model_provider") != CLAUDE_PROVIDER_NAME
-                or payload.get("model") != CLAUDE_MODEL_ALIAS
+            if not _is_expected_subscription_validation_response(
+                payload,
+                expected_provider=CLAUDE_PROVIDER_NAME,
+                expected_model=CLAUDE_MODEL_ALIAS,
             ):
                 await channel.send_response(
                     ws,

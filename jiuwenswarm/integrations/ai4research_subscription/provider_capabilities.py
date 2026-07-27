@@ -90,7 +90,7 @@ def missing_model_fields(
         required.append("api_base")
     if capabilities.requires_api_key:
         required.append("api_key")
-    return [field for field in required if not values[field]]
+    return [field for field in required if not values.get(field)]
 
 
 def validate_provider_model_name(model_provider: object, model_name: object) -> bool:

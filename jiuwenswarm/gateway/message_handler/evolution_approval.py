@@ -33,6 +33,13 @@ class _OriginRequestRoute:
     session_id: str
 
 
+def _route_conflicts(
+    existing: _OriginRequestRoute | None,
+    origin: _OriginRequestRoute,
+) -> bool:
+    return existing is not None and existing != origin
+
+
 class ApprovalDispatchLease:
     """Opaque ownership token for one exact approval dispatch."""
 
@@ -161,9 +168,7 @@ class EvolutionApprovalCoordinator:
         origin = _OriginRequestRoute(route=route, session_id=session_key)
         existing = self._active_request_routes.get(request_key)
         retained = self._recent_request_routes.get(request_key)
-        if (existing is not None and existing != origin) or (
-            retained is not None and retained != origin
-        ):
+        if _route_conflicts(existing, origin) or _route_conflicts(retained, origin):
             logger.warning(
                 "[MessageHandler] conflicting actual model route receipt ignored: "
                 "request_id=%s session_id=%s",
@@ -191,11 +196,11 @@ class EvolutionApprovalCoordinator:
     ) -> None:
         request_key = str(request_id or "").strip()
         origin = self._active_request_routes.pop(request_key, None)
-        if (
-            origin is None
-            or not retain
-            or origin.route.mode.strip().lower() != "agent.fast"
-        ):
+        if origin is None:
+            return
+        if not retain:
+            return
+        if origin.route.mode.strip().lower() != "agent.fast":
             return
         self._recent_request_routes[request_key] = origin
         self._recent_request_routes.move_to_end(request_key)
@@ -319,11 +324,11 @@ class EvolutionApprovalCoordinator:
             self._pending_question_dispatches.pop(route_key, None)
 
     def is_current_pending(self, session_id: str | None, request_id: Any) -> bool:
-        return (
-            isinstance(session_id, str)
-            and isinstance(request_id, str)
-            and self._pending_evolution_approval.get(session_id) == request_id
-        )
+        if not isinstance(session_id, str):
+            return False
+        if not isinstance(request_id, str):
+            return False
+        return self._pending_evolution_approval.get(session_id) == request_id
 
     def pending_request_id(self, session_id: str | None) -> str | None:
         if not isinstance(session_id, str):

@@ -23,6 +23,10 @@ from jiuwenswarm.integrations.ai4research_subscription.constants import (
     CODEX_MODEL_ALIAS,
     CODEX_PROVIDER_NAME,
 )
+from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+    CLAUDE_MODEL_ALIAS,
+    CLAUDE_PROVIDER_NAME,
+)
 from jiuwenswarm.common.security.ws_origin import is_sensitive_browser_origin_allowed
 
 
@@ -89,6 +93,15 @@ class FakeBrowserWebSocket:
     ("origin", "host", "expected"),
     [
         (None, "127.0.0.1:19000", False),
+        ("http://localhost:5173", None, False),
+        ("ftp://localhost:5173", "localhost:19000", False),
+        ("http:///dashboard", "localhost:19000", False),
+        ("http://localhost:5173", "", False),
+        ("http://user@localhost:5173", "localhost:19000", False),
+        ("http://user:pass@localhost:5173", "localhost:19000", False),
+        ("http://localhost:5173/dashboard", "localhost:19000", False),
+        ("http://localhost:5173?token=x", "localhost:19000", False),
+        ("http://localhost:5173#fragment", "localhost:19000", False),
         ("https://evil.example", "127.0.0.1:19000", False),
         ("http://127.0.0.1:5173", "localhost:19000", True),
         ("https://swarm.example:8443", "swarm.example:8443", True),
@@ -735,6 +748,90 @@ async def test_config_validate_codex_rejects_untrusted_origin_without_forwarding
     assert agent_client.requests == []
     assert channel.responses[-1]["ok"] is False
     assert channel.responses[-1]["code"] == "FORBIDDEN_ORIGIN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "expected_error"),
+    (
+        (
+            CODEX_PROVIDER_NAME,
+            CODEX_MODEL_ALIAS,
+            "Codex model validation returned an invalid response.",
+        ),
+        (
+            CLAUDE_PROVIDER_NAME,
+            CLAUDE_MODEL_ALIAS,
+            "Claude model validation returned an invalid response.",
+        ),
+    ),
+)
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("validated", False),
+        ("model_provider", "unexpected-provider"),
+        ("model", "unexpected-model"),
+    ),
+)
+async def test_config_validate_subscription_rejects_each_invalid_agent_response(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model: str,
+    expected_error: str,
+    field: str,
+    invalid_value: object,
+) -> None:
+    channel = FakeWebChannel()
+
+    class InvalidValidationAgentClient:
+        server_ready = True
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def send_request(self, envelope):
+            self.requests.append(envelope)
+            payload = {
+                "validated": True,
+                "model_provider": provider,
+                "model": model,
+            }
+            payload[field] = invalid_value
+            return SimpleNamespace(ok=True, payload=payload)
+
+    agent_client = InvalidValidationAgentClient()
+    monkeypatch.setattr(
+        app_web_handlers,
+        "Model",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Gateway must not construct a subscription model client"
+        ),
+    )
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["config.validate_model"](
+        FakeBrowserWebSocket(origin="http://localhost:5173"),
+        "req-invalid-subscription-response",
+        {
+            "model_provider": provider,
+            "model": model,
+            "api_base": "",
+            "api_key": "",
+        },
+        "sess-1",
+    )
+
+    assert len(agent_client.requests) == 1
+    assert channel.responses[-1] == {
+        "id": "req-invalid-subscription-response",
+        "ok": False,
+        "payload": None,
+        "error": expected_error,
+        "code": "LLM_ERROR",
+    }
 
 
 @pytest.mark.asyncio

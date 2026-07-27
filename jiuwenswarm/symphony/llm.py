@@ -13,6 +13,10 @@ from typing import Any, Dict, Iterator, List, Optional
 from json_repair import repair_json
 
 
+def _is_disallowed_credential(required: bool, value: str) -> bool:
+    return not required and bool(value)
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     """LLM chat configuration resolved from JiuwenSwarm model settings."""
@@ -82,9 +86,11 @@ class LLMConfig:
             raise RuntimeError("JiuwenSwarm default model is missing api_key.")
         if not provider:
             raise RuntimeError("JiuwenSwarm default model is missing client_provider.")
-        if (not capabilities.requires_api_base and api_base) or (
-            not capabilities.requires_api_key and api_key
-        ):
+        if _is_disallowed_credential(capabilities.requires_api_base, api_base):
+            raise RuntimeError(
+                f"JiuwenSwarm default model credentials must be empty for {provider}."
+            )
+        if _is_disallowed_credential(capabilities.requires_api_key, api_key):
             raise RuntimeError(
                 f"JiuwenSwarm default model credentials must be empty for {provider}."
             )

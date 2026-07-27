@@ -66,7 +66,7 @@ def _read_recorded_groups(path: Path) -> list[int]:
             isinstance(value, int) and not isinstance(value, bool) for value in groups
         ):
             raise ValueError("malformed process_groups")
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         # A marker we cannot trust means we cannot prove safety: fail closed.
         raise claude_provider_unavailable() from exc
     return groups

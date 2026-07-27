@@ -14,6 +14,10 @@ from jiuwenswarm.integrations.ai4research_subscription.constants import (
     CODEX_MODEL_ALIAS,
     CODEX_PROVIDER_NAME,
 )
+from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+    CLAUDE_MODEL_ALIAS,
+    CLAUDE_PROVIDER_NAME,
+)
 
 
 class _FakeInvokeModel:
@@ -138,6 +142,39 @@ def test_llm_config_accepts_codex_subscription_without_api_credentials():
     assert config.model == CODEX_MODEL_ALIAS
     assert config.base_url == ""
     assert config.model_client_config["client_provider"] == CODEX_PROVIDER_NAME
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    (
+        (CODEX_PROVIDER_NAME, CODEX_MODEL_ALIAS),
+        (CLAUDE_PROVIDER_NAME, CLAUDE_MODEL_ALIAS),
+    ),
+)
+@pytest.mark.parametrize("field", ("api_base", "api_key"))
+def test_llm_config_rejects_subscription_provider_credentials(
+    provider: str,
+    model: str,
+    field: str,
+) -> None:
+    client_config = {
+        "api_key": "",
+        "api_base": "",
+        "model_name": model,
+        "client_provider": provider,
+    }
+    client_config[field] = "must-not-be-accepted"
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"credentials must be empty for {provider}",
+    ):
+        LLMConfig.from_model_entry(
+            {
+                "model_client_config": client_config,
+                "model_config_obj": {},
+            }
+        )
 
 
 def test_llm_config_keeps_api_provider_credentials_required():

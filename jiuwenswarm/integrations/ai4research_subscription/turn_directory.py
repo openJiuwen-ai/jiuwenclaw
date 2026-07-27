@@ -52,9 +52,14 @@ def cleanup_owned_turn_directory(turn_dir: Path, turns_dir: Path) -> None:
     root_fd = -1
     opened_directories: list[int] = []
     try:
-        owner_fd = os.open(turns_dir, _directory_flags())
+        owner_fd = os.open(turns_dir, _directory_flags(), 0o700)
         try:
-            root_fd = os.open(turn_dir.name, _directory_flags(), dir_fd=owner_fd)
+            root_fd = os.open(
+                turn_dir.name,
+                _directory_flags(),
+                0o700,
+                dir_fd=owner_fd,
+            )
         except FileNotFoundError:
             return
         except OSError:
@@ -106,7 +111,12 @@ def cleanup_owned_turn_directory(turn_dir: Path, turns_dir: Path) -> None:
                             "Turn directory contained a mounted filesystem."
                         )
                     try:
-                        child_fd = os.open(name, _directory_flags(), dir_fd=directory_fd)
+                        child_fd = os.open(
+                            name,
+                            _directory_flags(),
+                            0o700,
+                            dir_fd=directory_fd,
+                        )
                     except OSError:
                         raise TurnDirectoryCleanupError(
                             "Turn directory changed during cleanup inspection."
@@ -165,8 +175,6 @@ def cleanup_owned_turn_directory(turn_dir: Path, turns_dir: Path) -> None:
         if (current_root.st_dev, current_root.st_ino) != root_identity:
             raise TurnDirectoryCleanupError("Turn directory changed during cleanup.")
         os.rmdir(turn_dir.name, dir_fd=owner_fd)
-    except TurnDirectoryCleanupError:
-        raise
     except OSError:
         raise TurnDirectoryCleanupError(
             "Turn directory could not be safely inspected."

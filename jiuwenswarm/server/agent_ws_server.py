@@ -3217,8 +3217,6 @@ class AgentWebSocketServer:
         from jiuwenswarm.integrations.ai4research_subscription.auth_controller import (
             get_codex_auth_controller,
         )
-        from jiuwenswarm.integrations.ai4research_subscription.errors import CodexProviderError
-
         params = request.params if isinstance(request.params, dict) else {}
         try:
             if request.req_method == ReqMethod.CODEX_AUTH_STATUS and not codex_subscription_enabled():
@@ -3397,10 +3395,6 @@ class AgentWebSocketServer:
         from jiuwenswarm.integrations.ai4research_subscription.claude_consumer_policy import (
             require_claude_enabled,
         )
-        from jiuwenswarm.integrations.ai4research_subscription.errors import (
-            ClaudeProviderError,
-        )
-
         params = request.params if isinstance(request.params, dict) else None
         try:
             if params is None or set(params) != {"model_provider", "model"}:

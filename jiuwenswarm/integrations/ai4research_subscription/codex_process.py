@@ -211,16 +211,30 @@ class CodexProcessRunner:
                 )
                 if spawn_cancellation is not None:
                     raise spawn_cancellation
-                assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+                stdin_writer = process.stdin
+                stdout_reader = process.stdout
+                stderr_reader = process.stderr
+                if (
+                    stdin_writer is None
+                    or stdout_reader is None
+                    or stderr_reader is None
+                ):
+                    raise CodexProviderError(
+                        "provider_failed", "Codex could not complete the model turn."
+                    )
                 wait_task = asyncio.create_task(wait_process_exit(process))
-                stdout_task = asyncio.create_task(read_limited(process.stdout, MAX_STDOUT_BYTES))
-                stderr_task = asyncio.create_task(read_limited(process.stderr, MAX_STDERR_BYTES))
+                stdout_task = asyncio.create_task(
+                    read_limited(stdout_reader, MAX_STDOUT_BYTES)
+                )
+                stderr_task = asyncio.create_task(
+                    read_limited(stderr_reader, MAX_STDERR_BYTES)
+                )
                 reader_tasks = (stdout_task, stderr_task)
                 async with asyncio.timeout(turn_timeout):
-                    process.stdin.write(prompt.encode("utf-8"))
-                    await process.stdin.drain()
-                    process.stdin.close()
-                    await process.stdin.wait_closed()
+                    stdin_writer.write(prompt.encode("utf-8"))
+                    await stdin_writer.drain()
+                    stdin_writer.close()
+                    await stdin_writer.wait_closed()
                     returncode, stdout, _stderr = await asyncio.gather(
                         wait_task, stdout_task, stderr_task
                     )
@@ -351,7 +365,10 @@ class CodexProcessRunner:
             raise pending_error
         if cleanup_cancellation is not None:
             raise cleanup_cancellation
-        assert result_data is not None
+        if result_data is None:
+            raise CodexProviderError(
+                "provider_failed", "Codex could not complete the model turn."
+            )
         returncode, stdout = result_data
         if returncode != 0:
             raise CodexProviderError("provider_failed", "Codex could not complete the model turn.")

@@ -144,7 +144,8 @@ class ClaudeProcessRunner:
         self._binary_path = binary_path
         self._enforce_version = enforce_version
 
-    def _argv(self, binary: Path) -> list[str]:
+    @staticmethod
+    def _argv(binary: Path) -> list[str]:
         # Flags verified against 2.1.218 in Phase 0. Prompt arrives on stdin.
         # --tools "" disables all built-in tools; --setting-sources "" prevents
         # any repository/user settings, CLAUDE.md, hooks, or skills from shaping
@@ -165,7 +166,8 @@ class ClaudeProcessRunner:
             "--no-session-persistence",
         ]
 
-    def _resolve_timeout(self, timeout: float | None) -> float:
+    @staticmethod
+    def _resolve_timeout(timeout: float | None) -> float:
         try:
             turn_timeout = DEFAULT_TURN_TIMEOUT_SECONDS if timeout is None else float(timeout)
         except (TypeError, ValueError) as exc:
@@ -339,7 +341,10 @@ class ClaudeProcessRunner:
             raise ClaudeProviderError(
                 "cleanup_failed", "Claude could not remove the turn working directory."
             ) from cleanup_error
-        assert result is not None
+        if result is None:
+            raise ClaudeProviderError(
+                "provider_failed", "Claude could not complete the model turn."
+            )
         return result
 
     async def _spawn_and_collect(
@@ -377,18 +382,29 @@ class ClaudeProcessRunner:
                 process_group_id = process.pid
             if spawn_cancellation is not None:
                 raise spawn_cancellation
-            assert process.stdout is not None and process.stderr is not None
+            stdin_writer = process.stdin
+            stdout_reader = process.stdout
+            stderr_reader = process.stderr
+            if stdout_reader is None or stderr_reader is None:
+                raise ClaudeProviderError(
+                    "provider_failed", "Claude could not complete the model turn."
+                )
+            if stdin_bytes is not None and stdin_writer is None:
+                raise ClaudeProviderError(
+                    "provider_failed", "Claude could not complete the model turn."
+                )
             wait_task = asyncio.create_task(wait_process_exit(process))
-            stdout_task = asyncio.create_task(read_limited(process.stdout, stdout_limit))
-            stderr_task = asyncio.create_task(read_limited(process.stderr, MAX_CLAUDE_STDERR_BYTES))
+            stdout_task = asyncio.create_task(read_limited(stdout_reader, stdout_limit))
+            stderr_task = asyncio.create_task(
+                read_limited(stderr_reader, MAX_CLAUDE_STDERR_BYTES)
+            )
             reader_tasks = (stdout_task, stderr_task)
             async with asyncio.timeout(timeout):
-                if stdin_bytes is not None:
-                    assert process.stdin is not None
-                    process.stdin.write(stdin_bytes)
-                    await process.stdin.drain()
-                    process.stdin.close()
-                    await process.stdin.wait_closed()
+                if stdin_bytes is not None and stdin_writer is not None:
+                    stdin_writer.write(stdin_bytes)
+                    await stdin_writer.drain()
+                    stdin_writer.close()
+                    await stdin_writer.wait_closed()
                 returncode, stdout, _stderr = await asyncio.gather(
                     wait_task, stdout_task, stderr_task
                 )
@@ -452,5 +468,8 @@ class ClaudeProcessRunner:
             raise pending_error
         if cleanup_cancellation is not None:
             raise cleanup_cancellation
-        assert result_data is not None
+        if result_data is None:
+            raise ClaudeProviderError(
+                "provider_failed", "Claude could not complete the model turn."
+            )
         return result_data

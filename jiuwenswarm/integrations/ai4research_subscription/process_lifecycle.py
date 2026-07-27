@@ -61,7 +61,7 @@ def process_group_snapshot(pgid: int | None) -> list[dict[str, int | str]]:
             raw = stat_path.read_text(encoding="utf-8")
             closing = raw.rfind(")")
             pid = int(raw[: raw.find(" ")])
-            fields = raw[closing + 2 :].split()
+            fields = raw[closing + 2:].split()
             process_pgid = int(fields[2])
             if process_pgid != pgid:
                 continue
@@ -77,7 +77,7 @@ def process_group_snapshot(pgid: int | None) -> list[dict[str, int | str]]:
                     "etimes": max(0, int(uptime - (start_ticks / ticks))),
                 }
             )
-        except (FileNotFoundError, OSError, ValueError, IndexError):
+        except (OSError, ValueError, IndexError):
             continue
     return sorted(members, key=lambda item: int(item["pid"]))
 

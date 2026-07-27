@@ -77,10 +77,18 @@ class CodexAppServerClient:
         try:
             if spawn_cancellation is not None:
                 raise spawn_cancellation
-            assert process.stdout is not None and process.stderr is not None
-            self._reader_task = asyncio.create_task(self._read_frames())
+            stdout_reader = process.stdout
+            stderr_reader = process.stderr
+            if stdout_reader is None or stderr_reader is None:
+                raise CodexProviderError(
+                    "auth_protocol_error",
+                    "Codex authentication process pipes are unavailable.",
+                )
+            self._reader_task = asyncio.create_task(
+                self._read_frames(stdout_reader)
+            )
             self._stderr_task = asyncio.create_task(
-                read_limited(process.stderr, MAX_STDERR_BYTES)
+                read_limited(stderr_reader, MAX_STDERR_BYTES)
             )
             initialized = await self.request(
                 "initialize",
@@ -107,17 +115,23 @@ class CodexAppServerClient:
                     exc if isinstance(exc, asyncio.CancelledError) else None,
                 )
             except BaseException as cleanup_exc:
-                raise cleanup_exc
+                raise cleanup_exc from exc
             if cleanup_cancellation is not None:
-                raise cleanup_cancellation
+                if cleanup_cancellation is exc:
+                    raise cleanup_cancellation from None
+                raise cleanup_cancellation from exc
             raise
 
-    async def _read_frames(self) -> None:
-        assert self._process is not None and self._process.stdout is not None
+    async def _read_frames(self, stdout_reader: asyncio.StreamReader) -> None:
+        if stdout_reader is None:
+            raise CodexProviderError(
+                "auth_protocol_error",
+                "Codex authentication process pipes are unavailable.",
+            )
         total = 0
         try:
             while True:
-                line = await self._process.stdout.readline()
+                line = await stdout_reader.readline()
                 if not line:
                     break
                 total += len(line)
@@ -126,7 +140,10 @@ class CodexAppServerClient:
                 try:
                     frame = json.loads(line)
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise CodexProviderError("auth_protocol_error", "Codex authentication returned malformed output.") from exc
+                    raise CodexProviderError(
+                        "auth_protocol_error",
+                        "Codex authentication returned malformed output.",
+                    ) from exc
                 if not isinstance(frame, dict):
                     raise CodexProviderError("auth_protocol_error", "Codex authentication returned invalid output.")
                 if "id" in frame:
@@ -137,7 +154,10 @@ class CodexAppServerClient:
                     try:
                         self._notifications.put_nowait(frame)
                     except asyncio.QueueFull as exc:
-                        raise CodexProviderError("auth_protocol_error", "Codex authentication emitted too many events.") from exc
+                        raise CodexProviderError(
+                            "auth_protocol_error",
+                            "Codex authentication emitted too many events.",
+                        ) from exc
             raise CodexProviderError(
                 "auth_protocol_error", "Codex authentication stopped unexpectedly."
             )

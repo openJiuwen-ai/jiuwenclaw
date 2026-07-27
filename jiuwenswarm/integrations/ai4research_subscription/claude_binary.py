@@ -11,9 +11,11 @@ environment.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -34,7 +36,25 @@ from .process_lifecycle import (
 
 # `claude --version` prints e.g. "2.1.218 (Claude Code)".
 _VERSION_PATTERN = re.compile(r"\A(\d+\.\d+\.\d+)[ \t]+\(Claude Code\)[ \t\r\n]*\Z")
-_VERIFIED_EXECUTABLES: set[tuple[object, ...]] = set()
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _FileIdentity:
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+
+
+@dataclass(frozen=True)
+class _ExecutableIdentity:
+    path: str
+    launcher: _FileIdentity
+    target: _FileIdentity
+
+
+_VERIFIED_EXECUTABLES: set[_ExecutableIdentity] = set()
 
 
 def resolve_claude_binary(candidate: Path | None = None) -> Path:
@@ -55,23 +75,41 @@ def resolve_claude_binary(candidate: Path | None = None) -> Path:
     return launcher
 
 
-def _executable_identity(binary: Path) -> tuple[object, ...]:
+def _file_identity(info: os.stat_result) -> _FileIdentity:
+    return _FileIdentity(
+        device=info.st_dev,
+        inode=info.st_ino,
+        size=info.st_size,
+        modified_ns=info.st_mtime_ns,
+    )
+
+
+def _executable_identity(binary: Path) -> _ExecutableIdentity:
     try:
         launcher = binary.lstat()
         target = binary.stat()
     except OSError:
         raise claude_unsupported_cli() from None
-    return (
-        str(binary),
-        launcher.st_dev,
-        launcher.st_ino,
-        launcher.st_size,
-        launcher.st_mtime_ns,
-        target.st_dev,
-        target.st_ino,
-        target.st_size,
-        target.st_mtime_ns,
+    return _ExecutableIdentity(
+        path=str(binary),
+        launcher=_file_identity(launcher),
+        target=_file_identity(target),
     )
+
+
+def _record_unreaped_group_best_effort(
+    callback: Callable[[int], None] | None,
+    pgid: int | None,
+) -> None:
+    if callback is None or pgid is None:
+        return
+    try:
+        callback(pgid)
+    except Exception as exc:
+        logger.warning(
+            "Claude version quarantine callback failed: %s",
+            type(exc).__name__,
+        )
 
 
 async def verify_claude_version(
@@ -117,13 +155,16 @@ async def verify_claude_version(
                 process_group_id = process.pid
             if spawn_cancellation is not None:
                 raise spawn_cancellation
-            assert process.stdout is not None and process.stderr is not None
+            stdout_reader = process.stdout
+            stderr_reader = process.stderr
+            if stdout_reader is None or stderr_reader is None:
+                raise claude_unsupported_cli()
             wait_task = asyncio.create_task(wait_process_exit(process))
             stdout_task = asyncio.create_task(
-                read_limited(process.stdout, MAX_VERSION_OUTPUT_BYTES)
+                read_limited(stdout_reader, MAX_VERSION_OUTPUT_BYTES)
             )
             stderr_task = asyncio.create_task(
-                read_limited(process.stderr, MAX_VERSION_OUTPUT_BYTES)
+                read_limited(stderr_reader, MAX_VERSION_OUTPUT_BYTES)
             )
             reader_tasks = (stdout_task, stderr_task)
             returncode, stdout, _stderr = await asyncio.gather(
@@ -132,7 +173,7 @@ async def verify_claude_version(
             result = (returncode, stdout)
     except asyncio.CancelledError as exc:
         pending_error = exc
-    except (TimeoutError, ClaudeProviderError, OSError):
+    except (ClaudeProviderError, OSError):
         pending_error = claude_unsupported_cli()
     except Exception:
         pending_error = claude_unsupported_cli()
@@ -151,11 +192,10 @@ async def verify_claude_version(
                 # credential-bearing leak (it inherited the real HOME). Quarantine
                 # its group so subsequent turns stay blocked until it is gone, and
                 # fail this turn closed.
-                if on_unreaped_group is not None and process_group_id is not None:
-                    try:
-                        on_unreaped_group(process_group_id)
-                    except Exception:
-                        pass
+                _record_unreaped_group_best_effort(
+                    on_unreaped_group,
+                    process_group_id,
+                )
                 raise claude_provider_unavailable() from None
         for task in reader_tasks:
             if not task.done():

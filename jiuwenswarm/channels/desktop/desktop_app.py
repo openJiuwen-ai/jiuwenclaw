@@ -265,7 +265,8 @@ class _WindowApi:
     def install_update(self, installer_path: str) -> bool:
         return self._runtime.install_update(installer_path)
 
-    def open_external_url(self, url: str) -> bool:
+    @staticmethod
+    def open_external_url(url: str) -> bool:
         """Open a vetted provider-authentication URL in the system browser."""
         from urllib.parse import urlparse
 

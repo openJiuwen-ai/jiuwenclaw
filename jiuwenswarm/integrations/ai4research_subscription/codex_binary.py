@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from .constants import (
@@ -27,7 +28,24 @@ from .quarantine import quarantine_ownership
 
 
 _VERSION_PATTERN = re.compile(r"\Acodex-cli[ \t]+(\d+\.\d+\.\d+)[ \t\r\n]*\Z")
-_VERIFIED_EXECUTABLES: set[tuple[object, ...]] = set()
+
+
+@dataclass(frozen=True)
+class _FileIdentity:
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+
+
+@dataclass(frozen=True)
+class _ExecutableIdentity:
+    path: str
+    launcher: _FileIdentity
+    target: _FileIdentity
+
+
+_VERIFIED_EXECUTABLES: set[_ExecutableIdentity] = set()
 
 
 def resolve_codex_binary(candidate: Path | None = None) -> Path:
@@ -50,7 +68,16 @@ def resolve_codex_binary(candidate: Path | None = None) -> Path:
     return launcher
 
 
-def _executable_identity(binary: Path) -> tuple[object, ...]:
+def _file_identity(info: os.stat_result) -> _FileIdentity:
+    return _FileIdentity(
+        device=info.st_dev,
+        inode=info.st_ino,
+        size=info.st_size,
+        modified_ns=info.st_mtime_ns,
+    )
+
+
+def _executable_identity(binary: Path) -> _ExecutableIdentity:
     """Identify both a launcher and its target so replacements invalidate the cache."""
 
     try:
@@ -58,16 +85,10 @@ def _executable_identity(binary: Path) -> tuple[object, ...]:
         target = binary.stat()
     except OSError:
         raise unsupported_cli() from None
-    return (
-        str(binary),
-        launcher.st_dev,
-        launcher.st_ino,
-        launcher.st_size,
-        launcher.st_mtime_ns,
-        target.st_dev,
-        target.st_ino,
-        target.st_size,
-        target.st_mtime_ns,
+    return _ExecutableIdentity(
+        path=str(binary),
+        launcher=_file_identity(launcher),
+        target=_file_identity(target),
     )
 
 
@@ -105,13 +126,16 @@ async def verify_codex_version(
                 process_group_id = process.pid
             if spawn_cancellation is not None:
                 raise spawn_cancellation
-            assert process.stdout is not None and process.stderr is not None
+            stdout_reader = process.stdout
+            stderr_reader = process.stderr
+            if stdout_reader is None or stderr_reader is None:
+                raise unsupported_cli()
             wait_task = asyncio.create_task(wait_process_exit(process))
             stdout_task = asyncio.create_task(
-                read_limited(process.stdout, MAX_VERSION_OUTPUT_BYTES)
+                read_limited(stdout_reader, MAX_VERSION_OUTPUT_BYTES)
             )
             stderr_task = asyncio.create_task(
-                read_limited(process.stderr, MAX_VERSION_OUTPUT_BYTES)
+                read_limited(stderr_reader, MAX_VERSION_OUTPUT_BYTES)
             )
             reader_tasks = (stdout_task, stderr_task)
             returncode, stdout, _stderr = await asyncio.gather(
@@ -120,7 +144,7 @@ async def verify_codex_version(
             result = (returncode, stdout)
     except asyncio.CancelledError as exc:
         pending_error = exc
-    except (TimeoutError, CodexProviderError, OSError):
+    except (CodexProviderError, OSError):
         pending_error = unsupported_cli()
     except Exception:
         pending_error = unsupported_cli()
