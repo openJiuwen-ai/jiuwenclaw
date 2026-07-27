@@ -387,7 +387,7 @@ def _is_restorable_history_record(record: Any) -> bool:
 
     if role == "user":
         mode = record.get("mode", "")
-        if mode == "team":
+        if mode in ("team", "team.plan", "code.team"):
             channel_id = record.get("channel_id", "")
             if channel_id not in ("web", "tui"):
                 return False
