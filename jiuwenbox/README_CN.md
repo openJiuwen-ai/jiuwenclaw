@@ -605,6 +605,32 @@ sandbox:
 
 跨机部署要求 jiuwenbox 主机能访问 jiuwenswarm 的固有 agent 文件路径——`preserve_file_sharing_mode` 现在只支持 `mount` jiuwenswarm 会把 intrinsic 文件（`AGENT.md` / `HEARTBEAT.md` / `IDENTITY.md` / `SOUL.md` / `USER.md` / `memory/daily_memory/`）和 `project_dir` 通过 bind mount 暴露给沙箱，因此目标主机必须能在同样的 host path 下看到这些文件（例如共享文件系统、容器 volume 等）。
 
+## 在 jiuwenclaw (claw2b) 中通过环境变量启用 jiuwenbox
+
+jiuwenclaw 不读 `config.yaml::sandbox`，统一走 `JIUWENCLAW_SANDBOX_*` 环境变量。默认 `STARTUP_MODE=external`（企业 K8s / sidecar 不误 spawn）；本地开发需**显式**设为 `internal`，AgentServer boot 时才会拉起 `jiuwenbox-server` 子进程。
+
+```bash
+# internal 本地开发（AgentServer 自动 spawn jiuwenbox）
+export JIUWENCLAW_SANDBOX_ENABLED=true
+export JIUWENCLAW_SANDBOX_STARTUP_MODE=internal
+export JIUWENCLAW_SANDBOX_URL=http://127.0.0.1:8321
+export JIUWENCLAW_SANDBOX_POLICY_FILE=code-agent-policy.yaml
+
+# external 企业部署（默认；需自行启动 jiuwenbox）
+export JIUWENCLAW_SANDBOX_ENABLED=true
+export JIUWENCLAW_SANDBOX_STARTUP_MODE=external
+export JIUWENCLAW_SANDBOX_URL=http://jiuwenbox:8321
+```
+
+| 变量 | 取值 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `JIUWENCLAW_SANDBOX_STARTUP_MODE` | `internal` / `external` | `external` | `internal`：AgentServer 启动时 spawn `jiuwenbox-server`（端口占用时自动换端口并把生效 URL 写回进程 tip）；`external`：只连 `URL`，不碰 jiuwenbox 进程 |
+| `JIUWENCLAW_SANDBOX_POLICY_FILE` | 文件名 / 路径 | `code-agent-policy.yaml` | 仅 `internal` 生效；bare 名 → `jiuwenbox/configs/<name>`，经 `JIUWENBOX_POLICY_PATH` 注入子进程 |
+| `JIUWENCLAW_SANDBOX_URL` | URL | （空） | jiuwenbox HTTP 端点 |
+| `JIUWENCLAW_SANDBOX_ENABLED` | bool | `false` | 是否启用沙箱模式 |
+
+停机时 AgentServer 先 `JiuwenBoxRunner.stop()`（仅 owns 的子进程），再对本进程缓存的 sandbox 发 DELETE（主要为 external / 共享 jiuwenbox 防泄漏）。
+
 ## 远程 MCP
 
 JiuwenBox 支持三种访问方式：**REST API**、**CLI** 和**远程 MCP**。

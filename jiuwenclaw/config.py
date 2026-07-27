@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import copy
+import json
 import logging
 import os
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 from ruamel.yaml import YAML
 import yaml
-from jiuwenclaw.local_env_config import get_local_config
+from jiuwenclaw.local_env_config import get_local_config, set_local_config
 
 
 from jiuwenclaw.utils import (
@@ -1139,7 +1140,11 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
 #   TYPE                          (str, sandbox provider 名; 缺省/空回落到
 #                                   ``jiuwenbox`` —— 这是项目里唯一注册的
 #                                   provider, 显式覆盖只有自定义 provider 时才用)
-#   STARTUP_MODE                  (str, 仅接受 ``external``; 非法抛 ValueError)
+#   STARTUP_MODE                  (str, ``external`` | ``internal``; 缺省
+#                                   ``external``; 非法抛 ValueError)
+#   POLICY_FILE                   (str, 仅 ``internal`` 生效; bare 名 →
+#                                   ``jiuwenbox/configs/<name>``; 缺省
+#                                   ``code-agent-policy.yaml``)
 #   PRESERVE_FILE_SHARING_MODE    (str, 仅接受 ``mount``; 缺省回落 ``mount``)
 #   EXCLUDED_COMMANDS             (str: JSON 数组 ``["ls", "cat"]`` 或
 #                                   :func:`os.pathsep` (linux ``:``) 分隔
@@ -1154,12 +1159,14 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
 #                                   jiuwenbox 服务端用自身默认值)
 #
 # 注意:
-#   - ``startup_mode`` 仅接受 ``external``，``internal`` 之类抛 ``ValueError``。
-#     ``external`` 表示 “使用 ``URL`` 端点连接由外部启动的 jiuwenbox”
-#     (claw2b 不负责拉起 jiuwenbox; 在 K8s / 企业部署里 jiuwenbox-server 由
-#     Deployment / sidecar 等独立托管)。
-#   - 不引入 ``policy_file`` 字段 (jiuwenbox 自管 policy)。
-#   - 不引入任何 ``update_sandbox_*`` 写回函数 (无 ``/sandbox`` 命令调用方)。
+#   - ``startup_mode`` 经 :func:`get_sandbox_runtime` 读取 (不在
+#     :func:`get_sandbox_endpoint` 重复):
+#       - ``external`` (默认): 连接由外部启动的 jiuwenbox (K8s / sidecar);
+#         AgentServer 不 spawn。
+#       - ``internal``: AgentServer boot 时 spawn ``jiuwenbox-server`` 子进程,
+#         经 ``POLICY_FILE`` 注入 ``JIUWENBOX_POLICY_PATH``。
+#   - 无 ``/sandbox`` TUI 命令; internal 端口变更后写回进程内 tip
+#     (``set_local_config``), 不写 yaml。
 #   - ``IDLE_TTL_SECONDS`` / ``IDLE_CHECK_INTERVAL`` 经
 #     :func:`create_sandbox_sysop_card` 透传给 jiuwenbox provider, 由其
 #     ``PUT /api/v1/timeout`` 写到 jiuwenbox server 根 policy 上 (per-sandbox
@@ -1168,8 +1175,13 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
 
 _SANDBOX_ENV_PREFIX: str = "JIUWENCLAW_SANDBOX_"
 
-_VALID_SANDBOX_STARTUP_MODES: tuple[str, ...] = ("external",)
+_VALID_SANDBOX_STARTUP_MODES: tuple[str, ...] = ("external", "internal")
 _DEFAULT_SANDBOX_STARTUP_MODE: str = "external"
+_DEFAULT_SANDBOX_POLICY_FILE: str = "code-agent-policy.yaml"
+
+# Public re-exports for callers that advertise / fall back to defaults.
+DEFAULT_SANDBOX_STARTUP_MODE = _DEFAULT_SANDBOX_STARTUP_MODE
+DEFAULT_SANDBOX_POLICY_FILE = _DEFAULT_SANDBOX_POLICY_FILE
 
 _VALID_PRESERVE_FILE_SHARING_MODES: tuple[str, ...] = ("mount",)
 _DEFAULT_PRESERVE_FILE_SHARING_MODE: str = "mount"
@@ -1181,6 +1193,7 @@ _DEFAULT_SANDBOX_TYPE: str = "jiuwenbox"
 
 _SANDBOX_RUNTIME_DEFAULTS: dict[str, Any] = {
     "enabled": False,
+    "startup_mode": _DEFAULT_SANDBOX_STARTUP_MODE,
     "excluded_commands": [],
     "files": {"allow": [], "deny": []},
     "idle_ttl_seconds": None,
@@ -1303,14 +1316,11 @@ def _normalize_sandbox_startup_mode(value: Any) -> str:
     """归一化 ``sandbox.startup_mode``.
 
     - ``None`` / 空字符串 → 返回默认 ``external``；
-    - ``"external"`` (大小写不敏感, 前后空格) → 返回 ``"external"``；
-    - 其它任何取值 (含 ``internal``) → 抛 ``ValueError``。
+    - ``"external"`` / ``"internal"`` (大小写不敏感) → 原样返回；
+    - 其它任何取值 → 抛 ``ValueError`` (严格校验, 不同于 upstream 回落默认)。
 
-    显式拒绝 ``internal``: claw2b 在 K8s / 企业部署中, jiuwenbox-server 由
-    Deployment / sidecar 等外部进程独立托管, agent-server 完全不 spawn 它,
-    只通过 ``JIUWENCLAW_SANDBOX_URL`` 健康检查 + HTTP 调用。 这就是 jiuwenbox
-    README 中 ``external`` 的定义; ``internal`` (agent-server 自动拉起
-    jiuwenbox 子进程) 在本工程内不实现, 留下名字徒增歧义, 故 schema 收窄。
+    默认 ``external`` 避免企业 K8s 升级后突然 spawn; 本地开发须显式设
+    ``JIUWENCLAW_SANDBOX_STARTUP_MODE=internal``。
     """
     if value is None:
         return _DEFAULT_SANDBOX_STARTUP_MODE
@@ -1323,6 +1333,84 @@ def _normalize_sandbox_startup_mode(value: Any) -> str:
             f"{_VALID_SANDBOX_STARTUP_MODES}, got {value!r}",
         )
     return text
+
+
+def _looks_like_bare_filename(value: str) -> bool:
+    """``True`` 表示参数应解释为 ``jiuwenbox/configs/`` 下的文件名。"""
+    if not value:
+        return False
+    return "/" not in value and "\\" not in value and not Path(value).is_absolute()
+
+
+def _jiuwenbox_configs_dir() -> Path | None:
+    """探测仓库或安装位置上的 ``jiuwenbox/configs/`` 目录。"""
+    here = Path(__file__).resolve()
+    for ancestor in here.parents[0:7]:
+        for candidate in (
+            ancestor / "jiuwenbox" / "src" / "jiuwenbox" / "configs",
+            ancestor / "jiuwenbox" / "configs",
+        ):
+            if candidate.is_dir():
+                return candidate
+    try:
+        import jiuwenbox  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        pkg_dir = Path(jiuwenbox.__file__).resolve().parent
+    except Exception:  # noqa: BLE001
+        return None
+    direct = pkg_dir / "configs"
+    if direct.is_dir():
+        return direct
+    for steps_up in (2, 3):
+        candidate = pkg_dir
+        for _ in range(steps_up):
+            candidate = candidate.parent
+        candidate = candidate / "configs"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def resolve_sandbox_policy_path(value: str | None) -> Path | None:
+    r"""把 ``POLICY_FILE`` 取值解析为宿主机绝对路径。
+
+    - ``None`` / 空 → ``None``;
+    - 仅文件名 → ``jiuwenbox/configs/<name>``; configs 不可达时 ``None``;
+    - 含 ``/`` ``\\`` 或绝对路径 → 展开 ``~`` / ``$VAR`` 后返回。
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    expanded = os.path.expandvars(os.path.expanduser(text))
+    if _looks_like_bare_filename(expanded):
+        configs_dir = _jiuwenbox_configs_dir()
+        if configs_dir is None:
+            return None
+        return (configs_dir / expanded).resolve()
+    return Path(expanded).resolve()
+
+
+def get_sandbox_policy_file() -> str:
+    """返回 ``JIUWENCLAW_SANDBOX_POLICY_FILE`` 原始字符串 (空表示未配置)。"""
+    return _read_sandbox_env("POLICY_FILE") or ""
+
+
+def get_sandbox_policy_path() -> Path | None:
+    """返回 policy 解析后的绝对路径; 未配置时回落默认文件名。"""
+    raw = get_sandbox_policy_file() or _DEFAULT_SANDBOX_POLICY_FILE
+    return resolve_sandbox_policy_path(raw)
+
+
+def persist_sandbox_endpoint_url(url: str) -> None:
+    """把生效的 sandbox URL 写回进程 tip (internal 换端口后调用)。"""
+    text = str(url or "").strip()
+    if not text:
+        raise ValueError("sandbox url must be non-empty")
+    set_local_config("JIUWENCLAW_SANDBOX_URL", text)
 
 
 def _normalize_preserve_file_sharing_mode(value: Any) -> str | None:
@@ -1361,6 +1449,8 @@ def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
     out = dict(base)
     if "enabled" in runtime:
         out["enabled"] = bool(runtime["enabled"])
+    if "startup_mode" in runtime:
+        out["startup_mode"] = _normalize_sandbox_startup_mode(runtime["startup_mode"])
     raw_excluded = runtime.get("excluded_commands")
     if isinstance(raw_excluded, list):
         out["excluded_commands"] = [str(p) for p in raw_excluded if str(p).strip()]
@@ -1392,22 +1482,22 @@ def get_sandbox_endpoint() -> dict[str, Any]:
 
     Reads:
         - ``JIUWENCLAW_SANDBOX_URL``
-        - ``JIUWENCLAW_SANDBOX_TYPE`` (default ``jiuwenbox`` —— 项目内唯一
-          已注册的 provider; 不必显式设)
-        - ``JIUWENCLAW_SANDBOX_STARTUP_MODE`` (default ``external``,
-          非法值抛 ``ValueError``)
+        - ``JIUWENCLAW_SANDBOX_TYPE`` (default ``jiuwenbox``)
+        - ``JIUWENCLAW_SANDBOX_POLICY_FILE`` (default
+          ``code-agent-policy.yaml``; 仅 internal 启动时注入子进程)
         - ``JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE`` (default
           ``mount``)
 
-    返回 key 与历史调用方契约保持一致 (``url`` / ``type`` / ``startup_mode`` /
-    ``preserve_file_sharing_mode``), 让 ``interface_deep.py`` 等调用方
-    无需改动。
+    返回 key: ``url`` / ``type`` / ``policy_file`` /
+    ``preserve_file_sharing_mode``。
+
+    ``startup_mode`` 在 :func:`get_sandbox_runtime` 中读取, 不在此重复。
     """
     mode = _normalize_preserve_file_sharing_mode(_read_sandbox_env("PRESERVE_FILE_SHARING_MODE"))
     return {
         "url": _read_sandbox_env("URL") or "",
         "type": _read_sandbox_env("TYPE") or _DEFAULT_SANDBOX_TYPE,
-        "startup_mode": _normalize_sandbox_startup_mode(_read_sandbox_env("STARTUP_MODE")),
+        "policy_file": get_sandbox_policy_file() or _DEFAULT_SANDBOX_POLICY_FILE,
         "preserve_file_sharing_mode": mode or _DEFAULT_PRESERVE_FILE_SHARING_MODE,
     }
 
@@ -1417,15 +1507,16 @@ def get_sandbox_runtime() -> dict[str, Any]:
 
     Reads:
         - ``JIUWENCLAW_SANDBOX_ENABLED`` (bool, 默认 false)
+        - ``JIUWENCLAW_SANDBOX_STARTUP_MODE`` (``external`` / ``internal``,
+          默认 ``external``; 非法值抛 ``ValueError``)
         - ``JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS`` (JSON 数组 / 分隔列表)
         - ``JIUWENCLAW_SANDBOX_FILES_ALLOW``  (JSON 数组 / 分隔列表)
         - ``JIUWENCLAW_SANDBOX_FILES_DENY``   (JSON 数组 / 分隔列表)
         - ``JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS`` (int seconds; ``<=0`` 视作禁用)
         - ``JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL`` (int seconds; ``<=0`` 视作未配置)
 
-    返回结构与历史 ``config.yaml::sandbox`` runtime 完全相同 (含
-    ``files: {allow, deny}`` 子结构), 让下游 ``interface_deep.py`` /
-    ``sysop_builder.py`` 不感知配置源切换。
+    返回结构含 ``files: {allow, deny}`` 与 ``startup_mode`` 等字段, 让下游
+    ``interface_deep.py`` / ``sysop_builder.py`` / AgentServer boot 走同一套读取。
     """
     raw: dict[str, Any] = {
         "enabled": _coerce_bool_env(
@@ -1433,6 +1524,7 @@ def get_sandbox_runtime() -> dict[str, Any]:
             env_name="JIUWENCLAW_SANDBOX_ENABLED",
             default=False,
         ),
+        "startup_mode": _read_sandbox_env("STARTUP_MODE"),
         "excluded_commands": _parse_list_env(
             _read_sandbox_env("EXCLUDED_COMMANDS"),
             env_name="JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS",
@@ -1457,12 +1549,15 @@ _SANDBOX_YAML_TO_ENV: dict[str, str] = {
     "url": "JIUWENCLAW_SANDBOX_URL",
     "type": "JIUWENCLAW_SANDBOX_TYPE",
     "enabled": "JIUWENCLAW_SANDBOX_ENABLED",
+    "startup_mode": "JIUWENCLAW_SANDBOX_STARTUP_MODE",
+    "policy_file": "JIUWENCLAW_SANDBOX_POLICY_FILE",
 }
 
 
 def _sandbox_yaml_to_env_overlay(sandbox: Any) -> dict[str, str]:
-    """从 ``config_base['sandbox']`` 抽 url/type/enabled, 翻译成 env overlay key。
+    """从 ``config_base['sandbox']`` 抽字段, 翻译成 env overlay key。
 
+    映射: url / type / enabled / startup_mode / policy_file。
     缺失字段不进 overlay, 让 env var fallback 生效。``enabled`` 归一化为
     ``'true'`` / ``'false'``。非法 bool 抛 ``ValueError``, 让 reload 整体失败。
 
@@ -1491,6 +1586,9 @@ def _sandbox_yaml_to_env_overlay(sandbox: Any) -> dict[str, str]:
                     raise ValueError(
                         f"sandbox.{yaml_key} must be a boolean string, got {value!r}"
                     )
+        elif yaml_key == "startup_mode":
+            # 严格校验, 非法值让 reload 失败而不是悄悄回落。
+            out[env_key] = _normalize_sandbox_startup_mode(value)
         else:
             text = str(value).strip()
             if text:

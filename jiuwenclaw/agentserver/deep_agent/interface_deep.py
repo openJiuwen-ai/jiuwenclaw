@@ -2551,7 +2551,7 @@ class JiuWenClawDeepAdapter:
                     "startup_mode=%s idle_ttl_seconds=%s idle_check_interval=%s",
                     sandbox_url,
                     sandbox_type,
-                    endpoint.get("startup_mode"),
+                    runtime.get("startup_mode"),
                     runtime.get("idle_ttl_seconds"),
                     runtime.get("idle_check_interval"),
                 )

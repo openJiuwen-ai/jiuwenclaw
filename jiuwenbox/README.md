@@ -637,6 +637,31 @@ Under this mode agent-server **does not** try to spawn jiuwenbox, and `sandbox.p
 
 For cross-host setups, the jiuwenbox host has to be able to reach jiuwenswarm's intrinsic agent files on the same host paths: `preserve_file_sharing_mode` is now fixed to `mount`, so jiuwenswarm bind-mounts the intrinsic files (`AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `memory/daily_memory/`) and `project_dir` into the sandbox. Make the relevant directories visible on the jiuwenbox machine (via shared filesystem, container volume, etc.) and confirm the policy allows writes into them (the bundled `jiuwenbox/configs/code-agent-policy.yaml` already does).
 
+## Enabling jiuwenbox from jiuwenclaw (claw2b) via environment variables
+
+jiuwenclaw does **not** read `config.yaml::sandbox`; it uses `JIUWENCLAW_SANDBOX_*` env vars. Default `STARTUP_MODE` is `external` (so enterprise K8s / sidecars never accidentally spawn). Local development must **explicitly** set `internal` for AgentServer to spawn `jiuwenbox-server` at boot.
+
+```bash
+# internal — local dev (AgentServer spawns jiuwenbox)
+export JIUWENCLAW_SANDBOX_ENABLED=true
+export JIUWENCLAW_SANDBOX_STARTUP_MODE=internal
+export JIUWENCLAW_SANDBOX_URL=http://127.0.0.1:8321
+export JIUWENCLAW_SANDBOX_POLICY_FILE=code-agent-policy.yaml
+
+# external — enterprise (default; start jiuwenbox yourself)
+export JIUWENCLAW_SANDBOX_ENABLED=true
+export JIUWENCLAW_SANDBOX_STARTUP_MODE=external
+export JIUWENCLAW_SANDBOX_URL=http://jiuwenbox:8321
+```
+
+| Variable | Values | Default | Notes |
+| --- | --- | --- | --- |
+| `JIUWENCLAW_SANDBOX_STARTUP_MODE` | `internal` / `external` | `external` | `internal`: AgentServer spawns `jiuwenbox-server` (auto-picks a free port and writes the effective URL into the process tip). `external`: connect to `URL` only; never touch the jiuwenbox process. |
+| `JIUWENCLAW_SANDBOX_POLICY_FILE` | filename / path | `code-agent-policy.yaml` | Honored only under `internal`; bare name → `jiuwenbox/configs/<name>`, injected via `JIUWENBOX_POLICY_PATH`. |
+| `JIUWENCLAW_SANDBOX_URL` | URL | (empty) | jiuwenbox HTTP endpoint |
+| `JIUWENCLAW_SANDBOX_ENABLED` | bool | `false` | Whether sandbox mode is on |
+
+On shutdown AgentServer calls `JiuwenBoxRunner.stop()` first (owned child only), then DELETEs sandboxes cached in-process (mainly for external / shared jiuwenbox leak prevention).
 
 ## Remote MCP
 

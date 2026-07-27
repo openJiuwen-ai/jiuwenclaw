@@ -64,3 +64,21 @@ class TestSandboxYamlToEnvOverlay:
     @staticmethod
     def test_empty_dict_returns_empty():
         assert _sandbox_yaml_to_env_overlay({}) == {}
+
+    @staticmethod
+    def test_maps_startup_mode_and_policy_file():
+        out = _sandbox_yaml_to_env_overlay(
+            {
+                "startup_mode": "internal",
+                "policy_file": "code-agent-policy.yaml",
+            }
+        )
+        assert out == {
+            "JIUWENCLAW_SANDBOX_STARTUP_MODE": "internal",
+            "JIUWENCLAW_SANDBOX_POLICY_FILE": "code-agent-policy.yaml",
+        }
+
+    @staticmethod
+    def test_invalid_startup_mode_raises():
+        with pytest.raises(ValueError, match="STARTUP_MODE"):
+            _sandbox_yaml_to_env_overlay({"startup_mode": "sidecar"})
