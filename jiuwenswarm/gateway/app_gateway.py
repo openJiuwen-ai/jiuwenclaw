@@ -63,8 +63,6 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 
-from jiuwenswarm.openjiuwen_logging import configure_openjiuwen_logging_under_jiuwenswarm
-
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
     from openjiuwen.core.common.logging.log_config import configure_log
@@ -74,8 +72,6 @@ else:
     # Reduce openjiuwen internal logs (keep Gateway logs)
     for _lg in LogManager.get_all_loggers().values():
         _lg.set_level(logging.CRITICAL)
-
-configure_openjiuwen_logging_under_jiuwenswarm()
 
 load_dotenv(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
