@@ -1896,6 +1896,8 @@ class JsonOnlyFormatter(logging.Formatter):
 
 # 源头脱敏是否已安装（全局，避免重复设置 LogRecordFactory）。
 _source_record_masking_installed = False
+# 源头脱敏失败计数（脱敏异常时递增；运维可通过此值监控脱敏失效，避免静默泄露）。
+_source_masking_failures = 0
 
 
 def install_source_record_masking() -> None:
@@ -1943,8 +1945,18 @@ def install_source_record_masking() -> None:
             elif record.exc_text:
                 record.exc_text = _sanitize_log_text(record.exc_text)
         except Exception:
-            # 永不因脱敏失败而阻断日志输出。
-            pass
+            # 永不因脱敏失败而阻断日志输出。但记录失败（计数 + 首次 stderr 提示），
+            # 避免静默吞掉异常导致 api_key 在无感知下明文泄露。
+            global _source_masking_failures
+            _source_masking_failures += 1
+            if _source_masking_failures == 1:
+                # 仅首次打 stderr（不用 logging，避免自循环），提示运维脱敏失效。
+                # 后续仅靠计数器累积，避免高频失败刷屏。
+                print(
+                    "[jiuwenswarm] source record masking failed — secrets may be "
+                    "exposed in logs; check _source_masking_failures counter",
+                    file=sys.stderr,
+                )
         return record
 
     logging.setLogRecordFactory(_sanitizing_record_factory)

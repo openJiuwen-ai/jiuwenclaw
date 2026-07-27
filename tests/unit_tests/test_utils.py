@@ -152,7 +152,9 @@ class TestSourceRecordMasking:
             lg.removeHandler(h)
         buf = io.StringIO()
         handler = logging.StreamHandler(buf)
-        handler.setFormatter(logging.Formatter("%(name)s: %(message)s\n%(exc_text)s"))
+        # Formatter 默认在 message 后自动追加 traceback（若 record 有 exc_info/exc_text），
+        # 无需显式 %(exc_text)s，否则会与生产行为不一致导致 traceback 重复。
+        handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
         lg.addHandler(handler)
         lg.setLevel(logging.DEBUG)
         lg.propagate = False
