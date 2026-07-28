@@ -43,6 +43,10 @@ class GatewayHookHandler:
         for cfg in hook_configs:
             cfg.setdefault("timeout", self._gateway_timeout)
 
+        logger.info(
+            "GatewayHookHandler: fire SessionStart hooks session=%s source=%s count=%d",
+            session_id, source, len(hook_configs),
+        )
         try:
             await self._executor.run_all(
                 hook_configs,

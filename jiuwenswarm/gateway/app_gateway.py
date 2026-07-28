@@ -1721,6 +1721,24 @@ async def _run(
                 _inject_session_work_mode(normalized)
             await channel_manager.deliver_to_message_handler(normalized)
             logger.info("[App] %s 入站 -> MessageHandler: id=%s channel_id=%s", source_label, msg.id, msg.channel_id)
+            # session.create 主路径(Web/ACP 走 forward 到 AgentServer,不进本地
+            # _session_create)在此触发 SessionStart hook,与 TUI 本地
+            # _session_create(tui_connect.py)对齐。否则 hooks.SessionStart 配置
+            # 在 Web 新建会话时永不执行。详见 MessageHandler.trigger_session_start_hook。
+            if method_val == "session.create":
+                _sess_params = getattr(normalized, "params", None) or {}
+                _new_sid = _sess_params.get("session_id") if isinstance(_sess_params, dict) else None
+                if _new_sid and message_handler:
+                    try:
+                        message_handler.trigger_session_start_hook(
+                            str(_new_sid),
+                            source=getattr(msg, "channel_id", None) or source_label,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[App] %s session.create trigger_session_start_hook failed: sid=%s",
+                            source_label, _new_sid, exc_info=True,
+                        )
             if method_val in no_local_methods:
                 return True
             return False
