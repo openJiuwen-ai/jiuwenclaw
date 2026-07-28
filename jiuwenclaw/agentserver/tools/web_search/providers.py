@@ -196,7 +196,6 @@ async def run_paid_chain(
         )
         last_run = run
         if run.error == "skipped":
-            tried.append(f"{run.provider}(skipped)")
             continue
         if run.error:
             tried.append(f"{run.provider}(error)")
