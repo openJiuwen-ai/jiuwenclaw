@@ -55,6 +55,12 @@ interface ChatPanelProps {
     media_items?: Record<string, unknown>[];
     files?: Record<string, unknown>;
   }>;
+  onPersistDocuments: (content: string, mediaItems: MediaItem[]) => Promise<{
+    content?: string;
+    query?: string;
+    media_items?: Record<string, unknown>[];
+    files?: Record<string, unknown>;
+  }>;
   onInterrupt: (newInput?: string) => void;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
@@ -646,6 +652,7 @@ function scrollToBottom(el: HTMLDivElement): void {
 export function ChatPanel({
   onSendMessage,
   onPersistMedia,
+  onPersistDocuments,
   onInterrupt,
   onCancel,
   onSwitchMode,
@@ -1109,6 +1116,7 @@ export function ChatPanel({
                 <InputArea
                   onSubmit={handleSendMessage}
                   onPersistMedia={onPersistMedia}
+                  onPersistDocuments={onPersistDocuments}
                   onInterrupt={onInterrupt}
                   onCancel={onCancel}
                   onSwitchMode={onSwitchMode}
@@ -1149,6 +1157,7 @@ export function ChatPanel({
           <InputArea
             onSubmit={handleSendMessage}
             onPersistMedia={onPersistMedia}
+            onPersistDocuments={onPersistDocuments}
             onInterrupt={onInterrupt}
             onCancel={onCancel}
             onSwitchMode={onSwitchMode}

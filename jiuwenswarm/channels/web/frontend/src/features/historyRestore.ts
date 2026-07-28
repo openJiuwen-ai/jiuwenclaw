@@ -285,21 +285,12 @@ function normalizeHistoryMediaItem(value: unknown): MediaItem | null {
     return null;
   }
 
-  const rawType = typeof value.type === 'string' ? value.type.trim().toLowerCase() : 'image';
-  if (rawType && rawType !== 'image') {
-    return null;
-  }
-
   const path = pickFirstString(value, ['path', 'url']);
   if (!path) {
     return null;
   }
 
-  const mimeType = pickFirstString(value, ['mime_type', 'mimeType']) ?? 'image/png';
-  if (!mimeType.startsWith('image/')) {
-    return null;
-  }
-
+  const mimeType = pickFirstString(value, ['mime_type', 'mimeType']) ?? 'application/octet-stream';
   const filename = pickFirstString(value, ['filename', 'name']) ?? filenameFromPath(path);
   const size = typeof value.size_bytes === 'number'
     ? value.size_bytes
@@ -307,8 +298,27 @@ function normalizeHistoryMediaItem(value: unknown): MediaItem | null {
       ? value.sizeBytes
       : undefined;
 
+  const rawType = typeof value.type === 'string' ? value.type.trim().toLowerCase() : '';
+  let type: MediaItem['type'];
+  if (rawType === 'image' || rawType === 'audio' || rawType === 'video' || rawType === 'document') {
+    type = rawType;
+  } else if (mimeType.startsWith('image/')) {
+    type = 'image';
+  } else if (mimeType.startsWith('audio/')) {
+    type = 'audio';
+  } else if (mimeType.startsWith('video/')) {
+    type = 'video';
+  } else {
+    type = 'document';
+  }
+
+  // Keep legacy image-only filtering for ambiguous image records without type.
+  if (type === 'image' && !mimeType.startsWith('image/') && rawType !== 'image') {
+    return null;
+  }
+
   return {
-    type: 'image',
+    type,
     filename,
     path,
     mime_type: mimeType,
@@ -348,11 +358,13 @@ function extractHistoryMediaItems(record: Record<string, unknown>): MediaItem[] 
 
   if (isRecord(record.files)) {
     appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_images);
+    appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_documents);
   }
   if (isRecord(record.event_payload)) {
     appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.media_items);
     if (isRecord(record.event_payload.files)) {
       appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_images);
+      appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_documents);
     }
   }
 

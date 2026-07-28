@@ -103,6 +103,12 @@ from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
+from jiuwenswarm.gateway.document_attachments import (
+    coerce_document_parse_flag,
+    parse_existing_document,
+    persist_and_parse_documents,
+)
+from jiuwenswarm.common.document_parser import DEFAULT_MAX_CHARS, supported_formats
 from jiuwenswarm.server.runtime.session import project_store
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
@@ -4738,12 +4744,97 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.exception("[media.persist] failed: %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
             return
-        payload = {
-            key: normalized[key]
-            for key in ("content", "query", "media_items", "files")
-            if key in normalized
-        }
+        # G.EXP.04: 多 key + 条件过滤不用推导式，改为显式循环。
+        payload = {}
+        for key in ("content", "query", "media_items", "files"):
+            if key in normalized:
+                payload[key] = normalized[key]
         await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _document_persist(ws, req_id, params, session_id):
+        """Upload documents (PDF/DOCX/XLSX/ipynb/...) and parse via AutoFileParser."""
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        normalized = dict(params)
+        parse = coerce_document_parse_flag(normalized.get("parse", True), default=True)
+        max_chars_raw = normalized.get("max_chars", DEFAULT_MAX_CHARS)
+        try:
+            max_chars = int(max_chars_raw)
+        except (TypeError, ValueError):
+            max_chars = DEFAULT_MAX_CHARS
+        max_chars = max(1, min(max_chars, 500_000))
+        try:
+            await persist_and_parse_documents(
+                normalized,
+                session_id,
+                parse=parse,
+                max_chars=max_chars,
+            )
+        except Exception as exc:
+            logger.exception("[document.persist] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+        # G.EXP.04: 多 key + 条件过滤不用推导式，改为显式循环。
+        payload = {}
+        for key in (
+            "content",
+            "query",
+            "media_items",
+            "files",
+            "documents",
+            "document_errors",
+            "supported_formats",
+        ):
+            if key in normalized:
+                payload[key] = normalized[key]
+        if "supported_formats" not in payload:
+            payload["supported_formats"] = supported_formats()
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _document_parse(ws, req_id, params, session_id):
+        """Parse an already-uploaded document path with AutoFileParser (+ ipynb)."""
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        path = str(params.get("path") or "").strip()
+        if not path:
+            await channel.send_response(ws, req_id, ok=False, error="path is required", code="BAD_REQUEST")
+            return
+        max_chars_raw = params.get("max_chars", DEFAULT_MAX_CHARS)
+        try:
+            max_chars = int(max_chars_raw)
+        except (TypeError, ValueError):
+            max_chars = DEFAULT_MAX_CHARS
+        max_chars = max(1, min(max_chars, 500_000))
+        try:
+            result = await parse_existing_document(
+                path,
+                session_id=session_id,
+                max_chars=max_chars,
+            )
+        except FileNotFoundError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="NOT_FOUND")
+            return
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+            return
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+            return
+        except Exception as exc:
+            logger.exception("[document.parse] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _document_formats(ws, req_id, params, session_id):
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={"supported_formats": supported_formats()},
+        )
 
     async def _chat_resume(ws, req_id, params, session_id):
         await channel.send_response(
@@ -5842,6 +5933,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("chat.send", _chat_send)
     channel.register_method("media.persist", _media_persist)
+    channel.register_method("document.persist", _document_persist)
+    channel.register_method("document.parse", _document_parse)
+    channel.register_method("document.formats", _document_formats)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("chat.user_answer", _chat_user_answer)

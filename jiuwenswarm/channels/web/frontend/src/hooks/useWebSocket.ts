@@ -73,6 +73,7 @@ import {
   findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn,
 } from '../features/teamLeaderMessages';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
+import { stripUploadDocumentBlocks } from '../utils/documentMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -504,6 +505,7 @@ interface UseWebSocketReturn {
     options?: WebRequestOptions
   ) => Promise<T>;
   persistMedia: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
+  persistDocuments: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   sendMessage: (content: string, sessionId: string, mediaItems?: MediaItem[]) => Promise<boolean>;
   sendStructuredChatContent: (content: unknown, sessionId: string) => Promise<void>;
   interrupt: (
@@ -563,15 +565,37 @@ function toPersistedMediaRecord(item: MediaItem): Record<string, unknown> {
   };
 }
 
+function slimPersistedMediaRecords(items: Record<string, unknown>[]): Record<string, unknown>[] {
+  return items.map((item) => ({
+    type: item.type,
+    filename: item.filename,
+    mime_type: item.mime_type ?? item.mimeType,
+    path: item.path,
+    size_bytes: item.size_bytes ?? item.sizeBytes,
+  }));
+}
+
 function buildPersistedMediaFiles(mediaItems: MediaItem[]): Record<string, unknown> {
-  return {
-    uploaded_images: mediaItems.map((item) => ({
+  const files: Record<string, unknown> = {};
+  const images = mediaItems.filter((item) => item.type === 'image');
+  const documents = mediaItems.filter((item) => item.type === 'document');
+  if (images.length) {
+    files.uploaded_images = images.map((item) => ({
       filename: item.filename,
       path: item.path,
       mime_type: getMediaMimeType(item),
       size_bytes: item.size_bytes ?? item.sizeBytes,
-    })),
-  };
+    }));
+  }
+  if (documents.length) {
+    files.uploaded_documents = documents.map((item) => ({
+      filename: item.filename,
+      path: item.path,
+      mime_type: getMediaMimeType(item),
+      size_bytes: item.size_bytes ?? item.sizeBytes,
+    }));
+  }
+  return files;
 }
 
 function getSessionWorkContext(sessionId: string): Record<string, unknown> {
@@ -1151,6 +1175,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     [request],
   );
 
+  const persistDocuments = useCallback(
+    async (content: string, sessionId: string, mediaItems: MediaItem[]) => {
+      return request<PersistMediaResponse>('document.persist', {
+        session_id: sessionId,
+        content,
+        parse: true,
+        documents: mediaItems.map((item) => ({
+          filename: item.filename,
+          mime_type: getMediaMimeType(item),
+          base64_data: item.base64_data || item.base64Data,
+        })),
+      });
+    },
+    [request],
+  );
+
   // Goal（持续目标）控制：get/set/pause/resume/clear 共用一套 loading + 错误处理。
   // get/pause/clear 走非流式一次性响应，真的会有 res，用 requestGoalAction() 正常等待；
   // set/resume 走流式、正常路径上永远不会有 res（见 backend-requests.md #4），改用
@@ -1310,11 +1350,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
 
       // 添加用户消息（附带输入栏选中的技能）
+      // 气泡只展示用户原文；路径提示仅随 chat.send 发给 Agent。
       const selectedSkills = useSessionStore.getState().getRuntime(sessionId)?.selectedSkills ?? [];
       useChatStore.getState().addMessage(sessionId, {
         id: `user-${Date.now()}`,
         role: 'user',
-        content,
+        content: stripUploadDocumentBlocks(content) || content.replace(/\n*【上传文档[\s\S]*$/, '').trim() || content,
         mediaItems,
         timestamp: new Date().toISOString(),
         ...(selectedSkills.length > 0 ? { skills: selectedSkills } : {}),
@@ -1354,10 +1395,31 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             outgoingMediaItems = mediaItems.map(toPersistedMediaRecord);
             outgoingFiles = buildPersistedMediaFiles(mediaItems);
           } else {
-            const persisted = await persistMedia(content, sessionId, mediaItems);
-            outgoingContent = persisted.content ?? persisted.query ?? content;
-            outgoingMediaItems = persisted.media_items;
-            outgoingFiles = persisted.files;
+            const imageItems = mediaItems.filter((item) => item.type !== 'document');
+            const documentItems = mediaItems.filter((item) => item.type === 'document');
+            const mergedItems: Record<string, unknown>[] = [];
+            const mergedFiles: Record<string, unknown> = {};
+            if (imageItems.length) {
+              const persisted = await persistMedia(content, sessionId, imageItems);
+              outgoingContent = persisted.content ?? persisted.query ?? content;
+              if (Array.isArray(persisted.media_items)) {
+                mergedItems.push(...persisted.media_items);
+              }
+              if (persisted.files && typeof persisted.files === 'object') {
+                Object.assign(mergedFiles, persisted.files);
+              }
+            }
+            if (documentItems.length) {
+              const persistedDocs = await persistDocuments(content, sessionId, documentItems);
+              if (Array.isArray(persistedDocs.media_items)) {
+                mergedItems.push(...persistedDocs.media_items);
+              }
+              if (persistedDocs.files && typeof persistedDocs.files === 'object') {
+                Object.assign(mergedFiles, persistedDocs.files);
+              }
+            }
+            outgoingMediaItems = mergedItems.length ? slimPersistedMediaRecords(mergedItems) : undefined;
+            outgoingFiles = Object.keys(mergedFiles).length ? mergedFiles : undefined;
           }
         }
         // Goal 处于 active 时，普通输入按文档 §5.1 作为补充约束插入当前 Goal，而不是覆盖它
@@ -1393,6 +1455,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
     },
     [
+      persistDocuments,
       persistMedia,
       request,
       resetContextCompressionTurn,
@@ -3823,6 +3886,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     connectionState,
     request,
     persistMedia,
+    persistDocuments,
     sendMessage,
     sendStructuredChatContent,
     interrupt,
