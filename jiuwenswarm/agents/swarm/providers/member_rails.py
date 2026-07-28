@@ -41,7 +41,6 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.agents.harness.common.rails.symphony_orchestration_prompt_rail import (
     SymphonyOrchestrationPromptRail,
 )
-from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from jiuwenswarm.agents.harness.team.rails.team_skill_storage_policy_rail import (
     TeamSkillStoragePolicyRail,
 )
@@ -66,7 +65,6 @@ CONTEXT_PROCESSOR = "swarm.context_processor"
 PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
 SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
-TOOL_RETRIEVAL_PROMPT = "swarm.tool_retrieval_prompt"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
 
 
@@ -126,67 +124,6 @@ def _build_symphony_orchestration_prompt_rail(
     if getattr(context, "role", "") != "leader":
         return None
     return SymphonyOrchestrationPromptRail()
-
-
-@harness_element(
-    kind=ElementKind.RAIL,
-    name=TOOL_RETRIEVAL_PROMPT,
-    description="Lightweight prompt guidance for progressive registered-tool tree retrieval.",
-)
-def _build_tool_retrieval_prompt_rail(
-    params: dict[str, Any],
-    context: SwarmBuildContext,
-) -> ProgressiveToolRail | None:
-    """Build the tool retrieval prompt rail (gated by progressive_tool_enabled)."""
-    try:
-        from jiuwenswarm.common.config import get_config
-        react_cfg = (get_config().get("react", {}) or {})
-        if not react_cfg.get("progressive_tool_enabled", False):
-            return None
-    except Exception as exc:
-        logger.warning("[SwarmRails] tool_retrieval_prompt config check failed: %s", exc)
-        return None
-    # ── agent-core ProgressiveToolRail ──
-    return _build_progressive_tool_rail()
-
-
-def _build_progressive_tool_rail() -> ProgressiveToolRail | None:
-    """Build agent-core ProgressiveToolRail for swarm member agents (auto-load variant)."""
-    try:
-        from types import SimpleNamespace
-
-        config = SimpleNamespace(
-            progressive_tool_enabled=True,
-            progressive_tool_always_visible_tools=[
-                "bash", "read_file", "write_file", "edit_file",
-                "glob", "grep", "fetch_webpage",
-            ],
-            # list_files, code, task_tool, ask_user → 隐藏
-            progressive_tool_default_visible_tools=[],
-            progressive_tool_max_loaded_tools=16,
-            language="cn",
-        )
-
-        class AutoLoadProgressiveToolRail(ProgressiveToolRail):
-            async def _search_tools(self, query, limit=10, detail_level=1):
-                # Force detail_level>=3 so the LLM always gets full JSON Schema
-                # parameters and can call matched tools by name directly,
-                # without them being present in the request tools[] list.
-                detail_level = max(detail_level, 3)
-                results = await super()._search_tools(query, limit, detail_level)
-                # NOTE: do NOT auto-load matched tools into session_visible.
-                # Doing so would inject them into inputs.tools on the next
-                # turn, changing the request prefill and breaking prompt-cache
-                # stability. The LLM calls matched tools by name directly —
-                # ability_manager._execute_single_tool_call resolves by name
-                # regardless of the tools[] parameter.
-                return results
-
-        rail = AutoLoadProgressiveToolRail(config)
-        return rail
-    except Exception as exc:
-        logger.warning("[SwarmRails] build progressive_tool_rail failed: %s", exc)
-        return None
 
 
 class RuntimePromptInput(ConstructionInput):
@@ -488,7 +425,6 @@ __all__ = [
     "PLUGIN_RAILS",
     "SKILL_RETRIEVAL_PROMPT",
     "SYMPHONY_ORCHESTRATION_PROMPT",
-    "TOOL_RETRIEVAL_PROMPT",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
 ]
