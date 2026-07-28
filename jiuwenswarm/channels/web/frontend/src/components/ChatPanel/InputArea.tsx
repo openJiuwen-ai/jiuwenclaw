@@ -1,7 +1,8 @@
 ﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { AtSign, CircleX, FileImage, Loader2, Plus, Square, Target, X } from 'lucide-react';
+import { AtSign, CircleX, FileImage, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
+import { FileTypeIcon, getFileTypeIconKeyFromFilename, type FileTypeIconKey } from './FileTypeIcon';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -101,6 +102,7 @@ function isDefaultProject(project: ProjectInfo): boolean {
 interface InputAreaProps {
   onSubmit: (content: string, mediaItems?: MediaItem[]) => void;
   onPersistMedia: (content: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
+  onPersistDocuments: (content: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   onInterrupt: (newInput?: string) => void;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
@@ -124,13 +126,49 @@ interface InputAreaProps {
 }
 
 const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const ACCEPTED_DOCUMENT_EXTENSIONS = new Set([
+  '.pdf',
+  '.docx',
+  '.xlsx',
+  '.csv',
+  '.tsv',
+  '.txt',
+  '.md',
+  '.markdown',
+  '.html',
+  '.htm',
+  '.json',
+  '.ipynb',
+]);
+const ACCEPTED_DOCUMENT_MIME_TYPES = new Set([
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/csv',
+  'application/csv',
+  'text/tab-separated-values',
+  'text/plain',
+  'text/markdown',
+  'text/x-markdown',
+  'text/html',
+  'application/xhtml+xml',
+  'application/json',
+  'application/x-ipynb+json',
+  'application/jupyter',
+  'application/vnd.jupyter',
+]);
+const DOCUMENT_ACCEPT =
+  '.pdf,.docx,.xlsx,.csv,.tsv,.txt,.md,.markdown,.html,.htm,.json,.ipynb,application/pdf,text/plain,text/markdown,text/html,application/json';
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const MAX_IMAGE_COUNT = 20;
+const MAX_DOCUMENT_BYTES = 30 * 1024 * 1024;
+const MAX_ATTACHMENT_COUNT = 20;
 
+type AttachmentKind = 'image' | 'document';
 type AttachmentStatus = 'uploading' | 'ready' | 'error';
 
 interface AttachmentDraft {
   id: string;
+  kind: AttachmentKind;
   filename: string;
   mimeType: string;
   size: number;
@@ -161,7 +199,21 @@ function formatAttachmentSize(size: number): string {
 }
 
 function makeAttachmentId(file: File): string {
-  return `${file.name || 'image'}-${file.size}-${generateUuidV4()}`;
+  return `${file.name || 'attachment'}-${file.size}-${generateUuidV4()}`;
+}
+
+function getFileExtension(filename: string): string {
+  const idx = filename.lastIndexOf('.');
+  if (idx < 0) return '';
+  return filename.slice(idx).toLowerCase();
+}
+
+function getAttachmentTypeKey(attachment: AttachmentDraft): FileTypeIconKey {
+  return getFileTypeIconKeyFromFilename(attachment.filename, attachment.kind);
+}
+
+function AttachmentTypeIcon({ attachment }: { attachment: AttachmentDraft }) {
+  return <FileTypeIcon typeKey={getAttachmentTypeKey(attachment)} size={32} />;
 }
 
 function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
@@ -169,13 +221,14 @@ function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
   const filename = pickString(persisted?.filename) || attachment.filename;
   const mimeType = pickString(persisted?.mime_type, persisted?.mimeType) || attachment.mimeType;
   const sizeBytes = pickNumber(persisted?.size_bytes, persisted?.sizeBytes) ?? attachment.size;
+  const path = pickString(persisted?.path);
+  // After persist, only send path metadata — never re-send base64 on chat.send.
   return {
-    type: 'image',
+    type: attachment.kind,
     mimeType,
     mime_type: mimeType,
     filename,
-    base64Data: attachment.base64Data,
-    path: pickString(persisted?.path),
+    ...(path ? { path } : { base64Data: attachment.base64Data }),
     sizeBytes,
     size_bytes: sizeBytes,
   };
@@ -183,7 +236,7 @@ function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
 
 function buildUploadMediaItem(attachment: AttachmentDraft, payload: Pick<AttachmentDraft, 'base64Data'>): MediaItem {
   return {
-    type: 'image',
+    type: attachment.kind,
     mimeType: attachment.mimeType,
     filename: attachment.filename,
     base64Data: payload.base64Data,
@@ -218,10 +271,20 @@ function getImageValidationError(file: File): string | null {
   return null;
 }
 
-function readImageFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
-  if (getImageValidationError(file)) {
-    return Promise.resolve(null);
+function getDocumentValidationError(file: File): string | null {
+  const ext = getFileExtension(file.name || '');
+  const mimeOk = Boolean(file.type) && ACCEPTED_DOCUMENT_MIME_TYPES.has(file.type);
+  const extOk = ACCEPTED_DOCUMENT_EXTENSIONS.has(ext);
+  if (!mimeOk && !extOk) {
+    return `文件类型不支持：${file.name || '未命名文件'}`;
   }
+  if (file.size > MAX_DOCUMENT_BYTES) {
+    return `文件大小超出限制：${file.name || '未命名文件'}（最大${formatAttachmentSize(MAX_DOCUMENT_BYTES)}）`;
+  }
+  return null;
+}
+
+function readBinaryFileAsBase64(file: File): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -231,16 +294,40 @@ function readImageFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' |
         resolve(null);
         return;
       }
-      resolve({ base64Data, previewUrl: result });
+      resolve({
+        base64Data,
+        previewUrl: ACCEPTED_IMAGE_TYPES.has(file.type) ? result : undefined,
+      });
     };
     reader.onerror = () => resolve(null);
     reader.readAsDataURL(file);
   });
 }
 
+function readImageFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
+  if (getImageValidationError(file)) {
+    return Promise.resolve(null);
+  }
+  return readBinaryFileAsBase64(file);
+}
+
+function buildSubmitContent(text: string, attachments: AttachmentDraft[]): string {
+  const docs = attachments.filter((item) => item.kind === 'document' && item.status === 'ready');
+  if (!docs.length) {
+    return text;
+  }
+  // Agent-facing hint only (stripped from chat bubble). List every file; no 说明 line.
+  const lines = docs.map((doc) => {
+    const path = pickString(doc.persistedMediaItem?.path) || '';
+    return path ? `- ${doc.filename}: ${path}` : `- ${doc.filename}`;
+  });
+  return [text, '【上传文档】', ...lines].filter(Boolean).join('\n');
+}
+
 export function InputArea({
   onSubmit,
   onPersistMedia,
+  onPersistDocuments,
   onInterrupt,
   onCancel,
   onSwitchMode,
@@ -259,6 +346,7 @@ export function InputArea({
   const [attachmentAlerts, setAttachmentAlerts] = useState<AttachmentAlert[]>([]);
   const [attachmentMenuId, setAttachmentMenuId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const documentFileInputRef = useRef<HTMLInputElement>(null);
   const [workMenuOpen, setWorkMenuOpen] = useState<'project' | null>(null);
   const [workDialogOpen, setWorkDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState('');
@@ -447,7 +535,12 @@ export function InputArea({
   // 触发按钮只要不在录音就该能点开；具体某一项能不能选，交给菜单里每一项各自的禁用态处理。
   const attachTriggerDisabled = isListening;
   const readyAttachments = useMemo(
-    () => attachments.filter((attachment) => attachment.status === 'ready' && attachment.base64Data),
+    () =>
+      attachments.filter(
+        (attachment) =>
+          attachment.status === 'ready' &&
+          (Boolean(pickString(attachment.persistedMediaItem?.path)) || Boolean(attachment.base64Data)),
+      ),
     [attachments],
   );
   const hasUploadingAttachments = attachments.some((attachment) => attachment.status === 'uploading');
@@ -546,14 +639,21 @@ export function InputArea({
 
   const uploadAttachment = useCallback((attachment: AttachmentDraft) => {
     if (!attachment.file) return;
-    const validationError = getImageValidationError(attachment.file);
+    const validationError =
+      attachment.kind === 'document'
+        ? getDocumentValidationError(attachment.file)
+        : getImageValidationError(attachment.file);
     if (validationError) {
       pushAttachmentAlert(validationError);
       updateAttachment(attachment.id, { status: 'error', error: validationError });
       return;
     }
     updateAttachment(attachment.id, { status: 'uploading', error: undefined });
-    void readImageFile(attachment.file).then(async (payload) => {
+    const reader =
+      attachment.kind === 'document'
+        ? readBinaryFileAsBase64(attachment.file)
+        : readImageFile(attachment.file);
+    void reader.then(async (payload) => {
       if (!payload) {
         updateAttachment(attachment.id, {
           status: 'error',
@@ -570,19 +670,25 @@ export function InputArea({
         return;
       }
       try {
-        const persisted = await onPersistMedia('', [buildUploadMediaItem(attachment, payload)]);
+        const persistFn = attachment.kind === 'document' ? onPersistDocuments : onPersistMedia;
+        const persisted = await persistFn('', [buildUploadMediaItem(attachment, payload)]);
         const persistedMediaItem = persisted.media_items?.[0];
         if (!persistedMediaItem || !pickString(persistedMediaItem.path)) {
-          throw new Error('media.persist did not return image path');
+          throw new Error(
+            attachment.kind === 'document'
+              ? 'document.persist did not return document path'
+              : 'media.persist did not return image path',
+          );
         }
         updateAttachment(attachment.id, {
           ...payload,
+          base64Data: undefined,
           persistedMediaItem,
           status: 'ready',
           error: undefined,
         });
       } catch (error) {
-        console.error('图片上传失败:', error);
+        console.error(attachment.kind === 'document' ? '文档上传失败:' : '图片上传失败:', error);
         updateAttachment(attachment.id, {
           ...payload,
           status: 'error',
@@ -590,36 +696,38 @@ export function InputArea({
         });
       }
     });
-  }, [canPersistAttachments, onPersistMedia, pushAttachmentAlert, updateAttachment]);
+  }, [canPersistAttachments, onPersistDocuments, onPersistMedia, pushAttachmentAlert, updateAttachment]);
 
   const retryAttachment = useCallback((attachment: AttachmentDraft) => {
     uploadAttachment(attachment);
   }, [uploadAttachment]);
 
-  const appendImageFiles = useCallback((files: FileList | File[]) => {
+  const appendAttachmentFiles = useCallback((files: FileList | File[], kind: AttachmentKind) => {
     const selectedFiles = Array.from(files);
     if (!selectedFiles.length) return;
-    const remainingSlots = Math.max(0, MAX_IMAGE_COUNT - attachments.length);
+    const remainingSlots = Math.max(0, MAX_ATTACHMENT_COUNT - attachments.length);
     if (!remainingSlots) {
-      pushAttachmentAlert(`单次对话最多上传${MAX_IMAGE_COUNT}个附件。`);
+      pushAttachmentAlert(`单次对话最多上传${MAX_ATTACHMENT_COUNT}个附件。`);
       return;
     }
 
     const acceptedFiles = selectedFiles.slice(0, remainingSlots);
     const overflow = selectedFiles.length - acceptedFiles.length;
     if (overflow > 0) {
-      pushAttachmentAlert(`单次对话最多上传${MAX_IMAGE_COUNT}个附件。`);
+      pushAttachmentAlert(`单次对话最多上传${MAX_ATTACHMENT_COUNT}个附件。`);
     }
 
     const drafts = acceptedFiles.reduce<AttachmentDraft[]>((items, file) => {
       const base = {
         id: makeAttachmentId(file),
-        filename: file.name || `image-${Date.now()}`,
+        kind,
+        filename: file.name || (kind === 'document' ? `document-${Date.now()}` : `image-${Date.now()}`),
         mimeType: file.type || 'application/octet-stream',
         size: file.size,
         file,
       };
-      const validationError = getImageValidationError(file);
+      const validationError =
+        kind === 'document' ? getDocumentValidationError(file) : getImageValidationError(file);
       if (validationError) {
         pushAttachmentAlert(validationError);
         items.push({
@@ -638,12 +746,20 @@ export function InputArea({
 
     if (!drafts.length) return;
 
-    setAttachments((prev) => [...prev, ...drafts].slice(0, MAX_IMAGE_COUNT));
+    setAttachments((prev) => [...prev, ...drafts].slice(0, MAX_ATTACHMENT_COUNT));
     drafts.forEach((draft) => {
       if (draft.status !== 'uploading' || !draft.file) return;
       uploadAttachment(draft);
     });
   }, [attachments.length, pushAttachmentAlert, uploadAttachment]);
+
+  const appendImageFiles = useCallback((files: FileList | File[]) => {
+    appendAttachmentFiles(files, 'image');
+  }, [appendAttachmentFiles]);
+
+  const appendDocumentFiles = useCallback((files: FileList | File[]) => {
+    appendAttachmentFiles(files, 'document');
+  }, [appendAttachmentFiles]);
 
   useEffect(() => {
     if (!isModeMenuOpen) return;
@@ -812,7 +928,13 @@ export function InputArea({
   const handleSubmit = useCallback(() => {
     // 用富文本（含 chip 标记）作为发送内容，气泡可交织渲染技能
     const richContent = extractRichContent();
-    const trimmed = (richContent + pendingVoiceText).trim();
+    const trimmedBase = (richContent + pendingVoiceText).trim();
+    const readyDrafts = attachments.filter(
+      (attachment) =>
+        attachment.status === 'ready' &&
+        (Boolean(pickString(attachment.persistedMediaItem?.path)) || Boolean(attachment.base64Data)),
+    );
+    const trimmed = buildSubmitContent(trimmedBase, readyDrafts);
     if ((!trimmed && readyMediaItems.length === 0) || hasUploadingAttachments || hasAttachmentErrors) return;
     if (isInterruptible && !isTeamMode && readyMediaItems.length > 0) return;
 
@@ -821,19 +943,19 @@ export function InputArea({
     }
 
     const sid = useChatStore.getState().activeSessionId;
-    if (goalArmed && trimmed && sid && onSetGoal && sid !== NEW_CONVERSATION_ID) {
+    if (goalArmed && trimmedBase && sid && onSetGoal && sid !== NEW_CONVERSATION_ID) {
       // command.goal 是独立控制信令，不受聊天排队影响，跳过 team/queue/interrupt 判断；
       // 消息仍要本地落进 chatStore 才能在气泡上显示"设为目标"徽章（见 MessageItem.tsx）
       useChatStore.getState().addMessage(sid, {
         id: `user-${Date.now()}`,
         role: 'user',
-        content: trimmed,
+        content: trimmedBase,
         timestamp: new Date().toISOString(),
         isGoalObjectiveMessage: true,
       });
       useGoalStore.getState().setArmed(sid, false);
-      onSetGoal(sid, trimmed);
-    } else if (goalArmed && trimmed && sid === NEW_CONVERSATION_ID) {
+      onSetGoal(sid, trimmedBase);
+    } else if (goalArmed && trimmedBase && sid === NEW_CONVERSATION_ID) {
       // 欢迎页尚无真实 session，armed 状态先保留，交给 App.tsx 的 handleSendMessage
       // 在 session.create 成功、拿到真实 session id 后再落地消息 + 调 onSetGoal
       onSubmit(trimmed, readyMediaItems);
@@ -878,6 +1000,7 @@ export function InputArea({
     }
     setComposerSuggestion(null);
   }, [
+    attachments,
     extractRichContent,
     pendingVoiceText,
     readyMediaItems,
@@ -1131,6 +1254,14 @@ export function InputArea({
     }
     event.target.value = '';
   }, [appendImageFiles]);
+
+  const handleDocumentFileInputChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (files) {
+      void appendDocumentFiles(files);
+    }
+    event.target.value = '';
+  }, [appendDocumentFiles]);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
     if (Array.from(event.clipboardData.items).some((item) => item.kind === 'file')) {
@@ -1440,11 +1571,17 @@ export function InputArea({
                 )}
                 key={attachment.id}
               >
-                <div className="chat-input-attachment-preview" aria-hidden="true">
+                <div
+                  className={cx(
+                    'chat-input-attachment-preview',
+                    `chat-input-attachment-preview--${getAttachmentTypeKey(attachment)}`,
+                  )}
+                  aria-hidden="true"
+                >
                   {attachment.previewUrl ? (
                     <img src={attachment.previewUrl} alt="" />
                   ) : (
-                    <FileImage size={18} strokeWidth={1.8} />
+                    <AttachmentTypeIcon attachment={attachment} />
                   )}
                 </div>
                 <div className="chat-input-attachment-main">
@@ -1477,7 +1614,11 @@ export function InputArea({
                       </>
                     ) : (
                       <>
-                        <span>{attachment.mimeType.split('/')[1]?.toUpperCase() || 'IMAGE'}</span>
+                        <span>
+                          {attachment.kind === 'document'
+                            ? (getFileExtension(attachment.filename).replace('.', '').toUpperCase() || 'FILE')
+                            : (attachment.mimeType.split('/')[1]?.toUpperCase() || 'IMAGE')}
+                        </span>
                         <span>{formatAttachmentSize(attachment.size)}</span>
                       </>
                     )}
@@ -1573,47 +1714,37 @@ export function InputArea({
             className="hidden"
             onChange={handleFileInputChange}
           />
+          <input
+            ref={documentFileInputRef}
+            type="file"
+            accept={DOCUMENT_ACCEPT}
+            multiple
+            className="hidden"
+            onChange={handleDocumentFileInputChange}
+          />
           <div ref={attachMenuRef} className="chat-input-attach-menu-anchor">
-            {canUseGoalMenu ? (
-              <button
-                type="button"
-                onClick={() => {
-                  if (attachTriggerDisabled) return;
-                  if (!attachMenuOpen && attachMenuRef.current) {
-                    setAttachMenuAnchor(attachMenuRef.current.getBoundingClientRect());
-                  }
-                  setAttachMenuOpen((open) => !open);
-                }}
-                disabled={attachTriggerDisabled}
-                className={cx(
-                  'chat-input-btn chat-input-btn--add-file',
-                  attachTriggerDisabled && 'chat-input-btn--disabled',
-                )}
-                title={attachTriggerDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
-                aria-label={attachTriggerDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
-                aria-haspopup="menu"
-                aria-expanded={attachMenuOpen}
-              >
-                <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
-              </button>
-            ) : (
-              // 没有 onSetGoal（如欢迎页新会话尚未创建）时，Goal 入口本来就不适用——
-              // 保持原来"+"直接打开文件选择器的单击行为，不额外套一层菜单
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={imageInputDisabled}
-                className={cx(
-                  'chat-input-btn chat-input-btn--add-file',
-                  imageInputDisabled && 'chat-input-btn--disabled',
-                )}
-                title={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
-                aria-label={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
-              >
-                <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
-              </button>
-            )}
-            {canUseGoalMenu && attachMenuOpen && attachMenuAnchor && createPortal(
+            <button
+              type="button"
+              onClick={() => {
+                if (attachTriggerDisabled) return;
+                if (!attachMenuOpen && attachMenuRef.current) {
+                  setAttachMenuAnchor(attachMenuRef.current.getBoundingClientRect());
+                }
+                setAttachMenuOpen((open) => !open);
+              }}
+              disabled={attachTriggerDisabled}
+              className={cx(
+                'chat-input-btn chat-input-btn--add-file',
+                attachTriggerDisabled && 'chat-input-btn--disabled',
+              )}
+              title={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addAttachment')}
+              aria-label={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addAttachment')}
+              aria-haspopup="menu"
+              aria-expanded={attachMenuOpen}
+            >
+              <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
+            </button>
+            {attachMenuOpen && attachMenuAnchor && createPortal(
               <div
                 ref={attachMenuPortalRef}
                 className="chat-mode-select__menu"
@@ -1644,7 +1775,26 @@ export function InputArea({
                     <span className="chat-mode-select__label">{t('chat.addImage')}</span>
                   </span>
                 </button>
-                {isAgentMode && onSetGoal && (
+                <button
+                  type="button"
+                  className="chat-mode-select__option"
+                  role="menuitem"
+                  disabled={imageInputDisabled}
+                  title={imageInputDisabled ? t('chat.addFileDisabled') : undefined}
+                  onClick={() => {
+                    if (imageInputDisabled) return;
+                    setAttachMenuOpen(false);
+                    documentFileInputRef.current?.click();
+                  }}
+                >
+                  <span className="chat-mode-select__option-main">
+                    <span className="chat-mode-select__icon" aria-hidden="true">
+                      <FileText className="w-4 h-4" />
+                    </span>
+                    <span className="chat-mode-select__label">{t('chat.addFile')}</span>
+                  </span>
+                </button>
+                {canUseGoalMenu && (
                   <button
                     type="button"
                     className="chat-mode-select__option"
