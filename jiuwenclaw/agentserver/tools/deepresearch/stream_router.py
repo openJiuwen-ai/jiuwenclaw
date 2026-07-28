@@ -132,16 +132,16 @@ def _stage_child_reasoning(stage: int, agent: str, display: tuple[str, str], con
     }
 
 
-def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> dict | None:
-    """Advance the six-stage task snapshot without allowing regressions."""
+def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> list[dict]:
+    """Advance the six-stage snapshot and emit every Stage-facing surface."""
     if complete:
         if state.stages_completed:
-            return None
+            return []
         state.current_stage = len(DEEPRESEARCH_STAGES)
         state.stages_completed = True
     else:
         if state.stages_completed or stage <= state.current_stage:
-            return None
+            return []
         if stage < 1 or stage > len(DEEPRESEARCH_STAGES):
             raise ValueError(f"invalid deepresearch stage: {stage}")
         state.current_stage = stage
@@ -162,7 +162,7 @@ def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> 
 
     completed = len(DEEPRESEARCH_STAGES) if state.stages_completed else state.current_stage - 1
     in_progress = 0 if state.stages_completed else 1
-    return {
+    task_update = {
         "event_type": "task.update",
         "tasks": tasks,
         "total_tasks": len(DEEPRESEARCH_STAGES),
@@ -170,6 +170,22 @@ def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> 
         "in_progress_tasks": in_progress,
         "pending_tasks": len(DEEPRESEARCH_STAGES) - completed - in_progress,
     }
+    title = DEEPRESEARCH_STAGES[state.current_stage - 1]
+    content = (
+        f"[DeepResearch 阶段完成] Stage {state.current_stage}：{title}\n"
+        if complete
+        else f"[DeepResearch 阶段切换] 开始 Stage {state.current_stage}：{title}\n"
+    )
+    message = {
+        "task_id": f"deepresearch_stage_{state.current_stage}",
+        "task_content": title,
+        "content": content,
+    }
+    return [
+        task_update,
+        {"event_type": "chat.reasoning", **message},
+        {"event_type": "chat.delta", **message},
+    ]
 
 
 def _as_text(val) -> str:
@@ -337,9 +353,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     section_idx = str(chunk.get("section_idx", "0"))
     target_stage = 3 if agent in _SECTION_PROCESS_NODES and section_idx != "0" else _NODE_STAGE.get(agent)
     if target_stage is not None:
-        stage_update = advance_stage(state, target_stage)
-        if stage_update is not None:
-            frames.append(stage_update)
+        frames.extend(advance_stage(state, target_stage))
 
     # 中断 chunk:捕获 raw_prompt + node_id,不转发(interrupted marker 到达时拼 prompt)
     if message_type == "interrupt" or str(chunk.get("event")) == "waiting_user_input":
@@ -403,7 +417,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
             })
         return frames
 
-    if target_stage in {2, 3, 4, 5}:
+    if target_stage in {1, 2, 3, 4, 5}:
         node_state = state.active_nodes.get(key)
         if node_state is None:
             node_state = {

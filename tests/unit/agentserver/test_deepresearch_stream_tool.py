@@ -531,7 +531,7 @@ def _active_stage(update):
 
 
 @pytest.mark.asyncio
-async def test_tool_sends_nested_section_reasoning_without_task_snapshots(tmp_path):
+async def test_tool_sends_ordered_stage_surfaces_and_retains_completed_snapshot(tmp_path):
     raw_process = "原始检索过程第一行\n\n原始检索过程第二行" + "完整内容" * 40
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
@@ -577,9 +577,20 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots(tmp_pa
     reasoning = [
         payload for payload in payloads if payload.get("event_type") == "chat.reasoning"
     ]
+    stage_reasoning = [
+        payload for payload in reasoning if not payload.get("stream_source_id")
+    ]
+    process_reasoning = [
+        payload for payload in reasoning if payload.get("stream_source_id")
+    ]
+    stage_deltas = [
+        payload for payload in payloads
+        if payload.get("event_type") == "chat.delta"
+        and payload.get("task_id", "").startswith("deepresearch_stage_")
+    ]
     task_updates = _task_updates(payloads)
     assert json.loads(result)["status"] == "completed"
-    assert reasoning == [
+    assert process_reasoning == [
         {
             "event_type": "chat.reasoning",
             "task_id": "deepresearch_stage_3",
@@ -608,8 +619,61 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots(tmp_pa
             "content": "章节撰写完成\n",
         },
     ]
+    assert [payload["content"] for payload in stage_reasoning] == [
+        "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+        "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
+        "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
+        "[DeepResearch 阶段完成] Stage 6：报告交付\n",
+    ]
+    assert [payload["content"] for payload in stage_deltas] == [
+        "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+        "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
+        "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
+        "[DeepResearch 阶段完成] Stage 6：报告交付\n",
+    ]
     assert [_active_stage(update) for update in task_updates] == [1, 3, 6, None]
-    assert all(task["status"] == "completed" for task in task_updates[-1]["tasks"])
+    completed_update = task_updates[-1]
+    assert [task["task_id"] for task in completed_update["tasks"]] == [
+        f"deepresearch_stage_{index}" for index in range(1, 7)
+    ]
+    assert all(task["status"] == "completed" for task in completed_update["tasks"])
+    assert not any(
+        payload.get("event_type") == "task.update" and not payload.get("tasks")
+        for payload in payloads
+    )
+    completed_update_index = payloads.index(completed_update)
+    file_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "chat.file"
+    )
+    completion_reasoning_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "chat.reasoning"
+        and payload.get("content") == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+    )
+    completion_delta_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "chat.delta"
+        and payload.get("content") == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+    )
+    assert file_index < completed_update_index < completion_reasoning_index < completion_delta_index
+
+    for update in task_updates[:-1]:
+        active_stage = _active_stage(update)
+        title = update["tasks"][active_stage - 1]["task_content"]
+        content = f"[DeepResearch 阶段切换] 开始 Stage {active_stage}：{title}\n"
+        update_index = payloads.index(update)
+        reasoning_index = next(
+            index for index, payload in enumerate(payloads)
+            if payload.get("event_type") == "chat.reasoning"
+            and payload.get("content") == content
+        )
+        delta_index = next(
+            index for index, payload in enumerate(payloads)
+            if payload.get("event_type") == "chat.delta"
+            and payload.get("content") == content
+        )
+        assert update_index < reasoning_index < delta_index
     assert any(
         payload.get("event_type") == "chat.processing_status"
         and payload.get("is_processing") is True
@@ -2336,7 +2400,12 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
 
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     report_frames = [payload for payload in payloads if payload.get("event_type") == "chat.delta"]
-    assert report_frames == []
+    assert report_frames
+    assert all(frame.get("content") != report_content for frame in report_frames)
+    assert all(
+        frame.get("task_id", "").startswith("deepresearch_stage_")
+        for frame in report_frames
+    )
     write_report.assert_called_once_with(
         final_result,
         "r",

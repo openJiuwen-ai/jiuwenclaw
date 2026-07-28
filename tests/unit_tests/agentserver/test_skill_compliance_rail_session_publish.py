@@ -15,6 +15,18 @@ from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import (
 )
 
 
+def test_load_directive_cn_allows_tool_owned_stage_messages():
+    directive = scr._build_load_directive("zh", "example-skill")
+    assert "阶段状态和阶段消息由工具事件唯一生成" in directive
+    assert "禁止自行输出" in directive
+
+
+def test_load_directive_en_allows_tool_owned_stage_messages():
+    directive = scr._build_load_directive("en", "example-skill")
+    assert "stage status and stage messages are emitted exclusively by tool events" in directive
+    assert "must not declare" in directive
+
+
 class TestBeforeInvokePublishesSession:
     """Verify before_invoke sets the ContextVar read by the patch layer.
 
