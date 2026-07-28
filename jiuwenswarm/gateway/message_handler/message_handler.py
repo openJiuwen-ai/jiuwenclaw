@@ -2857,9 +2857,14 @@ class MessageHandler(ABC):
     ) -> bool:
         """Publish one AgentServer stream chunk (evolution + robot_messages).
 
-        Returns False when the chunk is a terminal stream sentinel.
+        Returns False when the chunk should not be forwarded to robot_messages
+        (terminal sentinel or filtered control message like keepalive).
         """
         if self._is_terminal_stream_chunk(chunk):
+            return False
+        # 跳过 keepalive chunk — 仅用于 WebSocket 保活，不投递到 IM 通道
+        payload = getattr(chunk, "payload", None)
+        if isinstance(payload, dict) and payload.get("event_type") == "keepalive":
             return False
         if not await self._handle_evolution_chunk(chunk, session_id, request_metadata):
             return False
