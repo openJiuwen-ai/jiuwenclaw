@@ -115,7 +115,7 @@ function scheduleAfterTurnSettles(sessionId: string, run: () => void): void {
     return;
   }
   let settled = false;
-  let fallbackTimer: ReturnType<typeof window.setTimeout>;
+  let fallbackTimer: number;
   const finish = () => {
     if (settled) return;
     settled = true;
@@ -148,7 +148,7 @@ function scheduleAfterTurnSettles(sessionId: string, run: () => void): void {
 function applyIncomingGoal(
   sessionId: string,
   goal: GoalRecord | null,
-  hideTimerMap: Map<string, ReturnType<typeof window.setTimeout>>,
+  hideTimerMap: Map<string, number>,
   lastGoalEventAtMap?: Map<string, number>
 ): void {
   const goalStore = useGoalStore.getState();
@@ -272,7 +272,7 @@ function applyIncomingGoal(
 async function performGoalGet(
   sessionId: string,
   mode: string,
-  hideTimerMap: Map<string, ReturnType<typeof window.setTimeout>>,
+  hideTimerMap: Map<string, number>,
   lastGoalEventAtMap?: Map<string, number>,
   lastAttemptAtMap?: Map<string, number>
 ): Promise<void> {
@@ -566,7 +566,7 @@ interface ContextCompressionStatePayload extends Record<string, unknown> {
 }
 
 interface PendingContextCompressionStart {
-  timer: ReturnType<typeof setTimeout>;
+  timer: number;
   runtimeState: Omit<ContextCompressionRuntime, 'status'>;
   shown: boolean;
 }
@@ -769,7 +769,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     new Map()
   );
   // goal_id -> 本地"完成后自动隐藏"定时器句柄，见 applyIncomingGoal
-  const goalCompletedHideTimerRef = useRef<Map<string, ReturnType<typeof window.setTimeout>>>(new Map());
+  const goalCompletedHideTimerRef = useRef<Map<string, number>>(new Map());
   /** session_id -> 最近一次成功落地 goal.snapshot/goal.updated 的时间戳，供 1 分钟无更新兜底巡检用 */
   const lastGoalEventAtRef = useRef<Map<string, number>>(new Map());
   /** session_id -> 最近一次调用 performGoalGet 的时间戳（不管成败），供 unknown 态退避巡检用 */
