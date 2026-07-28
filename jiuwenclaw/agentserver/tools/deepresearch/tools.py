@@ -1667,10 +1667,18 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     push = WebSocketGatewayPushTransport()
     cached_titles = outline_title_cache.get(conversation_id, {}) if action == "resume" else {}
     existing_state = _deepresearch_router_state_ctx.get()
+    resume_stage = (
+        1
+        if action == "resume" and node == "feedback_handler"
+        else 0
+    )
     state = (
         existing_state
         if existing_state is not None
-        else RouterState(section_titles=dict(cached_titles))
+        else RouterState(
+            section_titles=dict(cached_titles),
+            current_stage=resume_stage,
+        )
     )
     outcome_cid = conversation_id
 

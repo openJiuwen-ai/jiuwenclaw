@@ -3047,6 +3047,67 @@ async def test_resume_requires_conversation_id_and_node():
 
 
 @pytest.mark.asyncio
+async def test_feedback_resume_does_not_repeat_stage_1_transition():
+    start_lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({
+            "__deepsearch_status__": "interrupted",
+            "agent": "feedback_handler",
+            "conversation_id": "C1",
+        }),
+    ]
+    resume_lines = [
+        json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
+        json.dumps({"agent": "outline", "content": "# 第一章"}),
+        json.dumps({
+            "__deepsearch_status__": "error",
+            "conversation_id": "C1",
+            "error": "stop after outline",
+        }),
+    ]
+    push = AsyncMock()
+    spawn = AsyncMock(side_effect=[_Proc(start_lines), _Proc(resume_lines)])
+
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "R1", "channel_id": "CH1", "session_id": "S1",
+         }), \
+         patch("asyncio.create_subprocess_exec", new=spawn), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+             return_value=push,
+         ):
+        interrupted = await dt.deepresearch_stream._func(
+            action="start", query="X", file_name="r",
+        )
+        resumed = await dt.deepresearch_stream._func(
+            action="resume",
+            conversation_id="C1",
+            node="feedback_handler",
+            feedback='{"feedback":"补充范围"}',
+            file_name="r",
+        )
+
+    assert json.loads(interrupted)["status"] == "interrupted"
+    assert json.loads(resumed)["status"] == "error"
+    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
+    transitions = [
+        (payload["event_type"], payload["task_id"])
+        for payload in payloads
+        if payload.get("event_type") in {"chat.reasoning", "chat.delta"}
+        and payload.get("content", "").startswith("[DeepResearch 阶段切换]")
+    ]
+    assert transitions == [
+        ("chat.reasoning", "deepresearch_stage_1"),
+        ("chat.delta", "deepresearch_stage_1"),
+        ("chat.reasoning", "deepresearch_stage_2"),
+        ("chat.delta", "deepresearch_stage_2"),
+    ]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_feedback_resume_normalizes_answered_empty_result_to_skipped():
     lines = [
         json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
