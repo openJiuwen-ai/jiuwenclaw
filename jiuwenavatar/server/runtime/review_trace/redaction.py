@@ -20,8 +20,8 @@ def redact_sensitive_values(value: Any) -> Any:
     """Redact common credentials and normalize the current home path."""
 
     if isinstance(value, str):
-        redacted = SENSITIVE_KV_PATTERN.sub(r"\1\2" + SENSITIVE_MASK, value)
-        redacted = SENSITIVE_BEARER_PATTERN.sub(r"\1" + SENSITIVE_MASK, redacted)
+        redacted = SENSITIVE_KV_PATTERN.sub(rf"\1\2{SENSITIVE_MASK}", value)
+        redacted = SENSITIVE_BEARER_PATTERN.sub(rf"\1{SENSITIVE_MASK}", redacted)
         redacted = SENSITIVE_KEY_PATTERN.sub(SENSITIVE_MASK, redacted)
         home = str(Path.home())
         if home:
