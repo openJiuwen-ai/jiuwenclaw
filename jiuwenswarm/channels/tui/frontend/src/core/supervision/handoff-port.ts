@@ -64,7 +64,7 @@ export class HandoffPortImpl implements HandoffPort {
     return { ok: true };
   }
 
-  async requestHandoff(target: HandoffTarget): Promise<void> {
+  async requestHandoff(target: HandoffTarget, switchContent: string): Promise<void> {
     // requestHandoff 在询问/取消任务之后才被调用；必须二次校验。
     const check = this.checkHandoff(target);
     if (!check.ok) {
@@ -78,9 +78,18 @@ export class HandoffPortImpl implements HandoffPort {
       if (exitCode === null) {
         throw new Error("Switch exit code unexpectedly null after checkHandoff");
       }
+      // 构造 handoff JSON，供 launcher 从 stdout 读取后发起 3rdagent.switch RPC。
+      // content 是完整命令文本（如 "switch claude"），parsed 是目标名（如 "claude"）。
+      const parsed = switchContent.replace(/^switch\s+/i, "").trim();
+      const handoffMessage = JSON.stringify({
+        action: "switch",
+        content: switchContent,
+        parsed,
+      });
       await this.lifecycle.closeUi({
         reason: "switch",
         exitCode,
+        handoffMessage,
       });
     } catch (err) {
       // 清理失败：尽力恢复终端，以非动作错误码退出；不得使用切换动作码。

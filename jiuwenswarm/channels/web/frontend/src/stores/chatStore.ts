@@ -28,6 +28,7 @@ import {
   mergeToolResultProgress,
   shouldDropToolResult,
 } from './toolResultLifecycle';
+import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
 const EVOLUTION_STATUS_END_VISIBLE_MS = 3_000;
@@ -455,7 +456,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
   setThinking: (sessionId, status) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
+      if (!runtime || runtime.isThinking === status) return state;
       return {
         runtimes: {
           ...state.runtimes,
@@ -1239,7 +1240,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             ...runtime,
             messages: runtime.messages.map((msg) =>
               msg.id === targetId
-                ? { ...msg, fileItems: [...(msg.fileItems || []), ...files] }
+                ? { ...msg, fileItems: mergeFileDownloadItems(msg.fileItems, files) }
                 : msg
             ),
           },

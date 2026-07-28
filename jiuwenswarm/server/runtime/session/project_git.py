@@ -19,6 +19,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.common.git_safe_directory import (
+    is_dubious_ownership_error,
+    safe_directory_hint,
+)
 from jiuwenswarm.server.runtime.session.project_store import Project, save_project
 
 logger = logging.getLogger(__name__)
@@ -260,7 +264,10 @@ def _is_transient_state(project_dir: str) -> tuple[bool, str]:
             content = dot_git.read_text(encoding="utf-8").strip()
             if content.startswith("gitdir:"):
                 git_dir = Path(project_dir) / content.split("gitdir:", 1)[1].strip()
-                git_dir = git_dir.resolve()
+                # 使用 absolute() 而非 resolve():不解析 symlink,避免通过 symlink
+                # 访问的 worktree gitdir 与 git 内部管理的真实路径不一致,导致
+                # transient 状态(merge/rebase 等)检测失败。
+                git_dir = git_dir.absolute()
         except Exception:  # noqa: BLE001
             return False, ""
     if git_dir is None or not git_dir.exists():
@@ -308,8 +315,76 @@ def _run_git(
     )
 
 
+def _dubious_ownership_error_if_needed(
+    project: Project,
+    project_dir: str,
+    result: subprocess.CompletedProcess[str],
+) -> GitError | None:
+    """Return a structured error when Git rejects repo ownership."""
+    if not is_dubious_ownership_error(result):
+        return None
+    return _make_repo_error(
+        "GIT_DUBIOUS_OWNERSHIP",
+        "git repository ownership check failed",
+        project,
+        command="git rev-parse --show-toplevel",
+        exit_code=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        hint=safe_directory_hint(project_dir),
+        retryable=False,
+    )
+
+
 def _truncate(s: str) -> str:
     return (s or "")[:_GIT_OUTPUT_TRUNCATE]
+
+
+def _is_branch_held_by_worktree(stderr: str) -> bool:
+    """检测 git stderr 是否表示目标分支被 worktree 占用。
+
+    stale(worktree 目录已删但 ``.git/worktrees`` 管理条目残留)与 live(团队仍在运行)
+    两种情形 stderr 相同,需配合 ``git worktree prune`` + 重试来区分。
+    """
+    s = (stderr or "").lower()
+    return "already used by worktree" in s or "already checked out" in s
+
+
+def _find_worktrees_holding_branch(
+    repo_root: str,
+    branch: str,
+) -> list[str]:
+    """返回占用目标分支的 worktree 工作目录路径(不含主仓库)。
+
+    通过 ``git worktree list --porcelain`` 解析 porcelain 输出,
+    branch 字段为 ``refs/heads/<branch>`` 的 worktree 即为占用者。
+    主仓库本身(worktree 列表第一项)被显式排除,避免误 detach 用户
+    当前工作区。命令失败或解析异常时返回空列表,调用方回退到错误
+    分类逻辑提示用户手动处理。
+    """
+    try:
+        cp = _run_git(
+            ["worktree", "list", "--porcelain"],
+            cwd=repo_root,
+        )
+    except FileNotFoundError:
+        return []
+    if cp.returncode != 0:
+        return []
+    target_ref = f"refs/heads/{branch}"
+    real_root = os.path.realpath(repo_root)
+    worktrees: list[str] = []
+    wt_path: str | None = None
+    for line in cp.stdout.splitlines():
+        if line.startswith("worktree "):
+            wt_path = line[len("worktree "):].strip()
+        elif line.startswith("branch ") and wt_path is not None:
+            ref = line[len("branch "):].strip()
+            if ref == target_ref:
+                if os.path.realpath(wt_path) != real_root:
+                    worktrees.append(wt_path)
+            wt_path = None
+    return worktrees
 
 
 def _make_error(
@@ -468,6 +543,9 @@ def _git_to_repo_status(
             )
         )
     if cp.returncode != 0:
+        dubious_error = _dubious_ownership_error_if_needed(project, project_dir, cp)
+        if dubious_error is not None:
+            return _err_status(dubious_error)
         return _err_status(
             _make_repo_error(
                 "NOT_GIT_REPOSITORY",
@@ -533,9 +611,9 @@ def _git_to_repo_status(
                 elif xy[0] == "?":
                     untracked += 1
                 else:
-                    if xy[0] in ("A", "M", "D", "R", "C"):
+                    if xy[0] in ("A", "M", "D", "R", "C", "T"):
                         staged += 1
-                    if xy[1] in ("M", "D"):
+                    if xy[1] in ("M", "D", "T"):
                         unstaged += 1
             is_dirty = staged > 0 or unstaged > 0 or untracked > 0 or conflicted > 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -603,6 +681,8 @@ def _persist_git_snapshot(project: Project, status: GitRepoStatus) -> None:
             "branch": status.branch or "",
             "status": _map_status_string(status),
             "error": status.error.message,
+            "error_code": status.error.code,
+            "hint": status.error.hint,
             "is_dirty": status.is_dirty,
         }
     else:
@@ -616,6 +696,8 @@ def _persist_git_snapshot(project: Project, status: GitRepoStatus) -> None:
             "branch": status.branch or "",
             "status": "ready" if not status.transient else "transient",
             "error": "",
+            "error_code": "",
+            "hint": "",
             "is_dirty": status.is_dirty,
         }
     project.git = git_snapshot
@@ -642,6 +724,8 @@ def _persist_probe_result(project: Project, result: GitProbeResult) -> None:
         "branch": result.branch or "",
         "status": result.status,
         "error": result.error.message if result.error else "",
+        "error_code": result.error.code if result.error else "",
+        "hint": result.error.hint if result.error else "",
         # 保留 init() 已持久化的 is_dirty;非 init 路径(未探测 dirty)默认 False
         "is_dirty": project.git.get("is_dirty", False),
     }
@@ -664,6 +748,8 @@ def _map_status_string(status: GitRepoStatus) -> str:
         return "not_git"
     if code == "GIT_NOT_FOUND":
         return "git_missing"
+    if code == "GIT_DUBIOUS_OWNERSHIP":
+        return "dubious_ownership"
     if code == "GIT_COMMAND_TIMEOUT":
         return "error"
     return "error"
@@ -819,6 +905,9 @@ class ProjectGitService:
                 repo_root=cp.stdout.strip(),
                 branch=branch,
             )
+        dubious_error = _dubious_ownership_error_if_needed(project, project_dir, cp)
+        if dubious_error is not None:
+            return GitProbeResult(status="error", error=dubious_error)
         try:
             entries = list(Path(project_dir).iterdir())
         except OSError:
@@ -897,6 +986,9 @@ class ProjectGitService:
             )
             return GitRepoStatus(is_git=False, error=err)
         if cp.returncode != 0:
+            dubious_error = _dubious_ownership_error_if_needed(project, project_dir, cp)
+            if dubious_error is not None:
+                return GitRepoStatus(is_git=False, error=dubious_error)
             if "unknown switch" in cp.stderr or "invalid option" in cp.stderr:
                 # git < 2.28 不支持 ``init -b``,回退到 ``init`` + ``symbolic-ref``。
                 # 用 ``symbolic-ref HEAD refs/heads/<branch>`` 替代 ``checkout -b``:
@@ -935,6 +1027,9 @@ class ProjectGitService:
                     )
                     return GitRepoStatus(is_git=False, error=err)
         if cp.returncode != 0:
+            dubious_error = _dubious_ownership_error_if_needed(project, project_dir, cp)
+            if dubious_error is not None:
+                return GitRepoStatus(is_git=False, error=dubious_error)
             err = _make_repo_error(
                 "GIT_COMMAND_FAILED",
                 "git command failed",
@@ -1086,16 +1181,103 @@ class ProjectGitService:
                 error=err,
             )
         if cp_co.returncode != 0:
+            # Stale worktree admin entries (e.g. a dissolved team whose
+            # worktree dirs were rmtree'd without `git worktree remove`)
+            # make `git checkout <branch>` fail with "already used by
+            # worktree" even though the worktree no longer exists. Prune
+            # stale admin and retry once; live worktrees remain user-managed.
+            prune_co = None
+            if _is_branch_held_by_worktree(cp_co.stderr):
+                logger.info(
+                    "[ProjectGit] checkout %s blocked by worktree; "
+                    "pruning stale admin and retrying (cwd=%s)",
+                    branch, project.project_dir,
+                )
+                try:
+                    prune_co = _run_git(
+                        ["-c", "safe.directory=*", "worktree", "prune"],
+                        cwd=project.project_dir,
+                    )
+                    cp_co = _run_git(["checkout", branch], cwd=project.project_dir)
+                except FileNotFoundError:
+                    err = _file_not_found_error(
+                        project, project.project_dir,
+                        branch=previous_branch,
+                        command=f"git checkout {branch}",
+                    )
+                    return GitOperationResult(
+                        success=False,
+                        repo_status=pre_status,
+                        previous_branch=previous_branch,
+                        error=err,
+                    )
+                except subprocess.TimeoutExpired:
+                    err = _make_repo_error(
+                        "GIT_COMMAND_TIMEOUT",
+                        "git command timed out",
+                        project,
+                        command=f"git checkout {branch}",
+                        branch=previous_branch,
+                        retryable=True,
+                    )
+                    return GitOperationResult(
+                        success=False,
+                        repo_status=pre_status,
+                        previous_branch=previous_branch,
+                        error=err,
+                    )
+                if cp_co.returncode == 0:
+                    post_status = _git_to_repo_status(project, persist=True)
+                    return GitOperationResult(
+                        success=True,
+                        repo_status=post_status,
+                        previous_branch=previous_branch,
+                    )
+            # LIVE worktree(团队未解散)占用目标分支时不再自动 detach 占用者。
+            # 自动修改其他 worktree 的 HEAD 会破坏正在运行的团队/agent 上下文;
+            # 保留 stale worktree prune,但 live 占用交由用户显式解散或手动处理。
+            holding: list[str] = []
+            if _is_branch_held_by_worktree(cp_co.stderr):
+                holding = _find_worktrees_holding_branch(
+                    project.project_dir, branch,
+                )
+                if holding:
+                    logger.info(
+                        "[ProjectGit] checkout %s blocked by live worktree(s) "
+                        "%s; refusing automatic detach (cwd=%s)",
+                        branch, holding, project.project_dir,
+                    )
+            held = _is_branch_held_by_worktree(cp_co.stderr)
+            if held and prune_co is not None and prune_co.returncode != 0:
+                msg = "清理 stale worktree 失败,无法切换分支"
+                hint = ("git worktree prune 执行失败(rc={rc}): {stderr}。"
+                        "请手动在仓库目录执行: git -c safe.directory=* worktree prune").format(
+                    rc=prune_co.returncode, stderr=(prune_co.stderr or "")[:300])
+            elif held and holding:
+                msg = "分支被其他 worktree 占用"
+                hint = ("占用 {branch} 的 worktree: {paths}。"
+                        "请先解散对应团队,或手动在占用 worktree 执行 "
+                        "git checkout --detach 后重试").format(
+                    branch=branch,
+                    paths=", ".join(holding[:3]),
+                )
+            elif held:
+                msg = "分支被其他 worktree 占用"
+                hint = "请先解散占用该分支的团队,或手动处理对应 worktree 后重试"
+            elif "would be overwritten" in cp_co.stderr:
+                msg = "切换分支失败:本地改动阻止切换"
+                hint = "请先提交或 stash 改动后重试"
+            else:
+                msg = "git command failed"
+                hint = "请先提交或 stash 改动后重试"
             err = _make_repo_error(
-                "GIT_COMMAND_FAILED",
-                "切换分支失败:本地改动阻止切换" if "would be overwritten" in cp_co.stderr else "git command failed",
-                project,
+                "GIT_COMMAND_FAILED", msg, project,
                 command=f"git checkout {branch}",
                 exit_code=cp_co.returncode,
                 stdout=cp_co.stdout,
                 stderr=cp_co.stderr,
                 branch=previous_branch,
-                hint="请先提交或 stash 改动后重试",
+                hint=hint,
                 retryable=True,
             )
             return GitOperationResult(
@@ -1273,6 +1455,10 @@ class ProjectGitService:
                     cwd=project.project_dir,
                 )
             except FileNotFoundError:
+                # git 可执行文件消失:无法重新探测,且 ``_git_to_repo_status`` 内部
+                # 会再次抛 ``FileNotFoundError`` 被 ``_file_not_found_error`` 捕获,
+                # 多一次失败探测无意义。返回 pre_status,但分支已在仓库中创建,
+                # 下次 status/probe 会反映新分支。
                 err = _file_not_found_error(
                     project, project.project_dir,
                     branch=previous_branch,
@@ -1285,6 +1471,8 @@ class ProjectGitService:
                     error=err,
                 )
             except subprocess.TimeoutExpired:
+                # git 卡住:重新探测可能再次 timeout,延长错误响应时间。
+                # 返回 pre_status 避免延长等待;分支已创建,下次 probe 会反映。
                 err = _make_repo_error(
                     "GIT_COMMAND_TIMEOUT",
                     "git command timed out",
@@ -1300,6 +1488,9 @@ class ProjectGitService:
                     error=err,
                 )
             if cp_co.returncode != 0:
+                # git 仍可用但 checkout 失败(如本地改动阻止切换):重新探测以让
+                # ``local_branches`` 包含新创建的分支,前端列表即时更新。
+                post_status = _git_to_repo_status(project, persist=True)
                 err = _make_repo_error(
                     "GIT_COMMAND_FAILED",
                     "git command failed",
@@ -1314,7 +1505,7 @@ class ProjectGitService:
                 )
                 return GitOperationResult(
                     success=False,
-                    repo_status=pre_status,
+                    repo_status=post_status,
                     previous_branch=previous_branch,
                     error=err,
                 )

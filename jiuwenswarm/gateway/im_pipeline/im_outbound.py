@@ -28,12 +28,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SKIP_EVENT_TYPES = frozenset({
-    "chat.delta",
-    "chat.tool_call",
-    "chat.tool_result",
-    "todo.updated",
-})
+_CLASSIFIABLE_EVENT_TYPES = frozenset({"chat.final"})
 
 _GROUP_ACK_KEYWORDS: tuple[str, ...] = (
     "待办",
@@ -152,8 +147,13 @@ class IMOutboundPipeline:
             return
 
         payload = msg.payload if isinstance(msg.payload, dict) else {}
-        event_type = str(payload.get("event_type") or "")
-        if event_type in _SKIP_EVENT_TYPES:
+        message_event_type = getattr(msg, "event_type", None)
+        event_type = str(
+            payload.get("event_type")
+            or getattr(message_event_type, "value", message_event_type)
+            or ""
+        )
+        if event_type and event_type not in _CLASSIFIABLE_EVENT_TYPES:
             return
 
         chat_type = str(meta.get("chat_type") or "").strip()

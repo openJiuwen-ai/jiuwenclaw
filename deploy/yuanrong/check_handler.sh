@@ -103,6 +103,38 @@ check_gateway_up_dependency() {
         warning "FRONTEND_PORT not set, using default: 8888"
     fi
 
+    if [ -z "${DEPLOY_VARS["REGISTRY_PORT"]:-}" ]; then
+        DEPLOY_VARS["REGISTRY_PORT"]="4003"
+        warning "REGISTRY_PORT not set, using default: 4003"
+    fi
+
+    if [ -z "${DEPLOY_VARS["SSH_PORT"]:-}" ]; then
+        DEPLOY_VARS["SSH_PORT"]="2223"
+        warning "SSH_PORT not set, using default: 2223"
+    fi
+
+    # TUI (/tui on GatewayServer) bind host defaults to master node IP.
+    if [ -z "${DEPLOY_VARS["GATEWAY_HOST"]:-}" ]; then
+        DEPLOY_VARS["GATEWAY_HOST"]="${DEPLOY_VARS["MASTER_NODE_IP"]}"
+        info "GATEWAY_HOST not set, using MASTER_NODE_IP: ${DEPLOY_VARS["GATEWAY_HOST"]}"
+    fi
+
+    if [ -z "${DEPLOY_VARS["GATEWAY_PORT"]:-}" ]; then
+        DEPLOY_VARS["GATEWAY_PORT"]="19001"
+        warning "GATEWAY_PORT not set, using default: 19001"
+    fi
+
+    # WebChannel (/ws) bind host defaults to master node IP.
+    if [ -z "${DEPLOY_VARS["WEB_HOST"]:-}" ]; then
+        DEPLOY_VARS["WEB_HOST"]="${DEPLOY_VARS["MASTER_NODE_IP"]}"
+        info "WEB_HOST not set, using MASTER_NODE_IP: ${DEPLOY_VARS["WEB_HOST"]}"
+    fi
+
+    if [ -z "${DEPLOY_VARS["WEB_PORT"]:-}" ]; then
+        DEPLOY_VARS["WEB_PORT"]="19000"
+        warning "WEB_PORT not set, using default: 19000"
+    fi
+
     if [ -z "${DEPLOY_VARS["FUNCTION_ID"]:-}" ]; then
         error "FUNCTION_ID is not set. Please deploy jiuwenswarm first or set FUNCTION_ID in .env.custom."
     fi

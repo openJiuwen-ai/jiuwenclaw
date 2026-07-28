@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
 _SKILLNET_MAX_RETRIES: int = int(os.environ.get("SKILLNET_MAX_RETRIES", "3"))
+# SkillNet 异步安装 job 必须跨 SkillManager 实例共享：skills.* 无状态 RPC 在
+# AgentManager 缓存未命中时会临时 new JiuWenSwarm()，install 与 install_status
+# 可能落到不同实例；若 job 仅存实例内存会误报「安装会话已过期」。
+_SKILLNET_INSTALL_JOBS: dict[str, dict[str, Any]] = {}
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
 _SKILLNET_PROXY_ENV_KEYS = (
@@ -419,8 +423,12 @@ class SkillManager:
         # local_skills，使其与"导入本地技能"完全等价（可展示/卸载/查看详情/禁用）。
         self._register_unmanaged_local_skills()
         # SkillNet 异步安装：install 立即返回 install_id，后台下载；完成后调用 hook 重载 Agent
-        self._skillnet_install_jobs: dict[str, dict[str, Any]] = {}
         self._skillnet_install_complete_hook: Callable[[], Awaitable[None]] | None = None
+
+    @property
+    def _skillnet_install_jobs(self) -> dict[str, dict[str, Any]]:
+        """进程级共享的 SkillNet 安装任务表（见模块常量 ``_SKILLNET_INSTALL_JOBS``）."""
+        return _SKILLNET_INSTALL_JOBS
 
     def set_skillnet_install_complete_hook(self, hook: Callable[[], Awaitable[None]] | None) -> None:
         """安装成功落盘后回调（通常为重载 Agent 实例）."""
@@ -1335,6 +1343,7 @@ class SkillManager:
                             "summary": item.get("summary", ""),
                             "version": item.get("version", ""),
                             "updated_at": item.get("updatedAt", 0),
+                            "owner_handle": item.get("ownerHandle", ""),
                         }
                     )
 
@@ -1365,6 +1374,7 @@ class SkillManager:
 
         params:
             slug: skill slug (必需)
+            owner_handle: 发布者标识 (可选，slug 有多个发布者时必需)
             version: 版本号 (可选，默认 latest)
             tag: 标签 (可选，如 latest)
             force: 强制覆盖 (可选，默认 False)
@@ -1386,6 +1396,7 @@ class SkillManager:
                 "detail_key": "skills.clawhub.errors.tokenNotConfigured",
             }
 
+        owner_handle = str(params.get("owner_handle") or "").strip()
         version = params.get("version")
         tag = params.get("tag")
         force = bool(params.get("force", False))
@@ -1408,6 +1419,8 @@ class SkillManager:
                 headers["Authorization"] = f"Bearer {token}"
 
             download_params = {"slug": slug}
+            if owner_handle:
+                download_params["ownerHandle"] = owner_handle
             if version:
                 download_params["version"] = version
             if tag:

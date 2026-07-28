@@ -64,6 +64,8 @@ export interface CommandContext {
   clearBtwOverlay?: () => void;
   /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   setBtwActive?: (active: boolean) => void;
+  /** 设置 /btw 正在回答的问题；null 表示加载已结束。 */
+  setBtwPendingQuestion?: (question: string | null) => void;
   clearEntries: () => void;
   restoreHistory: (sessionId: string) => Promise<void>;
   exitApp: () => void;
@@ -130,8 +132,8 @@ export interface CommandContext {
 
   /** HandoffPort 预检：校验托管标记、动作退出码和目标能力。 */
   checkHandoff?: (target: HandoffTarget) => HandoffCheckResult;
-  /** HandoffPort 请求：二次校验后调用统一顶层关闭路径。 */
-  requestHandoff?: (target: HandoffTarget) => Promise<void>;
+  /** HandoffPort 请求：二次校验后调用统一顶层关闭路径，输出 handoff JSON 到 stdout。 */
+  requestHandoff?: (target: HandoffTarget, switchContent: string) => Promise<void>;
   /** TaskLifecyclePort：统一任务快照；/switch 用于判断是否需要询问中断。 */
   hasServerTask?: () => boolean;
   /** TaskLifecyclePort：等待型取消；只供 /switch 等生命周期动作使用。 */

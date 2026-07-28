@@ -14,6 +14,7 @@ import {
   syncAgentsWithModelChanges,
   type ModelIdentity,
 } from "./openaiAccountModelState";
+import { ConfigFieldHintLabel } from "./ConfigFieldHintLabel";
 import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
 import { ModelProviderIcon } from '../ModelProviderIcon';
 
@@ -388,9 +389,12 @@ const PROACTIVE_KEYS = new Set([
   "proactive_recommendation_max_recommend_per_day",
   "proactive_recommendation_max_rounds_per_tick",
 ]);
-// 调度频率已交给定时任务面板，ConfigPanel 不再暴露 tick_interval。
-// 即便后端残留下发，也在比较/提交时跳过，避免误提交空值。
-const PROACTIVE_HIDDEN_FROM_UI_KEYS = new Set(["proactive_recommendation_tick_interval_minutes"]);
+// ConfigPanel 暂不展示这些配置；保留后端下发值，并在比较/提交时跳过。
+const HIDDEN_FROM_UI_CONFIG_KEYS = new Set([
+  "proactive_recommendation_tick_interval_minutes",
+  "kv_cache_release_enabled",
+  "kv_cache_affinity_enabled",
+]);
 
 function classifyKey(key: string): string {
   if (MODEL_DEFAULT_KEYS.has(key)) return "model_default";
@@ -763,9 +767,43 @@ const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   skill_retrieval_build_root_categories: "config.keys.skillRetrievalBuildRootCategoriesPlaceholder",
 };
 const KEY_LABEL_HINT_I18N: Record<string, string> = {
+  // 模型：仅协议/推理等易歧义项（model_name / alias / api_base / api_key 不加）
+  model_provider: "config.keyHelp.modelProvider",
+  provider: "config.keyHelp.modelProvider",
+  reasoning_level: "config.keyHelp.reasoningLevel",
+  // 第三方 Key 名称本身可能不直观
+  jina_api_key: "config.keyHelp.jinaApiKey",
+  bocha_api_key: "config.keyHelp.bochaApiKey",
+  perplexity_api_key: "config.keyHelp.perplexityApiKey",
+  serper_api_key: "config.keyHelp.serperApiKey",
+  github_token: "config.keyHelp.githubToken",
+  // 免费搜索 / 演进
+  free_search_ddg_enabled: "config.keyHelp.freeSearchDdg",
+  free_search_bing_enabled: "config.keyHelp.freeSearchBing",
+  evolution_auto_scan: "config.keyHelp.evolutionAutoScan",
   skill_create: "config.keyHelp.skillCreate",
+  // 含义需补充（「启用」等不加）
+  memory_forbidden_description: "config.keyHelp.memoryForbiddenDescription",
   symphony_dynamic_graph_enabled: "config.keyHelp.symphonyDynamicGraphEnabled",
   skill_retrieval_build_root_categories: "config.keyHelp.skillRetrievalBuildRootCategories",
+  skill_retrieval_build_max_depth: "config.keyHelp.skillRetrievalBuildMaxDepth",
+  skill_retrieval_build_max_workers: "config.keyHelp.skillRetrievalBuildMaxWorkers",
+  skill_retrieval_build_max_retries: "config.keyHelp.skillRetrievalBuildMaxRetries",
+  skill_retrieval_build_total_timeout_seconds: "config.keyHelp.skillRetrievalBuildTotalTimeout",
+  skill_retrieval_build_classification_batch_limit: "config.keyHelp.skillRetrievalBuildClassificationBatchLimit",
+  skill_retrieval_retrieve_max_exposure_depth: "config.keyHelp.skillRetrievalMaxExposureDepth",
+  proactive_recommendation_max_recommend_per_day: "config.keyHelp.proactiveMaxPerDay",
+  proactive_recommendation_max_rounds_per_tick: "config.keyHelp.proactiveMaxRounds",
+  // Agent / Team 易歧义项（名称 / 模型 / 显示名称不加）
+  skills: "config.keyHelp.agentSkills",
+  lifecycle: "config.keyHelp.teamLifecycle",
+  teammate_mode: "config.keyHelp.teamTeammateMode",
+  spawn_mode: "config.keyHelp.teamSpawnMode",
+  enable_permissions: "config.keyHelp.teamEnablePermissions",
+  member_name: "config.keyHelp.teamMemberName",
+  persona: "config.keyHelp.teamPersona",
+  prompt_hint: "config.keyHelp.teamPromptHint",
+  agent_key: "config.keyHelp.teamAgentKey",
 };
 
 /** 组内字段排序优先级，数字越小越靠前 */
@@ -800,8 +838,17 @@ function getKeyDisplayLabel(key: string, t: (key: string) => string): string {
   return m ? m[2] : (getBooleanKeyLabel(key, t) ?? key);
 }
 
+function resolveKeyHelpI18nKey(key: string): string | undefined {
+  if (KEY_LABEL_HINT_I18N[key]) return KEY_LABEL_HINT_I18N[key];
+  const m = key.match(/^(video|audio|vision)_(.+)$/);
+  if (!m) return undefined;
+  const suffix = m[2];
+  if (suffix === "provider") return KEY_LABEL_HINT_I18N.model_provider ?? KEY_LABEL_HINT_I18N.provider;
+  return KEY_LABEL_HINT_I18N[suffix];
+}
+
 function getKeyLabelHintText(key: string, t: (key: string) => string): string {
-  const hintKey = KEY_LABEL_HINT_I18N[key];
+  const hintKey = resolveKeyHelpI18nKey(key);
   return hintKey ? t(hintKey) : "";
 }
 
@@ -897,13 +944,12 @@ function GroupSection({
             <tbody>
               {group.keys.map(([key, value]) => (
                 <tr key={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 ">
-                  <td className="px-4 py-2.5 align-middle text-xs text-text-muted w-[32%]" title={key}>
-                    <div className="mono">{getKeyDisplayLabel(key, t)}</div>
-                    {getKeyLabelHintText(key, t) ? (
-                      <div className="mt-1 text-[11px] leading-4 text-text-muted">
-                        {getKeyLabelHintText(key, t)}
-                      </div>
-                    ) : null}
+                  <td className="px-4 py-2.5 align-middle text-xs text-text-muted w-[32%]">
+                    <ConfigFieldHintLabel
+                      mono
+                      label={getKeyDisplayLabel(key, t)}
+                      help={getKeyLabelHintText(key, t) || undefined}
+                    />
                     {PROACTIVE_INT_SPECS[key] ? (() => {
                       const e = validateProactiveInt(key, draftValues[key] ?? "", t);
                       return e ? (
@@ -960,7 +1006,6 @@ function GroupSection({
                                 <option value="DashScope">DashScope</option>
                                 <option value="SiliconFlow">SiliconFlow</option>
                                 <option value="InferenceAffinity">InferenceAffinity</option>
-                                <option value="AscendAffinity">AscendAffinity</option>
                                 <option value="DeepSeek">DeepSeek</option>
                                 <option value="OpenRouter">OpenRouter</option>
                               </>
@@ -1061,7 +1106,6 @@ const MODEL_PROVIDER_OPTIONS = [
   "DashScope",
   "SiliconFlow",
   "InferenceAffinity",
-  ASCEND_AFFINITY_PROVIDER,
   "DeepSeek",
 ] as const;
 const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
@@ -1767,7 +1811,7 @@ function OpenAIAccountAuthPanel({
       ) : null}
 
       {authError ? (
-        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-2 py-1.5 text-[11px] text-danger">
+        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-2 py-1.5 text-[11px] text-danger">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>{authError}</span>
         </div>
@@ -2206,7 +2250,15 @@ function MultiModelSection({
                   {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
                     <div key={field} className="flex items-center gap-2 text-xs">
                       <label className="w-28 text-text-muted shrink-0">
-                        {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && modelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
+                        <ConfigFieldHintLabel
+                          label={
+                            <>
+                              {field}
+                              {["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && modelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
+                            </>
+                          }
+                          help={getKeyLabelHintText(field, t) || undefined}
+                        />
                       </label>
                       {field === "model_provider" ? (
                         <select
@@ -2284,7 +2336,15 @@ function MultiModelSection({
             {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0">
-                  {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && newModelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
+                  <ConfigFieldHintLabel
+                    label={
+                      <>
+                        {field}
+                        {["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && newModelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
+                      </>
+                    }
+                    help={getKeyLabelHintText(field, t) || undefined}
+                  />
                 </label>
                 {field === "model_provider" ? (
                   <select
@@ -2584,9 +2644,16 @@ function MultiAgentSection({
                 </div>
                 {agentFields.map((field) => (
                   <div key={field} className="flex items-center gap-2 text-xs">
-                    <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
-                      {getAgentFieldLabel(field)}
-                      {AGENT_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                    <label className="w-28 text-text-muted shrink-0">
+                      <ConfigFieldHintLabel
+                        label={
+                          <>
+                            {getAgentFieldLabel(field)}
+                            {AGENT_REQUIRED_FIELDS.has(field) && <span className="text-danger ml-0.5">*</span>}
+                          </>
+                        }
+                        help={getKeyLabelHintText(field, t) || undefined}
+                      />
                     </label>
                     {field === "skills" ? (
                       <MultiSelectDropdown
@@ -2675,9 +2742,16 @@ function MultiAgentSection({
           </div>
           {agentFields.map((field) => (
             <div key={field} className="flex items-center gap-2 text-xs">
-              <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
-                {getAgentFieldLabel(field)}
-                {AGENT_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+              <label className="w-28 text-text-muted shrink-0">
+                <ConfigFieldHintLabel
+                  label={
+                    <>
+                      {getAgentFieldLabel(field)}
+                      {AGENT_REQUIRED_FIELDS.has(field) && <span className="text-danger ml-0.5">*</span>}
+                    </>
+                  }
+                  help={getKeyLabelHintText(field, t) || undefined}
+                />
               </label>
               {field === "skills" ? (
                 <MultiSelectDropdown
@@ -2947,9 +3021,16 @@ function TeamItemSection({
       <div className="space-y-2">
         {teamStringFields.map((field) => (
           <div key={field} className="flex items-center gap-2 text-xs">
-            <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
-              {getTeamFieldLabel(field)}
-              {TEAM_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+            <label className="w-28 text-text-muted shrink-0">
+              <ConfigFieldHintLabel
+                label={
+                  <>
+                    {getTeamFieldLabel(field)}
+                    {TEAM_REQUIRED_FIELDS.has(field) && <span className="text-danger ml-0.5">*</span>}
+                  </>
+                }
+                help={getKeyLabelHintText(field, t) || undefined}
+              />
             </label>
             {field === "lifecycle" ? (
               <select
@@ -2989,14 +3070,17 @@ function TeamItemSection({
         ))}
         <div className="flex items-center gap-2 text-xs">
           <label className="w-28 text-text-muted shrink-0">
-            {t("config.keys.teamEnablePermissions")}
+            <ConfigFieldHintLabel
+              label={t("config.keys.teamEnablePermissions")}
+              help={t("config.keyHelp.teamEnablePermissions")}
+            />
           </label>
           <button
             type="button"
             role="switch"
             aria-checked={team.enable_permissions}
             onClick={updateTeamPermissions}
-            title={t("config.keys.teamEnablePermissions")}
+            title={t("config.keyHelp.teamEnablePermissions")}
             className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${team.enable_permissions ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"
               }`}
           >
@@ -3024,9 +3108,16 @@ function TeamItemSection({
           <div className="border-t border-border px-3 py-2 space-y-2">
             {leaderFields.map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs">
-                <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
-                  {getLeaderFieldLabel(field)}
-                  {LEADER_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                <label className="w-28 text-text-muted shrink-0">
+                  <ConfigFieldHintLabel
+                    label={
+                      <>
+                        {getLeaderFieldLabel(field)}
+                        {LEADER_REQUIRED_FIELDS.has(field) && <span className="text-danger ml-0.5">*</span>}
+                      </>
+                    }
+                    help={getKeyLabelHintText(field, t) || undefined}
+                  />
                 </label>
                 {field === "agent_key" ? (
                   <select
@@ -3082,9 +3173,16 @@ function TeamItemSection({
           <div className="border-t border-border px-3 py-2 space-y-2">
             {teammateFields.map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs">
-                <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
-                  {getLeaderFieldLabel(field)}
-                  {LEADER_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                <label className="w-28 text-text-muted shrink-0">
+                  <ConfigFieldHintLabel
+                    label={
+                      <>
+                        {getLeaderFieldLabel(field)}
+                        {LEADER_REQUIRED_FIELDS.has(field) && <span className="text-danger ml-0.5">*</span>}
+                      </>
+                    }
+                    help={getKeyLabelHintText(field, t) || undefined}
+                  />
                 </label>
                 {field === "agent_key" ? (
                   <select
@@ -3162,9 +3260,16 @@ function TeamItemSection({
                     <div className="border-t border-border px-3 py-2 space-y-2">
                       {memberFields.map((field) => (
                         <div key={field} className="flex items-center gap-2 text-xs">
-                          <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
-                            {getMemberFieldLabel(field)}
-                            {MEMBER_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                          <label className="w-28 text-text-muted shrink-0">
+                            <ConfigFieldHintLabel
+                              label={
+                                <>
+                                  {getMemberFieldLabel(field)}
+                                  {MEMBER_REQUIRED_FIELDS.has(field) && <span className="text-danger ml-0.5">*</span>}
+                                </>
+                              }
+                              help={getKeyLabelHintText(field, t) || undefined}
+                            />
                           </label>
                           {field === "agent_key" ? (
                             <select
@@ -3209,9 +3314,16 @@ function TeamItemSection({
               <div className="rounded border border-accent/40 bg-accent/5 p-2 space-y-2">
                 {memberFields.map((field) => (
                   <div key={field} className="flex items-center gap-2 text-xs">
-                    <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
-                      {getMemberFieldLabel(field)}
-                      {MEMBER_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                    <label className="w-28 text-text-muted shrink-0">
+                      <ConfigFieldHintLabel
+                        label={
+                          <>
+                            {getMemberFieldLabel(field)}
+                            {MEMBER_REQUIRED_FIELDS.has(field) && <span className="text-danger ml-0.5">*</span>}
+                          </>
+                        }
+                        help={getKeyLabelHintText(field, t) || undefined}
+                      />
                     </label>
                     {field === "agent_key" ? (
                       <select
@@ -3766,7 +3878,7 @@ export function ConfigPanel({
     if (!Object.keys(normalizedConfig).length) return [];
     const buckets: Record<string, [string, string][]> = {};
     for (const [key, value] of Object.entries(normalizedConfig)) {
-      if (HIDDEN_CONFIG_KEYS.has(key)) continue;
+      if (HIDDEN_CONFIG_KEYS.has(key) || HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
       const tag = classifyKey(key);
       // 临时注释：先隐藏邮件配置，后续需要时可恢复。
       if (tag === "email") continue;
@@ -3840,12 +3952,12 @@ export function ConfigPanel({
   const topLevelGroupCount = groups.length;
   const hasConfigChanges = useMemo(() => {
     const keys = Object.keys(normalizedConfig);
-    return keys.some((key) => !PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key) && (draftValues[key] ?? "") !== normalizedConfig[key]);
+    return keys.some((key) => !HIDDEN_FROM_UI_CONFIG_KEYS.has(key) && (draftValues[key] ?? "") !== normalizedConfig[key]);
   }, [draftValues, normalizedConfig]);
   const configUpdates = useMemo(() => {
     const updates: Record<string, string> = {};
     for (const key of Object.keys(normalizedConfig)) {
-      if (PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key)) continue;
+      if (HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
       const draftValue = draftValues[key] ?? "";
       if (draftValue !== normalizedConfig[key]) {
         updates[key] = draftValue;
@@ -4305,7 +4417,7 @@ export function ConfigPanel({
           </div>
         ) : null}
         {!error && hasMissingModelName ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.modelNameRequired')}
           </div>
         ) : null}
@@ -4373,7 +4485,7 @@ export function ConfigPanel({
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelName ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.modelNameRequired')}
                     </div>
                   ) : null}

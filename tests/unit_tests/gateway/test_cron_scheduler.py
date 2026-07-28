@@ -1410,3 +1410,157 @@ class TestCronBroadcastText:
             text="[cron] 任务执行超时（>10min）",
             is_placeholder=False,
         ) == "[cron] 任务执行超时（>10min）"
+
+def _create_many_jobs_in_thread(path: Path, prefix: str, n: int) -> None:
+    """在独立线程 + 独立事件循环里写 store（模拟另一 Gateway 进程）。"""
+    store = CronJobStore(path=path)
+
+    async def _run() -> None:
+        for i in range(n):
+            await store.create_job(
+                name=f"{prefix}-{i}",
+                cron_expr="0 0 9 * * ? *",
+                timezone="Asia/Shanghai",
+                description="reminder",
+                targets="web",
+            )
+
+    asyncio.run(_run())
+
+
+class TestCronJobStoreFileLock:
+    """验证 portalocker 伴生锁包住 read-modify-write，避免多实例 lost update。"""
+
+    def test_threaded_concurrent_creates_preserve_all_jobs(self, tmp_path):
+        """两线程各持独立 store 并发 create，最终 jobs 应全部保留。"""
+        from concurrent.futures import ThreadPoolExecutor
+
+        store_file = tmp_path / "cron_jobs.json"
+        n = 40
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_a = pool.submit(_create_many_jobs_in_thread, store_file, "a", n)
+            fut_b = pool.submit(_create_many_jobs_in_thread, store_file, "b", n)
+            fut_a.result(timeout=120)
+            fut_b.result(timeout=120)
+
+        jobs = asyncio.run(CronJobStore(path=store_file).list_jobs())
+        names = sorted(j.name for j in jobs)
+        expected = sorted([f"a-{i}" for i in range(n)] + [f"b-{i}" for i in range(n)])
+        assert len(jobs) == 2 * n, (
+            f"lost update without effective file lock: got {len(jobs)}, expected {2 * n}"
+        )
+        assert names == expected
+        assert store_file.with_suffix(".json.lock").exists()
+
+    @pytest.mark.asyncio
+    async def test_held_file_lock_times_out_other_store(self, tmp_path):
+        """外部已持有伴生锁时，短超时的 store 写操作应抛 LockException。"""
+        import portalocker
+
+        store_file = tmp_path / "cron_jobs.json"
+        lock_path = store_file.with_suffix(".json.lock")
+        store = CronJobStore(path=store_file, file_lock_timeout=0.2)
+
+        store_file.parent.mkdir(parents=True, exist_ok=True)
+        with portalocker.Lock(str(lock_path), timeout=1.0):
+            with pytest.raises(portalocker.exceptions.LockException):
+                await store.create_job(
+                    name="blocked",
+                    cron_expr="0 0 9 * * ? *",
+                    timezone="Asia/Shanghai",
+                    description="reminder",
+                    targets="web",
+                )
+
+        # 锁释放后应可正常写入
+        job = await store.create_job(
+            name="after-unlock",
+            cron_expr="0 0 9 * * ? *",
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="web",
+        )
+        assert job.name == "after-unlock"
+        listed = await store.list_jobs()
+        assert any(j.id == job.id for j in listed)
+
+
+class TestCronJobStoreWakeOffset:
+    """面板「提前唤醒」对应 store 的 wake_offset_seconds 读写（Issue #2533）。"""
+
+    @pytest.mark.asyncio
+    async def test_create_job_persists_wake_offset_seconds(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="daily-meeting",
+            cron_expr="0 0 17 * * ? *",
+            timezone="Asia/Shanghai",
+            description="提醒用户开会",
+            targets="web",
+            wake_offset_seconds=300,
+        )
+        assert job.wake_offset_seconds == 300
+        reloaded = await store.get_job(job.id)
+        assert reloaded is not None
+        assert reloaded.wake_offset_seconds == 300
+
+    @pytest.mark.asyncio
+    async def test_update_job_can_change_and_clear_wake_offset_seconds(self, tmp_path):
+        """前端编辑「提前唤醒」分钟数时，经 cron.job.update patch 写入秒数。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="daily-meeting",
+            cron_expr="0 0 10 * * ? *",
+            timezone="Asia/Shanghai",
+            description="提醒用户开会",
+            targets="web",
+            wake_offset_seconds=300,
+        )
+
+        updated = await store.update_job(
+            job.id,
+            {"cron_expr": "0 0 17 * * ? *", "wake_offset_seconds": 0},
+        )
+        assert updated.cron_expr == "0 0 17 * * ? *"
+        assert updated.wake_offset_seconds == 0
+
+        again = await store.update_job(job.id, {"wake_offset_seconds": 600})
+        assert again.wake_offset_seconds == 600
+        reloaded = await store.get_job(job.id)
+        assert reloaded is not None
+        assert reloaded.wake_offset_seconds == 600
+
+    @pytest.mark.asyncio
+    async def test_update_job_clamps_negative_wake_offset_to_zero(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="daily-meeting",
+            cron_expr="0 0 17 * * ? *",
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="web",
+            wake_offset_seconds=300,
+        )
+        updated = await store.update_job(job.id, {"wake_offset_seconds": -1})
+        assert updated.wake_offset_seconds == 0
+
+    @pytest.mark.asyncio
+    async def test_proactive_tick_update_rejects_wake_offset_patch(self, tmp_path):
+        """proactive.tick 只允许改 cron_expr/timezone，wake_offset 被丢弃。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="proactive-auto",
+            cron_expr="0 0 * * * ? *",
+            timezone="Asia/Shanghai",
+            description="proactive",
+            targets="web",
+            mode="proactive.tick",
+            wake_offset_seconds=0,
+        )
+        updated = await store.update_job(
+            job.id,
+            {"cron_expr": "0 30 * * * ? *", "wake_offset_seconds": 300},
+        )
+        assert updated.cron_expr == "0 30 * * * ? *"
+        assert updated.wake_offset_seconds == 0

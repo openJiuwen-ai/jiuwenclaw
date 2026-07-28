@@ -125,6 +125,8 @@ def _summary_fingerprint(
         else None
     )
     return _fingerprint(
+        repo.get("is_git"),
+        repo.get("repo_root"),
         repo.get("branch"),
         repo.get("head"),
         repo.get("transient"),
@@ -229,14 +231,21 @@ class GitDiffWatcherRegistry:
                 抛错则触发自动 ``remove_watch``。返回值用于 seed fingerprint。
                 若为 ``None``,保持旧行为(调用方自行 ``commit_initial_summary``)。
         """
-        watch_id = f"gitdiff_{project_id}_{session_id}_{uuid.uuid4().hex[:12]}"
+        # session_id 为空串时强制关闭 include_last_turn。
+        # 原因:``_compute_and_push`` 用 ``if session_id:`` 判定是否计算 last_turn,
+        # 空串会被判定为 False 而静默跳过 last_turn 计算。若 ``include_last_turn``
+        # 仍为 True,summary fingerprint 会包含 ``last_turn.stats=None``,
+        # 且事件 payload 的 ``last_turn`` 字段语义不一致(前端误以为有 last_turn)。
+        # 此处显式关闭,让 watcher 语义自洽:无 session 即不监控 last_turn。
+        effective_include_last_turn = bool(include_last_turn) and bool(session_id)
+        watch_id = f"gitdiff_{project_id}_{session_id or 'noss'}_{uuid.uuid4().hex[:12]}"
         watch = GitDiffWatch(
             watch_id=watch_id,
             project_id=project_id,
             session_id=session_id,
             ws=ws,
             scope=scope,
-            include_last_turn=include_last_turn,
+            include_last_turn=effective_include_last_turn,
         )
         async with self._lock:
             self._watches[watch_id] = watch
@@ -839,6 +848,7 @@ class GitDiffWatcherRegistry:
                 if isinstance(exc, GitOperationError):
                     err_code = getattr(exc.git_error, "code", "")
                     if err_code in _STRUCTURAL_ERROR_CODES:
+                        await self._push_error_event(project_id, exc)
                         logger.info(
                             "[GitDiffWatcher] structural error (%s), pausing poll loop "
                             "for project=%s (watches kept, will resume on mark_dirty)",
@@ -940,11 +950,17 @@ class GitDiffWatcherRegistry:
             include_hunks = need_hunks
 
             # 计算 session 级 ``last_turn`` diff(不复用跨 session)。
-            # 直接调 ``get_turn_diffs`` + ``_convert_turn_diff``,避免再次调
+            # 直接调 ``get_turn_diff_summaries`` + ``_convert_turn_diff``,避免再次调
             # ``get_project_diff_status``(会重复计算项目级 ``current``)。
             # 异常处理与 ``get_project_diff_status`` 内部一致:捕获后 last_turn=None。
+            group_needs_last_turn = any(
+                w.include_last_turn
+                or w.files_source == "last_turn"
+                or w.detail_source == "last_turn"
+                for w in group_watches
+            )
             last_turn = None
-            if session_id:
+            if session_id and group_needs_last_turn:
                 try:
                     # 与首次快照路径(DiffStatusService.get_project_diff_status)对齐:
                     # 传入 extra_history_roots 以收集 team/member workspace 与
@@ -952,13 +968,18 @@ class GitDiffWatcherRegistry:
                     # 工作时的改动会被漏读,导致实时轮询推送的 last_turn 数据残缺。
                     extra_roots = get_session_extra_history_roots(session_id)
                     turns = await asyncio.to_thread(
-                        diff_service.get_turn_diffs,
+                        diff_service.get_turn_diff_summaries,
                         session_id, project_dir,
+                        repo_context={
+                            "repo_root": repo_root,
+                            "branch": base_status.repo.branch,
+                            "base_head": base_status.repo.head,
+                        },
                         extra_history_roots=extra_roots,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "[GitDiffWatcher] get_turn_diffs failed (session=%s): %s",
+                        "[GitDiffWatcher] get_turn_diff_summaries failed (session=%s): %s",
                         session_id, exc,
                     )
                     turns = []
@@ -1046,6 +1067,8 @@ class GitDiffWatcherRegistry:
             "change_type": "summary",
             "revision": _build_revision("gitdiff", fingerprint),
             "repo": {
+                "is_git": repo.get("is_git", False),
+                "repo_root": repo.get("repo_root"),
                 "branch": repo.get("branch"),
                 "head": repo.get("head"),
                 "transient": repo.get("transient", False),

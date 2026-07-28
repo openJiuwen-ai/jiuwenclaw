@@ -181,13 +181,29 @@ class SSHProxy:
             )
             await self.agent_hooks.submit_relay(session_id, metadata)
             exit_code = await self.agent_hooks.wait_relay_done(session_id)
-            process.exit(exit_code)
+            try:
+                process.exit(exit_code)
+            except Exception:  # noqa: BLE001 - may already be closed by southbound teardown
+                logger.debug(
+                    "[SSHChannel] process.exit after relay done failed for %s",
+                    username,
+                    exc_info=True,
+                )
         except asyncssh.Error as exc:
             logger.error("[SSHChannel] session error for %s: %s", username, exc)
-            process.stdout.write(f"Proxy error: {exc}\n".encode())
-            process.exit(1)
+            try:
+                process.stdout.write(f"Proxy error: {exc}\n".encode())
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                process.exit(1)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:
             logger.exception("[SSHChannel] SSH session failed for %s", username)
-            process.exit(1)
+            try:
+                process.exit(1)
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             await self.agent_hooks.unregister_session(session_id)

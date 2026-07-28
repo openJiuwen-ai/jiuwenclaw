@@ -31,6 +31,10 @@ export interface GoalRecord {
   attempt_count: number;
   created_at?: string;
   updated_at?: string;
+  // 后端已结算的累计耗时（秒）；active_started_at 是当前 active 计时段的开始时间
+  // （UTC ISO-8601），非 active 状态下为 null。见 Goal持续目标Web前端对接4.md「前端耗时展示对接」。
+  time_used_seconds?: number;
+  active_started_at?: string | null;
   token_usage?: GoalTokenUsage;
   max_attempts?: number | null;
   token_budget?: number | null;

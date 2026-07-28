@@ -28,6 +28,9 @@ from jiuwenswarm.symphony.fingerprint import (
     SkillSchemaExtractor,
     write_extraction_result,
 )
+from jiuwenswarm.symphony.fingerprint.extract.extractor import (
+    SCHEMA_EXTRACTION_PROTOCOL_VERSION,
+)
 from jiuwenswarm.symphony.graph.candidates import CandidateGenerator
 from jiuwenswarm.symphony.graph.matcher import (
     CachedOntologyMatcher,
@@ -559,6 +562,7 @@ def _fingerprint_signature(
 ) -> str:
     payload = {
         "schema_version": "Symphony-fingerprint-signature-v1",
+        "extraction_protocol": SCHEMA_EXTRACTION_PROTOCOL_VERSION,
         "fingerprint": asdict(runtime_config.fingerprint),
         "llm": _llm_signature(llm_config),
     }

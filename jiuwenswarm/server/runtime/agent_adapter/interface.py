@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
 
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
+from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
@@ -247,6 +247,55 @@ def _make_a2ui_pending_render_chunk(*, request_id: str, channel_id: str) -> Agen
     )
 
 
+def _make_a2ui_final_chunk(
+        *,
+        request_id: str,
+        channel_id: str,
+        session_id: str,
+        content: str,
+) -> AgentResponseChunk:
+    return AgentResponseChunk(
+        request_id=request_id,
+        channel_id=channel_id,
+        payload={
+            "event_type": "chat.final",
+            "session_id": session_id,
+            "content": content,
+        },
+        is_complete=False,
+    )
+
+
+def _should_defer_a2ui_processing_status(
+        *,
+        suppress_a2ui_stream: bool,
+        event_type: str,
+        payload: dict[str, Any],
+) -> bool:
+    return (
+        suppress_a2ui_stream
+        and event_type == "chat.processing_status"
+        and payload.get("is_processing") is False
+    )
+
+
+def _normalize_nested_stream_chunk(
+        chunk: AgentResponseChunk,
+) -> AgentResponseChunk | None:
+    """Keep the facade stream open until its post-processing has finished."""
+    if not chunk.is_complete:
+        return chunk
+    payload = chunk.payload
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        is_complete = payload.get("is_complete") is True
+        has_event_type = bool(payload.get("event_type"))
+        if is_complete and not has_event_type:
+            return None
+    return replace(chunk, is_complete=False)
+
+
 def _extend_a2ui_stream_probe(previous: str, content: str) -> str:
     probe = f"{previous}{content}"
     if len(probe) <= _A2UI_STREAM_PROBE_WINDOW:
@@ -265,7 +314,7 @@ def _looks_like_partial_a2ui_marker(value: Any) -> bool:
         if match is None:
             continue
         token = match.group(0)
-        if len(token) < 3:
+        if len(token) < 2:
             continue
         rest = candidate[len(token):].strip()
         if rest and not any(marker.startswith(token + rest) for marker in _A2UI_STREAM_PARTIAL_MARKERS):
@@ -320,7 +369,7 @@ def _a2ui_marker_start(value: Any) -> int | None:
         if match is None:
             continue
         token = match.group(0)
-        if len(token) < 3:
+        if len(token) < 2:
             continue
         rest = candidate[len(token):].strip()
         if rest and not any(marker.startswith(token + rest) for marker in _A2UI_STREAM_PARTIAL_MARKERS):
@@ -342,7 +391,7 @@ def _split_a2ui_stream_content(previous_probe: str, content: str) -> tuple[str, 
     return content[:split_index], content[split_index:]
 
 
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
 
@@ -1237,10 +1286,16 @@ class JiuWenSwarm:
                             for raw_option in selected_options
                             if str(raw_option or "").strip()
                         ]
-                        # When the only selection is "Other", prefer the free-text
-                        # custom_input (single-select free-text path).
-                        if len(cleaned_options) == 1 and cleaned_options[0] == "Other" and custom_input:
-                            answer_value: Any = custom_input
+                        if custom_input:
+                            # "Other" is only a UI placeholder. Preserve normal
+                            # multi-select choices and append the user's text.
+                            normal_options = [
+                                option for option in cleaned_options if option != "Other"
+                            ]
+                            if normal_options:
+                                answer_value: Any = [*normal_options, custom_input]
+                            else:
+                                answer_value = custom_input
                         elif len(cleaned_options) == 1:
                             answer_value = cleaned_options[0]
                         elif cleaned_options:
@@ -2105,25 +2160,13 @@ class JiuWenSwarm:
 
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
-        # command.goal: only set records the objective as a user turn; resume/
-        # pause/clear/get remain control traffic.
+        # command.goal set history is written only after a successful set inside
+        # the DeepAdapter stream path (same success gate as unary process_message).
         params_for_history = request.params if isinstance(request.params, dict) else {}
-        if request.req_method == ReqMethod.COMMAND_GOAL:
-            goal_action = str(params_for_history.get("action", "") or "").strip().lower()
-            if goal_action == "set":
-                objective = str(params_for_history.get("objective") or "").strip()
-                if objective:
-                    append_history_record(
-                        session_id=session_id,
-                        request_id=request.request_id,
-                        channel_id=request.channel_id,
-                        role="user",
-                        content=objective,
-                        timestamp=time.time(),
-                        channel_metadata=request.metadata,
-                        mode=params_for_history.get("mode", "unknown"),
-                    )
-        elif _should_record_user_history(params_for_history):
+        if (
+            request.req_method != ReqMethod.COMMAND_GOAL
+            and _should_record_user_history(params_for_history)
+        ):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -2365,6 +2408,10 @@ class JiuWenSwarm:
                     )
                 else:
                     if isinstance(data, AgentResponseChunk):
+                        if suppress_a2ui_stream:
+                            data = _normalize_nested_stream_chunk(data)
+                            if data is None:
+                                continue
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
                             should_record = et.startswith("chat.")
@@ -2384,6 +2431,17 @@ class JiuWenSwarm:
                             if et in {"chat.delta", "chat.final"} and payload_content:
                                 a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
                                 a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
+                            if _should_defer_a2ui_processing_status(
+                                    suppress_a2ui_stream=suppress_a2ui_stream,
+                                    event_type=et,
+                                    payload=data.payload,
+                            ):
+                                logger.info(
+                                    "A2UI processing_status=false deferred until finalization: "
+                                    "request_id=%s",
+                                    rid,
+                                )
+                                continue
                             if et == "chat.delta":
                                 final_answer_chunks.append(payload_content)
                                 if suppress_a2ui_stream or a2ui_split is not None:
@@ -2484,6 +2542,17 @@ class JiuWenSwarm:
                         if et in {"chat.delta", "chat.final"} and payload_content:
                             a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
                             a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
+                        if _should_defer_a2ui_processing_status(
+                                suppress_a2ui_stream=suppress_a2ui_stream,
+                                event_type=et,
+                                payload=data,
+                        ):
+                            logger.info(
+                                "A2UI processing_status=false deferred until finalization: "
+                                "request_id=%s",
+                                rid,
+                            )
+                            continue
                         if et == "chat.delta":
                             final_answer_chunks.append(payload_content)
                             if suppress_a2ui_stream or a2ui_split is not None:
@@ -2624,11 +2693,11 @@ class JiuWenSwarm:
             )
             final_answer_content = finalized_assistant_message
             final_answer_chunks = []
-            yield AgentResponseChunk(
+            yield _make_a2ui_final_chunk(
                 request_id=rid,
                 channel_id=cid,
-                payload={"event_type": "chat.final", "content": finalized_assistant_message},
-                is_complete=False,
+                session_id=session_id,
+                content=finalized_assistant_message,
             )
 
         # cloud memory: after chat hook
@@ -2807,6 +2876,20 @@ class JiuWenSwarm:
             return processor_cleaned
         adapter_cleaned = bool(await cleanup_fn(session_id))
         return processor_cleaned or adapter_cleaned
+
+    def has_session_runtime(self, session_id: str | None = None) -> bool:
+        """Return whether this facade still owns session-scoped runtime."""
+        if self._session_manager.has_session_runtime(session_id):
+            return True
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        has_runtime = getattr(adapter, "has_session_runtime", None)
+        if not callable(has_runtime):
+            return True
+        if session_id is None:
+            return bool(has_runtime())
+        return bool(has_runtime(session_id))
 
     async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时调用：取消 session 流式任务并中止 adapter 内层循环。"""

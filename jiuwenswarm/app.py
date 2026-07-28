@@ -13,10 +13,7 @@ import sys
 import time
 import os
 
-from dotenv import load_dotenv
-
-# --- Early --dotenv parsing (before jiuwenswarm imports) ---
-from jiuwenswarm.dotenv_early import parse_dotenv_early, get_parsed_dotenv
+from jiuwenswarm.dotenv_early import parse_dotenv_early, get_parsed_dotenv, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-app")
 
 # --- Now safe to import jiuwenswarm modules ---
@@ -45,7 +42,7 @@ cleanup_team_files(_workspace_dir)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
 
@@ -105,7 +102,6 @@ def main() -> None:
     agent = subprocess.Popen(agent_cmd, **_popen_kwargs)
     gateway = None
     try:
-        time.sleep(0.4)
         gateway = subprocess.Popen(gateway_cmd, **_popen_kwargs)
     except Exception:
         if agent.poll() is None:

@@ -48,7 +48,7 @@ class ExperienceItem:
 @dataclass
 class TraceRecord:
     trace_id: str
-    query: str
+    query: str = ""
     skills: list[str] = field(default_factory=list)
     messages: list[dict] = field(default_factory=list)
     result: str = ""

@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
-import { openFileInEditor as openInExternalEditor, openFolderInExplorer } from "../core/utils/editor.js";
+import { openFileInEditor as openInExternalEditor, openFolderInExplorer, getEditorInfo } from "../core/utils/editor.js";
 import { collectOrderedMemoryFiles, type MemoryFile } from "../core/commands/builtins/memory.js";
 import { getDisplayPath } from "../core/commands/builtins/memory-path-utils.js";
 import { palette, selectListTheme } from "./theme.js";
@@ -74,6 +74,16 @@ export class MemoryViewController {
   private statusMessage: string | null = null;
   /** 上一次 open 的目录绝对路径；Ctrl+O 切换时据此重算 statusMessage 的显示格式 */
   private lastOpenedPath: string | null = null;
+  /**
+   * 外部编辑器打开期间置为 true:此时 MemoryView 进入“不可操作态”
+   * (吞掉所有按键,渲染一条 Editing… 提示行)。
+   * GUI 编辑器异步 spawn,onExit 时清零;终端编辑器 spawnSync 同步返回后清零。
+   * 这与 Claude Code / 原 swarm 的体验一致:打开文件后原列表冻结,
+   * 编辑器关闭后列表退出并提示编辑成功。
+   */
+  private editing = false;
+  /** 正在编辑的文件绝对路径,用于 onExit 成功提示 */
+  private editingPath: string | null = null;
 
   constructor(
     private appState: CliPiAppState,
@@ -144,6 +154,10 @@ export class MemoryViewController {
     this.showFullPath = false;
     this.statusMessage = null;
     this.lastOpenedPath = null;
+    // 防御:若上一次进入时 editing 残留(理论上不会,因 editing 期间输入被吞),
+    // 这里清零避免新会话一进来就处于不可操作态。
+    this.editing = false;
+    this.editingPath = null;
     const ctx = this.appState.getCommandContext();
     const fullMode = ctx.mode ?? "code.normal";
     const projectDir = ctx.getCurrentProjectDir() || process.cwd();
@@ -206,6 +220,12 @@ export class MemoryViewController {
   /** 处理 MemoryView 上下文的键盘输入，返回 true 表示已消费。 */
   handleInput(data: string): boolean {
     if (this.state === null) return false;
+    // 编辑器打开期间:列表进入不可操作态,吞掉所有按键(含 Esc 也不打断编辑),
+    // 仅触发重绘以保持“Editing…” 提示常驻。等待编辑器退出后由 onExit 关闭。
+    if (this.editing) {
+      this.tui.requestRender();
+      return true;
+    }
     // loading 时只允许 Esc 关闭
     if (this.state.loading) {
       if (resolveAction("MemoryView", data) === "memory:close") {
@@ -243,7 +263,17 @@ export class MemoryViewController {
     const lines: string[] = [];
     lines.push(...this.renderTabBar(width));
     lines.push(padToWidth(palette.text.dim("─".repeat(width)), width));
-    if (this.state.loading) {
+    if (this.editing) {
+      // 不可操作态:列表冻结(对应 CC editFileInEditor 的 pause()+suspendStdin())。
+      // 显示编辑器来源,便于用户在编辑期间知道当前用的是哪个编辑器。
+      const { source, value } = getEditorInfo();
+      const editorHint = source !== "default" ? ` (${source}="${value}")` : " (default editor)";
+      const displayPath = this.editingPath
+        ? getDisplayPath(this.editingPath, this.state.projectDir, this.state.gitRoot)
+        : "";
+      lines.push(padToWidth(palette.status.warning(`  Editing ${displayPath}${editorHint}`), width));
+      lines.push(padToWidth(palette.text.dim("  Close the editor to return — list frozen"), width));
+    } else if (this.state.loading) {
       lines.push(padToWidth(palette.text.dim("  Loading..."), width));
     } else if (this.state.tab === "status") {
       const items = this.buildStatusItems(this.state.statusPayload, this.state.mode);
@@ -258,8 +288,9 @@ export class MemoryViewController {
     if (this.statusMessage) {
       lines.push(padToWidth(palette.status.warning(this.statusMessage), width));
     }
-    const hint =
-      this.state.tab === "edit"
+    const hint = this.editing
+      ? "Editor open · list frozen until editor closes"
+      : this.state.tab === "edit"
         ? "←/→ tabs · Enter edit file · Ctrl+O toggle full path · Esc close"
         : this.state.tab === "status"
           ? "←/→ tabs · Esc close"
@@ -436,10 +467,19 @@ export class MemoryViewController {
           // 创建失败仍尝试打开，让编辑器报错
         }
       }
-      // GUI 编辑器：异步 spawn，TUI 不阻塞，编辑器关闭后通过 onExit 回调刷新
+      // 打开编辑器前先冻结列表(进入不可操作态)。编辑器关闭后由 onExit 退出列表
+      // 并提示编辑成功(含编辑器来源与环境变量切换提示),与 CC memory.tsx 行为一致:
+      // CC 在 await editFileInEditor 期间 pause()+suspendStdin() 使对话框不可操作,
+      // 退出后 onDone() 输出单条 “Opened memory file at <path>” + 编辑器切换提示。
+      const { source, value } = getEditorInfo();
+      this.editing = true;
+      this.editingPath = filePath;
+      this.statusMessage = "Opening editor…";
+      this.tui.requestRender();
+      // GUI 编辑器：异步 spawn，TUI 不阻塞，编辑器关闭后通过 onExit 回调
       // 终端编辑器：spawnSync 阻塞，tui.start() 后同步调用 onExit
       openInExternalEditor(this.tui, filePath, () => {
-        this.refreshFiles();
+        this.handleEditComplete(filePath, source, value);
       });
       return;
     }
@@ -491,21 +531,31 @@ export class MemoryViewController {
     // status 只读，无操作
   }
 
-  /** 编辑器关闭后重新加载文件列表，刷新 edit 页签的元信息 */
-  private async refreshFiles(): Promise<void> {
-    const s = this.state;
-    if (!s) return;
-    const ctx = this.appState.getCommandContext();
-    const collected = await collectOrderedMemoryFiles(ctx, this.shortMode(s.mode)).catch(() => ({
-      files: [] as MemoryFile[],
-      userMemoryPath: s.userMemoryPath,
-      gitRoot: s.gitRoot,
-      projectDir: s.projectDir,
-    }));
-    s.files = collected.files;
-    if (collected.gitRoot) s.gitRoot = collected.gitRoot;
-    s.userMemoryPath = collected.userMemoryPath;
-    this.rebuildTabList();
+  /**
+   * 编辑器退出后的收尾:清掉不可操作态,关闭 MemoryView(列表退出),
+   * 并向 transcript 写入一条信息。与 CC memory.tsx 行为对齐:
+   *  - 动词用 “Opened”(编辑器已打开过,不假设用户一定保存),而非 “saved”;
+   *  - 始终附上编辑器来源与环境变量切换提示(见下方 editorHint 措辞)。
+   * 不复用 close():close() 会额外写一条“Memory console dismissed”,
+   * 与编辑成功提示重复,故这里静默置空 state,只保留一条提示。
+   */
+  private handleEditComplete(filePath: string, source: string, value: string): void {
+    this.editing = false;
+    this.editingPath = null;
+    const sessionId = this.appState.getSnapshot().sessionId;
+    const projectDir = this.state?.projectDir ?? "";
+    const gitRoot = this.state?.gitRoot ?? null;
+    const displayPath = getDisplayPath(filePath, projectDir, gitRoot);
+    // 措辞与 CC memory.tsx 的 editorHint 保持一致:
+    //   命中 $VISUAL/$EDITOR: “> Using $VAR="value". To change editor, set $EDITOR or $VISUAL environment variable.”
+    //   均未设置(默认):      “> To use a different editor, set the $EDITOR or $VISUAL environment variable.”
+    const editorHint = source !== "default"
+      ? `> Using ${source}="${value}". To change editor, set $EDITOR or $VISUAL environment variable.`
+      : `> To use a different editor, set the $EDITOR or $VISUAL environment variable.`;
+    this.appState.addItem(addInfo(sessionId, `Opened memory file at ${displayPath}\n\n${editorHint}`, "✓"));
+    this.statusMessage = null;
+    this.state = null;
+    this.tui.requestRender();
   }
 
   // ── 辅助方法 ──

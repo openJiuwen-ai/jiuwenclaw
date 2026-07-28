@@ -878,12 +878,86 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
 
 
 @pytest.mark.asyncio
-async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkeypatch, tmp_path):
+async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path):
+    """session.create 在 team prepare 后回包；可选 KVC 异步，避免拖慢前端超时窗口。"""
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="unused-default")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    prepare_calls = []
+    kvc_started = asyncio.Event()
+    kvc_release = asyncio.Event()
+    kvc_calls = []
+
+    async def _prepare(**kwargs):
+        prepare_calls.append(kwargs)
+        return False, "agent", object(), None, object()
+
+    async def _slow_kvc(**kwargs):
+        kvc_calls.append(kwargs)
+        kvc_started.set()
+        await kvc_release.wait()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    _patch_session_create_fs(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+    monkeypatch.setattr(server, "_dispatch_session_switch_kvc", _slow_kvc)
+
+    request = AgentRequest(
+        request_id="req-session-create-async-kvc",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"session_id": "sess_async_kvc_001", "mode": "agent"},
+    )
+
+    create_task = asyncio.create_task(
+        server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+    )
+    await asyncio.wait_for(kvc_started.wait(), timeout=1.0)
+    # prepare 已完成且成功响应已发出时，KVC 仍可在后台继续
+    assert len(prepare_calls) == 1
+    assert prepare_calls[0]["target_session_id"] == "sess_async_kvc_001"
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-create-async-kvc",
+            "payload": {
+                "sessionId": "sess_async_kvc_001",
+                "projectId": "default",
+                "projectDir": "",
+                "workMode": "work",
+            },
+            "ok": True,
+        }
+    ]
+    assert create_task.done()
+    kvc_release.set()
+    await create_task
+    assert len(kvc_calls) == 1
+    assert kvc_calls[0]["target_session_id"] == "sess_async_kvc_001"
+    assert kvc_calls[0]["reason"] == "session.create switch: "
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_path):
+    """team prepare 必须在 create 成功回包前完成，避免与首条 chat.send 竞态。"""
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="unused-default")
     fake_team_manager = FakeTeamManager()
     server.set_agent_manager_for_test(fake_manager)
     fake_ws = FakeWebSocket()
+    prepare_released = asyncio.Event()
+    saw_prepare_before_ack = asyncio.Event()
+
+    async def _slow_prepare(session_id, reason="", previous_session_id=None):
+        fake_team_manager.prepare_session_switch_calls.append(
+            {"session_id": session_id, "reason": reason}
+        )
+        saw_prepare_before_ack.set()
+        await prepare_released.wait()
 
     monkeypatch.setattr(
         agent_ws_server_module,
@@ -895,6 +969,7 @@ async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkey
         "jiuwenswarm.agents.harness.team.get_team_manager",
         lambda channel_id: fake_team_manager,
     )
+    monkeypatch.setattr(fake_team_manager, "prepare_session_switch", _slow_prepare)
 
     request = AgentRequest(
         request_id="req-session-create-team",
@@ -903,14 +978,14 @@ async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkey
         params={"mode": "team", "session_id": "team_sess_001"},
     )
 
-    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+    create_task = asyncio.create_task(
+        server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+    )
+    await asyncio.wait_for(saw_prepare_before_ack.wait(), timeout=1.0)
+    assert fake_ws.sent == []
+    prepare_released.set()
+    await create_task
 
-    assert fake_manager.create_session_calls == [
-        {"channel_id": "web", "session_id": "team_sess_001"}
-    ]
-    assert fake_team_manager.prepare_session_switch_calls == [
-        {"session_id": "team_sess_001", "reason": "session.create switch: "}
-    ]
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create-team",
@@ -922,6 +997,12 @@ async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkey
             },
             "ok": True,
         }
+    ]
+    assert fake_manager.create_session_calls == [
+        {"channel_id": "web", "session_id": "team_sess_001"}
+    ]
+    assert fake_team_manager.prepare_session_switch_calls == [
+        {"session_id": "team_sess_001", "reason": "session.create switch: "}
     ]
 
 
