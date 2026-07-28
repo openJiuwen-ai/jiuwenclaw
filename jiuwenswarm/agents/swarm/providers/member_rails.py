@@ -183,6 +183,11 @@ def _build_runtime_prompt_rail(
 class TeamSkillStoragePolicyInput(ConstructionInput):
     """Construction inputs for the team skill storage policy rail."""
 
+    language: str = context_field(
+        attr="language",
+        default="cn",
+        description="Resolved member language code.",
+    )
     global_skills_dir: str | None = context_field(
         attr="global_skills_dir",
         description="Global shared skills source directory.",
@@ -230,6 +235,7 @@ def _build_team_skill_storage_policy_rail(
         team_workspace_root=inp.team_ws_root,
         team_skills_dir=inp.team_skills_dir,
         member_workspace_root=inp.member_workspace_root,
+        language=inp.language,
     )
 
 
