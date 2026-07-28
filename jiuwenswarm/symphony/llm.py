@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from jiuwenswarm.common.reasoning_injector import inject_reasoning_params
 
+
 @dataclass(frozen=True)
 class LLMConfig:
     """LLM chat configuration resolved from JiuwenSwarm model settings."""
