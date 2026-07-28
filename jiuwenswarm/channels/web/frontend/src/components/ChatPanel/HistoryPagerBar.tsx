@@ -1,5 +1,12 @@
 import { useTranslation } from 'react-i18next';
 import { useState, useEffect } from 'react';
+import {
+  dismissHistoryPagerMessage,
+  initHistoryPagerMessageState,
+  reduceHistoryPagerMessage,
+} from './historyPagerMessage';
+
+const LOADED_MESSAGE_DURATION_MS = 3000;
 
 export interface HistoryPagerBarProps {
   loadedPages: number;
@@ -16,26 +23,23 @@ export function HistoryPagerBar({
 }: HistoryPagerBarProps) {
   const { t } = useTranslation();
   const hasMore = loadedPages < totalPages;
-  const [showLoadedMessage, setShowLoadedMessage] = useState(false);
+  const [messageState, setMessageState] = useState(() => (
+    initHistoryPagerMessageState({ loadedPages, loadingMore })
+  ));
+  const showLoadedMessage = messageState.showLoadedMessage;
 
-  // 监听 loadingMore 状态变化，当从 true 变为 false 时，显示加载完成消息
+  // 只有用户触发的 load more 真正翻到新页后才提示；首屏渲染与后台预取都不提示
   useEffect(() => {
-    if (!loadingMore && loadedPages > 0) {
-      setShowLoadedMessage(true);
-      // 3秒后关闭消息
-      const timer = setTimeout(() => {
-        setShowLoadedMessage(false);
-      }, 3000);
-      return () => clearTimeout(timer);
-    }
+    setMessageState((prev) => reduceHistoryPagerMessage(prev, { loadedPages, loadingMore }));
   }, [loadingMore, loadedPages]);
 
-  // 当开始加载新内容时，隐藏已加载消息
   useEffect(() => {
-    if (loadingMore) {
-      setShowLoadedMessage(false);
-    }
-  }, [loadingMore]);
+    if (!showLoadedMessage) return;
+    const timer = setTimeout(() => {
+      setMessageState(dismissHistoryPagerMessage);
+    }, LOADED_MESSAGE_DURATION_MS);
+    return () => clearTimeout(timer);
+  }, [showLoadedMessage]);
 
   const handleClick = () => {
     if (hasMore && !loadingMore) {
@@ -45,9 +49,9 @@ export function HistoryPagerBar({
 
   return (
     <div 
-      className="history-pager-bar mb-3 rounded-lg border border-white/10 bg-secondary/50 px-3 py-2.5 flex flex-col items-center justify-center gap-2 text-sm cursor-pointer"
+      className={`history-pager-bar mb-3 rounded-lg border border-white/10 bg-secondary/50 px-3 py-2.5 flex flex-col items-center justify-center gap-2 text-sm${hasMore ? ' cursor-pointer' : ''}`}
       onClick={handleClick}
-      title={t('chat.historyPager.clickOrScrollToLoadMore')}
+      title={hasMore ? t('chat.historyPager.clickOrScrollToLoadMore') : undefined}
     >
       {/* 加载完成消息 */}
       {showLoadedMessage && (
