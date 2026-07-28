@@ -43,7 +43,7 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
-1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。
+1. **声明步骤**：默认情况下，每次行动前必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。若 SKILL.md 明确声明“阶段状态和阶段消息由工具事件唯一生成”，则以该声明为准，禁止自行输出 `[当前步骤: ...]` 或其他步骤声明。
 2. **必须使用 todo**：在执行skill步骤前，必须先创建 todo 列表。创建后，必须在执行过程中持续更新（如打勾已完成项、添加遗漏项等），确保 todo 与实际执行状态始终保持一致。
    放弃、跳过或决定不再执行某步骤时（如用户说「不生成 PPT 了」），**必须**立即 `todo_modify` 将该条标为 `cancelled`；
    禁止仅用口头回复收尾而仍保留 `in_progress`/`pending` 项。
@@ -80,7 +80,7 @@ If `skill_acceleration_exec` returns success (the artifact is already generated)
 
 Then execute the workflow; the rules below govern execution.
 
-1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step.
+1. **Declare step**: By default, before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step. If SKILL.md explicitly states that stage status and stage messages are emitted exclusively by tool events, follow that rule and you must not declare `[Current Step: ...]` or any other step message yourself.
 2. **Use todo (mandatory)**: For skills, you MUST create a todo list before executing the skill steps.
    Once created, you MUST continuously update it throughout execution (e.g. check off completed items,
    add missing steps) to ensure the todo always reflects the actual execution state.

@@ -4,6 +4,7 @@ import json
 
 from jiuwenclaw.agentserver.tools.deepresearch.stream_router import (
     RouterState,
+    advance_stage,
     build_interrupt_prompt,
     collected_questions,
     route_chunk,
@@ -24,6 +25,13 @@ def _stage_update(frames):
     return next((frame for frame in frames if frame["event_type"] == "task.update"), None)
 
 
+def _process_reasoning(frames):
+    return [
+        frame for frame in frames
+        if frame["event_type"] == "chat.reasoning" and frame.get("stream_source_id")
+    ]
+
+
 def _assert_stage(update, active_stage):
     assert update is not None
     assert [task["task_id"] for task in update["tasks"]] == [
@@ -41,6 +49,57 @@ def _assert_stage(update, active_stage):
     assert update["completed_tasks"] == active_stage - 1
     assert update["in_progress_tasks"] == 1
     assert update["pending_tasks"] == 6 - active_stage
+
+
+def test_advance_stage_emits_ordered_task_reasoning_and_foreground_events():
+    frames = advance_stage(RouterState(), 1)
+
+    assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+    ]
+    assert frames[1] == {
+        "event_type": "chat.reasoning",
+        "task_id": "deepresearch_stage_1",
+        "task_content": "研究主题澄清",
+        "content": "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+    }
+    assert frames[2] == {
+        "event_type": "chat.delta",
+        "task_id": "deepresearch_stage_1",
+        "task_content": "研究主题澄清",
+        "content": "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+    }
+
+
+def test_advance_stage_completion_keeps_all_six_completed_tasks_visible():
+    state = RouterState()
+    advance_stage(state, 6)
+
+    frames = advance_stage(state, 6, complete=True)
+
+    assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+    ]
+    update = frames[0]
+    assert len(update["tasks"]) == 6
+    assert [task["task_id"] for task in update["tasks"]] == [
+        f"deepresearch_stage_{index}" for index in range(1, 7)
+    ]
+    assert all(task["status"] == "completed" for task in update["tasks"])
+    assert frames[1]["content"] == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+    assert frames[2]["content"] == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+
+
+def test_advance_stage_does_not_repeat_or_regress_transition_messages():
+    state = RouterState()
+
+    assert advance_stage(state, 4)
+    assert advance_stage(state, 4) == []
+    assert advance_stage(state, 2) == []
 
 
 def test_workflow_nodes_advance_six_stage_snapshot():
@@ -79,13 +138,22 @@ def test_stage_snapshot_never_regresses_on_late_earlier_node():
     assert _stage_update(frames) is None
 
 
-def test_first_seen_node_emits_task_start():
+def test_stage_one_node_uses_explicit_stage_parent_without_task_boundaries():
     state = RouterState()
-    chunk = {"agent": "intent_recognition", "event": "", "content": "分析..."}
+    chunk = {
+        "agent": "intent_recognition",
+        "event": "start",
+        "reasoning_content": "分析研究需求",
+    }
     frames = route_chunk(chunk, state)
-    task_start = next(frame for frame in frames if frame["event_type"] == "task.start")
-    assert task_start["node_name"] == "intent_recognition"
-    assert task_start["task_id"] == "dr_intent_recognition"
+
+    assert not any(frame["event_type"] in {"task.start", "task.complete"} for frame in frames)
+    reasoning = _process_reasoning(frames)
+    assert [frame["content"] for frame in reasoning] == [
+        "意图识别开始\n",
+        "分析研究需求",
+    ]
+    assert all(frame["task_id"] == "deepresearch_stage_1" for frame in reasoning)
     assert state.active_nodes["intent_recognition"]["started"] is True
 
 
@@ -95,9 +163,7 @@ def test_outline_reasoning_is_nested_under_stage_two():
         RouterState(),
     )
 
-    assert [
-        frame for frame in frames if frame["event_type"] == "chat.reasoning"
-    ] == [{
+    assert _process_reasoning(frames) == [{
         "event_type": "chat.reasoning",
         "task_id": "deepresearch_stage_2",
         "task_content": "大纲生成 - 规划报告章节结构",
@@ -117,11 +183,18 @@ def test_same_node_second_chunk_no_duplicate_start():
     assert frames == []
 
 
-def test_event_done_emits_task_complete():
+def test_stage_one_event_done_emits_stage_scoped_reasoning():
     state = RouterState()
     route_chunk({"agent": "intent_recognition", "content": "a"}, state)
     frames = route_chunk({"agent": "intent_recognition", "event": "done"}, state)
-    assert any(f["event_type"] == "task.complete" for f in frames)
+    assert _process_reasoning(frames) == [{
+        "event_type": "chat.reasoning",
+        "task_id": "deepresearch_stage_1",
+        "task_content": "意图识别 - 分析研究需求",
+        "stream_source_id": "dr_intent_recognition",
+        "content": "意图识别完成\n",
+    }]
+    assert not any(frame["event_type"] == "task.complete" for frame in frames)
 
 
 def test_parallel_section_nodes_emit_nested_reasoning_without_node_task_frames():
@@ -151,9 +224,7 @@ def test_parallel_section_nodes_emit_nested_reasoning_without_node_task_frames()
             state,
         )
 
-        started_reasoning = [
-            frame for frame in started if frame["event_type"] == "chat.reasoning"
-        ]
+        started_reasoning = _process_reasoning(started)
         assert started_reasoning == [{
             "event_type": "chat.reasoning",
             "task_id": "deepresearch_stage_3",
@@ -162,9 +233,7 @@ def test_parallel_section_nodes_emit_nested_reasoning_without_node_task_frames()
             "stream_source_id": "deepresearch_section_3",
             "content": f"{display_name}开始\n",
         }]
-        completed_reasoning = [
-            frame for frame in completed if frame["event_type"] == "chat.reasoning"
-        ]
+        completed_reasoning = _process_reasoning(completed)
         assert completed_reasoning == [{
             "event_type": "chat.reasoning",
             "task_id": "deepresearch_stage_3",
@@ -196,7 +265,7 @@ def test_parallel_sections_use_explicit_stage_three_parent_without_boundaries():
     reporter_frames = route_chunk({"agent": "reporter", "event": "start"}, state)
 
     assert not any(frame["event_type"] in {"task.start", "task.complete"} for frame in section_frames)
-    section_reasoning = [frame for frame in section_frames if frame["event_type"] == "chat.reasoning"]
+    section_reasoning = _process_reasoning(section_frames)
     assert all(frame["task_id"] == "deepresearch_stage_3" for frame in section_reasoning)
     assert all(frame["stream_source_id"] == "deepresearch_section_1" for frame in section_reasoning)
     assert reporter_frames[0]["event_type"] == "task.update"
@@ -209,7 +278,7 @@ def test_stage_internal_nodes_use_explicit_parent_without_task_boundaries():
         RouterState(),
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert [frame["content"] for frame in reasoning] == ["报告整合开始\n", "整合报告"]
     assert all(frame["task_id"] == "deepresearch_stage_4" for frame in reasoning)
     assert all(frame["task_content"] == "报告整合 - 整合最终报告" for frame in reasoning)
@@ -260,7 +329,7 @@ def test_parallel_section_reasoning_keeps_authoritative_outline_title():
         state,
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     _assert_stage(_stage_update(frames), 3)
     assert all(frame["task_content"] == "核心架构设计与检索增强能力深度对比" for frame in reasoning)
     assert all(frame["stream_source_id"] == "deepresearch_section_2" for frame in reasoning)
@@ -284,7 +353,7 @@ def test_plan_reasoning_message_emits_complete_original_json():
         state,
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert reasoning == [
         {
             "event_type": "chat.reasoning",
@@ -332,7 +401,7 @@ def test_collector_summary_response_preserves_long_text_and_line_breaks():
         state,
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert reasoning == [
         {
             "event_type": "chat.reasoning",
@@ -423,8 +492,7 @@ def test_parallel_sections_emit_one_stage_update_without_chapter_snapshots():
     assert _stage_update(completed) is None
     assert all(
         frame["stream_source_id"] == "deepresearch_section_1"
-        for frame in started + completed
-        if frame["event_type"] == "chat.reasoning"
+        for frame in _process_reasoning(started + completed)
     )
     assert repeated_success == []
 
@@ -440,7 +508,7 @@ def test_parallel_section_emits_distinct_reasoning_and_content_without_compactio
         "content": ["证据 A", {"source": "原始来源"}],
     }, state)
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert [frame["content"] for frame in reasoning] == [
         "采集评估开始\n",
         "原始推理\n第二行",
@@ -509,7 +577,7 @@ def test_sub_reporter_forwards_reasoning_without_streaming_chapter_body():
         state,
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert [frame["content"] for frame in reasoning] == [
         "章节撰写开始\n",
         "正在组织章节结构",
@@ -520,7 +588,11 @@ def test_interrupt_chunk_not_forwarded():
     state = RouterState()
     frames = route_chunk({"agent": "outline_interaction", "message_type": "interrupt"}, state)
     _assert_stage(_stage_update(frames), 2)
-    assert len(frames) == 1
+    assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+    ]
 
 
 def test_status_marker_skipped():
@@ -554,7 +626,7 @@ def test_outline_content_emits_chat_reasoning_for_readonly_thinking_display():
         "content": "# 研究大纲\n\n1. 背景\n2. 方案对比",
     }, state)
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert reasoning[0] == {
         "event_type": "chat.reasoning",
         "task_id": "deepresearch_stage_2",

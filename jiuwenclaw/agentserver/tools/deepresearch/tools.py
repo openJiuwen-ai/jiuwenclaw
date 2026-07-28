@@ -1734,9 +1734,8 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                     initial_stage = 2
                 elif action == "resume" and node == "user_feedback_processor":
                     initial_stage = 6
-                stage_update = advance_stage(state, initial_stage)
-                if stage_update is not None:
-                    await _send(stage_update)
+                for stage_payload in advance_stage(state, initial_stage):
+                    await _send(stage_payload)
                 await _send({"event_type": "chat.processing_status",
                              "is_processing": True,
                              "current_task": status})
@@ -1792,9 +1791,8 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                 # breaking here makes finally terminate the resumable subprocess.
                 continue
             if status == "completed":
-                delivery_update = advance_stage(state, 6)
-                if delivery_update is not None:
-                    await _send(delivery_update)
+                for stage_payload in advance_stage(state, 6):
+                    await _send(stage_payload)
                 final_result = chunk.get("final_result")
                 response_content = (
                     final_result.get("response_content", "")
@@ -1855,9 +1853,8 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                     break
 
                 if report_delivered:
-                    completed_update = advance_stage(state, 6, complete=True)
-                    if completed_update is not None:
-                        await _send(completed_update)
+                    for stage_payload in advance_stage(state, 6, complete=True):
+                        await _send(stage_payload)
                     outcome = {
                         "status": "completed",
                         "conversation_id": chunk.get("conversation_id", outcome_cid),
