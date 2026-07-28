@@ -7731,8 +7731,8 @@ class JiuWenClawDeepAdapter:
         return await run_rewrite_fast_path(
             query,
             model_invoke=self._model.invoke,
-            prepare_invoke=rewrite_tools.deepresearch_prepare_rewrite._func,
-            commit_invoke=rewrite_tools.deepresearch_commit_rewrite._func,
+            prepare_invoke=rewrite_tools.deepresearch_prepare_rewrite._func,  # pylint: disable=protected-access
+            commit_invoke=rewrite_tools.deepresearch_commit_rewrite._func,  # pylint: disable=protected-access
         )
 
     async def _persist_deepresearch_rewrite_fast_path_turn(
@@ -7747,8 +7747,9 @@ class JiuWenClawDeepAdapter:
             self._instance is None
             or not session_id
             or not isinstance(query, str)
-            or not isinstance(result.commit_result, dict)
         ):
+            return False
+        if not isinstance(result.commit_result, dict):
             return False
 
         context_engine = resolve_context_engine(self._instance)

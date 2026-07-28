@@ -127,9 +127,9 @@ def parse_rewrite_envelope(query: object) -> RewriteRequest | None:
         not isinstance(report_path, str)
         or not report_path
         or action not in _ACTIONS
-        or not isinstance(selection, dict)
-        or not isinstance(instruction, str)
     ):
+        raise _invalid_request()
+    if not isinstance(selection, dict) or not isinstance(instruction, str):
         raise _invalid_request()
     return RewriteRequest(
         report_path=report_path,
@@ -190,9 +190,9 @@ def _decode_model_result(content: object) -> dict[str, Any]:
         not isinstance(payload, dict)
         or set(payload) != {"units", "facts_added"}
         or payload.get("facts_added") is not False
-        or not isinstance(payload.get("units"), list)
-        or not payload["units"]
     ):
+        raise ValueError("model output has an invalid shape")
+    if not isinstance(payload.get("units"), list) or not payload["units"]:
         raise ValueError("model output has an invalid shape")
     return payload
 
@@ -323,7 +323,7 @@ async def run_rewrite_fast_path(
     )
     try:
         structured_result = _decode_model_result(getattr(response, "content", None))
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (TypeError, ValueError):
         return _result(
             started_at=started_at,
             status="error",

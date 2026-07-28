@@ -350,8 +350,9 @@ def _build_styled_export_llm_config() -> dict:
         not api_key
         or not model_name
         or not base_url
-        or "example.com" in base_url.lower()
     ):
+        raise ValueError("styled HTML LLM configuration is invalid")
+    if "example.com" in base_url.lower():
         raise ValueError("styled HTML LLM configuration is invalid")
 
     # LLMConfig.model_type only allows "openai" or "siliconflow";
