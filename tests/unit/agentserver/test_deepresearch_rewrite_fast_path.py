@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from openjiuwen.core.foundation.llm import UsageMetadata
 
 from jiuwenclaw.agentserver.deep_agent.deepresearch_rewrite_fast_path import (
     RewriteFastPathError,
@@ -185,7 +186,60 @@ async def test_run_rewrite_fast_path_calls_prepare_model_commit_once_in_order():
         "output_tokens": 20,
         "total_tokens": 120,
     }
+    assert result.commit_result == _COMPLETED
     assert calls == ["prepare", "model", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_normalizes_structured_usage_metadata():
+    usage = UsageMetadata(
+        input_tokens=100,
+        output_tokens=20,
+        total_tokens=120,
+        cache_tokens=10,
+    )
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=AsyncMock(
+            return_value=SimpleNamespace(
+                content=_json_result(_STRUCTURED_RESULT),
+                usage_metadata=usage,
+            )
+        ),
+        commit_invoke=AsyncMock(return_value=_json_result(_COMPLETED)),
+    )
+
+    assert result is not None
+    assert result.usage_metadata == usage.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_surfaces_completed_delivery_failure():
+    completed_without_delivery = {
+        **_COMPLETED,
+        "report_delivered": False,
+        "delivery_status": "failed",
+        "delivery_error_code": "REPORT_DELIVERY_FAILED",
+    }
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=AsyncMock(
+            return_value=SimpleNamespace(content=_json_result(_STRUCTURED_RESULT))
+        ),
+        commit_invoke=AsyncMock(
+            return_value=_json_result(completed_without_delivery)
+        ),
+    )
+
+    assert result is not None
+    assert result.status == "completed"
+    assert result.error_code == "REPORT_DELIVERY_FAILED"
+    assert result.message == "改写版本已成功保留，但报告文件交付失败。"
+    assert result.commit_result == completed_without_delivery
 
 
 @pytest.mark.asyncio

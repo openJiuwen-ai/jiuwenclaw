@@ -71,7 +71,11 @@ Agent。一次成功改写通常需要多轮模型决策来完成技能发现、
 
 - 在 runtime context 已绑定后调用快速通道。
 - 把快速通道的成功或错误转换为既有 `AgentResponseChunk`。
+- commit 完成后，将本轮按合法的 user → assistant tool call → tool result →
+  assistant 拓扑写入 ContextEngine 并落到 checkpointer，使后续“生成 HTML”仍可从可信的
+  `deepresearch_commit_rewrite` 工具结果读取目标 revision。
 - 成功时发送 `chat.final`，内容保持现有改写 Skill 的固定邀请语。
+- 将 dict 或 Pydantic `UsageMetadata` 统一计入既有 usage summary。
 - 错误时发送 `chat.final`，展示安全错误码和可行动提示。
 - 发送唯一终止事件，并执行现有 `finally` 清理逻辑。
 - 未识别时无副作用地继续调用 Runner。
@@ -128,7 +132,9 @@ user message 仅包含 prepare 的以下结果：
 7. 解析唯一模型响应的 content 为 structured result。
 8. 调用 `deepresearch_commit_rewrite._func(...)`；context token 保持在同一进程和任务中。
 9. commit 继续负责 child revision、provenance、引用/拓扑校验和 `chat.file` 推送。
-10. 适配器发送固定 `chat.final` 并完成请求。
+10. 保留完整 commit 结果，并将配对的 `deepresearch_commit_rewrite` tool call/tool result
+    写入当前 session 的对话上下文和 checkpointer。
+11. 适配器发送固定 `chat.final` 并完成请求。
 
 ## 错误处理
 
@@ -138,7 +144,10 @@ user message 仅包含 prepare 的以下结果：
 - 模型 content 缺失或不是单个合法 JSON object：`MODEL_OUTPUT_INVALID`，不 commit。
 - commit 业务错误：保留现有安全 `error_code`。
 - commit 已完成但文件推送失败：保留现有 `completed` 和
-  `REPORT_DELIVERY_FAILED` 语义，不将已创建 revision 表述为回滚。
+  `REPORT_DELIVERY_FAILED` 语义，明确提示“版本已保留但交付失败”，不发送标准成功邀请，
+  也不将已创建 revision 表述为回滚。
+- commit 已完成但可信工具结果无法持久化：保留已创建 revision，返回
+  `CONTEXT_PERSIST_FAILED`，不得承诺后续 HTML 请求能够自动恢复目标版本。
 - 所有已识别的快速通道错误都不回退 Runner，避免重复调用、重复提交或改变错误语义。
 
 ## 并发与安全
@@ -181,6 +190,7 @@ P0 验收标准：
 ### 编排单元测试
 
 - 成功时调用顺序为 prepare、model、commit，且 model 恰好一次。
+- 成功结果保留完整 commit tool result；结构化 `UsageMetadata` 归一化为字典。
 - prepare 错误短路模型和 commit。
 - 模型异常、空 content、code fence 或非法 JSON 短路 commit。
 - commit 错误原样映射安全错误码。
@@ -191,6 +201,9 @@ P0 验收标准：
 - 已识别请求不调用 `Runner.run_agent_streaming`。
 - 未识别请求继续调用 Runner。
 - 成功和失败流均只产生一个正确终止态。
+- commit 成功会持久化成对的 assistant tool call 与 `ToolMessage`；后者包含
+  `status=completed`、`report_path` 和 `revision_id`。
+- `report_delivered=false` 明确显示交付失败，且不显示标准“生成 HTML”邀请。
 - 原有 rewrite tool 和 document rewrite 测试继续通过。
 
 ## 交付范围

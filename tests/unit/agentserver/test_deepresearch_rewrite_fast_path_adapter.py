@@ -4,6 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    ToolMessage,
+    UsageMetadata,
+    UserMessage,
+)
 
 from jiuwenclaw.agentserver.deep_agent import interface_deep as interface_module
 from jiuwenclaw.agentserver.deep_agent.deepresearch_rewrite_fast_path import (
@@ -72,14 +78,22 @@ def _result(
         "本轮改写已完成。若报告已是最终版本，请回复‘生成 HTML’；"
         "如需继续改写，可直接选择下一处内容。"
     ),
-    usage_metadata: dict | None = None,
+    usage_metadata: object | None = None,
     model_calls: int = 1,
+    commit_result: dict | None = None,
 ) -> RewriteFastPathResult:
     if usage_metadata is None and model_calls:
         usage_metadata = {
             "input_tokens": 100,
             "output_tokens": 20,
             "total_tokens": 120,
+        }
+    if commit_result is None and status == "completed":
+        commit_result = {
+            "status": "completed",
+            "report_delivered": True,
+            "report_path": "/workspace/report.rewrite.md",
+            "revision_id": "rev_child",
         }
     return RewriteFastPathResult(
         recognized=True,
@@ -93,6 +107,7 @@ def _result(
         commit_ms=2.0,
         total_ms=23.0,
         model_calls=model_calls,
+        commit_result=commit_result,
     )
 
 
@@ -189,6 +204,24 @@ def test_adapter_fast_path_error_chunk_contains_only_safe_error():
     assert chunks[0].is_complete is False
 
 
+def test_adapter_fast_path_delivery_failure_does_not_claim_standard_success():
+    chunks = JiuWenClawDeepAdapter._fast_path_chunks(
+        _result(
+            status="completed",
+            error_code="REPORT_DELIVERY_FAILED",
+            message="改写版本已成功保留，但报告文件交付失败。",
+        ),
+        request_id="request-1",
+        channel_id="web",
+    )
+
+    assert chunks[0].payload == {
+        "event_type": "chat.final",
+        "content": "改写版本已成功保留，但报告文件交付失败。",
+    }
+    assert "生成 HTML" not in chunks[0].payload["content"]
+
+
 def _stream_adapter(fast_path_result: RewriteFastPathResult | None):
     adapter = object.__new__(JiuWenClawDeepAdapter)
     adapter._instance = SimpleNamespace()
@@ -212,10 +245,90 @@ def _stream_adapter(fast_path_result: RewriteFastPathResult | None):
     adapter._try_deepresearch_rewrite_fast_path = AsyncMock(
         return_value=fast_path_result
     )
+    adapter._persist_deepresearch_rewrite_fast_path_turn = AsyncMock(
+        return_value=True
+    )
     adapter._untrack_session_toolkit = Mock()
     adapter._cleanup_circuit_breaker_session = Mock()
     adapter._schedule_background_evolution_followup = Mock()
     return adapter
+
+
+class _FakeContext:
+    def __init__(self):
+        self.messages = []
+
+    async def add_messages(self, messages):
+        if isinstance(messages, list):
+            self.messages.extend(messages)
+        else:
+            self.messages.append(messages)
+
+
+@pytest.mark.asyncio
+async def test_persist_fast_path_turn_records_trusted_commit_tool_result():
+    context = _FakeContext()
+    react_agent = SimpleNamespace(
+        _init_context=AsyncMock(return_value=context),
+    )
+    context_engine = SimpleNamespace(save_contexts=AsyncMock())
+    session = SimpleNamespace(
+        pre_run=AsyncMock(),
+        post_run=AsyncMock(),
+        get_session_id=Mock(return_value="session-1"),
+    )
+    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter._instance = SimpleNamespace(
+        card=SimpleNamespace(id="main-agent"),
+        react_agent=react_agent,
+        context_engine=context_engine,
+        loop_session=None,
+    )
+    adapter._checkpointer = SimpleNamespace()
+    result = _result()
+
+    with patch.object(
+        interface_module,
+        "_resolve_session_for_checkpoint",
+        new=AsyncMock(return_value=(session, True)),
+    ), patch.object(
+        interface_module,
+        "post_agent_execute_for_session",
+        new=AsyncMock(),
+    ) as flush:
+        persisted = await adapter._persist_deepresearch_rewrite_fast_path_turn(
+            session_id="session-1",
+            query=_query(),
+            result=result,
+        )
+
+    assert persisted is True
+    assert len(context.messages) == 4
+    assert isinstance(context.messages[0], UserMessage)
+    assert context.messages[0].content == _query()
+
+    tool_call_message = context.messages[1]
+    assert isinstance(tool_call_message, AssistantMessage)
+    assert len(tool_call_message.tool_calls) == 1
+    tool_call = tool_call_message.tool_calls[0]
+    assert tool_call.name == "deepresearch_commit_rewrite"
+    assert tool_call.arguments == "{}"
+
+    tool_result_message = context.messages[2]
+    assert isinstance(tool_result_message, ToolMessage)
+    assert tool_result_message.tool_call_id == tool_call.id
+    trusted_result = json.loads(tool_result_message.content)
+    assert trusted_result["status"] == "completed"
+    assert trusted_result["report_path"] == "/workspace/report.rewrite.md"
+    assert trusted_result["revision_id"] == "rev_child"
+
+    assert isinstance(context.messages[3], AssistantMessage)
+    assert context.messages[3].content == result.message
+    react_agent._init_context.assert_awaited_once_with(session)
+    context_engine.save_contexts.assert_awaited_once_with(session)
+    flush.assert_awaited_once_with(session, adapter._checkpointer)
+    session.pre_run.assert_awaited_once_with(inputs=None)
+    session.post_run.assert_awaited_once_with()
 
 
 @asynccontextmanager
@@ -292,7 +405,63 @@ async def test_process_stream_skips_runner_for_recognized_fast_path(
     assert ("chat.usage_summary" in event_types) is bool(
         fast_path_result.usage_metadata
     )
+    if fast_path_result.status == "completed":
+        adapter._persist_deepresearch_rewrite_fast_path_turn.assert_awaited_once_with(
+            session_id="session-1",
+            query=_query(),
+            result=fast_path_result,
+        )
+    else:
+        adapter._persist_deepresearch_rewrite_fast_path_turn.assert_not_awaited()
     assert sum(chunk.is_complete for chunk in chunks) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_stream_accounts_for_structured_fast_path_usage(monkeypatch):
+    usage = UsageMetadata(
+        input_tokens=100,
+        output_tokens=20,
+        total_tokens=120,
+        cache_tokens=10,
+    )
+    adapter = _stream_adapter(_result(usage_metadata=usage))
+
+    async def empty_runner(*_args, **_kwargs):
+        if False:
+            yield None
+
+    monkeypatch.setattr(
+        interface_module.Runner,
+        "run_agent_streaming",
+        empty_runner,
+    )
+    monkeypatch.setattr(
+        interface_module,
+        "ask_user_question_request_scope",
+        _request_scope,
+    )
+    monkeypatch.setattr(interface_module, "setup_permission_context", Mock())
+    monkeypatch.setattr(interface_module, "cleanup_permission_context", Mock())
+    monkeypatch.setattr(interface_module, "set_perf_summary_context", Mock())
+    monkeypatch.setattr(interface_module, "finalize_perf_summary_request", Mock())
+    monkeypatch.setattr(interface_module, "clear_perf_summary_context", Mock())
+    monkeypatch.setattr(interface_module, "mark_request_first_byte", Mock())
+
+    chunks = await _collect_stream(adapter, _query())
+
+    usage_summaries = [
+        chunk.payload
+        for chunk in chunks
+        if chunk.payload
+        and chunk.payload.get("event_type") == "chat.usage_summary"
+    ]
+    assert usage_summaries
+    assert usage_summaries[0]["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "cache_tokens": 10,
+    }
 
 
 @pytest.mark.asyncio

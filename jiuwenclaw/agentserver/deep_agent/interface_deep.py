@@ -17,7 +17,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, List, Self, Sequence, Tuple
@@ -35,7 +35,15 @@ except ImportError:
     _UPSTREAM_HAS_ACTIVE_SKILL_BODIES = False
 from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    Model,
+    ModelClientConfig,
+    ModelRequestConfig,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+)
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
@@ -7685,6 +7693,86 @@ class JiuWenClawDeepAdapter:
             commit_invoke=rewrite_tools.deepresearch_commit_rewrite._func,
         )
 
+    async def _persist_deepresearch_rewrite_fast_path_turn(
+            self,
+            *,
+            session_id: str,
+            query: object,
+            result: RewriteFastPathResult,
+    ) -> bool:
+        """Persist a fast rewrite as a valid tool-call conversation turn."""
+        if (
+            self._instance is None
+            or not session_id
+            or not isinstance(query, str)
+            or not isinstance(result.commit_result, dict)
+        ):
+            return False
+
+        context_engine = resolve_context_engine(self._instance)
+        react_agent = (
+            getattr(self._instance, "react_agent", None)
+            or getattr(self._instance, "_react_agent", None)
+        )
+        init_context = getattr(react_agent, "_init_context", None)
+        if context_engine is None or not callable(init_context):
+            return False
+
+        session = None
+        owned = False
+        try:
+            session, owned = await _resolve_session_for_checkpoint(
+                self._instance,
+                session_id,
+                card=self._instance.card,
+            )
+            if owned:
+                await session.pre_run(inputs=None)
+            actual_session = getattr(session, "_parent", session) or session
+            context = await init_context(actual_session)
+
+            tool_call_id = f"rewrite-fast-path-{uuid.uuid4().hex}"
+            tool_call = ToolCall(
+                id=tool_call_id,
+                type="function",
+                name="deepresearch_commit_rewrite",
+                arguments="{}",
+            )
+            tool_result = json.dumps(
+                result.commit_result,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            await context.add_messages([
+                UserMessage(content=query),
+                AssistantMessage(content="", tool_calls=[tool_call]),
+                ToolMessage(content=tool_result, tool_call_id=tool_call_id),
+                AssistantMessage(content=result.message),
+            ])
+            await context_engine.save_contexts(actual_session)
+            await post_agent_execute_for_session(session, self._checkpointer)
+            return True
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "[DeepResearchRewriteFastPath] persist tool result failed "
+                "session_id=%s error_type=%s",
+                session_id,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return False
+        finally:
+            if owned and session is not None:
+                try:
+                    await session.post_run()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    logger.error(
+                        "[DeepResearchRewriteFastPath] session cleanup failed "
+                        "session_id=%s",
+                        session_id,
+                        exc_info=True,
+                    )
+
     @staticmethod
     def _fast_path_chunks(
             result: RewriteFastPathResult,
@@ -8031,12 +8119,33 @@ class JiuWenClawDeepAdapter:
             if fast_path_result is not None:
                 has_streamed_content = True
                 _mark_first_byte_once()
-                if isinstance(fast_path_result.usage_metadata, dict):
+                fast_path_usage = self._normalize_usage_metadata(
+                    fast_path_result.usage_metadata
+                )
+                if fast_path_usage is not None:
                     self._accumulate_usage_metadata(
                         usage_accumulator,
-                        fast_path_result.usage_metadata,
+                        fast_path_usage,
                     )
-                if fast_path_result.status != "completed":
+                if fast_path_result.status == "completed":
+                    persisted = await self._persist_deepresearch_rewrite_fast_path_turn(
+                        session_id=session_id,
+                        query=query,
+                        result=fast_path_result,
+                    )
+                    if not persisted:
+                        fast_path_result = replace(
+                            fast_path_result,
+                            error_code="CONTEXT_PERSIST_FAILED",
+                            message=(
+                                "改写版本已创建，但未能保存后续生成 HTML "
+                                "所需的版本上下文。"
+                            ),
+                        )
+                if (
+                    fast_path_result.status != "completed"
+                    or fast_path_result.error_code is not None
+                ):
                     perf_summary_status = "error"
                 logger.info(
                     "[DeepResearchRewriteFastPath] request_id=%s session_id=%s "
@@ -9013,6 +9122,22 @@ class JiuWenClawDeepAdapter:
             "output_cost": 0.0,
             "total_cost": 0.0,
         }
+
+    @staticmethod
+    def _normalize_usage_metadata(value: Any) -> dict[str, Any] | None:
+        if isinstance(value, dict):
+            return value
+        for method_name in ("model_dump", "dict"):
+            serializer = getattr(value, method_name, None)
+            if not callable(serializer):
+                continue
+            try:
+                payload = serializer()
+            except Exception:  # pylint: disable=broad-exception-caught
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
 
     @staticmethod
     def _extract_usage_metadata_from_payload(payload: Any) -> dict[str, Any] | None:

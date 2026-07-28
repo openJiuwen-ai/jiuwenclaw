@@ -53,6 +53,7 @@ _SUCCESS_MESSAGE = (
     "本轮改写已完成。若报告已是最终版本，请回复‘生成 HTML’；"
     "如需继续改写，可直接选择下一处内容。"
 )
+_DELIVERY_FAILURE_MESSAGE = "改写版本已成功保留，但报告文件交付失败。"
 
 
 class RewriteFastPathError(ValueError):
@@ -91,6 +92,7 @@ class RewriteFastPathResult:
     commit_ms: float
     total_ms: float
     model_calls: int
+    commit_result: dict[str, Any] | None = None
 
 
 def _invalid_request() -> RewriteFastPathError:
@@ -147,6 +149,7 @@ def _result(
     model_ms: float = 0.0,
     commit_ms: float = 0.0,
     model_calls: int = 0,
+    commit_result: dict[str, Any] | None = None,
 ) -> RewriteFastPathResult:
     return RewriteFastPathResult(
         recognized=True,
@@ -160,6 +163,7 @@ def _result(
         commit_ms=commit_ms,
         total_ms=_milliseconds(started_at),
         model_calls=model_calls,
+        commit_result=commit_result,
     )
 
 
@@ -185,6 +189,22 @@ def _decode_model_result(content: object) -> dict[str, Any]:
     ):
         raise ValueError("model output has an invalid shape")
     return payload
+
+
+def _normalize_usage_metadata(raw: object) -> dict[str, Any] | None:
+    if isinstance(raw, dict):
+        return dict(raw)
+    for method_name in ("model_dump", "dict"):
+        serializer = getattr(raw, method_name, None)
+        if not callable(serializer):
+            continue
+        try:
+            payload = serializer()
+        except Exception:  # pylint: disable=broad-exception-caught
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
 
 
 def _safe_error_fields(
@@ -292,7 +312,9 @@ async def run_rewrite_fast_path(
             model_calls=1,
         )
     model_ms = _milliseconds(model_started)
-    usage_metadata = getattr(response, "usage_metadata", None)
+    usage_metadata = _normalize_usage_metadata(
+        getattr(response, "usage_metadata", None)
+    )
     try:
         structured_result = _decode_model_result(getattr(response, "content", None))
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -348,6 +370,25 @@ async def run_rewrite_fast_path(
             commit_ms=commit_ms,
             model_calls=1,
         )
+    if committed.get("report_delivered") is False:
+        delivery_error_code = committed.get("delivery_error_code")
+        return _result(
+            started_at=started_at,
+            status="completed",
+            action=request.action,
+            error_code=(
+                delivery_error_code
+                if isinstance(delivery_error_code, str) and delivery_error_code
+                else "REPORT_DELIVERY_FAILED"
+            ),
+            message=_DELIVERY_FAILURE_MESSAGE,
+            usage_metadata=usage_metadata,
+            prepare_ms=prepare_ms,
+            model_ms=model_ms,
+            commit_ms=commit_ms,
+            model_calls=1,
+            commit_result=committed,
+        )
     return _result(
         started_at=started_at,
         status="completed",
@@ -359,4 +400,5 @@ async def run_rewrite_fast_path(
         model_ms=model_ms,
         commit_ms=commit_ms,
         model_calls=1,
+        commit_result=committed,
     )
