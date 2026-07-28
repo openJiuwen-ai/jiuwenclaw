@@ -4,6 +4,7 @@ import json
 
 from jiuwenclaw.agentserver.tools.deepresearch.stream_router import (
     RouterState,
+    advance_stage,
     build_interrupt_prompt,
     collected_questions,
     route_chunk,
@@ -12,7 +13,7 @@ from jiuwenclaw.agentserver.tools.deepresearch.stream_router import (
 
 STAGE_TITLES = [
     "研究主题澄清",
-    "大纲生成与确认",
+    "大纲生成",
     "并行调研与章节撰写",
     "报告整合",
     "引用溯源与校验",
@@ -21,7 +22,17 @@ STAGE_TITLES = [
 
 
 def _stage_update(frames):
-    return next((frame for frame in frames if frame["event_type"] == "task.update"), None)
+    updates = [
+        frame for frame in frames if frame["event_type"] == "task.update"
+    ]
+    return updates[-1] if updates else None
+
+
+def _process_reasoning(frames):
+    return [
+        frame for frame in frames
+        if frame["event_type"] == "chat.reasoning" and frame.get("stream_source_id")
+    ]
 
 
 def _assert_stage(update, active_stage):
@@ -41,6 +52,106 @@ def _assert_stage(update, active_stage):
     assert update["completed_tasks"] == active_stage - 1
     assert update["in_progress_tasks"] == 1
     assert update["pending_tasks"] == 6 - active_stage
+
+
+def test_advance_stage_emits_ordered_task_reasoning_and_foreground_events():
+    frames = advance_stage(RouterState(), 1)
+
+    assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+    ]
+    assert frames[1] == {
+        "event_type": "chat.reasoning",
+        "task_id": "deepresearch_stage_1",
+        "task_content": "研究主题澄清",
+        "content": "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+    }
+    assert frames[2] == {
+        "event_type": "chat.delta",
+        "task_id": "deepresearch_stage_1",
+        "task_content": "研究主题澄清",
+        "content": "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+    }
+
+
+def test_advance_stage_backfills_every_missing_stage_in_event_order():
+    state = RouterState(current_stage=3)
+
+    frames = advance_stage(state, 6)
+
+    assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+    ]
+    updates = [
+        frame for frame in frames if frame["event_type"] == "task.update"
+    ]
+    assert [
+        next(
+            index
+            for index, task in enumerate(update["tasks"], start=1)
+            if task["status"] == "in_progress"
+        )
+        for update in updates
+    ] == [4, 5, 6]
+    assert [
+        frame["content"]
+        for frame in frames
+        if frame["event_type"] == "chat.delta"
+    ] == [
+        "[DeepResearch 阶段切换] 开始 Stage 4：报告整合\n",
+        "[DeepResearch 阶段切换] 开始 Stage 5：引用溯源与校验\n",
+        "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
+    ]
+    assert state.current_stage == 6
+
+
+def test_stage_2_uses_outline_generation_title_on_all_surfaces():
+    frames = advance_stage(RouterState(), 2)[-3:]
+
+    assert frames[0]["tasks"][1]["task_content"] == "大纲生成"
+    assert frames[1]["task_content"] == "大纲生成"
+    assert frames[1]["content"] == "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n"
+    assert frames[2]["task_content"] == "大纲生成"
+    assert frames[2]["content"] == "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n"
+
+
+def test_advance_stage_completion_keeps_all_six_completed_tasks_visible():
+    state = RouterState()
+    advance_stage(state, 6)
+
+    frames = advance_stage(state, 6, complete=True)
+
+    assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+    ]
+    update = frames[0]
+    assert len(update["tasks"]) == 6
+    assert [task["task_id"] for task in update["tasks"]] == [
+        f"deepresearch_stage_{index}" for index in range(1, 7)
+    ]
+    assert all(task["status"] == "completed" for task in update["tasks"])
+    assert frames[1]["content"] == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+    assert frames[2]["content"] == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+
+
+def test_advance_stage_does_not_repeat_or_regress_transition_messages():
+    state = RouterState()
+
+    assert advance_stage(state, 4)
+    assert advance_stage(state, 4) == []
+    assert advance_stage(state, 2) == []
 
 
 def test_workflow_nodes_advance_six_stage_snapshot():
@@ -79,13 +190,22 @@ def test_stage_snapshot_never_regresses_on_late_earlier_node():
     assert _stage_update(frames) is None
 
 
-def test_first_seen_node_emits_task_start():
+def test_stage_one_node_uses_explicit_stage_parent_without_task_boundaries():
     state = RouterState()
-    chunk = {"agent": "intent_recognition", "event": "", "content": "分析..."}
+    chunk = {
+        "agent": "intent_recognition",
+        "event": "start",
+        "reasoning_content": "分析研究需求",
+    }
     frames = route_chunk(chunk, state)
-    task_start = next(frame for frame in frames if frame["event_type"] == "task.start")
-    assert task_start["node_name"] == "intent_recognition"
-    assert task_start["task_id"] == "dr_intent_recognition"
+
+    assert not any(frame["event_type"] in {"task.start", "task.complete"} for frame in frames)
+    reasoning = _process_reasoning(frames)
+    assert [frame["content"] for frame in reasoning] == [
+        "意图识别开始\n",
+        "分析研究需求",
+    ]
+    assert all(frame["task_id"] == "deepresearch_stage_1" for frame in reasoning)
     assert state.active_nodes["intent_recognition"]["started"] is True
 
 
@@ -95,9 +215,7 @@ def test_outline_reasoning_is_nested_under_stage_two():
         RouterState(),
     )
 
-    assert [
-        frame for frame in frames if frame["event_type"] == "chat.reasoning"
-    ] == [{
+    assert _process_reasoning(frames) == [{
         "event_type": "chat.reasoning",
         "task_id": "deepresearch_stage_2",
         "task_content": "大纲生成 - 规划报告章节结构",
@@ -117,11 +235,18 @@ def test_same_node_second_chunk_no_duplicate_start():
     assert frames == []
 
 
-def test_event_done_emits_task_complete():
+def test_stage_one_event_done_emits_stage_scoped_reasoning():
     state = RouterState()
     route_chunk({"agent": "intent_recognition", "content": "a"}, state)
     frames = route_chunk({"agent": "intent_recognition", "event": "done"}, state)
-    assert any(f["event_type"] == "task.complete" for f in frames)
+    assert _process_reasoning(frames) == [{
+        "event_type": "chat.reasoning",
+        "task_id": "deepresearch_stage_1",
+        "task_content": "意图识别 - 分析研究需求",
+        "stream_source_id": "dr_intent_recognition",
+        "content": "意图识别完成\n",
+    }]
+    assert not any(frame["event_type"] == "task.complete" for frame in frames)
 
 
 def test_parallel_section_nodes_emit_nested_reasoning_without_node_task_frames():
@@ -151,9 +276,7 @@ def test_parallel_section_nodes_emit_nested_reasoning_without_node_task_frames()
             state,
         )
 
-        started_reasoning = [
-            frame for frame in started if frame["event_type"] == "chat.reasoning"
-        ]
+        started_reasoning = _process_reasoning(started)
         assert started_reasoning == [{
             "event_type": "chat.reasoning",
             "task_id": "deepresearch_stage_3",
@@ -162,9 +285,7 @@ def test_parallel_section_nodes_emit_nested_reasoning_without_node_task_frames()
             "stream_source_id": "deepresearch_section_3",
             "content": f"{display_name}开始\n",
         }]
-        completed_reasoning = [
-            frame for frame in completed if frame["event_type"] == "chat.reasoning"
-        ]
+        completed_reasoning = _process_reasoning(completed)
         assert completed_reasoning == [{
             "event_type": "chat.reasoning",
             "task_id": "deepresearch_stage_3",
@@ -196,7 +317,7 @@ def test_parallel_sections_use_explicit_stage_three_parent_without_boundaries():
     reporter_frames = route_chunk({"agent": "reporter", "event": "start"}, state)
 
     assert not any(frame["event_type"] in {"task.start", "task.complete"} for frame in section_frames)
-    section_reasoning = [frame for frame in section_frames if frame["event_type"] == "chat.reasoning"]
+    section_reasoning = _process_reasoning(section_frames)
     assert all(frame["task_id"] == "deepresearch_stage_3" for frame in section_reasoning)
     assert all(frame["stream_source_id"] == "deepresearch_section_1" for frame in section_reasoning)
     assert reporter_frames[0]["event_type"] == "task.update"
@@ -209,7 +330,7 @@ def test_stage_internal_nodes_use_explicit_parent_without_task_boundaries():
         RouterState(),
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert [frame["content"] for frame in reasoning] == ["报告整合开始\n", "整合报告"]
     assert all(frame["task_id"] == "deepresearch_stage_4" for frame in reasoning)
     assert all(frame["task_content"] == "报告整合 - 整合最终报告" for frame in reasoning)
@@ -260,14 +381,14 @@ def test_parallel_section_reasoning_keeps_authoritative_outline_title():
         state,
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     _assert_stage(_stage_update(frames), 3)
     assert all(frame["task_content"] == "核心架构设计与检索增强能力深度对比" for frame in reasoning)
     assert all(frame["stream_source_id"] == "deepresearch_section_2" for frame in reasoning)
     assert state.section_titles["2"] == "核心架构设计与检索增强能力深度对比"
 
 
-def test_plan_reasoning_message_emits_complete_original_json():
+def test_plan_reasoning_message_preserves_complete_content_in_readable_markdown():
     state = RouterState()
     frames = route_chunk(
         {
@@ -284,7 +405,7 @@ def test_plan_reasoning_message_emits_complete_original_json():
         state,
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert reasoning == [
         {
             "event_type": "chat.reasoning",
@@ -302,12 +423,9 @@ def test_plan_reasoning_message_emits_complete_original_json():
             "task_index": 1,
             "total_tasks": 1,
             "stream_source_id": "deepresearch_section_1",
-            "content": json.dumps(
-                {
-                    "title": "梳理主流记忆框架的分类、架构与数据流",
-                    "thought": "这段详细推理必须完整进入思考过程。",
-                },
-                ensure_ascii=False,
+            "content": (
+                "#### 调研计划：梳理主流记忆框架的分类、架构与数据流\n\n"
+                "调研思路：这段详细推理必须完整进入思考过程。"
             ),
         },
     ]
@@ -332,7 +450,7 @@ def test_collector_summary_response_preserves_long_text_and_line_breaks():
         state,
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert reasoning == [
         {
             "event_type": "chat.reasoning",
@@ -423,8 +541,7 @@ def test_parallel_sections_emit_one_stage_update_without_chapter_snapshots():
     assert _stage_update(completed) is None
     assert all(
         frame["stream_source_id"] == "deepresearch_section_1"
-        for frame in started + completed
-        if frame["event_type"] == "chat.reasoning"
+        for frame in _process_reasoning(started + completed)
     )
     assert repeated_success == []
 
@@ -440,7 +557,7 @@ def test_parallel_section_emits_distinct_reasoning_and_content_without_compactio
         "content": ["证据 A", {"source": "原始来源"}],
     }, state)
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert [frame["content"] for frame in reasoning] == [
         "采集评估开始\n",
         "原始推理\n第二行",
@@ -509,7 +626,7 @@ def test_sub_reporter_forwards_reasoning_without_streaming_chapter_body():
         state,
     )
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert [frame["content"] for frame in reasoning] == [
         "章节撰写开始\n",
         "正在组织章节结构",
@@ -520,7 +637,14 @@ def test_interrupt_chunk_not_forwarded():
     state = RouterState()
     frames = route_chunk({"agent": "outline_interaction", "message_type": "interrupt"}, state)
     _assert_stage(_stage_update(frames), 2)
-    assert len(frames) == 1
+    assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+    ]
 
 
 def test_status_marker_skipped():
@@ -554,7 +678,7 @@ def test_outline_content_emits_chat_reasoning_for_readonly_thinking_display():
         "content": "# 研究大纲\n\n1. 背景\n2. 方案对比",
     }, state)
 
-    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    reasoning = _process_reasoning(frames)
     assert reasoning[0] == {
         "event_type": "chat.reasoning",
         "task_id": "deepresearch_stage_2",
@@ -710,3 +834,258 @@ def test_build_interrupt_prompt_ufp_truncates_report():
     prompt = build_interrupt_prompt(state.interrupt_node_id, state, {}, "q")
     assert len(prompt) < 6200  # 截断 6000 + 占位
     assert "完整报告见最终产物" in prompt
+
+
+def test_outline_json_is_rendered_as_readable_markdown():
+    state = RouterState()
+    frames = route_chunk(
+        {
+            "agent": "outline",
+            "event": "message",
+            "content": json.dumps(
+                {
+                    "id": "outline-1",
+                    "language": "zh-CN",
+                    "thought": "先分析市场，再比较竞争格局。",
+                    "title": "行业分析",
+                    "sections": [
+                        {
+                            "id": "section-1",
+                            "title": "市场现状",
+                            "description": "分析市场规模与增长驱动因素。",
+                            "is_core_section": True,
+                        },
+                        {
+                            "id": "section-2",
+                            "title": "竞争格局",
+                            "description": "比较主要厂商及其差异。",
+                            "is_core_section": False,
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        },
+        state,
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    assert reasoning[-1]["content"] == (
+        "### 行业分析\n\n"
+        "规划思路：先分析市场，再比较竞争格局。\n\n"
+        "1. **市场现状（重点）**\n"
+        "   分析市场规模与增长驱动因素。\n"
+        "2. **竞争格局**\n"
+        "   比较主要厂商及其差异。"
+    )
+    assert '"sections"' not in reasoning[-1]["content"]
+    assert '"thought"' not in reasoning[-1]["content"]
+
+
+def test_plan_reasoning_json_is_rendered_as_readable_markdown():
+    frames = route_chunk(
+        {
+            "agent": "plan_reasoning",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "message",
+            "content": json.dumps(
+                {
+                    "id": "plan-1",
+                    "language": "zh-CN",
+                    "title": "梳理市场现状",
+                    "thought": "先确认规模，再定位增长因素。",
+                    "is_research_completed": False,
+                    "steps": [
+                        {
+                            "id": "step-1",
+                            "type": "info_collecting",
+                            "title": "收集市场规模数据",
+                            "description": "查找近三年的市场规模和增速。",
+                        },
+                        {
+                            "id": "step-2",
+                            "type": "info_collecting",
+                            "title": "识别增长驱动因素",
+                            "description": "汇总政策、需求和技术变化。",
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    assert reasoning[-1]["content"] == (
+        "#### 调研计划：梳理市场现状\n\n"
+        "调研思路：先确认规模，再定位增长因素。\n\n"
+        "状态：继续调研\n\n"
+        "1. **收集市场规模数据**\n"
+        "   查找近三年的市场规模和增速。\n"
+        "2. **识别增长驱动因素**\n"
+        "   汇总政策、需求和技术变化。"
+    )
+
+
+def test_retrieved_source_json_is_rendered_as_markdown_link():
+    frames = route_chunk(
+        {
+            "agent": "collector_info_retrieval",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "summary_response",
+            "content": json.dumps(
+                {
+                    "title": "2026 市场研究[摘要]",
+                    "url": "https://example.com/report",
+                    "query": "2026 市场规模 增长率",
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    assert reasoning[-1]["content"] == (
+        "发现资料：[2026 市场研究\\[摘要\\]](<https://example.com/report>)\n\n"
+        "检索词：2026 市场规模 增长率"
+    )
+
+
+def test_retrieved_source_does_not_link_non_http_url():
+    frames = route_chunk(
+        {
+            "agent": "collector_info_retrieval",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "summary_response",
+            "content": json.dumps(
+                {
+                    "title": "外部来源",
+                    "url": "javascript:alert(1)",
+                    "query": "市场规模",
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    assert reasoning[-1]["content"] == (
+        "发现资料：外部来源\n\n"
+        "链接：javascript\\:alert\\(1\\)\n\n"
+        "检索词：市场规模"
+    )
+    assert "](" not in reasoning[-1]["content"]
+
+
+def test_unknown_json_and_plain_text_keep_original_content():
+    state = RouterState()
+    unknown = route_chunk(
+        {
+            "agent": "collector_supervisor",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "message",
+            "content": '{"custom":"value"}',
+        },
+        state,
+    )
+    plain = route_chunk(
+        {
+            "agent": "collector_summary",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "summary_response",
+            "content": "资料已经覆盖市场规模和增速。",
+        },
+        state,
+    )
+
+    unknown_reasoning = [frame for frame in unknown if frame["event_type"] == "chat.reasoning"]
+    plain_reasoning = [frame for frame in plain if frame["event_type"] == "chat.reasoning"]
+    assert unknown_reasoning[-1]["content"] == '{"custom":"value"}'
+    assert plain_reasoning[-1]["content"] == "资料已经覆盖市场规模和增速。"
+
+
+def test_target_nodes_keep_incomplete_json_unchanged():
+    cases = [
+        ("outline", '{"title":"not-an-outline","custom":"value"}'),
+        ("plan_reasoning", '{"title":"not-a-plan","custom":"value"}'),
+        ("collector_info_retrieval", '{"title":"not-a-source","custom":"value"}'),
+    ]
+
+    for agent, raw_content in cases:
+        frames = route_chunk(
+            {
+                "agent": agent,
+                "section_idx": "1",
+                "section_title": "市场现状",
+                "event": "message",
+                "content": raw_content,
+            },
+            RouterState(),
+        )
+
+        reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+        assert reasoning[-1]["content"] == raw_content
+
+
+def test_outline_display_fields_cannot_create_links_or_raw_html():
+    frames = route_chunk(
+        {
+            "agent": "outline",
+            "event": "message",
+            "content": json.dumps(
+                {
+                    "title": '[mail](mailto:test@example.com)<a href="https://evil.example">x</a>',
+                    "thought": "[internal](/models)",
+                    "sections": [
+                        {
+                            "title": "[section](https://evil.example)",
+                            "description": '<a href="https://evil.example">危险</a>',
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    content = reasoning[-1]["content"]
+    assert "](" not in content
+    assert r"\[mail\]\(mailto" in content
+    assert r"\<a href" in content
+
+
+def test_retrieved_source_allows_only_constructed_http_link():
+    frames = route_chunk(
+        {
+            "agent": "collector_info_retrieval",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "summary_response",
+            "content": json.dumps(
+                {
+                    "title": "[mail](mailto:test@example.com)",
+                    "url": "https://example.com/report",
+                    "query": '[internal](/models)<a href="https://evil.example">x</a>',
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    content = reasoning[-1]["content"]
+    assert content.count("](") == 1
+    assert r"\[mail\]\(mailto" in content
+    assert r"\[internal\]\(\/models\)" in content
+    assert r"\<a href" in content

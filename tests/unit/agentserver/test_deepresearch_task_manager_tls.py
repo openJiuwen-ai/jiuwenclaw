@@ -173,15 +173,15 @@ async def test_styled_tls_scope_preserves_concurrent_external_update(monkeypatch
     monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
     monkeypatch.setattr(
         dt,
-        "_build_bridge_env",
-        lambda _source: {"LLM_SSL_VERIFY": "resolved-by-bridge"},
+        "read_env",
+        lambda _name, _default: "resolved-by-overlay",
     )
     entry_started = asyncio.Event()
     allow_entry = asyncio.Event()
 
     @asynccontextmanager
     async def fake_context_factory(_llm_config):
-        assert os.environ.get("LLM_SSL_VERIFY") == "resolved-by-bridge"
+        assert os.environ.get("LLM_SSL_VERIFY") == "resolved-by-overlay"
         entry_started.set()
         await allow_entry.wait()
         yield "runtime-llm"

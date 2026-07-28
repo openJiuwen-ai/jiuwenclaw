@@ -36,7 +36,7 @@ from jiuwenclaw.agentserver.tools.deepresearch.tls import (
     DEEPRESEARCH_TLS_ENV_LOCK as _REPORT_STYLE_LLM_INIT_LOCK,
     scoped_deepresearch_tls_env,
 )
-from jiuwenclaw.local_env_config import export_agent_environ
+from jiuwenclaw.local_env_config import export_agent_environ, read_env
 
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
@@ -66,6 +66,9 @@ _OUTLINE_TITLE_CACHES_GUARD = threading.Lock()
 # 使用 contextvars
 _deepresearch_route_ctx: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
     "jiuwenclaw_deepresearch_route", default=None
+)
+_deepresearch_router_state_ctx: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "jiuwenclaw_deepresearch_router_state", default=None
 )
 
 
@@ -330,19 +333,27 @@ def _write_report_markdown(
 def _build_styled_export_llm_config() -> dict:
     """Build llm_config dict for the SDK's report_style_llm_context().
 
-    Resolves LLM credentials via the same bridge-env logic
-    (``_build_bridge_env``) used by the skill subprocess, ensuring
-    identical API KEY resolution (DeepSearch-专属 → 项目全局 fallback,
-    provider-to-type mapping, SSL defaults).
+    Resolves LLM credentials from the active request/tenant configuration,
+    using the same DeepSearch-specific to project-global fallback rules as
+    the task manager.
     The SDK's LLMConfig only accepts ``"openai"`` or ``"siliconflow"``
     as model_type; most providers are OpenAI-compatible and default to
     ``"openai"``.
     """
-    bridge_env = _build_bridge_env(os.environ)
-    api_key = bridge_env.get("LLM_API_KEY", "")
-    model_name = bridge_env.get("LLM_MODEL_NAME", "")
-    base_url = bridge_env.get("LLM_BASE_URL", "")
-    model_type = bridge_env.get("LLM_MODEL_TYPE", "openai").lower()
+    resolved = load_deepresearch_config()
+    api_key = resolved["LLM_API_KEY"].strip()
+    model_name = resolved["LLM_MODEL_NAME"].strip()
+    base_url = resolved["LLM_BASE_URL"].strip()
+    model_type = _map_provider_to_type(resolved["LLM_MODEL_TYPE"]).lower()
+
+    if (
+        not api_key
+        or not model_name
+        or not base_url
+    ):
+        raise ValueError("styled HTML LLM configuration is invalid")
+    if "example.com" in base_url.lower():
+        raise ValueError("styled HTML LLM configuration is invalid")
 
     # LLMConfig.model_type only allows "openai" or "siliconflow";
     # map everything else to "openai" (OpenAI-compatible).
@@ -371,7 +382,7 @@ async def _scoped_report_style_llm_context(context_factory, llm_config):
     async with AsyncExitStack() as stack:
         async with scoped_deepresearch_tls_env(
             lambda: {
-                "LLM_SSL_VERIFY": _build_bridge_env(os.environ)["LLM_SSL_VERIFY"]
+                "LLM_SSL_VERIFY": read_env("LLM_SSL_VERIFY", "false")
             }
         ):
             llm = await stack.enter_async_context(context_factory(llm_config))
@@ -1541,8 +1552,14 @@ def _normalize_feedback_handler_resume_feedback(
     return feedback
 
 
-async def _call_deepresearch_stream_impl(**kwargs) -> str:
-    return await getattr(deepresearch_stream, "_func")(**kwargs)
+async def _call_deepresearch_stream_impl(
+    *, _router_state: object | None = None, **kwargs
+) -> str:
+    token = _deepresearch_router_state_ctx.set(_router_state)
+    try:
+        return await getattr(deepresearch_stream, "_func")(**kwargs)
+    finally:
+        _deepresearch_router_state_ctx.reset(token)
 
 
 @tool(
@@ -1650,7 +1667,20 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
 
     push = WebSocketGatewayPushTransport()
     cached_titles = outline_title_cache.get(conversation_id, {}) if action == "resume" else {}
-    state = RouterState(section_titles=dict(cached_titles))
+    existing_state = _deepresearch_router_state_ctx.get()
+    resume_stage = (
+        1
+        if action == "resume" and node == "feedback_handler"
+        else 0
+    )
+    state = (
+        existing_state
+        if existing_state is not None
+        else RouterState(
+            section_titles=dict(cached_titles),
+            current_stage=resume_stage,
+        )
+    )
     outcome_cid = conversation_id
 
     async def _send(payload: dict) -> bool:
@@ -1727,9 +1757,8 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                     initial_stage = 2
                 elif action == "resume" and node == "user_feedback_processor":
                     initial_stage = 6
-                stage_update = advance_stage(state, initial_stage)
-                if stage_update is not None:
-                    await _send(stage_update)
+                for stage_payload in advance_stage(state, initial_stage):
+                    await _send(stage_payload)
                 await _send({"event_type": "chat.processing_status",
                              "is_processing": True,
                              "current_task": status})
@@ -1785,9 +1814,8 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                 # breaking here makes finally terminate the resumable subprocess.
                 continue
             if status == "completed":
-                delivery_update = advance_stage(state, 6)
-                if delivery_update is not None:
-                    await _send(delivery_update)
+                for stage_payload in advance_stage(state, 6):
+                    await _send(stage_payload)
                 final_result = chunk.get("final_result")
                 response_content = (
                     final_result.get("response_content", "")
@@ -1848,9 +1876,8 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                     break
 
                 if report_delivered:
-                    completed_update = advance_stage(state, 6, complete=True)
-                    if completed_update is not None:
-                        await _send(completed_update)
+                    for stage_payload in advance_stage(state, 6, complete=True):
+                        await _send(stage_payload)
                     outcome = {
                         "status": "completed",
                         "conversation_id": chunk.get("conversation_id", outcome_cid),
@@ -1930,6 +1957,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
             feedback='{"interrupt_feedback":"accepted","feedback":""}',
             node="outline_interaction",
             file_name=file_name,
+            _router_state=state,
         )
     return json.dumps(outcome, ensure_ascii=False)
 
