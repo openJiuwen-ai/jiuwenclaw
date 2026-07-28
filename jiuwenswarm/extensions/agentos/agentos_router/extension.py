@@ -53,6 +53,10 @@ class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
             ssh_relay=self._ssh_relay,
             ssh_channel_endpoint=config.ssh_channel,
             workspace_root=config.workspace_root,
+            sandbox_idle_timeout_seconds=config.sandbox_idle_timeout_seconds,
+            sandbox_idle_check_interval_seconds=(
+                config.sandbox_idle_check_interval_seconds
+            ),
         )
         self._third_agent = AgentOSThirdAgent(self._router_client)
         self._closed = False

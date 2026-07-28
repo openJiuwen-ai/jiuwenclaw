@@ -4,7 +4,7 @@ import { renderTeamPanel } from "./components/team-panel.js";
 import { isTeamWorking } from "./components/team-shared.js";
 import { renderTodoList } from "./components/todo-list.js";
 import { APP_SCREEN_KEY_BINDINGS } from "./keymap.js";
-import { padToWidth, renderWrappedText } from "./rendering/text.js";
+import { padToWidth, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
 import { palette } from "./theme.js";
 import { buildTranscriptLines } from "./transcript-renderer.js";
 import { loadTuiConfig } from "../core/tui-config-store.js";
@@ -255,9 +255,9 @@ function renderBtwOverlay(
     };
   }
 
-  const answerLines = overlay.answer
-    .split("\n")
-    .flatMap((line) => renderWrappedText(safeWidth, line, palette.text.secondary));
+  const answerLines = renderStyledMarkdownLines(safeWidth, overlay.answer, {
+    color: palette.text.secondary,
+  });
   const maxOffset = Math.max(0, answerLines.length - bodyHeight);
   const offset = Math.min(maxOffset, Math.max(0, Math.floor(scrollOffset)));
   const visibleAnswerLines = answerLines.slice(offset, offset + bodyHeight);
@@ -270,12 +270,12 @@ function renderBtwOverlay(
   const showHistory = total > 1;
   const posLabel = showHistory ? `${(overlayIndex ?? 0) + 1}/${total}` : "";
   // 用数组拼接避免尾部多余管道符（不可滚动分支末尾不再出现 " | "）
-  const hintParts = ["Esc dismiss"];
+  const hintParts = ["Esc/Enter/Space/ctrl+c dismiss"];
   if (showHistory) hintParts.push(`←/→ history ${posLabel}`);
   hintParts.push("c copy");
   hintParts.push("x delete");
   if (answerLines.length > bodyHeight) {
-    hintParts.push("↑/↓ scroll", "PgUp/PgDn page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
+    hintParts.push("↑/↓ scroll", "PgUp/PgDn·ctrl+p/n page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
   }
   const scrollHint = hintParts.join(" | ");
 
@@ -296,6 +296,19 @@ function buildShortcutLines(width: number): string[] {
     " ".repeat(width),
   ];
   return lines;
+}
+
+function renderBtwLoading(width: number, question: string, animationPhase: number): string[] {
+  const pulseTone = [
+    palette.text.dim,
+    palette.text.secondary,
+    palette.text.accent,
+    palette.text.secondary,
+  ][animationPhase % 4]!;
+  return renderWrappedText(
+    width,
+    `${pulseTone("●")} ${palette.text.dim(`Answering: ${question} (Esc to cancel)`)}`,
+  );
 }
 
 export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayoutOptions): string[] {
@@ -351,11 +364,15 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
           options.viewedTeamMemberId,
         )
       : [];
+  const btwLoadingLines = snapshot.btwPendingQuestion
+    ? renderBtwLoading(options.width, snapshot.btwPendingQuestion, options.animationPhase)
+    : [];
   const fixedLinesBeforeBtw = [
     ...todoLines,
     ...(todoLines.length > 0 && teamPanelLines.length > 0 ? [" ".repeat(options.width)] : []),
     ...teamPanelLines,
     ...options.questionLines,
+    ...btwLoadingLines,
   ];
   const fixedLinesAfterBtw = [
     ...options.editorLines,

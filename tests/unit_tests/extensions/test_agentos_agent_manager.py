@@ -179,6 +179,79 @@ def test_normalize_agent_key_fields_defaults_and_aliases() -> None:
 
 
 @pytest.mark.asyncio
+async def test_acquire_and_release_track_task_count() -> None:
+    agent_manager = AgentManager()
+
+    first = await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", acquire=True
+    )
+    assert first.task_count == 1
+
+    second = await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", acquire=True
+    )
+    assert second.task_count == 2
+
+    await agent_manager.release(first.key)
+    await agent_manager.release(first.key)
+    fetched = await agent_manager.get_agent("u1", "jiuwenswarm")
+    assert fetched is not None
+    assert fetched.task_count == 0
+
+    # Extra release stays floored at zero; release on a missing key is a no-op.
+    await agent_manager.release(first.key)
+    fetched = await agent_manager.get_agent("u1", "jiuwenswarm")
+    assert fetched.task_count == 0
+    await agent_manager.delete_agent("u1", "jiuwenswarm")
+    await agent_manager.release(first.key)
+
+
+@pytest.mark.asyncio
+async def test_pop_if_idle_respects_holds_and_staleness() -> None:
+    agent_manager = AgentManager()
+
+    async def creator(agent: AgentInfo) -> AgentInfo:
+        agent.sandbox_id = "sandbox-1"
+        return agent
+
+    held = await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=creator, acquire=True
+    )
+    key = held.key
+
+    # Held (task_count > 0): never reclaimed even when "stale".
+    await asyncio.sleep(0.05)
+    assert await agent_manager.pop_if_idle(key, 0.01) is None
+
+    # Released but not idle long enough.
+    await agent_manager.release(key)
+    assert await agent_manager.pop_if_idle(key, 60.0) is None
+
+    # Released and stale: reclaimed atomically with sandbox info preserved.
+    await asyncio.sleep(0.05)
+    reclaimed = await agent_manager.pop_if_idle(key, 0.01)
+    assert reclaimed is not None
+    assert reclaimed.info.status is AgentStatus.DELETED
+    assert reclaimed.info.sandbox_id == "sandbox-1"
+    assert await agent_manager.get_agent("u1", "jiuwenswarm") is None
+
+    # Missing key after pop.
+    assert await agent_manager.pop_if_idle(key, 0.01) is None
+
+
+@pytest.mark.asyncio
+async def test_pop_if_idle_disabled_with_nonpositive_timeout() -> None:
+    agent_manager = AgentManager()
+    runtime = await agent_manager.get_or_create_agent("u1", "jiuwenswarm")
+    await asyncio.sleep(0.05)
+
+    assert await agent_manager.pop_if_idle(runtime.key, 0) is None
+    assert await agent_manager.pop_if_idle(runtime.key, -1) is None
+    assert await agent_manager.get_agent("u1", "jiuwenswarm") is not None
+    assert await agent_manager.list_keys() == [runtime.key]
+
+
+@pytest.mark.asyncio
 async def test_session_scoped_key_creates_independent_agents() -> None:
     agent_manager = AgentManager(
         key_fields=["user_id", "agent_type", "session_id"]

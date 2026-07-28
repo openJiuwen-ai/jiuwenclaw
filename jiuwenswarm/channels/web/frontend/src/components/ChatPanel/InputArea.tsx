@@ -1872,10 +1872,9 @@ export function InputArea({
             >
               <WorkIcon name="folder" className="chat-work-select__root-icon" />
               <span>{getProjectLabel(displayedProject, t('multiSession.project.chooseProjectDirectory'))}</span>
-              <WorkIcon
-                className="chat-work-select__chevron"
-                name={workMenuOpen === 'project' ? 'collapse' : 'expand'}
-              />
+              <svg className="chat-work-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+              </svg>
             </button>
             {displayedProject && !isWorkContextLocked ? (
               <span className="chat-work-select__clear-wrap" aria-hidden="false">
@@ -2146,7 +2145,11 @@ function ModelSelector({
 
   if (chatAvailableModels.length === 0) return null;
 
-  const displayedModelName = lockedToDefault ? defaultModelName : selectedModelName;
+  // 集群模式下 UI 禁止手动改模型（见下方 disabled/tooltip），但显示仍应优先反映
+  // 该会话实际记录的模型（如定时任务在集群模式下显式指定了非默认模型，后端也确实
+  // 按该模型执行——见 bug002 回归），而不是不管三七二十一恒显示全局默认模型；
+  // 从未指定过模型的会话 selectedModelName 本就兜底等于默认模型，行为不变。
+  const displayedModelName = selectedModelName || defaultModelName;
   const selectedModel =
     chatAvailableModels.find((m) => (m.alias || m.model_name) === displayedModelName) ??
     chatAvailableModels[0];

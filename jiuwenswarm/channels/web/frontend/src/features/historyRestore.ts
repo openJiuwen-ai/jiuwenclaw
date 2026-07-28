@@ -1,6 +1,7 @@
 import { Message, MessageRole, UsageSummary, FileDownloadItem, MediaItem, WsEvent } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
+import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
 
 export const HISTORY_GET_METHOD = 'history.get';
@@ -692,7 +693,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
           },
         });
       } else if (e.kind === 'file_items') {
-        pendingFileItems = e.files;
+        pendingFileItems = mergeFileDownloadItems(pendingFileItems, e.files);
       } else if (e.kind === 'team_member' || e.kind === 'team_task') {
         teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
       } else {
@@ -847,7 +848,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
           },
         });
       } else if (e.kind === 'file_items') {
-        pendingFileItems = e.files;
+        pendingFileItems = mergeFileDownloadItems(pendingFileItems, e.files);
       } else if (e.kind === 'team_member' || e.kind === 'team_task') {
         teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
       } else {
