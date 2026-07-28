@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.dotenv_early import DESKTOP_PRESERVED_ENV_KEYS, load_dotenv_runtime
+from jiuwenswarm.dotenv_early import (
+    CLI_PORTS_ENV_FLAG,
+    DESKTOP_PRESERVED_ENV_KEYS,
+    load_dotenv_runtime,
+)
 from jiuwenswarm.instance_manager.config import BASE_PORTS, calculate_instance_ports
 
 
@@ -39,6 +43,7 @@ def test_load_dotenv_runtime_preserves_desktop_ports(tmp_path: Path, monkeypatch
     )
 
     monkeypatch.setenv("JIUWENSWARM_DESKTOP", "1")
+    monkeypatch.delenv(CLI_PORTS_ENV_FLAG, raising=False)
     monkeypatch.setenv("WEB_PORT", "20000")
     monkeypatch.setenv("GATEWAY_PORT", "20001")
     monkeypatch.setenv("AGENT_SERVER_PORT", "19092")
@@ -62,6 +67,7 @@ def test_load_dotenv_runtime_drops_stale_agent_server_url(tmp_path: Path, monkey
     )
 
     monkeypatch.setenv("JIUWENSWARM_DESKTOP", "1")
+    monkeypatch.delenv(CLI_PORTS_ENV_FLAG, raising=False)
     monkeypatch.setenv("AGENT_SERVER_PORT", "19092")
     monkeypatch.delenv("AGENT_SERVER_URL", raising=False)
 
@@ -81,6 +87,7 @@ def test_load_dotenv_runtime_non_desktop_keeps_agent_server_url(
     )
 
     monkeypatch.delenv("JIUWENSWARM_DESKTOP", raising=False)
+    monkeypatch.delenv(CLI_PORTS_ENV_FLAG, raising=False)
     monkeypatch.delenv("AGENT_SERVER_URL", raising=False)
 
     load_dotenv_runtime(env_file, override=True)
@@ -93,11 +100,66 @@ def test_load_dotenv_runtime_non_desktop_allows_override(tmp_path: Path, monkeyp
     env_file.write_text("WEB_PORT=11111\n", encoding="utf-8")
 
     monkeypatch.delenv("JIUWENSWARM_DESKTOP", raising=False)
+    monkeypatch.delenv(CLI_PORTS_ENV_FLAG, raising=False)
     monkeypatch.setenv("WEB_PORT", "20000")
 
     load_dotenv_runtime(env_file, override=True)
 
     assert os.environ["WEB_PORT"] == "11111"
+
+
+def test_load_dotenv_runtime_preserves_cli_ports(tmp_path: Path, monkeypatch):
+    """Issue #2749: jiuwenswarm-start injected ports must beat stale .env.
+
+    Scenario: a prior fallback left GATEWAY_PORT=20001 in .env, while this
+    launch's banner / child env decided on index-0 defaults (19001). Without
+    JIUWENSWARM_CLI_PORTS preservation, load_dotenv(override=True) would make
+    Gateway bind 20001 while the start banner still prints 19001.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "WEB_PORT=11111\nGATEWAY_PORT=22222\nAGENT_SERVER_PORT=33333\nFRONTEND_PORT=44444\n"
+        "AGENT_SERVER_URL=ws://127.0.0.1:18092\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("JIUWENSWARM_DESKTOP", raising=False)
+    monkeypatch.setenv(CLI_PORTS_ENV_FLAG, "1")
+    monkeypatch.setenv("WEB_PORT", "19000")
+    monkeypatch.setenv("GATEWAY_PORT", "19001")
+    monkeypatch.setenv("AGENT_SERVER_PORT", "18092")
+    monkeypatch.setenv("AGENT_PORT", "18092")
+    monkeypatch.setenv("FRONTEND_PORT", "5173")
+    monkeypatch.delenv("AGENT_SERVER_URL", raising=False)
+
+    load_dotenv_runtime(env_file, override=True)
+
+    assert os.environ["WEB_PORT"] == "19000"
+    assert os.environ["GATEWAY_PORT"] == "19001"
+    assert os.environ["AGENT_SERVER_PORT"] == "18092"
+    assert os.environ["AGENT_PORT"] == "18092"
+    assert os.environ["FRONTEND_PORT"] == "5173"
+    assert "AGENT_SERVER_URL" not in os.environ
+
+
+def test_load_dotenv_runtime_cli_ports_drops_stale_agent_server_url(
+    tmp_path: Path, monkeypatch
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AGENT_SERVER_URL=ws://127.0.0.1:18092\nAGENT_SERVER_PORT=33333\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("JIUWENSWARM_DESKTOP", raising=False)
+    monkeypatch.setenv(CLI_PORTS_ENV_FLAG, "1")
+    monkeypatch.setenv("AGENT_SERVER_PORT", "18092")
+    monkeypatch.delenv("AGENT_SERVER_URL", raising=False)
+
+    load_dotenv_runtime(env_file, override=True)
+
+    assert os.environ["AGENT_SERVER_PORT"] == "18092"
+    assert "AGENT_SERVER_URL" not in os.environ
 
 
 def test_resolve_desktop_ports_uses_default_group(desktop_app, monkeypatch):
