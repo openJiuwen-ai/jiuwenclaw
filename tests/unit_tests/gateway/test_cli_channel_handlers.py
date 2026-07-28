@@ -48,11 +48,15 @@ class FakeMessageHandler:
         self.scheduled = []
         self.reconnected = []
 
-    async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+    async def cancel_agent_sessions_on_disconnect(
+        self, session_keys, *, stale_request_keys=None, user_id=None
+    ):
         self.cancelled.append((session_keys, stale_request_keys or []))
         return True
 
-    async def schedule_cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+    async def schedule_cancel_agent_sessions_on_disconnect(
+        self, session_keys, *, stale_request_keys=None, user_id=None
+    ):
         self.scheduled.append((session_keys, stale_request_keys or []))
 
     def cancel_scheduled_disconnect_cancel(self, channel_id, session_id):
@@ -65,13 +69,17 @@ class BlockingDisconnectMessageHandler(FakeMessageHandler):
         super().__init__()
         self.cancel_started = asyncio.Event()
 
-    async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+    async def cancel_agent_sessions_on_disconnect(
+        self, session_keys, *, stale_request_keys=None, user_id=None
+    ):
         self.cancel_started.set()
         await asyncio.Future()
 
 
 class FailedDisconnectMessageHandler(FakeMessageHandler):
-    async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+    async def cancel_agent_sessions_on_disconnect(
+        self, session_keys, *, stale_request_keys=None, user_id=None
+    ):
         self.cancelled.append((session_keys, stale_request_keys or []))
         return False
 

@@ -1095,6 +1095,7 @@ class MessageHandler(ABC):
         session_keys: list[tuple[str, str]],
         *,
         stale_request_keys: list[tuple[str, str]] | None = None,
+        user_id: str | None = None,
     ) -> bool:
         """取消仍绑定在断开连接上的会话（与显式 chat.interrupt 对齐）。
 
@@ -1133,7 +1134,7 @@ class MessageHandler(ABC):
                 continue
             seen.add(sid)
             self.cancel_scheduled_disconnect_cancel(_channel_id, sid)
-            cleaned = await self._cancel_disconnect_session(_channel_id, sid)
+            cleaned = await self._cancel_disconnect_session(_channel_id, sid, user_id=user_id)
             all_cleaned = cleaned and all_cleaned
         return all_cleaned
 
@@ -1143,6 +1144,7 @@ class MessageHandler(ABC):
         *,
         stale_request_keys: list[tuple[str, str]] | None = None,
         delay_seconds: float = _TUI_DISCONNECT_CANCEL_GRACE_SECONDS,
+        user_id: str | None = None,
     ) -> None:
         """Schedule a disconnect cancel unless the same session reconnects first."""
         merged, recovered_via_requests = self._merge_disconnect_session_keys(
@@ -1169,7 +1171,9 @@ class MessageHandler(ABC):
             seen.add(task_key)
             self.cancel_scheduled_disconnect_cancel(channel_id, sid)
             task = asyncio.create_task(
-                self._delayed_disconnect_cancel(channel_id, sid, delay_seconds)
+                self._delayed_disconnect_cancel(
+                    channel_id, sid, delay_seconds, user_id=user_id
+                )
             )
             self._disconnect_cancel_tasks[task_key] = task
 
@@ -1221,7 +1225,12 @@ class MessageHandler(ABC):
 
         return merged, recovered_via_requests
 
-    def _build_disconnect_cancel_message(self, channel_id: str, session_id: str) -> "Message":
+    def _build_disconnect_cancel_message(
+        self,
+        channel_id: str,
+        session_id: str,
+        user_id: str | None = None,
+    ) -> "Message":
         from jiuwenswarm.common.schema.message import Message, ReqMethod
 
         disconnect_params = {
@@ -1247,10 +1256,16 @@ class MessageHandler(ABC):
             ok=True,
             req_method=ReqMethod.CHAT_CANCEL,
             is_stream=False,
+            user_id=user_id,
         )
 
-    async def _cancel_disconnect_session(self, channel_id: str, session_id: str) -> bool:
-        stub = self._build_disconnect_cancel_message(channel_id, session_id)
+    async def _cancel_disconnect_session(
+        self,
+        channel_id: str,
+        session_id: str,
+        user_id: str | None = None,
+    ) -> bool:
+        stub = self._build_disconnect_cancel_message(channel_id, session_id, user_id=user_id)
         try:
             return bool(
                 await self._cancel_agent_work_for_session(
@@ -1273,11 +1288,12 @@ class MessageHandler(ABC):
         channel_id: str,
         session_id: str,
         delay_seconds: float,
+        user_id: str | None = None,
     ) -> None:
         task_key = (channel_id, session_id)
         try:
             await asyncio.sleep(max(0.0, delay_seconds))
-            await self._cancel_disconnect_session(channel_id, session_id)
+            await self._cancel_disconnect_session(channel_id, session_id, user_id=user_id)
         finally:
             if self._disconnect_cancel_tasks.get(task_key) is asyncio.current_task():
                 self._disconnect_cancel_tasks.pop(task_key, None)
@@ -3248,6 +3264,7 @@ class MessageHandler(ABC):
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
             is_stream=True,
+            user_id=getattr(msg, "user_id", None),
         )
 
     async def _send_non_stream_agent_request(
@@ -3480,6 +3497,7 @@ class MessageHandler(ABC):
                             is_stream=False,
                             timestamp=time.time(),
                             metadata=msg.metadata,
+                            user_id=getattr(msg, "user_id", None),
                         )
                         try:
                             resp = await self._send_non_stream_agent_request(supplement_env)
