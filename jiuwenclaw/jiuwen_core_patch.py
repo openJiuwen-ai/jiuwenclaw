@@ -858,6 +858,9 @@ def _patch_railed_model_call_session() -> None:
     around llm.invoke/stream calls so RetryMixin._notify_retry_start can reach the frontend."""
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 
+    if not hasattr(ReActAgent, "_railed_model_call"):
+        return
+
     _orig_railed_model_call = ReActAgent._railed_model_call  # pylint: disable=protected-access
 
     async def _patched_railed_model_call(self, ctx):

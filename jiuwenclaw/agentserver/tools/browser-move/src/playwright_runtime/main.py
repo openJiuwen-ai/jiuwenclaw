@@ -18,7 +18,12 @@ _SRC_ROOT = _HERE.parent
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
+from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from playwright_runtime import REPO_ROOT  # noqa: F401
+
+# Apply the same OpenAI client compatibility patch used by the main services
+# so browser runtime can parse non-standard string responses as well.
+apply_openai_model_client_patch()
 
 # Inject browser-move client subclasses before openjiuwen's ToolMgr is used,
 # so that our retry/timeout/reconnect logic is active without modifying openjiuwen.

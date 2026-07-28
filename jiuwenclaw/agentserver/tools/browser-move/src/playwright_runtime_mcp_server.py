@@ -29,7 +29,12 @@ for _p in (str(_REPO_ROOT), str(_SRC_ROOT)):
 
 from fastmcp import Context, FastMCP
 from jiuwenclaw.browser_timeout_policy import resolve_browser_task_timeout
+from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from playwright_runtime.openjiuwen_monkeypatch import apply_openjiuwen_monkeypatch
+
+# Apply the same OpenAI client compatibility patch used by the main services
+# so browser runtime can parse non-standard string responses as well.
+apply_openai_model_client_patch()
 
 # Inject browser-move client subclasses before openjiuwen's ToolMgr is used,
 # so retry/timeout/reconnect logic is active in MCP server mode as well.
