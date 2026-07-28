@@ -3639,17 +3639,6 @@ export function ConfigPanel({
     return next;
   }, [config, i18n.language]);
 
-  useEffect(() => {
-    setDraftValues(normalizedConfig);
-    setError(null);
-    setModelError(null);
-  }, [normalizedConfig]);
-
-  useEffect(() => {
-    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
-    setModelError(null);
-  }, [storeAvailableModels]);
-
   const agentsFromConfig = useMemo<AgentEntry[]>(() => {
     const agents: AgentEntry[] = [];
     for (let i = 0; i < 10; i++) {
@@ -3899,9 +3888,31 @@ export function ConfigPanel({
     return false;
   }, [draftAgents, draftTeams, initialAgents, initialTeams]);
   const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
+  const hasChangesRef = useRef(hasChanges);
+  hasChangesRef.current = hasChanges;
   useEffect(() => {
     onHasChangesChange?.(hasChanges);
   }, [hasChanges, onHasChangesChange]);
+
+  // Keep local drafts while the user is editing; resync from the store when clean
+  // or after an explicit allow (initial load / cancel / successful save).
+  const allowConfigStoreSyncRef = useRef(true);
+  const allowModelsStoreSyncRef = useRef(true);
+  useEffect(() => {
+    if (!allowConfigStoreSyncRef.current && hasChangesRef.current) return;
+    allowConfigStoreSyncRef.current = false;
+    setDraftValues(normalizedConfig);
+    setError(null);
+    setModelError(null);
+  }, [normalizedConfig]);
+
+  useEffect(() => {
+    if (!allowModelsStoreSyncRef.current && hasChangesRef.current) return;
+    allowModelsStoreSyncRef.current = false;
+    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    setModelError(null);
+  }, [storeAvailableModels]);
+
   const missingRequiredModelFields = useMemo(
     () => REQUIRED_MODEL_FIELDS.filter((key) => {
       if (key === "api_key" && isOpenAIAccountProvider(draftValues.model_provider)) {
@@ -4081,6 +4092,7 @@ export function ConfigPanel({
         setAgentsTeamsEdited(false);
         setAgentsTeamsUserEdited(false);
       }
+      allowModelsStoreSyncRef.current = true;
       if (onModelsRefresh) {
         await onModelsRefresh();
       }
@@ -4218,6 +4230,8 @@ export function ConfigPanel({
           payload.team = agentsTeamsPayload.team;
         }
         await onSaveAllConfig(payload);
+        allowConfigStoreSyncRef.current = true;
+        allowModelsStoreSyncRef.current = true;
         if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
           setAgentsTeamsJustSaved(true);
@@ -4232,6 +4246,7 @@ export function ConfigPanel({
         // 兼容旧后端：按旧接口顺序保存，但只在普通配置实际变化时调用 config.set。
         if (hasModelChanges && onModelsReplaceAll) {
           await onModelsReplaceAll(draftModels);
+          allowModelsStoreSyncRef.current = true;
           if (onModelsRefresh) await onModelsRefresh();
         }
         if (hasAgentsTeamsChanges && onAgentsTeamsSave) {
@@ -4248,6 +4263,7 @@ export function ConfigPanel({
         }
         if (hasConfigChanges) {
           await onSaveConfig(configUpdates);
+          allowConfigStoreSyncRef.current = true;
         }
       }
     } catch (saveError) {
@@ -4271,6 +4287,11 @@ export function ConfigPanel({
           <div className="flex items-center gap-2">
             {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
               <span className="text-xs text-warn">{t('config.errors.processingDisabled')}</span>
+            ) : null}
+            {hasChanges ? (
+              <span className="text-xs text-warn" role="status">
+                {t('config.unsavedChanges')}
+              </span>
             ) : null}
             <button
               type="button"
@@ -4350,9 +4371,14 @@ export function ConfigPanel({
                 </button>
               ))}
             </div>
-            <div className="flex-1 min-h-0 overflow-auto pr-1 space-y-3 pt-1">
-              {configTab === "model" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-model" className="space-y-3 pb-2">
+            <div className="flex-1 min-h-0 overflow-auto pr-1 pt-1">
+              {/* Keep tab panels mounted so in-progress edits (e.g. add-model form) survive tab switches. */}
+              <div
+                role="tabpanel"
+                aria-labelledby="config-tab-model"
+                hidden={configTab !== "model"}
+                className="space-y-3 pb-2"
+              >
                   {modelError ? (
                     <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {modelError}
@@ -4422,11 +4448,14 @@ export function ConfigPanel({
                       t={t}
                     />
                   ))}
-                </div>
-              ) : null}
+              </div>
 
-              {configTab === "agent" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-agent" className="space-y-3 pb-2">
+              <div
+                role="tabpanel"
+                aria-labelledby="config-tab-agent"
+                hidden={configTab !== "agent"}
+                className="space-y-3 pb-2"
+              >
                   <div id="config-group-agents" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
                     <div className="w-full flex items-center justify-between px-4 py-3 bg-secondary/30">
                       <span className="flex items-center gap-3 min-w-0">
@@ -4487,12 +4516,14 @@ export function ConfigPanel({
                       />
                     </div>
                   </div>
-                </div>
-              ) : null
-              }
+              </div>
 
-              {configTab === "security" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-security" className="space-y-3 pb-2">
+              <div
+                role="tabpanel"
+                aria-labelledby="config-tab-security"
+                hidden={configTab !== "security"}
+                className="space-y-3 pb-2"
+              >
                   {securityGroups.length === 0 ? (
                     <p className="text-sm text-text-muted px-1">{t("config.tabEmpty.security")}</p>
                   ) : (
@@ -4513,11 +4544,14 @@ export function ConfigPanel({
                       />
                     ))
                   )}
-                </div>
-              ) : null}
+              </div>
 
-              {configTab === "other" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-other" className="space-y-3 pb-2">
+              <div
+                role="tabpanel"
+                aria-labelledby="config-tab-other"
+                hidden={configTab !== "other"}
+                className="space-y-3 pb-2"
+              >
                   {otherTabGroups.length === 0 ? (
                     <p className="text-sm text-text-muted px-1">{t("config.tabEmpty.other")}</p>
                   ) : (
@@ -4532,8 +4566,7 @@ export function ConfigPanel({
                       />
                     ))
                   )}
-                </div>
-              ) : null}
+              </div>
             </div>
           </div>
         )}

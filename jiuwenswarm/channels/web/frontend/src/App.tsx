@@ -292,6 +292,9 @@ function AppContent() {
   const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
+  const [hasVisitedConfig, setHasVisitedConfig] = useState(false);
+  /** Bumped when the user chooses to discard drafts and reload config from the server. */
+  const [configPanelMountKey, setConfigPanelMountKey] = useState(0);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
   const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
   const [modelSetupGuideManual, setModelSetupGuideManual] = useState(false);
@@ -310,7 +313,9 @@ function AppContent() {
   }, [t]);
 
   useEffect(() => {
-    if (activeNav !== 'configpanel') {
+    if (activeNav === 'configpanel') {
+      setHasVisitedConfig(true);
+    } else {
       setConfigInitialExpandGroup(null);
     }
     if (activeNav === 'chat') {
@@ -1965,16 +1970,14 @@ function AppContent() {
     }
     if (nav === 'skills') setHasVisitedSkills(true);
     if (nav === 'channels') setHasVisitedChannels(true);
+    if (nav === 'configpanel') setHasVisitedConfig(true);
   }, [modelSetupGuideStep]);
 
-  const skipModelSetupGuide = useCallback(() => {
+  const dismissModelSetupGuide = useCallback((persist: boolean) => {
     setModelSetupGuideStep(null);
     setModelSetupGuideManual(false);
-  }, []);
 
-  const acknowledgeModelSetupGuide = useCallback(() => {
-    setModelSetupGuideStep(null);
-    setModelSetupGuideManual(false);
+    if (!persist) return;
 
     void request('config.set', { setup_guide_enabled: 'false' })
       .then(() => {
@@ -1987,6 +1990,15 @@ function AppContent() {
         console.error('Failed to disable setup guide:', error);
       });
   }, [request]);
+
+  const skipModelSetupGuide = useCallback(() => {
+    // Auto-shown guide: skipping permanently dismisses it. Manual reopen: just close.
+    dismissModelSetupGuide(!modelSetupGuideManual);
+  }, [dismissModelSetupGuide, modelSetupGuideManual]);
+
+  const acknowledgeModelSetupGuide = useCallback(() => {
+    dismissModelSetupGuide(true);
+  }, [dismissModelSetupGuide]);
 
   const openModelSetupGuide = useCallback(() => {
     setActiveNav('chat');
@@ -2103,7 +2115,6 @@ function AppContent() {
       {modelSetupGuideStep ? (
         <ModelSetupGuide
           step={modelSetupGuideStep}
-          manual={modelSetupGuideManual}
           onAcknowledge={acknowledgeModelSetupGuide}
           onSkip={skipModelSetupGuide}
         />
@@ -2276,9 +2287,10 @@ function AppContent() {
             </div>
           </div>
         )}
-        {activeNav === 'configpanel' && (
-          <div className="app-section">
+        {hasVisitedConfig && (
+          <div className={`app-section ${activeNav === 'configpanel' ? '' : 'is-hidden'}`}>
             <ConfigPanel
+              key={configPanelMountKey}
               config={serverConfig}
               isConnected={isConnected}
               sessionId={sessionId}
@@ -2462,7 +2474,17 @@ function AppContent() {
               <h3 className="text-base font-semibold text-text mb-1">{t('config.errors.configChangedTitle')}</h3>
               <p className="text-sm text-text-muted mb-5">{t('config.errors.configChangedDesc')}</p>
               <div className="flex gap-3">
-                <button type="button" onClick={() => { setConfigChangedConfirmOpen(false); void fetchConfig(); }} className="btn primary !px-4 !py-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfigChangedConfirmOpen(false);
+                    hasChangesRef.current = false;
+                    // Remount so drafts reload from the server instead of keeping stale local edits.
+                    setConfigPanelMountKey((key) => key + 1);
+                    void fetchConfig();
+                  }}
+                  className="btn primary !px-4 !py-2"
+                >
                   {t('config.errors.configChangedConfirm')}
                 </button>
                 <button type="button" onClick={() => setConfigChangedConfirmOpen(false)} className="btn !px-4 !py-2">
