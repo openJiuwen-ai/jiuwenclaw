@@ -29,6 +29,19 @@ class UserHookRail(DeepAgentRail):
         self._config = hooks_config
         self._executor = HookExecutor()
 
+    @staticmethod
+    def _resolve_session_id(ctx: AgentCallbackContext) -> str:
+        """Resolve the session ID from the callback context."""
+        for source in (getattr(ctx, "session", None), ctx):
+            if source is None:
+                continue
+            for attr_name in ("get_session_id", "session_id"):
+                attr = getattr(source, attr_name, None)
+                value = attr() if callable(attr) else attr
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
     # ---- PreToolUse: BEFORE_TOOL_CALL ----
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
@@ -47,7 +60,7 @@ class UserHookRail(DeepAgentRail):
                 "event": "PreToolUse",
                 "tool_name": tool_name,
                 "tool_input": tool_args,
-                "session_id": getattr(ctx, "session_id", ""),
+                "session_id": self._resolve_session_id(ctx),
             },
         )
 
@@ -90,7 +103,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "tool_result": ctx.inputs.tool_result,
-                "session_id": getattr(ctx, "session_id", ""),
+                "session_id": self._resolve_session_id(ctx),
             },
         )
 
@@ -123,7 +136,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "error": str(getattr(ctx, "exception", "")),
-                "session_id": getattr(ctx, "session_id", ""),
+                "session_id": self._resolve_session_id(ctx),
             },
         )
 
@@ -139,7 +152,7 @@ class UserHookRail(DeepAgentRail):
             hook_input={
                 "event": "Stop",
                 "final_response": getattr(ctx.inputs, "result", None),
-                "session_id": getattr(ctx, "session_id", ""),
+                "session_id": self._resolve_session_id(ctx),
             },
         )
 
