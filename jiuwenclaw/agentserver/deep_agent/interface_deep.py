@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 
@@ -372,6 +373,10 @@ from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
     create_local_sysop_card,
     create_sandbox_sysop_card,
 )
+from jiuwenclaw.agentserver.deep_agent.deepresearch_rewrite_fast_path import (
+    RewriteFastPathResult,
+    run_rewrite_fast_path,
+)
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
@@ -401,6 +406,16 @@ from jiuwenclaw.agentserver.deep_agent.agent_card_id import (
 
 _react_config = get_config().get("react", {})
 _sandbox_config = get_config().get("sandbox", {})
+
+
+@asynccontextmanager
+async def _noop_async_context() -> AsyncIterator[None]:
+    yield
+
+
+async def _empty_agent_stream() -> AsyncIterator[Any]:
+    if False:
+        yield None
 
 
 _CRON_TOOL_CHANNEL_ID: ContextVar[str] = ContextVar(
@@ -7657,6 +7672,40 @@ class JiuWenClawDeepAdapter:
             is_complete=True,
         )
 
+    async def _try_deepresearch_rewrite_fast_path(
+            self,
+            query: object,
+    ) -> RewriteFastPathResult | None:
+        from jiuwenclaw.agentserver.tools.deepresearch import rewrite_tools
+
+        return await run_rewrite_fast_path(
+            query,
+            model_invoke=self._model.invoke,
+            prepare_invoke=rewrite_tools.deepresearch_prepare_rewrite._func,
+            commit_invoke=rewrite_tools.deepresearch_commit_rewrite._func,
+        )
+
+    @staticmethod
+    def _fast_path_chunks(
+            result: RewriteFastPathResult,
+            *,
+            request_id: str,
+            channel_id: str,
+    ) -> tuple[AgentResponseChunk, ...]:
+        if result.status == "completed":
+            content = result.message
+        else:
+            code = result.error_code or "INTERNAL_ERROR"
+            content = f"改写失败（{code}）：{result.message}"
+        return (
+            AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={"event_type": "chat.final", "content": content},
+                is_complete=False,
+            ),
+        )
+
     async def process_message_impl(
             self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AgentResponse:
@@ -7977,20 +8026,66 @@ class JiuWenClawDeepAdapter:
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
+            fast_path_result = await self._try_deepresearch_rewrite_fast_path(query)
+            fast_path_handled = fast_path_result is not None
+            if fast_path_result is not None:
+                has_streamed_content = True
+                _mark_first_byte_once()
+                if isinstance(fast_path_result.usage_metadata, dict):
+                    self._accumulate_usage_metadata(
+                        usage_accumulator,
+                        fast_path_result.usage_metadata,
+                    )
+                if fast_path_result.status != "completed":
+                    perf_summary_status = "error"
+                logger.info(
+                    "[DeepResearchRewriteFastPath] request_id=%s session_id=%s "
+                    "action=%s status=%s error_code=%s prepare_ms=%.3f "
+                    "model_ms=%.3f commit_ms=%.3f total_ms=%.3f model_calls=%d",
+                    rid,
+                    session_id,
+                    fast_path_result.action,
+                    fast_path_result.status,
+                    fast_path_result.error_code,
+                    fast_path_result.prepare_ms,
+                    fast_path_result.model_ms,
+                    fast_path_result.commit_ms,
+                    fast_path_result.total_ms,
+                    fast_path_result.model_calls,
+                    extra={'user_visible': 'critical'},
+                )
+                for fast_path_chunk in self._fast_path_chunks(
+                    fast_path_result,
+                    request_id=rid,
+                    channel_id=cid,
+                ):
+                    yield fast_path_chunk
+
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort()
-            async with ask_user_question_request_scope(
-                interactive_ask=interactive_ask,
-                session_id=session_id,
-                stream_request_id=rid or "",
-                channel_id=cid or "",
-                scope=RuntimeScopeKey.from_adapter(self, session_id=session_id),
-            ):
-                logger.info(
-                    f"[JiuWenClawDeepAdapter] Agent执行开始: request_id={request.request_id} mode={mode}",
-                    extra={'user_visible': 'critical'}
+            request_scope = (
+                _noop_async_context()
+                if fast_path_handled
+                else ask_user_question_request_scope(
+                    interactive_ask=interactive_ask,
+                    session_id=session_id,
+                    stream_request_id=rid or "",
+                    channel_id=cid or "",
+                    scope=RuntimeScopeKey.from_adapter(self, session_id=session_id),
                 )
-                async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+            )
+            agent_stream = (
+                _empty_agent_stream()
+                if fast_path_handled
+                else Runner.run_agent_streaming(self._instance, inputs)
+            )
+            async with request_scope:
+                if not fast_path_handled:
+                    logger.info(
+                        f"[JiuWenClawDeepAdapter] Agent执行开始: request_id={request.request_id} mode={mode}",
+                        extra={'user_visible': 'critical'}
+                    )
+                async for chunk in agent_stream:
                     if not first_byte_marked:
                         if hasattr(chunk, "type") and chunk.type in {
                             "llm_output",
@@ -8317,7 +8412,7 @@ class JiuWenClawDeepAdapter:
 
             # Drain only approval events already ready (usually empty while evolution
             # is still running). Late summary / rebuild happen in a background task.
-            if self._skill_evolution_rail is not None:
+            if not fast_path_handled and self._skill_evolution_rail is not None:
                 for evt in self._skill_evolution_rail.drain_pending_approval_events():
                     payload = evt.payload or {}
                     action = payload.get("action")
