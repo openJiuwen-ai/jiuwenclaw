@@ -59,7 +59,7 @@ _SAFE_HTTP_URL_RE = re.compile(r"https?://[^\x00-\x20\x7f<>]+", re.IGNORECASE)
 
 DEEPRESEARCH_STAGES: tuple[str, ...] = (
     "研究主题澄清",
-    "大纲生成与确认",
+    "大纲生成",
     "并行调研与章节撰写",
     "报告整合",
     "引用溯源与校验",

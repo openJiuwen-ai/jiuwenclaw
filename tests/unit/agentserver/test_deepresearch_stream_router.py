@@ -13,7 +13,7 @@ from jiuwenclaw.agentserver.tools.deepresearch.stream_router import (
 
 STAGE_TITLES = [
     "研究主题澄清",
-    "大纲生成与确认",
+    "大纲生成",
     "并行调研与章节撰写",
     "报告整合",
     "引用溯源与校验",
@@ -71,6 +71,16 @@ def test_advance_stage_emits_ordered_task_reasoning_and_foreground_events():
         "task_content": "研究主题澄清",
         "content": "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
     }
+
+
+def test_stage_2_uses_outline_generation_title_on_all_surfaces():
+    frames = advance_stage(RouterState(), 2)
+
+    assert frames[0]["tasks"][1]["task_content"] == "大纲生成"
+    assert frames[1]["task_content"] == "大纲生成"
+    assert frames[1]["content"] == "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n"
+    assert frames[2]["task_content"] == "大纲生成"
+    assert frames[2]["content"] == "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n"
 
 
 def test_advance_stage_completion_keeps_all_six_completed_tasks_visible():

@@ -67,6 +67,9 @@ _OUTLINE_TITLE_CACHES_GUARD = threading.Lock()
 _deepresearch_route_ctx: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
     "jiuwenclaw_deepresearch_route", default=None
 )
+_deepresearch_router_state_ctx: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "jiuwenclaw_deepresearch_router_state", default=None
+)
 
 
 def push_deepresearch_route(
@@ -1548,8 +1551,14 @@ def _normalize_feedback_handler_resume_feedback(
     return feedback
 
 
-async def _call_deepresearch_stream_impl(**kwargs) -> str:
-    return await getattr(deepresearch_stream, "_func")(**kwargs)
+async def _call_deepresearch_stream_impl(
+    *, _router_state: object | None = None, **kwargs
+) -> str:
+    token = _deepresearch_router_state_ctx.set(_router_state)
+    try:
+        return await getattr(deepresearch_stream, "_func")(**kwargs)
+    finally:
+        _deepresearch_router_state_ctx.reset(token)
 
 
 @tool(
@@ -1657,7 +1666,12 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
 
     push = WebSocketGatewayPushTransport()
     cached_titles = outline_title_cache.get(conversation_id, {}) if action == "resume" else {}
-    state = RouterState(section_titles=dict(cached_titles))
+    existing_state = _deepresearch_router_state_ctx.get()
+    state = (
+        existing_state
+        if existing_state is not None
+        else RouterState(section_titles=dict(cached_titles))
+    )
     outcome_cid = conversation_id
 
     async def _send(payload: dict) -> bool:
@@ -1934,6 +1948,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
             feedback='{"interrupt_feedback":"accepted","feedback":""}',
             node="outline_interaction",
             file_name=file_name,
+            _router_state=state,
         )
     return json.dumps(outcome, ensure_ascii=False)
 

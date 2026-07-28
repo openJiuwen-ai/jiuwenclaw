@@ -2723,6 +2723,22 @@ async def test_outline_interaction_is_resumed_inside_the_tool_without_returning_
     assert resume_argv[1:4] == ("/s", "resume", "--conversation-id")
     assert resume_argv[4] == "C1"
     assert '{"interrupt_feedback":"accepted","feedback":""}' in resume_argv
+    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
+    stage_2_updates = [
+        payload for payload in _task_updates(payloads)
+        if _active_stage(payload) == 2
+    ]
+    stage_2_messages = [
+        payload for payload in payloads
+        if payload.get("task_id") == "deepresearch_stage_2"
+        and payload.get("event_type") in {"chat.reasoning", "chat.delta"}
+        and payload.get("content", "").startswith("[DeepResearch 阶段切换]")
+    ]
+    assert len(stage_2_updates) == 1
+    assert [payload["event_type"] for payload in stage_2_messages] == [
+        "chat.reasoning",
+        "chat.delta",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2792,7 +2808,7 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume(tmp_path
     )
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     assert [_active_stage(update) for update in _task_updates(payloads)] == [
-        1, 2, 2, 3, 6, None,
+        1, 2, 3, 6, None,
     ]
 
 
