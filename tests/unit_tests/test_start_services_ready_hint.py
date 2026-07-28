@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from unittest.mock import MagicMock, patch
 
@@ -86,6 +87,8 @@ def test_start_process_passes_resolved_ports_to_child(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ):
+    from jiuwenswarm.dotenv_early import CLI_PORTS_ENV_FLAG
+
     captured: dict[str, object] = {}
 
     def fake_popen(cmd, *, cwd, env):
@@ -93,6 +96,7 @@ def test_start_process_passes_resolved_ports_to_child(
         return MagicMock()
 
     monkeypatch.setattr("jiuwenswarm.start_services.subprocess.Popen", fake_popen)
+    monkeypatch.setenv("AGENT_SERVER_URL", "ws://127.0.0.1:18092")
     ports = {
         "agent_server": 19092,
         "web": 20000,
@@ -104,10 +108,14 @@ def test_start_process_passes_resolved_ports_to_child(
 
     child_env = captured["env"]
     assert isinstance(child_env, dict)
+    assert child_env[CLI_PORTS_ENV_FLAG] == "1"
     assert child_env["AGENT_SERVER_PORT"] == "19092"
+    assert child_env["AGENT_PORT"] == "19092"
     assert child_env["WEB_PORT"] == "20000"
     assert child_env["GATEWAY_PORT"] == "20001"
     assert child_env["FRONTEND_PORT"] == "6173"
+    # Stale URL from parent shell must not override the remapped agent port.
+    assert "AGENT_SERVER_URL" not in child_env
 
 
 def test_wait_for_services_ready_prints_access_url_for_web_dev(caplog: pytest.LogCaptureFixture):
@@ -336,3 +344,58 @@ def test_process_death_ends_wait_early(caplog: pytest.LogCaptureFixture):
     assert "required process exited during startup wait" in joined
     assert elapsed < 3.0
     assert "服务启动中，端口信息如下：" in joined
+
+
+def test_cli_injected_ports_survive_stale_dotenv_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    """Issue #2749: banner ports and Gateway bind ports must stay aligned.
+
+    jiuwenswarm-start injects index-0 defaults into the child env and prints
+    them in the access banner, but app/gateway historically re-loaded a stale
+    .env (GATEWAY_PORT=20001 from a prior fallback) with override=True and
+    rebound to 20001. The CLI_PORTS flag must keep the injected group.
+    """
+    from jiuwenswarm.dotenv_early import CLI_PORTS_ENV_FLAG, load_dotenv_runtime
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(cmd, *, cwd, env):
+        captured["env"] = env
+        return MagicMock()
+
+    monkeypatch.setattr("jiuwenswarm.start_services.subprocess.Popen", fake_popen)
+
+    banner_ports = {
+        "agent_server": 18092,
+        "web": 19000,
+        "gateway": 19001,
+        "frontend": 5173,
+    }
+    _start_process("app", ["python", "-m", "jiuwenswarm.app"], tmp_path, ports=banner_ports)
+
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+
+    # Simulate the child process environment after spawn.
+    monkeypatch.delenv("JIUWENSWARM_DESKTOP", raising=False)
+    for key, value in child_env.items():
+        monkeypatch.setenv(key, value)
+
+    stale_env = tmp_path / ".env"
+    stale_env.write_text(
+        "AGENT_SERVER_PORT=19092\n"
+        "WEB_PORT=20000\n"
+        "GATEWAY_PORT=20001\n"
+        "FRONTEND_PORT=6173\n",
+        encoding="utf-8",
+    )
+
+    load_dotenv_runtime(stale_env, override=True)
+
+    assert os.environ.get(CLI_PORTS_ENV_FLAG) == "1"
+    assert os.environ["GATEWAY_PORT"] == "19001"
+    assert os.environ["WEB_PORT"] == "19000"
+    assert os.environ["AGENT_SERVER_PORT"] == "18092"
+    assert os.environ["FRONTEND_PORT"] == "5173"

@@ -65,9 +65,10 @@ def _early_error(component_name: str, message: str) -> None:
     _early_logger.error("[%s] %s", component_name, message)
 
 
-# Port / bind keys injected by jiuwenswarm-desktop for the current session.
-# When JIUWENSWARM_DESKTOP=1, load_dotenv(override=True) must not clobber them
-# with stale values from ~/.jiuwenswarm/config/.env (e.g. a prior CLI fallback).
+# Port / bind keys injected for the current launch session (desktop or
+# jiuwenswarm-start). When a session flag is set, load_dotenv(override=True)
+# must not clobber them with stale values from ~/.jiuwenswarm/config/.env
+# (e.g. a prior CLI port-fallback residue such as GATEWAY_PORT=20001).
 DESKTOP_PRESERVED_ENV_KEYS = (
     "WEB_HOST",
     "WEB_PORT",
@@ -77,23 +78,36 @@ DESKTOP_PRESERVED_ENV_KEYS = (
     "FRONTEND_PORT",
 )
 
+# Flag set by jiuwenswarm-start when it injects the resolved port group into
+# child env. Mirrors JIUWENSWARM_DESKTOP=1 for the CLI launcher path (issue #2749).
+CLI_PORTS_ENV_FLAG = "JIUWENSWARM_CLI_PORTS"
+
+
+def _should_preserve_session_ports() -> bool:
+    """True when this process was launched with an explicit session port remap."""
+    return (
+        os.environ.get("JIUWENSWARM_DESKTOP") == "1"
+        or os.environ.get(CLI_PORTS_ENV_FLAG) == "1"
+    )
+
 
 def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True) -> bool:
-    """load_dotenv wrapper that keeps desktop-injected port env vars.
+    """load_dotenv wrapper that keeps session-injected port env vars.
 
-    Non-desktop processes behave exactly like ``load_dotenv``. Under
-    ``JIUWENSWARM_DESKTOP=1``, any of ``DESKTOP_PRESERVED_ENV_KEYS`` already
-    present in ``os.environ`` are restored after loading so a session-local
-    port remap survives ``override=True``.
+    Plain processes behave exactly like ``load_dotenv``. Under
+    ``JIUWENSWARM_DESKTOP=1`` or ``JIUWENSWARM_CLI_PORTS=1``, any of
+    ``DESKTOP_PRESERVED_ENV_KEYS`` already present in ``os.environ`` are
+    restored after loading so the launcher's resolved port group survives
+    ``override=True`` (avoids banner vs Gateway bind mismatch, issue #2749).
 
-    Also drops ``AGENT_SERVER_URL`` in desktop mode: Gateway prefers that URL
+    Also drops ``AGENT_SERVER_URL`` in those modes: Gateway prefers that URL
     over ``AGENT_SERVER_PORT``, so a stale value from .env/shell would bypass
     the remapped agent port. Without the URL, Gateway builds
     ``ws://{host}:{AGENT_SERVER_PORT}`` from the injected port.
     """
     from dotenv import load_dotenv
 
-    preserve = os.environ.get("JIUWENSWARM_DESKTOP") == "1"
+    preserve = _should_preserve_session_ports()
     saved = (
         {k: os.environ[k] for k in DESKTOP_PRESERVED_ENV_KEYS if k in os.environ}
         if preserve
@@ -291,6 +305,7 @@ def load_instance_bootstrap_by_name(name: str) -> Path | None:
 
 
 __all__ = [
+    "CLI_PORTS_ENV_FLAG",
     "DESKTOP_PRESERVED_ENV_KEYS",
     "parse_dotenv_early",
     "load_dotenv_runtime",
