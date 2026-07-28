@@ -287,6 +287,7 @@ class XiaoyiChannel(BaseChannel):
         self._sessions_waiting_for_push: dict[str, str] = {}  # {session: task} waiting for push
         self._team_sessions: set[str] = set()  # Team rounds stay active across member outputs
         self._team_tasks: set[tuple[str, str]] = set()
+        self._team_last_leader_finals: dict[tuple[str, str], str] = {}
         # Session cleanup management
         self._sessions_marked_for_cleanup: dict[str, dict[str, Any]] = {}  # Session cleanup state
         # File upload service configuration
@@ -405,6 +406,7 @@ class XiaoyiChannel(BaseChannel):
         self._sessions_waiting_for_push.clear()
         self._team_sessions.clear()
         self._team_tasks.clear()
+        self._team_last_leader_finals.clear()
         self._sessions_marked_for_cleanup.clear()
         self._accumulated_texts.clear()
         logger.info("XiaoyiChannel 已停止")
@@ -451,6 +453,7 @@ class XiaoyiChannel(BaseChannel):
         event_name = str(
             getattr(msg.event_type, "value", None) or payload.get("event_type") or ""
         ).strip()
+        team_role = str(payload.get("role") or "").strip().lower()
         metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
         mode = str(metadata.get("mode") or "").strip().lower()
         session_id, task_id = self._extract_platform_receive_info(msg)
@@ -525,7 +528,18 @@ class XiaoyiChannel(BaseChannel):
 
         if event_name == "team.completed":
             if self._is_session_active(session_id, task_id):
+                leader_summary = self._team_last_leader_finals.get(team_task_key, "")
                 for url_key in list(self._ws_connections.keys()):
+                    if leader_summary:
+                        await self._send_text_response(
+                            session_id,
+                            task_id,
+                            leader_summary,
+                            url_key,
+                            append=False,
+                            last_chunk=True,
+                            is_final=False,
+                        )
                     await self._send_status_update_with_state(
                         task_id,
                         session_id,
@@ -533,13 +547,26 @@ class XiaoyiChannel(BaseChannel):
                         "completed",
                         url_key,
                     )
-                await self._finalize_session(session_id, task_id)
+                await self._finalize_session(
+                    session_id,
+                    task_id,
+                    leader_summary or None,
+                )
             self._latest_platform_tasks.pop(session_id, None)
             self._session_task_map.pop(task_id, None)
             self._clear_task_timeout(session_id)
             self._clear_session_timeout(session_id)
             self._sessions_waiting_for_push.pop(session_id, None)
             self._clear_team_session(session_id)
+            return
+
+        # Xiaoyi exposes chat.delta/subtask updates as reasoningText. Keep that
+        # live process leader-only while preserving teammate final/error output.
+        if (
+            is_team_session
+            and team_role == "teammate"
+            and event_name in {"chat.delta", "chat.subtask_update"}
+        ):
             return
 
         # Handle chat.file event
@@ -697,6 +724,14 @@ class XiaoyiChannel(BaseChannel):
         elif msg.payload:
             content = str(msg.payload)
 
+        if (
+            is_team_session
+            and team_role != "teammate"
+            and event_name == "chat.final"
+            and content.strip()
+        ):
+            self._team_last_leader_finals[team_task_key] = content
+
         # 推送消息发送
         if msg.id.startswith("cron-push"):
             await self._send_push_notification(cron_job_name, content)
@@ -710,7 +745,7 @@ class XiaoyiChannel(BaseChannel):
                 is_team_session
                 and msg.event_type in {EventType.CHAT_FINAL, EventType.CHAT_ERROR}
             )
-            if not final:
+            if not final and team_role == "teammate":
                 member_name = str(msg.payload.get("member_name") or "").strip()
                 if member_name:
                     content = f"【{member_name}】\n{content}"
@@ -728,9 +763,10 @@ class XiaoyiChannel(BaseChannel):
                 EventType.CHAT_FINAL,
                 EventType.CHAT_ERROR,
             }:
-                member_name = str(msg.payload.get("member_name") or "").strip()
-                if member_name:
-                    content = f"【{member_name}】\n{content}"
+                if team_role == "teammate":
+                    member_name = str(msg.payload.get("member_name") or "").strip()
+                    if member_name:
+                        content = f"【{member_name}】\n{content}"
                 append = False
                 last_chunk = True
                 final = False
@@ -1530,13 +1566,20 @@ class XiaoyiChannel(BaseChannel):
 
     def _clear_team_task(self, session_id: str, task_id: str) -> None:
         """Clear one Team A2A round without clearing later tasks."""
-        self._team_tasks.discard((session_id, task_id))
+        task_key = (session_id, task_id)
+        self._team_tasks.discard(task_key)
+        self._team_last_leader_finals.pop(task_key, None)
         if not any(key[0] == session_id for key in self._team_tasks):
             self._team_sessions.discard(session_id)
 
     def _clear_team_session(self, session_id: str) -> None:
         """Clear all Team task markers for a platform session."""
         self._team_tasks = {key for key in self._team_tasks if key[0] != session_id}
+        self._team_last_leader_finals = {
+            key: value
+            for key, value in self._team_last_leader_finals.items()
+            if key[0] != session_id
+        }
         self._team_sessions.discard(session_id)
 
     def _is_session_waiting_for_push(self, session_id: str, task_id: str) -> bool:
@@ -1583,6 +1626,7 @@ class XiaoyiChannel(BaseChannel):
         self._accumulated_texts.pop(task_key, None)
         if preserve_team_session:
             self._team_tasks.discard((session_id, task_id))
+            self._team_last_leader_finals.pop((session_id, task_id), None)
         else:
             self._clear_team_task(session_id, task_id)
 
@@ -1666,6 +1710,7 @@ class XiaoyiChannel(BaseChannel):
         # Cancelling one platform task must not stop a long-running Team
         # runtime. A later user turn will replace the latest task mapping.
         self._team_tasks.discard((session_id, task_id))
+        self._team_last_leader_finals.pop((session_id, task_id), None)
 
     async def _send_text_response(
             self,
