@@ -54,10 +54,12 @@ _SECTION_PROCESS_NODES = {
 
 _CONTROL_PROCESS_VALUES = {"SUCCESS", "ALL END", "SECTION END"}
 _QUESTION_NODES = {"question_generator", "generate_questions"}
+_MARKDOWN_ESCAPE_RE = re.compile(r"""([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])""")
+_SAFE_HTTP_URL_RE = re.compile(r"https?://[^\x00-\x20\x7f<>]+", re.IGNORECASE)
 
 DEEPRESEARCH_STAGES: tuple[str, ...] = (
     "研究主题澄清",
-    "大纲生成与确认",
+    "大纲生成",
     "并行调研与章节撰写",
     "报告整合",
     "引用溯源与校验",
@@ -132,20 +134,7 @@ def _stage_child_reasoning(stage: int, agent: str, display: tuple[str, str], con
     }
 
 
-def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> dict | None:
-    """Advance the six-stage task snapshot without allowing regressions."""
-    if complete:
-        if state.stages_completed:
-            return None
-        state.current_stage = len(DEEPRESEARCH_STAGES)
-        state.stages_completed = True
-    else:
-        if state.stages_completed or stage <= state.current_stage:
-            return None
-        if stage < 1 or stage > len(DEEPRESEARCH_STAGES):
-            raise ValueError(f"invalid deepresearch stage: {stage}")
-        state.current_stage = stage
-
+def _stage_snapshot_frames(state: RouterState, *, complete: bool = False) -> list[dict]:
     tasks = []
     for index, title in enumerate(DEEPRESEARCH_STAGES, start=1):
         if state.stages_completed or index < state.current_stage:
@@ -162,7 +151,7 @@ def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> 
 
     completed = len(DEEPRESEARCH_STAGES) if state.stages_completed else state.current_stage - 1
     in_progress = 0 if state.stages_completed else 1
-    return {
+    task_update = {
         "event_type": "task.update",
         "tasks": tasks,
         "total_tasks": len(DEEPRESEARCH_STAGES),
@@ -170,6 +159,43 @@ def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> 
         "in_progress_tasks": in_progress,
         "pending_tasks": len(DEEPRESEARCH_STAGES) - completed - in_progress,
     }
+    title = DEEPRESEARCH_STAGES[state.current_stage - 1]
+    content = (
+        f"[DeepResearch 阶段完成] Stage {state.current_stage}：{title}\n"
+        if complete
+        else f"[DeepResearch 阶段切换] 开始 Stage {state.current_stage}：{title}\n"
+    )
+    message = {
+        "task_id": f"deepresearch_stage_{state.current_stage}",
+        "task_content": title,
+        "content": content,
+    }
+    return [
+        task_update,
+        {"event_type": "chat.reasoning", **message},
+        {"event_type": "chat.delta", **message},
+    ]
+
+
+def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> list[dict]:
+    """Advance monotonically and emit every missing Stage-facing snapshot."""
+    if complete:
+        if state.stages_completed:
+            return []
+        state.current_stage = len(DEEPRESEARCH_STAGES)
+        state.stages_completed = True
+        return _stage_snapshot_frames(state, complete=True)
+
+    if state.stages_completed or stage <= state.current_stage:
+        return []
+    if stage < 1 or stage > len(DEEPRESEARCH_STAGES):
+        raise ValueError(f"invalid deepresearch stage: {stage}")
+
+    frames: list[dict] = []
+    for next_stage in range(state.current_stage + 1, stage + 1):
+        state.current_stage = next_stage
+        frames.extend(_stage_snapshot_frames(state))
+    return frames
 
 
 def _as_text(val) -> str:
@@ -182,6 +208,135 @@ def _as_text(val) -> str:
         return json.dumps(val, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(val)
+
+
+def _as_json_object(val: Any) -> dict[str, Any] | None:
+    if isinstance(val, dict):
+        return val
+    if not isinstance(val, str):
+        return None
+    try:
+        parsed = json.loads(val)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _text_field(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _escape_markdown_text(value: str) -> str:
+    """Keep untrusted display text inert inside the frontend Markdown renderer."""
+    return _MARKDOWN_ESCAPE_RE.sub(r"\\\1", value)
+
+
+def _format_outline_markdown(data: dict[str, Any]) -> str | None:
+    title = _text_field(data.get("title"))
+    thought = _text_field(data.get("thought"))
+    raw_sections = data.get("sections")
+    if not title or not isinstance(raw_sections, list):
+        return None
+
+    sections: list[tuple[dict[str, Any], str]] = []
+    for section in raw_sections:
+        if not isinstance(section, dict):
+            continue
+        section_title = _text_field(section.get("title"))
+        if section_title:
+            sections.append((section, section_title))
+    if not sections:
+        return None
+
+    blocks: list[str] = []
+    blocks.append(f"### {_escape_markdown_text(title)}")
+    if thought:
+        blocks.append(f"规划思路：{_escape_markdown_text(thought)}")
+
+    section_lines: list[str] = []
+    for section_number, (section, section_title) in enumerate(sections, start=1):
+        core_suffix = "（重点）" if section.get("is_core_section") is True else ""
+        safe_section_title = _escape_markdown_text(section_title)
+        section_lines.append(f"{section_number}. **{safe_section_title}{core_suffix}**")
+        description = _text_field(section.get("description"))
+        if description:
+            section_lines.append(f"   {_escape_markdown_text(description)}")
+    blocks.append("\n".join(section_lines))
+    return "\n\n".join(blocks)
+
+
+def _format_plan_markdown(data: dict[str, Any]) -> str | None:
+    title = _text_field(data.get("title"))
+    thought = _text_field(data.get("thought"))
+    raw_steps = data.get("steps")
+    if not title or (raw_steps is not None and not isinstance(raw_steps, list)):
+        return None
+
+    steps: list[tuple[dict[str, Any], str]] = []
+    for step in raw_steps or []:
+        if not isinstance(step, dict):
+            continue
+        step_title = _text_field(step.get("title"))
+        if step_title:
+            steps.append((step, step_title))
+    completed = data.get("is_research_completed")
+    if not steps and not thought and not isinstance(completed, bool):
+        return None
+
+    blocks: list[str] = []
+    blocks.append(f"#### 调研计划：{_escape_markdown_text(title)}")
+    if thought:
+        blocks.append(f"调研思路：{_escape_markdown_text(thought)}")
+    if isinstance(completed, bool):
+        blocks.append("状态：资料已充分，准备撰写" if completed else "状态：继续调研")
+
+    step_lines: list[str] = []
+    for step_number, (step, step_title) in enumerate(steps, start=1):
+        safe_step_title = _escape_markdown_text(step_title)
+        step_lines.append(f"{step_number}. **{safe_step_title}**")
+        description = _text_field(step.get("description"))
+        if description:
+            step_lines.append(f"   {_escape_markdown_text(description)}")
+    if step_lines:
+        blocks.append("\n".join(step_lines))
+    return "\n\n".join(blocks)
+
+
+def _format_retrieved_source_markdown(data: dict[str, Any]) -> str | None:
+    title = _text_field(data.get("title"))
+    url = _text_field(data.get("url"))
+    raw_query = data.get("query")
+    if not title or not url or not isinstance(raw_query, str):
+        return None
+    query = raw_query.strip()
+
+    safe_title = _escape_markdown_text(title)
+    safe_link_url = url if _SAFE_HTTP_URL_RE.fullmatch(url) else ""
+    if safe_link_url:
+        source = f"[{safe_title}](<{safe_link_url}>)"
+    else:
+        source = safe_title
+    blocks = [f"发现资料：{source}"]
+    if not safe_link_url:
+        blocks.append(f"链接：{_escape_markdown_text(url)}")
+    if query:
+        blocks.append(f"检索词：{_escape_markdown_text(query)}")
+    return "\n\n".join(blocks)
+
+
+def _format_process_content(agent: str, value: Any) -> str:
+    data = _as_json_object(value)
+    if data is None:
+        return _as_text(value)
+
+    formatted: str | None = None
+    if agent == "outline":
+        formatted = _format_outline_markdown(data)
+    elif agent == "plan_reasoning":
+        formatted = _format_plan_markdown(data)
+    elif agent == "collector_info_retrieval":
+        formatted = _format_retrieved_source_markdown(data)
+    return formatted if formatted is not None else _as_text(value)
 
 
 def collected_questions(state: RouterState) -> str:
@@ -219,14 +374,20 @@ def _chunk_reasoning_content(chunk: dict, content: Any) -> Any:
     return parsed.get("reasoning_content") if isinstance(parsed, dict) else reasoning
 
 
-def _raw_process_parts(chunk: dict, content: Any, *, include_content: bool = True) -> list[str]:
-    """Return original process bodies without compaction or semantic summarization."""
+def _raw_process_parts(
+    chunk: dict,
+    content: Any,
+    *,
+    agent: str,
+    include_content: bool = True,
+) -> list[str]:
+    """Return process bodies with node-aware display formatting and lossless fallback."""
     parts: list[str] = []
     values = [_chunk_reasoning_content(chunk, content)]
     if include_content:
         values.append(content)
     for value in values:
-        text = _as_text(value)
+        text = _format_process_content(agent, value)
         if not text or not text.strip() or text.strip() in _CONTROL_PROCESS_VALUES:
             continue
         if text not in parts:
@@ -337,9 +498,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     section_idx = str(chunk.get("section_idx", "0"))
     target_stage = 3 if agent in _SECTION_PROCESS_NODES and section_idx != "0" else _NODE_STAGE.get(agent)
     if target_stage is not None:
-        stage_update = advance_stage(state, target_stage)
-        if stage_update is not None:
-            frames.append(stage_update)
+        frames.extend(advance_stage(state, target_stage))
 
     # 中断 chunk:捕获 raw_prompt + node_id,不转发(interrupted marker 到达时拼 prompt)
     if message_type == "interrupt" or str(chunk.get("event")) == "waiting_user_input":
@@ -367,6 +526,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
         process_parts = _raw_process_parts(
             chunk,
             content,
+            agent=agent,
             include_content=agent != "sub_reporter",
         )
         _remember_section_title(state, section_idx, chunk.get("section_title"))
@@ -393,7 +553,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     # 大纲正文只读展示在思考过程；其他非并行节点维持 reasoning_content 通用透传。
     if agent == "outline":
         task_content = display[0] + (f" - {display[1]}" if display[1] else "")
-        for process_content in _raw_process_parts(chunk, content):
+        for process_content in _raw_process_parts(chunk, content, agent=agent):
             frames.append({
                 "event_type": "chat.reasoning",
                 "task_id": "deepresearch_stage_2",
@@ -403,7 +563,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
             })
         return frames
 
-    if target_stage in {2, 3, 4, 5}:
+    if target_stage in {1, 2, 3, 4, 5}:
         node_state = state.active_nodes.get(key)
         if node_state is None:
             node_state = {

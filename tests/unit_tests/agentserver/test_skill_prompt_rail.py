@@ -24,6 +24,18 @@ def test_skill_protocol_en_contains_todo_before_execution():
     assert "todo" in text.lower()
 
 
+def test_skill_protocol_cn_allows_tool_owned_stage_messages():
+    text = _build_skill_protocol_section_text("cn")
+    assert "阶段状态和阶段消息由工具事件唯一生成" in text
+    assert "禁止自行输出" in text
+
+
+def test_skill_protocol_en_allows_tool_owned_stage_messages():
+    text = _build_skill_protocol_section_text("en")
+    assert "stage status and stage messages are emitted exclusively by tool events" in text
+    assert "must not declare" in text
+
+
 class _FakeBuilder:
     def __init__(self, language: str = "cn") -> None:
         self.language = language

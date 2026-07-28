@@ -25,6 +25,10 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
+from jiuwenclaw.local_env_config import (
+    bind_task_env_overlay,
+    reset_task_env_overlay,
+)
 
 
 class _Proc:
@@ -150,12 +154,77 @@ class _LargeStdoutLineProc(_Proc):
         return self._stdout
 
 
+def test_styled_export_llm_config_uses_request_overlay_instead_of_process_env(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_NAME", "static-model")
+    monkeypatch.setenv("MODEL_PROVIDER", "OpenAI")
+    monkeypatch.setenv("API_BASE", "https://example.com/compatible-mode/v1")
+    monkeypatch.setenv("API_KEY", "static-key")
+    token = bind_task_env_overlay({
+        "MODEL_NAME": "glm-5.2",
+        "MODEL_PROVIDER": "OpenAI",
+        "API_BASE": "https://client-claw.example/v2",
+        "API_KEY": "request-key",
+    })
+    try:
+        config = dt._build_styled_export_llm_config()
+    finally:
+        reset_task_env_overlay(token)
+
+    assert config["general"]["model_name"] == "glm-5.2"
+    assert config["general"]["model_type"] == "openai"
+    assert config["general"]["base_url"] == "https://client-claw.example/v2"
+    assert config["general"]["api_key"] == bytearray(b"request-key")
+
+
+@pytest.mark.parametrize(
+    "overlay",
+    [
+        {
+            "MODEL_PROVIDER": "OpenAI",
+            "API_BASE": "https://llm.example/v1",
+            "API_KEY": "key",
+        },
+        {
+            "MODEL_NAME": "model",
+            "MODEL_PROVIDER": "OpenAI",
+            "API_KEY": "key",
+        },
+        {
+            "MODEL_NAME": "model",
+            "MODEL_PROVIDER": "OpenAI",
+            "API_BASE": "https://llm.example/v1",
+        },
+        {
+            "MODEL_NAME": "model",
+            "MODEL_PROVIDER": "OpenAI",
+            "API_BASE": "https://example.com/compatible-mode/v1",
+            "API_KEY": "key",
+        },
+    ],
+)
+def test_styled_export_llm_config_rejects_invalid_config_before_client_creation(
+    overlay,
+):
+    token = bind_task_env_overlay(overlay)
+    try:
+        with pytest.raises(
+            ValueError,
+            match="styled HTML LLM configuration is invalid",
+        ):
+            dt._build_styled_export_llm_config()
+    finally:
+        reset_task_env_overlay(token)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raise_during_use", [False, True])
 async def test_styled_report_llm_context_restores_explicit_tls_value(
     monkeypatch, raise_during_use
 ):
     monkeypatch.setenv("LLM_SSL_VERIFY", "true")
+    monkeypatch.setattr(dt, "read_env", lambda _name, _default: "true")
     observed = {}
 
     @asynccontextmanager
@@ -192,30 +261,30 @@ async def test_styled_report_llm_context_restores_explicit_tls_value(
 
 
 @pytest.mark.asyncio
-async def test_styled_report_llm_context_uses_bridge_tls_only_for_entry(monkeypatch):
+async def test_styled_report_llm_context_uses_overlay_tls_only_for_entry(monkeypatch):
     monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
-    bridge_inputs = []
+    read_inputs = []
     observed = {}
 
-    def fake_build_bridge_env(source):
-        bridge_inputs.append(source.get("LLM_SSL_VERIFY"))
-        return {"LLM_SSL_VERIFY": "resolved-by-bridge"}
+    def fake_read_env(name, default):
+        read_inputs.append((name, default))
+        return "resolved-by-overlay"
 
     @asynccontextmanager
     async def fake_context_factory(_llm_config):
         observed["entry"] = os.environ.get("LLM_SSL_VERIFY")
         yield "runtime-llm"
 
-    monkeypatch.setattr(dt, "_build_bridge_env", fake_build_bridge_env)
+    monkeypatch.setattr(dt, "read_env", fake_read_env)
 
     async with dt._scoped_report_style_llm_context(
         fake_context_factory, {"general": {}}
     ):
         observed["yielded"] = os.environ.get("LLM_SSL_VERIFY")
 
-    assert bridge_inputs == ["ambient"]
+    assert read_inputs == [("LLM_SSL_VERIFY", "false")]
     assert observed == {
-        "entry": "resolved-by-bridge",
+        "entry": "resolved-by-overlay",
         "yielded": "ambient",
     }
     assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
@@ -225,8 +294,8 @@ def test_styled_report_llm_context_serializes_concurrent_event_loops(monkeypatch
     monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
     monkeypatch.setattr(
         dt,
-        "_build_bridge_env",
-        lambda _source: {"LLM_SSL_VERIFY": "resolved-by-bridge"},
+        "read_env",
+        lambda _name, _default: "resolved-by-overlay",
     )
     start_barrier = threading.Barrier(3)
     observation_lock = threading.Lock()
@@ -272,7 +341,7 @@ def test_styled_report_llm_context_serializes_concurrent_event_loops(monkeypatch
     assert errors == []
     assert max_active_entries == 1
     assert len(observed) == 4
-    assert observed.count(("entry", "resolved-by-bridge")) == 2
+    assert observed.count(("entry", "resolved-by-overlay")) == 2
     assert observed.count(("yielded", "ambient")) == 2
     assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
 
@@ -401,14 +470,14 @@ async def test_styled_report_llm_context_releases_after_repeated_entry_cancellat
     monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
     monkeypatch.setattr(
         dt,
-        "_build_bridge_env",
-        lambda _source: {"LLM_SSL_VERIFY": "resolved-by-bridge"},
+        "read_env",
+        lambda _name, _default: "resolved-by-overlay",
     )
     entry_started = asyncio.Event()
 
     @asynccontextmanager
     async def blocked_context_factory(_llm_config):
-        assert os.environ.get("LLM_SSL_VERIFY") == "resolved-by-bridge"
+        assert os.environ.get("LLM_SSL_VERIFY") == "resolved-by-overlay"
         entry_started.set()
         await asyncio.Event().wait()
         yield "runtime-llm"  # pragma: no cover
@@ -462,7 +531,7 @@ def _active_stage(update):
 
 
 @pytest.mark.asyncio
-async def test_tool_sends_nested_section_reasoning_without_task_snapshots(tmp_path):
+async def test_tool_sends_ordered_stage_surfaces_and_retains_completed_snapshot(tmp_path):
     raw_process = "原始检索过程第一行\n\n原始检索过程第二行" + "完整内容" * 40
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
@@ -508,9 +577,20 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots(tmp_pa
     reasoning = [
         payload for payload in payloads if payload.get("event_type") == "chat.reasoning"
     ]
+    stage_reasoning = [
+        payload for payload in reasoning if not payload.get("stream_source_id")
+    ]
+    process_reasoning = [
+        payload for payload in reasoning if payload.get("stream_source_id")
+    ]
+    stage_deltas = [
+        payload for payload in payloads
+        if payload.get("event_type") == "chat.delta"
+        and payload.get("task_id", "").startswith("deepresearch_stage_")
+    ]
     task_updates = _task_updates(payloads)
     assert json.loads(result)["status"] == "completed"
-    assert reasoning == [
+    assert process_reasoning == [
         {
             "event_type": "chat.reasoning",
             "task_id": "deepresearch_stage_3",
@@ -539,8 +619,69 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots(tmp_pa
             "content": "章节撰写完成\n",
         },
     ]
-    assert [_active_stage(update) for update in task_updates] == [1, 3, 6, None]
-    assert all(task["status"] == "completed" for task in task_updates[-1]["tasks"])
+    assert [payload["content"] for payload in stage_reasoning] == [
+        "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+        "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n",
+        "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
+        "[DeepResearch 阶段切换] 开始 Stage 4：报告整合\n",
+        "[DeepResearch 阶段切换] 开始 Stage 5：引用溯源与校验\n",
+        "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
+        "[DeepResearch 阶段完成] Stage 6：报告交付\n",
+    ]
+    assert [payload["content"] for payload in stage_deltas] == [
+        "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+        "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n",
+        "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
+        "[DeepResearch 阶段切换] 开始 Stage 4：报告整合\n",
+        "[DeepResearch 阶段切换] 开始 Stage 5：引用溯源与校验\n",
+        "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
+        "[DeepResearch 阶段完成] Stage 6：报告交付\n",
+    ]
+    assert [_active_stage(update) for update in task_updates] == [
+        1, 2, 3, 4, 5, 6, None,
+    ]
+    completed_update = task_updates[-1]
+    assert [task["task_id"] for task in completed_update["tasks"]] == [
+        f"deepresearch_stage_{index}" for index in range(1, 7)
+    ]
+    assert all(task["status"] == "completed" for task in completed_update["tasks"])
+    assert not any(
+        payload.get("event_type") == "task.update" and not payload.get("tasks")
+        for payload in payloads
+    )
+    completed_update_index = payloads.index(completed_update)
+    file_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "chat.file"
+    )
+    completion_reasoning_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "chat.reasoning"
+        and payload.get("content") == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+    )
+    completion_delta_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "chat.delta"
+        and payload.get("content") == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+    )
+    assert file_index < completed_update_index < completion_reasoning_index < completion_delta_index
+
+    for update in task_updates[:-1]:
+        active_stage = _active_stage(update)
+        title = update["tasks"][active_stage - 1]["task_content"]
+        content = f"[DeepResearch 阶段切换] 开始 Stage {active_stage}：{title}\n"
+        update_index = payloads.index(update)
+        reasoning_index = next(
+            index for index, payload in enumerate(payloads)
+            if payload.get("event_type") == "chat.reasoning"
+            and payload.get("content") == content
+        )
+        delta_index = next(
+            index for index, payload in enumerate(payloads)
+            if payload.get("event_type") == "chat.delta"
+            and payload.get("content") == content
+        )
+        assert update_index < reasoning_index < delta_index
     assert any(
         payload.get("event_type") == "chat.processing_status"
         and payload.get("is_processing") is True
@@ -563,6 +704,10 @@ def _styled_report_archive(
 @asynccontextmanager
 async def _async_context(value):
     yield value
+
+
+def _valid_styled_export_llm_config():
+    return {"general": {"model_name": "test-model"}}
 
 
 @pytest.mark.asyncio
@@ -588,6 +733,10 @@ async def test_generate_report_html_installs_styled_report(tmp_path):
     (chart_dir / "existing.png").write_bytes(b"existing chart")
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(llm),
@@ -659,6 +808,10 @@ async def test_generate_report_html_does_not_depend_on_supports_dir_fd(tmp_path)
         return _wrapped
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
@@ -795,6 +948,10 @@ async def test_generate_report_html_does_not_follow_legacy_fixed_temp_symlink(tm
 
     with patch.object(
         dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
+        dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
     ), patch(
@@ -841,6 +998,10 @@ async def test_generate_report_html_does_not_follow_asset_root_symlink(
     )
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
@@ -897,6 +1058,10 @@ async def test_generate_report_html_ignores_fixed_asset_root_swapped_to_symlink(
     )
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
@@ -961,6 +1126,10 @@ async def test_generate_report_html_rolls_back_owned_assets_when_install_fails(
 
     with patch.object(
         dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
+        dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
     ), patch(
@@ -1019,6 +1188,10 @@ async def test_generate_report_html_preserves_replaced_published_asset_dir(
         return real_atomic_create(path, payload)
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
@@ -1086,6 +1259,10 @@ async def test_generate_report_html_propagates_cancellation(tmp_path):
         yield  # pragma: no cover
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         side_effect=_cancelled_context,
@@ -2231,7 +2408,12 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
 
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     report_frames = [payload for payload in payloads if payload.get("event_type") == "chat.delta"]
-    assert report_frames == []
+    assert report_frames
+    assert all(frame.get("content") != report_content for frame in report_frames)
+    assert all(
+        frame.get("task_id", "").startswith("deepresearch_stage_")
+        for frame in report_frames
+    )
     write_report.assert_called_once_with(
         final_result,
         "r",
@@ -2270,7 +2452,9 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
         },
     }
     assert "C1.citations.json" not in json.dumps(file_payload)
-    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 6, None]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [
+        1, 2, 3, 4, 5, 6, None,
+    ]
     assert json.loads(result) == {
         "status": "completed",
         "conversation_id": "C1",
@@ -2318,7 +2502,9 @@ async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fa
     assert outcome["error_code"] == "report_file_delivery_failed"
     assert "report_content" not in outcome
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
-    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 6]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [
+        1, 2, 3, 4, 5, 6,
+    ]
 
 
 @pytest.mark.asyncio
@@ -2351,7 +2537,9 @@ async def test_tool_keeps_current_workflow_stage_in_progress_when_research_fails
         await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
 
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
-    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 3]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [
+        1, 2, 3,
+    ]
 
 
 @pytest.mark.asyncio
@@ -2549,6 +2737,22 @@ async def test_outline_interaction_is_resumed_inside_the_tool_without_returning_
     assert resume_argv[1:4] == ("/s", "resume", "--conversation-id")
     assert resume_argv[4] == "C1"
     assert '{"interrupt_feedback":"accepted","feedback":""}' in resume_argv
+    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
+    stage_2_updates = [
+        payload for payload in _task_updates(payloads)
+        if _active_stage(payload) == 2
+    ]
+    stage_2_messages = [
+        payload for payload in payloads
+        if payload.get("task_id") == "deepresearch_stage_2"
+        and payload.get("event_type") in {"chat.reasoning", "chat.delta"}
+        and payload.get("content", "").startswith("[DeepResearch 阶段切换]")
+    ]
+    assert len(stage_2_updates) == 1
+    assert [payload["event_type"] for payload in stage_2_messages] == [
+        "chat.reasoning",
+        "chat.delta",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2618,7 +2822,7 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume(tmp_path
     )
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     assert [_active_stage(update) for update in _task_updates(payloads)] == [
-        1, 2, 2, 3, 6, None,
+        1, 2, 3, 4, 5, 6, None,
     ]
 
 
@@ -2840,6 +3044,67 @@ async def test_resume_requires_conversation_id_and_node():
     out = json.loads(result)
     assert out["status"] == "error"
     assert "conversation_id and node" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_feedback_resume_does_not_repeat_stage_1_transition():
+    start_lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({
+            "__deepsearch_status__": "interrupted",
+            "agent": "feedback_handler",
+            "conversation_id": "C1",
+        }),
+    ]
+    resume_lines = [
+        json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
+        json.dumps({"agent": "outline", "content": "# 第一章"}),
+        json.dumps({
+            "__deepsearch_status__": "error",
+            "conversation_id": "C1",
+            "error": "stop after outline",
+        }),
+    ]
+    push = AsyncMock()
+    spawn = AsyncMock(side_effect=[_Proc(start_lines), _Proc(resume_lines)])
+
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "R1", "channel_id": "CH1", "session_id": "S1",
+         }), \
+         patch("asyncio.create_subprocess_exec", new=spawn), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+             return_value=push,
+         ):
+        interrupted = await dt.deepresearch_stream._func(
+            action="start", query="X", file_name="r",
+        )
+        resumed = await dt.deepresearch_stream._func(
+            action="resume",
+            conversation_id="C1",
+            node="feedback_handler",
+            feedback='{"feedback":"补充范围"}',
+            file_name="r",
+        )
+
+    assert json.loads(interrupted)["status"] == "interrupted"
+    assert json.loads(resumed)["status"] == "error"
+    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
+    transitions = [
+        (payload["event_type"], payload["task_id"])
+        for payload in payloads
+        if payload.get("event_type") in {"chat.reasoning", "chat.delta"}
+        and payload.get("content", "").startswith("[DeepResearch 阶段切换]")
+    ]
+    assert transitions == [
+        ("chat.reasoning", "deepresearch_stage_1"),
+        ("chat.delta", "deepresearch_stage_1"),
+        ("chat.reasoning", "deepresearch_stage_2"),
+        ("chat.delta", "deepresearch_stage_2"),
+    ]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 2]
 
 
 @pytest.mark.asyncio
