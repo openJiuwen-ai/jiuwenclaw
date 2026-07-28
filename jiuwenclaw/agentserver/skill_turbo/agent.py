@@ -29,6 +29,16 @@ class SkillTurbo:
         self._executor = SkillTurboExecutor(self._env)
 
     @property
+    def env(self) -> SkillTurboEnvironment:
+        """只读：SkillTurbo 运行环境。"""
+        return self._env
+
+    @property
+    def executor(self) -> SkillTurboExecutor:
+        """只读：SkillTurbo 执行器。"""
+        return self._executor
+
+    @property
     def artifact_holder(self) -> dict[str, dict[str, Any]]:
         """返回 executor 的节点产物 holder，供外部构建产物摘要。"""
         return self._executor.node_artifacts

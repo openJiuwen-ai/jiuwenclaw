@@ -174,6 +174,17 @@ class SkillTurboEnvironment:
         self._strict_builtin_skill_validation: bool = bool(
             config.get("strict_builtin_skill_validation", False)
         )
+        # 在线执行模式（设计 §8.4）：
+        # "online"（默认）：主 Agent 在线驱动逐 PlanTask 执行（skill_turbo_tool）
+        # "batch"：批量自主编排（已下线，M6 阶段3 移除；保留配置项供回滚）
+        raw_mode = str(config.get("skill_turbo_execution_mode", "online") or "online").strip().lower()
+        if raw_mode not in ("online", "batch"):
+            logger.warning(
+                "[SkillTurboEnvironment] invalid skill_turbo_execution_mode=%r, fallback to online",
+                raw_mode,
+            )
+            raw_mode = "online"
+        self._execution_mode: str = raw_mode
         self._load(config)
 
     def _resolve_skill_root(self) -> str:
@@ -324,6 +335,11 @@ class SkillTurboEnvironment:
     def skill_checksum_ok(self) -> bool:
         """[TEMP-EXTERNAL-SKILL] SHA256 校验是否通过（空值时为 True）。"""
         return self._skill_checksum_ok
+
+    @property
+    def execution_mode(self) -> str:
+        """在线执行模式："online"（默认）| "batch"。"""
+        return self._execution_mode
 
     @property
     def skill_codes_dir(self) -> str:

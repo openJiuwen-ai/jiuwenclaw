@@ -14,7 +14,8 @@ from jiuwenclaw.agentserver.deep_agent.rails.skill_prompt_rail import (
 
 def test_skill_protocol_cn_contains_todo_before_execution():
     text = _build_skill_protocol_section_text("cn")
-    assert "在执行skill步骤前" in text
+    # online 加速后：todo 仅约束 skill_tool 标准流程（turbo 走系统 task 进度）
+    assert "在执行 **skill_tool 标准流程** 的步骤前" in text
     assert "todo" in text.lower()
 
 
@@ -98,16 +99,18 @@ def test_skill_protocol_en_requires_cancelled_on_abandon():
 
 
 def test_skill_protocol_cn_requires_acceleration_first():
-    """加速通道硬约束：第一个工具调用必须是 skill_acceleration_exec。"""
+    """加速通道硬约束：第一个工具调用必须是 skill_turbo_tool。"""
     text = _build_skill_protocol_section_text("cn")
     assert "第一个工具调用必须是" in text
+    assert "skill_turbo_tool" in text
     assert "禁止" in text and "web_search" in text and "fetch_webpage" in text
     assert "仍须立即调用" in text
 
 
 def test_skill_protocol_en_requires_acceleration_first():
-    """Acceleration channel hard constraint: FIRST tool call MUST be skill_acceleration_exec."""
+    """Acceleration channel hard constraint: FIRST tool call MUST be skill_turbo_tool."""
     text = _build_skill_protocol_section_text("en")
     assert "FIRST tool call MUST be" in text
+    assert "skill_turbo_tool" in text
     assert "FORBIDDEN" in text and "web_search" in text and "fetch_webpage" in text
     assert "you MUST still call" in text
