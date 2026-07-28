@@ -7,6 +7,17 @@ class AccuracyEvaluator(LLMScoreEvaluator):
     metric = "accuracy"
     thresholds = (0.90, 0.95, 0.99)
     aggregation_thresholds = thresholds
+    additional_guidance = (
+        "时间基准规则：\n"
+        "- Evaluation data 中的 reference_time 是本次评估的权威当前时间，"
+        "即使它晚于模型训练截止时间，也必须将其视为真实时间基准。\n"
+        "- 不得仅因电影、产品、功能或事件晚于模型训练时间，就认定其尚未"
+        "发生或存在事实错误。\n"
+        "- 对训练截止时间之后的信息，优先依据工具结果、对话上下文和回答的"
+        "内部一致性判断。\n"
+        "- 没有相反证据时，不得仅以模型不知道该信息为由判定 score=0；"
+        "但如果工具结果或上下文与回答矛盾，仍应判定为事实错误。"
+    )
     rubric = (
         "准确性二值评分标准：\n"
         "优秀（score=1，满足以下所有条件）：\n"
