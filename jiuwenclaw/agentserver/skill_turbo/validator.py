@@ -199,6 +199,102 @@ class CodeValidationPolicy:
             require_abort_reraise=True,
         )
 
+    @classmethod
+    def turbo_skill_code(
+        cls, allowed_import_prefixes: list[str] | tuple[str, ...] | None = None
+    ) -> "CodeValidationPolicy":
+        """在线 turbo_codes 包校验策略。
+
+        与 ``builtin_skill_code`` 的差异：
+        - ``deny_relative_import=False``：允许包内相对 import
+          （turbo_codes_<scenario> 是自包含 Python 包，节点间用 ``from .ppt_common import``）
+        - 其余安全约束与 builtin_skill_code 一致：保留全部危险调用/import 黑名单
+          （open/exec/subprocess/os/... 仍禁），安全不降级。
+
+        设计 §8.5：节点只能 import 包内兄弟 + 框架 + 安全 stdlib，危险调用全禁。
+        """
+        return cls(
+            name="turbo_skill_code",
+            allow_import=True,
+            allow_import_from=True,
+            allowed_import_exact=(
+                "__future__",
+                "asyncio",
+                "collections.abc",
+                "dataclasses",
+                "datetime",
+                "json",
+                "logging",
+                "pathlib",
+                "re",
+                "typing",
+                # AbortError 经 plan_node 统一 re-export，skill_code 不直连 openjiuwen
+                "jiuwenclaw.agentserver.skill_turbo.plan_node",
+            ),
+            allowed_import_prefixes=tuple(allowed_import_prefixes or ()),
+            denied_import_exact=(
+                "builtins",
+                "ctypes",
+                "importlib",
+                "inspect",
+                "marshal",
+                "multiprocessing",
+                "os",
+                "pickle",
+                "shutil",
+                "socket",
+                "subprocess",
+                "sys",
+                "tempfile",
+                "threading",
+            ),
+            denied_import_prefixes=("http.", "urllib.", "requests."),
+            import_error_hint="仅允许安全标准库与 skill_turbo 内部模块",
+            # 关键：允许包内相对 import（turbo_codes_<scenario> 自包含包）
+            deny_relative_import=False,
+            allowed_dunder_attributes=("__init__", "__name__"),
+            denied_call_names=(
+                "open",
+                "exec",
+                "eval",
+                "compile",
+                "__import__",
+                "getattr",
+                "setattr",
+                "delattr",
+                "globals",
+                "locals",
+                "vars",
+                "dir",
+                "input",
+                "help",
+                "breakpoint",
+                "exit",
+                "quit",
+                "memoryview",
+            ),
+            denied_attribute_call_names=(
+                "read_text",
+                "read_bytes",
+                "write_text",
+                "write_bytes",
+                "open",
+                "unlink",
+                "rmdir",
+                "rename",
+                "mkdir",
+                "glob",
+                "rglob",
+                "create_subprocess_exec",
+                "create_subprocess_shell",
+                "to_thread",
+                "basicConfig",
+            ),
+            deny_del_attribute=True,
+            deny_type_three_args=True,
+            require_abort_reraise=True,
+        )
+
 
 class PlanCodeValidator:
     """代码安全校验器：按 profile 拦截 import、dunder 与危险语法。"""
@@ -222,6 +318,15 @@ class PlanCodeValidator:
     ) -> "PlanCodeValidator":
         return cls(
             policy=CodeValidationPolicy.builtin_skill_code(allowed_import_prefixes)
+        )
+
+    @classmethod
+    def for_turbo_skill_code(
+        cls, allowed_import_prefixes: list[str] | None = None
+    ) -> "PlanCodeValidator":
+        """在线 turbo_codes 包校验器：允许包内相对 import，保留危险调用黑名单。"""
+        return cls(
+            policy=CodeValidationPolicy.turbo_skill_code(allowed_import_prefixes)
         )
 
     def validate(self, code: str) -> list[str]:
@@ -302,6 +407,12 @@ class PlanCodeValidator:
     def _check_import_from(self, node: ast.ImportFrom, errors: list[str]) -> None:
         if node.level and node.level > 0 and self._policy.deny_relative_import:
             errors.append(f"禁止相对 import (行 {node.lineno})")
+            return
+
+        # 相对 import（node.level > 0）在 deny_relative_import=False 时不检查模块名：
+        # 包内兄弟模块（如 .ppt_common / .utils.bash_utils）由包本身校验，
+        # 相对模块名不匹配绝对 import 白名单，单独检查会误报。
+        if node.level and node.level > 0 and not self._policy.deny_relative_import:
             return
 
         module = node.module or ""

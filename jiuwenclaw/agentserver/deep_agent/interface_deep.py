@@ -612,6 +612,46 @@ def _ensure_progressive_meta_tools(eager_tools: list[str]) -> list[str]:
     return eager_tools
 
 
+_SKILL_TURBO_ONLINE_TOOL = "skill_turbo_tool"
+_SKILL_TURBO_BATCH_TOOL = "skill_acceleration_exec"
+
+
+def _apply_skill_turbo_eager_mutex(
+    eager_tools: list[str],
+    react_config: dict[str, Any],
+) -> list[str]:
+    """按 skill_turbo_execution_mode 互斥注入/剔除 turbo 工具（O3）。
+
+    - mode=online → eager 含 skill_turbo_tool，不含 skill_acceleration_exec
+    - mode=batch  → eager 含 skill_acceleration_exec，不含 skill_turbo_tool
+    - skill_turbo 未启用 → 剔除两者，避免幽灵工具名
+    """
+    result = list(eager_tools)
+    skill_turbo_config = react_config.get("skill_turbo") or {}
+    if not isinstance(skill_turbo_config, dict):
+        skill_turbo_config = {}
+    enabled = _parse_bool_switch(skill_turbo_config.get("enabled", False), default=False)
+    if not enabled:
+        return [
+            name for name in result
+            if name not in (_SKILL_TURBO_ONLINE_TOOL, _SKILL_TURBO_BATCH_TOOL)
+        ]
+
+    mode = str(
+        skill_turbo_config.get("skill_turbo_execution_mode", "online") or "online"
+    ).strip().lower() or "online"
+
+    if mode == "batch":
+        result = [name for name in result if name != _SKILL_TURBO_ONLINE_TOOL]
+        if _SKILL_TURBO_BATCH_TOOL not in result:
+            result.append(_SKILL_TURBO_BATCH_TOOL)
+    else:
+        result = [name for name in result if name != _SKILL_TURBO_BATCH_TOOL]
+        if _SKILL_TURBO_ONLINE_TOOL not in result:
+            result.append(_SKILL_TURBO_ONLINE_TOOL)
+    return result
+
+
 def build_jiuwen_progressive_tool_rail_from_react_config(
     react_config: dict[str, Any],
     *,
@@ -675,6 +715,8 @@ def build_jiuwen_progressive_tool_rail_from_react_config(
                 _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
             )
         )
+
+    eager_tools = _apply_skill_turbo_eager_mutex(eager_tools, config)
 
     normalized_language = resolve_language(language)
     logger.info(
@@ -4021,14 +4063,43 @@ class JiuWenClawDeepAdapter:
                 return
 
             from openjiuwen.core.runner import Runner as RunnerClass
-            from jiuwenclaw.agentserver.skill_turbo.skill_turbo_tools import get_skill_turbo_tools
+            from jiuwenclaw.agentserver.skill_turbo.online.skill_turbo_tool import (
+                get_skill_turbo_online_tools,
+            )
 
-            for tool in get_skill_turbo_tools():
+            # 注册工具：默认 online；execution_mode=batch 时回滚注册批量工具（优化修复 F10）
+            execution_mode = "online"
+            if isinstance(skill_turbo_config, dict):
+                execution_mode = str(
+                    skill_turbo_config.get("skill_turbo_execution_mode", "online")
+                ).strip() or "online"
+
+            if execution_mode == "batch":
+                from jiuwenclaw.agentserver.skill_turbo.skill_turbo_tools import (
+                    get_skill_turbo_tools,
+                )
+                tools_to_register = get_skill_turbo_tools()
+                logger.info(
+                    "[JiuWenClawDeepAdapter] skill_turbo_execution_mode=batch, "
+                    "registering skill_acceleration_exec"
+                )
+            else:
+                # M6：在线模型为默认 turbo 执行路径；回退直跳 skill_tool（stage=3）
+                tools_to_register = get_skill_turbo_online_tools()
+                logger.info(
+                    "[JiuWenClawDeepAdapter] skill_turbo_execution_mode=%s, "
+                    "registering skill_turbo_tool",
+                    execution_mode,
+                )
+
+            for tool in tools_to_register:
                 try:
                     RunnerClass.resource_mgr.add_tool(tool)
                 except Exception as e:
                     if "already exist" not in str(e):
-                        logger.warning("[JiuWenClawDeepAdapter] Failed to register skill_turbo tool: %s", e)
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] Failed to register skill turbo tool: %s", e,
+                        )
                         continue
                 self._instance.ability_manager.add(tool.card)
 
@@ -7557,6 +7628,300 @@ class JiuWenClawDeepAdapter:
 
         return _resume_impl()
 
+    async def _try_skill_turbo_online_resume(
+        self,
+        request: AgentRequest,
+        inputs: dict[str, Any],
+    ) -> AsyncIterator[AgentResponseChunk] | None:
+        """检测在线 SkillTurbo HITL resume 请求并走单节点重放恢复路径。
+
+        设计 §6.5：在线模式无 root，恢复时只重放中断的那个 group/叶节点，
+        非 root-based resume_stream。重放完成后回到在线 loop 继续后续节点。
+
+        仅处理 answers 非空 + online interrupt state 存在的请求。
+        其他请求（无 answers 或无 online interrupt state）返回 None，
+        由批量 resume（_try_skill_turbo_resume）或 DeepAgent 主流程处理。
+        """
+        params = request.params if isinstance(getattr(request, "params", None), dict) else {}
+        answers: list = params.get("answers") or []
+        if not answers:
+            return None
+        if self._instance is None:
+            return None
+
+        session = create_agent_session(
+            session_id=request.session_id or "default",
+            card=self._instance.card,
+        )
+        _skill_turbo_set_agent_id(session, self._instance.card)
+
+        # pre_run 从 checkpointer 加载 session state
+        try:
+            await session.pre_run(inputs=None)
+        except Exception as exc:
+            logger.debug(
+                "[JiuWenClawDeepAdapter] online resume pre_run failed: %s", exc,
+            )
+            return None
+
+        # 检查是否有在线中断现场
+        from jiuwenclaw.agentserver.skill_turbo.online.context_store import (
+            load_online_interrupt_state,
+        )
+        interrupt_state = await load_online_interrupt_state(session)
+        if interrupt_state is None:
+            # 不是在线中断（可能是批量中断）→ 交给 _try_skill_turbo_resume
+            try:
+                await session.post_run()
+            except Exception:
+                pass
+            return None
+
+        logger.info(
+            "[JiuWenClawDeepAdapter] SkillTurbo online resume detected: plan=%s tcid=%s",
+            interrupt_state.get("interrupted_plan_name"),
+            interrupt_state.get("pending_tool_call_id"),
+        )
+
+        # 清除 harness 的 ToolInterruptionState：在线有自己的恢复机制
+        # （单节点重放 + ContextStore 衔接），不走 harness 的 handle_resume。
+        try:
+            from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+            session.update_state({INTERRUPTION_KEY: None})
+        except Exception as exc:
+            logger.debug(
+                "[JiuWenClawDeepAdapter] clear ToolInterruptionState failed: %s", exc,
+            )
+
+        if inputs is None:
+            inputs = {}
+        return self._make_skill_turbo_online_resume_stream(
+            request=request,
+            inputs=inputs,
+            session=session,
+            interrupt_state=interrupt_state,
+            answers=answers,
+        )
+
+    def _make_skill_turbo_online_resume_stream(
+        self,
+        request: AgentRequest,
+        inputs: dict[str, Any],
+        session: Any,
+        interrupt_state: dict[str, Any],
+        answers: list,
+    ) -> AsyncIterator[AgentResponseChunk] | None:
+        """构造在线 resume 的流式 AsyncIterator（单节点重放 + 回到在线 loop）。
+
+        流程（设计 §6.5）：
+        1. 恢复 ContextStore 快照
+        2. 构建 SkillTurbo 实例（提供 executor + environment）
+        3. answers → user_input（与批量 resume 同范式）
+        4. 单节点重放：set_pending_resume + run_single_node
+        5. 更新 ContextStore + 清除中断现场
+        6. yield 结果摘要给前端
+        7. 回到在线 loop：re-invoke agent，Agent 据 next_candidates 继续驱动
+        """
+        from jiuwenclaw.agentserver.skill_turbo.agent import SkillTurbo
+
+        async def _resume_impl() -> AsyncIterator[AgentResponseChunk]:
+            rid = request.request_id or ""
+            cid = request.channel_id or ""
+            sid = request.session_id or "default"
+            token_trace_sid = _LLM_TRACE_SESSION_ID.set(sid)
+            token_trace_rid = _LLM_TRACE_REQUEST_ID.set(rid)
+            token_trace_iter = _LLM_TRACE_ITERATION.set(0)
+            token_trace_model = _LLM_TRACE_MODEL_NAME.set(
+                getattr(self._model, "model_config", None)
+                and getattr(self._model.model_config, "model_name", "")
+                or ""
+            )
+
+            plan_name = interrupt_state.get("interrupted_plan_name", "")
+            tcid = interrupt_state.get("pending_tool_call_id", "")
+
+            params = request.params or {}
+            raw_interactive = params.get(
+                "interactive_ask", params.get("interactiveAsk")
+            )
+            interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
+
+            try:
+                from jiuwenclaw.agentserver.skill_turbo.online.context_store import (
+                    load_online_context,
+                    save_online_context,
+                    clear_online_interrupt_state,
+                )
+                from jiuwenclaw.agentserver.skill_turbo.online import (
+                    schema_loader,
+                    flow_scheduler,
+                    executor_single,
+                )
+
+                # 1. 恢复 ContextStore
+                ctx = await load_online_context(session)
+                if ctx is None:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] online resume: ContextStore missing"
+                    )
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "chat.error",
+                            "error": "恢复失败：任务上下文丢失，请重新发起任务",
+                        },
+                        is_complete=True,
+                    )
+                    return
+
+                # 2. 构建 SkillTurbo 实例（提供 executor + environment）
+                skill_turbo = SkillTurbo(self.build_skill_turbo_config())
+                env = skill_turbo._env
+                executor = skill_turbo._executor
+
+                # 3. answers → user_input（与批量 resume 同范式）
+                user_input = self._skill_turbo_answers_to_confirm_payload(
+                    answers, {"pending_tool_call_id": tcid},
+                )
+
+                # 4. 加载 schema + 单节点重放
+                schema = schema_loader.load_schema(ctx.turbo_dir, ctx.scenario)
+                single = executor_single.SkillCodeExecutor(
+                    env, request_id=rid, channel_id=cid,
+                )
+                single.set_pending_resume(executor, tcid, user_input)
+
+                logger.info(
+                    "[JiuWenClawDeepAdapter] online resume replay plan=%s tcid=%s",
+                    plan_name, tcid,
+                )
+
+                async with ask_user_question_request_scope(
+                    interactive_ask=interactive_ask,
+                    session_id=sid,
+                    stream_request_id=rid,
+                    channel_id=cid,
+                    scope=RuntimeScopeKey.from_adapter(self, session_id=sid),
+                ):
+                    node_outputs = await single.run_single_node(
+                        turbo_dir=ctx.turbo_dir,
+                        scenario=ctx.scenario,
+                        plan_name=plan_name,
+                        schema=schema,
+                        node_inputs=ctx.accumulator,
+                        parent_session=session,
+                        executor=executor,
+                    )
+
+                # 5. 更新 ContextStore + 清除中断现场
+                if isinstance(node_outputs, dict):
+                    if node_outputs.get("fallback"):
+                        ctx.record_fallback(plan_name)
+                    ctx.update(node_outputs, plan_name)
+
+                await clear_online_interrupt_state(session)
+                await save_online_context(session, ctx, skip_post_run=True)
+                try:
+                    await session.post_run()
+                except Exception:
+                    pass
+
+                # 6. 构造结果摘要 + next_candidates
+                candidates = flow_scheduler.next_candidates(schema, ctx)
+                complete = flow_scheduler.is_task_complete(schema, ctx)
+
+                # yield 结果给前端（让用户看到恢复进度）
+                if complete:
+                    result_msg = f"节点 {plan_name} 审批恢复完成，任务已全部完成。"
+                else:
+                    result_msg = (
+                        f"节点 {plan_name} 审批恢复完成。"
+                        f"下一候选节点: {candidates}。请继续执行。"
+                    )
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.delta", "content": result_msg},
+                    is_complete=False,
+                )
+
+                if complete:
+                    # 任务完成：清理 ContextStore（落盘）+ 释放层2（优化修复 F3）
+                    from jiuwenclaw.agentserver.skill_turbo.online.context_store import (
+                        clear_online_context,
+                    )
+                    from jiuwenclaw.agentserver.skill_turbo.online.skill_turbo_tool import (
+                        _release_turbo_active_body,
+                    )
+                    await clear_online_context(session, persist=True)
+                    _release_turbo_active_body(session, ctx.skill_name)
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "chat.final",
+                            "content": "任务已完成",
+                        },
+                        is_complete=True,
+                    )
+                    return
+
+                # 7. 回到在线 loop：re-invoke agent
+                # Agent 据 follow-up 中的 next_candidates 继续调用 skill_turbo_tool
+                followup_inputs = dict(inputs)
+                followup_inputs["query"] = (
+                    f"[SYSTEM] skill_turbo_tool(plan_name={plan_name}) 审批已通过，"
+                    f"节点执行完成。请继续调用 skill_turbo_tool 执行下一节点"
+                    f"（next_candidates: {candidates}）。"
+                )
+                followup_inputs["conversation_id"] = sid
+                followup_inputs["_invoke_turn_id"] = rid
+
+                async for chunk in Runner.run_agent_streaming(
+                    self._instance, followup_inputs,
+                ):
+                    parsed = self._parse_stream_chunk_with_source(chunk)
+                    if parsed is None:
+                        continue
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload=parsed,
+                        is_complete=False,
+                    )
+            except _SkillTurboAbortError as e:
+                # 二次中断：防御性处理（理论上 rail 已收到答案，但防御性兜底）
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] online resume second interrupt: %s", e,
+                )
+                async for hitl_chunk in self._emit_skill_turbo_hitl_chunks(
+                    request, e,
+                ):
+                    yield hitl_chunk
+                return
+            except Exception as exc:
+                logger.error(
+                    "[JiuWenClawDeepAdapter] online resume failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "chat.error",
+                        "error": f"恢复失败: {exc}",
+                    },
+                    is_complete=True,
+                )
+            finally:
+                _reset_llm_trace_tokens(
+                    token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model,
+                )
+
+        return _resume_impl()
+
     @staticmethod
     def _skill_turbo_answers_to_confirm_payload(
         answers: list,
@@ -7883,6 +8248,15 @@ class JiuWenClawDeepAdapter:
         usage_accumulator = self._new_usage_accumulator()
 
         # ── SkillTurbo V2：resume 请求仍由适配器层面路由 ──
+        # 在线 resume 优先（单节点重放，设计 §6.5）；非在线中断则回退批量 resume
+        skill_turbo_online_resume_stream = await self._try_skill_turbo_online_resume(
+            request, inputs,
+        )
+        if skill_turbo_online_resume_stream is not None:
+            async for chunk in skill_turbo_online_resume_stream:
+                yield chunk
+            return
+
         skill_turbo_resume_stream = await self._try_skill_turbo_resume(request, inputs)
         if skill_turbo_resume_stream is not None:
             async for chunk in skill_turbo_resume_stream:

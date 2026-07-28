@@ -100,6 +100,36 @@ _task_states_var: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
 )
 
 
+def bind_online_parent_session(
+    session: Session | None,
+    *,
+    request_id: str = "",
+    channel_id: str = "",
+) -> dict[str, Any]:
+    """Online 单节点执行：将父会话绑到 Executor ContextVar，供 call_llm/stream_llm 写流。
+
+    与批量 ``_init_execution_context`` 不同：直接绑定父会话（不新建独立 session），
+    使 llm_reasoning / llm_output 写入主 Agent 可出站的 stream。
+    """
+    return {
+        "session": _session_var.set(session),
+        "request": _request_id_var.set(request_id or ""),
+        "channel": _channel_id_var.set(channel_id or ""),
+    }
+
+
+def reset_online_parent_session(tokens: dict[str, Any] | None) -> None:
+    """恢复 ``bind_online_parent_session`` 设置的 ContextVar。"""
+    if not tokens:
+        return
+    if "channel" in tokens:
+        _channel_id_var.reset(tokens["channel"])
+    if "request" in tokens:
+        _request_id_var.reset(tokens["request"])
+    if "session" in tokens:
+        _session_var.reset(tokens["session"])
+
+
 # ──────────────────────── 简单的ToolCall类 ────────────────────────
 @dataclass
 class ToolCall:
