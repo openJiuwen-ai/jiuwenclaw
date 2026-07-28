@@ -56,7 +56,7 @@ _QUESTIONS_ITEM_SCHEMA: dict[str, Any] = {
         },
         "header": {
             "type": "string",
-            "description": "A short label displayed as a chip/tag (max 12 chars).",
+            "description": "A short label displayed as a chip/tag.",
         },
         "options": {
             "type": "array",
