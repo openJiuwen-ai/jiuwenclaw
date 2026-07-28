@@ -194,7 +194,10 @@ def _bind_listen_probe(host: str, port: int, family: int) -> bool | None:
         True if the port can be bound, False if occupied, None if this address
         family / host is unsupported on the machine (caller should ignore).
     """
-    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+    except OSError:
+        return None
     # Intentionally NOT setting SO_REUSEADDR: on Windows it permits multiple
     # sockets to bind the same port, which would mask an occupied port and
     # reproduce the very 10048 crash we are trying to avoid. The real services

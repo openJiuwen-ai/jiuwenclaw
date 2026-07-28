@@ -246,20 +246,28 @@ class TestPortAvailability:
         import socket as _socket
         import pytest
 
+        s = None
         try:
-            s = _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM)
-            # Restrict to IPv6-only so we do not also claim IPv4 via dualstack.
-            if hasattr(_socket, "IPV6_V6ONLY"):
-                s.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 1)
-            s.bind(("::1", 0))
-        except OSError:
-            pytest.skip("IPv6 loopback unavailable on this host")
-        port = s.getsockname()[1]
-        s.listen(1)
-        try:
+            try:
+                s = _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM)
+                # Restrict to IPv6-only so we do not also claim IPv4 via dualstack.
+                if hasattr(_socket, "IPV6_V6ONLY"):
+                    s.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 1)
+                s.bind(("::1", 0))
+                s.listen(1)
+            except OSError:
+                # Must close before skip: an unbound AF_INET6 socket still
+                # triggers ResourceWarning / PytestUnraisableExceptionWarning
+                # on the next test's setup (seen on Linux CI without ::1).
+                if s is not None:
+                    s.close()
+                    s = None
+                pytest.skip("IPv6 loopback unavailable on this host")
+            port = s.getsockname()[1]
             assert is_port_available("127.0.0.1", port) is False
         finally:
-            s.close()
+            if s is not None:
+                s.close()
 
 
 class TestInstanceConfig:
