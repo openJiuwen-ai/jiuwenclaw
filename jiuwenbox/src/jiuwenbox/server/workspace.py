@@ -22,5 +22,22 @@ def _effective_user_home() -> Path:
         return Path.home()
 
 
-JIUWENBOX_HOME = _effective_user_home() / ".jiuwenbox"
+# Windows: JIUWENBOX_HOME 与 agent-server (jiuwenclaw) 同根, 放在其
+# <workspace>/jiuwenbox 下. agent-server (或上游产品如 office-claw) 启动时设
+# JIUWENCLAW_DATA_DIR (~/.office-claw/.jiuwenclaw), box-server 是 agent-server
+# 拉起的子进程, 继承该 env. 同根保证 box-server (liubuyu) 天然是这些目录
+# owner → 改 DACL 不会 WinError 5, 子目录继承 ACL 顺. 旧版用 ~/.jiuwenbox 时
+# 该目录 owner 可能非当前用户或 ACL 被 revoke 残留, 导致 upload/list 频繁
+# Permission denied. 所有 JIUWENBOX_HOME 引用 (policies/sandboxes/logs/workspace)
+# 统一走新根, 不再生成 ~/.jiuwenbox. Linux 不变 (~/.jiuwenbox).
+if sys.platform == "win32":
+    _win_root_env = os.environ.get("JIUWENCLAW_DATA_DIR", "").strip()
+    JIUWENBOX_HOME = (
+        Path(_win_root_env).expanduser().resolve()
+        if _win_root_env
+        else _effective_user_home() / ".jiuwenclaw"
+    ) / "jiuwenbox"
+else:
+    JIUWENBOX_HOME = _effective_user_home() / ".jiuwenbox"
 SANDBOX_WORKSPACE = JIUWENBOX_HOME / "workspace"
+WIN_SANDBOX_WORKSPACE_ROOT = SANDBOX_WORKSPACE

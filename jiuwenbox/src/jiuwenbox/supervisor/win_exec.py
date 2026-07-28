@@ -33,10 +33,16 @@ from ctypes import wintypes
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.supervisor import win_constants as const
 from jiuwenbox.supervisor.daemon_ipc import (
+    LOG_FIELD_LEVEL,
+    LOG_FIELD_MESSAGE,
+    LOG_FIELD_TIMESTAMP,
+    LOG_FIELD_TRACEBACK,
+    LOG_FRAME_TYPE,
     MAX_FILE_BYTES,
     MAX_HEADER_BYTES,
     MAX_STDIN_BYTES,
     MAX_STDOUT_BYTES,
+    REQUEST_TYPE_SUBSCRIBE_LOG,
     recv_frame,
     send_frame,
 )
@@ -53,6 +59,67 @@ RUNNER_SUBCOMMAND = "runner"
 # box-server 每次 exec connect. 对齐 Linux AF_UNIX listener 模型
 # (Windows 不能传 fd, 改传端口号).
 LISTENER_PORT_ENV = "JIUWENBOX_CONTROL_LISTENER_PORT"
+
+# 日志订阅连接集合 (runner 端). box-server 创建 sandbox 后会 connect control_port
+# 发 subscribe_log 握手帧, runner 把该连接存入此集合并保持, 之后任何阶段往里 push
+# log 帧. runner 在 jbx-sandbox 受限 token 下, CREATE_NO_WINDOW 导致 stderr 无落盘,
+# 早期异常 (尤其 _create_restricted_token 失败) 静默退出时, 靠这条长连把异常发回
+# box-server 由主进程打印. 线程安全: 多个 exec worker 线程会并发 _push_log.
+import threading as _threading  # noqa: E402
+
+_log_subscribers: list = []  # list[socket.socket]
+_log_sub_lock = _threading.Lock()
+
+# runner 启动时记下的代理端口范围, 供 _create_process_as_user 自动注入
+# HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 子进程环境 (对齐文档 §6.6). runner_main 解析
+# args 后写入. box-server 起 win_proxy 监听 127.0.0.1:<port_range>, 沙箱子进程
+# 的出网流量经 WFP 只能到这些端口, env 让遵守代理协议的程序自动走代理.
+_proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START
+_proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END
+
+
+def _push_log(level: str, msg: str, exc: str | None = None) -> None:
+    """往所有日志订阅连接 push 一个 log 帧 (best-effort, 不抛错).
+
+    runner 任何阶段都可调: 启动/受限 token 创建失败/bind 失败/exec 子命令结果/
+    退出前. 单个订阅连接发送失败则移除该连接 (订阅方已断开), 不影响主流程.
+    本地也 logger 一份 (CREATE_NO_WINDOW 下虽不落盘, 但若有 console 仍可见).
+    """
+    import json as _json
+    import time as _time
+    payload = {
+        "v": 1,
+        "type": LOG_FRAME_TYPE,
+        LOG_FIELD_LEVEL: level,
+        LOG_FIELD_MESSAGE: msg,
+        LOG_FIELD_TIMESTAMP: _time.time(),
+    }
+    if exc:
+        payload[LOG_FIELD_TRACEBACK] = exc
+    blob = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    dead: list = []
+    with _log_sub_lock:
+        subs = list(_log_subscribers)
+    for sock in subs:
+        try:
+            send_frame(sock, blob)
+        except (OSError, ConnectionError, ValueError):
+            dead.append(sock)
+    if dead:
+        with _log_sub_lock:
+            for sock in dead:
+                if sock in _log_subscribers:
+                    _log_subscribers.remove(sock)
+    # 本地也记一份 (与 push 同时, 方便有 console 的场景).
+    try:
+        if level == "ERROR":
+            logger.error("[runner] %s", msg)
+        elif level == "WARNING":
+            logger.warning("[runner] %s", msg)
+        else:
+            logger.info("[runner] %s", msg)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _require_windows() -> None:
@@ -348,15 +415,28 @@ def two_hop_spawn(
     LOGON_WITH_PROFILE = 0x00000001
     # CREATE_SUSPENDED: runner 主线程挂起, 调用方 assign Job 后再 ResumeThread,
     # 避免 Job 逃逸窗口 (设计 6.8 SUSPEND→Assign→Resume).
+    # CREATE_UNICODE_ENVIRONMENT: 传 Unicode env 块时必须带, 否则 WinError 87.
     creation_flags = const.CREATE_NO_WINDOW | const.CREATE_SUSPENDED
+    # 传 env 块给 runner 进程: box-server 把 tool_paths 目录拼进 PATH 后,
+    # runner 必须继承这个 PATH (否则 runner 的 os.environ 不含工具目录 →
+    # 起 child 时 env=None 回退到 os.environ 也无 PATH → WinError 2).
+    # 旧版 env=None "用调用方环境" 会丢掉调用方拼的 PATH_prefix.
+    # env_block_buf 必须存活到 CreateProcessWithLogonW 返回 (悬垂指针防护,
+    # 同 _create_process_as_user 的 env_block_buf 处理).
+    env_block_buf = None
+    env_block_ptr = None
+    if env:
+        env_block_buf = _build_env_block(env)
+        env_block_ptr = ctypes.cast(env_block_buf, ctypes.c_void_p)
+        creation_flags |= const.CREATE_UNICODE_ENVIRONMENT
 
     ok = advapi32.CreateProcessWithLogonW(
         sandbox_user, None, sandbox_password,
         LOGON_WITH_PROFILE,
         None, cmd,
         creation_flags,
-        None, None,  # env=None 用调用方环境
-        ctypes.byref(startup), ctypes.byref(pi),
+        env_block_ptr,  # env 块; NULL 则用调用方环境
+        None, ctypes.byref(startup), ctypes.byref(pi),
     )
     if not ok:
         err = ctypes.WinError(ctypes.get_last_error())
@@ -616,13 +696,31 @@ def _create_process_as_user(
     # c_void_p 指向的内存被 GC 释放, 子进程拿到的是悬垂内存 (review
     # CRITICAL #3). 旧版 _build_environment_block 返回 c_void_p 后 buf
     # 立即被回收. 这里内联构造并持有 buf 引用直到 API 调用完成.
+    #
+    # env=None 时不能传 NULL 给 CreateProcessAsUserW (那给子进程空环境块,
+    # 无 PATH → 可执行名解析失败 → WinError 2). 回退到 runner 自身环境
+    # (os.environ, 含 box-server 继承的 PATH + 工具目录), 并自动注入
+    # HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 指向代理端口 (文档 §6.6 要求).
     env_block_buf = None
     env_block_ptr = None
-    if env:
-        parts = [f"{k}={v}" for k, v in env.items()]
-        block = "\0".join(parts) + "\0\0"
-        env_block_buf = ctypes.create_unicode_buffer(block)
-        env_block_ptr = ctypes.cast(env_block_buf, ctypes.c_void_p)
+    if env is None:
+        env = dict(os.environ)
+    else:
+        env = dict(env)
+    # 自动注入代理 env (文档 §6.6): 即使调用方没传, 也让遵守代理协议的程序
+    # (pip/git/curl/node 等) 走 win_proxy, WFP 兜底拦截不走代理的出网.
+    proxy_url = f"http://127.0.0.1:{_proxy_port_start}"
+    env.setdefault("HTTP_PROXY", proxy_url)
+    env.setdefault("HTTPS_PROXY", proxy_url)
+    env.setdefault("http_proxy", proxy_url)
+    env.setdefault("https_proxy", proxy_url)
+    env.setdefault("ALL_PROXY", proxy_url)
+    # NO_PROXY 放行 loopback 自身 (代理 → 代理 不该再走代理).
+    env.setdefault("NO_PROXY", "127.0.0.1,localhost,::1")
+    parts = [f"{k}={v}" for k, v in env.items()]
+    block = "\0".join(parts) + "\0\0"
+    env_block_buf = ctypes.create_unicode_buffer(block)
+    env_block_ptr = ctypes.cast(env_block_buf, ctypes.c_void_p)
 
     startup = STARTUPINFOW()
     startup.cb = ctypes.sizeof(STARTUPINFOW)
@@ -632,7 +730,13 @@ def _create_process_as_user(
     startup.hStdError = wintypes.HANDLE(stdout_fd)
     pi = PROCESS_INFORMATION()
 
-    creation_flags = const.CREATE_NO_WINDOW | const.CREATE_NEW_PROCESS_GROUP
+    # env block 始终构造 (env=None 回退 os.environ), 故必须带 UNICODE flag,
+    # 否则 CreateProcessAsUserW 按 ANSI 解析 env block → WinError 87.
+    creation_flags = (
+        const.CREATE_NO_WINDOW
+        | const.CREATE_NEW_PROCESS_GROUP
+        | const.CREATE_UNICODE_ENVIRONMENT
+    )
     cwd = workdir if workdir else None
 
     ok = advapi32.CreateProcessAsUserW(
@@ -647,6 +751,30 @@ def _create_process_as_user(
         ctypes.byref(startup), ctypes.byref(pi),
     )
     if not ok:
+        # 诊断: CreateProcessAsUserW 失败时区分"PATH 找不到" vs "ACL 读不了".
+        # WinError 2 通常是可执行名解析失败 (PATH 无该目录) 或受限 token 读不了
+        # 可执行文件 (ACL). 打印 command[0]、PATH 片段、目标文件存在性+可读性,
+        # 经 [win-runner] 日志长连发回 box-server 由主进程打印.
+        _cmd0 = str(command[0]) if command else "<empty>"
+        _path_val = env.get("PATH", "") if isinstance(env, dict) else ""
+        _path_segs = (_path_val or "").split(os.pathsep)[:8]
+        import ntpath as _ntp
+        _resolved = None
+        for _seg in _path_segs:
+            if not _seg:
+                continue
+            _cand = _ntp.join(_seg, _cmd0)
+            if os.path.isfile(_cand):
+                _resolved = _cand
+                break
+        _exists = os.path.isfile(_cmd0)
+        _readable = os.access(_cmd0, os.R_OK) if _exists else False
+        _push_log(
+            "ERROR",
+            f"CreateProcessAsUserW 失败 cmd0={_cmd0!r} resolved_in_PATH={_resolved!r} "
+            f"cmd0_exists={_exists} cmd0_readable={_readable} "
+            f"PATH_segs(8)={_path_segs}",
+        )
         raise ctypes.WinError(ctypes.get_last_error())
     return int(pi.dwProcessId), int(pi.hProcess)
 
@@ -671,24 +799,38 @@ def runner_main(argv: list[str]) -> int:
     parser.add_argument("--control-port", type=int, required=True)
     args = parser.parse_args(argv)
 
+    # 记录代理端口到模块级, 供 _create_process_as_user 自动注入 HTTP_PROXY env.
+    global _proxy_port_start, _proxy_port_end
+    _proxy_port_start = args.proxy_port_start
+    _proxy_port_end = args.proxy_port_end
+
     _require_windows()
     logger.info(
         "runner 启动: sandbox_id=%s workspace=%s control_port=%s",
         args.sandbox_id, args.workspace, args.control_port,
     )
+    _push_log("INFO", f"runner 启动: sandbox_id={args.sandbox_id} "
+               f"workspace={args.workspace} control_port={args.control_port}")
 
     # runner 由 CreateProcessWithLogonW + CREATE_NO_WINDOW 拉起, stderr 无落盘.
     # 任何早期异常 (尤其 _create_restricted_token) 会让 runner 静默退出,
     # box-server 端只看到 control_port ECONNREFUSED, 无法定位根因.
-    # 这里在最外层包 try/except, 把异常完整落盘 + logger.error, 方便 debug.
+    # 这里在最外层包 try/except, 把异常完整落盘 + logger.error + _push_log,
+    # 后者经日志长连发回 box-server 由主进程打印.
     try:
         restricted_token = _create_restricted_token()
     except Exception:
+        import traceback as _tb
+        tb = _tb.format_exc()
         logger.exception(
             "runner _create_restricted_token 失败, runner 退出 (sandbox_id=%s)",
             args.sandbox_id,
         )
+        _push_log("ERROR",
+                  f"runner _create_restricted_token 失败, runner 退出 "
+                  f"(sandbox_id={args.sandbox_id})", exc=tb)
         return 1
+    _push_log("INFO", f"restricted token 创建成功: handle={restricted_token}")
 
     # TCP loopback 控制端口 (box-server 分配, 命令行参数传入). runner bind + listen,
     # box-server 每次 exec connect 一条新连接, 发一帧请求读一帧响应后 close.
@@ -702,8 +844,10 @@ def runner_main(argv: list[str]) -> int:
         listener.listen(64)
     except OSError as exc:
         logger.error("runner bind 127.0.0.1:%d 失败: %s", port, exc)
+        _push_log("ERROR", f"runner bind 127.0.0.1:{port} 失败: {exc}")
         return 1
     logger.info("runner 监听 127.0.0.1:%d (sandbox_id=%s)", port, args.sandbox_id)
+    _push_log("INFO", f"runner 监听 127.0.0.1:{port} (sandbox_id={args.sandbox_id})")
 
     try:
         while True:
@@ -722,31 +866,78 @@ def runner_main(argv: list[str]) -> int:
                 continue
 
             req_type = header.get("type")
+            # 日志订阅长连: box-server 创建 sandbox 后主动 connect 发此帧.
+            # runner 把该连接存入订阅集保持, 之后任何阶段往里 push log 帧.
+            # 不 close, 不回响应 (订阅是单向 push), 回 accept 等下一条短连.
+            if req_type == REQUEST_TYPE_SUBSCRIBE_LOG:
+                try:
+                    conn.setblocking(True)
+                    with _log_sub_lock:
+                        _log_subscribers.append(conn)
+                    _push_log("INFO",
+                              "日志订阅连接已建立 (box-server -> runner 长连)")
+                except OSError as exc:
+                    _push_log("WARNING", f"订阅连接入集失败: {exc}")
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                continue
             if req_type == "shutdown":
                 _send_response(conn, {"ok": True})
                 conn.close()
                 break
-            if req_type == "exec":
-                # exec 请求的 stdin body 帧 (紧跟 header), 从同一连接读.
-                stdin_size = int(header.get("stdin_size", 0))
-                stdin_bytes = recv_frame(conn, MAX_STDIN_BYTES) if stdin_size > 0 else b""
-                _handle_exec_request(
-                    conn, header, restricted_token, args.workspace,
-                    stdin_bytes,
-                )
-            elif req_type == "write_file":
-                _handle_write_file_request(conn, header, conn)
-            elif req_type == "read_file":
-                _handle_read_file_request(conn, header)
-            elif req_type == "list_dir":
-                _handle_list_dir_request(conn, header)
-            else:
-                _send_error_response(conn, f"unknown request type: {req_type!r}")
+            # 每个 request handler 独立 try/except: 单个连接的 OSError (如 box-server
+            # 读超时主动 close 后 runner 发响应抛 ConnectionAbortedError) 不应杀掉
+            # 整个 runner — 旧版直接冒泡到 accept 循环 except → runner 退出 → 后续
+            # 所有 exec 全 timeout (409). 这里捕获后只 close 该连接, 继续 accept.
+            try:
+                if req_type == "exec":
+                    # exec 请求的 stdin body 帧 (紧跟 header), 从同一连接读.
+                    stdin_size = int(header.get("stdin_size", 0))
+                    stdin_bytes = recv_frame(conn, MAX_STDIN_BYTES) if stdin_size > 0 else b""
+                    _handle_exec_request(
+                        conn, header, restricted_token, args.workspace,
+                        stdin_bytes,
+                    )
+                elif req_type == "write_file":
+                    _handle_write_file_request(conn, header, conn)
+                elif req_type == "read_file":
+                    _handle_read_file_request(conn, header)
+                elif req_type == "list_dir":
+                    _handle_list_dir_request(conn, header)
+                else:
+                    _send_error_response(conn, f"unknown request type: {req_type!r}")
+            except OSError as exc:
+                # 连接已断 (box-server 超时关闭 / 对端崩). 单连接失败不杀 runner.
+                logger.debug("runner 处理 %s 请求连接异常, 跳过: %s", req_type, exc)
+            except Exception as exc:  # noqa: BLE001
+                import traceback as _tb_req
+                logger.debug("runner 处理 %s 请求异常: %s", req_type, exc, exc_info=True)
+                _push_log("WARNING",
+                          f"runner 处理 {req_type} 请求异常 (单连接, 不杀 runner): "
+                          f"{exc}", exc=_tb_req.format_exc())
             conn.close()
+    except Exception:
+        import traceback as _tb
+        tb = _tb.format_exc()
+        logger.exception("runner accept 循环异常 (sandbox_id=%s)", args.sandbox_id)
+        _push_log("ERROR",
+                  f"runner accept 循环异常 (sandbox_id={args.sandbox_id})", exc=tb)
     finally:
+        _push_log("INFO", f"runner 退出 (sandbox_id={args.sandbox_id})")
         kernel32 = _get_kernel32()
         kernel32.CloseHandle(wintypes.HANDLE(restricted_token))
         listener.close()
+        # 关闭所有日志订阅连接, 通知订阅方 runner 已退出.
+        with _log_sub_lock:
+            subs = list(_log_subscribers)
+            _log_subscribers.clear()
+        for sock in subs:
+            try:
+                sock.close()
+            except OSError:
+                pass
     return 0
 
 
@@ -810,6 +1001,32 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             kernel32.CloseHandle(child_in_write)
         else:
             kernel32.CloseHandle(child_in_write)
+        # 等待子进程退出, 再读 stdout. 顺序不能反: 若先 read 再 wait, child 崩溃
+        # (如 0xc0000142 STATUS_DLL_INIT_FAILED) 后其继承的 stdout 写端可能未
+        # 干净关闭 → pipe 不 EOF → runner read 阻塞 → control_port 无响应 →
+        # box-server 端 exec 超时 (timed out). 先 wait 让内核回收 child 持有的
+        # 所有 handle (含 stdout 写端), 再 drain stdout 能拿到 EOF.
+        # 用带超时的循环 wait 而非 INFINITE: 防 child stdout 写满 pipe (64KB) 后
+        # 阻塞在 write 等 runner 读 → 互相死锁. 120s 足够覆盖正常命令; 超时强杀.
+        INFINITE = 0xFFFFFFFF
+        WAIT_TIMEOUT_MS = 500
+        deadline_waited_ms = 0
+        WAIT_BUDGET_MS = 120000
+        while True:
+            result = kernel32.WaitForSingleObject(
+                wintypes.HANDLE(proc_handle), WAIT_TIMEOUT_MS,
+            )
+            if result == 0:  # WAIT_OBJECT_0: child 已退出
+                break
+            deadline_waited_ms += WAIT_TIMEOUT_MS
+            if deadline_waited_ms >= WAIT_BUDGET_MS:
+                # child 长时间不退出 (可能 stdout 写满死锁, 或 child 卡住),
+                # 强杀避免 runner 永久挂起. 后续 exec 还能继续 (单连接不杀 runner).
+                kernel32.TerminateProcess(wintypes.HANDLE(proc_handle), 1)
+                _push_log("WARNING",
+                          f"exec child 超时未退出 ({WAIT_BUDGET_MS}ms) 强杀, "
+                          f"cmd={command[:3] if command else []!r}")
+                break
         # 读取子进程 stdout 全部输出.
         # 用 os.fdopen 包装 child_out_read handle -> 文件对象.
         import msvcrt  # type: ignore[import-not-found]
@@ -826,22 +1043,44 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                 if len(out_buf) > MAX_STDOUT_BYTES:
                     out_buf = out_buf[:MAX_STDOUT_BYTES]
                     break
-        # 等待子进程退出.
-        INFINITE = 0xFFFFFFFF
-        kernel32.WaitForSingleObject(wintypes.HANDLE(proc_handle), INFINITE)
         exit_code = wintypes.DWORD()
         kernel32.GetExitCodeProcess(
             wintypes.HANDLE(proc_handle), ctypes.byref(exit_code),
         )
         kernel32.CloseHandle(wintypes.HANDLE(proc_handle))
+        ec = int(exit_code.value)
+        out_text = bytes(out_buf).decode("utf-8", errors="replace")
         _send_response(stream, {
             "ok": True,
-            "exit_code": int(exit_code.value),
-            "stdout": bytes(out_buf).decode("utf-8", errors="replace"),
+            "exit_code": ec,
+            "stdout": out_text,
             "stderr": "",
         })
+        # 上报 exec 结果 (尤其失败时). exit_code != 0 或输出为空是定位
+        # "空 stderr exit=1" 类问题的关键, 把 command 摘要 + exit + 输出前缀
+        # 经日志长连发回 box-server 由主进程打印. 输出截断防撑爆日志帧.
+        cmd_summary = " ".join(str(c) for c in (header.get("command") or []))[:200]
+        out_preview = out_text[:512]
+        if ec != 0:
+            _push_log("WARNING",
+                      f"exec 失败 exit={ec} cmd={cmd_summary!r} "
+                      f"stdout_len={len(out_text)} stdout_preview={out_preview!r}")
+        else:
+            _push_log("INFO",
+                      f"exec 成功 exit=0 cmd={cmd_summary!r} "
+                      f"stdout_len={len(out_text)}")
     except Exception as exc:  # noqa: BLE001
-        _send_error_response(stream, f"exec failed: {exc}")
+        import traceback as _tb
+        tb = _tb.format_exc()
+        # 发 error response 时若连接已断 (box-server 读超时主动 close) 会再抛
+        # ConnectionAbortedError/BrokenPipeError, 若不吞会冒泡到 accept 循环的
+        # except → runner 退出 → 后续所有 exec 全 timeout (409). 这里兜底: 发
+        # error response 失败就吞掉, 不让单个 exec 的连接异常杀掉整个 runner.
+        try:
+            _send_error_response(stream, f"exec failed: {exc}")
+        except OSError:
+            pass
+        _push_log("ERROR", f"exec 处理异常: {exc}", exc=tb)
         try:
             kernel32.CloseHandle(child_out_write)
             kernel32.CloseHandle(child_out_read)

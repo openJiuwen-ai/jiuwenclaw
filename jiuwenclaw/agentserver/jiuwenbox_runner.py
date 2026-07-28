@@ -44,6 +44,88 @@ logger = logging.getLogger(__name__)
 # 模块级常量, 避免在 ``_try_set_pdeathsig`` 函数内出现 UPPER_CASE 局部变量。
 _PR_SET_PDEATHSIG = 1
 
+# Windows 沙箱出站代理端口范围 (win_proxy 监听). 启动 box-server 前若这些端口
+# 被残留的旧 box-server 进程占用 (agent-server 上次被强杀未走 stop → 子进程
+# 孤儿, 仍占着端口), 新 box-server 的 win_proxy bind 会上 WinError 10048.
+# policy 里端口范围可配, 但 60080-60089 是 windows-policy.yaml 默认值, 这里
+# 做清理兜底; 实际范围由调用方 (ensure_running) 按当前 policy 决定, 这里只
+# 提供按范围清理的能力.
+_WIN_PROXY_DEFAULT_PORT_START = 60080
+_WIN_PROXY_DEFAULT_PORT_END = 60089
+
+
+def _cleanup_stale_win_proxy_ports(
+    port_start: int = _WIN_PROXY_DEFAULT_PORT_START,
+    port_end: int = _WIN_PROXY_DEFAULT_PORT_END,
+) -> None:
+    """启动新 box-server 前, 清理占用 win_proxy 端口范围的残留进程.
+
+    agent-server 重启后, self._process 不再持有旧 box-server 引用 → ensure_running
+    的 "owned_match" 判定失效, 旧 box-server (孤儿) 不会被 stop, 仍占着
+    60080-60089 → 新 box-server win_proxy bind WinError 10048. 这里检测占用
+    这些端口的进程, kill 掉 (Windows 用 PowerShell Get-NetTCPConnection).
+
+    仅 Windows internal 模式调用. best-effort: 检测/kill 失败只 warning, 不阻断
+    spawn (极端情况端口被非 jiuwenbox 第三方占, 不该误杀).
+    """
+    if sys.platform != "win32":
+        return
+    import subprocess
+    stale_pids: dict[int, list[int]] = {}  # pid -> ports
+    for port in range(port_start, port_end + 1):
+        try:
+            # Get-NetTCPConnection 查 Listen 状态的端口占用.
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Get-NetTCPConnection -LocalPort {port} -State Listen "
+                 f"-ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess"],
+                capture_output=True, timeout=5,
+            )
+            out = result.stdout.decode("utf-8", errors="replace").strip()
+            if not out:
+                continue
+            for pid_str in out.splitlines():
+                pid_str = pid_str.strip()
+                if pid_str.isdigit():
+                    pid = int(pid_str)
+                    stale_pids.setdefault(pid, []).append(port)
+        except Exception:  # noqa: BLE001
+            continue
+    if not stale_pids:
+        return
+    # 获取进程名, 避免误杀非 python 进程 (win_proxy 只可能由 python 进程占).
+    for pid, ports in stale_pids.items():
+        try:
+            name_result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-Process -Id {pid} -ErrorAction SilentlyContinue).ProcessName"],
+                capture_output=True, timeout=5,
+            )
+            proc_name = name_result.stdout.decode("utf-8", errors="replace").strip()
+        except Exception:  # noqa: BLE001
+            proc_name = ""
+        if proc_name.lower() != "python":
+            logger.warning(
+                "[JiuwenBoxRunner] 端口 %s 被非 python 进程 PID=%d (%s) 占用, 跳过清理",
+                ports, pid, proc_name or "<unknown>",
+            )
+            continue
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", f"Stop-Process -Id {pid} -Force"],
+                capture_output=True, timeout=5,
+            )
+            logger.warning(
+                "[JiuwenBoxRunner] 清理占用 win_proxy 端口 %s 的残留进程 PID=%d "
+                "(旧 box-server 孤儿, 阻止新 win_proxy bind)",
+                ports, pid,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuwenBoxRunner] 清理残留进程 PID=%d 失败 (端口 %s): %s",
+                pid, ports, exc,
+            )
+
 
 def _resolve_jiuwenbox_src_dir() -> Optional[Path]:
     """探测仓库内 ``code_agent/jiuwenbox/src``; 若存在则供 PYTHONPATH 注入用.
@@ -310,6 +392,15 @@ class JiuwenBoxRunner:
                 )
                 await self._stop_no_lock()
 
+            # Windows: 启动新 box-server 前清理占用 win_proxy 端口 (60080-60089)
+            # 的残留进程. agent-server 重启后 self._process 不持有旧 box-server 引用,
+            # 上面的 _stop_no_lock 清不到孤儿进程. 旧 box-server 仍占端口 → 新
+            # win_proxy bind WinError 10048. 这里按默认端口范围兜底清理 (若用户
+            # 改了 policy 的 proxy 端口范围, 用默认范围清不到, 但 bind 失败日志
+            # 会显示具体端口).
+            if sys.platform == "win32":
+                _cleanup_stale_win_proxy_ports()
+
             self._host = host
             self._port = port
 
@@ -403,7 +494,13 @@ class JiuwenBoxRunner:
             return ok
 
     async def _pump_stream(self, stream: Any, kind: str) -> None:  # type: ignore[override]
-        """持续读取子进程 stdout/stderr, 写入 logger debug; stderr 额外保留滚动尾部."""
+        """持续读取子进程 stdout/stderr, 写入 logger info; stderr 额外保留滚动尾部.
+
+        注意: 这里用 INFO 而非 DEBUG. box-server (uvicorn 子进程) 的所有运行期
+        日志——含 Windows 沙箱创建/ACL/spawn runner/runner 经日志长连回传的
+        [win-runner] 上报——都经此 pump 转发到 agent_server 日志. 若用 DEBUG,
+        在 agent_server 默认 INFO 级别下全部被过滤, 沙箱内部失败无法定位.
+        """
         if stream is None:
             return
         try:
@@ -420,11 +517,11 @@ class JiuwenBoxRunner:
                     if len(self._stderr_tail) > self._STDERR_TAIL_MAX:
                         # 保留尾部 N 行
                         del self._stderr_tail[0:len(self._stderr_tail) - self._STDERR_TAIL_MAX]
-                logger.debug("[jiuwenbox/%s] %s", kind, line)
+                logger.info("[jiuwenbox/%s] %s", kind, line)
         # ``asyncio.CancelledError`` 是 ``BaseException`` 子类 (Python 3.8+),
         # 不会被 ``except Exception`` 捕获, 因此无需显式 ``except ... raise``。
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[JiuwenBoxRunner] pump %s stopped: %s", kind, exc)
+            logger.info("[JiuwenBoxRunner] pump %s stopped: %s", kind, exc)
 
     async def _wait_until_ready(self, host: str, port: int, *, timeout: float) -> bool:
         deadline = time.monotonic() + timeout

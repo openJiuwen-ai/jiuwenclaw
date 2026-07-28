@@ -765,6 +765,34 @@ class WindowsProxyPolicy(BaseModel):
         return self
 
 
+class WindowsToolPaths(BaseModel):
+    """Windows 沙箱非默认安装路径的工具目录/可执行.
+
+    当 Git/Node/Python 不在默认的 %ProgramFiles% / %SystemRoot% 下时, 受限
+    token 读不了这些路径. _create_windows 读到此配置后, 把存在的目录加进
+    allow_read (补受限 token 读权限) 并拼进子进程 PATH (补可执行名解析).
+    全部留空则跳过, 依赖系统 PATH + 默认预装目录.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Git 安装根 (含 usr/bin/bash.exe), 如 D:\Files\Git / C:\Program Files\Git
+    git_dir: str = ""
+    # Node.js 安装目录 (含 node.exe), 如 D:\Files\nodejs / %ProgramFiles%\nodejs
+    node_dir: str = ""
+    # 标准 CPython 目录 (含 python.exe, 非 uv venv), 如 D:\Files\python313
+    python_dir: str = ""
+    # bash.exe 全路径 (git_dir 未覆盖时用, 如 D:\Files\Git\usr\bin\bash.exe)
+    bash_path: str = ""
+
+    @field_validator("git_dir", "node_dir", "python_dir", "bash_path", mode="before")
+    @classmethod
+    def expand_paths(cls, value: object) -> object:
+        if isinstance(value, str):
+            return _expand_path(value) if value else ""
+        return value
+
+
 class WindowsFilesystemPolicy(BaseModel):
     """Windows 文件系统 ACL 配置.
 
@@ -774,6 +802,10 @@ class WindowsFilesystemPolicy(BaseModel):
       - deny_write: 在 allow 覆盖范围内精细化封锁 (如 .git/.env).
       - allow_read: allow 列表施加 Allow Read ACE (deny-then-allow 覆盖 deny).
       - deny_read:  deny 列表施加 Deny Read ACE.
+      - tool_paths: 非默认安装路径的工具目录/可执行. 受限 token 默认读不了这些
+        路径 → CreateProcessAsUserW 返回 WinError 2/5. 在此配置后: ① 加进
+        read ACL 预装 (含 Execute, FILE_GENERIC_READ 已含) ② 拼进子进程 PATH.
+        留空则跳过, 依赖系统 PATH + 默认预装目录 (适合工具装在默认路径的场景).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -783,6 +815,7 @@ class WindowsFilesystemPolicy(BaseModel):
     deny_write: list[str] = Field(default_factory=list)
     allow_read: list[str] = Field(default_factory=list)
     deny_read: list[str] = Field(default_factory=list)
+    tool_paths: WindowsToolPaths = Field(default_factory=WindowsToolPaths)
 
     @field_validator(
         "read_acl_preinstall",

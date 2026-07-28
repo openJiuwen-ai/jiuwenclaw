@@ -106,6 +106,16 @@ windows:
     deny_write:
       - "{{ workspace }}/.git"
       - "{{ workspace }}/.env"
+    # 非默认安装路径的工具目录/可执行. 受限 token 默认读不了这些路径
+    # (不在 read_acl_preinstall 的默认目录内) → CreateProcessAsUserW 返回
+    # WinError 2/5. 在此配置后: ① 加进 read ACL 预装 (含 Execute) ② 拼进
+    # 子进程 PATH. 全部留空则跳过, 依赖系统 PATH + 默认预装目录
+    # (适合工具装在 %ProgramFiles% / %SystemRoot% 等默认路径的场景).
+    tool_paths:
+      git_dir: 'D:\Files\Git'        # Git 安装根 (含 usr/bin/bash.exe). 单引号: YAML 里反斜杠不转义
+      node_dir: 'D:\Files\nodeJs'       # Node.js 安装目录 (含 node.exe)
+      python_dir: 'D:\Files\python313'     # 标准 CPython 目录 (含 python.exe, 非 uv venv)
+      bash_path: 'D:\Files\Git\usr\bin\bash.exe'      # bash.exe 全路径 (git_dir 未覆盖时用)
 
   network:
     # wfp_loopback_proxy: WFP Block 所有出站 + Permit loopback:port_range.

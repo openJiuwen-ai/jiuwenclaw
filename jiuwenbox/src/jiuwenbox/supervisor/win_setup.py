@@ -443,16 +443,55 @@ def _is_admin() -> bool:
         return False
 
 
+def _load_policy_preinstall_paths(policy_path: str) -> list[str]:
+    """从 windows-policy.yaml 读 read_acl_preinstall + tool_paths, 返回去重后的
+    预装路径列表 (含 git_dir 的 usr/bin, bin 子目录 + bash_path 父目录).
+
+    install 时调: 用户改 tool_paths 后 --force 重装, 把工具目录的读 ACL
+    预装上 (运行时普通用户无权改这些目录 DACL). 纯数据读取, 不依赖 pydantic.
+    """
+    import yaml
+    with open(policy_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    win_fs = (data.get("windows") or {}).get("filesystem") or {}
+    paths: list[str] = []
+    for p in win_fs.get("read_acl_preinstall") or []:
+        if isinstance(p, str) and p:
+            paths.append(p)
+    tp = win_fs.get("tool_paths") or {}
+    for key in ("git_dir", "node_dir", "python_dir"):
+        v = tp.get(key)
+        if isinstance(v, str) and v:
+            paths.append(v)
+            if key == "git_dir":
+                paths.append(v.rstrip("\\/").replace("/", "\\") + "\\usr\\bin")
+                paths.append(v.rstrip("\\/").replace("/", "\\") + "\\bin")
+    bash_p = tp.get("bash_path")
+    if isinstance(bash_p, str) and bash_p:
+        paths.append(os.path.dirname(bash_p))
+    # 去重保序.
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
 def _elevate_and_run_install(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
     proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
     proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
+    policy_path: str | None = None,
 ) -> int:
     """通过 UAC 拉起提权子进程执行 install.
 
-    转发 force / preinstall_paths / proxy_port_* 参数到提权子进程 (review
-    MAJOR #9: 旧版只传 --install, force=True 从非管理员进程调用会静默 no-op).
+    转发 force / preinstall_paths / proxy_port_* / policy_path 参数到提权子进程
+    (review MAJOR #9: 旧版只传 --install, force=True 从非管理员进程调用会静默
+    no-op). policy_path 让提权子进程读 policy 的 read_acl_preinstall + tool_paths
+    合并预装 (用户改 tool_paths 后 --force 重装用).
     """
     import json
     shell32 = _get_shell32()
@@ -471,6 +510,9 @@ def _elevate_and_run_install(
         encoded = json.dumps(preinstall_paths)
         parts.append("--preinstall-paths")
         parts.append(encoded)
+    if policy_path:
+        parts.append("--policy-path")
+        parts.append(policy_path)
     # 用 subprocess.list2cmdline 风格构造参数串 (ShellExecuteW 接受单一 params 字符串).
     params = " ".join(_quote_arg(p) for p in parts)
     # ShellExecuteW(parent, verb, file, parameters, directory, show).
@@ -572,6 +614,7 @@ def install(
     preinstall_paths: list[str] | None = None,
     proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
     proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
+    policy_path: str | None = None,
 ) -> None:
     """执行一次性安装 (需管理员权限).
 
@@ -584,14 +627,27 @@ def install(
             (来自根 policy 的 ``windows.proxy.port_range_*``). 必须与
             win_proxy 实际监听端口一致, 否则代理路径被 Block 拦截
             (review MAJOR #7: 旧版硬编码默认端口, 忽略 policy).
+        policy_path: windows-policy.yaml 路径; install 时读其 read_acl_preinstall
+            + tool_paths 合并进预装路径. 用户改 tool_paths 后 --force 重装用.
     """
     _require_windows()
+    # 若给了 policy_path, 读其 read_acl_preinstall + tool_paths 合并进预装路径.
+    # 用户改 tool_paths 后 --force --policy-path <yaml> 重装即可预装新工具目录
+    # (运行时普通用户无权改这些目录 DACL, 必须管理员预装).
+    if policy_path:
+        try:
+            _pp = _load_policy_preinstall_paths(policy_path)
+            if _pp:
+                preinstall_paths = (preinstall_paths or []) + _pp
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("install 读 policy 预装路径失败: %s", exc)
     if not _is_admin():
         _elevate_and_run_install(
             force=force,
             preinstall_paths=preinstall_paths,
             proxy_port_start=proxy_port_start,
             proxy_port_end=proxy_port_end,
+            policy_path=policy_path,
         )
         return
 
@@ -696,6 +752,14 @@ def install(
         # 5. 全部致命步骤通过, 写完成标记; 清进度标记 (断点续传已无用)。
         _reg_set_str(const.REG_VALUE_INSTALLED, "1")
         _reg_set_str(const.REG_VALUE_READ_ACL_PROGRESS, "")
+        # 记录本次预装的路径集, 供 ensure_windows_setup 增量检测: 用户改了
+        # tool_paths 后首次起 sandbox 时对比出新增路径, 提示需 --force 重装
+        # (运行时普通用户无 WRITE_DAC 权限改外部目录 ACL, 只能管理员补预装).
+        import json as _json5
+        _reg_set_str(
+            const.REG_VALUE_PREINSTALLED_PATHS,
+            _json5.dumps(sorted({os.path.expandvars(p) for p in paths_to_preinstall})),
+        )
         logger.info("Windows 沙箱安装完成")
     except Exception:
         # S1: 任一致命步骤失败 → 回滚 (删用户/组/WFP/注册表, 含 S7 profile 清理),
@@ -713,6 +777,7 @@ def ensure_windows_setup(
     preinstall_paths: list[str] | None = None,
     proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
     proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
+    policy_path: str | None = None,
 ) -> None:
     """运行时入口: 确保安装已完成 (幂等).
 
@@ -729,16 +794,96 @@ def ensure_windows_setup(
     _require_windows()
     try:
         if not force and _reg_get_str(const.REG_VALUE_INSTALLED) == "1":
+            # 幂等: 已安装. 但若本次 preinstall_paths 含已预装集合之外的新路径
+            # (典型: 用户改了 windows-policy.yaml 的 tool_paths 后首次起 sandbox),
+            # 运行时普通用户进程无权改外部目录 DACL → 新路径的读 ACL 没预装 →
+            # 后续 _create_windows 给这些目录改 ACL 会 WinError 5, 或受限 token 读
+            # 不了工具可执行 → WinError 2. 这里检测出新增并提示用户 --force 重装.
+            self_check_paths = {
+                os.path.expandvars(p) for p in (preinstall_paths or []) if p
+            }
+            recorded_raw = _reg_get_str(const.REG_VALUE_PREINSTALLED_PATHS)
+            recorded: set[str] = set()
+            if recorded_raw:
+                try:
+                    import json as _json_chk
+                    recorded = set(_json_chk.loads(recorded_raw))
+                except (ValueError, TypeError):
+                    recorded = set()
+            new_paths = self_check_paths - recorded
+            if new_paths:
+                logger.warning(
+                    "Windows 沙箱已安装, 但检测到新增预装路径未预装读 ACL: %s. "
+                    "运行时进程无权改这些目录 DACL (owner 非当前用户). 请以管理员"
+                    "身份运行 'python -m jiuwenbox.supervisor.win_setup --install "
+                    "--force' 让提权子进程补预装, 否则受限 token 读不了这些路径"
+                    "下的工具可执行 (CreateProcessAsUserW 返回 WinError 2/5).",
+                    sorted(new_paths),
+                )
+            # 密码一致性验证: install 失败回滚不彻底时, jbx-sandbox 用户可能残留
+            # 旧密码 (NetUserDel 没删干净), 注册表密码 (000000) 与用户实际密码
+            # 不一致 → CreateProcessWithLogonW WinError 1326. 幂等检查只看
+            # installed=1 不会发现. 这里用 LogonUserW 测登录, 失败则自动重设密码
+            # (liubuyu 是 jbx-sandbox 创建者, 有权重设). 避免反复 1326.
+            _verify_or_reset_sandbox_user_password()
             return
+        # installed != "1" 或 force=True: 执行安装 (内部会判 admin / UAC 提权).
         install(
             force=force,
             preinstall_paths=preinstall_paths,
             proxy_port_start=proxy_port_start,
             proxy_port_end=proxy_port_end,
+            policy_path=policy_path,
         )
     except Exception:  # noqa: BLE001
         logger.error("ensure_windows_setup 失败", exc_info=True)
         raise
+
+
+def _verify_or_reset_sandbox_user_password() -> None:
+    """验证 jbx-sandbox 密码与注册表一致, 不一致则重设.
+
+    install 失败回滚时 NetUserDel 可能没删干净 (权限/进程占用), 用户残留旧
+    密码, 注册表 DPAPI 密码 (固定 000000) 与之不一致 → CreateProcessWithLogonW
+    WinError 1326. 幂等检查看不到. 这里 LogonUserW 测登录, 失败则用
+    NetUserSetInfo 重设密码为注册表值. liubuyu 是 jbx-sandbox 创建者, 有权重设.
+    """
+    import ctypes
+    password = get_sandbox_user_password()
+    if not password:
+        return
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    token = ctypes.c_void_p()
+    LOGON32_LOGON_INTERACTIVE = 2
+    LOGON32_PROVIDER_DEFAULT = 0
+    ok = advapi32.LogonUserW(
+        const.SANDBOX_USER_NAME, None, password,
+        LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
+        ctypes.byref(token),
+    )
+    if ok:
+        try:
+            ctypes.WinDLL("kernel32").CloseHandle(token)
+        except OSError:
+            pass
+        logger.debug("jbx-sandbox 密码一致性验证通过")
+        return
+    err = ctypes.get_last_error()
+    # WinError 1326 = ERROR_LOGON_FAILURE (密码不一致), 1327 = 账户限制等.
+    # 失败就重设密码 (NetUserSetInfo), 让其与注册表一致.
+    logger.warning(
+        "jbx-sandbox 密码验证失败 (LogonUserW WinError %d), 重设密码以对齐注册表",
+        err,
+    )
+    try:
+        _set_user_password(const.SANDBOX_USER_NAME, password)
+        logger.info("jbx-sandbox 密码已重设, 与注册表一致")
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "jbx-sandbox 密码重设失败 (运行时非管理员可能无权, 请以管理员运行 "
+            "'python -m jiuwenbox.supervisor.win_setup --install --force'): %s",
+            exc,
+        )
 
 
 def get_sandbox_user_sid() -> str | None:
@@ -829,6 +974,24 @@ def _main(argv: list[str]) -> int:
     """
     import argparse
     import json
+    # 提权子进程 (ShellExecuteW runas) 的 stdout/stderr 不回传父进程, 也不进
+    # agent-server 日志. 这里加文件 handler 让 install/uninstall 的输出落盘到
+    # 固定文件, 方便排查 "install 失败回滚" 类问题 (UAC 弹窗里看不到详情).
+    try:
+        _install_log_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "install_force.log",
+        )
+        _install_log_path = os.path.normpath(_install_log_path)
+        _fh = logging.FileHandler(_install_log_path, mode="w", encoding="utf-8")
+        _fh.setLevel(logging.DEBUG)
+        _fh.setFormatter(logging.Formatter(
+            "[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+        ))
+        logging.getLogger().addHandler(_fh)
+        logging.getLogger().setLevel(logging.DEBUG)
+        print(f"[win_setup] install 日志落盘: {_install_log_path}", flush=True)
+    except Exception:  # noqa: BLE001
+        pass
     # argparse 子命令不能带 "--" 前缀; 调用方 (UAC 提权) 用的是
     # "--install"/"--uninstall", 这里规整为 "install"/"uninstall".
     normalized = [a.lstrip("-") if a.startswith("--") and a.lstrip("-") in (
@@ -856,6 +1019,11 @@ def _main(argv: list[str]) -> int:
         "--preinstall-paths", default=None,
         help="读 ACL 预装路径列表 (JSON 编码字符串)",
     )
+    p_install.add_argument(
+        "--policy-path", default=None,
+        help="windows-policy.yaml 路径; install 时读其 read_acl_preinstall + "
+        "tool_paths 合并进预装路径 (用户改 tool_paths 后 --force 重装用)",
+    )
     sub.add_parser(
         const.UNINSTALL_SUBCOMMAND.lstrip("-"), help="执行卸载",
     )
@@ -869,11 +1037,13 @@ def _main(argv: list[str]) -> int:
             except (ValueError, TypeError) as exc:
                 print(f"--preinstall-paths 解析失败: {exc}")
                 return 2
+        # --policy-path: install 内部会读 policy 合并预装路径, 这里只透传路径.
         install(
             force=args.force,
             preinstall_paths=preinstall_paths,
             proxy_port_start=args.proxy_port_start,
             proxy_port_end=args.proxy_port_end,
+            policy_path=args.policy_path,
         )
         return 0
     if args.cmd == const.UNINSTALL_SUBCOMMAND.lstrip("-"):

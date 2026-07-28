@@ -91,6 +91,9 @@ LOGON32_PROVIDER_DEFAULT = 0
 # CreateProcessW / CreateProcessAsUserW dwCreationFlags.
 CREATE_SUSPENDED = 0x00000004
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+# 传入 Unicode (UTF-16) 环境块时必须带此 flag, 否则按 ANSI 解析 env block →
+# WinError 87 (参数错误). two_hop_spawn / _create_process_as_user 传 env 块时用.
+CREATE_UNICODE_ENVIRONMENT = 0x00000400
 CREATE_NO_WINDOW = 0x08000000
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 EXTENDED_STARTUPINFO_PRESENT = 0x00080000
@@ -347,6 +350,10 @@ REG_VALUE_SANDBOX_USER_SID = "sandbox_user_sid"
 REG_VALUE_SYNTHETIC_WRITE_SID = "synthetic_write_sid"
 REG_VALUE_SANDBOX_USER_PW = "sandbox_user_pw_encrypted"
 REG_VALUE_READ_ACL_PROGRESS = "read_acl_progress"
+# 已预装读 ACL 的完整路径集合 (JSON). ensure_windows_setup 幂等检查时对比
+# 本次 preinstall_paths, 若有新增路径 (如用户改了 tool_paths 后首次起 sandbox)
+# 则提示需 --force 重装让管理员补预装; 运行时普通用户无权改外部目录 DACL.
+REG_VALUE_PREINSTALLED_PATHS = "preinstalled_paths"
 
 # UAC 提权子进程的命令行标记.
 INSTALL_SUBCOMMAND = "--install"
