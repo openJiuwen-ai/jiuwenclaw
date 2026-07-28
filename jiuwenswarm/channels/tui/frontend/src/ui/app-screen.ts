@@ -1382,6 +1382,11 @@ function formatWorkflowStatus(status: WorkflowStatus): string {
   return workflowStatusTone(status)(`${workflowStatusIcon(status)} ${status}`);
 }
 
+function formatSwarmWorkflowListStatus(status: WorkflowStatus): string {
+  const icon = status === "running" ? "●" : workflowStatusIcon(status);
+  return workflowStatusTone(status)(`${icon} ${status}`);
+}
+
 function formatWorkflowStatusWord(status: WorkflowStatus): string {
   return status === "waiting_for_human" ? "waiting" : status;
 }
@@ -1585,6 +1590,7 @@ export class AppScreen implements Component, Focusable {
   private runningStoppedAtMs: number | null = null;
   /** Whether the eager skill-cache fetch on first WebSocket connection has already been fired. */
   private didEagerFetchSkills = false;
+  private didEagerFetchSandboxMeta = false;
   private pendingSubmittedInput: string | null = null;
   private pendingSubmittedBaseline = 0;
   private pendingSubmittedSessionId: string | null = null;
@@ -3472,6 +3478,21 @@ export class AppScreen implements Component, Focusable {
       this.didEagerFetchSkills = true;
       void this.commands.refreshSkills(this.state.getCommandContext());
     }
+    // Hide /sandbox subcommand inline hints when sandbox.type=yuanrong.
+    if (!this.didEagerFetchSandboxMeta && snapshot.connectionStatus === "connected") {
+      this.didEagerFetchSandboxMeta = true;
+      void import("../core/commands/builtins/sandbox.js")
+        .then(({ refreshSandboxCommandPresentation }) =>
+          refreshSandboxCommandPresentation(this.state.getCommandContext()),
+        )
+        .then(() => {
+          this.composerAutocompleteProvider = this.rebuildAutocompleteProvider();
+          this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
+        })
+        .catch(() => {
+          // Best-effort; /sandbox action still probes on use.
+        });
+    }
     if (
       this.pendingSubmittedInput &&
       (snapshot.sessionId !== this.pendingSubmittedSessionId ||
@@ -3581,6 +3602,21 @@ export class AppScreen implements Component, Focusable {
       return true;
     }
 
+    // Enter / Space / ctrl+c 关闭 btw 浮层（对齐 Esc：关闭 overlay + 取消进行中的 btw 请求）
+    if (
+      matchesKey(data, "enter") ||
+      matchesKey(data, "return") ||
+      matchesKey(data, "space") ||
+      matchesKey(data, "ctrl+c")
+    ) {
+      this.state.clearBtwOverlay();
+      this.btwOverlayScrollOffset = 0;
+      this.state.requestLocalInterrupt();
+      this.state.setBtwActive(false);
+      this.tui.requestRender();
+      return true;
+    }
+
     // ←/→ 在 btw 历史间切换（必须在 scroll 之前消费，避免落入 composer）
     if (matchesKey(data, "left")) {
       this.state.navigateBtw(-1);
@@ -3610,6 +3646,17 @@ export class AppScreen implements Component, Focusable {
     }
 
     const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
+    // ctrl+p / ctrl+n 翻页（对齐 PgUp/PgDn）
+    if (matchesKey(data, "ctrl+p")) {
+      this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - pageSize);
+      this.tui.requestRender();
+      return true;
+    }
+    if (matchesKey(data, "ctrl+n")) {
+      this.btwOverlayScrollOffset += pageSize;
+      this.tui.requestRender();
+      return true;
+    }
     if (matchesKey(data, "up")) {
       this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - 1);
       this.tui.requestRender();
@@ -5542,7 +5589,7 @@ export class AppScreen implements Component, Focusable {
       const progress = workflow.status === "running" ? `${completed}/${total}` : `${total}`;
       return {
         value: workflow.id,
-        label: `${formatWorkflowStatus(workflow.status)} ${workflow.name}`,
+        label: `${formatSwarmWorkflowListStatus(workflow.status)} ${workflow.name}`,
         description: `${progress} agents`,
       };
     });
@@ -8321,9 +8368,12 @@ export class AppScreen implements Component, Focusable {
       (workflow) => workflow.status === "running",
     );
     const hasRunningWorkflow = runningWorkflows.length > 0;
+    const hasBtwLoading = snapshot.btwPendingQuestion !== null;
     const runningWorkflow = runningWorkflows[0];
     const shouldAnimate =
-      !snapshot.isInterrupted && (snapshot.isProcessing || hasRunningTools || teamWorking || hasRunningWorkflow);
+      hasBtwLoading ||
+      (!snapshot.isInterrupted &&
+        (snapshot.isProcessing || hasRunningTools || teamWorking || hasRunningWorkflow));
     if (!shouldAnimate) {
       const nowMs = Date.now();
       if (this.runningStoppedAtMs === null) {

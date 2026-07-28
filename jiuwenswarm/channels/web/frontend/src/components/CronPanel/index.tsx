@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronLeft, ChevronRight, Search, TrendingUp, Newspaper, Briefcase } from 'lucide-react';
 import { webRequest, webClient } from '../../services/webClient';
-import { useSessionStore } from '../../stores/sessionStore';
 import { useCronStore } from '../../stores';
 import { projectRegistryClient } from '../../features/workspace/projectRegistryClient';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
@@ -13,7 +12,8 @@ import { normalizeWakeOffsetSeconds } from './cronWakeOffset';
 import { cronExprToSchedule, summarizeSchedule } from './scheduleConvert';
 import StatusBadge, { BoldRingIcon, RunningIcon } from './StatusBadge';
 import ConfirmDialog from './ConfirmDialog';
-import CronTaskDrawer, { jobToForm, templateToForm, isDefaultLikeProject, type CronTaskFormValue } from './CronTaskDrawer';
+import CronTaskDrawer, { jobToForm, templateToForm, type CronTaskFormValue } from './CronTaskDrawer';
+import { resolveCronJobProjectName } from './cronProjectDisplay';
 import { useClickOutside } from './useClickOutside';
 import SimpleSelect from './SimpleSelect';
 import { hasXiaoyiPushApiId, isCronTargetOptionDisabled } from './xiaoyiCronTarget';
@@ -178,13 +178,8 @@ function Th({ children, first }: { children: React.ReactNode; first?: boolean })
 }
 
 function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
-  // 会话本身锁定在默认项目下时，后端 resolve_cron_project_binding 会把 job.project_id 原样存成
-  // 'default'/'default_code'（不是空串），这里如果只判断"非空"就会在 projects 里查到那条
-  // "默认项目"记录并显示出来，跟下拉框/其他地方"未选=用 -"的口径不一致（bug009 第 5 轮）。
-  // 用跟 CronTaskDrawer/ConversationSidebar/projectSelection 一致的 isDefaultLikeProject 口径，
-  // 把默认类项目也当"未选项目"处理，统一显示"-"。
-  const project = job.project_id ? projects.find((p) => p.project_id === job.project_id) ?? null : null;
-  const projectName = project && !isDefaultLikeProject(project) ? project.name : null;
+  // 空串与 default/default_code 统一按「未选真实项目」显示 "-"（Issue #2653 / bug009）。
+  const projectName = resolveCronJobProjectName(job.project_id, projects);
   return {
     id: job.id,
     name: job.name,
@@ -192,6 +187,12 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
     projectName,
     description: job.description,
     modelName: job.model_name ?? null,
+    // 后端 mode 归一：team/team.plan/code.team 等都算集群模式，其余（agent/plan/agent.plan/
+    // agent.fast）归一成单 Agent。后端 normalize_cron_job_mode 在落库时已把 legacy 别名
+    // （plan/agent.plan/agent.fast）归一到 "agent"，但 proactive.tick 这类特殊值以及历史存量
+    // 仍可能存在，这里用 isTeamCronModeValue 做兜底归一，避免界面看到陌生值。前端表单只在
+    // 'agent' | 'team' 两态之间切换，提交时也只下发这两个值（见 handleCreateSubmit/handleEditSubmit）。
+    mode: isTeamCronModeValue(job.mode) ? 'team' : 'agent',
     cronExpr: job.cron_expr,
     timezone: job.timezone,
     wakeOffsetSeconds: normalizeWakeOffsetSeconds(job.wake_offset_seconds),
@@ -199,6 +200,15 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
     expired: job.expired,
     deliveryChannel: job.targets,
   };
+}
+
+// 后端 CronJob.mode 合法值集合（对齐 jiuwenswarm/gateway/cron/models.py 的 _TEAM_CRON_MODES）。
+// 用于 cronJobToUI 把后端的 mode 字段归一成 UI 的 AgentMode 二态——只有 'team' 这一类算集群，
+// 其余一律按单 Agent 处理。inline 在这里而不是放到 types/cron.ts 是因为它只服务于本文件的归一逻辑，
+// 跟 CronTaskUI.mode 这个已经归一过的 UI 字段语义不同。
+function isTeamCronModeValue(raw: string | undefined | null): boolean {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'team' || value === 'team.plan' || value === 'code.team';
 }
 
 type StatusFilterKey = 'running' | 'paused' | 'expired';
@@ -221,7 +231,6 @@ const STATUS_FILTER_BADGE_PROPS: Record<StatusFilterKey, { enabled: boolean; exp
 
 export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession }: CronPanelProps) {
   const { t } = useTranslation();
-  const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent');
   // 工作面板侧边栏的"按项目分组展示定时任务"用的是独立的 useCronStore（见
   // multi-session/sidebar/ConversationSidebar.tsx），跟这个面板自己的 jobs state 是两份数据；
   // 在这里创建/编辑/停止/删除任务后也要通知它刷新，否则侧边栏那边的任务文件夹会显示过期数据
@@ -523,8 +532,12 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         // 手动创建抽屉这条链路用户明确看到并操作了"项目"下拉框，属于前一种情况；
         // 之前省略 key 会命中后端的会话兜底，导致"不选项目"被错误绑定成当前会话所在项目（bug003）。
         project_dir: value.projectDir ?? '',
+        // 下拉框选中真实项目时一并带上 project_id：后端 controller.py resolve_cron_project_binding
+        // 优先信任显式 project_id，只传 project_dir 需要多一层反查（见 CronTaskFormValue.projectId 注释）。
+        // 未选项目（projectId 为 null）时不传这个 key，走 project_dir 空串的既有归默认项目逻辑。
+        ...(value.projectId ? { project_id: value.projectId } : {}),
         ...(value.modelName ? { model_name: value.modelName } : {}),
-        mode,
+        mode: value.mode,
         session_id: sessionId,
       });
       setSuccess(t('cron.success.created'));
@@ -565,7 +578,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             enabled: value.enabled,
             wake_offset_seconds: normalizeWakeOffsetSeconds(value.wakeOffsetSeconds),
             ...(value.modelName ? { model_name: value.modelName } : {}),
-            mode,
+            mode: value.mode,
           };
       await webRequest<{ job: CronJobDTO }>('cron.job.update', {
         id: jobId,

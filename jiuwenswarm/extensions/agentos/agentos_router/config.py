@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,8 @@ from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
 )
 
 DEFAULT_AGENT_WORKSPACE_ROOT = "/home/agentos/users"
+# Env override for gateway.agentos.sandbox_idle_timeout_seconds (vibeskill-aligned).
+SANDBOX_IDLE_TIMEOUT_ENV = "SANDBOX_IDLE_TIMEOUT_SECONDS"
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,10 @@ class RouterConfig:
     creating_timeout_seconds: float = 60.0
     agent_key_fields: tuple[str, ...] = DEFAULT_AGENT_KEY_FIELDS
     workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT
+    # Idle sandbox reclamation: delete the YuanRong instance once an agent
+    # has no held tasks (chat/SSH) for this long. <= 0 disables reclamation.
+    sandbox_idle_timeout_seconds: float = 600.0
+    sandbox_idle_check_interval_seconds: float = 30.0
     ssh: YuanrongSshSettings = YuanrongSshSettings()
     ssh_channel: SshChannelEndpoint | None = None
 
@@ -78,6 +85,25 @@ def load_ssh_channel_endpoint(config: dict[str, Any]) -> SshChannelEndpoint | No
     return SshChannelEndpoint(ip=ip, port=port)
 
 
+def _read_float(section: dict[str, Any], key: str, default: float) -> float:
+    """Read a float honoring explicit ``0`` (``or default`` would swallow it)."""
+    raw = section.get(key)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    return float(raw)
+
+
+def _read_float_env(name: str) -> float | None:
+    """Parse a float env var; empty / unset → None; invalid → raise ValueError."""
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    return float(text)
+
+
 def load_router_config(config: dict[str, Any]) -> RouterConfig:
     gateway = config.get("gateway") if isinstance(config, dict) else {}
     if not isinstance(gateway, dict):
@@ -102,6 +128,14 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
             "are required in agentos_router mode"
         )
 
+    # Env wins over yaml (incl. explicit 0 to disable), same as vibeskill.
+    idle_timeout_env = _read_float_env(SANDBOX_IDLE_TIMEOUT_ENV)
+    sandbox_idle_timeout_seconds = (
+        idle_timeout_env
+        if idle_timeout_env is not None
+        else _read_float(agentos, "sandbox_idle_timeout_seconds", 600.0)
+    )
+
     return RouterConfig(
         frontend_endpoint=frontend_endpoint,
         function_version_urn=function_version_urn,
@@ -124,6 +158,10 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
             agentos.get("workspace_root") or DEFAULT_AGENT_WORKSPACE_ROOT
         ).strip()
         or DEFAULT_AGENT_WORKSPACE_ROOT,
+        sandbox_idle_timeout_seconds=sandbox_idle_timeout_seconds,
+        sandbox_idle_check_interval_seconds=_read_float(
+            agentos, "sandbox_idle_check_interval_seconds", 30.0
+        ),
         ssh=load_yuanrong_ssh_settings(agentos.get("ssh")),
         ssh_channel=load_ssh_channel_endpoint(config),
     )
