@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock
+
 import pytest
 
 from jiuwenswarm.common.hooks_config import HooksConfig, HookMatcher
@@ -28,6 +30,15 @@ class MockToolInputs:
 class MockCallbackContext:
     inputs: MockToolInputs = field(default_factory=MockToolInputs)
     extra: dict = field(default_factory=dict)
+    session: Any = None
+
+
+@dataclass
+class MockSession:
+    session_id: str
+
+    def get_session_id(self) -> str:
+        return self.session_id
 
 
 # ============================================================
@@ -331,6 +342,55 @@ class TestAfterInvoke:
         await rail.after_invoke(ctx)
         # 即使第二个 hook 是 blocking，也应记录 feedback
         assert "_stop_hook_feedback" in ctx.extra
+
+
+# ============================================================
+# UserHookRail: session identity
+# ============================================================
+
+
+class TestSessionIdentity:
+    @staticmethod
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("event_name", "callback_name"),
+        [
+            ("PreToolUse", "before_tool_call"),
+            ("PostToolUse", "after_tool_call"),
+            ("PostToolUseFailure", "on_tool_exception"),
+            ("Stop", "after_invoke"),
+        ],
+    )
+    async def test_hook_receives_session_id(event_name, callback_name):
+        config = HooksConfig(
+            events={
+                event_name: [
+                    HookMatcher(matcher="*", hooks=[{"command": "unused"}]),
+                ],
+            }
+        )
+        rail = UserHookRail(config)
+        rail._executor.run_all = AsyncMock(return_value=[])
+        ctx = MockCallbackContext(
+            inputs=MockToolInputs(tool_name="Read"),
+            session=MockSession("  sess_123  "),
+        )
+
+        await getattr(rail, callback_name)(ctx)
+
+        hook_input = rail._executor.run_all.await_args.kwargs["hook_input"]
+        assert hook_input["session_id"] == "sess_123"
+
+    @staticmethod
+    def test_resolve_session_id_falls_back_to_context_attribute():
+        ctx = MockCallbackContext()
+        ctx.session_id = "sess_legacy"
+
+        assert UserHookRail._resolve_session_id(ctx) == "sess_legacy"
+
+    @staticmethod
+    def test_resolve_session_id_returns_empty_without_session():
+        assert UserHookRail._resolve_session_id(MockCallbackContext()) == ""
 
 
 # ============================================================
