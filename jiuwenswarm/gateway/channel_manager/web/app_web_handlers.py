@@ -4355,6 +4355,45 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
 
+    async def _path_select_directory(ws, req_id, params, session_id):
+        """在服务端本机弹出系统文件夹对话框（浏览器 / whl 包回退方案）。
+
+        桌面端 pywebview 已提供 ``select_project_directory``；本方法覆盖无该桥接时的
+        纯浏览器访问场景。
+
+        - Windows：tkinter
+        - macOS：osascript；
+        - Linux：zenity/kdialog/yad/tkinter
+        - 不可用时返回 ``UNSUPPORTED``，前端回落到手填绝对路径
+        """
+        if not isinstance(params, dict):
+            params = {}
+        initial_dir = params.get("initial_dir")
+        if initial_dir is not None and not isinstance(initial_dir, str):
+            await channel.send_response(
+                ws, req_id, ok=False, error="initial_dir must be string", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.channels.web.directory_picker import select_directory_native
+
+        try:
+            selected = await asyncio.to_thread(
+                select_directory_native,
+                initial_dir=initial_dir.strip() if isinstance(initial_dir, str) else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[path.select_directory] picker unavailable: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED",
+            )
+            return
+
+        if not selected:
+            await channel.send_response(ws, req_id, ok=True, payload={"path": None, "cancelled": True})
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"path": selected, "cancelled": False})
+
     async def _memory_compute(ws, req_id, params, session_id):
         if _HAS_PSUTIL:
             process = _psutil.Process()  # type: ignore[union-attribute]
@@ -5470,6 +5509,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("path.get", _path_get)
     channel.register_method("path.set", _path_set)
+    channel.register_method("path.select_directory", _path_select_directory)
 
     async def _hooks_list(ws, req_id, params, session_id):
         from jiuwenswarm.common.hooks_config import load_hooks_config
