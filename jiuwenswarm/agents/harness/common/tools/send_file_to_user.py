@@ -22,6 +22,46 @@ from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 logger = logging.getLogger(__name__)
 
+# Session-level dedup for send_file_to_user. Compression may drop prior tool
+# results, so the agent can re-call the same path; IM request-level dedup alone
+# cannot stop cross-turn duplicates.
+_SENT_FILE_PATHS_BY_SESSION: dict[str, set[str]] = {}
+
+
+def _normalize_sent_file_path(path: str) -> str:
+    return os.path.abspath(path).replace("\\", "/").lower()
+
+
+def _partition_sent_files(
+    session_id: str,
+    paths: list[str],
+) -> tuple[list[str], list[str]]:
+    """Split *paths* into (new_to_send, already_sent). Does not mutate the registry."""
+    sid = (session_id or "").strip() or "default"
+    sent = _SENT_FILE_PATHS_BY_SESSION.get(sid) or set()
+    new_paths: list[str] = []
+    skipped: list[str] = []
+    for path in paths:
+        key = _normalize_sent_file_path(path)
+        if key in sent:
+            skipped.append(path)
+        else:
+            new_paths.append(path)
+    return new_paths, skipped
+
+
+def _mark_files_sent(session_id: str, paths: list[str]) -> None:
+    sid = (session_id or "").strip() or "default"
+    sent = _SENT_FILE_PATHS_BY_SESSION.setdefault(sid, set())
+    for path in paths:
+        sent.add(_normalize_sent_file_path(path))
+
+
+def clear_sent_files_for_session(session_id: str | None) -> None:
+    """Drop session dedup state when the session adapter is cleaned up."""
+    sid = (session_id or "").strip() or "default"
+    _SENT_FILE_PATHS_BY_SESSION.pop(sid, None)
+
 
 class SendFileToolkit:
     """Toolkit for sending files to users."""
@@ -160,11 +200,33 @@ class SendFileToolkit:
                 msg_parts.append(f"  - {mf}")
             return "\n".join(msg_parts)
 
+        valid_files, skipped_files = _partition_sent_files(self.session_id, valid_files)
+        if not valid_files:
+            logger.info(
+                "[SendFileToolkit] skip duplicate send session_id=%s skipped=%s missing=%s",
+                self.session_id,
+                skipped_files,
+                missing_files,
+            )
+            msg_parts: list[str] = []
+            if skipped_files:
+                msg_parts.append("文件已在本次会话发送过，跳过重复投递：")
+                for sf in skipped_files:
+                    msg_parts.append(f"  - {sf}")
+            if missing_files:
+                msg_parts.append("以下文件不存在，未发送：")
+                for mf in missing_files:
+                    msg_parts.append(f"  - {mf}")
+            if not msg_parts:
+                msg_parts.append("没有可发送的文件")
+            return "\n".join(msg_parts)
+
         logger.info(
-            "[SendFileToolkit] send_file 开始 session_id=%s 有效文件=%d 缺失=%d",
+            "[SendFileToolkit] send_file 开始 session_id=%s 有效文件=%d 缺失=%d 跳过重复=%d",
             self.session_id,
             len(valid_files),
             len(missing_files),
+            len(skipped_files),
         )
 
         try:
@@ -240,7 +302,12 @@ class SendFileToolkit:
             if merged_meta:
                 msg["metadata"] = merged_meta
             await server.send_push(msg)
+            _mark_files_sent(self.session_id, valid_files)
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
+            if skipped_files:
+                result_parts.append("以下文件已在本次会话发送过，已跳过：")
+                for sf in skipped_files:
+                    result_parts.append(f"  - {sf}")
             if missing_files:
                 result_parts.append("以下文件不存在，未发送：")
                 for mf in missing_files:

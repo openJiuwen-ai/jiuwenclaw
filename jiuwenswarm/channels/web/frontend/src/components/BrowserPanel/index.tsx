@@ -7,10 +7,6 @@ interface BrowserPathPayload {
   headless?: unknown;
 }
 
-interface BrowserStartPayload {
-  returncode?: unknown;
-}
-
 interface BrowserPanelProps {
   isConnected: boolean;
   request: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>;
@@ -28,13 +24,6 @@ function normalizeHeadless(payload: unknown): boolean {
   return typeof data.headless === 'boolean' ? data.headless : true;
 }
 
-function normalizeReturnCode(payload: unknown): number | null {
-  if (!payload || typeof payload !== 'object') return null;
-  const data = payload as BrowserStartPayload;
-  const code = Number(data.returncode);
-  return Number.isInteger(code) ? code : null;
-}
-
 export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
   const { t } = useTranslation();
   const [chromePath, setChromePath] = useState('');
@@ -43,19 +32,12 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
   const [initialHeadless, setInitialHeadless] = useState(true);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [showPathError, setShowPathError] = useState(false);
 
   const hasChanges = useMemo(
     () => chromePath !== initialPath || headless !== initialHeadless,
     [chromePath, initialPath, headless, initialHeadless]
-  );
-  const isPathValid = useMemo(() => chromePath.trim().length > 0, [chromePath]);
-  const canStart = useMemo(
-    () => isConnected && !starting && !saving && !loading && isPathValid && !hasChanges,
-    [hasChanges, isConnected, isPathValid, loading, saving, starting]
   );
 
   const clearFeedback = () => {
@@ -120,38 +102,6 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
     }
   };
 
-  const handleStart = async () => {
-    if (starting || !isConnected) {
-      return;
-    }
-    if (!isPathValid) {
-      setShowPathError(true);
-      return;
-    }
-    if (hasChanges) {
-      clearFeedback();
-      setError(t('browser.errors.saveBeforeStart'));
-      return;
-    }
-    setStarting(true);
-    clearFeedback();
-    setShowPathError(false);
-    try {
-      const payload = await request<BrowserStartPayload>('browser.start');
-      const returncode = normalizeReturnCode(payload);
-      if (returncode === null || returncode === 0) {
-        setSuccess(t('browser.success.started'));
-      } else {
-        setError(t('browser.errors.startFailedWithCode', { code: returncode }));
-      }
-    } catch (startError) {
-      const message = startError instanceof Error ? startError.message : t('browser.errors.startFailed');
-      setError(t('browser.errors.startFailedWithMessage', { message }));
-    } finally {
-      setStarting(false);
-    }
-  };
-
   return (
     <div className="flex-1 min-h-0">
       <div className="card main-panel-card w-full h-full flex flex-col">
@@ -166,7 +116,7 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
             <button
               type="button"
               onClick={() => void loadPath()}
-              disabled={saving || starting}
+              disabled={saving || loading}
               className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {loading ? t('common.refreshing') : t('browser.refreshPath')}
@@ -198,17 +148,12 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
                 onChange={(event) => {
                   setChromePath(event.target.value);
                   if (error) setError(null);
-                  if (showPathError) setShowPathError(false);
                 }}
                 placeholder={t('browser.examplePath')}
                 className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
-                disabled={loading || saving || starting}
+                disabled={loading || saving}
               />
             </label>
-
-            {showPathError && !isPathValid ? (
-              <div className="text-xs text-danger">{t('browser.errors.pathRequired')}</div>
-            ) : null}
 
             <div className="flex items-center justify-between gap-4 py-1">
               <div>
@@ -218,7 +163,7 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
               <Switch
                 checked={!headless}
                 onChange={(val) => setHeadless(!val)}
-                disabled={loading || saving || starting}
+                disabled={loading || saving}
               />
             </div>
 
@@ -231,7 +176,7 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
                   setHeadless(initialHeadless);
                   clearFeedback();
                 }}
-                disabled={!hasChanges || saving || starting}
+                disabled={!hasChanges || saving}
               >
                 {t('common.cancel')}
               </button>
@@ -239,24 +184,9 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
                 type="button"
                 className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={() => void handleSave()}
-                disabled={!isConnected || !hasChanges || saving || starting || loading}
+                disabled={!isConnected || !hasChanges || saving || loading}
               >
                 {saving ? t('common.saving') : t('browser.savePath')}
-              </button>
-              <button
-                type="button"
-                className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                onClick={() => void handleStart()}
-                disabled={!canStart}
-                title={
-                  !isPathValid
-                    ? t('browser.tooltips.fillPath')
-                    : hasChanges
-                      ? t('browser.tooltips.savePath')
-                      : undefined
-                }
-              >
-                {starting ? t('browser.starting') : t('browser.startService')}
               </button>
             </div>
           </div>

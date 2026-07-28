@@ -565,10 +565,6 @@ class DingTalkChannel(BaseChannel):
         *, routing_target: RoutingTarget | None = None,
     ) -> None:
         """通过钉钉发送消息"""
-        token = await self._get_access_token()
-        if not token:
-            return
-
         # 提取事件类型
         payload = msg.payload if isinstance(msg.payload, dict) else {}
         event_type = getattr(msg.event_type, "value", None) or payload.get("event_type") or ""
@@ -583,11 +579,18 @@ class DingTalkChannel(BaseChannel):
         if not content:
             logger.warning("钉钉发送: 在 msg.params 或 msg.payload 中未找到内容")
             return
+        if not content.strip():
+            logger.debug("钉钉发送: 跳过纯空白流式内容")
+            return
 
         # 提取聊天ID
         chat_id = self._extract_chat_id(msg)
         if not chat_id:
             logger.warning("钉钉发送: 在消息中未找到 chat_id 或 session_id")
+            return
+
+        token = await self._get_access_token()
+        if not token:
             return
 
         # 构建请求

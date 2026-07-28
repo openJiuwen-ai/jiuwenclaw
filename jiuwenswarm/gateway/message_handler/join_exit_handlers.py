@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Team seat ownership is implemented only for these IM channels.
+_TEAM_SEAT_SUPPORTED_CHANNELS: frozenset[str] = frozenset({"feishu", "xiaoyi"})
+
 
 # 已 /join 认领 team 席位后仍允许执行的控制指令白名单。
 # 其余会改变 session/mode/分支/对话历史或向 Agent 注入 query 的执行类指令一律拒绝
@@ -121,6 +124,16 @@ class JoinExitHandlers:
         parsed: "ParsedChannelControl",
     ) -> None:
         """处理 /join 指令：注册到 SessionSharingRegistry 并发送确认."""
+        # Reject unsupported channels before any lookup or registration can
+        # create partial state.
+        if str(msg.channel_id).lower() not in _TEAM_SEAT_SUPPORTED_CHANNELS:
+            await self._h.send_channel_notice(
+                user_infos,
+                channel_id,
+                msg.session_id,
+                "当前通道暂不支持 /join，仅飞书和小艺支持加入团队。",
+            )
+            return
         sid = self._h.extract_session_id_from_ref(parsed.session_ref)
         if not sid or not parsed.member_name:
             await self._h.send_channel_notice(
@@ -179,22 +192,8 @@ class JoinExitHandlers:
                 f"⚠️ {_join_err_mismatch(_join_team_name, sid)}",
             )
             return
-        human_member_names = await self.fetch_team_human_members(
-            msg.channel_id, sid, _join_team_name,
-        )
-        if human_member_names is None:
-            await self._h.send_channel_notice(
-                user_infos, channel_id, msg.session_id,
-                f"⚠️ {_join_err_team_not_exist(_join_team_name)}",
-            )
-            return
-        if parsed.member_name not in human_member_names:
-            await self._h.send_channel_notice(
-                user_infos, channel_id, msg.session_id,
-                f"⚠️ 成员 **{parsed.member_name}** 不存在。可用席位：{', '.join(human_member_names)}",
-            )
-            return
         # 检查席位占用状态（V2 §8.1）
+        # 优先内存判断,同时发多条join将"无需重复加入"提示挤到后面
         joining_user_id = msg.user_id or msg.metadata.get("im_sender_user_id", "")
         existing_subs = self._h.get_session_sharing_registry().lookup_member(sid, parsed.member_name)
         for sub in existing_subs:
@@ -209,6 +208,21 @@ class JoinExitHandlers:
             await self._h.send_channel_notice(
                 user_infos, channel_id, msg.session_id,
                 f"⚠️ 你已是 **{sid}** 的 **{parsed.member_name}**，无需重复加入。",
+            )
+            return
+        human_member_names = await self.fetch_team_human_members(
+            msg.channel_id, sid, _join_team_name,
+        )
+        if human_member_names is None:
+            await self._h.send_channel_notice(
+                user_infos, channel_id, msg.session_id,
+                f"⚠️ {_join_err_team_not_exist(_join_team_name)}",
+            )
+            return
+        if parsed.member_name not in human_member_names:
+            await self._h.send_channel_notice(
+                user_infos, channel_id, msg.session_id,
+                f"⚠️ 成员 **{parsed.member_name}** 不存在。可用席位：{', '.join(human_member_names)}",
             )
             return
         try:
@@ -551,6 +565,14 @@ class JoinExitHandlers:
         parsed: "ParsedChannelControl",
     ) -> None:
         """处理 /exit 指令：从 SessionSharingRegistry 注销并发送确认."""
+        if str(msg.channel_id).lower() not in _TEAM_SEAT_SUPPORTED_CHANNELS:
+            await self._h.send_channel_notice(
+                user_infos,
+                channel_id,
+                msg.session_id,
+                "当前通道暂不支持 /exit，仅飞书和小艺支持退出团队。",
+            )
+            return
         sid = self._h.extract_session_id_from_ref(parsed.session_ref)
         if not sid:
             # 不带 session_ref：直接用 msg.session_id。handle_message 入队前已对已 /join

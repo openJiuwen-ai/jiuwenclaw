@@ -1,4 +1,4 @@
-﻿﻿﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
+﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { AtSign, CircleX, FileImage, Loader2, Plus, Square, Target, X } from 'lucide-react';
@@ -26,6 +26,7 @@ import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector';
+import { generateUuidV4 } from '../../utils/uuid';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -157,10 +158,7 @@ function formatAttachmentSize(size: number): string {
 }
 
 function makeAttachmentId(file: File): string {
-  const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${file.name || 'image'}-${file.size}-${random}`;
+  return `${file.name || 'image'}-${file.size}-${generateUuidV4()}`;
 }
 
 function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
@@ -267,6 +265,13 @@ export function InputArea({
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectDirError || workDialogOpen) return;
+    const timeoutId = window.setTimeout(() => setProjectDirError(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [projectDirError, workDialogOpen]);
+
   const [composerSuggestion, setComposerSuggestion] = useState<ComposerSuggestionState | null>(null);
   const [composerSuggestionIndex, setComposerSuggestionIndex] = useState(0);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
@@ -1867,10 +1872,9 @@ export function InputArea({
             >
               <WorkIcon name="folder" className="chat-work-select__root-icon" />
               <span>{getProjectLabel(displayedProject, t('multiSession.project.chooseProjectDirectory'))}</span>
-              <WorkIcon
-                className="chat-work-select__chevron"
-                name={workMenuOpen === 'project' ? 'collapse' : 'expand'}
-              />
+              <svg className="chat-work-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+              </svg>
             </button>
             {displayedProject && !isWorkContextLocked ? (
               <span className="chat-work-select__clear-wrap" aria-hidden="false">
@@ -1949,7 +1953,11 @@ export function InputArea({
             <CodeBranchSelector project={displayedProject} disabled={isProcessing} compact />
           ) : null}
           {projectDirError && !workDialogOpen ? (
-            <div className="chat-work-select__error" role="alert">{projectDirError}</div>
+            <div className="app-toast-wrapper app-toast-wrapper--top-center">
+              <div className="app-session-toast" role="status" aria-live="polite">
+                {projectDirError}
+              </div>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -2137,7 +2145,11 @@ function ModelSelector({
 
   if (chatAvailableModels.length === 0) return null;
 
-  const displayedModelName = lockedToDefault ? defaultModelName : selectedModelName;
+  // 集群模式下 UI 禁止手动改模型（见下方 disabled/tooltip），但显示仍应优先反映
+  // 该会话实际记录的模型（如定时任务在集群模式下显式指定了非默认模型，后端也确实
+  // 按该模型执行——见 bug002 回归），而不是不管三七二十一恒显示全局默认模型；
+  // 从未指定过模型的会话 selectedModelName 本就兜底等于默认模型，行为不变。
+  const displayedModelName = selectedModelName || defaultModelName;
   const selectedModel =
     chatAvailableModels.find((m) => (m.alias || m.model_name) === displayedModelName) ??
     chatAvailableModels[0];

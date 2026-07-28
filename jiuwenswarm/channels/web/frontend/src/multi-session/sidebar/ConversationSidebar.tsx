@@ -612,6 +612,13 @@ export function ConversationSidebar({
   const addMenuRef = useRef<HTMLDivElement>(null);
   const workModeMenuRef = useRef<HTMLDivElement>(null);
   const previousProcessing = useRef<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (!pathDialogError || pathDialogOpen) return;
+    const timeoutId = window.setTimeout(() => setPathDialogError(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [pathDialogError, pathDialogOpen]);
+
   const {
     workMode,
     projects,
@@ -812,6 +819,14 @@ export function ConversationSidebar({
 
   async function handleRenameSession(sessionId: string, title: string) {
     await renameSession(sessionId, title);
+    // 重命名后刷新所有展开的定时任务触发列表，保证标题立即更新
+    for (const [groupId, isOpen] of Object.entries(expandedCronGroups)) {
+      if (!isOpen) continue;
+      const cronId = groupId.startsWith('cron-') ? groupId.slice(5) : groupId;
+      const job = cronJobs.find((j) => j.id === cronId);
+      if (!job) continue;
+      void loadCronSessions(job.project_id || 'default', cronId);
+    }
   }
 
   async function handleRenameSubmit(value: string) {
@@ -1073,7 +1088,6 @@ export function ConversationSidebar({
           onClick={() => setWorkModeMenuOpen((open) => !open)}
           aria-haspopup="menu"
           aria-expanded={workModeMenuOpen}
-          disabled={Boolean(activeSessionId && runtimes[activeSessionId]?.isProcessing)}
         >
           <span>{workMode === 'code' ? t('codeMode.code') : t('codeMode.work')}</span>
           <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />
@@ -1152,8 +1166,10 @@ export function ConversationSidebar({
           </div>
         ) : null}
         {pathDialogError && !pathDialogOpen ? (
-          <div className="conversation-sidebar__error" role="alert">
-            {pathDialogError}
+          <div className="app-toast-wrapper app-toast-wrapper--top-center">
+            <div className="app-session-toast" role="status" aria-live="polite">
+              {pathDialogError}
+            </div>
           </div>
         ) : null}
         <div className="conversation-sidebar__group conversation-sidebar__project-add" ref={addMenuRef}>

@@ -352,6 +352,51 @@ def test_add_accepts_valid_trace() -> None:
     assert len(builder._pending) == 1
 
 
+def test_trace_record_query_defaults_to_empty_string() -> None:
+    """TraceRecord must be constructible with only trace_id — query defaults to "".
+
+    Regression: ``query`` used to be a required positional field, so callers
+    that built a record from a partially-known session (e.g. only the
+    request_id available) had to pass a placeholder. Making it default to
+    ``""`` aligns the dataclass with the already-tolerant ``from_dict``,
+    which reads ``data.get("query", "")``.
+    """
+    record = TraceRecord(trace_id="t1")
+    assert record.query == ""
+    assert record.skills == []
+    assert record.messages == []
+    assert record.result == ""
+    assert record.success is False
+
+
+def test_trace_record_to_dict_preserves_default_query() -> None:
+    """to_dict must emit the default ``query`` as ``""`` for round-trip parity."""
+    record = TraceRecord(trace_id="t1")
+    assert record.to_dict()["query"] == ""
+
+
+def test_trace_record_from_dict_tolerates_missing_query() -> None:
+    """from_dict must not raise when the persisted record lacks ``query``.
+
+    Regression: the persistence layer (records.jsonl) may carry legacy rows
+    written before ``query`` was added; ``from_dict`` already used
+    ``data.get("query", "")`` and must keep accepting such rows.
+    """
+    record = TraceRecord.from_dict({"trace_id": "t_legacy", "skills": ["s"]})
+    assert record.trace_id == "t_legacy"
+    assert record.query == ""
+    assert record.skills == ["s"]
+
+
+def test_trace_record_round_trip_preserves_empty_and_populated_query() -> None:
+    """to_dict -> from_dict round-trip must preserve ``query`` in both states."""
+    empty = TraceRecord(trace_id="t1")
+    assert TraceRecord.from_dict(empty.to_dict()).query == ""
+
+    populated = TraceRecord(trace_id="t2", query="how do I x", skills=["s"])
+    assert TraceRecord.from_dict(populated.to_dict()).query == "how do I x"
+
+
 def test_add_propagates_flush_exception_instead_of_dropping_pending(monkeypatch) -> None:
     """When the LLM is down, distiller.run() must surface the error from
     add()'s auto-flush rather than silently clearing the pending buffer.

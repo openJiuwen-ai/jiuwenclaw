@@ -98,9 +98,13 @@ async def test_send_image_file_success():
         # Verify upload was called
         file_service.upload_media.assert_called_once()
         
-        # Verify HTTP POST was called
-        assert http_client.post.call_count == 3
-        call_args = http_client.post.call_args
+        # Verify one token request and one media send request were made.
+        posted_urls = [call.args[0] for call in http_client.post.await_args_list]
+        assert posted_urls == [
+            "https://api.dingtalk.com/v1.0/oauth2/accessToken",
+            "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+        ]
+        call_args = http_client.post.await_args_list[-1]
         assert call_args[0][0] == "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
         
         # Verify request body

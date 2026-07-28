@@ -174,6 +174,13 @@ export interface AppEventDelegate {
   pushHistoryEntry(entry: HistoryItem): void;
   scheduleHistoryFlush(): void;
   safeRestoreHistory(sessionId: string): void;
+  /** 是否通过 `--session <id>` 启动（决定 boot resume/create 是否介入）。 */
+  hasBootSession(): boolean;
+  /**
+   * `--session <id>` 启动闭环：已存在→session.switch 恢复，不存在→session.create 新建。
+   * 无 --session 时 no-op，由调用方回退到纯 safeRestoreHistory。
+   */
+  resumeOrCreateBootSession(): void;
   /** 报告 history.get 流返回的分页元数据（本页 page_idx / total_pages）。 */
   reportHistoryPageMeta(meta: { pageIdx?: number; totalPages?: number }): void;
   /** 某一页 history.get 流已结束（收到 `status: done` 帧），由 app-state 决定是否继续拉下一页。 */
@@ -448,12 +455,16 @@ function handleConnectionAck(delegate: AppEventDelegate, frame: EventFrame): boo
   if (frame.event !== "connection.ack") {
     return false;
   }
-  // session_id is determined at construction time; connection.ack is only
-  // used as a signal to restore history once connected.
+  // `--session <id>` 启动：走 resume/create 闭环（已存在→switch 恢复，不存在→create 新建），
+  // 由该方法内部负责 safeRestoreHistory/safeFetchSessionTitle。
+  // 无 --session（hasBootSession=false）：该方法 no-op，回退到下方纯历史拉取。
   const sessionId = delegate.getSessionId();
   if (sessionId && delegate.getConnectionStatus() === "connected") {
-    delegate.safeRestoreHistory(sessionId);
-    delegate.safeFetchSessionTitle(sessionId);
+    delegate.resumeOrCreateBootSession();
+    if (!delegate.hasBootSession()) {
+      delegate.safeRestoreHistory(sessionId);
+      delegate.safeFetchSessionTitle(sessionId);
+    }
   }
   return true;
 }

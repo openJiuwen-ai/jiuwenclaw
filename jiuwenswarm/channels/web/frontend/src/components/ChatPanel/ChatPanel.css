@@ -899,6 +899,15 @@ overflow: hidden;
   height: 12px;
 }
 
+/* Member/role chips have no leading icon container. Keep their remove action
+   in a reserved trailing slot so it never covers the member name on hover. */
+.chat-input-chip-inline--member .chat-input-chip-inline__remove,
+.chat-input-chip-inline--role .chat-input-chip-inline__remove {
+  position: static;
+  transform: none;
+  color: var(--color-action-primary);
+}
+
 .chat-input-chip-inline:hover .chat-input-chip-inline__icon::before {
   opacity: 0;
 }
@@ -1227,6 +1236,14 @@ overflow: hidden;
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
+}
+
+/* 定时任务抽屉里的模式/模型 pill 行：比会话输入框工具栏更紧凑，只在抽屉这个
+   容器内覆盖，不影响会话界面本体的 .chat-mode-select 尺寸。 */
+.cron-drawer-mode-model-row .chat-mode-select__trigger {
+  min-height: 26px;
+  padding: 0 8px;
+  gap: 6px;
 }
 
 .chat-mode-select__trigger:hover {
@@ -1572,6 +1589,11 @@ overflow: hidden;
   width: 9px;
   height: 9px;
   flex: 0 0 auto;
+  transition: transform 0.2s ease;
+}
+
+.chat-work-select--open .chat-work-select__chevron {
+  transform: rotate(180deg);
 }
 
 .chat-work-select__trigger:disabled {

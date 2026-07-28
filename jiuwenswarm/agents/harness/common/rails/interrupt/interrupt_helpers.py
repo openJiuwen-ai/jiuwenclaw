@@ -674,7 +674,7 @@ def _build_multi_questions(questions_data: list) -> list:
             options = []
         question_payload = {
             "question": q["question"],
-            "header": q["header"],
+            "header": q.get("header") or "Question",
             "options": options,
             "multi_select": q.get("multi_select", False),
         }

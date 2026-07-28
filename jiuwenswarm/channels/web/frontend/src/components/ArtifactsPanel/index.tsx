@@ -5,6 +5,11 @@ import clsx from 'clsx';
 import { useChatStore, useSessionStore } from '../../stores';
 import type { FileDownloadItem, Message } from '../../types';
 import type { TeamMemberExecutionEvent, TeamTask } from '../../stores/sessionStore';
+import {
+  extractTokenFromDownloadUrl,
+  getFileIdentityKey,
+  resolveFilePath,
+} from '../../utils/fileDownloadDedup';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { getMemberDisplayName } from '../teamArea/shared';
 
@@ -64,53 +69,51 @@ function isMarkdownArtifact(item: ArtifactItem): boolean {
   return MARKDOWN_EXTENSIONS.has(getFileExtension(item.name));
 }
 
-function decodeBase64UrlUtf8(value: string): string | null {
-  try {
-    const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
-    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
-    const binary = window.atob(padded);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
-function getTokenPayload(token?: string): Record<string, unknown> | null {
-  if (!token) return null;
-  const payloadPart = token.split('.')[0];
-  if (!payloadPart) return null;
-  const decoded = decodeBase64UrlUtf8(payloadPart);
-  if (!decoded) return null;
-  try {
-    const payload = JSON.parse(decoded);
-    return payload && typeof payload === 'object' ? payload as Record<string, unknown> : null;
-  } catch {
-    return null;
-  }
-}
-
-function extractTokenFromDownloadUrl(downloadUrl?: string): string | undefined {
-  if (!downloadUrl) return undefined;
-  try {
-    const url = new URL(downloadUrl, window.location.origin);
-    return url.searchParams.get('token') || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function resolveArtifactPath(downloadToken?: string, downloadUrl?: string): string | undefined {
-  const token = downloadToken || extractTokenFromDownloadUrl(downloadUrl);
-  const payload = getTokenPayload(token);
-  const path = payload?.path;
-  return typeof path === 'string' && path.trim() ? path : undefined;
-}
-
 function normalizeDownloadUrl(downloadUrl?: string, downloadToken?: string): string | undefined {
   if (downloadUrl) return downloadUrl;
   if (downloadToken) return `/file-api/download?token=${encodeURIComponent(downloadToken)}`;
   return undefined;
+}
+
+function preferArtifact(existing: ArtifactItem, candidate: ArtifactItem): ArtifactItem {
+  const existingTs = existing.timestamp || 0;
+  const candidateTs = candidate.timestamp || 0;
+  const existingHasUrl = Boolean(existing.downloadUrl || existing.downloadToken);
+  const candidateHasUrl = Boolean(candidate.downloadUrl || candidate.downloadToken);
+
+  let primary: ArtifactItem;
+  let secondary: ArtifactItem;
+  if (candidateTs > existingTs) {
+    primary = candidate;
+    secondary = existing;
+  } else if (candidateTs < existingTs) {
+    primary = existing;
+    secondary = candidate;
+  } else if (candidateHasUrl && !existingHasUrl) {
+    primary = candidate;
+    secondary = existing;
+  } else {
+    primary = existing;
+    secondary = candidate;
+  }
+
+  // 保留可下载信息：避免较新的 team_task 路径条目盖掉已有 downloadUrl
+  if (!primary.downloadUrl && secondary.downloadUrl) {
+    primary = {
+      ...primary,
+      downloadUrl: secondary.downloadUrl,
+      downloadToken: primary.downloadToken || secondary.downloadToken,
+      size: primary.size ?? secondary.size,
+      mimeType: primary.mimeType || secondary.mimeType,
+    };
+  }
+  if (!primary.path && secondary.path) {
+    primary = { ...primary, path: secondary.path };
+  }
+  if (!primary.sourceMember && secondary.sourceMember) {
+    primary = { ...primary, sourceMember: secondary.sourceMember };
+  }
+  return primary;
 }
 
 function messageTime(message: Message): number {
@@ -127,7 +130,11 @@ function fileItemToArtifact(file: FileDownloadItem, message: Message, index: num
     mimeType: file.mime_type,
     downloadUrl: normalizeDownloadUrl(file.download_url, downloadToken),
     downloadToken,
-    path: resolveArtifactPath(downloadToken, file.download_url),
+    path: resolveFilePath({
+      path: file.path,
+      download_token: downloadToken,
+      download_url: file.download_url,
+    }),
     source: 'message',
     timestamp: messageTime(message),
   };
@@ -146,7 +153,11 @@ function executionFileToArtifact(
     mimeType: file.mime_type,
     downloadUrl: normalizeDownloadUrl(file.download_url, downloadToken),
     downloadToken,
-    path: resolveArtifactPath(downloadToken, file.download_url),
+    path: resolveFilePath({
+      path: file.path,
+      download_token: downloadToken,
+      download_url: file.download_url,
+    }),
     source: 'team_execution',
     sourceMember: event.member_id,
     timestamp: event.timestamp,
@@ -193,16 +204,15 @@ function buildArtifacts(
 
   const deduped = new Map<string, ArtifactItem>();
   artifacts.forEach((artifact) => {
-    const key = [
-      artifact.path || '',
-      artifact.downloadUrl || '',
-      artifact.name,
-      artifact.sourceMember || '',
-    ].join('\n');
+    const key = getFileIdentityKey({
+      name: artifact.name,
+      size: artifact.size,
+      path: artifact.path,
+      download_url: artifact.downloadUrl,
+      download_token: artifact.downloadToken,
+    });
     const existing = deduped.get(key);
-    if (!existing || (artifact.timestamp || 0) >= (existing.timestamp || 0)) {
-      deduped.set(key, artifact);
-    }
+    deduped.set(key, existing ? preferArtifact(existing, artifact) : artifact);
   });
 
   return Array.from(deduped.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));

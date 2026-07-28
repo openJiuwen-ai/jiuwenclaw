@@ -173,6 +173,8 @@ export interface AppSnapshot {
   btwOverlayTotal: number;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），Esc 优先消费 */
   btwActive: boolean;
+  /** /btw 正在回答的问题；非空时显示加载动画。 */
+  btwPendingQuestion: string | null;
 }
 
 function formatElapsed(ms: number): string {
@@ -324,6 +326,15 @@ export class CliPiAppState {
   private connectionStatus: ConnectionStatus = "idle";
   private sessionId: string;
   private sessionTitle: string = "";
+  /**
+   * `--session <id>` 启动时传入的目标 session id；为 null 表示用户未显式指定
+   * （走 generateSessionId 新会话路径，不触发 boot resume/create）。
+   * 由 connection.ack 收到后驱动 resumeOrCreateBootSession：已存在→session.switch
+   * 恢复，不存在→session.create 新建并落盘。
+   */
+  private bootSessionId: string | null = null;
+  /** 幂等守卫：boot resume/create 只在首次 connection.ack 触发一次（重连/重发不重试）。 */
+  private bootSessionHandled = false;
   private mode: ClientMode = "code.normal";
   private themeName: ThemeName = getCurrentThemeName();
   private accentColor: AccentColorName = getCurrentAccentColor();
@@ -403,6 +414,8 @@ export class CliPiAppState {
   private btwOverlayIndex = -1;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   private _btwActive = false;
+  /** /btw 正在回答的问题；与回答 overlay 的可见状态分离。 */
+  private btwPendingQuestion: string | null = null;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
   private interruptRequested = false;
   /** 是否有一个 cancel interrupt 在途（已发送但未收到 interrupt_result 确认）。
@@ -549,6 +562,10 @@ export class CliPiAppState {
     safeFetchSessionTitle: (sessionId) => {
       this.safeFetchSessionTitle(sessionId);
     },
+    hasBootSession: () => this.bootSessionId !== null,
+    resumeOrCreateBootSession: () => {
+      this.resumeOrCreateBootSession();
+    },
     getSuppressInterruptResult: () => this.suppressInterruptResult,
     clearSuppressInterruptResult: () => {
       this.suppressInterruptResult = false;
@@ -621,6 +638,7 @@ export class CliPiAppState {
     },
   ) {
     this.sessionId = cliSession || generateSessionId();
+    this.bootSessionId = cliSession ? cliSession : null;
     const config = loadTuiConfig();
     if (config.theme) {
       setCurrentThemeName(config.theme);
@@ -1085,6 +1103,7 @@ export class CliPiAppState {
       btwOverlayIndex: this.btwOverlayIndex,
       btwOverlayTotal: this.btwHistory.length,
       btwActive: this._btwActive,
+      btwPendingQuestion: this.btwPendingQuestion,
     };
   }
 
@@ -1151,6 +1170,7 @@ export class CliPiAppState {
       setBtwOverlay: this.setBtwOverlay,
       clearBtwOverlay: this.clearBtwOverlay,
       setBtwActive: this.setBtwActive,
+      setBtwPendingQuestion: this.setBtwPendingQuestion,
       clearEntries: this.clearEntries,
       restoreHistory: this.restoreHistory,
       exitApp: () => {
@@ -1212,8 +1232,8 @@ export class CliPiAppState {
           code: "NOT_SUPERVISED",
           message: "Running outside agentos-tui launcher; start via `agentos-tui` to use /switch",
         },
-      requestHandoff: (target) => this.handoffPort
-        ? this.handoffPort.requestHandoff(target)
+      requestHandoff: (target, switchContent) => this.handoffPort
+        ? this.handoffPort.requestHandoff(target, switchContent)
         : Promise.reject(new Error("Handoff port not available (not supervised)")),
       hasServerTask: () => this.taskLifecycle?.hasServerTask() ?? this.hasServerTask(),
       cancelAndWaitForIdle: (opts) => this.taskLifecycle
@@ -1643,6 +1663,7 @@ export class CliPiAppState {
     this.btwHistory = [];
     this.btwOverlayIndex = -1;
     this._btwActive = false;
+    this.btwPendingQuestion = null;
     this.pendingPlanEntrySource = null;
     if (this.accentColor !== "default") {
       this.accentColor = "default";
@@ -1680,11 +1701,16 @@ export class CliPiAppState {
     if (item.kind === "user") {
       this.autoRecapState = "idle";
       // 用户发送新消息时自动清除 /btw overlay（含历史）
-      if (this.btwOverlay !== null || this.btwHistory.length > 0) {
+      if (
+        this.btwOverlay !== null ||
+        this.btwHistory.length > 0 ||
+        this.btwPendingQuestion !== null
+      ) {
         this.btwOverlay = null;
         this.btwHistory = [];
         this.btwOverlayIndex = -1;
         this._btwActive = false;
+        this.btwPendingQuestion = null;
       }
     }
     this.emitChange();
@@ -1692,6 +1718,7 @@ export class CliPiAppState {
 
   /** 设置 /btw 侧问题覆盖层（独立于 transcript 渲染，不受滚动影响） */
   readonly setBtwOverlay = (question: string, answer: string): void => {
+    this.btwPendingQuestion = null;
     this.btwOverlay = { question, answer };
     this.btwHistory.push({ question, answer });
     this.btwOverlayIndex = this.btwHistory.length - 1;
@@ -1700,19 +1727,35 @@ export class CliPiAppState {
 
   /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   readonly setBtwActive = (active: boolean): void => {
-    if (this._btwActive !== active) {
+    const pendingChanged = !active && this.btwPendingQuestion !== null;
+    if (this._btwActive !== active || pendingChanged) {
       this._btwActive = active;
+      if (!active) {
+        this.btwPendingQuestion = null;
+      }
+      this.emitChange();
+    }
+  };
+
+  readonly setBtwPendingQuestion = (question: string | null): void => {
+    if (this.btwPendingQuestion !== question) {
+      this.btwPendingQuestion = question;
       this.emitChange();
     }
   };
 
   /** 清除 /btw 侧问题覆盖层（同时清空历史，Esc 视为放弃这批侧问） */
   readonly clearBtwOverlay = (): void => {
-    if (this.btwOverlay !== null || this.btwHistory.length > 0) {
+    if (
+      this.btwOverlay !== null ||
+      this.btwHistory.length > 0 ||
+      this.btwPendingQuestion !== null
+    ) {
       this.btwOverlay = null;
       this.btwHistory = [];
       this.btwOverlayIndex = -1;
       this._btwActive = false;
+      this.btwPendingQuestion = null;
       this.emitChange();
     }
   };
@@ -1737,6 +1780,7 @@ export class CliPiAppState {
       this.btwOverlay = null;
       this.btwOverlayIndex = -1;
       this._btwActive = false;
+      this.btwPendingQuestion = null;
     } else {
       this.btwOverlayIndex = Math.min(this.btwOverlayIndex, len - 1);
       this.btwOverlay = this.btwHistory[this.btwOverlayIndex];
@@ -1789,6 +1833,7 @@ export class CliPiAppState {
     this.btwHistory = [];
     this.btwOverlayIndex = -1;
     this._btwActive = false;
+    this.btwPendingQuestion = null;
     this.setStreamingStateInternal(StreamingState.Idle);
     this.collapsedToolGroupIds.clear();
     this.activeSubtasks.clear();
@@ -3264,6 +3309,69 @@ export class CliPiAppState {
         }
         this.lastError = error instanceof Error ? error.message : String(error);
         this.emitChange();
+      }
+    })();
+  }
+
+  /**
+   * `--session <id>` 启动闭环：connection.ack 收到后驱动。
+   * 先 try `session.create(target)`：
+   *  - 成功 → id 不存在，后端已新建并落盘 metadata；下次同 id 启动即可恢复。
+   *  - 返回 ALREADY_EXISTS → id 已存在，转 `session.switch` 恢复会话生命周期
+   *    （KV cache affinity + team prepare），并按 res.mode 对齐前端 mode。
+   *  - 其他错误 → 降级仅拉历史，不阻断 UI（用户可手动 /resume）。
+   * 收尾统一 safeRestoreHistory + safeFetchSessionTitle 展示历史/标题。
+   * 无 --session（bootSessionId 为 null）时直接 return，由外层走原生成新会话路径。
+   */
+  private resumeOrCreateBootSession(): void {
+    if (this.bootSessionHandled) return;
+    if (this.bootSessionId === null) return;
+    if (this.connectionStatus !== "connected") return;
+    this.bootSessionHandled = true;
+    const target = this.bootSessionId;
+    const previousMode = this.mode;
+    void (async () => {
+      try {
+        await this.request("session.create", {
+          session_id: target,
+          previous_session_id: "",
+          previous_mode: previousMode,
+          mode: previousMode,
+        });
+        // 新建成功：target 已落盘，无历史/标题可拉（空页无害）。
+      } catch (createErr) {
+        const message = createErr instanceof Error ? createErr.message : String(createErr);
+        // ALREADY_EXISTS → 已存在，转 switch 恢复
+        if (/ALREADY_EXISTS|already exists/i.test(message)) {
+          try {
+            const res = await this.request<{
+              session_id?: string;
+              mode?: string;
+              switched?: boolean;
+            }>("session.switch", {
+              session_id: target,
+              previous_session_id: "",
+              previous_mode: previousMode,
+              mode: previousMode,
+            });
+            const resolvedMode = res?.mode;
+            if (typeof resolvedMode === "string" && resolvedMode) {
+              this.setMode(resolvedMode as ClientMode);
+            }
+          } catch (switchErr) {
+            const switchMessage =
+              switchErr instanceof Error ? switchErr.message : String(switchErr);
+            this.lastError = `session.switch failed: ${switchMessage}`;
+            this.emitChange();
+          }
+        } else {
+          // 非已存在错误：降级仅拉历史，不阻断
+          this.lastError = `session.create failed: ${message}`;
+          this.emitChange();
+        }
+      } finally {
+        this.safeRestoreHistory(target);
+        this.safeFetchSessionTitle(target);
       }
     })();
   }

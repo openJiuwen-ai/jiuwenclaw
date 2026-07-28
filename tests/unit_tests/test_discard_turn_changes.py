@@ -335,3 +335,40 @@ async def test_partial_failure_keeps_file_ops_for_retry():
 
     # 验证 watcher 仍标脏(已恢复的文件需要刷新前端)
     assert registry.mark_dirty_calls == ["proj-A"]
+
+
+@pytest.mark.asyncio
+async def test_restore_exception_returns_error_response():
+    """恢复前置计算抛异常时返回结构化错误,而不是让 WS 连接被关闭。"""
+    channel = FakeWebChannel()
+    registry = FakeRegistry()
+    handler = _make_handler(channel, registry)
+
+    with (
+        patch(
+            "jiuwenswarm.gateway.channel_manager.web.git_ws_handler.GitDiffWebSocketHandler._resolve_git_project",
+            return_value=(_make_project("proj-A"), None, None),
+        ),
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={"project_id": "proj-A"},
+        ),
+        patch(
+            "jiuwenswarm.agents.harness.common.session_ops_service.get_last_turn_info",
+            return_value={"turn_index": 2, "timestamp": 1000.0},
+        ),
+        patch(
+            "jiuwenswarm.agents.harness.common.session_ops_service.restore_session_files",
+            side_effect=RuntimeError("broken file_ops"),
+        ),
+    ):
+        await handler._handle_discard_turn_changes(
+            ws=None, req_id="r1",
+            params={"project_id": "proj-A", "session_id": "sess-1"},
+        )
+
+    resp = channel.responses[0]
+    assert resp["ok"] is False
+    assert resp["code"] == "INTERNAL_ERROR"
+    assert "broken file_ops" in resp["error"]
+    assert registry.mark_dirty_calls == []
