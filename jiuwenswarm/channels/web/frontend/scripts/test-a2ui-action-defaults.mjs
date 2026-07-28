@@ -37,6 +37,82 @@ const {
   enrichA2UIClientEventWithDefaults,
   recordA2UIActionDefaults,
 } = await importTsModule(sourceUrl);
+const helperOutputPath = await transpileTsModule(helperUrl, 'formDefaults.mjs');
+const {
+  isMultiSelectChoice,
+  isSingleSelectChoice,
+  nextChoiceSelections,
+  selectionCollectionValues,
+} = await import(`file://${helperOutputPath.replace(/\\/g, '/')}?choice-helpers`);
+
+assert.equal(
+  isMultiSelectChoice({ variant: 'chips', maxAllowedSelections: 1 }),
+  true,
+  'chips controls should retain their multi-choice visual renderer',
+);
+assert.equal(
+  isSingleSelectChoice({ variant: 'chips', maxAllowedSelections: 1 }),
+  true,
+  'chips appearance must not override maxAllowedSelections=1 semantics',
+);
+assert.equal(
+  isSingleSelectChoice({ variant: 'checkbox', maxAllowedSelections: 1 }),
+  true,
+  'checkbox appearance must not override maxAllowedSelections=1 semantics',
+);
+assert.deepEqual(
+  nextChoiceSelections(['very_spicy'], 'mild', true, 1),
+  ['mild'],
+  'single-select chips should replace the previous selection',
+);
+assert.deepEqual(
+  nextChoiceSelections(['very_spicy'], 'mild', true, 2),
+  ['very_spicy', 'mild'],
+  'multi-select chips should add a second selection within the limit',
+);
+assert.deepEqual(
+  nextChoiceSelections(['very_spicy', 'mild'], 'no_spicy', true, 2),
+  ['very_spicy', 'mild'],
+  'multi-select chips should keep their previous value when the limit is exceeded',
+);
+assert.deepEqual(
+  nextChoiceSelections(['very_spicy', 'mild'], 'mild', false),
+  ['very_spicy'],
+  'multi-select chips should remove an unchecked selection',
+);
+assert.deepEqual(
+  selectionCollectionValues(new Map()),
+  [],
+  'an empty A2UI valueMap must not consume a hidden selection slot',
+);
+assert.deepEqual(
+  selectionCollectionValues(new Map([
+    ['0', 'chinese'],
+    ['1', 'japanese'],
+  ])),
+  ['chinese', 'japanese'],
+  'A2UI valueMap selections should be read from their values',
+);
+const fiveCuisineSelections = ['chinese', 'japanese', 'western', 'mexican']
+  .reduce(
+    (selected, cuisine) => nextChoiceSelections(selected, cuisine, true, 5),
+    selectionCollectionValues(new Map()),
+  );
+assert.deepEqual(
+  nextChoiceSelections(fiveCuisineSelections, 'italian', true, 5),
+  ['chinese', 'japanese', 'western', 'mexican', 'italian'],
+  'an empty valueMap should allow all five visible selections',
+);
+assert.deepEqual(
+  nextChoiceSelections(
+    ['chinese', 'japanese', 'western', 'mexican', 'italian'],
+    'korean',
+    true,
+    5,
+  ),
+  ['chinese', 'japanese', 'western', 'mexican', 'italian'],
+  'the sixth visible selection should still be rejected',
+);
 
 function selectionMessages(defaultValue = 'chinese') {
   return [

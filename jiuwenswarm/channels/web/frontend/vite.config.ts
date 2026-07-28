@@ -832,6 +832,15 @@ function devFileContentApi(): Plugin {
 }
 
 // https://vitejs.dev/config/
+function portFromEnv(name: string, fallback: number): number {
+  const value = Number.parseInt(process.env[name] ?? '', 10)
+  return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback
+}
+
+const frontendPort = portFromEnv('FRONTEND_PORT', 5173)
+const webPort = portFromEnv('WEB_PORT', 19000)
+const webTarget = `http://127.0.0.1:${webPort}`
+
 export default defineConfig({
   plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), devFileContentApi(), react(), svgr()],
   resolve: {
@@ -840,15 +849,15 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,  // 默认端口
-    strictPort: true,  // 强制使用 5173 端口
+    port: frontendPort,
+    strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:19000',
+        target: webTarget,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'http://127.0.0.1:19000',
+        target: webTarget,
         ws: true,
         changeOrigin: true,
         configure: (proxy) => {

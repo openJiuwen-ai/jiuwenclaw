@@ -50,7 +50,10 @@ async def test_a2ui_system_flow_accepts_event_and_valid_response(monkeypatch):
     monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
 
     config = get_a2ui_config({"a2ui": {"enabled": True}})
-    prompt_section = build_a2ui_prompt_section("en")
+    prompt_section = build_a2ui_prompt_section(
+        "en",
+        include_browser_workflows=True,
+    )
     client_event = {
         "type": "a2ui.client_event",
         "event": {

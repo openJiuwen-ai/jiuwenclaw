@@ -2,6 +2,8 @@
 
 from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
     build_a2ui_autonomy_instruction,
+    build_a2ui_browser_workflow_instruction,
+    is_a2ui_browser_workflow_request,
 )
 from jiuwenswarm.server.runtime.a2ui.runtime.prompt import (
     build_a2ui_client_event_prompt,
@@ -23,8 +25,8 @@ def test_a2ui_prompt_is_autonomous_not_forced():
     assert "A2UI is optional" in instruction
     assert "If A2UI is not appropriate, answer in plain text" in instruction
     assert "Do not promise to show the result with A2UI and then output only Markdown" in instruction
-    assert "Mandatory A2UI account-action gate" in instruction
-    assert "This is not optional" in instruction
+    assert "Mandatory A2UI account-action gate" not in instruction
+    assert "browser_preflight_submit" not in instruction
 
 
 def test_a2ui_prompt_discourages_nested_templates():
@@ -35,7 +37,7 @@ def test_a2ui_prompt_discourages_nested_templates():
 
 
 def test_a2ui_prompt_defines_hotel_booking_actions():
-    instruction = build_a2ui_autonomy_instruction("en")
+    instruction = build_a2ui_browser_workflow_instruction()
 
     assert "hotel_option_select" in instruction
     assert "continue_hotel_booking" in instruction
@@ -62,7 +64,7 @@ def test_a2ui_zh_prompt_discourages_unsupported_popup_components():
 
 
 def test_a2ui_prompt_defines_gmail_and_social_actions():
-    instruction = build_a2ui_autonomy_instruction("en")
+    instruction = build_a2ui_browser_workflow_instruction()
 
     assert "Mandatory A2UI account-action gate" in instruction
     assert "task_tool as a substitute" in instruction
@@ -76,6 +78,36 @@ def test_a2ui_prompt_defines_gmail_and_social_actions():
     assert "social_post_draft_select" in instruction
     assert "social_post_confirm" in instruction
     assert "social_post_cancel" in instruction
+
+
+def test_a2ui_browser_workflow_detection_is_request_scoped():
+    """Only real browser workflows and their A2UI events should match."""
+    assert is_a2ui_browser_workflow_request("帮我预订北京的酒店")
+    assert is_a2ui_browser_workflow_request("Search Gmail and draft replies")
+    assert is_a2ui_browser_workflow_request(
+        {
+            "type": "a2ui.client_event",
+            "event": {"userAction": {"name": "gmail_send_confirm"}},
+        }
+    )
+    assert not is_a2ui_browser_workflow_request(
+        "生成一个带有故宫图片的介绍故宫的A2UI卡片"
+    )
+    assert not is_a2ui_browser_workflow_request("生成一个酒店介绍 A2UI 卡片")
+
+
+def test_a2ui_prompt_adds_browser_rules_only_when_requested():
+    """Generic cards stay concise while browser tasks retain workflow rules."""
+    generic_prompt = build_a2ui_prompt_section("zh")
+    browser_prompt = build_a2ui_prompt_section(
+        "zh",
+        include_browser_workflows=True,
+    )
+
+    assert "browser_preflight_submit" not in generic_prompt
+    assert "Mandatory A2UI account-action gate" not in generic_prompt
+    assert "browser_preflight_submit" in browser_prompt
+    assert "Mandatory A2UI account-action gate" in browser_prompt
 
 
 def test_a2ui_zh_prompt_section_is_readable():

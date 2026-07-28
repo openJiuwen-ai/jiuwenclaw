@@ -20,7 +20,10 @@ from jiuwenswarm.server.runtime.a2ui.parser import (
     may_contain_a2ui_content,
     parse_a2ui_response,
 )
-from jiuwenswarm.server.runtime.a2ui.prompt_instructions import build_a2ui_autonomy_instruction
+from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
+    build_a2ui_autonomy_instruction,
+    build_a2ui_browser_workflow_instruction,
+)
 from jiuwenswarm.server.runtime.a2ui.stream_guard import A2UIStreamGuard
 from jiuwenswarm.server.runtime.a2ui.text_formatter import format_for_text_channel
 from jiuwenswarm.server.runtime.a2ui.types import A2UIExample, A2UIResponsePart, A2UIValidationResult
@@ -88,7 +91,12 @@ class A2UIProtocolSpec:
     def catalog(self):
         return self.schema_manager.get_selected_catalog()
 
-    def build_prompt(self, language: str = "en") -> str:
+    def build_prompt(
+        self,
+        language: str = "en",
+        *,
+        include_browser_workflows: bool = False,
+    ) -> str:
         if language in {"zh", "cn"}:
             role = (
                 "JiuwenSwarm 支持可选的 A2UI 输出格式。当富交互界面适合当前回答时，"
@@ -129,6 +137,8 @@ class A2UIProtocolSpec:
             )
 
         workflow = f"{workflow}\n\n{build_a2ui_autonomy_instruction(language)}"
+        if include_browser_workflows:
+            workflow = f"{workflow}\n\n{build_a2ui_browser_workflow_instruction()}"
         prompt = self.schema_manager.generate_system_prompt(
             role_description=role,
             workflow_description=workflow,
@@ -229,8 +239,15 @@ def get_protocol_spec(version: str = A2UI_ACTIVE_PROTOCOL_VERSION) -> A2UIProtoc
     return A2UIProtocolSpec(version)
 
 
-def build_a2ui_prompt_section(language: str = "en") -> str:
-    return get_protocol_spec().build_prompt(language)
+def build_a2ui_prompt_section(
+    language: str = "en",
+    *,
+    include_browser_workflows: bool = False,
+) -> str:
+    return get_protocol_spec().build_prompt(
+        language,
+        include_browser_workflows=include_browser_workflows,
+    )
 
 
 def format_a2ui_for_text_channel(content: str, version: str = VERSION_0_8) -> str:

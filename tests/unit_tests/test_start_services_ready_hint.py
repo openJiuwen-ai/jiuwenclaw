@@ -10,7 +10,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from jiuwenswarm.start_services import _resolve_runtime_ports, _wait_for_services_ready
+from jiuwenswarm.start_services import (
+    _resolve_runtime_ports,
+    _start_process,
+    _wait_for_services_ready,
+)
 
 
 def _open_ports(*open_ports: int):
@@ -76,6 +80,34 @@ def test_resolve_runtime_ports_out_of_range_env_keeps_default(
     assert ports["frontend"] == 5173
     assert ports["agent_server"] == 18092
     assert ports["web"] == 19000
+
+
+def test_start_process_passes_resolved_ports_to_child(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    captured: dict[str, object] = {}
+
+    def fake_popen(cmd, *, cwd, env):
+        captured.update({"cmd": cmd, "cwd": cwd, "env": env})
+        return MagicMock()
+
+    monkeypatch.setattr("jiuwenswarm.start_services.subprocess.Popen", fake_popen)
+    ports = {
+        "agent_server": 19092,
+        "web": 20000,
+        "gateway": 20001,
+        "frontend": 6173,
+    }
+
+    _start_process("web-dev", ["npm", "run", "dev"], tmp_path, ports=ports)
+
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert child_env["AGENT_SERVER_PORT"] == "19092"
+    assert child_env["WEB_PORT"] == "20000"
+    assert child_env["GATEWAY_PORT"] == "20001"
+    assert child_env["FRONTEND_PORT"] == "6173"
 
 
 def test_wait_for_services_ready_prints_access_url_for_web_dev(caplog: pytest.LogCaptureFixture):

@@ -1336,7 +1336,7 @@ class TestStartServicesFallback:
         )
         monkeypatch.setattr(
             "jiuwenswarm.start_services._run_processes",
-            lambda commands: 0,
+            lambda commands, ports: 0,
         )
 
         rc = start_services._run("app")

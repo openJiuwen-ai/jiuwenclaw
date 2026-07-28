@@ -247,6 +247,54 @@ def _make_a2ui_pending_render_chunk(*, request_id: str, channel_id: str) -> Agen
     )
 
 
+def _make_a2ui_final_chunk(
+        *,
+        request_id: str,
+        channel_id: str,
+        session_id: str,
+        content: str,
+) -> AgentResponseChunk:
+    return AgentResponseChunk(
+        request_id=request_id,
+        channel_id=channel_id,
+        payload={
+            "event_type": "chat.final",
+            "session_id": session_id,
+            "content": content,
+        },
+        is_complete=False,
+    )
+
+
+def _should_defer_a2ui_processing_status(
+        *,
+        suppress_a2ui_stream: bool,
+        event_type: str,
+        payload: dict[str, Any],
+) -> bool:
+    return (
+        suppress_a2ui_stream
+        and event_type == "chat.processing_status"
+        and payload.get("is_processing") is False
+    )
+
+
+def _normalize_nested_stream_chunk(
+        chunk: AgentResponseChunk,
+) -> AgentResponseChunk | None:
+    """Keep the facade stream open until its post-processing has finished."""
+    if not chunk.is_complete:
+        return chunk
+    payload = chunk.payload
+    if payload is None or (
+            isinstance(payload, dict)
+            and payload.get("is_complete") is True
+            and not payload.get("event_type")
+    ):
+        return None
+    return replace(chunk, is_complete=False)
+
+
 def _extend_a2ui_stream_probe(previous: str, content: str) -> str:
     probe = f"{previous}{content}"
     if len(probe) <= _A2UI_STREAM_PROBE_WINDOW:
@@ -265,7 +313,7 @@ def _looks_like_partial_a2ui_marker(value: Any) -> bool:
         if match is None:
             continue
         token = match.group(0)
-        if len(token) < 3:
+        if len(token) < 2:
             continue
         rest = candidate[len(token):].strip()
         if rest and not any(marker.startswith(token + rest) for marker in _A2UI_STREAM_PARTIAL_MARKERS):
@@ -320,7 +368,7 @@ def _a2ui_marker_start(value: Any) -> int | None:
         if match is None:
             continue
         token = match.group(0)
-        if len(token) < 3:
+        if len(token) < 2:
             continue
         rest = candidate[len(token):].strip()
         if rest and not any(marker.startswith(token + rest) for marker in _A2UI_STREAM_PARTIAL_MARKERS):
@@ -2359,6 +2407,10 @@ class JiuWenSwarm:
                     )
                 else:
                     if isinstance(data, AgentResponseChunk):
+                        if suppress_a2ui_stream:
+                            data = _normalize_nested_stream_chunk(data)
+                            if data is None:
+                                continue
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
                             should_record = et.startswith("chat.")
@@ -2378,6 +2430,17 @@ class JiuWenSwarm:
                             if et in {"chat.delta", "chat.final"} and payload_content:
                                 a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
                                 a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
+                            if _should_defer_a2ui_processing_status(
+                                    suppress_a2ui_stream=suppress_a2ui_stream,
+                                    event_type=et,
+                                    payload=data.payload,
+                            ):
+                                logger.info(
+                                    "A2UI processing_status=false deferred until finalization: "
+                                    "request_id=%s",
+                                    rid,
+                                )
+                                continue
                             if et == "chat.delta":
                                 final_answer_chunks.append(payload_content)
                                 if suppress_a2ui_stream or a2ui_split is not None:
@@ -2478,6 +2541,17 @@ class JiuWenSwarm:
                         if et in {"chat.delta", "chat.final"} and payload_content:
                             a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
                             a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
+                        if _should_defer_a2ui_processing_status(
+                                suppress_a2ui_stream=suppress_a2ui_stream,
+                                event_type=et,
+                                payload=data,
+                        ):
+                            logger.info(
+                                "A2UI processing_status=false deferred until finalization: "
+                                "request_id=%s",
+                                rid,
+                            )
+                            continue
                         if et == "chat.delta":
                             final_answer_chunks.append(payload_content)
                             if suppress_a2ui_stream or a2ui_split is not None:
@@ -2618,11 +2692,11 @@ class JiuWenSwarm:
             )
             final_answer_content = finalized_assistant_message
             final_answer_chunks = []
-            yield AgentResponseChunk(
+            yield _make_a2ui_final_chunk(
                 request_id=rid,
                 channel_id=cid,
-                payload={"event_type": "chat.final", "content": finalized_assistant_message},
-                is_complete=False,
+                session_id=session_id,
+                content=finalized_assistant_message,
             )
 
         # cloud memory: after chat hook
