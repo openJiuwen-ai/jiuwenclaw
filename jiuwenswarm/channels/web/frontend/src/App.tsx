@@ -595,6 +595,7 @@ function AppContent() {
     isConnected,
     request,
     persistMedia,
+    persistDocuments,
     sendMessage,
     sendStructuredChatContent,
     pause,
@@ -1708,6 +1709,14 @@ function AppContent() {
     return persistMedia(content, currentSessionId, mediaItems);
   }, [persistMedia]);
 
+  const handlePersistDocuments = useCallback((content: string, mediaItems: MediaItem[]) => {
+    const currentSessionId = sessionIdRef.current;
+    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) {
+      return Promise.reject(new Error('会话未就绪，请稍后重试'));
+    }
+    return persistDocuments(content, currentSessionId, mediaItems);
+  }, [persistDocuments]);
+
   useEffect(() => {
     return setA2UIActionHandler((message) => {
       const currentSessionId = sessionIdRef.current;
@@ -2178,6 +2187,7 @@ function AppContent() {
                     <ChatPanel
                       onSendMessage={handleSendMessage}
                       onPersistMedia={handlePersistMedia}
+                      onPersistDocuments={handlePersistDocuments}
                       onInterrupt={handleInterrupt}
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}
