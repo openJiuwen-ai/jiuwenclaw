@@ -1130,7 +1130,7 @@ modes:
       # Codex uses the openjiuwen Codex SDK backend and receives the team MCP
       # tools required for task claiming, messaging, and lifecycle operations.
       external_cli_agents:
-        - enabled: true
+        - enabled: false
           cli_agent: codex
           inject_mcp: true
           mcp_default_tools_approval_mode: approve
