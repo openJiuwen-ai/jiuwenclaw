@@ -66,7 +66,7 @@ def _build_web_search_description() -> str:
     else:
         return (
             "网页搜索统一入口。"
-            "search_mode=default（默认）先付费后免费；"
+            "search_mode=default（默认）使用付费源；"
             "search_mode=paid 仅付费，失败报错。"
             f"search_source 可选，指定付费源名称（如 {providers}），"
             "配合 search_mode=paid 使用时优先使用指定源，不可用时返回明确错误。"
@@ -76,14 +76,7 @@ def _build_web_search_description() -> str:
 
 @tool(
     name="web_search",
-    description=(
-        "网页搜索统一入口。"
-        "search_mode=default（默认）先付费后免费；"
-        "search_mode=paid 仅付费，失败报错。"
-        "search_source 可选，指定付费源名称，"
-        "配合 search_mode=paid 使用时优先使用指定源，不可用时返回明确错误。"
-        "max_results 可选，限制单个 query 的最大返回条数。"
-    ),
+    description=_build_web_search_description(),
 )
 async def web_search(
     query: str,
