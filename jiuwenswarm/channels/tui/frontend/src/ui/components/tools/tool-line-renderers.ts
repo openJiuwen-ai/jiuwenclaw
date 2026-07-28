@@ -14,28 +14,28 @@ const MAX_STRUCTURED_LINES_EXPANDED = 18;
 
 function toolPrefix(tool: ToolCallDisplay, animationPhase = 0): string {
   if (tool.isError || tool.status === "error") return "● ";
-  if (tool.status === "timeout") return "◌ ";
+  if (tool.status === "timeout" || tool.status === "canceled") return "◌ ";
   if (isToolRunning(tool)) return ["◐ ", "◓ ", "◑ ", "◒ "][animationPhase % 4]!;
   return "● ";
 }
 
 function toolPrefixColor(tool: ToolCallDisplay): (value: string) => string {
   if (tool.isError || tool.status === "error") return palette.status.error;
-  if (tool.status === "timeout") return palette.status.warning;
+  if (tool.status === "timeout" || tool.status === "canceled") return palette.status.warning;
   if (isToolRunning(tool)) return palette.text.tool;
   return palette.status.success;
 }
 
 function toolLineColor(tool: ToolCallDisplay): (value: string) => string {
   if (tool.isError || tool.status === "error") return palette.status.error;
-  if (tool.status === "timeout") return palette.status.warning;
+  if (tool.status === "timeout" || tool.status === "canceled") return palette.status.warning;
   if (isToolRunning(tool)) return palette.text.tool;
   return palette.text.dim;
 }
 
 export function toolStateColor(tool: ToolCallDisplay): (value: string) => string {
   if (tool.isError || tool.status === "error") return palette.status.error;
-  if (tool.status === "timeout") return palette.status.warning;
+  if (tool.status === "timeout" || tool.status === "canceled") return palette.status.warning;
   if (isToolRunning(tool)) return palette.text.tool;
   return palette.text.dim;
 }

@@ -213,11 +213,20 @@ class BaseWsChannel(BaseChannel):
         与 ``_coalesce`` 解析回 dict 的往返）、str/bytes（原样发送）或 None
         哨兵。ws 已关闭或队列缺失时静默丢弃（与旧 _safe_send 语义一致）。
         """
-        if getattr(ws, "closed", False):
-            return
         ws_id = getattr(ws, "_jiuwen_ws_id", "")
+        if getattr(ws, "closed", False):
+            logger.debug(
+                "[%s] _enqueue_send drop: ws already closed ws_id=%s", self.channel_id, ws_id,
+            )
+            return
         q = self._send_queues.get(ws_id)
         if q is None:
+            # 未见过的 ws_id：连接已清理但仍被引用，或 writer 尚未注册，静默丢弃前留痕
+            # 方便定位"gateway 已确认写队列但前端收不到"类问题。
+            logger.warning(
+                "[%s] _enqueue_send drop: no send queue for ws_id=%s (stale/unregistered ws)",
+                self.channel_id, ws_id,
+            )
             return
         try:
             q.put_nowait(data)

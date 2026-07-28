@@ -13,6 +13,7 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.tool_result',
   'chat.usage_summary',
   'chat.file',
+  'chat.session_result',
   'team.message',
   'team.member',
   'team.task',
@@ -25,7 +26,7 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
 const HISTORY_RESTORE_DONE_CONTENT = 'done';
 
 export interface HistoryToolReplayItem {
-  kind: 'tool_call' | 'tool_result';
+  kind: 'tool_call' | 'tool_result' | 'session_result';
   at: string;
   payload: Record<string, unknown>;
 }
@@ -55,6 +56,7 @@ type HistoryTimelineEntry =
   | { kind: 'message'; message: Message }
   | { kind: 'tool_call'; at: string; payload: Record<string, unknown> }
   | { kind: 'tool_result'; at: string; payload: Record<string, unknown> }
+  | { kind: 'session_result'; at: string; payload: Record<string, unknown> }
   | { kind: 'usage_summary'; at: string; usage: UsageSummary }
   | { kind: 'file_items'; at: string; files: FileDownloadItem[] }
   | { kind: 'team_member'; at: string; payload: { event: Record<string, unknown> } }
@@ -419,8 +421,15 @@ function parseHistoryTimelineEntry(
     if (!content.trim()) {
       return null;
     }
+    // 主动推荐 / 后台任务摘要：从历史记录还原 source（及 task_id），
+    // 使刷新后仍按专用气泡渲染，且与实时链路使用稳定 message id。
+    const histSource = typeof payload.source === 'string' ? payload.source : '';
+    const histTaskId = typeof payload.task_id === 'string' ? payload.task_id.trim() : '';
     const id =
-      pickFirstString(record, ['id', 'message_id', 'msg_id']) ?? `hist-final-${sessionId}-${at}`;
+      histSource === 'session_task_summary' && histTaskId
+        ? `session-task-summary-${histTaskId}`
+        : pickFirstString(record, ['id', 'message_id', 'msg_id']) ??
+          `hist-final-${sessionId}-${at}`;
     if (isTeamModeRecord(record)) {
       if (isHiddenTeamTeammateMessageRecord(record)) {
         return null;
@@ -438,9 +447,6 @@ function parseHistoryTimelineEntry(
         },
       };
     }
-    // 主动推荐消息：从历史记录还原 source/proactive_type，使刷新后仍按
-    // ProactiveRecommendationCard 渲染（否则会退化为普通白色气泡）。
-    const histSource = typeof payload.source === 'string' ? payload.source : '';
     const isProactiveRecommendation = histSource === 'proactive_recommendation';
     const histProactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
     return {
@@ -464,6 +470,10 @@ function parseHistoryTimelineEntry(
 
   if (eventType === 'chat.tool_result') {
     return { kind: 'tool_result', at, payload };
+  }
+
+  if (eventType === 'chat.session_result') {
+    return { kind: 'session_result', at, payload };
   }
 
   if (eventType === 'chat.usage_summary') {

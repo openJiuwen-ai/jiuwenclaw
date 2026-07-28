@@ -419,3 +419,31 @@ async def test_web_channel_routes_event_by_request_ws_id_before_session_bucket()
     finally:
         await channel.unregister_ws(client)
         await channel.unregister_ws(other_client)
+
+
+def test_web_channel_preserves_session_task_summary_ids_on_chat_final():
+    """session_task_summary chat.final must keep task_id for stable bubble ids."""
+    msg = Message(
+        id="req-summary",
+        type="event",
+        channel_id="web",
+        session_id="parent-session",
+        params={},
+        timestamp=0.0,
+        ok=True,
+        payload={
+            "event_type": "chat.final",
+            "session_id": "parent-session",
+            "content": "杭州多云 28°C",
+            "source": "session_task_summary",
+            "task_id": "task-hangzhou",
+            "subagent_id": "sub-1",
+        },
+        event_type=EventType.CHAT_FINAL,
+    )
+    payload = WebChannel._build_event_payload(msg, "chat.final")
+    assert payload["source"] == "session_task_summary"
+    assert payload["content"] == "杭州多云 28°C"
+    assert payload["task_id"] == "task-hangzhou"
+    assert payload["subagent_id"] == "sub-1"
+    assert payload["session_id"] == "parent-session"

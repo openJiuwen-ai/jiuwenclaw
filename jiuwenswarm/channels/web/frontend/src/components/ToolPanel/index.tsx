@@ -29,6 +29,7 @@ function todoItemToTeamTask(todo: TodoItem): TeamTask {
     pending: 'pending',
     in_progress: 'in_progress',
     completed: 'completed',
+    cancelled: 'cancelled',
   };
   const ts = todo.updatedAt ? Date.parse(todo.updatedAt) : NaN;
   return {

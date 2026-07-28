@@ -35,6 +35,7 @@ import {
   type FetchHistoryPageResult,
 } from './features/historyRestore';
 import {
+  buildSessionResultReplay,
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
@@ -624,6 +625,13 @@ function AppContent() {
     for (const item of result.toolReplay) {
       if (item.kind === 'tool_call') {
         const n = normalizeToolCallPayload(item.payload);
+        if (n.name === 'sessions_close') {
+          continue;
+        }
+        const insertBefore =
+          typeof n.arguments?.__insert_before_tool_call_id === 'string'
+            ? n.arguments.__insert_before_tool_call_id.trim()
+            : '';
         addToolCall(
           sid,
           {
@@ -634,16 +642,62 @@ function AppContent() {
             formatted_args: n.formatted_args,
             memberName: n.memberName,
           },
+          {
+            startedAt: item.at,
+            ...(insertBefore ? { beforeToolCallId: insertBefore } : {}),
+          }
+        );
+      } else if (item.kind === 'session_result') {
+        const replay = buildSessionResultReplay({
+          sessionId: sid,
+          payload: item.payload,
+          at: item.at,
+          toolCallIdPrefix: 'session-hist-',
+        });
+        useChatStore.getState().updateSubtask(sid, {
+          task_id: replay.taskId,
+          description: replay.description,
+          status: replay.status,
+          index: replay.index,
+          total: replay.total,
+          message: replay.result,
+          is_parallel: replay.isParallel,
+        });
+        addToolCall(
+          sid,
+          {
+            id: replay.toolCallId,
+            name: 'session',
+            arguments: { session_id: sid, description: replay.description },
+            description: replay.description || '会话完成',
+            formatted_args: `会话任务：【${replay.description || '未知任务'}】`,
+          },
           { startedAt: item.at }
+        );
+        addToolResult(
+          sid,
+          {
+            toolName: 'session',
+            result: replay.fullResult,
+            success: replay.status === 'completed',
+            canceled: replay.status === 'canceled',
+            toolCallId: replay.toolCallId,
+            summary: replay.summary,
+          },
+          { updatedAt: item.at }
         );
       } else {
         const n = normalizeToolResultPayload(item.payload);
+        if (n.toolName === 'sessions_close') {
+          continue;
+        }
         addToolResult(
           sid,
           {
             toolName: n.toolName,
             result: n.result,
             success: n.success,
+            canceled: n.canceled,
             toolCallId: n.toolCallId,
             summary: n.summary,
             skillTree: n.skillTree,
@@ -1357,6 +1411,13 @@ function AppContent() {
         for (const item of items) {
           if (item.kind === 'tool_call') {
             const n = normalizeToolCallPayload(item.payload);
+            if (n.name === 'sessions_close') {
+              continue;
+            }
+            const insertBefore =
+              typeof n.arguments?.__insert_before_tool_call_id === 'string'
+                ? n.arguments.__insert_before_tool_call_id.trim()
+                : '';
             addToolCall(
               sessionId,
               {
@@ -1367,16 +1428,63 @@ function AppContent() {
                 formatted_args: n.formatted_args,
                 memberName: n.memberName,
               },
+              {
+                startedAt: item.at,
+                ...(insertBefore ? { beforeToolCallId: insertBefore } : {}),
+              }
+            );
+          } else if (item.kind === 'session_result') {
+            // 与实时链路共用 buildSessionResultReplay，避免两套解析漂移。
+            const replay = buildSessionResultReplay({
+              sessionId,
+              payload: item.payload,
+              at: item.at,
+              toolCallIdPrefix: 'session-hist-',
+            });
+            useChatStore.getState().updateSubtask(sessionId, {
+              task_id: replay.taskId,
+              description: replay.description,
+              status: replay.status,
+              index: replay.index,
+              total: replay.total,
+              message: replay.result,
+              is_parallel: replay.isParallel,
+            });
+            addToolCall(
+              sessionId,
+              {
+                id: replay.toolCallId,
+                name: 'session',
+                arguments: { session_id: sessionId, description: replay.description },
+                description: replay.description || '会话完成',
+                formatted_args: `会话任务：【${replay.description || '未知任务'}】`,
+              },
               { startedAt: item.at }
+            );
+            addToolResult(
+              sessionId,
+              {
+                toolName: 'session',
+                result: replay.fullResult,
+                success: replay.status === 'completed',
+                canceled: replay.status === 'canceled',
+                toolCallId: replay.toolCallId,
+                summary: replay.summary,
+              },
+              { updatedAt: item.at }
             );
           } else {
             const n = normalizeToolResultPayload(item.payload);
+            if (n.toolName === 'sessions_close') {
+              continue;
+            }
             addToolResult(
               sessionId,
               {
                 toolName: n.toolName,
                 result: n.result,
                 success: n.success,
+                canceled: n.canceled,
                 toolCallId: n.toolCallId,
                 summary: n.summary,
                 skillTree: n.skillTree,

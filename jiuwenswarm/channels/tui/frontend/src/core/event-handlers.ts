@@ -589,6 +589,45 @@ function handleFinal(
   payload: Record<string, unknown>,
   activeSessionId: string,
 ): boolean {
+  // Background subagent summaries must be independent bubbles — never merge
+  // into the in-flight assistant stream or force Idle mid-turn.
+  if (payload.source === "session_task_summary") {
+    const content = normalizeFinalContent(payload);
+    if (!content) {
+      return true;
+    }
+    const taskId = typeof payload.task_id === "string" ? payload.task_id.trim() : "";
+    const id = taskId
+      ? `session-task-summary-${taskId}`
+      : createId("session-task-summary");
+    const entries = delegate.getEntries();
+    const existingIndex = entries.findIndex(
+      (entry) => entry.kind === "assistant" && entry.id === id,
+    );
+    const at = new Date().toISOString();
+    if (existingIndex !== -1 && entries[existingIndex]?.kind === "assistant") {
+      const next = [...entries];
+      next[existingIndex] = {
+        ...(entries[existingIndex] as Extract<HistoryItem, { kind: "assistant" }>),
+        content,
+        streaming: false,
+        at,
+      };
+      delegate.setEntries(next);
+    } else {
+      appendEntry(delegate, {
+        kind: "assistant",
+        id,
+        sessionId: activeSessionId,
+        content,
+        requestId: typeof payload.request_id === "string" ? payload.request_id : undefined,
+        streaming: false,
+        at,
+      });
+    }
+    return true;
+  }
+
   const content = normalizeFinalContent(payload);
   const finalizedAt = new Date().toISOString();
   const entries = delegate.getEntries();
@@ -938,7 +977,12 @@ function handleSubtaskUpdate(
   const taskId = typeof payload.task_id === "string" ? payload.task_id : "";
   if (!taskId) return false;
   const subtasks = delegate.getActiveSubtasks();
-  if (payload.status === "completed" || payload.status === "error") {
+  if (
+    payload.status === "completed" ||
+    payload.status === "error" ||
+    payload.status === "canceled" ||
+    payload.status === "cancelled"
+  ) {
     subtasks.delete(taskId);
     return true;
   }
@@ -959,10 +1003,18 @@ function handleSubtaskUpdate(
 }
 
 function normalizeTodoStatus(status: unknown): TodoItem["status"] | null {
-  if (status === "deleted" || status === "cancelled" || status === "canceled") {
+  if (status === "deleted") {
     return null;
   }
-  if (status === "in_progress" || status === "completed" || status === "error") {
+  if (status === "cancelled" || status === "canceled") {
+    return "cancelled";
+  }
+  if (
+    status === "in_progress" ||
+    status === "completed" ||
+    status === "error" ||
+    status === "pending"
+  ) {
     return status;
   }
   if (status === "failed") {
@@ -1145,13 +1197,30 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
     case "chat.error":
       return handleError(delegate, payload, activeSessionId) || connectionChanged;
 
-    case "chat.tool_call":
+    case "chat.tool_call": {
+      // Seal text-before-tools. Backend history-persists that segment on
+      // tool_call without a live chat.final; leaving streaming=true lets the
+      // next chat.final replace and wipe the earlier answer in the TUI.
+      const entries = delegate.getEntries();
+      const streamingIndex = findLastIndex(
+        entries,
+        (entry) => entry.kind === "assistant" && entry.streaming === true,
+      );
+      if (streamingIndex !== -1 && entries[streamingIndex]?.kind === "assistant") {
+        const next = [...entries];
+        next[streamingIndex] = {
+          ...(entries[streamingIndex] as Extract<HistoryItem, { kind: "assistant" }>),
+          streaming: false,
+        };
+        delegate.setEntries(next);
+      }
       delegate.addToolCallPayload(
         payload,
         activeSessionId,
         typeof payload.request_id === "string" ? payload.request_id : undefined,
       );
       return true;
+    }
 
     case "chat.tool_result":
       _handleAgentModeToolResult(delegate, payload);

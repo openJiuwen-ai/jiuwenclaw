@@ -65,11 +65,33 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
 
   if (toolResult) {
     // 使用格式化的摘要或默认显示（session 类型优先用 summary，避免出现 "session 完成"）
+    const isCanceled = Boolean(toolResult.canceled);
     const displaySummary = toolResult.summary
       ? toolResult.summary
       : (toolResult.toolName === 'session'
-        ? (toolResult.success ? t('chatUi.toolGroup.sessionCompleted') : t('chatUi.toolGroup.sessionFailed'))
-        : `${toolResult.toolName} ${toolResult.success ? t('chatUi.toolResult.success') : t('chatUi.toolResult.failed')}`);
+        ? (isCanceled
+          ? t('chatUi.toolGroup.sessionCanceled')
+          : toolResult.success
+            ? t('chatUi.toolGroup.sessionCompleted')
+            : t('chatUi.toolGroup.sessionFailed'))
+        : `${toolResult.toolName} ${
+            isCanceled
+              ? t('chatUi.toolResult.canceled')
+              : toolResult.success
+                ? t('chatUi.toolResult.success')
+                : t('chatUi.toolResult.failed')
+          }`);
+
+    const toneClass = isCanceled
+      ? 'bg-warn-subtle text-warn'
+      : toolResult.success
+        ? 'bg-ok-subtle text-ok'
+        : 'bg-danger-subtle text-danger';
+    const textClass = isCanceled
+      ? 'text-warn'
+      : toolResult.success
+        ? 'text-text-muted'
+        : 'text-danger';
 
     return (
       <div className="chat-tool-card animate-rise">
@@ -80,11 +102,9 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
           <div className="flex items-center gap-2">
             <span className={clsx(
               'w-5 h-5 rounded flex items-center justify-center text-sm',
-              toolResult.success
-                ? 'bg-ok-subtle text-ok'
-                : 'bg-danger-subtle text-danger'
+              toneClass
             )}>
-              {toolResult.success ? (
+              {toolResult.success && !isCanceled ? (
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
@@ -96,7 +116,7 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
             </span>
             <span className={clsx(
               'font-mono text-sm',
-              toolResult.success ? 'text-text-muted' : 'text-danger'
+              textClass
             )}>
               {displaySummary}
             </span>

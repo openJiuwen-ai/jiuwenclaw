@@ -80,6 +80,8 @@ export interface NormalizedToolResult {
   toolCallId?: string;
   result: string;
   success: boolean;
+  /** Distinct from failure — e.g. sessions_cancel / canceled session task. */
+  canceled?: boolean;
   summary?: string;
   skillTree?: SkillTreePath;
   beamSearch?: BeamSearchProgress;
@@ -138,6 +140,16 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     typeof toolResultPayload.status === 'string'
       ? toolResultPayload.status
       : '';
+  const dataRecord =
+    asRecord(rawOutputRecord?.data) ?? asRecord(toolResultPayload.data);
+  const dataStatus =
+    typeof dataRecord?.status === 'string' ? dataRecord.status : '';
+  const canceled =
+    toolResultPayload.canceled === true ||
+    status === 'canceled' ||
+    status === 'cancelled' ||
+    dataStatus === 'canceled' ||
+    dataStatus === 'cancelled';
   const success =
     typeof toolResultPayload.success === 'boolean'
       ? toolResultPayload.success
@@ -154,7 +166,11 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
   const summary =
     typeof toolResultPayload.summary === 'string'
       ? toolResultPayload.summary
-      : success ? undefined : '❌';
+      : canceled
+        ? undefined
+        : success
+          ? undefined
+          : '❌';
   const skillTree =
     parseSkillTreePath(toolResultPayload.raw_output) ??
     parseSkillTreePath(toolResultPayload.rawOutput);
@@ -166,6 +182,7 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     toolCallId,
     result,
     success,
+    canceled: canceled || undefined,
     summary,
     skillTree,
     beamSearch,
@@ -179,5 +196,70 @@ export function normalizeToolUpdatePayload(payload: UnknownPayload): NormalizedT
       (typeof update.tool_name === 'string' && update.tool_name) || 'unknown',
     toolCallId: resolveToolCallId(update, payload),
     beamSearch: parseBeamSearchProgress(update.beam_search_event),
+  };
+}
+
+/** Collapsed session-result card label: show result preview, not only “完成”. */
+export function previewSessionResultSummary(result: string, maxLen = 120): string {
+  const text = (result || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '完成';
+  return text.length > maxLen ? `${text.slice(0, maxLen)}…` : text;
+}
+
+export type SessionResultApplyInput = {
+  sessionId: string;
+  payload: UnknownPayload;
+  at?: string;
+  /** Prefix for synthetic toolCallId; live uses `session-`, history uses `session-hist-`. */
+  toolCallIdPrefix?: string;
+};
+
+/**
+ * Apply a chat.session_result payload: flip 最近任务 + synthesize tool card pair.
+ * Shared by live WS and history restore so the two paths cannot drift.
+ */
+export function buildSessionResultReplay(input: SessionResultApplyInput): {
+  taskId: string;
+  description: string;
+  result: string;
+  status: 'completed' | 'error' | 'canceled';
+  index: number;
+  total: number;
+  isParallel: boolean;
+  toolCallId: string;
+  fullResult: string;
+  summary: string;
+} {
+  const { payload } = input;
+  const description =
+    typeof payload.description === 'string' ? payload.description : '';
+  const result = typeof payload.result === 'string' ? payload.result : '';
+  const taskId =
+    typeof payload.task_id === 'string' && payload.task_id.trim()
+      ? payload.task_id.trim()
+      : `session-${input.at || Date.now()}`;
+  const payloadStatus =
+    typeof payload.status === 'string' ? payload.status : 'completed';
+  const prefix = input.toolCallIdPrefix ?? 'session-';
+  const fullResult = description
+    ? `描述: ${description}\n\n结果: ${result}`
+    : result;
+  let status: 'completed' | 'error' | 'canceled' = 'completed';
+  if (payloadStatus === 'error') {
+    status = 'error';
+  } else if (payloadStatus === 'canceled' || payloadStatus === 'cancelled') {
+    status = 'canceled';
+  }
+  return {
+    taskId,
+    description,
+    result,
+    status,
+    index: typeof payload.index === 'number' ? payload.index : 0,
+    total: typeof payload.total === 'number' ? payload.total : 1,
+    isParallel: payload.is_parallel === true,
+    toolCallId: `${prefix}${taskId}`,
+    fullResult,
+    summary: previewSessionResultSummary(result),
   };
 }
