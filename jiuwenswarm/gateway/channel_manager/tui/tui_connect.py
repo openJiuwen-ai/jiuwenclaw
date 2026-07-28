@@ -268,6 +268,11 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "extensions.delete",
         "extensions.toggle",
         "session.switch",
+        "team.templates.list",
+        "team.bindings.list",
+        "team.binding.create",
+        "team.binding.generate",
+        "team.session.bind",
         "session.fork",
         # Agent configuration
         "agents.list",
@@ -366,6 +371,11 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "extensions.delete",
         "extensions.toggle",
         "session.switch",
+        "team.templates.list",
+        "team.bindings.list",
+        "team.binding.create",
+        "team.binding.generate",
+        "team.session.bind",
         "session.fork",
         # Agent configuration
         "agents.list",
