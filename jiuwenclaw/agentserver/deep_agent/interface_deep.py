@@ -381,7 +381,7 @@ from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
     create_local_sysop_card,
     create_sandbox_sysop_card,
 )
-from jiuwenclaw.agentserver.deep_agent.deepresearch_rewrite_fast_path import (
+from jiuwenclaw.agentserver.tools.deepresearch.deepresearch_rewrite_fast_path import (
     RewriteFastPathResult,
     run_rewrite_fast_path,
 )

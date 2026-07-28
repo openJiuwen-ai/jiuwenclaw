@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from openjiuwen.core.foundation.llm import UsageMetadata
 
-from jiuwenclaw.agentserver.deep_agent.deepresearch_rewrite_fast_path import (
+from jiuwenclaw.agentserver.tools.deepresearch.deepresearch_rewrite_fast_path import (
     RewriteFastPathError,
     parse_rewrite_envelope,
     run_rewrite_fast_path,

@@ -12,7 +12,7 @@ from openjiuwen.core.foundation.llm import (
 )
 
 from jiuwenclaw.agentserver.deep_agent import interface_deep as interface_module
-from jiuwenclaw.agentserver.deep_agent.deepresearch_rewrite_fast_path import (
+from jiuwenclaw.agentserver.tools.deepresearch.deepresearch_rewrite_fast_path import (
     RewriteFastPathResult,
 )
 from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
