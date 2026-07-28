@@ -338,7 +338,10 @@ class _SessionRequest(ISessionRequest):
 
     @property
     def session_ttl(self) -> int:
-        # 优先使用 service_template 中的值，缺失时回退到环境变量
+        # 优先级：request.params.session_ttl > service_template > 环境变量
+        val = (self._req.params or {}).get("session_ttl")
+        if val is not None:
+            return int(val)
         cfg = self._service_template or {}
         val = cfg.get("session_ttl")
         if val is not None:
@@ -357,6 +360,11 @@ class _SessionRequest(ISessionRequest):
     def channel_id(self) -> str:
         # 与 AgentServer 同源：直接取 AgentRequest.channel_id（由 e2a_to_agent_request 从 envelope.channel 写入）
         return str(self._req.channel_id or "")
+
+    @property
+    def session_id(self) -> Optional[str]:
+        # chat_session 亲和：返回 AgentRequest.session_id（page session 或 IM 聊天会话标识）
+        return self._req.session_id
 
     @property
     def raw_msg(self) -> Any:
