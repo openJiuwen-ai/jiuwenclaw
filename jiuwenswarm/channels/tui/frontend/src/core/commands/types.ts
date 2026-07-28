@@ -64,6 +64,8 @@ export interface CommandContext {
   clearBtwOverlay?: () => void;
   /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   setBtwActive?: (active: boolean) => void;
+  /** 设置 /btw 正在回答的问题；null 表示加载已结束。 */
+  setBtwPendingQuestion?: (question: string | null) => void;
   clearEntries: () => void;
   restoreHistory: (sessionId: string) => Promise<void>;
   exitApp: () => void;

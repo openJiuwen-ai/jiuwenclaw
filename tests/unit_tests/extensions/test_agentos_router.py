@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -408,6 +409,176 @@ async def test_delete_agent_releases_yuanrong_sandbox() -> None:
     assert await agent_manager.list_user_agents("u1") == []
 
 
+class StubRelaySession:
+    def __init__(self) -> None:
+        self.session_id = "ssh_u1_test"
+        self.exit_code: int | None = None
+        self.done = asyncio.Event()
+        self.relay_task = None
+
+
+class StubSshRelay:
+    """Stands in for YuanrongSshRelay: run() blocks until released."""
+
+    def __init__(self) -> None:
+        self.run_instance_ids: list[str] = []
+        self.failures: list[str] = []
+        self.started = asyncio.Event()
+        self.finish = asyncio.Event()
+
+    def fail_session(self, session: StubRelaySession, message: str) -> None:
+        self.failures.append(message)
+        session.exit_code = 1
+        session.done.set()
+
+    async def run(
+        self,
+        session: StubRelaySession,
+        instance_id: str,
+        *,
+        user_id: str,
+    ) -> None:
+        del user_id
+        self.run_instance_ids.append(instance_id)
+        self.started.set()
+        await self.finish.wait()
+        session.exit_code = 0
+        session.done.set()
+
+
+@pytest.mark.asyncio
+async def test_reap_idle_once_deletes_idle_sandbox() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        sandbox_idle_timeout_seconds=0.01,
+    )
+
+    await client.send_request(_envelope(agent_type="opencode"))
+    assert yuanrong.create_calls == 1
+
+    await asyncio.sleep(0.05)
+    reaped = await client._reap_idle_once()
+    await client.shutdown()
+
+    assert reaped == 1
+    assert yuanrong.delete_calls == ["sbx-1"]
+    assert await agent_manager.list_user_agents("u1") == []
+
+
+@pytest.mark.asyncio
+async def test_reap_idle_once_skips_recently_active_and_held_agents() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        sandbox_idle_timeout_seconds=60.0,
+    )
+
+    # Recently active: idle clock has not expired.
+    await client.send_request(_envelope(agent_type="opencode"))
+    assert await client._reap_idle_once() == 0
+
+    # Held: a live task pins the agent even when stale.
+    held = await agent_manager.get_or_create_agent(
+        "u1", "opencode", key_values={"session_id": "sess-1"}, acquire=True
+    )
+    client._sandbox_idle_timeout_seconds = 0.01
+    await asyncio.sleep(0.05)
+    assert await client._reap_idle_once() == 0
+    assert yuanrong.delete_calls == []
+
+    # Released and stale: reclaimed.
+    await agent_manager.release(held.key)
+    await asyncio.sleep(0.05)
+    assert await client._reap_idle_once() == 1
+    assert yuanrong.delete_calls == ["sbx-1"]
+    await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_ssh_relay_holds_sandbox_until_disconnect() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    ssh_relay = StubSshRelay()
+    client = AgentOSRouterClient(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        ssh_relay=ssh_relay,
+        sandbox_idle_timeout_seconds=0.01,
+    )
+    relay_session = StubRelaySession()
+
+    relay_task = asyncio.create_task(
+        client._run_ssh_relay(_envelope(agent_type="opencode"), relay_session)
+    )
+    await ssh_relay.started.wait()
+    assert yuanrong.create_calls == 1
+
+    # A silent-but-live SSH session holds the task count: never reclaimed.
+    await asyncio.sleep(0.05)
+    assert await client._reap_idle_once() == 0
+    assert yuanrong.delete_calls == []
+
+    # Disconnect releases the hold; the idle clock starts now.
+    ssh_relay.finish.set()
+    await relay_task
+    assert relay_session.done.is_set()
+    await asyncio.sleep(0.05)
+    assert await client._reap_idle_once() == 1
+    assert yuanrong.delete_calls == ["sbx-1"]
+    assert await agent_manager.list_user_agents("u1") == []
+    await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_idle_reaper_disabled_with_nonpositive_timeout() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        sandbox_idle_timeout_seconds=0,
+    )
+
+    await client.connect("http://yuanrong.test")
+    assert client._idle_reaper_task is None
+
+    await client.send_request(_envelope(agent_type="opencode"))
+    await asyncio.sleep(0.05)
+    assert await client._reap_idle_once() == 0
+    await client.shutdown()
+
+    assert yuanrong.delete_calls == []
+    assert len(await agent_manager.list_user_agents("u1")) == 1
+
+
+@pytest.mark.asyncio
+async def test_idle_reaper_task_lifecycle_on_connect_disconnect() -> None:
+    yuanrong = FakeYuanRongClient()
+    client = AgentOSRouterClient(
+        yuanrong,
+        FakeRegistryClient(),
+        AgentManager(),
+        sandbox_idle_timeout_seconds=600.0,
+    )
+
+    await client.connect("http://yuanrong.test")
+    task = client._idle_reaper_task
+    assert task is not None and not task.done()
+
+    await client.disconnect()
+    assert client._idle_reaper_task is None
+    assert task.cancelled() or task.done()
+
+
 @pytest.mark.asyncio
 async def test_unsupported_third_agent_returns_unsupported() -> None:
     from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
@@ -520,6 +691,55 @@ def test_load_router_config_agent_key_fields() -> None:
     assert default_loaded.agent_key_fields == ("user_id", "agent_type")
     assert default_loaded.workspace_root == DEFAULT_AGENT_WORKSPACE_ROOT
     assert default_loaded.ssh.client_keys_dir == "/root/.ssh"
+
+
+def test_load_router_config_sandbox_idle_knobs(monkeypatch) -> None:
+    base_agent_client = {
+        "type": "agentos_router",
+        "frontend_endpoint": "http://yuanrong.test",
+        "function_version_urn": "urn:test",
+    }
+    monkeypatch.delenv("SANDBOX_IDLE_TIMEOUT_SECONDS", raising=False)
+
+    defaults = load_router_config({"gateway": {"agent_client": base_agent_client}})
+    assert defaults.sandbox_idle_timeout_seconds == 600.0
+    assert defaults.sandbox_idle_check_interval_seconds == 30.0
+
+    loaded = load_router_config(
+        {
+            "gateway": {
+                "agent_client": base_agent_client,
+                "agentos": {
+                    "sandbox_idle_timeout_seconds": 0,
+                    "sandbox_idle_check_interval_seconds": 5,
+                },
+            }
+        }
+    )
+    # Explicit 0 must be honored (disables reclamation), not swallowed.
+    assert loaded.sandbox_idle_timeout_seconds == 0.0
+    assert loaded.sandbox_idle_check_interval_seconds == 5.0
+
+    # Env overrides yaml (including yaml=0).
+    monkeypatch.setenv("SANDBOX_IDLE_TIMEOUT_SECONDS", "120")
+    env_loaded = load_router_config(
+        {
+            "gateway": {
+                "agent_client": base_agent_client,
+                "agentos": {"sandbox_idle_timeout_seconds": 0},
+            }
+        }
+    )
+    assert env_loaded.sandbox_idle_timeout_seconds == 120.0
+
+    # Env explicit 0 also disables.
+    monkeypatch.setenv("SANDBOX_IDLE_TIMEOUT_SECONDS", "0")
+    assert (
+        load_router_config(
+            {"gateway": {"agent_client": base_agent_client}}
+        ).sandbox_idle_timeout_seconds
+        == 0.0
+    )
 
 
 @pytest.mark.asyncio

@@ -205,6 +205,17 @@ def rewind_session(
     # 在截断 history 之前，记录目标 turn 的时间戳（用于后续清理 file_ops）
     cut_timestamp = history[cut_index].get("timestamp")
 
+    # 同样必须在下面 update_session_metadata 之前解析项目目录：metadata.json 是
+    # 非原子的原地覆写且走后台线程，之后再让 truncate_file_ops 自己去推断，会撞上
+    # 半截文件 → JSONDecodeError → 静默返回 None → 扫不到 file_ops → 清理无声失效。
+    project_dir: str | None = None
+    try:
+        from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+        project_dir = get_diff_service().resolve_project_dir(session_id)
+    except Exception as exc:
+        logger.warning("rewind_session: failed to resolve project_dir: %s", exc)
+
     result = truncate_history_records(session_id=session_id, cut_index=cut_index)
 
     from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
@@ -216,11 +227,16 @@ def rewind_session(
 
     # 清理 session-specific file_ops 日志，使 turn diff 显示与截断后的 history 一致
     # 必须在 truncate_history_records 之后调用，但传入截断前获取的时间戳
+    #
+    # soft=True: 本函数只回退对话、不动工作区文件。硬删除快照会让这些文件永久
+    # 失去回滚能力（后续 /rewind 选 code 找不到它们，却仍报告成功）。
     if cut_timestamp is not None:
         try:
             from jiuwenswarm.server.utils.diff_service import get_diff_service
 
-            get_diff_service().truncate_file_ops_by_timestamp(session_id, cut_timestamp)
+            get_diff_service().truncate_file_ops_by_timestamp(
+                session_id, cut_timestamp, project_dir=project_dir, soft=True,
+            )
         except Exception as exc:
             logger.warning("rewind_session: failed to truncate file_ops: %s", exc)
 
@@ -284,15 +300,27 @@ def compact_partial_session(
     if direction == "from":
         cut_timestamp = history[target_user_index].get("timestamp")
         summarized_count = len(history) - target_user_index
+        # 在 update_session_metadata 之前解析（同 rewind_session，避免元数据写入竞态）
+        compact_project_dir: str | None = None
+        try:
+            from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+            compact_project_dir = get_diff_service().resolve_project_dir(session_id)
+        except Exception as exc:
+            logger.warning("compact_partial_session: failed to resolve project_dir: %s", exc)
 
         result = truncate_history_records(session_id=session_id, cut_index=target_user_index)
         remaining = result["remaining_records"]
         removed = result["removed_records"]
 
+        # soft=True: 摘要化同样只改对话、不动工作区文件（同 rewind_session）
         if cut_timestamp is not None:
             try:
                 from jiuwenswarm.server.utils.diff_service import get_diff_service
-                get_diff_service().truncate_file_ops_by_timestamp(session_id, cut_timestamp)
+                get_diff_service().truncate_file_ops_by_timestamp(
+                    session_id, cut_timestamp,
+                    project_dir=compact_project_dir, soft=True,
+                )
             except Exception as exc:
                 logger.warning("compact_partial_session: failed to truncate file_ops: %s", exc)
 

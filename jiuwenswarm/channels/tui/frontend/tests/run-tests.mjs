@@ -202,6 +202,7 @@ const teamSnapshot = {
   btwOverlayIndex: -1,
   btwOverlayTotal: 0,
   btwActive: false,
+  btwPendingQuestion: null,
 };
 const teamLayoutOptions = {
   width: 80,
@@ -228,6 +229,77 @@ const expandedTeamLines = buildAppScreenLines(teamSnapshot, {
   showTeamPanel: true,
 });
 assert.equal(expandedTeamLines.some((line) => line.includes("teammate")), true);
+
+const stripAnsi = (value) => value.replace(/\u001b\[[0-9;]*m/g, "");
+const btwMarkdownLines = buildAppScreenLines(
+  {
+    ...teamSnapshot,
+    btwOverlay: {
+      question: "Explain React Hooks",
+      answer: "**React Hooks** use `useState`.\n\n- Manage state",
+    },
+    btwOverlayIndex: 0,
+    btwOverlayTotal: 1,
+    btwActive: true,
+  },
+  teamLayoutOptions,
+);
+const btwMarkdownText = stripAnsi(btwMarkdownLines.join("\n"));
+assert.equal(btwMarkdownText.includes("React Hooks"), true);
+assert.equal(btwMarkdownText.includes("useState"), true);
+assert.equal(btwMarkdownText.includes("**React Hooks**"), false);
+assert.equal(btwMarkdownText.includes("`useState`"), false);
+assert.equal(btwMarkdownText.includes("- Manage state"), false);
+
+const headingCases = [
+  ["#", "Level one"],
+  ["##", "Level two"],
+  ["###", "Level three"],
+  ["####", "Level four"],
+  ["#####", "Level five"],
+  ["######", "Level six"],
+];
+const btwHeadingLines = buildAppScreenLines(
+  {
+    ...teamSnapshot,
+    btwOverlay: {
+      question: "Render headings",
+      answer: `${headingCases.map(([prefix, title]) => `${prefix} ${title}`).join("\n\n")}\n\n\`\`\`text\n### code comment\n\`\`\`\n\n\\### literal marker`,
+    },
+    btwOverlayIndex: 0,
+    btwOverlayTotal: 1,
+    btwActive: true,
+  },
+  teamLayoutOptions,
+);
+const btwHeadingText = stripAnsi(btwHeadingLines.join("\n"));
+for (const [prefix, title] of headingCases) {
+  assert.equal(btwHeadingText.includes(title), true);
+  assert.equal(btwHeadingText.includes(`${prefix} ${title}`), false);
+}
+assert.equal(btwHeadingText.includes("### code comment"), true);
+assert.equal(btwHeadingText.includes("### literal marker"), true);
+
+const btwLoadingSnapshot = {
+  ...teamSnapshot,
+  btwActive: true,
+  btwPendingQuestion: "Explain React Hooks",
+};
+const btwPulseDim = buildAppScreenLines(btwLoadingSnapshot, {
+  ...teamLayoutOptions,
+  animationPhase: 0,
+});
+const btwPulseBright = buildAppScreenLines(btwLoadingSnapshot, {
+  ...teamLayoutOptions,
+  animationPhase: 2,
+});
+assert.equal(visibleWidth("●"), 1);
+assert.equal(
+  stripAnsi(btwPulseDim.join("\n")).includes("● Answering: Explain React Hooks"),
+  true,
+);
+assert.equal(stripAnsi(btwPulseDim.join("\n")), stripAnsi(btwPulseBright.join("\n")));
+assert.notEqual(btwPulseDim.join("\n"), btwPulseBright.join("\n"));
 
 const slashCommands = AppScreen.prototype.buildSlashCommands.call({
   commands: {

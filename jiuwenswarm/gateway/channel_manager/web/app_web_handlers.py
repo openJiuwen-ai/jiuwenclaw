@@ -19,7 +19,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from dotenv import load_dotenv
 try:
     import psutil as _psutil
     _HAS_PSUTIL = True
@@ -91,6 +90,7 @@ from jiuwenswarm.common.utils import (
     get_root_dir,
     get_user_workspace_dir
 )
+from jiuwenswarm.dotenv_early import load_dotenv_runtime
 from jiuwenswarm.common.work_mode import (
     DEFAULT_PROJECT_ID_CODE,
     DEFAULT_PROJECT_ID_WORK,
@@ -185,7 +185,7 @@ class _ConfigChangeSet:
 
 _PROJECT_ROOT = get_root_dir()
 _ENV_FILE = get_env_file()
-load_dotenv(dotenv_path=_ENV_FILE, override=True)
+load_dotenv_runtime(dotenv_path=_ENV_FILE, override=True)
 
 
 _ENV_VAR_PLACEHOLDER_RE = re.compile(r"^\$\{([^:}]+)(?::-([^}]*))?\}$")
