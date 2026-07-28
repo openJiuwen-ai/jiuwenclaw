@@ -3586,6 +3586,21 @@ export class AppScreen implements Component, Focusable {
       return true;
     }
 
+    // Enter / Space / ctrl+c 关闭 btw 浮层（对齐 Esc：关闭 overlay + 取消进行中的 btw 请求）
+    if (
+      matchesKey(data, "enter") ||
+      matchesKey(data, "return") ||
+      matchesKey(data, "space") ||
+      matchesKey(data, "ctrl+c")
+    ) {
+      this.state.clearBtwOverlay();
+      this.btwOverlayScrollOffset = 0;
+      this.state.requestLocalInterrupt();
+      this.state.setBtwActive(false);
+      this.tui.requestRender();
+      return true;
+    }
+
     // ←/→ 在 btw 历史间切换（必须在 scroll 之前消费，避免落入 composer）
     if (matchesKey(data, "left")) {
       this.state.navigateBtw(-1);
