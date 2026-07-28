@@ -40,8 +40,14 @@ Rules:
 - Do not output Markdown, URLs, citation anchors, file paths, or source IDs.
 - Do not add numbers, times, people, organizations, places, examples, facts,
   constraints, or conclusions.
-- For polish, improve wording, syntax, and cohesion while preserving facts, constraints,
-  judgment strength and conclusion direction; keep length about 90%-110% of the original.
+- For polish, preserve meaning and information boundaries while performing a medium
+  structural rewrite of wording, syntax, ordering, and cohesion. When a slot has
+  enough syntactic structure, restructure at least one sentence or clause; do not
+  stop after replacing only one or two synonyms. Keep length about 85%-115% of the
+  original. Preserve facts, numbers, actors, times, scope, evidence, constraints,
+  judgment strength, causal direction, negation, and conclusion direction.
+  For short, terminological, or otherwise unsafe-to-restructure slots, prioritize
+  naturalness and semantic safety.
 - For expand, elaborate only existing concepts, causes, premises, scope, and effects;
   do not add facts or examples.
 - For shorten, remove redundancy while preserving facts, numbers, actors, times, scope,
