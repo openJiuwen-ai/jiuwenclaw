@@ -217,17 +217,26 @@ def _apply_rule(
         }
 
     # --- Head/tail summarization ---
-    # JSON 里没写 summarize/failure → head/tail=None → 默认不截断(h=0,t=0)
+    # None 表示"不截断"（JSON 里没写 summarize/failure → 不截断）；
+    # 有显式值时才做 head_tail 截断。
     exit_code = input_.exit_code or 0
     if exit_code != 0 and rule.failure and rule.failure.preserve_on_failure:
-        h = rule.failure.head or 0
-        t = rule.failure.tail or 0
+        h = rule.failure.head
+        t = rule.failure.tail
+    elif rule.summarize:
+        h = rule.summarize.head
+        t = rule.summarize.tail
     else:
-        h = (rule.summarize.head if rule.summarize and rule.summarize.head is not None else 0)
-        t = (rule.summarize.tail if rule.summarize and rule.summarize.tail is not None else 0)
+        h = None
+        t = None
 
-    compacted = head_tail(lines, h, t, no_omit=no_omit)
-    summary = "\n".join(compacted["lines"]).strip()
+    if h is not None and t is not None:
+        compacted = head_tail(lines, h, t, no_omit=no_omit)
+        summary = "\n".join(compacted["lines"]).strip()
+    else:
+        # 无截断配置 → 返回原文
+        summary = "\n".join(lines).strip()
+        compacted = {"compaction": NO_COMPACTION}
 
     return {
         "summary": summary,
