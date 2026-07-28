@@ -817,8 +817,12 @@ def test_enrich_team_spec_for_swarm_rewrites_spec_in_place() -> None:
     assert not hasattr(spec, "agent_customizer")
 
 
-def test_enrich_team_spec_defaults_member_workspace_to_project_dir() -> None:
-    """Core receives project-rooted member workspaces from swarm enrichment."""
+def test_enrich_team_spec_points_member_cwd_at_project_dir() -> None:
+    """Core receives project-rooted member cwd, not a rewritten workspace.
+
+    cwd and workspace are separate layers: members run in the project
+    directory while keeping their own workspace for artifacts.
+    """
     spec = _make_team_spec()
     spec.worktree = WorktreeConfig(enabled=True)
 
@@ -830,8 +834,10 @@ def test_enrich_team_spec_defaults_member_workspace_to_project_dir() -> None:
         channel_id="web",
     )
 
-    assert spec.agents["leader"].workspace.root_path == "/tmp/project"
-    assert spec.agents["teammate"].workspace.root_path == "/tmp/project"
+    for role in ("leader", "teammate"):
+        assert spec.agents[role].cwd == "/tmp/project"
+        assert spec.agents[role].project_root == "/tmp/project"
+        assert spec.agents[role].workspace is None
 
 
 def test_enrich_team_spec_leaves_workspace_when_worktree_disabled() -> None:
@@ -848,10 +854,13 @@ def test_enrich_team_spec_leaves_workspace_when_worktree_disabled() -> None:
 
     assert spec.agents["leader"].workspace is None
     assert spec.agents["teammate"].workspace is None
+    # cwd is seeded regardless of worktree isolation.
+    assert spec.agents["leader"].cwd == "/tmp/project"
+    assert spec.agents["teammate"].cwd == "/tmp/project"
 
 
 def test_enrich_team_spec_preserves_explicit_member_workspace() -> None:
-    """A configured member workspace is not overwritten by project_dir."""
+    """A configured member workspace survives; only cwd is seeded."""
     spec = _make_team_spec()
     spec.worktree = WorktreeConfig(enabled=True)
     spec.agents["leader"].workspace = WorkspaceSpec(root_path="/tmp/custom")
@@ -865,7 +874,9 @@ def test_enrich_team_spec_preserves_explicit_member_workspace() -> None:
     )
 
     assert spec.agents["leader"].workspace.root_path == "/tmp/custom"
-    assert spec.agents["teammate"].workspace.root_path == "/tmp/project"
+    assert spec.agents["teammate"].workspace is None
+    assert spec.agents["leader"].cwd == "/tmp/project"
+    assert spec.agents["teammate"].cwd == "/tmp/project"
 
 
 def test_enrich_team_spec_appends_after_existing_rails(monkeypatch) -> None:
