@@ -108,6 +108,7 @@ def enrich_team_spec_for_swarm(
         request_metadata=request_metadata,
         mode=mode,
         project_dir=project_dir,
+        disable_teammate_worktree=str(channel_id or "").strip().lower() == "web",
         team_id=spec.team_name,
         team_ws_root=team_ws_root,
         team_skills_dir=team_skills_dir,

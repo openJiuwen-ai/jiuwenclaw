@@ -1970,6 +1970,7 @@ def test_swarm_build_context_seed_round_trip() -> None:
         request_metadata={"mode": "code.team"},
         mode="code.team",
         project_dir="/tmp/proj",
+        disable_teammate_worktree=True,
         team_id="t1",
         team_ws_root="/tmp/ws",
         team_skills_dir="/tmp/ws/skills",
@@ -2000,6 +2001,7 @@ def test_swarm_build_context_seed_round_trip() -> None:
     assert restored.session_id == "s1"
     assert restored.mode == "code.team"
     assert restored.project_dir == "/tmp/proj"
+    assert restored.disable_teammate_worktree is True
     assert restored.team_id == "t1"
     assert restored.team_ws_root == "/tmp/ws"
     assert restored.request_metadata == {"mode": "code.team"}
@@ -2045,6 +2047,7 @@ def test_enrich_sets_serializable_build_context_seed() -> None:
     assert spec.build_context_seed is not None
     assert spec.build_context_seed["mode"] == "code.team"
     assert spec.build_context_seed["project_dir"] == "/tmp/proj"
+    assert spec.build_context_seed["disable_teammate_worktree"] is True
     assert spec.build_context_seed["team_id"] == spec.team_name
     # The seed equals what the live context exports.
     assert spec.build_context_seed == spec.build_context.to_seed()
