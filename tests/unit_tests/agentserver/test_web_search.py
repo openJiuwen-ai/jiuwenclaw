@@ -131,7 +131,7 @@ def test_run_web_search_free_does_not_call_paid(monkeypatch):
 
 def test_run_web_search_default_paid_then_free(monkeypatch):
     async def fake_paid(query, settings, preferred_provider=None):
-        return None, ["paid:petal(skipped)"]
+        return None, []
 
     async def fake_free(query, settings):
         return ProviderRun(
