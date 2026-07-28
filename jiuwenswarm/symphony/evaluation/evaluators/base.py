@@ -70,7 +70,6 @@ class LLMScoreEvaluator(BaseEvaluator):
 
     thresholds: tuple[float, float, float]
     rubric: str
-    additional_guidance = ""
 
     def __init__(self, llm: EvaluationLLM | None = None) -> None:
         self.llm = llm
@@ -111,11 +110,8 @@ class LLMScoreEvaluator(BaseEvaluator):
             "reference_time": reference_time.isoformat(),
             "reference_time_source": reference_time_source,
         }
-        guidance = (
-            f"\n\n{self.additional_guidance}" if self.additional_guidance else ""
-        )
         return (
-            f"{self.rubric}{guidance}\n\n"
+            f"{self.rubric}\n\n"
             "输出要求：score 只能是数字 0 或 1；reason 只写一句简短理由，"
             "指出决定性证据，不复述评分标准，不虚构依据。不要输出思考过程，"
             "只返回 JSON：{\"score\": 0 或 1, \"reason\": \"理由\"}。\n"
