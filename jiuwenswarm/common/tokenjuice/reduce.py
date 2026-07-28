@@ -217,13 +217,14 @@ def _apply_rule(
         }
 
     # --- Head/tail summarization ---
+    # JSON 里没写 summarize/failure → head/tail=None → 默认不截断(h=0,t=0)
     exit_code = input_.exit_code or 0
     if exit_code != 0 and rule.failure and rule.failure.preserve_on_failure:
-        h = rule.failure.head or 6
-        t = rule.failure.tail or 12
+        h = rule.failure.head or 0
+        t = rule.failure.tail or 0
     else:
-        h = (rule.summarize.head if rule.summarize and rule.summarize.head is not None else 6)
-        t = (rule.summarize.tail if rule.summarize and rule.summarize.tail is not None else 6)
+        h = (rule.summarize.head if rule.summarize and rule.summarize.head is not None else 0)
+        t = (rule.summarize.tail if rule.summarize and rule.summarize.tail is not None else 0)
 
     compacted = head_tail(lines, h, t, no_omit=no_omit)
     summary = "\n".join(compacted["lines"]).strip()
