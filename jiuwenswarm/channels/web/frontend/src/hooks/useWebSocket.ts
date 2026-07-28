@@ -53,6 +53,10 @@ import {
   normalizeFinalContent,
 } from '../utils';
 import {
+  findOverlappingFileExecutionEvent,
+  mergeFileDownloadItems,
+} from '../utils/fileDownloadDedup';
+import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
   normalizeToolUpdatePayload,
@@ -2334,6 +2338,30 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const memberId = getTeamPayloadMemberName(payload);
           if (memberId) {
             const timestamp = eventTimestampMs(payload);
+            const mappedFiles = files.map((file) => ({
+              name: file.name,
+              size: file.size,
+              mime_type: file.mime_type,
+              download_url: file.download_url,
+              path: file.path,
+            }));
+            const runtime = useSessionStore.getState().getRuntime(sessionId);
+            // 仅当存在相同文件身份时合并（刷新 download token）；不同文件仍新建 execution
+            const existingFileEvent = findOverlappingFileExecutionEvent(
+              runtime?.teamMemberExecutionEvents,
+              mappedFiles,
+              (event) => event.member_id === memberId && event.kind === 'file'
+            );
+            if (existingFileEvent) {
+              const mergedFiles = mergeFileDownloadItems(existingFileEvent.files, mappedFiles);
+              useSessionStore.getState().addTeamMemberExecutionEvent(sessionId, {
+                ...existingFileEvent,
+                timestamp,
+                content: mergedFiles.map((file) => file.name).join('\n'),
+                files: mergedFiles,
+              });
+              return;
+            }
             useSessionStore.getState().addTeamMemberExecutionEvent(sessionId, {
               id: stableEventId('file', payload.session_id, memberId, timestamp, files.map((file) => file.name).join(',')),
               member_id: memberId,
@@ -2341,12 +2369,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               timestamp,
               title: t('team.process.execution.sentFile'),
               content: files.map((file) => file.name).join('\n'),
-              files: files.map((file) => ({
-                name: file.name,
-                size: file.size,
-                mime_type: file.mime_type,
-                download_url: file.download_url,
-              })),
+              files: mappedFiles,
             });
           }
           return;
@@ -2355,7 +2378,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const target = findActiveTeamLeaderMessage(sessionId);
           if (target) {
             useChatStore.getState().updateMessage(sessionId, target.id, {
-              fileItems: [...(target.fileItems || []), ...files],
+              fileItems: mergeFileDownloadItems(target.fileItems, files),
             });
           } else {
             useChatStore.getState().addMessage(sessionId, {

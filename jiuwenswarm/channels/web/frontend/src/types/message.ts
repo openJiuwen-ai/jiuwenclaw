@@ -35,6 +35,8 @@ export interface FileDownloadItem {
   mime_type: string;
   download_url: string;
   download_token: string;
+  /** 工作区绝对/相对路径；用于去重身份（优先于 downloadUrl 中的 exp token） */
+  path?: string;
 }
 
 export interface ContextCompressionRuntime {

@@ -230,6 +230,7 @@ export interface TeamMemberExecutionEvent {
     size?: number;
     mime_type?: string;
     download_url?: string;
+    path?: string;
   }>;
 }
 
