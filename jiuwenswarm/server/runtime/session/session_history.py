@@ -134,14 +134,17 @@ def resolve_session_dir(
     if sessions_root is None:
         sessions_root = get_agent_sessions_dir()
     session_dir = sessions_root / session_id
-    if create:
-        session_dir.mkdir(parents=True, exist_ok=True)
-    # 纵深防御：即便白名单被绕过，也拒绝解析后逃逸出 sessions 目录的路径。
+    # 纵深防御必须在 mkdir 之前：先 resolve + relative_to 确认路径仍在 sessions
+    # 目录内，通过后才允许创建。否则白名单一旦被绕过，mkdir(parents=True) 会
+    # 先在 sessions 根目录之外越界创建目录，relative_to 才事后检测到——此时
+    # 副作用已发生，越界空目录残留在磁盘上（虽不触发 rmtree，但仍是文件系统泄漏）。
     try:
         resolved = session_dir.resolve(strict=False)
         resolved.relative_to(sessions_root.resolve(strict=False))
     except (ValueError, OSError):
         return None, "invalid session_id"
+    if create:
+        resolved.mkdir(parents=True, exist_ok=True)
     return resolved, None
 
 
