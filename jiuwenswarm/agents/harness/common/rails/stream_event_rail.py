@@ -202,6 +202,9 @@ def _infer_tool_result_error(value: Any) -> bool | None:
             return True
         if text.startswith("[ERROR]"):
             return True
+        upper = text.upper()
+        if "[PERMISSION_DENIED]" in upper or "[PERMISSION_REJECTED]" in upper:
+            return True
         exit_match = re.search(
             r"\b(?:exit(?:[_ ]?code)?|returncode|return[_ ]code)\s*[:= ]\s*(-?\d+)\b",
             text,

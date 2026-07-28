@@ -1913,6 +1913,7 @@
     "toolResult": {
       "success": "done",
       "failed": "failed",
+      "denied": "denied",
       "timeout": "Execution timed out",
       "running": "Running...",
       "arguments": "Arguments",

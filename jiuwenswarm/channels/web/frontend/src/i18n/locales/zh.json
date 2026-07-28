@@ -1914,6 +1914,7 @@
     "toolResult": {
       "success": "完成",
       "failed": "失败",
+      "denied": "已拒绝",
       "timeout": "执行超时",
       "running": "执行中...",
       "arguments": "参数",

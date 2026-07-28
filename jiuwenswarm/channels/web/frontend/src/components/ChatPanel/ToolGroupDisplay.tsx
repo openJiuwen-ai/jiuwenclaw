@@ -27,7 +27,27 @@ interface ToolDetailModalProps {
   onClose: () => void;
 }
 
-type ToolStatusTone = 'success' | 'warning' | 'error' | 'pending';
+type ToolStatusTone = 'success' | 'warning' | 'error' | 'denied' | 'pending';
+
+const PERMISSION_DENIED_MARKERS = [
+  '[PERMISSION_DENIED]',
+  '[PERMISSION_REJECTED]',
+] as const;
+
+function isPermissionDeniedText(text?: string): boolean {
+  if (!text) {
+    return false;
+  }
+  const upper = text.toUpperCase();
+  return PERMISSION_DENIED_MARKERS.some((marker) => upper.includes(marker));
+}
+
+function isPermissionDeniedResult(result?: ToolExecution['result']): boolean {
+  if (!result) {
+    return false;
+  }
+  return isPermissionDeniedText(result.result) || isPermissionDeniedText(result.summary);
+}
 
 function ToolStatusIcon({
   tone,
@@ -42,6 +62,11 @@ function ToolStatusIcon({
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
           <circle cx="10" cy="10" r="6.8" />
           <path strokeLinecap="round" strokeLinejoin="round" d="M7.2 10.15 9.1 12.05l3.7-4.05" />
+        </svg>
+      ) : tone === 'denied' ? (
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <circle cx="10" cy="10" r="6.8" />
+          <path strokeLinecap="round" d="M6.2 13.8 13.8 6.2" />
         </svg>
       ) : tone === 'error' || tone === 'warning' ? (
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -60,7 +85,10 @@ function ToolStatusIcon({
 }
 
 function isToolResultSuccessful(result?: ToolExecution['result']) {
-  return Boolean(result?.success && !result.result.includes('success=False'));
+  if (!result?.success || isPermissionDeniedResult(result)) {
+    return false;
+  }
+  return !result.result.includes('success=False');
 }
 
 function isExecutionSuccessful(execution: ToolExecution) {
@@ -70,6 +98,9 @@ function isExecutionSuccessful(execution: ToolExecution) {
 function getExecutionTone(execution: ToolExecution): ToolStatusTone {
   if (execution.status === 'pending') {
     return 'pending';
+  }
+  if (isPermissionDeniedResult(execution.result)) {
+    return 'denied';
   }
   if (isExecutionSuccessful(execution)) {
     return 'success';
@@ -158,6 +189,7 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
   const isTimeout = status === 'timeout';
   const modalTone = getExecutionTone(execution);
   const resultSuccess = isToolResultSuccessful(result);
+  const resultDenied = isPermissionDeniedResult(result);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -267,21 +299,29 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                 style={{
                   color: resultSuccess
                     ? 'var(--color-feedback-success)'
-                    : 'var(--color-feedback-danger)',
+                    : resultDenied
+                      ? 'var(--color-feedback-warning)'
+                      : 'var(--color-feedback-danger)',
                 }}
               >
-                <ToolStatusIcon tone={resultSuccess ? 'success' : 'error'} />
+                <ToolStatusIcon
+                  tone={resultSuccess ? 'success' : resultDenied ? 'denied' : 'error'}
+                />
                 <span className="text-sm font-semibold">
                   {t('chatUi.toolResult.result')}
                   {!resultSuccess && (
                     <span
                       className="ml-2 px-2 py-0.5 rounded text-xs font-medium"
                       style={{
-                        backgroundColor: 'var(--color-feedback-danger-subtle)',
-                        color: 'var(--color-feedback-danger)',
+                        backgroundColor: resultDenied
+                          ? 'var(--color-feedback-warning-subtle)'
+                          : 'var(--color-feedback-danger-subtle)',
+                        color: resultDenied
+                          ? 'var(--color-feedback-warning)'
+                          : 'var(--color-feedback-danger)',
                       }}
                     >
-                      {t('chatUi.toolResult.failed')}
+                      {t(resultDenied ? 'chatUi.toolResult.denied' : 'chatUi.toolResult.failed')}
                     </span>
                   )}
                 </span>
@@ -303,7 +343,9 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                     border: '1px solid var(--color-border-default)',
                     color: resultSuccess
                       ? 'var(--color-text-primary)'
-                      : 'var(--color-feedback-danger)',
+                      : resultDenied
+                        ? 'var(--color-feedback-warning)'
+                        : 'var(--color-feedback-danger)',
                     wordBreak: 'break-word',
                   }}
                 >

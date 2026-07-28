@@ -1403,6 +1403,10 @@ select {
     color: var(--color-feedback-danger);
   }
 
+  .tool-status-icon.is-denied {
+    color: var(--color-feedback-warning);
+  }
+
   .tool-status-icon.is-pending {
     color: var(--color-action-primary);
   }
