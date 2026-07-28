@@ -999,6 +999,32 @@ class XiaoyiChannel(BaseChannel):
 
         if msg_type == "heartbeat":
             return
+        # ── 入站 A2A 诊断:扫描所有 AgentEvent header 打出,用于发现端侧下发的
+        # 各类指令(含尚未处理的 MemoryQuery/SelfEvolution/CronQuery 及其他)。
+        # 无 AgentEvent header 的普通消息也打一条 msg_type/method,便于全覆盖。
+        try:
+            from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.self_evolution import (
+                iter_agent_event_headers,
+            )
+            _in_events = iter_agent_event_headers(message)
+            if _in_events:
+                logger.info(
+                    "[XiaoyiChannel][A2A_IN] AgentEvent=%s msg_type=%s method=%s "
+                    "session_id=%s task_id=%s msg_id=%s",
+                    _in_events, msg_type, method,
+                    str(message.get("sessionId") or ""),
+                    str(message.get("taskId") or ""),
+                    str(message.get("id") or ""),
+                )
+            else:
+                logger.info(
+                    "[XiaoyiChannel][A2A_IN] no_AgentEvent msg_type=%s method=%s "
+                    "session_id=%s",
+                    msg_type, method,
+                    str(message.get("sessionId") or ""),
+                )
+        except Exception as _e:
+            logger.debug("[XiaoyiChannel][A2A_IN] scan failed: %s", _e)
         # MemoryQuery is a command data event (direct or wrapped A2A), not a
         # normal user message. Consume it before the generic data-event parser.
         from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.memory_query import (
@@ -1010,6 +1036,15 @@ class XiaoyiChannel(BaseChannel):
 
         memory_query = extract_memory_query(message)
         if memory_query is not None:
+            logger.info(
+                "[XiaoyiChannel][MemoryQuery_IN] action=%s session=%s task=%s "
+                "msg=%s params=%s",
+                memory_query.action,
+                memory_query.session_id,
+                memory_query.task_id,
+                memory_query.message_id,
+                memory_query.params,
+            )
             from jiuwenswarm.common.utils import get_agent_workspace_dir
 
             answer = await asyncio.to_thread(
@@ -1018,11 +1053,90 @@ class XiaoyiChannel(BaseChannel):
                 workspace_dir=get_agent_workspace_dir(),
                 runtime_state_path=configured_runtime_state_path(),
             )
+            logger.info(
+                "[XiaoyiChannel][MemoryQuery_DONE] action=%s answer=%s",
+                memory_query.action,
+                answer,
+            )
             await self.send_xiaoyi_phone_tools_command(
                 memory_query.session_id,
                 memory_query.task_id,
                 memory_query.message_id,
                 memory_query_command(memory_query.action, answer),
+                final=True,
+            )
+            return
+        # ── SelfEvolution detection (AgentEvent.ClawSelfEvolutionState / .Get) ──
+        # 1:1 with xy_channel self-evolution-handler.ts: persist device-reported
+        # selfEvolutionState to .xiaoyiruntime (set, reply empty final ACK) or emit
+        # a Common/Action intent back to the device (get). Consumed before the
+        # generic data-event parser, same slot as MemoryQuery above.
+        from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.self_evolution import (
+            extract_self_evolution_set,
+            extract_self_evolution_get,
+            build_self_evolution_state_get_command,
+        )
+        from jiuwenswarm.agents.harness.common.memory.celia.runtime_state import (
+            set_self_evolution_state,
+            read_self_evolution_state,
+        )
+
+        self_evolution_set = extract_self_evolution_set(message)
+        if self_evolution_set is not None:
+            logger.info(
+                "[XiaoyiChannel][SelfEvolution_IN] kind=ClawSelfEvolutionState "
+                "state=%s session=%s task=%s msg=%s",
+                self_evolution_set.state,
+                self_evolution_set.session_id,
+                self_evolution_set.task_id,
+                self_evolution_set.message_id,
+            )
+            await asyncio.to_thread(
+                set_self_evolution_state,
+                self_evolution_set.state,
+                configured_runtime_state_path(),
+            )
+            logger.info(
+                "[XiaoyiChannel][SelfEvolution_SET_DONE] persisted state=%s "
+                "session=%s task=%s msg=%s",
+                self_evolution_set.state,
+                self_evolution_set.session_id,
+                self_evolution_set.task_id,
+                self_evolution_set.message_id,
+            )
+            await self._send_empty_final_ack(
+                self_evolution_set.session_id,
+                self_evolution_set.task_id,
+                self_evolution_set.message_id,
+            )
+            return
+
+        self_evolution_get = extract_self_evolution_get(message)
+        if self_evolution_get is not None:
+            logger.info(
+                "[XiaoyiChannel][SelfEvolution_IN] kind=ClawSelfEvolutionStateGet "
+                "session=%s task=%s msg=%s",
+                self_evolution_get.session_id,
+                self_evolution_get.task_id,
+                self_evolution_get.message_id,
+            )
+            state = await asyncio.to_thread(
+                read_self_evolution_state,
+                configured_runtime_state_path(),
+            )
+            logger.info(
+                "[XiaoyiChannel][SelfEvolution_GET_DONE] read state=%s "
+                "session=%s task=%s msg=%s",
+                state,
+                self_evolution_get.session_id,
+                self_evolution_get.task_id,
+                self_evolution_get.message_id,
+            )
+            await self.send_xiaoyi_phone_tools_command(
+                self_evolution_get.session_id,
+                self_evolution_get.task_id,
+                self_evolution_get.message_id,
+                build_self_evolution_state_get_command(state),
                 final=True,
             )
             return
@@ -1792,6 +1906,51 @@ class XiaoyiChannel(BaseChannel):
             response,
         )
         await self._send_agent_response(session_id, task_id, response, url_key)
+
+    async def _send_empty_final_ack(
+            self, session_id: str, task_id: str, message_id: str
+    ) -> None:
+        """发送空正文 artifact-update 末帧作为事件 ACK.
+
+        1:1 对应 xy_channel formatter.ts sendA2AResponse(text:"", append:false,
+        final:true). 用于 SelfEvolution set 等只需确认"已处理、流结束"、无需
+        实质内容的事件回复:parts 为空 text part,final=True,id 用入站 message_id.
+        遍历所有活跃连接;ACK 失败只 warning 不 raise.
+        """
+        response = {
+            "jsonrpc": "2.0",
+            "id": message_id,
+            "result": {
+                "taskId": task_id,
+                "kind": "artifact-update",
+                "append": False,
+                "lastChunk": True,
+                "final": True,
+                "artifact": {
+                    "artifactId": str(uuid.uuid4()),
+                    "parts": [{"kind": "text", "text": ""}],
+                },
+            },
+        }
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_EMPTY_FINAL_ACK "
+            "session_id=%s task_id=%s message_id=%s",
+            session_id,
+            task_id,
+            message_id,
+        )
+        for url_key, ws in self._ws_connections.items():
+            if ws:
+                try:
+                    await self._send_agent_response(
+                        session_id, task_id, response, url_key
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[XiaoyiChannel] _send_empty_final_ack 失败 (%s): %s",
+                        url_key,
+                        e,
+                    )
 
     async def _send_agent_response(self, session_id: str, task_id: str, response: dict[str, Any], url_key: str) -> None:
         """发送 agent_response 包装的消息（A2A 格式）到指定通道."""
