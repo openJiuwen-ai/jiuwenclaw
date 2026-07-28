@@ -326,6 +326,11 @@ async def test_run_rewrite_fast_path_prompt_preserves_skill_semantics():
     assert "When a slot has enough syntactic structure" in polish_rule
     assert "restructure at least one sentence or clause" in polish_rule
     assert "do not stop after replacing only one or two synonyms" in polish_rule
+    assert (
+        "For short, terminological, or otherwise unsafe-to-restructure slots, "
+        "prioritize naturalness and semantic safety."
+        in polish_rule
+    )
     assert "85%-115%" in polish_rule
     assert "90%-110%" not in polish_rule
     assert (

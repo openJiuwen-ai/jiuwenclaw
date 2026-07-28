@@ -46,6 +46,8 @@ Rules:
   stop after replacing only one or two synonyms. Keep length about 85%-115% of the
   original. Preserve facts, numbers, actors, times, scope, evidence, constraints,
   judgment strength, causal direction, negation, and conclusion direction.
+  For short, terminological, or otherwise unsafe-to-restructure slots, prioritize
+  naturalness and semantic safety.
 - For expand, elaborate only existing concepts, causes, premises, scope, and effects;
   do not add facts or examples.
 - For shorten, remove redundancy while preserving facts, numbers, actors, times, scope,
