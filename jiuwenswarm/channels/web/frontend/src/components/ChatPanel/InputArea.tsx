@@ -1872,10 +1872,9 @@ export function InputArea({
             >
               <WorkIcon name="folder" className="chat-work-select__root-icon" />
               <span>{getProjectLabel(displayedProject, t('multiSession.project.chooseProjectDirectory'))}</span>
-              <WorkIcon
-                className="chat-work-select__chevron"
-                name={workMenuOpen === 'project' ? 'collapse' : 'expand'}
-              />
+              <svg className="chat-work-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+              </svg>
             </button>
             {displayedProject && !isWorkContextLocked ? (
               <span className="chat-work-select__clear-wrap" aria-hidden="false">
