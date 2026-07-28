@@ -5599,11 +5599,46 @@ class JiuWenSwarmDeepAdapter:
             return True
         return self._goal_record_is_active()
 
+    def _outer_loop_has_remaining_tasks(self, session_id: str = "") -> bool:
+        """Return True when DeepAgent OuterLoop still has pending task-plan items.
+
+        Port of enterprise !2079: intermediate OuterLoop answers must not be
+        mapped to terminal ``chat.final``, or the frontend closes the bubble
+        before later tasks finish.
+        """
+        deep = self._instance
+        if deep is None:
+            return False
+        deep_config = getattr(deep, "_deep_config", None)
+        if deep_config is None or not getattr(deep_config, "enable_task_loop", False):
+            return False
+        loop_session = getattr(deep, "_loop_session", None)
+        has_remaining_fn = getattr(deep, "_has_remaining_tasks", None)
+        if loop_session is None or not callable(has_remaining_fn):
+            return False
+        try:
+            return bool(has_remaining_fn(loop_session))
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] OuterLoop remaining-task check failed "
+                "session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+            return False
+
     def _adapt_goal_intermediate_final(self, parsed: dict | None) -> dict | None:
         if not isinstance(parsed, dict):
             return parsed
         if parsed.get("event_type") != "chat.final":
             return parsed
+        # OuterLoop still has remaining task-plan items: demote to delta so the
+        # frontend does not treat this round as bubble completion (!2079).
+        if self._outer_loop_has_remaining_tasks():
+            adapted = dict(parsed)
+            adapted["event_type"] = "chat.delta"
+            adapted["outer_loop_intermediate"] = True
+            return adapted
         # Demote only while the GoalRecord remains ACTIVE.  Do not key off an
         # in-flight goal round: user cancel pauses the record first, then
         # aborts the round — finals during unwind must stay terminal so the
@@ -8169,11 +8204,15 @@ class JiuWenSwarmDeepAdapter:
                     )
 
             if accumulated_text:
-                # Same rule as _adapt_goal_intermediate_final: only keep the
-                # host flush as delta while GoalRecord is still ACTIVE.
+                # Same rule as _adapt_goal_intermediate_final: keep host flush
+                # as delta while GoalRecord is ACTIVE or OuterLoop still has
+                # remaining task-plan items (!2079).
                 final_event_type = (
                     "chat.delta"
-                    if self._goal_record_is_active()
+                    if (
+                        self._goal_record_is_active()
+                        or self._outer_loop_has_remaining_tasks(session_id or "")
+                    )
                     else "chat.final"
                 )
                 yield AgentResponseChunk(
