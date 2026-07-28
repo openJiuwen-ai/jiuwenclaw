@@ -181,3 +181,20 @@ def update_runtime_info(
         },
         explicit_path,
     )
+
+
+def set_self_evolution_state(state: str, explicit_path: str = "") -> Path:
+    """Write ``selfEvolutionState=<state>`` to ``.xiaoyiruntime``.
+
+    1:1 with ``xy_channel-openclaw`` ``self-evolution-handler.ts`` (handleSelfEvolutionEvent).
+    The state is a string (e.g. "true"/"false"), not a boolean — see TS wire.
+    """
+    return update_runtime_values({"selfEvolutionState": str(state)}, explicit_path)
+
+
+def read_self_evolution_state(explicit_path: str = "") -> str:
+    """Read ``selfEvolutionState`` from ``.xiaoyiruntime``.
+
+    Missing key defaults to ``"false"`` (1:1 with TS handleSelfEvolutionStateGetEvent).
+    """
+    return read_runtime_values(explicit_path).get("selfEvolutionState", "false")
