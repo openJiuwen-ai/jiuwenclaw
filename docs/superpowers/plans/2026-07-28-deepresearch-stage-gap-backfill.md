@@ -202,15 +202,18 @@ assert [_active_stage(update) for update in _task_updates(payloads)] == [
 
 Update Stage-facing reasoning and delta assertions to include the same missing stages in order. Keep the Stage 2 single-emission count unchanged.
 
-- [ ] **Step 2: Keep error-path assertions unchanged**
+- [ ] **Step 2: Keep error paths bounded by the last observed stage**
 
-Retain:
+Require:
 
 ```python
-assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 3]
+assert [_active_stage(update) for update in _task_updates(payloads)] == [
+    1, 2, 3,
+]
 ```
 
-for the research error path, proving error markers do not synthesize successful later stages.
+for the research error path. The observed Stage 3 node backfills the missing Stage 2 event, while
+the following error marker does not synthesize Stage 4, 5, or 6.
 
 - [ ] **Step 3: Run the tool-level stage tests**
 

@@ -621,17 +621,25 @@ async def test_tool_sends_ordered_stage_surfaces_and_retains_completed_snapshot(
     ]
     assert [payload["content"] for payload in stage_reasoning] == [
         "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+        "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n",
         "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
+        "[DeepResearch 阶段切换] 开始 Stage 4：报告整合\n",
+        "[DeepResearch 阶段切换] 开始 Stage 5：引用溯源与校验\n",
         "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
         "[DeepResearch 阶段完成] Stage 6：报告交付\n",
     ]
     assert [payload["content"] for payload in stage_deltas] == [
         "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
+        "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n",
         "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
+        "[DeepResearch 阶段切换] 开始 Stage 4：报告整合\n",
+        "[DeepResearch 阶段切换] 开始 Stage 5：引用溯源与校验\n",
         "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
         "[DeepResearch 阶段完成] Stage 6：报告交付\n",
     ]
-    assert [_active_stage(update) for update in task_updates] == [1, 3, 6, None]
+    assert [_active_stage(update) for update in task_updates] == [
+        1, 2, 3, 4, 5, 6, None,
+    ]
     completed_update = task_updates[-1]
     assert [task["task_id"] for task in completed_update["tasks"]] == [
         f"deepresearch_stage_{index}" for index in range(1, 7)
@@ -2444,7 +2452,9 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
         },
     }
     assert "C1.citations.json" not in json.dumps(file_payload)
-    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 6, None]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [
+        1, 2, 3, 4, 5, 6, None,
+    ]
     assert json.loads(result) == {
         "status": "completed",
         "conversation_id": "C1",
@@ -2492,7 +2502,9 @@ async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fa
     assert outcome["error_code"] == "report_file_delivery_failed"
     assert "report_content" not in outcome
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
-    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 6]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [
+        1, 2, 3, 4, 5, 6,
+    ]
 
 
 @pytest.mark.asyncio
@@ -2525,7 +2537,9 @@ async def test_tool_keeps_current_workflow_stage_in_progress_when_research_fails
         await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
 
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
-    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 3]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [
+        1, 2, 3,
+    ]
 
 
 @pytest.mark.asyncio
@@ -2808,7 +2822,7 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume(tmp_path
     )
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     assert [_active_stage(update) for update in _task_updates(payloads)] == [
-        1, 2, 3, 6, None,
+        1, 2, 3, 4, 5, 6, None,
     ]
 
 

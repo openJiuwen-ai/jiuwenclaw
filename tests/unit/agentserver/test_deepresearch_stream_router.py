@@ -22,7 +22,10 @@ STAGE_TITLES = [
 
 
 def _stage_update(frames):
-    return next((frame for frame in frames if frame["event_type"] == "task.update"), None)
+    updates = [
+        frame for frame in frames if frame["event_type"] == "task.update"
+    ]
+    return updates[-1] if updates else None
 
 
 def _process_reasoning(frames):
@@ -73,8 +76,47 @@ def test_advance_stage_emits_ordered_task_reasoning_and_foreground_events():
     }
 
 
+def test_advance_stage_backfills_every_missing_stage_in_event_order():
+    state = RouterState(current_stage=3)
+
+    frames = advance_stage(state, 6)
+
+    assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
+    ]
+    updates = [
+        frame for frame in frames if frame["event_type"] == "task.update"
+    ]
+    assert [
+        next(
+            index
+            for index, task in enumerate(update["tasks"], start=1)
+            if task["status"] == "in_progress"
+        )
+        for update in updates
+    ] == [4, 5, 6]
+    assert [
+        frame["content"]
+        for frame in frames
+        if frame["event_type"] == "chat.delta"
+    ] == [
+        "[DeepResearch 阶段切换] 开始 Stage 4：报告整合\n",
+        "[DeepResearch 阶段切换] 开始 Stage 5：引用溯源与校验\n",
+        "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
+    ]
+    assert state.current_stage == 6
+
+
 def test_stage_2_uses_outline_generation_title_on_all_surfaces():
-    frames = advance_stage(RouterState(), 2)
+    frames = advance_stage(RouterState(), 2)[-3:]
 
     assert frames[0]["tasks"][1]["task_content"] == "大纲生成"
     assert frames[1]["task_content"] == "大纲生成"
@@ -596,6 +638,9 @@ def test_interrupt_chunk_not_forwarded():
     frames = route_chunk({"agent": "outline_interaction", "message_type": "interrupt"}, state)
     _assert_stage(_stage_update(frames), 2)
     assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "chat.reasoning",
+        "chat.delta",
         "task.update",
         "chat.reasoning",
         "chat.delta",

@@ -134,20 +134,7 @@ def _stage_child_reasoning(stage: int, agent: str, display: tuple[str, str], con
     }
 
 
-def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> list[dict]:
-    """Advance the six-stage snapshot and emit every Stage-facing surface."""
-    if complete:
-        if state.stages_completed:
-            return []
-        state.current_stage = len(DEEPRESEARCH_STAGES)
-        state.stages_completed = True
-    else:
-        if state.stages_completed or stage <= state.current_stage:
-            return []
-        if stage < 1 or stage > len(DEEPRESEARCH_STAGES):
-            raise ValueError(f"invalid deepresearch stage: {stage}")
-        state.current_stage = stage
-
+def _stage_snapshot_frames(state: RouterState, *, complete: bool = False) -> list[dict]:
     tasks = []
     for index, title in enumerate(DEEPRESEARCH_STAGES, start=1):
         if state.stages_completed or index < state.current_stage:
@@ -188,6 +175,27 @@ def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> 
         {"event_type": "chat.reasoning", **message},
         {"event_type": "chat.delta", **message},
     ]
+
+
+def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> list[dict]:
+    """Advance monotonically and emit every missing Stage-facing snapshot."""
+    if complete:
+        if state.stages_completed:
+            return []
+        state.current_stage = len(DEEPRESEARCH_STAGES)
+        state.stages_completed = True
+        return _stage_snapshot_frames(state, complete=True)
+
+    if state.stages_completed or stage <= state.current_stage:
+        return []
+    if stage < 1 or stage > len(DEEPRESEARCH_STAGES):
+        raise ValueError(f"invalid deepresearch stage: {stage}")
+
+    frames: list[dict] = []
+    for next_stage in range(state.current_stage + 1, stage + 1):
+        state.current_stage = next_stage
+        frames.extend(_stage_snapshot_frames(state))
+    return frames
 
 
 def _as_text(val) -> str:
