@@ -33,7 +33,7 @@ from openjiuwen.harness.rails.progressive_tool_rail import (
 
 from jiuwenswarm.common import tool_retrieval
 
-logger = logging.getLogger("jiuwenswarm.harness.common.rails.progressive_tool_rail_jiuwen")
+logger = logging.getLogger("jiuwenswarm.harness.common.rails.search_tool_rail")
 
 _HIDDEN_CATEGORY_CN: Dict[str, tuple[str, str]] = {
     "todo": ("待办管理", "创建、查看、修改、获取待办事项"),
@@ -263,6 +263,7 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
 
         def resolver(name):
             tool_id = name
+            card = None
             if am is not None:
                 try:
                     card = am.get(name)
@@ -272,9 +273,16 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
                 if cid:
                     tool_id = cid
             try:
-                return bool(Runner.resource_mgr.get_tool(tool_id=tool_id, session=session))
+                if Runner.resource_mgr.get_tool(tool_id=tool_id, session=session) is not None:
+                    return True
             except Exception:
-                return False
+                pass
+            # Fallback: ability_manager resolves the card by name → the tool
+            # is directly callable in the name-based direct-call model (e.g.
+            # session/runtime tools registered via ability_manager.add(card),
+            # such as send_file_to_user, whose resource_mgr probe key may not
+            # match). Such tools are NOT ghosts and must stay searchable.
+            return card is not None
 
         self._search_corpus = tool_retrieval.filter_executable(
             list(self._cached_all_tool_infos or []), resolver,

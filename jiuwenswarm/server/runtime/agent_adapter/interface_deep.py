@@ -3910,7 +3910,7 @@ class JiuWenSwarmDeepAdapter:
             )
 
             # ── JiuWen ProgressiveToolRail（全部 jiuwenswarm 改动在外部文件）──
-            from jiuwenswarm.agents.harness.common.rails.progressive_tool_rail_jiuwen import (
+            from jiuwenswarm.agents.harness.common.rails.search_tool_rail import (
                 JiuWenProgressiveToolRail,
             )
             # ── 结束 ──

@@ -143,7 +143,8 @@ def _build_tool_retrieval_prompt_rail(
         react_cfg = (get_config().get("react", {}) or {})
         if not react_cfg.get("progressive_tool_enabled", False):
             return None
-    except Exception:
+    except Exception as exc:
+        logger.warning("[SwarmRails] tool_retrieval_prompt config check failed: %s", exc)
         return None
     # ── agent-core ProgressiveToolRail ──
     return _build_progressive_tool_rail()
@@ -183,7 +184,8 @@ def _build_progressive_tool_rail() -> ProgressiveToolRail | None:
 
         rail = AutoLoadProgressiveToolRail(config)
         return rail
-    except Exception:
+    except Exception as exc:
+        logger.warning("[SwarmRails] build progressive_tool_rail failed: %s", exc)
         return None
 
 
