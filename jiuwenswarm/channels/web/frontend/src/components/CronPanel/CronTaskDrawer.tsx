@@ -11,6 +11,7 @@ import { validateCronExpr } from './cronExprValidation';
 import { normalizeWakeOffsetSeconds } from './cronWakeOffset';
 import { cronExprToSchedule, isOnceScheduleExpired } from './scheduleConvert';
 import { TIMEZONE_OPTIONS } from './constants';
+import { isDefaultLikeProject } from './cronProjectDisplay';
 import type { CronTaskUI, CronTemplateUI } from '../../types/cron';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
 import { getProjectDisplayName } from '../../stores/workspaceStore';
@@ -19,6 +20,8 @@ import type { AgentMode } from '../../types';
 // 抽屉里的模式/模型选择器直接复用同一套 class，跟会话界面视觉/交互完全一致。
 // 这份 CSS 是普通全局样式（非 CSS Module），AgentPanel/FileViewer.tsx 已有同样 import 先例。
 import '../ChatPanel/ChatPanel.css';
+
+export { isDefaultLikeProject } from './cronProjectDisplay';
 
 // "生效周期"依赖后端 effective_from/effective_until（见 backend-requests.md 需求3），目前后端还
 // 没有这个概念，选了也不下发。之前的方案是保留字段但标注"即将上线"，用户后来觉得不如先整个隐藏，
@@ -125,15 +128,6 @@ const fieldClass = 'w-full rounded-md border border-border bg-card px-3 py-1.5 t
 // "选中了默认项目"和"没选任何项目"，总会显示"默认项目"，与任务列表里未选项目显示"-"不一致（bug009）。
 // 这里索性把所有默认类项目都从下拉框选项里过滤掉——下拉框只保留 project_dir 为非空绝对路径的真实项目，
 // 不选时 SimpleSelect 找不到匹配项，走 placeholder 显示"-"，与列表里的"未选项目"语义保持一致。
-// 判断口径跟 ChatPanel/projectSelection.ts 的 isDefaultInputProject、ConversationSidebar.tsx 等处一致
-// （is_default 或 project_id 命中 'default'/'default_code' 都算默认项目）。这个函数导出给
-// index.tsx 的 cronJobToUI 复用：会话本身锁定在默认项目下时，cron job 的 project_id 会原样
-// 存成 'default'/'default_code'（而不是空串），任务列表也要按同样口径把它当"未选项目"处理，
-// 不能只看 project_id 是否非空，否则会显示成"默认项目"而不是"-"（bug009 第 5 轮修复）。
-export function isDefaultLikeProject(p: ProjectInfo): boolean {
-  return p.is_default || p.project_id === 'default' || p.project_id === 'default_code';
-}
-
 function filterNonDefaultProjects(projects: ProjectInfo[]): ProjectInfo[] {
   return projects.filter((p) => !isDefaultLikeProject(p));
 }

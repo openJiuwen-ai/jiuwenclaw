@@ -736,3 +736,61 @@ class TestProjectLazyMigration:
         projects = list_projects(cache_bust=True)
         # from_dict 已规范化为小写
         assert projects[0].work_mode == "code"
+
+
+class TestResolveCronProjectBinding:
+    """Issue #2653：手动空串 vs 对话默认 ID 的共享绑定语义。"""
+
+    @staticmethod
+    def test_empty_project_id_and_dir_resolves_to_empty(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            resolve_cron_project_binding,
+        )
+
+        binding = resolve_cron_project_binding("", "", "work")
+        assert binding.error is None
+        assert binding.project_id == ""
+        assert binding.work_mode == "work"
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "raw_pid, expected_wm",
+        [
+            ("default", "work"),
+            ("default_code", "code"),
+        ],
+    )
+    def test_explicit_default_ids_are_preserved(project_store_dir, raw_pid, expected_wm):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            resolve_cron_project_binding,
+        )
+
+        binding = resolve_cron_project_binding(raw_pid, "", "work")
+        assert binding.error is None
+        assert binding.project_id == raw_pid
+        assert binding.work_mode == expected_wm
+
+    @staticmethod
+    def test_real_project_id_injects_stored_work_mode(project_store_dir, tmp_path):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_or_restore_project,
+            resolve_cron_project_binding,
+        )
+
+        pd = tmp_path / "real-proj"
+        pd.mkdir()
+        proj, _ = create_or_restore_project("Real", str(pd), work_mode="code")
+        binding = resolve_cron_project_binding(proj.project_id, "", "work")
+        assert binding.error is None
+        assert binding.project_id == proj.project_id
+        assert binding.work_mode == "code"
+
+    @staticmethod
+    def test_unknown_project_id_returns_error(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            resolve_cron_project_binding,
+        )
+
+        binding = resolve_cron_project_binding("proj_missing", "", "work")
+        assert binding.error is not None
+        assert "project not found" in binding.error
