@@ -4295,17 +4295,17 @@ export function ConfigPanel({
             {error}
           </div>
         ) : null}
-        {!error && hasMissingRequiredModelFields ? (
+        {!error && configTab !== "model" && hasMissingRequiredModelFields ? (
           <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
           </div>
         ) : null}
-        {!error && hasMissingModelApiBase ? (
+        {!error && configTab !== "model" && hasMissingModelApiBase ? (
           <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.apiBaseRequired')}
           </div>
         ) : null}
-        {!error && hasMissingModelName ? (
+        {!error && configTab !== "model" && hasMissingModelName ? (
           <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.modelNameRequired')}
           </div>
