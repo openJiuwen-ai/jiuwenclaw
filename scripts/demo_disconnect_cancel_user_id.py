@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DemoAgentClient:
@@ -41,14 +45,18 @@ async def main() -> None:
     )
 
     request = DemoAgentClient.last_request
-    assert cleaned is True
-    assert request is not None
-    assert request.user_id == "demo-user"
-    print(
-        "disconnect cancel user_id preserved:",
+    if not cleaned:
+        raise RuntimeError("Disconnect cancellation did not complete")
+    if request is None:
+        raise RuntimeError("Disconnect cancellation request was not sent")
+    if request.user_id != "demo-user":
+        raise RuntimeError(f"Unexpected disconnect user_id: {request.user_id!r}")
+    LOGGER.info(
+        "disconnect cancel user_id preserved: %s",
         request.user_id,
     )
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     asyncio.run(main())
