@@ -37,6 +37,8 @@ _netapi32: ctypes.WinDLL | None = None
 _advapi32: ctypes.WinDLL | None = None
 _kernel32: ctypes.WinDLL | None = None
 _shell32: ctypes.WinDLL | None = None
+# userenv.dll (DeleteProfileW — 删 profile 目录 + ProfileList 注册项).
+_userenv: ctypes.WinDLL | None = None
 
 
 def _require_windows() -> None:
@@ -147,6 +149,28 @@ def _get_shell32() -> ctypes.WinDLL:
         ]
         _shell32.ShellExecuteW.restype = wintypes.HINSTANCE
     return _shell32
+
+
+def _get_userenv() -> ctypes.WinDLL:
+    """userenv.dll 的 DeleteProfileW: 删 profile 目录 + ProfileList 注册项.
+
+    这是删 Windows 用户 profile 的正规方式 (比 shutil.rmtree C:\\Users\\<x>
+    干净): 它会同时删除目录树 + HKLM\\...\\ProfileList\\<sid> 注册项. 仅
+    rmtree 目录会留 ProfileList 项, 下次同名用户登录 Windows 发现原目录没了
+    就建 .000/.001 备份 — 这正是 C:\\Users 下 jbx-sandbox.* 堆积的根因.
+    需 admin.
+    """
+    global _userenv
+    if _userenv is None:
+        _userenv = ctypes.WinDLL("userenv", use_last_error=True)
+        # DeleteProfileW(LPCWSTR lpSidString, LPCWSTR lpProfilePath,
+        #                LPCWSTR lpComputerName): lpProfilePath 传 None 让
+        # API 自己从 ProfileList 解析 (推荐, 避免 we 读到错路径).
+        _userenv.DeleteProfileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
+        ]
+        _userenv.DeleteProfileW.restype = wintypes.BOOL
+    return _userenv
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +465,62 @@ def _is_admin() -> bool:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except Exception:  # noqa: BLE001
         return False
+
+
+def _delete_profile_by_sid(sid_str: str) -> bool:
+    """DeleteProfileW 按 SID 删用户 profile (目录树 + ProfileList 注册项).
+
+    需 admin. lpProfilePath 传 None 让 API 自己从 ProfileList 解析路径.
+    返回 True=已删或本就无 profile; False=删除失败 (常见: profile 正被
+    占用, 此情形下注册表项仍会被清理, 目录待下次重启后可手动删).
+    """
+    if not sid_str:
+        return False
+    userenv = _get_userenv()
+    ok = userenv.DeleteProfileW(sid_str, None, None)
+    if ok:
+        return True
+    err = ctypes.get_last_error()
+    # ERROR_FILE_NOT_FOUND (2): 无 profile 可删, 视为幂等成功.
+    if err == 2:
+        return True
+    logger.warning(
+        "DeleteProfileW(sid=%s) 失败 last_error=%d (profile 可能正被占用; "
+        "注册表项已清, 目录待重启后可手动删)", sid_str, err,
+    )
+    return False
+
+
+def _purge_stale_profile_dirs() -> None:
+    """清理 C:\\Users 下 jbx-sandbox* 历史残留 profile 目录.
+
+    反复 reinstall 时 Windows 会建 jbx-sandbox.DESKTOP-XXX / .000 / .001 ...
+    备份目录 (DeleteProfile 按 SID 只能删当前 SID 对应的那一个, 历史 RID
+    对应的目录删不到). 这里按目录名前缀兜底 rmtree, 把所有
+    jbx-sandbox / jbx-sandbox.* 一次性清掉. best-effort, 失败仅 warning.
+    """
+    import shutil
+
+    users_root = os.environ.get("SystemDrive", "C:") + "\\Users"
+    try:
+        entries = os.listdir(users_root)
+    except OSError as exc:
+        logger.warning("列出 %s 失败, 跳过残留 profile 清理: %s", users_root, exc)
+        return
+    for name in entries:
+        # 严格前缀匹配, 避免误删无关目录 (如 sandbox-other).
+        if name == const.SANDBOX_USER_NAME or name.startswith(
+            const.SANDBOX_USER_NAME + "."
+        ):
+            path = os.path.join(users_root, name)
+            try:
+                shutil.rmtree(path, ignore_errors=False)
+                logger.info("删除残留 profile 目录 %s", path)
+            except OSError as exc:
+                # 正被占用 / 权限不足: 目录留待重启后删, 不阻断卸载.
+                logger.warning(
+                    "删除 %s 失败 (可能正被占用): %s", path, exc,
+                )
 
 
 def _load_policy_preinstall_paths(policy_path: str) -> list[str]:
@@ -918,7 +998,7 @@ def get_synthetic_write_sid() -> str | None:
 
 
 def uninstall() -> None:
-    """卸载: 删除 WFP filter + 用户 + 注册表标记 (管理员)."""
+    """卸载: 删除 WFP filter + profile + 用户 + 注册表标记 (管理员)."""
     _require_windows()
     if not _is_admin():
         _elevate_uninstall()
@@ -926,8 +1006,21 @@ def uninstall() -> None:
     try:
         from jiuwenbox.supervisor import win_wfp
         win_wfp.uninstall_wfp_filters()
+        # 降级路径 (PowerShell New-NetFirewallRule) 装的防火墙规则也卸载:
+        # 若 install 时 WFP 主路径失败走了降级, 这两条规则残留会导致沙箱用户
+        # 永久被 Block 出站 (即便卸载了沙箱). 旧版 uninstall 只调
+        # uninstall_wfp_filters, 漏掉降级规则 (review B2).
+        win_wfp.uninstall_firewall_rule_fallback()
     except Exception:  # noqa: BLE001
-        logger.warning("WFP 卸载失败", exc_info=True)
+        logger.warning("WFP/防火墙卸载失败", exc_info=True)
+    # 删 profile (目录 + ProfileList 注册项): 必须在 NetUserDel 之前做 —
+    # 删用户后 LookupAccountName 查不到 SID, 但 DeleteProfileW 按 SID 字符串
+    # 仍可工作. 先用注册表缓存的当前 SID 调 DeleteProfileW, 再兜底清理
+    # C:\Users\jbx-sandbox* 历史 .000/.001 拋留目录 (反复 reinstall 堆积).
+    sid_str = get_sandbox_user_sid()
+    if sid_str:
+        _delete_profile_by_sid(sid_str)
+    _purge_stale_profile_dirs()
     # 删用户 + 组 (best-effort: 不存在则跳过). 原实现注释说"保留账户避免残留密码"
     # 不删用户, 但这导致 reinstall 时用户密码与注册表密码不一致 (见 1326).
     # 改为彻底删用户/组, reinstall 干净重建.
