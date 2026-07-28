@@ -462,21 +462,25 @@ def _reload_review_result_from_final_state(activity: dict[str, Any]) -> None:
             activity["changed_files"] = summary["affected_files"]
 
 
-_RUNNER_SUBCOMMAND_RE = {
-    # code_review_runner.py may be invoked via an absolute path wrapped in quotes
-    # (e.g. `python "C:\path\code_review_runner.py" collect ...`); tolerate an
-    # optional closing quote and whitespace between the module and subcommand.
-    sub: re.compile(rf"code_review_runner\.py[\"']*\s+{re.escape(sub)}\b")
-    for sub in (
-        "collect",
-        "init-review",
-        "resolve-positions",
-        "validate-comments",
-        "render-comments",
-        "post-comments",
-        "report",
+_RUNNER_SUBCOMMANDS = (
+    "collect",
+    "init-review",
+    "resolve-positions",
+    "validate-comments",
+    "render-comments",
+    "post-comments",
+    "report",
+)
+# code_review_runner.py may be invoked via an absolute path wrapped in quotes
+# (e.g. `python "C:\path\code_review_runner.py" collect ...`); each pattern
+# tolerates an optional closing quote and whitespace between the module and
+# the subcommand. Built with an explicit loop so the literal tuple of
+# subcommands does not trip the multi-clause comprehension check.
+_RUNNER_SUBCOMMAND_RE: dict[str, re.Pattern[str]] = {}
+for _sub in _RUNNER_SUBCOMMANDS:
+    _RUNNER_SUBCOMMAND_RE[_sub] = re.compile(
+        rf"code_review_runner\.py[\"']*\s+{re.escape(_sub)}\b"
     )
-}
 _RUNNER_HELP_RE = re.compile(r"(--help\b|-h\b|\bhelp\b)", re.IGNORECASE)
 
 
