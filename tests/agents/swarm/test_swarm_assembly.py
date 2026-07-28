@@ -121,6 +121,7 @@ _TEAM_SHARED_RAIL_NAMES: frozenset[str] = frozenset(
         registry.SYMPHONY_ORCHESTRATION_PROMPT,
         registry.MEMBER_SKILL_TOOLKIT,
         registry.PROMPT_OPTIMIZER_PROMPT,
+        registry.PROMPT_OPTIMIZER_REVIEW,
     }
 )
 
@@ -462,9 +463,9 @@ def test_build_member_capability_specs_rail_names(
 
     assert _TEAM_SHARED_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    # The common set has exactly 17 entries; the role adds only its explicit
+    # The common set has exactly 18 entries; the role adds only its explicit
     # extra rails on top.
-    assert len(_TEAM_SHARED_RAIL_NAMES) == 17
+    assert len(_TEAM_SHARED_RAIL_NAMES) == 18
     assert rail_names == expected
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
