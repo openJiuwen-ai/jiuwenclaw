@@ -1903,6 +1903,42 @@
     "waitingTasks": "等待任务",
     "messageQueue": "消息队列",
     "parallelProgress": "并行任务执行中 ({{completedCount}}/{{total}} 完成)",
+    "turnRunning": "任务执行",
+    "turnElapsed": "任务用时",
+    "workCompleted": "已完成 {{duration}}",
+    "workCompletedFallback": "已完成",
+    "workCompletedBoth": "已完成 {{thinking}} 次思考，{{tools}} 次工具调用 · {{duration}}",
+    "workCompletedBothNoDuration": "已完成 {{thinking}} 次思考，{{tools}} 次工具调用",
+    "workCompletedThinking": "已完成 {{thinking}} 次思考 · {{duration}}",
+    "workCompletedThinkingNoDuration": "已完成 {{thinking}} 次思考",
+    "workCompletedTools": "已完成 {{tools}} 次工具调用 · {{duration}}",
+    "workCompletedToolsNoDuration": "已完成 {{tools}} 次工具调用",
+    "reasoning": {
+      "thinking": "思考中…",
+      "thought": "已完成思考"
+    },
+    "toolAction": {
+      "write": "写入",
+      "read": "读取",
+      "edit": "编辑",
+      "delete": "删除",
+      "move": "移动",
+      "rename": "重命名",
+      "list": "列出",
+      "search": "搜索",
+      "glob": "查找",
+      "webSearch": "联网搜索",
+      "fetch": "抓取",
+      "run": "执行",
+      "runCode": "运行代码",
+      "upload": "上传",
+      "sendFile": "发送文件",
+      "todoCreate": "创建待办",
+      "todoModify": "更新待办",
+      "todoList": "查看待办",
+      "todoGet": "读取待办",
+      "skill": "查看技能"
+    },
     "subtask": {
       "starting": "启动中...",
       "toolCall": "调用 {{tool}} (#{{count}})",
@@ -1921,12 +1957,18 @@
       "truncated": "结果已截断"
     },
     "toolGroup": {
-      "executed": "已执行 {{totalPairs}} 次工具调用",
+      "running": "正在{{label}}",
+      "completed": "已完成{{label}}",
+      "category": {
+        "file": "文件操作",
+        "search": "搜索",
+        "code": "代码执行",
+        "system": "系统调用",
+        "other": "工具调用"
+      },
       "sessionExecuted": "{{count}} 个会话任务已完成",
       "sessionCompleted": "会话任务已完成",
       "sessionFailed": "会话失败",
-      "pending": "{{pendingCount}} 个执行中",
-      "timeout": "{{timeoutCount}} 个超时",
       "latest": "↓ 最新"
     },
     "teamActivity": {

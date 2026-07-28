@@ -1,0 +1,775 @@
+/**
+ * 对话轮次时间线纯函数：live / history / FileViewer 共用同一套排序与折叠分组逻辑。
+ */
+import type { Message, ToolExecution } from '../../types';
+import type { ReasoningSegment } from '../../stores/chatStore';
+import { getMessageActor } from '../../components/ChatPanel/MessageItem';
+import { collectViewedSkillIds } from '../../components/ChatPanel/ToolGroupDisplay';
+import { isTeamMemberCollaborationMessage } from '../../components/ChatPanel/teamEventUtils';
+import { isA2UIClientEventContent } from '../a2ui/a2uiContent';
+
+const legacyMessageKeyCache = new WeakMap<Message, string>();
+let legacyMessageKeyCounter = 0;
+
+export function getMessageRenderKey(message: Message): string {
+  if (message.renderKey) {
+    return message.renderKey;
+  }
+  let key = legacyMessageKeyCache.get(message);
+  if (!key) {
+    legacyMessageKeyCounter += 1;
+    key = `legacy-message-${legacyMessageKeyCounter}`;
+    legacyMessageKeyCache.set(message, key);
+  }
+  return key;
+}
+
+export type TimelineItem =
+  | {
+      type: 'message';
+      key: string;
+      timestampMs: number;
+      sourceIndex: number;
+      message: Message;
+    }
+  | {
+      type: 'toolExecution';
+      key: string;
+      timestampMs: number;
+      sourceIndex: number;
+      execution: ToolExecution;
+    }
+  | {
+      type: 'reasoning';
+      key: string;
+      timestampMs: number;
+      sourceIndex: number;
+      segment: ReasoningSegment;
+    };
+
+export type RenderItem =
+  | {
+      type: 'message';
+      key: string;
+      showAvatar: boolean;
+      message: Message;
+      hideMeta: boolean;
+      turnId: number;
+    }
+  | {
+      type: 'toolGroup';
+      key: string;
+      showAvatar: boolean;
+      executions: ToolExecution[];
+      notices: string[];
+      collapseSkillTreeWhenContentStarts: boolean;
+      turnId: number;
+      viewedSkillIds: string[];
+    }
+  | {
+      type: 'reasoning';
+      key: string;
+      showAvatar: boolean;
+      segment: ReasoningSegment;
+      turnId: number;
+    }
+  | {
+      type: 'turnSummary';
+      key: string;
+      turnId: number;
+      startMs: number;
+      endMs: number;
+      isLastTurn: boolean;
+      hasWork: boolean;
+    };
+
+/**
+ * 将普通消息与工具执行合并为统一时间线，按时间升序渲染。
+ */
+export function toTimestampMs(value: string | undefined): number {
+  if (!value) {
+    return Number.NaN;
+  }
+  const ts = Date.parse(value);
+  return Number.isNaN(ts) ? Number.NaN : ts;
+}
+
+function compareTimelineItems(a: TimelineItem, b: TimelineItem): number {
+  const aTsValid = Number.isFinite(a.timestampMs);
+  const bTsValid = Number.isFinite(b.timestampMs);
+  if (aTsValid && bTsValid && a.timestampMs !== b.timestampMs) {
+    return a.timestampMs - b.timestampMs;
+  }
+  if (aTsValid !== bTsValid) {
+    return aTsValid ? -1 : 1;
+  }
+  return a.sourceIndex - b.sourceIndex;
+}
+
+export function buildTimelineItems(
+  messages: Message[],
+  executions: ToolExecution[],
+  reasoningSegments: ReasoningSegment[]
+): TimelineItem[] {
+  const messageItems: TimelineItem[] = messages
+    .filter((msg) => {
+      if (msg.role === 'tool') return false;
+      if (msg.role === 'user' && isA2UIClientEventContent(msg.content)) return false;
+      return true;
+    })
+    .map((message, index) => ({
+      type: 'message',
+      key: getMessageRenderKey(message),
+      timestampMs: toTimestampMs(message.timestamp),
+      sourceIndex: index,
+      message,
+    }));
+
+  const executionItems: TimelineItem[] = executions.map((execution, index) => ({
+    type: 'toolExecution',
+    key: `tool-execution-${execution.toolCallId}`,
+    timestampMs: toTimestampMs(execution.startedAt),
+    sourceIndex: messages.length + index,
+    execution,
+  }));
+
+  const reasoningItems: TimelineItem[] = reasoningSegments.map((segment, index) => ({
+    type: 'reasoning',
+    key: `timeline/reasoning/${segment.id}`,
+    timestampMs: segment.startedAt,
+    sourceIndex: messages.length + executions.length + index,
+    segment,
+  }));
+
+  return [...messageItems, ...executionItems, ...reasoningItems].sort(compareTimelineItems);
+}
+
+const IMAGE_TOOL_FALLBACK_NOTICE_PREFIX = 'notice-image_tool_fallback-';
+
+function getImageToolFallbackNoticeRequestId(message: Message): string | undefined {
+  if (message.role !== 'system' || !message.id.startsWith(IMAGE_TOOL_FALLBACK_NOTICE_PREFIX)) {
+    return undefined;
+  }
+  const requestId = message.id.slice(IMAGE_TOOL_FALLBACK_NOTICE_PREFIX.length).trim();
+  return requestId || undefined;
+}
+
+function addToolGroupNotice(notices: string[], content: string) {
+  const normalized = content.trim();
+  if (normalized && !notices.includes(normalized)) {
+    notices.push(normalized);
+  }
+}
+
+function attachToolGroupNotices(renderItems: RenderItem[]): RenderItem[] {
+  const nextItems = renderItems.map((item) =>
+    item.type === 'toolGroup'
+      ? { ...item, notices: [...item.notices] }
+      : item
+  );
+  const groupsByRequestId = new Map<string, Extract<RenderItem, { type: 'toolGroup' }>[]>();
+
+  for (const item of nextItems) {
+    if (item.type !== 'toolGroup') {
+      continue;
+    }
+    const requestIds = new Set(
+      item.executions
+        .map((execution) => execution.requestId)
+        .filter((requestId): requestId is string => Boolean(requestId))
+    );
+    for (const requestId of requestIds) {
+      const groups = groupsByRequestId.get(requestId) || [];
+      groups.push(item);
+      groupsByRequestId.set(requestId, groups);
+    }
+  }
+
+  const attachedNoticeIndexes = new Set<number>();
+  nextItems.forEach((item, index) => {
+    if (item.type !== 'message') {
+      return;
+    }
+    const requestId = getImageToolFallbackNoticeRequestId(item.message);
+    if (!requestId) {
+      return;
+    }
+    const targetGroup = groupsByRequestId.get(requestId)?.[0];
+    if (!targetGroup) {
+      return;
+    }
+    addToolGroupNotice(targetGroup.notices, item.message.content);
+    attachedNoticeIndexes.add(index);
+  });
+
+  return nextItems.filter((_, index) => !attachedNoticeIndexes.has(index));
+}
+
+function isToolGroupVisible(
+  item: Extract<RenderItem, { type: 'toolGroup' }>,
+  isTeamMode: boolean
+): boolean {
+  if (!isTeamMode) {
+    return item.executions.length > 0;
+  }
+  return item.executions.some((execution) => !execution.toolCall.memberName);
+}
+
+function consolidateReasoning(items: RenderItem[], isTeamMode: boolean): RenderItem[] {
+  const out: RenderItem[] = [];
+  for (const item of items) {
+    if (item.type === 'toolGroup' && !isToolGroupVisible(item, isTeamMode)) {
+      continue;
+    }
+    if (item.type === 'reasoning') {
+      const prev = out[out.length - 1];
+      if (prev && prev.type === 'reasoning') {
+        const mergedText = [prev.segment.text, item.segment.text]
+          .filter((text) => text.trim())
+          .join('\n\n');
+        out[out.length - 1] = {
+          ...prev,
+          segment: { ...prev.segment, text: mergedText, closed: item.segment.closed },
+        };
+        continue;
+      }
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isProcessing: boolean): RenderItem[] {
+  const renderItems: RenderItem[] = [];
+  let currentTurnId = 0;
+  let pendingToolExecutions: ToolExecution[] = [];
+
+  const flushToolGroup = (collapseSkillTreeWhenContentStarts = false) => {
+    if (pendingToolExecutions.length === 0) {
+      return;
+    }
+    renderItems.push({
+      type: 'toolGroup',
+      key: `tool-group-${pendingToolExecutions[0].toolCallId}`,
+      showAvatar: true,
+      executions: pendingToolExecutions,
+      notices: [],
+      collapseSkillTreeWhenContentStarts,
+      turnId: currentTurnId,
+      viewedSkillIds: [],
+    });
+    pendingToolExecutions = [];
+  };
+
+  const pushMessage = (item: Extract<TimelineItem, { type: 'message' }>) => {
+    renderItems.push({
+      type: 'message',
+      key: item.key,
+      showAvatar: true,
+      message: item.message,
+      hideMeta: false,
+      turnId: item.message.role === 'user' ? -1 : currentTurnId,
+    });
+  };
+
+  for (const item of items) {
+    if (item.type === 'toolExecution') {
+      pendingToolExecutions.push(item.execution);
+      continue;
+    }
+
+    if (item.type === 'reasoning') {
+      flushToolGroup(true);
+      renderItems.push({
+        type: 'reasoning',
+        key: item.key,
+        showAvatar: true,
+        segment: item.segment,
+        turnId: currentTurnId,
+      });
+      continue;
+    }
+
+    if (isTeamMemberCollaborationMessage(item.message)) {
+      continue;
+    }
+
+    flushToolGroup(true);
+    pushMessage(item);
+
+    if (item.message.role === 'user') {
+      currentTurnId += 1;
+    }
+  }
+
+  flushToolGroup();
+
+  const activeTurnId = currentTurnId;
+  let laterAssistantInTurn = false;
+  for (let i = renderItems.length - 1; i >= 0; i -= 1) {
+    const renderItem = renderItems[i];
+    if (renderItem.type !== 'message') {
+      continue;
+    }
+    if (renderItem.message.role === 'user') {
+      laterAssistantInTurn = false;
+      continue;
+    }
+    const isAssistantReply =
+      renderItem.message.role === 'assistant' || getMessageActor(renderItem.message) === 'team_leader';
+    if (isAssistantReply) {
+      const inRunningTurn = isProcessing && renderItem.turnId === activeTurnId;
+      renderItem.hideMeta = laterAssistantInTurn || inRunningTurn;
+      laterAssistantInTurn = true;
+    }
+  }
+
+  const viewedSkillIdsByTurn = new Map<number, string[]>();
+  for (const renderItem of renderItems) {
+    if (renderItem.type !== 'toolGroup') {
+      continue;
+    }
+    const viewedSkillIds = collectViewedSkillIds(renderItem.executions);
+    if (viewedSkillIds.length === 0) {
+      continue;
+    }
+    const current = viewedSkillIdsByTurn.get(renderItem.turnId) || [];
+    viewedSkillIdsByTurn.set(renderItem.turnId, Array.from(new Set([...current, ...viewedSkillIds])));
+  }
+  for (const renderItem of renderItems) {
+    if (renderItem.type === 'toolGroup') {
+      renderItem.viewedSkillIds = viewedSkillIdsByTurn.get(renderItem.turnId) || [];
+    }
+  }
+
+  const renderItemsWithNotices = consolidateReasoning(
+    attachToolGroupNotices(renderItems),
+    isTeamMode
+  );
+
+  if (!isTeamMode) {
+    let clusterActive = false;
+    for (const renderItem of renderItemsWithNotices) {
+      if (renderItem.type === 'reasoning' || renderItem.type === 'toolGroup') {
+        renderItem.showAvatar = !clusterActive;
+        clusterActive = true;
+        continue;
+      }
+      if (renderItem.type === 'message') {
+        if (renderItem.message.role === 'assistant') {
+          renderItem.showAvatar = !clusterActive;
+          clusterActive = true;
+        } else {
+          renderItem.showAvatar = false;
+          clusterActive = false;
+        }
+      }
+    }
+    return insertTurnSummaries(renderItemsWithNotices, isProcessing);
+  }
+
+  let clusterBlockActive = false;
+  for (const renderItem of renderItemsWithNotices) {
+    if (renderItem.type === 'reasoning' || renderItem.type === 'toolGroup') {
+      renderItem.showAvatar = !clusterBlockActive;
+      clusterBlockActive = true;
+      continue;
+    }
+    if (renderItem.type !== 'message') {
+      continue;
+    }
+
+    const actor = getMessageActor(renderItem.message);
+    if (actor === 'team_leader') {
+      renderItem.showAvatar = !clusterBlockActive;
+      clusterBlockActive = true;
+      continue;
+    }
+
+    clusterBlockActive = false;
+  }
+
+  return insertTurnSummaries(renderItemsWithNotices, isProcessing);
+}
+
+function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): RenderItem[] {
+  const out: RenderItem[] = [];
+  let startMs = Number.POSITIVE_INFINITY;
+  let endMs = Number.NEGATIVE_INFINITY;
+  let hasActivity = false;
+  let hasWork = false;
+  let turnId = 0;
+  let seq = 0;
+
+  const acc = (value: number) => {
+    if (!Number.isFinite(value)) return;
+    if (value < startMs) startMs = value;
+    if (value > endMs) endMs = value;
+  };
+  const flush = (isLastTurn: boolean) => {
+    const shouldShow = (isLastTurn && isProcessing) || hasActivity;
+    if (shouldShow && Number.isFinite(startMs) && Number.isFinite(endMs)) {
+      out.push({
+        type: 'turnSummary',
+        key: `turn-summary-${seq}`,
+        turnId,
+        startMs,
+        endMs,
+        isLastTurn,
+        hasWork,
+      });
+      seq += 1;
+    }
+    startMs = Number.POSITIVE_INFINITY;
+    endMs = Number.NEGATIVE_INFINITY;
+    hasActivity = false;
+    hasWork = false;
+  };
+
+  for (const item of items) {
+    if (item.type === 'message' && item.message.role === 'user') {
+      flush(false);
+      turnId += 1;
+      acc(toTimestampMs(item.message.timestamp));
+      out.push(item);
+      continue;
+    }
+    if (item.type === 'toolGroup') {
+      hasActivity = true;
+      hasWork = true;
+      turnId = item.turnId;
+      for (const execution of item.executions) {
+        acc(toTimestampMs(execution.startedAt));
+        acc(toTimestampMs(execution.updatedAt));
+      }
+    } else if (item.type === 'message') {
+      hasActivity = true;
+      acc(toTimestampMs(item.message.timestamp));
+    } else if (item.type === 'reasoning') {
+      hasActivity = true;
+      hasWork = true;
+      turnId = item.turnId;
+      acc(item.segment.startedAt);
+    }
+    out.push(item);
+  }
+  flush(true);
+  return out;
+}
+
+export type TurnWorkMeta = {
+  turnId: number;
+  completed: boolean;
+  hasWork: boolean;
+  firstWorkKey: string | null;
+  startMs: number;
+  endMs: number;
+  showAvatar: boolean;
+  thinkingCount: number;
+  toolCount: number;
+};
+
+const DELIVERABLE_TOOL_NAMES = new Set(['send_file_to_user']);
+
+export function isDeliverableToolName(name: string | undefined): boolean {
+  return Boolean(name && DELIVERABLE_TOOL_NAMES.has(name));
+}
+
+export function messageHasDeliverable(message: Message): boolean {
+  return Boolean(message.fileItems?.length || message.mediaItems?.length);
+}
+
+export function filterDeliverableExecutions(executions: ToolExecution[]): ToolExecution[] {
+  return executions.filter((execution) => isDeliverableToolName(execution.toolCall.name));
+}
+
+function isExecutionRunning(execution: ToolExecution): boolean {
+  if (
+    execution.status === 'completed' ||
+    execution.status === 'error' ||
+    execution.status === 'timeout'
+  ) {
+    return false;
+  }
+  if (execution.result) {
+    return false;
+  }
+  return execution.status === 'pending';
+}
+
+function countToolsInGroup(item: Extract<RenderItem, { type: 'toolGroup' }>): number {
+  return item.executions.filter((execution) => !isDeliverableToolName(execution.toolCall.name)).length;
+}
+
+export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): Map<number, TurnWorkMeta> {
+  const map = new Map<number, TurnWorkMeta>();
+  let lastTurnId = Number.NEGATIVE_INFINITY;
+  for (const item of items) {
+    if (item.type === 'turnSummary') {
+      lastTurnId = Math.max(lastTurnId, item.turnId);
+      const prev = map.get(item.turnId);
+      map.set(item.turnId, {
+        turnId: item.turnId,
+        completed: !(item.isLastTurn && isProcessing),
+        hasWork: item.hasWork || Boolean(prev?.hasWork),
+        firstWorkKey: prev?.firstWorkKey ?? null,
+        startMs: item.startMs,
+        endMs: item.endMs,
+        showAvatar: prev?.showAvatar ?? true,
+        thinkingCount: prev?.thinkingCount ?? 0,
+        toolCount: prev?.toolCount ?? 0,
+      });
+      continue;
+    }
+    if (item.type !== 'reasoning' && item.type !== 'toolGroup') {
+      continue;
+    }
+    lastTurnId = Math.max(lastTurnId, item.turnId);
+    const prev = map.get(item.turnId);
+    if (prev) {
+      if (!prev.firstWorkKey) {
+        prev.firstWorkKey = item.key;
+        prev.showAvatar = item.showAvatar;
+      }
+      prev.hasWork = true;
+      if (item.type === 'reasoning') {
+        prev.thinkingCount += 1;
+      } else {
+        prev.toolCount += countToolsInGroup(item);
+      }
+    } else {
+      map.set(item.turnId, {
+        turnId: item.turnId,
+        completed: false,
+        hasWork: true,
+        firstWorkKey: item.key,
+        startMs: Number.NaN,
+        endMs: Number.NaN,
+        showAvatar: item.showAvatar,
+        thinkingCount: item.type === 'reasoning' ? 1 : 0,
+        toolCount: item.type === 'toolGroup' ? countToolsInGroup(item) : 0,
+      });
+    }
+  }
+  for (const meta of map.values()) {
+    if (meta.thinkingCount > 0 || meta.toolCount > 0) {
+      meta.hasWork = true;
+    }
+    const isLast = Number.isFinite(lastTurnId) && meta.turnId === lastTurnId;
+    meta.completed = !(isProcessing && isLast);
+  }
+  return map;
+}
+
+export type LiveWorkStreak = {
+  id: string;
+  turnId: number;
+  /** 轮次内稳定序号（不绑易变的 item.key），供展开态持久化 */
+  ordinal: number;
+  firstKey: string;
+  keys: Set<string>;
+  thinkingCount: number;
+  toolCount: number;
+  showAvatar: boolean;
+};
+
+export const REASONING_COLLAPSE_DELAY_MS = 2000;
+const REASONING_STREAK_MERGE_EXTRA_MS = 700;
+const TOOL_STREAK_SETTLE_MS = 1200;
+export const STREAK_FOLD_TRANSITION_DELAY_MS = 160;
+
+/** streak 展开态 key：绑 turnId + 轮次内 ordinal，避免 firstKey 变化导致展开态丢失 */
+export function streakExpandKey(turnId: number, ordinal: number): string {
+  return `streak-${turnId}-${ordinal}`;
+}
+
+function isReasoningSettledForStreak(segment: ReasoningSegment, nowMs: number): boolean {
+  if (!segment.closed) {
+    return false;
+  }
+  const closedAt = segment.closedAt ?? 0;
+  return nowMs - closedAt >= REASONING_COLLAPSE_DELAY_MS + REASONING_STREAK_MERGE_EXTRA_MS;
+}
+
+function isToolGroupSettledForStreak(
+  item: Extract<RenderItem, { type: 'toolGroup' }>,
+  nowMs: number
+): boolean {
+  const workExecs = item.executions.filter(
+    (execution) => !isDeliverableToolName(execution.toolCall.name)
+  );
+  if (workExecs.length === 0) {
+    return false;
+  }
+  if (workExecs.some(isExecutionRunning)) {
+    return false;
+  }
+  let latestDone = 0;
+  for (const execution of workExecs) {
+    const ts = toTimestampMs(execution.updatedAt);
+    if (Number.isFinite(ts) && ts > latestDone) {
+      latestDone = ts;
+    }
+  }
+  if (latestDone <= 0) {
+    return true;
+  }
+  return nowMs - latestDone >= TOOL_STREAK_SETTLE_MS;
+}
+
+export function isSettlingForStreak(items: RenderItem[], nowMs: number): boolean {
+  for (const item of items) {
+    if (item.type === 'reasoning') {
+      if (item.segment.closed && typeof item.segment.closedAt === 'number' && !isReasoningSettledForStreak(item.segment, nowMs)) {
+        return true;
+      }
+      continue;
+    }
+    if (item.type !== 'toolGroup' || countToolsInGroup(item) === 0) continue;
+    if (!item.executions.some(isExecutionRunning) && !isToolGroupSettledForStreak(item, nowMs)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function streakMapFingerprint(streaks: Map<string, LiveWorkStreak>): string {
+  return [...streaks.values()]
+    .map(
+      (streak) =>
+        `${streak.id}:${streak.thinkingCount}:${streak.toolCount}:${[...streak.keys].join(',')}`
+    )
+    .sort()
+    .join('|');
+}
+
+/**
+ * 只编码影响 streak 分组的字段。正文流式改字不触发重建；
+ * settle 时钟滴答若尚未跨过阈值也不会改变签名。
+ */
+export function buildStreakInputSignature(items: RenderItem[], nowMs: number): string {
+  const parts: string[] = [];
+  for (const item of items) {
+    if (item.type === 'turnSummary') {
+      continue;
+    }
+    if (item.type === 'message') {
+      parts.push(`m:${item.turnId}`);
+      continue;
+    }
+    if (item.type === 'reasoning') {
+      const settled = isReasoningSettledForStreak(item.segment, nowMs) ? 1 : 0;
+      parts.push(
+        `r:${item.key}:${item.turnId}:${item.segment.closed ? 1 : 0}:${settled}:${item.showAvatar ? 1 : 0}`
+      );
+      continue;
+    }
+    const workToolCount = countToolsInGroup(item);
+    const running = item.executions.some(isExecutionRunning) ? 1 : 0;
+    const settled = workToolCount > 0 && !running && isToolGroupSettledForStreak(item, nowMs) ? 1 : 0;
+    parts.push(
+      `t:${item.key}:${item.turnId}:${workToolCount}:${running}:${settled}:${item.showAvatar ? 1 : 0}`
+    );
+  }
+  return parts.join('|');
+}
+
+export function buildLiveCompletedStreaks(
+  items: RenderItem[],
+  nowMs: number
+): Map<string, LiveWorkStreak> {
+  const sealed = new Map<string, LiveWorkStreak>();
+  let streak: LiveWorkStreak | null = null;
+  const ordinalByTurn = new Map<number, number>();
+
+  const nextOrdinal = (turnId: number): number => {
+    const n = ordinalByTurn.get(turnId) ?? 0;
+    ordinalByTurn.set(turnId, n + 1);
+    return n;
+  };
+
+  const seal = () => {
+    if (streak && streak.thinkingCount + streak.toolCount >= 2) {
+      sealed.set(streak.firstKey, streak);
+    }
+    streak = null;
+  };
+
+  for (const item of items) {
+    if (item.type === 'turnSummary') {
+      continue;
+    }
+    if (item.type === 'message') {
+      seal();
+      continue;
+    }
+
+    if (item.type === 'reasoning') {
+      if (!isReasoningSettledForStreak(item.segment, nowMs)) {
+        seal();
+        continue;
+      }
+      if (!streak) {
+        const ordinal = nextOrdinal(item.turnId);
+        streak = {
+          id: streakExpandKey(item.turnId, ordinal),
+          turnId: item.turnId,
+          ordinal,
+          firstKey: item.key,
+          keys: new Set(),
+          thinkingCount: 0,
+          toolCount: 0,
+          showAvatar: item.showAvatar,
+        };
+      }
+      streak.keys.add(item.key);
+      streak.thinkingCount += 1;
+      continue;
+    }
+
+    const workToolCount = countToolsInGroup(item);
+    if (workToolCount === 0) {
+      seal();
+      continue;
+    }
+    const hasRunning = item.executions.some(isExecutionRunning);
+    if (hasRunning || !isToolGroupSettledForStreak(item, nowMs)) {
+      seal();
+      continue;
+    }
+    if (!streak) {
+      const ordinal = nextOrdinal(item.turnId);
+      streak = {
+        id: streakExpandKey(item.turnId, ordinal),
+        turnId: item.turnId,
+        ordinal,
+        firstKey: item.key,
+        keys: new Set(),
+        thinkingCount: 0,
+        toolCount: 0,
+        showAvatar: item.showAvatar,
+      };
+    }
+    streak.keys.add(item.key);
+    streak.toolCount += workToolCount;
+  }
+  seal();
+  return sealed;
+}
+
+export function formatStreakSummaryLabel(
+  t: (key: string, options?: Record<string, unknown>) => string,
+  thinkingCount: number,
+  toolCount: number
+): string {
+  if (thinkingCount > 0 && toolCount > 0) {
+    return t('chatUi.workCompletedBothNoDuration', { thinking: thinkingCount, tools: toolCount });
+  }
+  if (thinkingCount > 0) {
+    return t('chatUi.workCompletedThinkingNoDuration', { thinking: thinkingCount });
+  }
+  if (toolCount > 0) {
+    return t('chatUi.workCompletedToolsNoDuration', { tools: toolCount });
+  }
+  return t('chatUi.workCompletedFallback');
+}

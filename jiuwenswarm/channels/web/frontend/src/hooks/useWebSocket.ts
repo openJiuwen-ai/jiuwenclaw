@@ -50,7 +50,13 @@ import {
   playAudioBase64,
   sanitizeTtsText,
   stopAllTts,
+  collapseWs,
+  findAssistantSegmentIdForFinal,
   normalizeFinalContent,
+  resolveStreamFinalContent,
+  unescapeLiteralNewlines,
+  interpretChatFinalAction,
+  shouldCollapseTurnFinal,
 } from '../utils';
 import {
   findOverlappingFileExecutionEvent,
@@ -61,7 +67,9 @@ import {
   normalizeToolResultPayload,
   normalizeToolUpdatePayload,
 } from '../features/tool-events/toolEventNormalizer';
-import { findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn } from '../features/teamLeaderMessages';
+import {
+  findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn,
+} from '../features/teamLeaderMessages';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
@@ -641,6 +649,7 @@ function isTeamTeammateMessagePayload(payload: Record<string, unknown>): boolean
   return typeof payload.role === 'string' && payload.role.trim().toLowerCase() === 'teammate';
 }
 
+/** 仅当 final 覆盖本轮已展示全文时才允许折叠，避免步进 final 抹掉前文（如 A/B/C）。 */
 function isHiddenTeamTeammateMessagePayload(mode: AgentMode, payload: Record<string, unknown>): boolean {
   return mode === 'team' && isTeamTeammateMessagePayload(payload);
 }
@@ -1961,7 +1970,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
 
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
-        const content = typeof payload.content === 'string' ? payload.content : '';
+        const content = unescapeLiteralNewlines(
+          typeof payload.content === 'string' ? payload.content : ''
+        );
 
         if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) {
           const memberId = getTeamPayloadMemberName(payload);
@@ -1975,6 +1986,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         if (currentMode === 'team' && content) {
           clearThinkingForVisibleOutput(sessionId);
+          if (content.trim()) {
+            useChatStore.getState().bumpThinkingAnchor(sessionId);
+            useChatStore.getState().closeReasoning(sessionId, {
+              atMs: eventTimestampMs(payload),
+            });
+          }
           const existingMsg = findActiveTeamLeaderMessage(sessionId);
 
           if (existingMsg) {
@@ -2007,6 +2024,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         let currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
         clearThinkingForVisibleOutput(sessionId);
+        if (content.trim()) {
+          useChatStore.getState().bumpThinkingAnchor(sessionId);
+          useChatStore.getState().closeReasoning(sessionId, {
+            atMs: eventTimestampMs(payload),
+          });
+        }
         if (!currentStreamId && content) {
           const assistantMsgId = `assistant-${Date.now()}`;
           useChatStore.getState().addMessage(sessionId, {
@@ -2037,6 +2060,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 把已完成会话重新拉回处理中。
         if (shouldRecoverProcessingFromReasoning(sessionId, payload)) {
           useChatStore.getState().setProcessing(sessionId, true);
+        }
+
+        const reasoningContent =
+          typeof payload.content === 'string' ? payload.content : '';
+        if (reasoningContent) {
+          useChatStore.getState().appendReasoning(sessionId, reasoningContent, {
+            atMs: eventTimestampMs(payload),
+          });
         }
       }),
       webClient.on('chat.final', ({ payload }) => {
@@ -2194,18 +2225,61 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (content) {
           revealPendingContextUsage(sessionId);
         }
+        const finalAction = interpretChatFinalAction(payload);
         if (currentMode === 'team' && content) {
           clearThinkingForVisibleOutput(sessionId);
           const timestamp = payload.timestamp || Date.now();
+          const iso = normalizeEventTimestampIso(payload.timestamp);
+          const teamRuntime = useChatStore.getState().getRuntime(sessionId);
+          const teamSplit = Boolean(teamRuntime?.assistantStreamSplit);
+          const teamMessages = teamRuntime?.messages ?? [];
+
+          if (teamSplit) {
+            useChatStore.getState().clearStreamSplit(sessionId);
+            if (shouldCollapseTurnFinal(teamMessages, content, 'team', finalAction)) {
+              useChatStore.getState().collapseTurnFinal(sessionId, {
+                kind: 'team',
+                content,
+                finalId: `team-leader-${Date.now()}`,
+                timestampIso: iso,
+              });
+              return;
+            }
+            if (finalAction.type === 'append') {
+              useChatStore.getState().addMessage(sessionId, {
+                id: `team-leader-${Date.now()}`,
+                role: 'system',
+                content: `team.leader:${JSON.stringify({ content, timestamp: Date.parse(iso) || Date.now() })}`,
+                timestamp: iso,
+              });
+              return;
+            }
+            if (teamLeaderMessageToFinalize) {
+              useChatStore.getState().updateMessage(sessionId, teamLeaderMessageToFinalize.id, {
+                content: `team.leader:${JSON.stringify({ content, timestamp: Date.parse(iso) || Date.now() })}`,
+                isStreaming: false,
+                timestamp: iso,
+              });
+              return;
+            }
+            useChatStore.getState().addMessage(sessionId, {
+              id: `team-leader-${Date.now()}`,
+              role: 'system',
+              content: `team.leader:${JSON.stringify({ content, timestamp: Date.parse(iso) || Date.now() })}`,
+              timestamp: iso,
+            });
+            return;
+          }
 
           if (teamLeaderMessageToFinalize) {
             useChatStore.getState().updateMessage(sessionId, teamLeaderMessageToFinalize.id, {
               content: `team.leader:${JSON.stringify({ content, timestamp })}`,
               isStreaming: false,
-              timestamp: normalizeEventTimestampIso(payload.timestamp),
+              timestamp: iso,
             });
             return;
           }
+
           useChatStore.getState().addMessage(sessionId, {
             id: `team-leader-${Date.now()}`,
             role: 'system',
@@ -2218,23 +2292,60 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const runtime = useChatStore.getState().getRuntime(sessionId);
         const currentStreamId = runtime?.currentStreamId;
         const messages = runtime?.messages ?? [];
-        const payloadSessionId =
-          typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
+        const assistantStreamSplit = Boolean(runtime?.assistantStreamSplit);
+        useChatStore.getState().clearStreamSplit(sessionId);
 
-        // 检查是否为主动推荐消息
         const source = typeof payload.source === 'string' ? payload.source : '';
         const isProactiveRecommendation = source === 'proactive_recommendation';
         const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
 
-        // 仅当有明确会话绑定时才把 final 合并进当前流式气泡。
-        // 定时任务等广播的 session_id 为空/null，若仍走 currentStreamId 会写到错误气泡甚至”无可见更新”。
         const streamId = currentStreamId;
-        if (streamId && payloadSessionId) {
-          // 注意：这里不能再用 payload.timestamp 覆盖消息的 timestamp——它是"开始输出那一刻"
-          // 盖的章，收尾只应该改 content/isStreaming。目标模式下 chat.final 和 goal.updated
-          // (completed) 走的是两条独立通道、到达顺序不定，用后端 chat.final 自带的时间戳覆盖会
-          // 让这条回复的时间戳跟"整轮真正跑完"（含目标评估）的时刻赛跑，一旦覆盖后的新时间戳
-          // 晚于目标完成提示卡的时间戳，消息排序就会翻车（真机复现过，提示卡跑到回复上方）。
+        const preferredSegmentId =
+          finalAction.type === 'patch_segment' ? finalAction.segmentId : undefined;
+
+        if (assistantStreamSplit && content) {
+          const cronMetaEarly = payload.cron as Record<string, unknown> | undefined;
+          const cronRunIdEarly =
+            typeof cronMetaEarly?.run_id === 'string' ? cronMetaEarly.run_id.trim() : '';
+          if (!cronRunIdEarly && !cronMetaEarly && !isProactiveRecommendation) {
+            if (streamId) {
+              useChatStore.getState().stopStreaming(sessionId);
+            }
+            if (shouldCollapseTurnFinal(messages, content, 'agent', finalAction)) {
+              const finalId = `msg-final-${Date.now()}`;
+              useChatStore.getState().collapseTurnFinal(sessionId, {
+                kind: 'agent',
+                content,
+                finalId,
+                timestampIso: new Date().toISOString(),
+              });
+              if (!content.includes('MEDIA:')) {
+                handleTtsPlayback(sessionId, finalId, content);
+              }
+              return;
+            }
+            if (finalAction.type !== 'append') {
+              const rewriteId = findAssistantSegmentIdForFinal(
+                messages,
+                content,
+                preferredSegmentId || streamId
+              );
+              if (rewriteId) {
+                useChatStore.getState().updateMessage(sessionId, rewriteId, {
+                  content,
+                  isStreaming: false,
+                });
+                if (!content.includes('MEDIA:')) {
+                  handleTtsPlayback(sessionId, rewriteId, content);
+                }
+                return;
+              }
+            }
+          }
+        }
+
+        // 未分段：合并进当前流。勿用 payload.timestamp 覆盖消息时间（会与 goal 完成卡抢序）。
+        if (streamId && !assistantStreamSplit) {
           useChatStore.getState().updateMessage(sessionId, streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
@@ -2246,6 +2357,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
+        if (streamId && assistantStreamSplit && content) {
+          const streamedMsg = messages.find((m) => m.id === streamId);
+          const streamedContent = typeof streamedMsg?.content === 'string' ? streamedMsg.content : '';
+          const nextContent = resolveStreamFinalContent(streamedContent, content, true);
+          if (nextContent !== undefined) {
+            useChatStore.getState().updateMessage(sessionId, streamId, {
+              content: nextContent,
+              isStreaming: false,
+              ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
+            });
+            useChatStore.getState().stopStreaming(sessionId);
+            if (!nextContent.includes('MEDIA:')) {
+              handleTtsPlayback(sessionId, streamId, nextContent);
+            }
+            return;
+          }
+          useChatStore.getState().updateMessage(sessionId, streamId, { isStreaming: false });
+          useChatStore.getState().stopStreaming(sessionId);
+        }
         if (content) {
           const cronMeta = payload.cron as Record<string, unknown> | undefined;
           const cronRunId =
@@ -2255,7 +2385,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             /正在执行中，结果稍后补发/.test(content) ||
             /^\[cron\].*正在执行中/.test(content);
 
-          // 正式结果：替换同 run_id 的占位气泡，或最近的定时任务「正在执行中」占位
           if (!isCronPlaceholderContent) {
             let placeholderId: string | null = null;
             if (cronRunId) {
@@ -2303,7 +2432,81 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             return;
           }
 
-          // 去重：若上一条已是相同内容的助手消息（同一回复被收到两次），不再追加
+          if (assistantStreamSplit && !cronRunId && !cronMeta) {
+            if (streamId) {
+              useChatStore.getState().stopStreaming(sessionId);
+            }
+            let turnStart = 0;
+            for (let i = messages.length - 1; i >= 0; i -= 1) {
+              if (messages[i].role === 'user') {
+                turnStart = i + 1;
+                break;
+              }
+            }
+            const shownConcat = messages
+              .slice(turnStart)
+              .filter((m) => m.role === 'assistant' && typeof m.content === 'string')
+              .map((m) => m.content as string)
+              .join('');
+
+            let remainder: string;
+            if (shownConcat && content.startsWith(shownConcat)) {
+              remainder = content.slice(shownConcat.length);
+            } else if (shownConcat && collapseWs(content) === collapseWs(shownConcat)) {
+              remainder = '';
+            } else if (shownConcat && collapseWs(shownConcat).includes(collapseWs(content))) {
+              remainder = '';
+            } else {
+              remainder = content;
+            }
+
+            if (!remainder.trim()) {
+              const rewriteId = findAssistantSegmentIdForFinal(
+                messages,
+                content,
+                preferredSegmentId || streamId
+              );
+              if (rewriteId) {
+                useChatStore.getState().updateMessage(sessionId, rewriteId, {
+                  content,
+                  isStreaming: false,
+                });
+                if (!content.includes('MEDIA:')) {
+                  handleTtsPlayback(sessionId, rewriteId, content);
+                }
+              }
+              return;
+            }
+            const finalMsgId = `msg-final-${Date.now()}`;
+            useChatStore.getState().addMessage(sessionId, {
+              id: finalMsgId,
+              role: 'assistant',
+              content: remainder,
+              timestamp: new Date().toISOString(),
+              isProactiveRecommendation,
+              ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
+            });
+            if (!remainder.includes('MEDIA:')) {
+              handleTtsPlayback(sessionId, finalMsgId, remainder);
+            }
+            return;
+          }
+
+          const rewriteId = findAssistantSegmentIdForFinal(
+            messages,
+            content,
+            preferredSegmentId || streamId
+          );
+          if (rewriteId) {
+            useChatStore.getState().updateMessage(sessionId, rewriteId, {
+              content,
+              isStreaming: false,
+            });
+            if (!content.includes('MEDIA:')) {
+              handleTtsPlayback(sessionId, rewriteId, content);
+            }
+            return;
+          }
           const last = messages[messages.length - 1];
           if (last?.role === 'assistant' && last.content === content) {
             return;
@@ -2437,6 +2640,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         clearThinkingForVisibleOutput(sessionId);
+        useChatStore.getState().closeReasoning(sessionId, {
+          atMs: eventTimestampMs(payload),
+        });
         const toolCall = normalizeToolCallPayload(payload);
         const shutdownMemberId = getShutdownMemberFromToolCall(toolCall);
         if (shutdownMemberId) {
@@ -2465,21 +2671,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         const runtime = useChatStore.getState().getRuntime(sessionId);
         const currentStreamId = runtime?.currentStreamId;
-        const messages = runtime?.messages ?? [];
         const toolRequestId = getPayloadRequestId(payload) || activeRequestIdRef.current;
-        const currentStreamMessage =
-          currentMode === 'team'
-            ? findActiveTeamLeaderMessage(sessionId)
-            : currentStreamId
-              ? messages.find((msg) => msg.id === currentStreamId)
-              : undefined;
-        useChatStore.getState().addToolCall(
-          sessionId,
-          toolCall,
-          currentStreamMessage?.timestamp
-            ? { startedAt: currentStreamMessage.timestamp, requestId: toolRequestId }
-            : { requestId: toolRequestId }
-        );
+        // 工具时间戳一律用事件自身时间，与 history 回放（item.at）对齐；勿绑气泡 timestamp。
+        const toolStartedAt = normalizeEventTimestampIso(payload.timestamp);
+        useChatStore.getState().addToolCall(sessionId, toolCall, {
+          startedAt: toolStartedAt,
+          requestId: toolRequestId,
+        });
+        // 工具调用会打断当前这段助手文字：收尾当前流式气泡，令后续文字另起新气泡，
+        // 从而实现 codex 风格的「文字 → 工具 → 文字 → 工具」分段交错。
+        // agent 模式走 currentStreamId；团队模式的 team-leader 气泡有独立生命周期，
+        // 需单独收尾，否则本轮 leader 文字会全部堆进同一条气泡，与刷新后的历史（按段拆分）不一致。
+        if (currentMode === 'team') {
+          useChatStore.getState().finalizeTeamLeaderSegment(sessionId);
+        } else if (currentStreamId) {
+          useChatStore.getState().finalizeStreamSegment(sessionId);
+        }
         if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
           applyTeamTaskToolCall(sessionId, toolCall);
         }
@@ -2543,7 +2750,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             activeSessionId
           );
         }
-        useChatStore.getState().addToolResult(sessionId, toolResult);
+        useChatStore.getState().addToolResult(sessionId, toolResult, {
+          updatedAt: normalizeEventTimestampIso(payload.timestamp),
+        });
       }),
       webClient.on('todo.updated', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);

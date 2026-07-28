@@ -90,20 +90,6 @@ interface ChatPanelProps {
   onDrainTaskQueueIfIdle?: (sessionId: string) => void;
 }
 
-function ThinkingIndicator() {
-  return (
-    <div className="flex justify-start animate-rise">
-      <div className="chat-bubble assistant chat-reading-indicator">
-        <div className="chat-reading-indicator__dots">
-          <span />
-          <span />
-          <span />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }) {
   return (
     <button className="chat-suggestion-card" onClick={onClick}>
@@ -1098,8 +1084,6 @@ export function ChatPanel({
                   <SubtaskProgress />
                   {/* 内联审批卡片（演进审批 & 权限审批共用） */}
                   <InlineQuestionCard onSubmit={onUserAnswer} />
-                  {/* 思考中指示器 */}
-                  {isThinking && <ThinkingIndicator />}
                   <ContextCompressionLines
                     runtime={contextCompressionRuntime}
                     summary={contextCompressionSummary}

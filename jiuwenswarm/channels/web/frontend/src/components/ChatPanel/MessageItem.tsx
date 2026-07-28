@@ -214,6 +214,8 @@ interface MessageItemProps {
   autoSpeak?: boolean;
   showAvatar?: boolean;
   disableA2UIInteraction?: boolean;
+  hideMeta?: boolean;
+  enableAssistantAvatar?: boolean;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -221,6 +223,8 @@ export const MessageItem = memo(function MessageItem({
   autoSpeak = false,
   showAvatar = true,
   disableA2UIInteraction = false,
+  hideMeta = false,
+  enableAssistantAvatar = false,
 }: MessageItemProps) {
   const { t } = useTranslation();
   const {
@@ -547,11 +551,19 @@ export const MessageItem = memo(function MessageItem({
   const hasBubbleContent =
     isUser || Boolean(content) || Boolean(visibleMediaItems) || Boolean(visibleFileItems);
 
+  const withAssistantAvatar = !isUser && enableAssistantAvatar;
+
   return (
     <div className={clsx(
-      'flex mb-3 animate-rise',
-      isUser ? 'justify-end' : 'justify-start'
+      'flex animate-rise',
+      isUser ? 'justify-end' : 'justify-start',
+      withAssistantAvatar && 'assistant-row'
     )}>
+      {withAssistantAvatar && (
+        <div className="assistant-row__avatar" aria-hidden={!showAvatar}>
+          {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
+        </div>
+      )}
       <div className="chat-bubble-wrapper max-w-[82%] min-w-0">
         {!isUser && (
           <div className="hidden" data-testid="thinking-summary" aria-hidden="true" />
@@ -569,9 +581,10 @@ export const MessageItem = memo(function MessageItem({
           >
             {isStreaming ? (
               isUser ? (
-                <StreamingContent content={content} isStreaming={true} />
+                <StreamingContent content={content} />
               ) : (
                 <A2UIMessageContent
+                  key={`${id}-streaming`}
                   content={content}
                   messageId={id}
                   isStreaming={true}
@@ -587,6 +600,7 @@ export const MessageItem = memo(function MessageItem({
                   </div>
                 ) : (
                   <A2UIMessageContent
+                    key={`${id}-final`}
                     content={content}
                     messageId={id}
                     disableInteraction={disableA2UIInteraction}
@@ -622,7 +636,7 @@ export const MessageItem = memo(function MessageItem({
           </div>
         )}
 
-        {!isStreaming && (
+        {!isStreaming && !hideMeta && (
           <div
             className={clsx(
               'flex items-center gap-3 text-sm mt-2 text-text-muted',
