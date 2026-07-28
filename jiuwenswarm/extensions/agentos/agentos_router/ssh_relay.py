@@ -251,8 +251,11 @@ class YuanrongSshRelay:
     async def _relay_over_connection(self, session: Any, conn: Any) -> int:
         process = session.process
 
-        # Interactive shell only (northbound rejects exec requests).
+        # Interactive shell, or forward northbound exec command into the sandbox.
         kwargs: dict[str, Any] = {"encoding": None}
+        command = str(getattr(session, "command", None) or "").strip() or None
+        if command:
+            kwargs["command"] = command
         term_type = process.get_terminal_type() or "xterm"
         kwargs["term_type"] = term_type
         term_size = process.get_terminal_size()

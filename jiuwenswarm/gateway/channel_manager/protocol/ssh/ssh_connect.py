@@ -31,6 +31,9 @@ class SshRelaySession:
     process: Any
     done: asyncio.Event = field(default_factory=asyncio.Event)
     exit_code: int = 0
+    # Optional northbound remote command (``ssh user@host "claude ..."``).
+    # Used for AgentOS agent_type selection and southbound exec forwarding.
+    command: str | None = None
     # Background southbound relay task (set by AgentOS Router); cancelled on
     # northbound timeout or disconnect so the YuanRong SSH connection is
     # torn down instead of lingering until relay_timeout_sec / TCP timeout.
@@ -228,6 +231,10 @@ class SshChannel(BaseChannel):
         params: dict[str, Any] = {
             "relay_session": relay,
         }
+        command = str(metadata.get("command") or "").strip()
+        if command:
+            params["command"] = command
+            relay.command = command
         msg = Message(
             id=f"ssh_{uuid.uuid4().hex[:12]}",
             type="req",
