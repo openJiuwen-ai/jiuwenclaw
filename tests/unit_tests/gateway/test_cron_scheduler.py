@@ -1564,3 +1564,67 @@ class TestCronJobStoreWakeOffset:
         )
         assert updated.cron_expr == "0 30 * * * ? *"
         assert updated.wake_offset_seconds == 0
+
+
+class TestExtractTextFromAgentPayload:
+    """Coverage for _extract_text_from_agent_payload (agent-mode unary response parser)."""
+
+    @staticmethod
+    def _call(payload):
+        from jiuwenswarm.gateway.cron.scheduler import _extract_text_from_agent_payload
+        return _extract_text_from_agent_payload(payload)
+
+    def test_error_payload_returns_raw_error(self):
+        """error is passed through unchanged, same as normal chat."""
+        result = self._call({"error": "PermissionDeniedError: Error code: 403 - ..."})
+        assert result == "PermissionDeniedError: Error code: 403 - ..."
+
+    def test_empty_error_returns_empty_string(self):
+        result = self._call({"error": ""})
+        assert result == ""
+
+    def test_whitespace_only_error_returns_empty_string(self):
+        result = self._call({"error": "   "})
+        assert result == ""
+
+    def test_content_str_not_affected(self):
+        result = self._call({"content": "hello"})
+        assert result == "hello"
+
+    def test_content_dict_not_affected(self):
+        result = self._call({"content": {"output": "result", "result_type": "answer"}})
+        assert result == "result"
+
+    def test_content_dict_no_output_returns_str(self):
+        result = self._call({"content": {"key": "val"}})
+        assert result == str({"key": "val"})
+
+    def test_empty_payload_returns_empty_string(self):
+        result = self._call({})
+        assert result == ""
+
+    def test_none_payload_returns_empty_string(self):
+        result = self._call(None)
+        assert result == ""
+
+    def test_error_takes_precedence_over_content(self):
+        """When both error and content present, error passes through raw."""
+        original_error = "PermissionDeniedError: Error code: 403"
+        result = self._call({"error": original_error, "content": "stale output"})
+        assert result == original_error
+
+    def test_heartbeat_fallback(self):
+        result = self._call({"heartbeat": "ping"})
+        assert result == "ping"
+
+    def test_text_fallback(self):
+        result = self._call({"text": "raw text"})
+        assert result == "raw text"
+
+    def test_error_none_value_returns_empty_string(self):
+        result = self._call({"error": None})
+        assert result == ""
+
+    def test_error_int_value_returns_empty_string(self):
+        result = self._call({"error": 42})
+        assert result == ""
