@@ -336,7 +336,7 @@ def test_parallel_section_reasoning_keeps_authoritative_outline_title():
     assert state.section_titles["2"] == "核心架构设计与检索增强能力深度对比"
 
 
-def test_plan_reasoning_message_emits_complete_original_json():
+def test_plan_reasoning_message_preserves_complete_content_in_readable_markdown():
     state = RouterState()
     frames = route_chunk(
         {
@@ -371,12 +371,9 @@ def test_plan_reasoning_message_emits_complete_original_json():
             "task_index": 1,
             "total_tasks": 1,
             "stream_source_id": "deepresearch_section_1",
-            "content": json.dumps(
-                {
-                    "title": "梳理主流记忆框架的分类、架构与数据流",
-                    "thought": "这段详细推理必须完整进入思考过程。",
-                },
-                ensure_ascii=False,
+            "content": (
+                "#### 调研计划：梳理主流记忆框架的分类、架构与数据流\n\n"
+                "调研思路：这段详细推理必须完整进入思考过程。"
             ),
         },
     ]
@@ -782,3 +779,258 @@ def test_build_interrupt_prompt_ufp_truncates_report():
     prompt = build_interrupt_prompt(state.interrupt_node_id, state, {}, "q")
     assert len(prompt) < 6200  # 截断 6000 + 占位
     assert "完整报告见最终产物" in prompt
+
+
+def test_outline_json_is_rendered_as_readable_markdown():
+    state = RouterState()
+    frames = route_chunk(
+        {
+            "agent": "outline",
+            "event": "message",
+            "content": json.dumps(
+                {
+                    "id": "outline-1",
+                    "language": "zh-CN",
+                    "thought": "先分析市场，再比较竞争格局。",
+                    "title": "行业分析",
+                    "sections": [
+                        {
+                            "id": "section-1",
+                            "title": "市场现状",
+                            "description": "分析市场规模与增长驱动因素。",
+                            "is_core_section": True,
+                        },
+                        {
+                            "id": "section-2",
+                            "title": "竞争格局",
+                            "description": "比较主要厂商及其差异。",
+                            "is_core_section": False,
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        },
+        state,
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    assert reasoning[-1]["content"] == (
+        "### 行业分析\n\n"
+        "规划思路：先分析市场，再比较竞争格局。\n\n"
+        "1. **市场现状（重点）**\n"
+        "   分析市场规模与增长驱动因素。\n"
+        "2. **竞争格局**\n"
+        "   比较主要厂商及其差异。"
+    )
+    assert '"sections"' not in reasoning[-1]["content"]
+    assert '"thought"' not in reasoning[-1]["content"]
+
+
+def test_plan_reasoning_json_is_rendered_as_readable_markdown():
+    frames = route_chunk(
+        {
+            "agent": "plan_reasoning",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "message",
+            "content": json.dumps(
+                {
+                    "id": "plan-1",
+                    "language": "zh-CN",
+                    "title": "梳理市场现状",
+                    "thought": "先确认规模，再定位增长因素。",
+                    "is_research_completed": False,
+                    "steps": [
+                        {
+                            "id": "step-1",
+                            "type": "info_collecting",
+                            "title": "收集市场规模数据",
+                            "description": "查找近三年的市场规模和增速。",
+                        },
+                        {
+                            "id": "step-2",
+                            "type": "info_collecting",
+                            "title": "识别增长驱动因素",
+                            "description": "汇总政策、需求和技术变化。",
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    assert reasoning[-1]["content"] == (
+        "#### 调研计划：梳理市场现状\n\n"
+        "调研思路：先确认规模，再定位增长因素。\n\n"
+        "状态：继续调研\n\n"
+        "1. **收集市场规模数据**\n"
+        "   查找近三年的市场规模和增速。\n"
+        "2. **识别增长驱动因素**\n"
+        "   汇总政策、需求和技术变化。"
+    )
+
+
+def test_retrieved_source_json_is_rendered_as_markdown_link():
+    frames = route_chunk(
+        {
+            "agent": "collector_info_retrieval",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "summary_response",
+            "content": json.dumps(
+                {
+                    "title": "2026 市场研究[摘要]",
+                    "url": "https://example.com/report",
+                    "query": "2026 市场规模 增长率",
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    assert reasoning[-1]["content"] == (
+        "发现资料：[2026 市场研究\\[摘要\\]](<https://example.com/report>)\n\n"
+        "检索词：2026 市场规模 增长率"
+    )
+
+
+def test_retrieved_source_does_not_link_non_http_url():
+    frames = route_chunk(
+        {
+            "agent": "collector_info_retrieval",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "summary_response",
+            "content": json.dumps(
+                {
+                    "title": "外部来源",
+                    "url": "javascript:alert(1)",
+                    "query": "市场规模",
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    assert reasoning[-1]["content"] == (
+        "发现资料：外部来源\n\n"
+        "链接：javascript\\:alert\\(1\\)\n\n"
+        "检索词：市场规模"
+    )
+    assert "](" not in reasoning[-1]["content"]
+
+
+def test_unknown_json_and_plain_text_keep_original_content():
+    state = RouterState()
+    unknown = route_chunk(
+        {
+            "agent": "collector_supervisor",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "message",
+            "content": '{"custom":"value"}',
+        },
+        state,
+    )
+    plain = route_chunk(
+        {
+            "agent": "collector_summary",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "summary_response",
+            "content": "资料已经覆盖市场规模和增速。",
+        },
+        state,
+    )
+
+    unknown_reasoning = [frame for frame in unknown if frame["event_type"] == "chat.reasoning"]
+    plain_reasoning = [frame for frame in plain if frame["event_type"] == "chat.reasoning"]
+    assert unknown_reasoning[-1]["content"] == '{"custom":"value"}'
+    assert plain_reasoning[-1]["content"] == "资料已经覆盖市场规模和增速。"
+
+
+def test_target_nodes_keep_incomplete_json_unchanged():
+    cases = [
+        ("outline", '{"title":"not-an-outline","custom":"value"}'),
+        ("plan_reasoning", '{"title":"not-a-plan","custom":"value"}'),
+        ("collector_info_retrieval", '{"title":"not-a-source","custom":"value"}'),
+    ]
+
+    for agent, raw_content in cases:
+        frames = route_chunk(
+            {
+                "agent": agent,
+                "section_idx": "1",
+                "section_title": "市场现状",
+                "event": "message",
+                "content": raw_content,
+            },
+            RouterState(),
+        )
+
+        reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+        assert reasoning[-1]["content"] == raw_content
+
+
+def test_outline_display_fields_cannot_create_links_or_raw_html():
+    frames = route_chunk(
+        {
+            "agent": "outline",
+            "event": "message",
+            "content": json.dumps(
+                {
+                    "title": '[mail](mailto:test@example.com)<a href="https://evil.example">x</a>',
+                    "thought": "[internal](/models)",
+                    "sections": [
+                        {
+                            "title": "[section](https://evil.example)",
+                            "description": '<a href="https://evil.example">危险</a>',
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    content = reasoning[-1]["content"]
+    assert "](" not in content
+    assert r"\[mail\]\(mailto" in content
+    assert r"\<a href" in content
+
+
+def test_retrieved_source_allows_only_constructed_http_link():
+    frames = route_chunk(
+        {
+            "agent": "collector_info_retrieval",
+            "section_idx": "1",
+            "section_title": "市场现状",
+            "event": "summary_response",
+            "content": json.dumps(
+                {
+                    "title": "[mail](mailto:test@example.com)",
+                    "url": "https://example.com/report",
+                    "query": '[internal](/models)<a href="https://evil.example">x</a>',
+                },
+                ensure_ascii=False,
+            ),
+        },
+        RouterState(),
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    content = reasoning[-1]["content"]
+    assert content.count("](") == 1
+    assert r"\[mail\]\(mailto" in content
+    assert r"\[internal\]\(\/models\)" in content
+    assert r"\<a href" in content
