@@ -1,20 +1,66 @@
 import asyncio
 import json
 import logging
+import os
+import re
+import time
+import textwrap
 import weakref
+from pathlib import Path
 
 import pytest
+from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
+from openjiuwen.core.single_agent import AgentCard
 from websockets.exceptions import ConnectionClosedError
 
 from jiuwenswarm.common.e2a.gateway_normalize import (
     build_fallback_e2a,
     e2a_from_agent_fields,
 )
+from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
 from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+from jiuwenswarm.integrations.ai4research_subscription.codex_process import (
+    CodexProcessRunner,
+)
+from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+    CLAUDE_MODEL_ALIAS,
+    CLAUDE_PROVIDER_NAME,
+)
+from jiuwenswarm.integrations.ai4research_subscription.claude_model_client import (
+    ClaudeSubscriptionModelClient,
+)
+from jiuwenswarm.integrations.ai4research_subscription.claude_process import (
+    ClaudeProcessRunner,
+)
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
+)
+from jiuwenswarm.integrations.ai4research_subscription.errors import (
+    CodexProviderError,
+)
+from jiuwenswarm.integrations.ai4research_subscription.model_client import (
+    CodexSubscriptionModelClient,
+)
+from jiuwenswarm.integrations.ai4research_subscription.locking import (
+    acquire_profile_lock,
+    release_profile_lock,
+)
+from jiuwenswarm.integrations.ai4research_subscription.profiles import (
+    ensure_codex_profile,
+)
+from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
+from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+from tests.unit_tests.codex_lifecycle_test_support import (
+    assert_zombie_only_quarantine,
+    discard_zombie_only_test_quarantine,
+)
 
 
 class FakeWebSocket:
@@ -81,6 +127,1130 @@ class _NoCreateCleanupAgentManager:
     async def cleanup_session_runtime(self, *, channel_id: str, session_id: str) -> bool:
         self.cleaned.append((channel_id, session_id))
         return False
+
+
+async def _clear_non_team_react_agent_session(
+    deep_agent,
+    session_id: str,
+) -> None:
+    """Bound the real non-team cleanup path used by ``ReactAgent.clear_session``.
+
+    The merged OpenJiuwen ``Runner.release`` first restores a prospective team
+    session before deciding whether to use its non-team fallback.  These tests
+    construct direct ReAct agents and therefore cannot own team runtime state.
+    Exercise that fallback against the checkpointer captured by the real test
+    session.  The process-wide default can rotate to persistence during the
+    request, but this session was created on the in-memory checkpointer.  This
+    keeps teardown scoped to the state it actually owns, clears the real context
+    cache, and avoids an irrelevant team-checkpoint restore.
+    """
+
+    react_agent = deep_agent.react_agent
+    session = deep_agent._interaction_session
+    assert session is not None
+    assert session.get_session_id() == session_id
+    checkpointer = session._inner.checkpointer()
+
+    async def clear() -> None:
+        await checkpointer.release(session_id)
+        await react_agent.context_engine.clear_context(session_id=session_id)
+
+    await asyncio.wait_for(clear(), timeout=5)
+    assert not await asyncio.wait_for(
+        checkpointer.session_exists(session_id),
+        timeout=5,
+    )
+    assert all(
+        context.session_id() != session_id
+        for context in react_agent.context_engine._context_pool.values()
+    )
+
+
+def _isolate_non_team_test_checkpointer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give one heavyweight test a real, fresh session checkpointer.
+
+    The production request may replace the process-wide default with SQLite.
+    Restore both globals through ``monkeypatch`` after the test so collection
+    order cannot make the next direct-agent session inherit that backend.
+    """
+
+    monkeypatch.setattr(
+        CheckpointerFactory,
+        "_default_checkpointer",
+        InMemoryCheckpointer(),
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "_PERSISTENT_CHECKPOINTER_READY",
+        False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_terminal_waits_for_exact_outer_stream_cleanup() -> None:
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    server._agent_manager = _CleanupRecordingAgentManager()
+    ws = FakeWebSocket()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def stream_owner() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            raise
+
+    stream_task = asyncio.create_task(stream_owner())
+    await asyncio.sleep(0)
+    stream_task.cancel()
+    await cleanup_started.wait()
+    request = e2a_from_agent_fields(
+        request_id="cancel-after-cleanup",
+        channel_id="tui",
+        session_id="sess",
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "mode": "agent.fast"},
+        is_stream=False,
+        timestamp=0.0,
+    )
+    handle = asyncio.create_task(
+        server._handle_cancel(
+            ws,
+            e2a_to_agent_request(request),
+            asyncio.Lock(),
+            stream_tasks=[stream_task],
+            deadline=time.monotonic() + 2,
+        )
+    )
+    await asyncio.sleep(0)
+    assert ws.sent == []
+    assert not handle.done()
+
+    allow_cleanup.set()
+    await handle
+    assert len(ws.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_cleanup_deadline_emits_typed_false_terminal() -> None:
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    server._agent_manager = _CleanupRecordingAgentManager()
+    ws = FakeWebSocket()
+    release = asyncio.Event()
+
+    async def stream_owner() -> None:
+        await release.wait()
+
+    stream_task = asyncio.create_task(stream_owner())
+    request = e2a_from_agent_fields(
+        request_id="cancel-timeout",
+        channel_id="tui",
+        session_id="sess",
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "mode": "agent.fast"},
+        is_stream=False,
+        timestamp=0.0,
+    )
+    await server._handle_cancel(
+        ws,
+        e2a_to_agent_request(request),
+        asyncio.Lock(),
+        stream_tasks=[stream_task],
+        deadline=time.monotonic() - 1,
+    )
+    assert len(ws.sent) == 1
+    encoded = json.dumps(ws.sent[0])
+    assert "cancel_cleanup_timeout" in encoded
+    assert '"success": false' in encoded
+
+    release.set()
+    await stream_task
+
+
+@pytest.mark.asyncio
+async def test_cancel_deadline_does_not_cancel_stalled_adapter_cleanup() -> None:
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    cancellation_count = 0
+
+    class StalledCleanupAgent:
+        async def process_message(self, request):
+            nonlocal cancellation_count
+            cleanup_started.set()
+            try:
+                await cleanup_release.wait()
+            except asyncio.CancelledError:
+                cancellation_count += 1
+                raise
+            finally:
+                cleanup_finished.set()
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"event_type": "chat.interrupt_result", "success": True},
+            )
+
+    class Manager:
+        def get_agent_nowait(self, *_args, **_kwargs):
+            return StalledCleanupAgent()
+
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    server._agent_manager = Manager()
+    server._session_stream_tasks = {}
+    server._cancel_cleanup_tasks = set()
+    ws = FakeWebSocket()
+    request = e2a_from_agent_fields(
+        request_id="cancel-stalled-adapter",
+        channel_id="tui",
+        session_id="sess",
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "mode": "agent.fast"},
+        is_stream=False,
+        timestamp=0.0,
+    )
+
+    await server._handle_cancel(
+        ws,
+        e2a_to_agent_request(request),
+        asyncio.Lock(),
+        deadline=time.monotonic() + 0.02,
+    )
+
+    assert cleanup_started.is_set()
+    assert len(server._cancel_cleanup_tasks) == 1
+    assert cancellation_count == 0
+    assert len(ws.sent) == 1
+    encoded = json.dumps(ws.sent[0])
+    assert "cancel_cleanup_timeout" in encoded
+    assert '"success": false' in encoded
+
+    cleanup_release.set()
+    await asyncio.wait_for(cleanup_finished.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert cancellation_count == 0
+    assert server._cancel_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group test")
+async def test_cancel_barrier_crosses_real_production_stream_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancel one real provider group through every production stream owner.
+
+    The synchronized snapshot proves that the active model-call task, the
+    JiuWenSwarm facade queue producer, and the AgentServer stream/send owner are
+    three distinct pending tasks.  The interrupt is sent through AgentServer,
+    not directly to the owner.  Its wire terminal is accepted only after the
+    real leader and child are gone and DeepAdapter has released its turn owner.
+    """
+    _isolate_non_team_test_checkpointer(monkeypatch)
+    workspace = tmp_path / "instance"
+    workspace.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "jiuwenswarm.integrations.ai4research_subscription.profiles.get_user_workspace_dir",
+        lambda: workspace,
+    )
+    profile = ensure_codex_profile()
+    auth_path = profile.root / "auth.json"
+    auth_path.write_text("not-a-real-token", encoding="utf-8")
+    auth_path.chmod(0o600)
+    binary = tmp_path / "codex"
+    binary.write_text(
+        textwrap.dedent(
+            r'''#!/usr/bin/env python3
+import json, os, pathlib, subprocess, sys, time
+if "--version" in sys.argv:
+ print("codex-cli 0.144.5"); raise SystemExit(0)
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+pathlib.Path(__file__).with_name("barrier-pids.json").write_text(
+ json.dumps({"pids":[os.getpid(), child.pid], "pgids":[os.getpgid(0), os.getpgid(child.pid)]})
+)
+time.sleep(60)
+'''
+        ),
+        encoding="utf-8",
+    )
+    binary.chmod(0o700)
+    runner = CodexProcessRunner(binary_path=binary)
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_id="production-chain-cancel",
+            client_provider=CODEX_PROVIDER_NAME,
+            api_key="",
+            api_base="",
+            timeout=30,
+            max_retries=0,
+        ),
+        model_config=ModelRequestConfig(
+            model_name=CODEX_MODEL_ALIAS,
+            temperature=0,
+        ),
+    )
+    assert isinstance(model._client, CodexSubscriptionModelClient)
+    model._client._runner = runner
+    deep_agent = interface_deep_module.create_deep_agent(
+        model=model,
+        card=AgentCard(id="production-chain-cancel", name="production-chain-cancel"),
+        tools=[],
+        rails=[],
+        max_iterations=3,
+        parallel_tool_calls=False,
+        enable_llm_retry_rail=False,
+        enable_read_image_multimodal=False,
+        enable_task_loop=False,
+        add_general_purpose_agent=False,
+        auto_create_workspace=False,
+    )
+    await deep_agent.ensure_initialized()
+
+    adapter = interface_deep_module.JiuWenSwarmDeepAdapter()
+    adapter._instance = deep_agent
+    adapter._is_session_scoped_adapter = True
+    adapter._model = model
+    adapter._model_request_config = model.model_config
+    adapter._model_client_config = model.model_client_config
+    adapter._model_cache = {CODEX_MODEL_ALIAS: model}
+    adapter._model_canonical_key_by_object_id = {id(model): CODEX_MODEL_ALIAS}
+    adapter._config_cache = {}
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _name: True)
+    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: model)
+
+    async def no_slash(*_args, **_kwargs):
+        return None
+
+    async def no_async_side_effect(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(adapter, "_handle_slash_command", no_slash)
+    monkeypatch.setattr(adapter, "_update_runtime_config", no_async_side_effect)
+    monkeypatch.setattr(adapter, "_sync_prompt_attachments_for_request", no_async_side_effect)
+    await adapter.start_interaction("sess")
+
+    facade = JiuWenSwarm()
+    facade._adapter = adapter
+    facade._sdk_name = "deep"
+    monkeypatch.setattr(
+        facade,
+        "_build_inputs",
+        lambda _request: (
+            {"query": "cancel", "conversation_id": "sess"},
+            "local",
+            "cancel",
+        ),
+    )
+    monkeypatch.setattr(facade, "_cancel_team_work_for_session", no_async_side_effect)
+
+    class Manager:
+        def get_agent_nowait(self, *_args, **_kwargs):
+            return facade
+
+        async def get_agent(self, **_kwargs):
+            return facade
+
+    class ProductionChainServer(_AgentWsTestHarness):
+        async def _trigger_before_chat_request_hook(self, _request):
+            return None
+
+        async def _prepare_code_mode_chat_turn(
+            self, _request, _channel_id, *, sync_metadata: bool = True
+        ):
+            assert sync_metadata is True
+            return "agent", "fast", facade
+
+        async def _ensure_code_mode_state(self, *_args, **_kwargs):
+            return False
+
+        async def _check_post_process_plan_exit(self, *_args, **_kwargs):
+            return None
+
+    pid_path = tmp_path / "barrier-pids.json"
+    terminal_snapshots: list[dict[str, object]] = []
+
+    class CleanupAwareWebSocket(FakeWebSocket):
+        async def send(self, payload):
+            decoded = json.loads(payload)
+            encoded = json.dumps(decoded)
+            if "chat.interrupt_result" in encoded:
+                evidence = json.loads(pid_path.read_text(encoding="utf-8"))
+                terminal_snapshots.append(
+                    {
+                        "pids_absent": all(
+                            not Path(f"/proc/{pid}").exists()
+                            for pid in evidence["pids"]
+                        ),
+                        "owners_empty": adapter._codex_turn_owners == {},
+                        "turns_empty": list(profile.turns_dir.iterdir()) == [],
+                    }
+                )
+            self.sent.append(decoded)
+
+    server = ProductionChainServer.__new__(ProductionChainServer)
+    server._agent_manager = Manager()
+    server._session_stream_tasks = {}
+    server._cancel_cleanup_tasks = set()
+    ws = CleanupAwareWebSocket()
+    send_lock = asyncio.Lock()
+    chat = e2a_from_agent_fields(
+        request_id="original-request",
+        channel_id="tui",
+        session_id="sess",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "query": "cancel",
+            "mode": "agent.fast",
+            "model_name": CODEX_MODEL_ALIAS,
+        },
+        is_stream=True,
+        timestamp=0.0,
+    )
+    tasks_before_stream = asyncio.all_tasks()
+    server_stream_task = asyncio.create_task(
+        server.handle_message_for_test(
+            ws,
+            json.dumps(chat.to_dict(), ensure_ascii=False),
+            send_lock,
+        )
+    )
+
+    pid_path = tmp_path / "barrier-pids.json"
+    for _ in range(200):
+        if pid_path.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert pid_path.exists()
+    provider_asend_tasks = [
+        task
+        for task in asyncio.all_tasks() - tasks_before_stream
+        if not task.done()
+        and type(task.get_coro()).__name__ == "async_generator_asend"
+    ]
+    assert len(provider_asend_tasks) == 1
+    provider_asend_task = provider_asend_tasks[0]
+    owner = adapter._codex_turn_owners["sess"]
+    model_call_task = owner._model_call_task
+    facade_tasks = [
+        task
+        for task in asyncio.all_tasks()
+        if not task.done()
+        and "JiuWenSwarm.process_message_stream.<locals>.run_stream_task"
+        in getattr(task.get_coro(), "__qualname__", "")
+    ]
+    assert len(facade_tasks) == 1
+    facade_queue_task = facade_tasks[0]
+    assert model_call_task is not None and not model_call_task.done()
+    assert not facade_queue_task.done()
+    assert server_stream_task in server._session_stream_tasks["sess"]
+    assert len({model_call_task, facade_queue_task, server_stream_task}) == 3
+
+    cancel = e2a_from_agent_fields(
+        request_id="cancel-request",
+        channel_id="tui",
+        session_id="sess",
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "mode": "agent.fast"},
+        is_stream=False,
+        timestamp=0.0,
+    )
+    await server.handle_message_for_test(
+        ws,
+        json.dumps(cancel.to_dict(), ensure_ascii=False),
+        send_lock,
+    )
+    await asyncio.wait_for(server_stream_task, timeout=5)
+    done, _pending = await asyncio.wait({provider_asend_task}, timeout=5)
+    assert done == {provider_asend_task}
+    provider_failure: CodexProviderError | None = None
+    provider_cancelled = False
+    try:
+        provider_asend_task.result()
+    except asyncio.CancelledError:
+        provider_cancelled = True
+    except CodexProviderError as exc:
+        provider_failure = exc
+
+    evidence = json.loads(pid_path.read_text(encoding="utf-8"))
+    assert len(set(evidence["pgids"])) == 1
+    assert adapter._codex_turn_owners == {}
+    if profile.quarantine_path.exists():
+        try:
+            assert_zombie_only_quarantine(
+                profile,
+                pgid=evidence["pgids"][0],
+                expected_pids=evidence["pids"],
+            )
+        finally:
+            discard_zombie_only_test_quarantine(profile)
+        assert len(terminal_snapshots) == 1
+        assert terminal_snapshots[0]["owners_empty"] is True
+        assert any(
+            item.get("event") == "profile_quarantined"
+            and item.get("quarantined") is True
+            for item in runner.lifecycle_evidence
+        )
+        assert provider_failure is not None
+        assert provider_failure.code == "provider_quarantined"
+        assert provider_cancelled is False
+    else:
+        for _ in range(100):
+            if all(not Path(f"/proc/{pid}").exists() for pid in evidence["pids"]):
+                break
+            await asyncio.sleep(0.01)
+        assert all(not Path(f"/proc/{pid}").exists() for pid in evidence["pids"])
+        assert list(profile.turns_dir.iterdir()) == []
+        lock_handle = acquire_profile_lock(profile)
+        release_profile_lock(lock_handle)
+        assert terminal_snapshots == [
+            {"pids_absent": True, "owners_empty": True, "turns_empty": True}
+        ]
+        assert any(
+            item.get("event") == "cleanup_finished" and item.get("cleanup_complete")
+            for item in runner.lifecycle_evidence
+        )
+        assert provider_failure is None
+    interrupt_frames = [
+        frame for frame in ws.sent if "chat.interrupt_result" in json.dumps(frame)
+    ]
+    assert len(interrupt_frames) == 1
+    encoded = json.dumps(interrupt_frames[0])
+    assert '"success": true' in encoded
+
+    processors = list(facade._session_manager._session_processors.values())
+    for processor in processors:
+        processor.cancel()
+    await asyncio.gather(*processors, return_exceptions=True)
+    await adapter.stop_interaction()
+    await _clear_non_team_react_agent_session(deep_agent, "sess")
+
+
+@pytest.mark.asyncio
+async def test_same_session_history_reaches_codex_prompt_through_real_ws_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two completed chat turns in one session must serialize turn-1 facts
+    into turn-2's provider prompt through the real AgentServer stream chain.
+
+    This is the live-path continuity seam the direct-Runner tests cannot see:
+    AgentWebSocketServer -> facade/session queue -> DeepAdapter -> real
+    DeepAgent/Runner -> call-bound model -> CodexSubscriptionModelClient ->
+    real CodexProcessRunner child, capturing the exact stdin prompt.
+    """
+    _isolate_non_team_test_checkpointer(monkeypatch)
+    workspace = tmp_path / "instance"
+    workspace.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "jiuwenswarm.integrations.ai4research_subscription.profiles.get_user_workspace_dir",
+        lambda: workspace,
+    )
+    profile = ensure_codex_profile()
+    auth_path = profile.root / "auth.json"
+    auth_path.write_text("not-a-real-token", encoding="utf-8")
+    auth_path.chmod(0o600)
+    binary = tmp_path / "codex"
+    binary.write_text(
+        textwrap.dedent(
+            r'''#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+if "--version" in sys.argv:
+ print("codex-cli 0.144.5"); raise SystemExit(0)
+prompt = sys.stdin.read()
+pathlib.Path(__file__).with_name(f"prompt-capture-{time.time_ns()}.txt").write_text(
+ prompt, encoding="utf-8")
+final = {"content": "Context stored.", "reasoning_content": "",
+ "tool_calls": [], "finish_reason": "stop"}
+for event in (
+ {"type": "thread.started", "thread_id": "diag"},
+ {"type": "turn.started"},
+ {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(final)}},
+ {"type": "turn.completed", "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}},
+):
+ print(json.dumps(event))
+'''
+        ),
+        encoding="utf-8",
+    )
+    binary.chmod(0o700)
+    runner = CodexProcessRunner(binary_path=binary)
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_id="history-continuity-probe",
+            client_provider=CODEX_PROVIDER_NAME,
+            api_key="",
+            api_base="",
+            timeout=30,
+            max_retries=0,
+        ),
+        model_config=ModelRequestConfig(
+            model_name=CODEX_MODEL_ALIAS,
+            temperature=0,
+        ),
+    )
+    assert isinstance(model._client, CodexSubscriptionModelClient)
+    model._client._runner = runner
+    deep_agent = interface_deep_module.create_deep_agent(
+        model=model,
+        card=AgentCard(id="history-continuity-probe", name="history-continuity-probe"),
+        tools=[],
+        rails=[],
+        max_iterations=3,
+        parallel_tool_calls=False,
+        enable_llm_retry_rail=False,
+        enable_read_image_multimodal=False,
+        enable_task_loop=False,
+        add_general_purpose_agent=False,
+        auto_create_workspace=False,
+    )
+    await deep_agent.ensure_initialized()
+
+    adapter = interface_deep_module.JiuWenSwarmDeepAdapter()
+    adapter._instance = deep_agent
+    adapter._is_session_scoped_adapter = True
+    adapter._model = model
+    adapter._model_request_config = model.model_config
+    adapter._model_client_config = model.model_client_config
+    adapter._model_cache = {CODEX_MODEL_ALIAS: model}
+    adapter._model_canonical_key_by_object_id = {id(model): CODEX_MODEL_ALIAS}
+    adapter._config_cache = {}
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _name: True)
+    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: model)
+
+    async def no_slash(*_args, **_kwargs):
+        return None
+
+    async def no_async_side_effect(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(adapter, "_handle_slash_command", no_slash)
+    monkeypatch.setattr(adapter, "_update_runtime_config", no_async_side_effect)
+    monkeypatch.setattr(
+        adapter, "_sync_prompt_attachments_for_request", no_async_side_effect
+    )
+    await adapter.start_interaction("history-sess")
+
+    facade = JiuWenSwarm()
+    facade._adapter = adapter
+    facade._sdk_name = "deep"
+
+    def build_inputs(request):
+        query = request.params.get("query")
+        return ({"query": query, "conversation_id": "history-sess"}, "local", query)
+
+    monkeypatch.setattr(facade, "_build_inputs", build_inputs)
+    monkeypatch.setattr(facade, "_cancel_team_work_for_session", no_async_side_effect)
+
+    class Manager:
+        def get_agent_nowait(self, *_args, **_kwargs):
+            return facade
+
+        async def get_agent(self, **_kwargs):
+            return facade
+
+    class ProductionChainServer(_AgentWsTestHarness):
+        async def _trigger_before_chat_request_hook(self, _request):
+            return None
+
+        async def _prepare_code_mode_chat_turn(
+            self, _request, _channel_id, *, sync_metadata: bool = True
+        ):
+            assert sync_metadata is True
+            return "agent", "fast", facade
+
+        async def _ensure_code_mode_state(self, *_args, **_kwargs):
+            return False
+
+        async def _check_post_process_plan_exit(self, *_args, **_kwargs):
+            return None
+
+    server = ProductionChainServer.__new__(ProductionChainServer)
+    server._agent_manager = Manager()
+    server._session_stream_tasks = {}
+    server._cancel_cleanup_tasks = set()
+    ws = FakeWebSocket()
+    send_lock = asyncio.Lock()
+
+    fact_query = (
+        "For this conversation, the fictional project is Atlas, its launch day is "
+        "Tuesday, and I prefer concise bullet points. Confirm with ATLAS_CONTEXT_STORED."
+    )
+    recall_query = (
+        "Without asking me to repeat the setup, state the launch day I gave you and "
+        "end with RECALL_CHECK_OK."
+    )
+    try:
+        for index, query in enumerate((fact_query, recall_query), start=1):
+            chat = e2a_from_agent_fields(
+                request_id=f"history-turn-{index}",
+                channel_id="tui",
+                session_id="history-sess",
+                req_method=ReqMethod.CHAT_SEND,
+                params={
+                    "query": query,
+                    "mode": "agent.fast",
+                    "model_name": CODEX_MODEL_ALIAS,
+                },
+                is_stream=True,
+                timestamp=0.0,
+            )
+            await asyncio.wait_for(
+                server.handle_message_for_test(
+                    ws,
+                    json.dumps(chat.to_dict(), ensure_ascii=False),
+                    send_lock,
+                ),
+                timeout=30,
+            )
+    finally:
+        processors = list(facade._session_manager._session_processors.values())
+        for processor in processors:
+            processor.cancel()
+        await asyncio.gather(*processors, return_exceptions=True)
+        await adapter.stop_interaction()
+        await _clear_non_team_react_agent_session(deep_agent, "history-sess")
+
+    captures = sorted(tmp_path.glob("prompt-capture-*.txt"))
+    assert len(captures) == 2, f"expected 2 provider prompts, saw {len(captures)}"
+    header_pattern = re.compile(
+        r"<<<JIUWEN_MSG (\d+)/(\d+) role=(system|developer|user|assistant|tool)>>>"
+    )
+
+    def parse(prompt: str) -> list[dict]:
+        lines = prompt.split("\n")
+        parsed = []
+        for position, line in enumerate(lines):
+            header = header_pattern.fullmatch(line)
+            if header is not None:
+                parsed.append(
+                    {
+                        "role": header.group(3),
+                        "content": json.loads(lines[position + 1]),
+                    }
+                )
+        return parsed
+
+    first_turn = parse(captures[0].read_text(encoding="utf-8"))
+    second_turn = parse(captures[1].read_text(encoding="utf-8"))
+    first_roles = [message["role"] for message in first_turn]
+    second_roles = [message["role"] for message in second_turn]
+
+    assert any(
+        fact_query in message["content"]
+        for message in first_turn
+        if message["role"] == "user"
+    ), f"turn-1 prompt lost the user fact; roles={first_roles}"
+    second_contents = " || ".join(
+        f"{message['role']}:{message['content'][:120]}" for message in second_turn
+    )
+    assert any(
+        fact_query in message["content"]
+        for message in second_turn
+        if message["role"] == "user"
+    ), (
+        "turn-2 prompt lost the turn-1 user fact; "
+        f"roles={second_roles}; messages={second_contents}"
+    )
+    assert any(
+        "Context stored." in message["content"]
+        for message in second_turn
+        if message["role"] == "assistant"
+    ), (
+        "turn-2 prompt lost the turn-1 assistant reply; "
+        f"roles={second_roles}; messages={second_contents}"
+    )
+    assert recall_query in second_turn[-1]["content"], (
+        "turn-2 prompt does not end with the current recall query; "
+        f"roles={second_roles}; messages={second_contents}"
+    )
+    assert second_roles.count("user") >= 2, (
+        f"turn-2 prompt did not accumulate history; roles={second_roles}; "
+        f"messages={second_contents}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_timeout_error_reaches_wire_with_typed_route_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The r12b live failure: OpenJiuwen converts the model-call timeout into a
+    stream error chunk, so the wire chat.error lost its typed code and
+    provider/consumer route receipts. The turn owner must restore them."""
+    _isolate_non_team_test_checkpointer(monkeypatch)
+    workspace = tmp_path / "instance"
+    workspace.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "jiuwenswarm.integrations.ai4research_subscription.profiles.get_user_workspace_dir",
+        lambda: workspace,
+    )
+    profile = ensure_codex_profile()
+    auth_path = profile.root / "auth.json"
+    auth_path.write_text("not-a-real-token", encoding="utf-8")
+    auth_path.chmod(0o600)
+    binary = tmp_path / "codex"
+    binary.write_text(
+        textwrap.dedent(
+            r'''#!/usr/bin/env python3
+import sys, time
+if "--version" in sys.argv:
+ print("codex-cli 0.144.5"); raise SystemExit(0)
+time.sleep(60)
+'''
+        ),
+        encoding="utf-8",
+    )
+    binary.chmod(0o700)
+    runner = CodexProcessRunner(binary_path=binary)
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_id="timeout-receipt-probe",
+            client_provider=CODEX_PROVIDER_NAME,
+            api_key="",
+            api_base="",
+            timeout=1,
+            max_retries=0,
+        ),
+        model_config=ModelRequestConfig(
+            model_name=CODEX_MODEL_ALIAS,
+            temperature=0,
+        ),
+    )
+    assert isinstance(model._client, CodexSubscriptionModelClient)
+    model._client._runner = runner
+    deep_agent = interface_deep_module.create_deep_agent(
+        model=model,
+        card=AgentCard(id="timeout-receipt-probe", name="timeout-receipt-probe"),
+        tools=[],
+        rails=[],
+        max_iterations=3,
+        parallel_tool_calls=False,
+        enable_llm_retry_rail=False,
+        enable_read_image_multimodal=False,
+        enable_task_loop=False,
+        add_general_purpose_agent=False,
+        auto_create_workspace=False,
+    )
+    await deep_agent.ensure_initialized()
+
+    adapter = interface_deep_module.JiuWenSwarmDeepAdapter()
+    adapter._instance = deep_agent
+    adapter._is_session_scoped_adapter = True
+    adapter._model = model
+    adapter._model_request_config = model.model_config
+    adapter._model_client_config = model.model_client_config
+    adapter._model_cache = {CODEX_MODEL_ALIAS: model}
+    adapter._model_canonical_key_by_object_id = {id(model): CODEX_MODEL_ALIAS}
+    adapter._config_cache = {}
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _name: True)
+    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: model)
+
+    async def no_slash(*_args, **_kwargs):
+        return None
+
+    async def no_async_side_effect(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(adapter, "_handle_slash_command", no_slash)
+    monkeypatch.setattr(adapter, "_update_runtime_config", no_async_side_effect)
+    monkeypatch.setattr(
+        adapter, "_sync_prompt_attachments_for_request", no_async_side_effect
+    )
+    await adapter.start_interaction("timeout-sess")
+
+    facade = JiuWenSwarm()
+    facade._adapter = adapter
+    facade._sdk_name = "deep"
+
+    def build_inputs(request):
+        query = request.params.get("query")
+        return ({"query": query, "conversation_id": "timeout-sess"}, "local", query)
+
+    monkeypatch.setattr(facade, "_build_inputs", build_inputs)
+    monkeypatch.setattr(facade, "_cancel_team_work_for_session", no_async_side_effect)
+
+    class Manager:
+        def get_agent_nowait(self, *_args, **_kwargs):
+            return facade
+
+        async def get_agent(self, **_kwargs):
+            return facade
+
+    class ProductionChainServer(_AgentWsTestHarness):
+        async def _trigger_before_chat_request_hook(self, _request):
+            return None
+
+        async def _prepare_code_mode_chat_turn(
+            self, _request, _channel_id, *, sync_metadata: bool = True
+        ):
+            assert sync_metadata is True
+            return "agent", "fast", facade
+
+        async def _ensure_code_mode_state(self, *_args, **_kwargs):
+            return False
+
+        async def _check_post_process_plan_exit(self, *_args, **_kwargs):
+            return None
+
+    server = ProductionChainServer.__new__(ProductionChainServer)
+    server._agent_manager = Manager()
+    server._session_stream_tasks = {}
+    server._cancel_cleanup_tasks = set()
+    ws = FakeWebSocket()
+    chat = e2a_from_agent_fields(
+        request_id="timeout-turn-1",
+        channel_id="tui",
+        session_id="timeout-sess",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "query": "Produce a long answer.",
+            "mode": "agent.fast",
+            "model_name": CODEX_MODEL_ALIAS,
+        },
+        is_stream=True,
+        timestamp=0.0,
+    )
+    try:
+        await asyncio.wait_for(
+            server.handle_message_for_test(
+                ws,
+                json.dumps(chat.to_dict(), ensure_ascii=False),
+                send_lock=asyncio.Lock(),
+            ),
+            timeout=30,
+        )
+    finally:
+        processors = list(facade._session_manager._session_processors.values())
+        for processor in processors:
+            processor.cancel()
+        await asyncio.gather(*processors, return_exceptions=True)
+        await adapter.stop_interaction()
+        await _clear_non_team_react_agent_session(deep_agent, "timeout-sess")
+
+    encoded_frames = [json.dumps(frame) for frame in ws.sent]
+    error_frames = [
+        frame
+        for frame in ws.sent
+        if json.dumps(frame).find('"chat.error"') != -1
+    ]
+    assert error_frames, f"no chat.error frame on the wire: {encoded_frames}"
+    def _frame_payloads(frame: dict) -> list[dict]:
+        found = []
+        for candidate in (
+            frame.get("payload"),
+            (frame.get("body") or {}).get("delta")
+            if isinstance(frame.get("body"), dict)
+            else None,
+        ):
+            if isinstance(candidate, dict):
+                found.append(candidate)
+        return found
+
+    error_payloads = [
+        payload for frame in error_frames for payload in _frame_payloads(frame)
+    ]
+    typed = [
+        payload
+        for payload in error_payloads
+        if isinstance(payload, dict) and payload.get("code") == "timeout"
+    ]
+    assert typed, f"chat.error lacked typed timeout code: {error_payloads}"
+    assert typed[0].get("provider") == CODEX_PROVIDER_NAME
+    assert typed[0].get("consumer") == "direct_agent_fast"
+    assert not any('"chat.final"' in frame for frame in encoded_frames)
+    assert adapter._codex_turn_owners == {}
+
+
+@pytest.mark.asyncio
+async def test_claude_login_error_reaches_wire_with_typed_provider_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OpenJiuwen stringifies a model exception before yielding chat.error.
+
+    The request-local Claude model proxy must retain the original typed error so
+    the production AgentServer stream emits its stable code/provider receipt.
+    """
+    _isolate_non_team_test_checkpointer(monkeypatch)
+    workspace = tmp_path / "instance"
+    workspace.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "jiuwenswarm.integrations.ai4research_subscription.claude_process.get_user_workspace_dir",
+        lambda: workspace,
+    )
+    binary = tmp_path / "claude"
+    binary.write_text(
+        textwrap.dedent(
+            r'''#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if args == ["--version"]:
+ print("2.1.218 (Claude Code)"); raise SystemExit(0)
+if args == ["auth", "status", "--json"]:
+ print(json.dumps({"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"})); raise SystemExit(1)
+raise SystemExit(99)
+'''
+        ),
+        encoding="utf-8",
+    )
+    binary.chmod(0o700)
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_id="claude-login-receipt-probe",
+            client_provider=CLAUDE_PROVIDER_NAME,
+            api_key="",
+            api_base="",
+            timeout=5,
+            max_retries=0,
+        ),
+        model_config=ModelRequestConfig(
+            model_name=CLAUDE_MODEL_ALIAS,
+            temperature=0,
+        ),
+    )
+    assert isinstance(model._client, ClaudeSubscriptionModelClient)
+    model._client._runner = ClaudeProcessRunner(binary_path=binary)
+    deep_agent = interface_deep_module.create_deep_agent(
+        model=model,
+        card=AgentCard(
+            id="claude-login-receipt-probe",
+            name="claude-login-receipt-probe",
+        ),
+        tools=[],
+        rails=[],
+        max_iterations=3,
+        parallel_tool_calls=False,
+        enable_llm_retry_rail=False,
+        enable_read_image_multimodal=False,
+        enable_task_loop=False,
+        add_general_purpose_agent=False,
+        auto_create_workspace=False,
+    )
+    await deep_agent.ensure_initialized()
+
+    adapter = interface_deep_module.JiuWenSwarmDeepAdapter()
+    adapter._instance = deep_agent
+    adapter._is_session_scoped_adapter = True
+    adapter._model = model
+    adapter._model_request_config = model.model_config
+    adapter._model_client_config = model.model_client_config
+    adapter._model_cache = {CLAUDE_MODEL_ALIAS: model}
+    adapter._model_canonical_key_by_object_id = {id(model): CLAUDE_MODEL_ALIAS}
+    adapter._config_cache = {}
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _name: True)
+    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: model)
+
+    async def no_slash(*_args, **_kwargs):
+        return None
+
+    async def no_async_side_effect(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(adapter, "_handle_slash_command", no_slash)
+    monkeypatch.setattr(adapter, "_update_runtime_config", no_async_side_effect)
+    monkeypatch.setattr(
+        adapter, "_sync_prompt_attachments_for_request", no_async_side_effect
+    )
+    await adapter.start_interaction("claude-login-sess")
+
+    facade = JiuWenSwarm()
+    facade._adapter = adapter
+    facade._sdk_name = "deep"
+
+    def build_inputs(request):
+        query = request.params.get("query")
+        return (
+            {"query": query, "conversation_id": "claude-login-sess"},
+            "local",
+            query,
+        )
+
+    monkeypatch.setattr(facade, "_build_inputs", build_inputs)
+    monkeypatch.setattr(facade, "_cancel_team_work_for_session", no_async_side_effect)
+
+    class Manager:
+        def get_agent_nowait(self, *_args, **_kwargs):
+            return facade
+
+        async def get_agent(self, **_kwargs):
+            return facade
+
+    class ProductionChainServer(_AgentWsTestHarness):
+        async def _trigger_before_chat_request_hook(self, _request):
+            return None
+
+        async def _prepare_code_mode_chat_turn(
+            self, _request, _channel_id, *, sync_metadata: bool = True
+        ):
+            assert sync_metadata is True
+            return "agent", "fast", facade
+
+        async def _ensure_code_mode_state(self, *_args, **_kwargs):
+            return False
+
+        async def _check_post_process_plan_exit(self, *_args, **_kwargs):
+            return None
+
+    server = ProductionChainServer.__new__(ProductionChainServer)
+    server._agent_manager = Manager()
+    server._session_stream_tasks = {}
+    server._cancel_cleanup_tasks = set()
+    ws = FakeWebSocket()
+    chat = e2a_from_agent_fields(
+        request_id="claude-login-turn-1",
+        channel_id="tui",
+        session_id="claude-login-sess",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "query": "This must fail before inference.",
+            "mode": "agent.fast",
+            "model_name": CLAUDE_MODEL_ALIAS,
+        },
+        is_stream=True,
+        timestamp=0.0,
+    )
+    try:
+        await asyncio.wait_for(
+            server.handle_message_for_test(
+                ws,
+                json.dumps(chat.to_dict(), ensure_ascii=False),
+                send_lock=asyncio.Lock(),
+            ),
+            timeout=30,
+        )
+    finally:
+        processors = list(facade._session_manager._session_processors.values())
+        for processor in processors:
+            processor.cancel()
+        await asyncio.gather(*processors, return_exceptions=True)
+        await adapter.stop_interaction()
+        await _clear_non_team_react_agent_session(deep_agent, "claude-login-sess")
+
+    encoded_frames = [json.dumps(frame) for frame in ws.sent]
+    error_payloads = [
+        candidate
+        for frame in ws.sent
+        if '"chat.error"' in json.dumps(frame)
+        for candidate in (
+            frame.get("payload"),
+            (frame.get("body") or {}).get("delta")
+            if isinstance(frame.get("body"), dict)
+            else None,
+        )
+        if isinstance(candidate, dict)
+    ]
+    typed = [
+        payload
+        for payload in error_payloads
+        if payload.get("code") == "auth_login_required"
+    ]
+    assert typed, f"chat.error lacked typed Claude login code: {error_payloads}"
+    assert typed[0].get("provider") == CLAUDE_PROVIDER_NAME
+    assert not any('"chat.final"' in frame for frame in encoded_frames)
+    assert not any('"chat.tool_' in frame for frame in encoded_frames)
 
 
 class _BlockingCleanupAgentManager(_CleanupRecordingAgentManager):
@@ -337,6 +1507,62 @@ async def test_disconnect_cancel_does_not_create_agent_when_runtime_missing() ->
 
     assert manager.cleaned == [("tui", "sess-no-agent")]
     assert len(ws.sent) == 1
+    assert parse_agent_server_wire_unary(ws.sent[0]).ok is True
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancel_runtime_cleanup_is_bounded_and_sends_one_terminal(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_CANCEL_CLEANUP_TIMEOUT_SECONDS",
+        0.02,
+    )
+    session_id = "sess-bounded-disconnect-cleanup"
+    env = e2a_from_agent_fields(
+        request_id="req-bounded-disconnect-cleanup",
+        channel_id="tui",
+        session_id=session_id,
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "session_id": session_id},
+        is_stream=False,
+        timestamp=0.0,
+    )
+    env.channel_context["_jiuwenswarm_cancel_source"] = "client_disconnect"
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    manager = _BlockingCleanupAgentManager()
+    server._agent_manager = manager
+    server._session_stream_tasks = {}
+    server._cancel_cleanup_tasks = set()
+    ws = FakeWebSocket()
+
+    await asyncio.wait_for(
+        server.handle_message_for_test(
+            ws,
+            json.dumps(env.to_dict(), ensure_ascii=False),
+            asyncio.Lock(),
+        ),
+        timeout=0.5,
+    )
+
+    assert manager.cleanup_started.is_set()
+    assert len(ws.sent) == 1
+    response = parse_agent_server_wire_unary(ws.sent[0])
+    assert response.ok is False
+    assert response.payload == {
+        "event_type": "chat.interrupt_result",
+        "success": False,
+        "error": "session runtime cleanup failed",
+    }
+    assert len(server._cancel_cleanup_tasks) == 1
+    cleanup_task = next(iter(server._cancel_cleanup_tasks))
+    assert cleanup_task.cancelled() is False
+
+    manager.allow_cleanup.set()
+    await asyncio.wait_for(cleanup_task, timeout=0.5)
+    await asyncio.sleep(0)
+    assert server._cancel_cleanup_tasks == set()
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
+from jiuwenswarm.common.e2a.constants import (
+    E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY,
+    E2A_INTERNAL_SOURCE_REQUEST_ID_KEY,
+    E2A_WIRE_SERVER_PUSH_KEY,
+)
 from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
     encode_agent_response_for_wire,
@@ -28,6 +32,28 @@ class FakeWebSocket:
 
     async def send(self, payload: str) -> None:
         self.sent.append(payload)
+
+
+def test_server_push_wire_attaches_trusted_actual_route_receipt() -> None:
+    receipt = {
+        "canonical_model_key": "codex-cli#0",
+        "provider": "AI4ResearchCodex",
+        "source_request_id": "origin-1",
+        "mode": "agent.fast",
+    }
+    wire = build_server_push_wire(
+        {
+            "request_id": "push-1",
+            "channel_id": "web",
+            "session_id": "session-push",
+            "payload": {"event_type": "chat.ask_user_question"},
+            "source_request_id": "origin-1",
+            "actual_model_route_receipt": receipt,
+        }
+    )
+
+    assert wire["metadata"][E2A_INTERNAL_SOURCE_REQUEST_ID_KEY] == "origin-1"
+    assert wire["metadata"][E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY] == receipt
 
 
 @pytest.mark.asyncio

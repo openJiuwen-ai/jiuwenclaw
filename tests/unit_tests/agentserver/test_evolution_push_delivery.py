@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from jiuwenswarm.common.model_route import ActualModelRouteReceipt
 from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
@@ -132,9 +133,16 @@ class _TestAdapter(JiuWenSwarmDeepAdapter):
         request_id: str,
         channel_id: str,
         session_id: str,
+        *,
+        actual_route_receipt: ActualModelRouteReceipt | None = None,
     ) -> None:
         watcher = getattr(self, "_watch_evolution_and_push")
-        await watcher(request_id, channel_id, session_id)
+        await watcher(
+            request_id,
+            channel_id,
+            session_id,
+            actual_route_receipt=actual_route_receipt,
+        )
 
 
 @pytest.mark.asyncio
@@ -180,11 +188,26 @@ async def test_normal_evolution_watcher_uses_delivery_context_metadata(monkeypat
         _fake_build_server_push_message,
     )
 
-    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-normal")
+    receipt = ActualModelRouteReceipt(
+        canonical_model_key="codex-cli#0",
+        provider="AI4ResearchCodex",
+        source_request_id="stream-rid",
+        mode="agent.fast",
+    )
+    await adapter.watch_evolution_and_push(
+        "stream-rid",
+        "web",
+        "sess-normal",
+        actual_route_receipt=receipt,
+    )
 
     assert recorded_calls
     assert all(call["session_id"] == "sess-normal" for call in recorded_calls)
     assert all(call["fallback_channel_id"] == "web" for call in recorded_calls)
+    assert all(
+        call["actual_model_route_receipt"] == receipt.to_dict()
+        for call in recorded_calls
+    )
     assert _FakeTransport.pushes
     assert all(
         push["metadata"] == {"route": "from-delivery-context"}

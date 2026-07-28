@@ -6,9 +6,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
-
-from jiuwenswarm.common.e2a.gateway_normalize import E2A_INTERNAL_CONTEXT_KEY
+from jiuwenswarm.common.e2a.constants import (
+    E2A_INTERNAL_EXPECTED_MODEL_ROUTE_KEY,
+)
+from jiuwenswarm.common.e2a.gateway_normalize import (
+    E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY,
+    E2A_BOUND_SUBSCRIPTION_ROUTE_KEY,
+    E2A_INTERNAL_CONTEXT_KEY,
+)
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -36,7 +41,17 @@ def e2a_to_agent_request(env: E2AEnvelope) -> AgentRequest:
     internal = ctx.pop(E2A_INTERNAL_CONTEXT_KEY, None)
     if isinstance(internal, dict) and internal.get("normalize_failed"):
         raise RuntimeError("e2a_to_agent_request called on fallback envelope; use legacy path")
+    subscription_continuation_bound = (
+        isinstance(internal, dict)
+        and internal.get(E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY) is True
+    )
 
+    if subscription_continuation_bound:
+        ctx[E2A_INTERNAL_EXPECTED_MODEL_ROUTE_KEY] = (
+            internal.get(E2A_BOUND_SUBSCRIPTION_ROUTE_KEY)
+            if isinstance(internal, dict)
+            else None
+        )
     metadata = ctx if ctx else None
     method_str = env.method
     req_method: ReqMethod | None = None
@@ -61,6 +76,7 @@ def e2a_to_agent_request(env: E2AEnvelope) -> AgentRequest:
         is_stream=bool(env.is_stream),
         timestamp=_e2a_timestamp_to_float(env.timestamp),
         metadata=metadata,
+        subscription_continuation_bound=subscription_continuation_bound,
         # V2: 透传 agent_ref 到 AgentServer，供响应侧 chunk/response 回带（设计 §6.3）。
         agent_ref=env.agent_ref,
     )

@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from jiuwenswarm.common.e2a.constants import E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
@@ -431,7 +432,19 @@ def _adapter_ready_for_followup_execution(monkeypatch: pytest.MonkeyPatch) -> Ji
     monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _model_name="": True)
     monkeypatch.setattr(adapter, "_bind_runtime_cron_context", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_reset_runtime_cron_context", lambda _tokens: None)
-    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: None)
+    fake_model = SimpleNamespace(
+        model_client_config=SimpleNamespace(client_provider="OpenAI"),
+        model_config=SimpleNamespace(model_name="test-model"),
+    )
+    adapter._model_cache = {"test-model#0": fake_model}  # pylint: disable=protected-access
+    adapter._model_canonical_key_by_object_id = {  # pylint: disable=protected-access
+        id(fake_model): "test-model#0"
+    }
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_model_for_request",
+        lambda _request: fake_model,
+    )
     monkeypatch.setattr(adapter, "_apply_model_to_react_agent", lambda _model: None)
     monkeypatch.setattr(adapter, "_mark_session_active", lambda _session_id: None)
     monkeypatch.setattr(adapter, "_register_session_agent_task", lambda _session_id: None)
@@ -510,6 +523,12 @@ async def test_agent_non_stream_slash_followup_continues_into_runner(monkeypatch
     ]
     assert response.ok is True
     assert response.payload == {"content": "agent completed"}
+    assert response.metadata[E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY] == {
+        "canonical_model_key": "test-model#0",
+        "provider": "OpenAI",
+        "source_request_id": "req-followup",
+        "mode": "agent.plan",
+    }
 
 
 @pytest.mark.anyio
@@ -559,9 +578,23 @@ async def test_team_stream_injects_image_tool_context_for_non_vision_model(monke
     adapter._instance = SimpleNamespace()  # pylint: disable=protected-access
     adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
     captured: dict[str, object] = {}
+    resolved_model = SimpleNamespace(
+        model_client_config=SimpleNamespace(client_provider="OpenAI"),
+        model_config=SimpleNamespace(model_name="test-model"),
+    )
+    adapter._model_cache = {  # pylint: disable=protected-access
+        "test-model#0": resolved_model
+    }
+    adapter._model_canonical_key_by_object_id = {  # pylint: disable=protected-access
+        id(resolved_model): "test-model#0"
+    }
 
     monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _model_name="": True)
-    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: object())
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_model_for_request",
+        lambda _request: resolved_model,
+    )
     monkeypatch.setattr(adapter, "_apply_model_to_react_agent", lambda _model: None)
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
     monkeypatch.setattr(adapter, "_native_image_input_enabled", lambda *_args: False)

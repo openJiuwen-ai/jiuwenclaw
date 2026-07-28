@@ -3,8 +3,14 @@
 import time
 
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
-from jiuwenswarm.common.e2a.constants import E2A_RESPONSE_KIND_PLAN_APPROVAL_REQUIRED
+from jiuwenswarm.common.e2a.constants import (
+    E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY,
+    E2A_INTERNAL_EXPECTED_MODEL_ROUTE_KEY,
+    E2A_RESPONSE_KIND_PLAN_APPROVAL_REQUIRED,
+)
 from jiuwenswarm.common.e2a.gateway_normalize import (
+    E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY,
+    E2A_BOUND_SUBSCRIPTION_ROUTE_KEY,
     E2A_FALLBACK_FAILED_KEY,
     E2A_INTERNAL_CONTEXT_KEY,
     E2A_LEGACY_AGENT_REQUEST_KEY,
@@ -78,6 +84,61 @@ def test_e2a_to_agent_request_roundtrip():
     assert req.channel_id == "wecom"
     assert req.req_method == ReqMethod.CHAT_SEND
     assert req.metadata == {"wecom_req_id": "abc"}
+
+
+def test_subscription_continuation_marker_is_stripped_from_channel_and_typed_on_trusted_wire():
+    msg = Message(
+        id="bound-answer",
+        type="req",
+        channel_id="web",
+        session_id="s1",
+        params={"request_id": "skill_evolve_1", "answers": [{}]},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.CHAT_ANSWER,
+        metadata={
+            E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY: {
+                "canonical_model_key": "forged#0",
+                "provider": "AI4ResearchCodex",
+                "source_request_id": "bound-answer",
+                "mode": "agent.fast",
+            },
+            E2A_INTERNAL_EXPECTED_MODEL_ROUTE_KEY: {
+                "canonical_model_key": "forged#0",
+                "provider": "AI4ResearchCodex",
+                "mode": "agent.fast",
+            },
+            E2A_INTERNAL_CONTEXT_KEY: {
+                E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY: True,
+                E2A_BOUND_SUBSCRIPTION_ROUTE_KEY: {
+                    "canonical_model_key": "forged#0",
+                    "provider": "AI4ResearchCodex",
+                    "mode": "agent.fast",
+                },
+            }
+        },
+    )
+    forged_env = message_to_e2a_or_fallback(msg)
+    forged_request = e2a_to_agent_request(forged_env)
+    assert E2A_INTERNAL_CONTEXT_KEY not in forged_env.channel_context
+    assert E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY not in forged_env.channel_context
+    assert E2A_INTERNAL_EXPECTED_MODEL_ROUTE_KEY not in forged_env.channel_context
+    assert forged_request.subscription_continuation_bound is False
+
+    expected_route = {
+        "canonical_model_key": "codex-cli#0",
+        "provider": "AI4ResearchCodex",
+        "mode": "agent.fast",
+    }
+    forged_env.channel_context[E2A_INTERNAL_CONTEXT_KEY] = {
+        E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY: True,
+        E2A_BOUND_SUBSCRIPTION_ROUTE_KEY: expected_route,
+    }
+    trusted_request = e2a_to_agent_request(forged_env)
+    assert trusted_request.subscription_continuation_bound is True
+    assert trusted_request.metadata == {
+        E2A_INTERNAL_EXPECTED_MODEL_ROUTE_KEY: expected_route,
+    }
 
 
 def test_message_to_e2a_or_fallback_preserves_user_id():

@@ -6,6 +6,7 @@ from jiuwenswarm.gateway.message_handler.evolution_approval import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
     SKILL_EVOLUTION_APPROVAL_SOURCE,
     EvolutionApprovalCoordinator,
+    GatewayRequestRoute,
     ensure_regular_evolution_approval_metadata,
     is_evolution_approval_payload,
     is_interrupt_evolution_approval_answer_payload,
@@ -80,6 +81,30 @@ def test_evolution_status_start_and_end_tracks_in_progress() -> None:
         auto_save_enabled=True,
     )
     assert coordinator.is_session_in_progress("sess-1") is False
+
+
+def test_finish_request_route_retains_only_requested_agent_fast_route() -> None:
+    cases = (
+        (False, "agent.fast", 0),
+        (True, "agent.plan", 0),
+        (True, "agent.fast", 1),
+    )
+    for retain, mode, expected_count in cases:
+        coordinator = EvolutionApprovalCoordinator()
+        coordinator.register_request_route(
+            "request-1",
+            GatewayRequestRoute(mode=mode, model_key="model#0", provider="OpenAI"),
+            "sess-1",
+        )
+
+        coordinator.finish_request_route("request-1", retain=retain)
+
+        assert coordinator.has_request_route("request-1") is False
+        assert coordinator.retained_request_route_count() == expected_count
+
+    coordinator = EvolutionApprovalCoordinator()
+    coordinator.finish_request_route("missing", retain=True)
+    assert coordinator.retained_request_route_count() == 0
 
 
 def test_auto_save_false_incoming_approval_marks_pending() -> None:

@@ -19,6 +19,15 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _register_web_handlers,
     _validate_wechat_numeric_params,
 )
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
+)
+from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+    CLAUDE_MODEL_ALIAS,
+    CLAUDE_PROVIDER_NAME,
+)
+from jiuwenswarm.common.security.ws_origin import is_sensitive_browser_origin_allowed
 
 
 class FakeWebChannel:
@@ -58,6 +67,100 @@ class FakeAgentClient:
             return type("Resp", (), {"ok": True, "payload": {}})()
         finally:
             self.reload_finished.set()
+
+
+class ImmediateAgentClient:
+    server_ready = True
+
+    def __init__(self):
+        self.requests = []
+
+    async def send_request(self, envelope):
+        self.requests.append(envelope)
+        return type("Resp", (), {"ok": True, "payload": {"state": "not_connected"}})()
+
+
+class FakeBrowserWebSocket:
+    def __init__(self, *, origin: str | None, host: str | None = "127.0.0.1:19000"):
+        self.request_headers = {}
+        if origin is not None:
+            self.request_headers["Origin"] = origin
+        if host is not None:
+            self.request_headers["Host"] = host
+
+
+@pytest.mark.parametrize(
+    ("origin", "host", "expected"),
+    [
+        (None, "127.0.0.1:19000", False),
+        ("http://localhost:5173", None, False),
+        ("ftp://localhost:5173", "localhost:19000", False),
+        ("http:///dashboard", "localhost:19000", False),
+        ("http://localhost:5173", "", False),
+        ("http://user@localhost:5173", "localhost:19000", False),
+        ("http://user:pass@localhost:5173", "localhost:19000", False),
+        ("http://localhost:5173/dashboard", "localhost:19000", False),
+        ("http://localhost:5173?token=x", "localhost:19000", False),
+        ("http://localhost:5173#fragment", "localhost:19000", False),
+        ("https://evil.example", "127.0.0.1:19000", False),
+        ("http://127.0.0.1:5173", "localhost:19000", True),
+        ("https://swarm.example:8443", "swarm.example:8443", True),
+        ("https://swarm.example:8443", "swarm.example:9443", False),
+    ],
+)
+def test_sensitive_browser_origin_is_fail_closed(origin, host, expected):
+    assert is_sensitive_browser_origin_allowed(origin, host) is expected
+
+
+def test_sensitive_browser_origin_accepts_explicit_hostname_allowlist(monkeypatch):
+    monkeypatch.setenv("JIUWENSWARM_WS_ALLOWED_ORIGIN_HOSTS", "dashboard.example")
+    assert is_sensitive_browser_origin_allowed(
+        "https://dashboard.example", "127.0.0.1:19000",
+    ) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method",
+    [
+        "provider.codex.auth.status",
+        "provider.codex.auth.start",
+        "provider.codex.auth.cancel",
+        "provider.codex.auth.logout",
+    ],
+)
+async def test_codex_web_auth_methods_reject_untrusted_origin_without_forwarding(method):
+    channel = FakeWebChannel()
+    agent_client = ImmediateAgentClient()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=agent_client))
+
+    await channel.methods[method](
+        FakeBrowserWebSocket(origin="https://evil.example"),
+        "req-sensitive",
+        {},
+        "sess-1",
+    )
+
+    assert agent_client.requests == []
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "FORBIDDEN_ORIGIN"
+
+
+@pytest.mark.asyncio
+async def test_codex_web_auth_method_forwards_trusted_loopback_origin():
+    channel = FakeWebChannel()
+    agent_client = ImmediateAgentClient()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=agent_client))
+
+    await channel.methods["provider.codex.auth.status"](
+        FakeBrowserWebSocket(origin="http://localhost:5173"),
+        "req-sensitive",
+        {},
+        "sess-1",
+    )
+
+    assert len(agent_client.requests) == 1
+    assert channel.responses[-1]["ok"] is True
 
 
 class FakeChannelManager:
@@ -612,6 +715,469 @@ async def test_models_replace_all_applies_scoped_reload_before_responding(monkey
     assert channel.responses[-1]["id"] == "req-models"
     assert channel.responses[-1]["ok"] is True
     assert channel.responses[-1]["payload"]["applied_without_restart"] is True
+
+
+def _stub_model_replace_dependencies(monkeypatch, *, raw_defaults=None, resolved_defaults=None):
+    persisted: list[list[dict]] = []
+    raw_defaults = [] if raw_defaults is None else raw_defaults
+    resolved_defaults = [] if resolved_defaults is None else resolved_defaults
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config_raw",
+        lambda: {"models": {"defaults": raw_defaults}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_default_models",
+        lambda *args, **kwargs: resolved_defaults,
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_default_models_in_config",
+        lambda models: persisted.append(list(models)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.registry.ExtensionRegistry.get_instance",
+        lambda: type(
+            "Registry",
+            (),
+            {"get_crypto_provider": lambda self: type(
+                "Crypto", (), {"encrypt": lambda self, value: value}
+            )()},
+        )(),
+    )
+    return persisted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "api_base", "api_key", "expected_provider"),
+    (
+        ("openai", "gpt-4.1", "https://example.test/v1", "secret", "OpenAI"),
+        (CODEX_PROVIDER_NAME.lower(), CODEX_MODEL_ALIAS, "", "", CODEX_PROVIDER_NAME),
+        (CLAUDE_PROVIDER_NAME.lower(), CLAUDE_MODEL_ALIAS, "", "", CLAUDE_PROVIDER_NAME),
+    ),
+)
+async def test_models_replace_all_normalizes_all_provider_kinds(
+    monkeypatch,
+    provider,
+    model,
+    api_base,
+    api_key,
+    expected_provider,
+):
+    channel = FakeWebChannel()
+    persisted = _stub_model_replace_dependencies(monkeypatch)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-normalized-provider",
+        {"models": [{
+            "model_name": model,
+            "api_base": api_base,
+            "api_key": api_key,
+            "model_provider": provider,
+            "is_default": True,
+        }]},
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert persisted[-1][0]["model_client_config"]["client_provider"] == expected_provider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "field", "value"),
+    (
+        (CODEX_PROVIDER_NAME.lower(), CODEX_MODEL_ALIAS, "api_key", "forbidden"),
+        (CODEX_PROVIDER_NAME.lower(), CODEX_MODEL_ALIAS, "api_base", "https://forbidden.test"),
+        (CODEX_PROVIDER_NAME.lower(), "wrong-codex", "model_name", "wrong-codex"),
+        (CLAUDE_PROVIDER_NAME.lower(), CLAUDE_MODEL_ALIAS, "api_key", "forbidden"),
+        (CLAUDE_PROVIDER_NAME.lower(), CLAUDE_MODEL_ALIAS, "api_base", "https://forbidden.test"),
+        (CLAUDE_PROVIDER_NAME.lower(), "wrong-claude", "model_name", "wrong-claude"),
+    ),
+)
+async def test_models_replace_all_rejects_invalid_subscription_fields_after_normalization(
+    monkeypatch,
+    provider,
+    model,
+    field,
+    value,
+):
+    channel = FakeWebChannel()
+    _stub_model_replace_dependencies(monkeypatch)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    draft = {
+        "model_name": model,
+        "api_base": "",
+        "api_key": "",
+        "model_provider": provider,
+        "is_default": True,
+    }
+    draft[field] = value
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-invalid-subscription",
+        {"models": [draft]},
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_models_replace_all_origin_index_preserves_only_empty_api_key_placeholder(
+    monkeypatch,
+):
+    raw_entry = {
+        "model_client_config": {
+            "model_name": "gpt-4.1",
+            "api_base": "https://example.test/v1",
+            "api_key": "${OPENAI_API_KEY:-}",
+            "client_provider": "OpenAI",
+        },
+        "model_config_obj": {},
+        "is_default": True,
+    }
+    resolved_entry = {
+        "model_client_config": {
+            **raw_entry["model_client_config"],
+            "api_key": "",
+        },
+        "model_config_obj": {},
+        "is_default": True,
+    }
+    channel = FakeWebChannel()
+    persisted = _stub_model_replace_dependencies(
+        monkeypatch,
+        raw_defaults=[raw_entry],
+        resolved_defaults=[resolved_entry],
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-preserve-placeholder",
+        {"models": [{
+            "model_name": "gpt-4.1",
+            "api_base": "https://example.test/v1",
+            "api_key": "",
+            "model_provider": "openai",
+            "origin_index": 0,
+            "is_default": True,
+        }]},
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert persisted[-1][0]["model_client_config"]["api_key"] == "${OPENAI_API_KEY:-}"
+
+
+@pytest.mark.asyncio
+async def test_config_validate_ordinary_provider_preserves_endpoint_and_injects_reasoning(
+    monkeypatch,
+):
+    captured: dict[str, object] = {}
+
+    class RecordingModel:
+        def __init__(self, *, model_config, model_client_config):
+            captured["model_config"] = model_config.model_dump()
+            captured["client_config"] = model_client_config.model_dump()
+
+        async def invoke(self, *_args, **_kwargs):
+            return SimpleNamespace(content="ok", reasoning_content=None)
+
+    configured_entry = {
+        "model_client_config": {
+            "model_name": "deepseek-v4-flash",
+            "api_base": "https://api.deepseek.com/chat/completions/",
+            "api_key": "secret",
+            "client_provider": "DeepSeek",
+        },
+        "model_config_obj": {"reasoning_level": "high"},
+    }
+    monkeypatch.setattr(app_web_handlers, "Model", RecordingModel)
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: {})
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_default_models",
+        lambda *_args, **_kwargs: [configured_entry],
+    )
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["config.validate_model"](
+        object(),
+        "req-ordinary-validate",
+        {
+            "model_provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_base": "https://api.deepseek.com/chat/completions/",
+            "api_key": "secret",
+        },
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert captured["client_config"]["client_provider"] == "DeepSeek"
+    assert captured["client_config"]["api_base"] == "https://api.deepseek.com/chat/completions"
+    assert captured["model_config"]["reasoning_effort"] == "high"
+    assert captured["model_config"]["extra_body"]["thinking"] == {"type": "enabled"}
+
+
+@pytest.mark.asyncio
+async def test_models_replace_all_accepts_codex_without_api_credentials(monkeypatch):
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"models": {"defaults": []}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_default_models",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_default_models_in_config",
+        lambda models: persisted.append(list(models)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.registry.ExtensionRegistry.get_instance",
+        lambda: type(
+            "Registry",
+            (),
+            {"get_crypto_provider": lambda self: type(
+                "Crypto", (), {"encrypt": lambda self, value: value}
+            )()},
+        )(),
+    )
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-codex-model",
+        {
+            "models": [{
+                "model_name": CODEX_MODEL_ALIAS,
+                "api_base": "",
+                "api_key": "",
+                "model_provider": CODEX_PROVIDER_NAME,
+                "is_default": True,
+            }]
+        },
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    saved = persisted[-1][0]["model_client_config"]
+    assert saved["client_provider"] == CODEX_PROVIDER_NAME
+    assert saved["model_name"] == CODEX_MODEL_ALIAS
+    assert saved["api_base"] == ""
+    assert saved["api_key"] == ""
+
+
+@pytest.mark.asyncio
+async def test_models_replace_all_keeps_api_provider_credentials_required(monkeypatch):
+    channel = FakeWebChannel()
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"models": {"defaults": []}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_default_models",
+        lambda *args, **kwargs: [],
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-api-model",
+        {
+            "models": [{
+                "model_name": "gpt-4.1",
+                "api_base": "",
+                "api_key": "",
+                "model_provider": "OpenAI",
+                "is_default": True,
+            }]
+        },
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+    assert "api_key is required" in channel.responses[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_config_validate_codex_forwards_one_typed_agentserver_request(monkeypatch):
+    channel = FakeWebChannel()
+
+    class ValidationAgentClient:
+        server_ready = True
+
+        def __init__(self):
+            self.requests = []
+
+        async def send_request(self, envelope):
+            self.requests.append(envelope)
+            return type(
+                "Resp",
+                (),
+                {
+                    "ok": True,
+                    "payload": {
+                        "validated": True,
+                        "model_provider": CODEX_PROVIDER_NAME,
+                        "model": CODEX_MODEL_ALIAS,
+                        "response": "hello",
+                    },
+                },
+            )()
+
+    agent_client = ValidationAgentClient()
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.Model",
+        lambda *args, **kwargs: pytest.fail("Gateway must not construct the Codex model client"),
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=agent_client))
+
+    await channel.methods["config.validate_model"](
+        FakeBrowserWebSocket(origin="http://localhost:5173"),
+        "req-codex-validate",
+        {
+            "model_provider": CODEX_PROVIDER_NAME,
+            "model": CODEX_MODEL_ALIAS,
+            "api_base": "",
+            "api_key": "",
+        },
+        "sess-1",
+    )
+
+    assert len(agent_client.requests) == 1
+    envelope = agent_client.requests[0]
+    assert envelope.method == "provider.codex.validate_model"
+    assert envelope.params == {
+        "model_provider": CODEX_PROVIDER_NAME,
+        "model": CODEX_MODEL_ALIAS,
+    }
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"] == {
+        "ok": True,
+        "model_provider": CODEX_PROVIDER_NAME,
+    }
+
+
+@pytest.mark.asyncio
+async def test_config_validate_codex_rejects_untrusted_origin_without_forwarding():
+    channel = FakeWebChannel()
+    agent_client = ImmediateAgentClient()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=agent_client))
+
+    await channel.methods["config.validate_model"](
+        FakeBrowserWebSocket(origin="https://evil.example"),
+        "req-codex-validate",
+        {
+            "model_provider": CODEX_PROVIDER_NAME,
+            "model": CODEX_MODEL_ALIAS,
+            "api_base": "",
+            "api_key": "",
+        },
+        "sess-1",
+    )
+
+    assert agent_client.requests == []
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "FORBIDDEN_ORIGIN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "expected_error"),
+    (
+        (
+            CODEX_PROVIDER_NAME,
+            CODEX_MODEL_ALIAS,
+            "Codex model validation returned an invalid response.",
+        ),
+        (
+            CLAUDE_PROVIDER_NAME,
+            CLAUDE_MODEL_ALIAS,
+            "Claude model validation returned an invalid response.",
+        ),
+    ),
+)
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("validated", False),
+        ("model_provider", "unexpected-provider"),
+        ("model", "unexpected-model"),
+    ),
+)
+async def test_config_validate_subscription_rejects_each_invalid_agent_response(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model: str,
+    expected_error: str,
+    field: str,
+    invalid_value: object,
+) -> None:
+    channel = FakeWebChannel()
+
+    class InvalidValidationAgentClient:
+        server_ready = True
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def send_request(self, envelope):
+            self.requests.append(envelope)
+            payload = {
+                "validated": True,
+                "model_provider": provider,
+                "model": model,
+            }
+            payload[field] = invalid_value
+            return SimpleNamespace(ok=True, payload=payload)
+
+    agent_client = InvalidValidationAgentClient()
+    monkeypatch.setattr(
+        app_web_handlers,
+        "Model",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Gateway must not construct a subscription model client"
+        ),
+    )
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["config.validate_model"](
+        FakeBrowserWebSocket(origin="http://localhost:5173"),
+        "req-invalid-subscription-response",
+        {
+            "model_provider": provider,
+            "model": model,
+            "api_base": "",
+            "api_key": "",
+        },
+        "sess-1",
+    )
+
+    assert len(agent_client.requests) == 1
+    assert channel.responses[-1] == {
+        "id": "req-invalid-subscription-response",
+        "ok": False,
+        "payload": None,
+        "error": expected_error,
+        "code": "LLM_ERROR",
+    }
 
 
 @pytest.mark.asyncio

@@ -117,6 +117,10 @@ else:
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
+# Register first-party model providers before any ModelClientConfig is validated.
+import jiuwenswarm.integrations.ai4research_subscription.model_client  # noqa: F401, E402
+import jiuwenswarm.integrations.ai4research_subscription.claude_model_client  # noqa: F401, E402
+
 from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
     install_shell_tool_safety_hooks,
 )
@@ -285,5 +289,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

@@ -12,6 +12,14 @@ from jiuwenswarm.symphony.llm import (
     thinking_disabled_request_overrides,
     _record_usage_from_response,
 )
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
+)
+from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+    CLAUDE_MODEL_ALIAS,
+    CLAUDE_PROVIDER_NAME,
+)
 
 
 class _FakeInvokeModel:
@@ -226,6 +234,124 @@ def test_llm_config_prefers_resolved_default_model(monkeypatch):
 
     assert config.model == "model-b"
     assert config.base_url == "https://b.example.test/v1"
+
+
+def test_llm_config_accepts_codex_subscription_without_api_credentials():
+    config = LLMConfig.from_model_entry({
+        "model_client_config": {
+            "api_key": "",
+            "api_base": "",
+            "model_name": CODEX_MODEL_ALIAS,
+            "client_provider": CODEX_PROVIDER_NAME,
+        },
+        "model_config_obj": {},
+    })
+
+    assert config.model == CODEX_MODEL_ALIAS
+    assert config.base_url == ""
+    assert config.model_client_config["client_provider"] == CODEX_PROVIDER_NAME
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    (
+        (CODEX_PROVIDER_NAME, CODEX_MODEL_ALIAS),
+        (CLAUDE_PROVIDER_NAME, CLAUDE_MODEL_ALIAS),
+    ),
+)
+def test_llm_config_subscription_construction_does_not_mutate_source(
+    provider: str,
+    model: str,
+) -> None:
+    entry = {
+        "model_client_config": {
+            "api_key": "",
+            "api_base": "",
+            "model_name": model,
+            "client_provider": provider,
+            "custom_headers": {"X-Test": "original"},
+        },
+        "model_config_obj": {
+            "extra_body": {"custom": {"enabled": True}},
+        },
+    }
+    original = deepcopy(entry)
+
+    config = LLMConfig.from_model_entry(entry)
+    config.model_client_kwargs()["custom_headers"]["X-Test"] = "changed"
+    config.model_request_kwargs()["extra_body"]["custom"]["enabled"] = False
+
+    assert entry == original
+    assert config.model_client_kwargs()["custom_headers"] == {"X-Test": "original"}
+    assert config.model_request_kwargs()["extra_body"]["custom"] == {"enabled": True}
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    (
+        (CODEX_PROVIDER_NAME, "wrong-codex"),
+        (CLAUDE_PROVIDER_NAME, "wrong-claude"),
+    ),
+)
+def test_llm_config_rejects_subscription_provider_wrong_fixed_alias(
+    provider: str,
+    model: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=f"model name is invalid for {provider}"):
+        LLMConfig.from_model_entry({
+            "model_client_config": {
+                "api_key": "",
+                "api_base": "",
+                "model_name": model,
+                "client_provider": provider,
+            },
+            "model_config_obj": {},
+        })
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    (
+        (CODEX_PROVIDER_NAME, CODEX_MODEL_ALIAS),
+        (CLAUDE_PROVIDER_NAME, CLAUDE_MODEL_ALIAS),
+    ),
+)
+@pytest.mark.parametrize("field", ("api_base", "api_key"))
+def test_llm_config_rejects_subscription_provider_credentials(
+    provider: str,
+    model: str,
+    field: str,
+) -> None:
+    client_config = {
+        "api_key": "",
+        "api_base": "",
+        "model_name": model,
+        "client_provider": provider,
+    }
+    client_config[field] = "must-not-be-accepted"
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"credentials must be empty for {provider}",
+    ):
+        LLMConfig.from_model_entry(
+            {
+                "model_client_config": client_config,
+                "model_config_obj": {},
+            }
+        )
+
+
+def test_llm_config_keeps_api_provider_credentials_required():
+    with pytest.raises(RuntimeError, match="missing api_base"):
+        LLMConfig.from_model_entry({
+            "model_client_config": {
+                "api_key": "",
+                "api_base": "",
+                "model_name": "gpt-4.1",
+                "client_provider": "OpenAI",
+            },
+        })
 
 
 def test_llm_config_does_not_fallback_to_environment_model(monkeypatch):

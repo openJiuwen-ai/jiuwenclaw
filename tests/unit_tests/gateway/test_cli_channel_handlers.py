@@ -9,6 +9,14 @@ from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
     build_cli_route_binding,
     register_cli_handlers,
 )
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
+)
+from jiuwenswarm.integrations.ai4research_subscription.claude_constants import (
+    CLAUDE_MODEL_ALIAS,
+    CLAUDE_PROVIDER_NAME,
+)
 
 
 class FakeGatewayServer:
@@ -342,6 +350,203 @@ async def test_config_validate_model_handler_uses_local_probe(monkeypatch):
         },
         "error": None,
         "code": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_config_validate_codex_forwards_one_typed_agentserver_request(monkeypatch):
+    server = FakeGatewayServer()
+
+    class ValidationAgentClient:
+        def __init__(self):
+            self.requests = []
+
+        async def send_request(self, envelope):
+            self.requests.append(envelope)
+            return type(
+                "Resp",
+                (),
+                {
+                    "ok": True,
+                    "payload": {
+                        "validated": True,
+                        "model_provider": CODEX_PROVIDER_NAME,
+                        "model": CODEX_MODEL_ALIAS,
+                        "response": "hello",
+                    },
+                },
+            )()
+
+    agent_client = ValidationAgentClient()
+
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=agent_client,
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.tui.tui_connect.Model",
+        lambda *args, **kwargs: pytest.fail("Gateway must not construct the Codex model client"),
+    )
+    await server.local_handlers["/tui"]["config.validate_model"](
+        type("LocalWs", (), {"remote_address": ("127.0.0.1", 50000)})(),
+        "req-codex-validate",
+        {
+            "model_provider": CODEX_PROVIDER_NAME,
+            "model": CODEX_MODEL_ALIAS,
+            "api_base": "",
+            "api_key": "",
+        },
+        "sess-1",
+    )
+
+    assert len(agent_client.requests) == 1
+    envelope = agent_client.requests[0]
+    assert envelope.method == "provider.codex.validate_model"
+    assert envelope.params == {
+        "model_provider": CODEX_PROVIDER_NAME,
+        "model": CODEX_MODEL_ALIAS,
+    }
+    assert server.responses[-1]["ok"] is True
+    assert server.responses[-1]["payload"] == {
+        "provider": CODEX_PROVIDER_NAME,
+        "model": CODEX_MODEL_ALIAS,
+        "response": "hello",
+    }
+
+
+@pytest.mark.asyncio
+async def test_config_validate_codex_rejects_nonlocal_tui_without_forwarding():
+    server = FakeGatewayServer()
+
+    class RecordingAgentClient:
+        def __init__(self):
+            self.requests = []
+
+        async def send_request(self, envelope):
+            self.requests.append(envelope)
+
+    agent_client = RecordingAgentClient()
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=agent_client,
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    await server.local_handlers["/tui"]["config.validate_model"](
+        type("RemoteWs", (), {"remote_address": ("203.0.113.9", 50000)})(),
+        "req-codex-validate",
+        {
+            "model_provider": CODEX_PROVIDER_NAME,
+            "model": CODEX_MODEL_ALIAS,
+            "api_base": "",
+            "api_key": "",
+        },
+        "sess-1",
+    )
+
+    assert agent_client.requests == []
+    assert server.responses[-1]["ok"] is False
+    assert server.responses[-1]["code"] == "local_provider_required"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "expected_error"),
+    (
+        (
+            CODEX_PROVIDER_NAME,
+            CODEX_MODEL_ALIAS,
+            "Codex model validation returned an invalid response.",
+        ),
+        (
+            CLAUDE_PROVIDER_NAME,
+            CLAUDE_MODEL_ALIAS,
+            "Claude model validation returned an invalid response.",
+        ),
+    ),
+)
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("validated", False),
+        ("model_provider", "unexpected-provider"),
+        ("model", "unexpected-model"),
+        ("response", None),
+        ("response", "   "),
+    ),
+)
+async def test_config_validate_subscription_rejects_each_invalid_agent_response(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model: str,
+    expected_error: str,
+    field: str,
+    invalid_value: object,
+) -> None:
+    server = FakeGatewayServer()
+
+    class InvalidValidationAgentClient:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def send_request(self, envelope):
+            self.requests.append(envelope)
+            payload = {
+                "validated": True,
+                "model_provider": provider,
+                "model": model,
+                "response": "hello",
+            }
+            payload[field] = invalid_value
+            return type("Resp", (), {"ok": True, "payload": payload})()
+
+    agent_client = InvalidValidationAgentClient()
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=agent_client,
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+    monkeypatch.setattr(
+        tui_connect_module,
+        "Model",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Gateway must not construct a subscription model client"
+        ),
+    )
+
+    await server.local_handlers["/tui"]["config.validate_model"](
+        type("LocalWs", (), {"remote_address": ("127.0.0.1", 50000)})(),
+        "req-invalid-subscription-response",
+        {
+            "model_provider": provider,
+            "model": model,
+            "api_base": "",
+            "api_key": "",
+        },
+        "sess-1",
+    )
+
+    assert len(agent_client.requests) == 1
+    assert server.responses[-1] == {
+        "id": "req-invalid-subscription-response",
+        "ok": False,
+        "payload": {},
+        "error": expected_error,
+        "code": "LLM_ERROR",
     }
 
 
