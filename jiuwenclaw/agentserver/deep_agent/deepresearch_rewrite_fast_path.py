@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 
 _ENVELOPE_RE = re.compile(
@@ -15,6 +16,33 @@ _ENVELOPE_RE = re.compile(
 )
 _REQUEST_KEYS = {"report_path", "action", "selection", "instruction"}
 _ACTIONS = {"polish", "expand", "shorten"}
+_PROMPT_FIELDS = (
+    "action",
+    "instruction",
+    "units",
+    "readonly_context",
+    "allowed_source_ids",
+    "citation_evidence",
+)
+_SYSTEM_PROMPT = """You rewrite selected slots from a DeepResearch Markdown report.
+
+Return exactly one JSON object without Markdown fences or explanatory text.
+The object must contain exactly:
+{"units":[{"unit_id":"...","slots":[{"slot_id":"...","text":"..."}]}],"facts_added":false}
+
+Rules:
+- Preserve unit order, unit_id, slot order, and slot_id exactly.
+- Rewrite only slot text. Do not alter citations, links, code, formulas, or protected structure.
+- Add no facts. Use only the supplied slots, readonly_context, and citation_evidence.
+- For polish, improve clarity and expression without changing meaning.
+- For expand, add useful detail supported by supplied context without adding facts.
+- For shorten, remove redundancy while preserving essential meaning.
+- Follow instruction when it does not conflict with these rules.
+"""
+_SUCCESS_MESSAGE = (
+    "本轮改写已完成。若报告已是最终版本，请回复‘生成 HTML’；"
+    "如需继续改写，可直接选择下一处内容。"
+)
 
 
 class RewriteFastPathError(ValueError):
@@ -36,6 +64,23 @@ class RewriteRequest:
     action: str
     selection: dict[str, Any]
     instruction: str
+
+
+@dataclass(frozen=True)
+class RewriteFastPathResult:
+    """Outcome and phase timings for one recognized rewrite request."""
+
+    recognized: bool
+    status: str
+    action: str | None
+    error_code: str | None
+    message: str
+    usage_metadata: object | None
+    prepare_ms: float
+    model_ms: float
+    commit_ms: float
+    total_ms: float
+    model_calls: int
 
 
 def _invalid_request() -> RewriteFastPathError:
@@ -73,4 +118,235 @@ def parse_rewrite_envelope(query: object) -> RewriteRequest | None:
         action=action,
         selection=selection,
         instruction=instruction,
+    )
+
+
+def _milliseconds(start: float) -> float:
+    return round((time.perf_counter() - start) * 1_000, 3)
+
+
+def _result(
+    *,
+    started_at: float,
+    status: str,
+    action: str | None,
+    error_code: str | None,
+    message: str,
+    usage_metadata: object | None = None,
+    prepare_ms: float = 0.0,
+    model_ms: float = 0.0,
+    commit_ms: float = 0.0,
+    model_calls: int = 0,
+) -> RewriteFastPathResult:
+    return RewriteFastPathResult(
+        recognized=True,
+        status=status,
+        action=action,
+        error_code=error_code,
+        message=message,
+        usage_metadata=usage_metadata,
+        prepare_ms=prepare_ms,
+        model_ms=model_ms,
+        commit_ms=commit_ms,
+        total_ms=_milliseconds(started_at),
+        model_calls=model_calls,
+    )
+
+
+def _decode_tool_result(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, str):
+        raise ValueError("tool result is not JSON text")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("tool result is not an object")
+    return payload
+
+
+def _decode_model_result(content: object) -> dict[str, Any]:
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("model content is unavailable")
+    payload = json.loads(content)
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"units", "facts_added"}
+        or payload.get("facts_added") is not False
+        or not isinstance(payload.get("units"), list)
+        or not payload["units"]
+    ):
+        raise ValueError("model output has an invalid shape")
+    return payload
+
+
+def _safe_error_fields(
+    payload: dict[str, Any],
+    *,
+    fallback_code: str,
+    fallback_message: str,
+) -> tuple[str, str]:
+    code = payload.get("error_code")
+    message = payload.get("error")
+    return (
+        code if isinstance(code, str) and code else fallback_code,
+        message if isinstance(message, str) and message else fallback_message,
+    )
+
+
+async def run_rewrite_fast_path(
+    query: object,
+    *,
+    prepare_invoke: Callable[..., Awaitable[object]],
+    model_invoke: Callable[[list[dict[str, str]]], Awaitable[object]],
+    commit_invoke: Callable[..., Awaitable[object]],
+) -> RewriteFastPathResult | None:
+    """Run a recognized rewrite request without entering the Agent loop."""
+    started_at = time.perf_counter()
+    try:
+        request = parse_rewrite_envelope(query)
+    except RewriteFastPathError as exc:
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=None,
+            error_code=exc.code,
+            message=str(exc),
+        )
+    if request is None:
+        return None
+
+    prepare_started = time.perf_counter()
+    try:
+        prepared = _decode_tool_result(
+            await prepare_invoke(
+                report_path=request.report_path,
+                action=request.action,
+                selection=request.selection,
+                instruction=request.instruction,
+            )
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code="INTERNAL_ERROR",
+            message="rewrite preparation failed",
+            prepare_ms=_milliseconds(prepare_started),
+        )
+    prepare_ms = _milliseconds(prepare_started)
+    if prepared.get("status") != "prepared":
+        code, message = _safe_error_fields(
+            prepared,
+            fallback_code="INTERNAL_ERROR",
+            fallback_message="rewrite preparation failed",
+        )
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code=code,
+            message=message,
+            prepare_ms=prepare_ms,
+        )
+
+    context_token = prepared.get("context_token")
+    if not isinstance(context_token, str) or not context_token:
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code="INTERNAL_ERROR",
+            message="rewrite preparation failed",
+            prepare_ms=prepare_ms,
+        )
+    prompt_payload = {field: prepared.get(field) for field in _PROMPT_FIELDS}
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":")),
+        },
+    ]
+
+    model_started = time.perf_counter()
+    try:
+        response = await model_invoke(messages)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code="MODEL_CALL_FAILED",
+            message="rewrite model call failed",
+            prepare_ms=prepare_ms,
+            model_ms=_milliseconds(model_started),
+            model_calls=1,
+        )
+    model_ms = _milliseconds(model_started)
+    usage_metadata = getattr(response, "usage_metadata", None)
+    try:
+        structured_result = _decode_model_result(getattr(response, "content", None))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code="MODEL_OUTPUT_INVALID",
+            message="invalid structured rewrite result",
+            usage_metadata=usage_metadata,
+            prepare_ms=prepare_ms,
+            model_ms=model_ms,
+            model_calls=1,
+        )
+
+    commit_started = time.perf_counter()
+    try:
+        committed = _decode_tool_result(
+            await commit_invoke(
+                context_token=context_token,
+                structured_result=structured_result,
+            )
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code="WRITE_FAILED",
+            message="rewrite commit failed",
+            usage_metadata=usage_metadata,
+            prepare_ms=prepare_ms,
+            model_ms=model_ms,
+            commit_ms=_milliseconds(commit_started),
+            model_calls=1,
+        )
+    commit_ms = _milliseconds(commit_started)
+    if committed.get("status") != "completed":
+        code, message = _safe_error_fields(
+            committed,
+            fallback_code="WRITE_FAILED",
+            fallback_message="rewrite commit failed",
+        )
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code=code,
+            message=message,
+            usage_metadata=usage_metadata,
+            prepare_ms=prepare_ms,
+            model_ms=model_ms,
+            commit_ms=commit_ms,
+            model_calls=1,
+        )
+    return _result(
+        started_at=started_at,
+        status="completed",
+        action=request.action,
+        error_code=None,
+        message=_SUCCESS_MESSAGE,
+        usage_metadata=usage_metadata,
+        prepare_ms=prepare_ms,
+        model_ms=model_ms,
+        commit_ms=commit_ms,
+        model_calls=1,
     )
