@@ -18,7 +18,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
-import { useChatStore, useGoalStore } from '../../stores';
+import { useChatStore, useGoalStore, useSessionStore } from '../../stores';
 import type { GoalStatus } from '../../types';
 import { EditGoalModal } from './EditGoalModal';
 import './GoalBar.css';
@@ -30,7 +30,10 @@ interface GoalBarProps {
   onClearGoal: (sessionId: string) => void;
 }
 
-const STATUS_TONE: Record<string, 'active' | 'paused' | 'completed' | 'blocked'> = {
+/** disconnected/unknown 是纯前端展示态，跟后端 goal.status 无关，见真实环境联调方案。 */
+type DisplayTone = 'active' | 'paused' | 'completed' | 'blocked' | 'disconnected' | 'unknown';
+
+const STATUS_TONE: Record<string, DisplayTone> = {
   active: 'active',
   paused: 'paused',
   completed: 'completed',
@@ -52,6 +55,10 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const goal = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.goal ?? null);
   const pendingAction = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.pendingAction ?? null);
+  const queryStatus = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.queryStatus ?? 'ok');
+  // 前后端连接是否正常，复用 webClient 原生 WS 状态机的镜像（不是心跳消息判断，见真实环境
+  // 联调方案）——跟专门播报 agent 心跳的 connection.heartbeat 是两回事。
+  const isConnected = useSessionStore((s) => s.isConnected);
   // 后端不下发 created_at（backend-requests.md #2），优先用真实值，没有时退回本地兜底时间
   const localCreatedAt = useGoalStore((s) => (goal ? s.localCreatedAt[goal.goal_id] : undefined));
   // completed 目标的 GoalBar 显隐单独用这个标记控制，不再靠 goal 是否存在于 store 里判断——
@@ -60,6 +67,10 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   const bannerHidden = useGoalStore((s) => (goal ? Boolean(s.bannerHiddenGoalIds[goal.goal_id]) : false));
   const [editing, setEditing] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // 暂停/恢复点击后的乐观图标翻转：只影响图标选哪个，不影响按钮是否可点（仍然沿用下面的
+  // isDisabled 整组置灰）、也不影响状态文字颜色（那个继续等权威数据）。pendingAction 落地
+  // （不管成功还是失败兜底完）后清空，让真实 goal.status 接管。
+  const [optimisticPausable, setOptimisticPausable] = useState<boolean | null>(null);
 
   useEffect(() => {
     // completed/blocked 是终态，不再有新的 attempt，耗时不该继续跳字——冻结在跳变那一刻附近的值
@@ -68,8 +79,12 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
     return () => window.clearInterval(timer);
   }, [goal]);
 
+  useEffect(() => {
+    if (pendingAction === null) setOptimisticPausable(null);
+  }, [pendingAction]);
+
   // 编辑弹窗打开期间目标在后台跑完了（用户可能没注意到，弹窗内容也不会自动同步最新状态）——
-  // 与其等 4 秒自动隐藏把弹窗连带 GoalBar 一起悄悄拽没（那样用户完全不知道发生了什么，编辑内容
+  // 与其等自动隐藏把弹窗连带 GoalBar 一起悄悄拽没（那样用户完全不知道发生了什么，编辑内容
   // 也白写了），不如一发现就主动关掉并提示，避免用户点保存把一个已经结束的目标悄悄"复活"。
   useEffect(() => {
     if (editing && goal?.status === 'completed' && activeSessionId) {
@@ -83,13 +98,29 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
     }
   }, [editing, goal?.status, activeSessionId, t]);
 
+  // 没有目标（goal 为 null）时严格"不用管"——即使当前处于断联/查询失败，也不展示任何占位条；
+  // 只有"这个会话之前已经查到过目标"（goal 非空，数据在断联/查询失败期间原样保留，不会被清空）
+  // 才叠加 disconnected/unknown 展示态。goal 是否非空天然承担了这个判断，不需要额外的标记位。
   if (!activeSessionId || !goal) return null;
   if (goal.status === 'completed' && bannerHidden) return null;
 
-  const tone = STATUS_TONE[goal.status as GoalStatus] ?? 'active';
+  // completed 是终态，不需要叠加断联/未知态（已完成的目标不再自动更新，见真实环境联调方案 9a）。
+  const degraded: 'disconnected' | 'unknown' | null =
+    goal.status === 'completed'
+      ? null
+      : !isConnected
+        ? 'disconnected'
+        : queryStatus === 'unknown'
+          ? 'unknown'
+          : null;
+
+  const tone: DisplayTone = degraded ?? STATUS_TONE[goal.status as GoalStatus] ?? 'active';
   const isPausable = goal.status === 'active';
   const isResumable = goal.status === 'paused' || goal.status === 'blocked';
   const isBusy = pendingAction !== null;
+  const isDisabled = isBusy || degraded !== null;
+  // 图标显示用的"是否展示为可暂停"：乐观值优先，否则用真实状态。
+  const displayAsPausable = optimisticPausable ?? isPausable;
 
   return (
     <div className="goal-bar-attached">
@@ -97,7 +128,7 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
         <Target size={16} strokeWidth={2} className="goal-bar__icon" />
         <div className="goal-bar__main">
           <span className={`goal-bar__status goal-bar__status--${tone}`}>
-            {t(`goal.status.${goal.status}`, goal.status)}
+            {t(`goal.status.${degraded ?? goal.status}`, degraded ?? goal.status)}
           </span>
           <span className="goal-bar__objective" title={goal.objective}>
             {goal.objective}
@@ -110,6 +141,7 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
               type="button"
               title={t('goal.action.editTooltip')}
               className="goal-bar__action-btn"
+              disabled={isDisabled}
               onClick={() => setEditing(true)}
             >
               <Pencil size={14} strokeWidth={2} />
@@ -118,19 +150,27 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
           {(isPausable || isResumable) && (
             <button
               type="button"
-              title={isPausable ? t('goal.action.pauseTooltip') : t('goal.action.resumeTooltip')}
+              title={displayAsPausable ? t('goal.action.pauseTooltip') : t('goal.action.resumeTooltip')}
               className="goal-bar__action-btn"
-              disabled={isBusy}
-              onClick={() => (isPausable ? onPauseGoal(activeSessionId) : onResumeGoal(activeSessionId))}
+              disabled={isDisabled}
+              onClick={() => {
+                if (isPausable) {
+                  setOptimisticPausable(false);
+                  onPauseGoal(activeSessionId);
+                } else {
+                  setOptimisticPausable(true);
+                  onResumeGoal(activeSessionId);
+                }
+              }}
             >
-              {isPausable ? <Pause size={14} strokeWidth={2} /> : <Play size={14} strokeWidth={2} />}
+              {displayAsPausable ? <Pause size={14} strokeWidth={2} /> : <Play size={14} strokeWidth={2} />}
             </button>
           )}
           <button
             type="button"
             title={t('goal.action.deleteTooltip')}
             className="goal-bar__action-btn goal-bar__action-btn--danger"
-            disabled={isBusy}
+            disabled={isDisabled}
             onClick={() => onClearGoal(activeSessionId)}
           >
             <Trash2 size={14} strokeWidth={2} />

@@ -28,7 +28,6 @@
     "agent": "智能体",
     "teams": "团队",
     "sessions": "会话",
-    "heartbeat": "心跳",
     "cron": "定时任务",
     "skills": "技能",
     "channels": "频道",
@@ -38,7 +37,7 @@
     "more": "更多",
     "settings": "设置",
     "config": "配置信息",
-    "browser": "浏览器服务",
+    "browser": "浏览器",
     "logs": "日志",
     "update": "更新"
   },
@@ -274,6 +273,7 @@
     "stop": "停止",
     "modelSelector": {
       "tooltip": "切换对话使用的模型",
+      "clusterLockedTooltip": "集群模式使用配置的默认模型，不支持修改",
       "configured": "已配置模型",
       "addModel": "添加自定义模型",
       "placeholder": "选择模型"
@@ -428,13 +428,16 @@
     "formCancel": "取消",
     "editTitle": "编辑目标",
     "toolbarTag": "目标",
+    "toolbarUnavailable": "当前已有进行中的目标，请先完成或清除",
     "closeTag": "取消目标",
-    "badge": "设为目标",
+    "badge": "目标",
     "status": {
       "active": "进行中",
       "paused": "已暂停",
       "completed": "已完成",
-      "blocked": "已阻塞"
+      "blocked": "已阻塞",
+      "disconnected": "连接已断开",
+      "unknown": "状态未知"
     },
     "action": {
       "editTooltip": "编辑目标",
@@ -486,6 +489,7 @@
       "wecom": "企业微信",
       "wechat": "微信",
       "discord": "Discord",
+      "slack": "Slack",
       "heartbeat": "心跳",
       "tui": "TUI",
       "unknown": "未知"
@@ -494,7 +498,8 @@
       "loadSessions": "会话列表加载失败",
       "loadFiles": "会话文件列表加载失败",
       "deleteSession": "删除会话失败：{{sessionId}}",
-      "restoreFailed": "恢复会话失败：{{sessionId}}"
+      "restoreFailed": "恢复会话失败：{{sessionId}}",
+      "switchSession": "切换会话失败，请重试。"
     }
   },
   "sessionSidebar": {
@@ -503,52 +508,6 @@
     "version": "版本",
     "language": "语言",
     "moreSettings": "更多设置"
-  },
-  "heartbeat": {
-    "title": "心跳管理",
-    "subtitle": "维护心跳参数与指令文件",
-    "configTitle": "心跳参数配置",
-    "configSubtitle": "配置心跳间隔、目标频道与生效时间",
-    "loadingConfig": "正在加载心跳配置...",
-    "saved": "心跳参数已保存",
-    "badges": {
-      "ok": "最近心跳正常",
-      "alert": "最近心跳告警",
-      "unknown": "尚无心跳结果"
-    },
-    "everyLabel": "间隔时间 (秒)",
-    "targetLabel": "目标频道 (channel_id)",
-    "enableActiveHours": "启用生效时间",
-    "startTime": "开始时间",
-    "endTime": "结束时间",
-    "recentMessages": "最近 20 条心跳消息",
-    "noHistory": "暂无历史心跳消息",
-    "statusOk": "OK",
-    "statusUnknown": "UNKNOWN",
-    "latestTime": "最近心跳时间",
-    "latestContent": "最近心跳内容",
-    "none": "暂无",
-    "channels": {
-      "web": "网页 (web)",
-      "feishu": "飞书 (feishu)",
-      "wechat": "微信 (wechat)",
-      "xiaoyi": "小艺 (xiaoyi)",
-      "dingtalk": "钉钉 (dingtalk)"
-    },
-    "errors": {
-      "loadConfig": "加载心跳配置失败",
-      "saveConfig": "保存心跳配置失败",
-      "invalidEvery": "心跳间隔必须是大于 0 的正数",
-      "invalidActiveHours": "active_hours 需使用 HH:MM 格式（例如 08:00）",
-      "invalidRange": "结束时间必须大于开始时间",
-      "feishuNoTarget": "飞书机器人尚未与用户对话，无法推送心跳。请先在飞书中与机器人对话一次。"
-    }
-  },
-  "heartbeatModal": {
-    "closeAria": "关闭心跳详情弹窗",
-    "title": "心跳消息",
-    "subtitle": "消息内容详情",
-    "empty": "无详细内容"
   },
   "offloadFiles": {
     "title": "离线文件",
@@ -574,8 +533,8 @@
   "sourceManager": {
     "closeAria": "关闭源管理弹窗",
     "title": "源管理",
-    "subtitle": "选择在线搜索源并配置",
-    "selectSource": "选择在线搜索源",
+    "subtitle": "配置在线源",
+    "selectSource": "配置在线源",
     "skillnetDesc": "开源技能库",
     "clawhubDesc": "企业技能库",
     "skillnetInfo": "SkillNet 在线搜索",
@@ -610,6 +569,7 @@
       "dingtalk": "钉钉",
       "telegram": "Telegram",
       "discord": "Discord",
+      "slack": "Slack",
       "whatsapp": "WhatsApp",
       "wecom": "企业微信",
       "wechat": "微信"
@@ -634,6 +594,9 @@
       "discordTitle": "Discord 频道参数配置",
       "discordSubtitle": "配置 Discord Bot 服务相关参数",
       "discordHint": "支持 Discord Bot 消息收发，请确保已在开发者后台开启 Message Content Intent 并配置目标频道，可使用block_dm开关屏蔽私信。",
+      "slackTitle": "Slack 频道参数配置",
+      "slackSubtitle": "配置 Slack Socket Mode 机器人服务参数",
+      "slackHint": "请创建并启用 Socket Mode 的 Slack App，配置 xoxb Bot Token 和 xapp App Token，并订阅 app_mention 与 message.im 事件。",
       "telegramTitle": "Telegram 频道参数配置",
       "telegramSubtitle": "配置 Telegram Bot 服务相关参数",
       "whatsappTitle": "WhatsApp 频道参数配置",
@@ -649,6 +612,7 @@
       "feishu": "正在加载飞书配置...",
       "telegram": "正在加载 Telegram 配置...",
       "discord": "正在加载 Discord 配置...",
+      "slack": "正在加载 Slack 配置...",
       "whatsapp": "正在加载 WhatsApp 配置...",
       "wecom": "正在加载企业微信配置...",
       "wechat": "正在加载微信配置..."
@@ -665,8 +629,15 @@
       "whatsappJids": "每行一个 WhatsApp JID（也支持逗号分隔）",
       "wecomDefaultChatId": "userid 或 chatid（群聊）",
       "wecomDefaultChatIdHint": "心跳/定时推送目标。不填则自动使用最近一次聊天的 chatid",
+      "xiaoyiApiIdHint": "定时任务推送到小艺需要配置 api_id；未配置时无法在定时任务中选择小艺作为推送渠道。",
+      "xiaoyiApiIdRequiredForCron": "未配置 api_id：定时任务中无法选择小艺作为推送渠道。",
       "discordGuildId": "请填入Discord的服务器ID（留空则仅接收私信）",
       "discordChannelId": "请填入Discord服务器的频道ID（留空则仅接收私信）",
+      "slackBotToken": "请输入 xoxb Bot Token",
+      "slackAppToken": "请输入 xapp App Token",
+      "slackChannelId": "请输入备用 Slack 频道 ID",
+      "slackUserIds": "每行一个 Slack 用户 ID（留空允许所有用户）",
+      "slackChannelIds": "每行一个 Slack 频道 ID（留空允许所有频道）",
       "allowFrom": "每行一个 chatid/userid（也支持逗号分隔）"
     },
     "saved": {
@@ -675,6 +646,7 @@
       "dingtalk": "钉钉配置已保存",
       "telegram": "Telegram 配置已保存",
       "discord": "Discord 配置已保存",
+      "slack": "Slack 配置已保存",
       "whatsapp": "WhatsApp 配置已保存",
       "wecom": "企业微信配置已保存",
       "wechat": "微信配置已保存"
@@ -710,6 +682,7 @@
       "loadDingtalk": "获取钉钉配置失败",
       "loadTelegram": "获取 Telegram 配置失败",
       "loadDiscord": "获取 Discord 配置失败",
+      "loadSlack": "获取 Slack 配置失败",
       "loadWhatsApp": "获取 WhatsApp 配置失败",
       "loadWecom": "获取企业微信配置失败",
       "loadWechat": "获取微信配置失败",
@@ -732,6 +705,23 @@
       "appIdNotConfigured": "未配置 app_id",
       "deleteApp": "删除应用",
       "addApp": "添加应用"
+    }
+  },
+  "modelSetupGuide": {
+    "progress": "第 {{current}} 步，共 {{total}} 步",
+    "clickMore": "点击“更多”继续",
+    "acknowledge": "我知道了",
+    "skip": "跳过",
+    "open": "配置指引",
+    "steps": {
+      "1": {
+        "title": "配置你的首个模型",
+        "description": "模型配置位于“更多”中的“配置信息”。"
+      },
+      "2": {
+        "title": "完成模型配置",
+        "description": "在默认模型区域填写模型名称、API 地址、API Key 和模型提供商，然后点击保存。"
+      }
     }
   },
   "config": {
@@ -788,6 +778,8 @@
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
       "swarmflowEnabled": "启用 SwarmFlow",
+      "kvCacheReleaseEnabled": "旧链路（KV 释放）",
+      "kvCacheAffinityEnabled": "新链路（Ascend 亲和）",
       "skillRetrievalBuildRootCategoriesPlaceholder": "直接编辑 YAML/JSON 树根分层配置",
       "agentSkillsPlaceholder": "点击选择技能",
       "agentSkillsEmpty": "暂无已安装技能",
@@ -970,6 +962,7 @@
       "agents": { "label": "多Agent配置", "hint": "仅供集群模式使用，且必须添加Team" },
       "team": { "label": "Team配置", "hint": "多智能体团队配置" },
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
+      "kvCacheAffinity": { "label": "算力亲和", "hint": "控制 Ascend KV Cache 亲和能力" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
       "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
       "swarmflow": { "label": "SwarmFlow", "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控" },
@@ -987,7 +980,8 @@
       "freeSearchBing": "启用 Bing",
       "enabled": "启用",
       "dynamicGraph": "启用动态图谱",
-      "kvCacheAffinity": "算力亲和（KV 释放）"
+      "kvCacheRelease": "旧链路（KV 释放）",
+      "kvCacheAffinity": "新链路（Ascend 亲和）"
     },
     "permissionsTools": {
       "title": "工具防护（permissions.tools）",
@@ -1086,6 +1080,15 @@
       "noResults": "未找到相关模板，可换个关键词再试。",
       "noResultsJobs": "未找到相关任务，可换个关键词再试。"
     },
+    "pagination": {
+      "pageSize": "每页显示",
+      "rangeInfo": "{{start}}-{{end}} / 共 {{total}} 条",
+      "prev": "上一页",
+      "next": "下一页"
+    },
+    "filter": {
+      "reset": "重置"
+    },
     "table": {
       "name": "名称",
       "project": "项目",
@@ -1094,7 +1097,7 @@
       "timezone": "时区",
       "channel": "推送频道",
       "actions": "操作",
-      "noProject": "–",
+      "noProject": "-",
       "runNow": "立即执行",
       "stop": "停止",
       "start": "启动",
@@ -1137,9 +1140,12 @@
       "fieldEnabled": "启用",
       "placeholderInput": "请输入",
       "placeholderSelect": "请选择",
+      "placeholderProject": "-",
       "placeholderEffectiveDate": "请选择生效日期",
       "missingFieldsHint": "还需要填写：{{fields}}",
-      "scheduleAlreadyExpiredHint": "所选的执行时间已经过去，请重新选择"
+      "scheduleAlreadyExpiredHint": "所选的执行时间已经过去，请重新选择",
+      "charCount": "{{count}}/{{max}}",
+      "maxLengthReachedHint": "已达到最大长度限制（{{max}} 字）"
     },
     "schedule": {
       "title": "执行计划",
@@ -1160,6 +1166,7 @@
       "every": "每",
       "everyHoursPlaceholder": "小时数",
       "everyMinutesPlaceholder": "分钟数",
+      "integerOnlyHint": "间隔必须为大于等于 1 的整数",
       "hoursUnit": "小时",
       "minutesUnit": "分钟",
       "intervalUnit": {
@@ -1202,7 +1209,10 @@
         "3": "第三周",
         "4": "第四周",
         "last": "最后一周"
-      }
+      },
+      "wakeOffset": "提前唤醒",
+      "wakeOffsetUnit": "分钟",
+      "wakeOffsetHelp": "在计划推送时间前启动 Agent 准备结果；0 表示到点执行"
     },
     "modelPicker": {
       "configured": "已配置",
@@ -1262,7 +1272,7 @@
     },
     "placeholders": {
       "name": "输入任务名称",
-      "cron": "7段式(Quartz)：秒 分 时 日 月 周 年。取值：秒(0-59)、分(0-59)、时(0-23)、日(1-31)、月(1-12)、周(1-7或?)、年(1970-2099或*)。日和周不能同时指定值。例：每天9点='0 0 9 * * ? *'；一次性2026年4月29日17:30='0 30 17 29 4 ? 2026'",
+      "cron": "7段式(Quartz)：秒 分 时 日 月 周 年。取值：秒(0-59)、分(0-59)、时(0-23)、日(1-31)、月(1-12)、周(0-6或?，0=周日、1=周一...6=周六，也支持 SUN/MON/TUE/WED/THU/FRI/SAT，不区分大小写)、年(1970-2099或*)。日和周可同时指定具体值，此时满足其一即触发，如15号或每周一，取的是并集而非交集。例：每天9点='0 0 9 * * ? *'；一次性2026年4月29日17:30='0 30 17 29 4 ? 2026'",
       "cronShort": "7段式(Quartz)：秒 分 时 日 月 周 年",
       "description": "输入描述",
       "wakeOffset": "唤醒偏移秒数"
@@ -1292,7 +1302,9 @@
     "errors": {
       "loadJobs": "加载定时任务失败",
       "createFailed": "创建任务失败",
+      "createFailedWithReason": "创建任务失败：{{reason}}",
       "updateFailed": "更新任务失败",
+      "updateFailedWithReason": "更新任务失败：{{reason}}",
       "deleteFailed": "删除任务失败",
       "toggleFailed": "更新任务状态失败",
       "previewFailed": "预览触发时间失败",
@@ -1305,12 +1317,10 @@
       "cronRequired": "Cron 表达式不能为空",
       "cronFormat": "Cron 表达式格式错误（应为7段式：秒 分 时 日 月 周 年）",
       "cronSecondOrMinute": "秒/分字段错误（取值 0-59，支持 * / - ,）",
-      "cronSecondOrMinuteStep": "秒/分步长需能被60整除",
       "cronHour": "小时字段错误（取值 0-23，支持 * / - ,）",
-      "cronHourStep": "小时步长需能被24整除",
       "cronDay": "日字段错误（取值 1-31，支持 * ? - ,）",
       "cronMonth": "月字段错误（取值 1-12，支持 * - ,）",
-      "cronWeek": "周字段错误（取值 0-6，支持 * ? - ,，0=周日、1=周一...6=周六）",
+      "cronWeek": "周字段错误（取值 0-6，支持 * ? - ,，0=周日、1=周一...6=周六；也支持 SUN/MON/TUE/WED/THU/FRI/SAT，不区分大小写）",
       "cronYear": "年份字段错误（取值 1970-2099 或 *）",
       "timezoneRequired": "时区不能为空",
       "targetRequired": "推送频道不能为空",
@@ -1318,32 +1328,20 @@
     }
   },
   "browser": {
-    "title": "浏览器服务",
-    "subtitle": "配置浏览器路径，启动浏览器服务。",
+    "title": "浏览器",
+    "subtitle": "配置浏览器 Agent 使用的 Chrome 路径和显示模式。",
     "refreshPath": "刷新路径",
     "savePath": "保存路径",
-    "startService": "启动浏览器服务",
-    "starting": "启动中...",
     "pathConfigHelp": "CHROME 路径配置（Chrome地址栏输入：chrome://version查看，复制可执行文件路径）",
     "examplePath": "例如：/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "success": {
-      "pathSaved": "Chrome 路径已保存",
-      "started": "浏览器服务启动成功"
-    },
-    "tooltips": {
-      "fillPath": "请先填写 Chrome 路径",
-      "savePath": "请先保存 Chrome 路径"
+      "pathSaved": "Chrome 路径已保存"
     },
     "showBrowser": "显示浏览器",
     "showBrowserDesc": "执行浏览器任务时打开可见的浏览器窗口。",
     "errors": {
       "loadPath": "加载 Chrome 路径失败",
-      "savePath": "保存 Chrome 路径失败",
-      "pathRequired": "Chrome 路径不能为空",
-      "saveBeforeStart": "请先保存 Chrome 路径后再启动浏览器服务",
-      "startFailed": "启动浏览器服务失败",
-      "startFailedWithCode": "浏览器服务启动失败，返回码 {{code}}",
-      "startFailedWithMessage": "浏览器服务启动失败：{{message}}"
+      "savePath": "保存 Chrome 路径失败"
     }
   },
   "logsPanel": {
@@ -1392,7 +1390,18 @@
       "searchPlaceholder": "输入关键词搜索SwarmSkills"
     },
     "onlineSearch": {
-      "title": "Skills在线搜索"
+      "title": "Skills在线搜索",
+      "searchPlaceholder": "输入关键词同时搜索多个在线技能源",
+      "searchFailed": "在线技能搜索失败，请稍后重试。",
+      "partialFailure": "部分在线源暂不可用，已展示其余来源的结果。",
+      "noResults": "未找到匹配的在线技能。",
+      "installFailed": "安装技能失败。",
+      "installed": "已安装技能 {{name}}",
+      "sourceStatus": {
+        "success": "可用（{{count}}）",
+        "error": "不可用",
+        "skipped": "未配置"
+      }
     },
     "actions": {
       "install": "安装",
@@ -1621,7 +1630,7 @@
     "evolution": {
       "closeAria": "关闭技能经验弹窗",
       "title": "技能经验：{{name}}",
-      "subtitle": "可编辑经验内容（change.content），并支持删除条目后保存。",
+      "subtitle": "可编辑或删除经验，保存后生效。",
       "empty": "暂无经验条目",
       "deleteConfirm": "确认删除该条经验吗？",
       "actions": {
@@ -1630,12 +1639,29 @@
       "fields": {
         "id": "ID",
         "source": "来源",
-        "section": "Section",
-        "target": "Target",
+        "section": "类型",
+        "target": "改进对象",
         "applied": "已应用",
-        "timestamp": "时间",
+        "timestamp": "生成时间",
         "context": "上下文",
         "content": "经验内容"
+      },
+      "values": {
+        "section": {
+          "instructions": "使用说明",
+          "examples": "使用示例",
+          "troubleshooting": "问题排查",
+          "workflow": "工作流程",
+          "constraints": "约束条件",
+          "roles": "角色定义",
+          "collaboration": "协作方式",
+          "scripts": "脚本"
+        },
+        "target": {
+          "description": "技能简介",
+          "body": "技能正文",
+          "script": "技能脚本"
+        }
       },
       "messages": {
         "saved": "保存成功"
@@ -2027,9 +2053,6 @@
     "configErrorHint": "请先启动 E2E 后端（如",
     "configErrorDefault": "，默认监听 19000）。若后端不在本机或端口不同，可在",
     "configErrorEnv": "设置",
-    "heartbeatTitle": "心跳消息",
-    "heartbeatClose": "关闭",
-    "heartbeatViewFull": "点击查看完整心跳消息",
     "securityAlertTitle": "安全警告",
     "noContent": "无详细内容",
     "restarting": "正在重启服务",
@@ -2109,7 +2132,7 @@
     "workDescription": "处理办公、协作和通用任务",
     "codeDescription": "在项目目录中查看并修改代码",
     "environment": "环境信息",
-    "changes": "变更",
+    "changes": "本轮变更",
     "review": "审核"
   },
   "multiSession": {
@@ -2168,7 +2191,8 @@
       "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
       "errors": {
         "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",
-        "nameExists": "该项目名已存在，请换个名称"
+        "nameExists": "该项目名已存在，请换个名称",
+        "pathMissing": "项目目录不存在，请选择已存在的目录"
       },
       "cancel": "取消",
       "confirm": "确定"
@@ -2207,7 +2231,8 @@
     "nextStep": "下一步",
     "confirm": "确定",
     "customOption": "自定义",
-    "customPlaceholder": "没有合适的选项？输入您的答案..."
+    "customPlaceholder": "没有合适的选项？输入您的答案...",
+    "skippedSummary": "已跳过"
   },
   "qaSummary": {
     "title": "问题澄清"

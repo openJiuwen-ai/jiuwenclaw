@@ -159,6 +159,17 @@ function parseSessionDisplayLabel(sessionId: string, t: (key: string, options?: 
     }
   }
 
+  // slack_{team_id}_{channel_id}_{thread_ts_or_user_id}
+  if (sessionId.startsWith('slack_')) {
+    const parts = sessionId.split('_');
+    const slackLabel = t('sessions.prefixes.slack');
+    if (parts.length >= 4) {
+      const channel = shortenDiscordIDForLabel(parts[2]);
+      const scope = shortenDiscordIDForLabel(parts[3]);
+      return `${slackLabel}-${channel}/${scope}`;
+    }
+  }
+
   // 解析会话ID中可能包含的时间戳格式，如 YYYYMMDD_HHMMSS_xxxx
   const timestampRegex = /(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/;
   const match = sessionId.match(timestampRegex);

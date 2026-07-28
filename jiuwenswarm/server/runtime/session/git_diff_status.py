@@ -1,7 +1,7 @@
 """DiffStatusService: 面向 Web 的 diff 状态聚合服务(设计文档 §2.4 / §3.5 / §4.1.16)。
 
 聚合"当前工作区 diff"与"上一轮对话 diff"两路来源,复用
-``DiffService.get_git_diff()`` / ``get_turn_diffs()`` 并转换为 snake_case schema,
+``DiffService.get_git_diff()`` / ``get_turn_diff_summaries()`` 并转换为 snake_case schema,
 合并 ``ProjectGitService`` 的 repo 状态。
 
 第一版能力边界(§2.7):staged/unstaged 分类计数不在范围内。
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,55 @@ from jiuwenswarm.server.runtime.session.project_git import GitError, GitOperatio
 from jiuwenswarm.server.utils.diff_service import get_diff_service
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_team_path_segment(value: str, fallback: str = "_") -> str:
+    """Sanitize a value into one path segment for team workspace paths."""
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    normalized = normalized.strip("._-")
+    return normalized[:96] or fallback
+
+
+def _session_team_member_names(session_id: str | None) -> list[str]:
+    """Return member names observed in persisted team events for a session."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    try:
+        from jiuwenswarm.server.runtime.session.session_history import (
+            load_history_records,
+        )
+
+        history = load_history_records(sid)
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(history, list):
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add_name(raw: Any) -> None:
+        if not isinstance(raw, str) or not raw.strip():
+            return
+        name = raw.strip()
+        if name in seen:
+            return
+        seen.add(name)
+        names.append(name)
+
+    for record in history:
+        if not isinstance(record, dict):
+            continue
+        extra = record.get("extra")
+        event = extra.get("event") if isinstance(extra, dict) else None
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") != "team.member.spawned":
+            continue
+        add_name(event.get("name"))
+        add_name(event.get("member_id"))
+    return names
 
 
 @dataclass(slots=True)
@@ -245,6 +295,7 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
     sid = str(session_id or "").strip()
     if not sid:
         return []
+    safe_sid = _safe_team_path_segment(sid)
     try:
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
@@ -285,6 +336,7 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
 
     team_name = str(metadata.get("team_name") or "").strip()
     if team_name:
+        spawned_member_names = _session_team_member_names(sid)
         for raw in raw_root_values:
             if not isinstance(raw, str) or team_name not in raw:
                 continue
@@ -302,14 +354,27 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
                     home = Path(*parts[: idx + 1])
                     add_root(str(home / "team-workspace"))
                     add_root(str(home / "workspaces"))
+                    add_root(str(home / "sessions" / safe_sid / "worktrees"))
+                    for member_name in spawned_member_names:
+                        safe_member = _safe_team_path_segment(member_name)
+                        add_root(str(home / "workspaces" / f"{safe_member}_workspace"))
             except Exception:  # noqa: BLE001
                 continue
         try:
-            from openjiuwen.agent_teams.paths import team_home
+            from openjiuwen.agent_teams.paths import (
+                independent_member_workspace,
+                team_home,
+                team_session_worktrees_dir,
+            )
 
             home = team_home(team_name)
             add_root(str(home / "team-workspace"))
             add_root(str(home / "workspaces"))
+            add_root(str(team_session_worktrees_dir(team_name, sid)))
+            for member_name in spawned_member_names:
+                safe_member = _safe_team_path_segment(member_name)
+                add_root(str(home / "workspaces" / f"{safe_member}_workspace"))
+                add_root(str(independent_member_workspace(member_name)))
         except Exception:  # noqa: BLE001
             pass
     return roots
@@ -431,7 +496,7 @@ def _convert_turn_diff(
     include_files: bool,
     include_hunks: bool,
 ) -> DiffTurnSummary | None:
-    """转换单个 ``get_turn_diffs()`` 返回的 turn → DiffTurnSummary。"""
+    """转换单个 turn diff dict → DiffTurnSummary。"""
     if not turn or not isinstance(turn, dict):
         return None
     stats = _convert_stats(turn.get("stats"))
@@ -470,7 +535,7 @@ def _historical_repo_context(
 def _convert_turn_summary(
     turn: dict[str, Any], *, repo_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """转换单个 ``get_turn_diffs()`` 返回的 turn 为摘要(不含 hunks)。
+    """转换单个 turn diff dict 为摘要(不含 hunks)。
 
     用于 ``project.git.turn_diff_list`` 摘要接口,响应包含文件列表但不含
     hunk,用于刷新后恢复历史编辑卡片。
@@ -551,6 +616,31 @@ def _repo_context_from_status(project: Any, *, reject_transient: bool = False) -
         "branch": repo_status.branch,
         "base_head": repo_status.head,
     }
+
+
+def _repo_context_for_history(project: Any) -> dict[str, Any]:
+    """历史轮次回放专用:读取 Git 上下文,失败时降级为 project_dir 兜底。
+
+    与 ``_repo_context_from_status`` 的区别:
+      - 不抛 ``GIT_TRANSIENT_STATE``:历史轮次回放基于 file_ops + change_set
+        snapshot,不执行 git 命令,transient 状态不应阻断历史预览。
+      - 不抛其他 Git 错误:timeout/command_failed 等与历史 snapshot 无关。
+      - 失败时返回 ``{"repo_root": project_dir, "branch": None, "base_head": None}``,
+        让历史 turn 的 ``_historical_repo_context`` 仍可用(优先级高于 fallback)。
+
+    设计原则:历史轮次的 repo 上下文已持久化在 change_set entry,当前 git 状态
+    只是 fallback。fallback 失败时用 project_dir 兜底,而非阻断整个请求。
+    """
+    try:
+        return _repo_context_from_status(project, reject_transient=False)
+    except GitOperationError:
+        # transient / timeout / command_failed 等:用 project_dir 兜底
+        project_dir = str(getattr(project, "project_dir", "") or "") or None
+        return {
+            "repo_root": project_dir,
+            "branch": None,
+            "base_head": None,
+        }
 
 
 class DiffStatusService:
@@ -647,7 +737,7 @@ class DiffStatusService:
             diff_service = get_diff_service()
             extra_history_roots = get_session_extra_history_roots(session_id)
             try:
-                turns = diff_service.get_turn_diffs(
+                turns = diff_service.get_turn_diff_summaries(
                     session_id,
                     project_dir,
                     repo_context={
@@ -662,7 +752,7 @@ class DiffStatusService:
                 # 订阅状态回滚。否则 source=last_turn 时会静默
                 # 返回空数据,客户端误以为订阅成功但拿不到内容。
                 logger.warning(
-                    "[DiffStatus] get_turn_diffs failed (session=%s): %s",
+                    "[DiffStatus] get_turn_diff_summaries failed (session=%s): %s",
                     session_id, exc,
                 )
                 raise
@@ -695,7 +785,9 @@ class DiffStatusService:
         """返回历史轮次摘要列表。"""
         project_id = getattr(project, "project_id", "")
         project_dir = getattr(project, "project_dir", "")
-        repo_context = _repo_context_from_status(project, reject_transient=True)
+        # 历史轮次回放不依赖当前 git 状态:用 _repo_context_for_history 兜底,
+        # 避免 transient/timeout 等错误阻断 file_ops 历史预览。
+        repo_context = _repo_context_for_history(project)
         diff_service = get_diff_service()
         extra_history_roots = get_session_extra_history_roots(session_id)
         turns = diff_service.get_turn_diff_summaries(
@@ -741,7 +833,9 @@ class DiffStatusService:
         """返回指定轮次详情，优先按 ``change_set_id`` 查询。"""
         project_id = getattr(project, "project_id", "")
         project_dir = getattr(project, "project_dir", "")
-        repo_context = _repo_context_from_status(project, reject_transient=True)
+        # 历史轮次回放不依赖当前 git 状态:用 _repo_context_for_history 兜底,
+        # 避免 transient/timeout 等错误阻断 file_ops 历史预览。
+        repo_context = _repo_context_for_history(project)
         repo_root = repo_context.get("repo_root")
 
         diff_service = get_diff_service()

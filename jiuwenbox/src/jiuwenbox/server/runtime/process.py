@@ -256,7 +256,6 @@ class _DaemonBgExecCall:
     env: dict[str, str] | None
     workdir: str | None
     stdin_bytes: bytes | None
-    capture_output: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -340,7 +339,6 @@ class BackgroundJob:
     sandbox_id: str
     command: list[str]
     pid: int | None
-    capture_output: bool
     workdir: str | None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
@@ -686,9 +684,6 @@ class ProcessRuntime(RuntimeAdapter):
         running = response.get("running")
         if not isinstance(running, bool):
             return
-        if job.capture_output:
-            job.stdout = str(response.get("stdout", ""))
-            job.stderr = str(response.get("stderr", ""))
         if running:
             job.exit_code = None
             job.finished_at = None
@@ -727,7 +722,6 @@ class ProcessRuntime(RuntimeAdapter):
             exit_code=job.exit_code,
             started_at=job.started_at,
             finished_at=job.finished_at,
-            capture_output=job.capture_output,
             stdout=job.stdout,
             stderr=job.stderr,
             workdir=job.workdir,
@@ -743,7 +737,6 @@ class ProcessRuntime(RuntimeAdapter):
             exit_code=job.exit_code,
             started_at=job.started_at,
             finished_at=job.finished_at,
-            capture_output=job.capture_output,
         )
 
     def _get_background_job_record(
@@ -2337,7 +2330,6 @@ class ProcessRuntime(RuntimeAdapter):
         request_payload: dict[str, Any] = {
             "job_id": call.job_id,
             "command": list(call.command),
-            "capture_output": call.capture_output,
             "stdin_size": len(call.stdin_bytes or b""),
         }
         if call.env:
@@ -2896,7 +2888,6 @@ class ProcessRuntime(RuntimeAdapter):
                     f"sandbox {sandbox_id!r} daemon IPC channel unavailable; "
                     "the daemon is not running or its control socket is gone"
                 ),
-                capture_output=request.capture_output,
             )
 
         loop = asyncio.get_running_loop()
@@ -2911,7 +2902,6 @@ class ProcessRuntime(RuntimeAdapter):
                     env=dict(request.env) if request.env else None,
                     workdir=request.workdir,
                     stdin_bytes=request.stdin_data,
-                    capture_output=request.capture_output,
                 ),
             )
         except (ConnectionError, ValueError) as exc:
@@ -2920,7 +2910,6 @@ class ProcessRuntime(RuntimeAdapter):
                 started=False,
                 command=list(request.command),
                 error_message=f"daemon IPC transport failure: {exc}",
-                capture_output=request.capture_output,
             )
         except socket.timeout as exc:
             self._daemon_socket_ready[sandbox_id] = False
@@ -2928,7 +2917,6 @@ class ProcessRuntime(RuntimeAdapter):
                 started=False,
                 command=list(request.command),
                 error_message=f"daemon IPC timeout: {exc}",
-                capture_output=request.capture_output,
             )
         except OSError as exc:
             if exc.errno in FATAL_DAEMON_ERRNOS:
@@ -2937,7 +2925,6 @@ class ProcessRuntime(RuntimeAdapter):
                 started=False,
                 command=list(request.command),
                 error_message=f"daemon IPC unavailable: {exc}",
-                capture_output=request.capture_output,
             )
 
         if not response.get("ok") or not response.get("started", False):
@@ -2946,7 +2933,6 @@ class ProcessRuntime(RuntimeAdapter):
                 started=False,
                 command=list(request.command),
                 error_message=str(error),
-                capture_output=request.capture_output,
             )
 
         pid = response.get("pid")
@@ -2961,11 +2947,8 @@ class ProcessRuntime(RuntimeAdapter):
             sandbox_id=sandbox_id,
             command=list(request.command),
             pid=pid_int,
-            capture_output=request.capture_output,
             workdir=request.workdir,
             exit_code=exit_code_int if not running_bool else None,
-            stdout=str(response.get("stdout", "")) if request.capture_output else "",
-            stderr=str(response.get("stderr", "")) if request.capture_output else "",
         )
         if not running_bool and job.finished_at is None:
             job.finished_at = datetime.now(timezone.utc)
@@ -2987,7 +2970,6 @@ class ProcessRuntime(RuntimeAdapter):
             command=list(request.command),
             running=running_bool,
             exit_code=exit_code_int,
-            capture_output=request.capture_output,
         )
 
     async def get_background_job(

@@ -248,7 +248,43 @@ async def _connect_with_retry(
         max_retries: int = 20,
         interval: float = 3.0,
 ) -> None:
+    """连接 AgentServer, 失败重试.
+
+    相比固定 3s 间隔: 先做轻量 TCP 端口探测, 端口通了再 ws 握手, 避免 AgentServer
+    尚未 listen 时反复走完整 WS 握手; 重试间隔改为指数退避 (0.2s 起, 翻倍至上限
+    ``interval``), 让 AgentServer 一旦 listen 即在亚秒级连上, 而非硬等下一个 3s 节拍.
+    """
+    import socket as _socket
+    from urllib.parse import urlparse as _urlparse
+
+    parsed = _urlparse(uri)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+
+    def _tcp_ready(timeout: float = 0.5) -> bool:
+        try:
+            with _socket.create_connection(("127.0.0.1", port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    backoff = 0.2
     for attempt in range(1, max_retries + 1):
+        # 先 TCP 探测: 端口未通则不浪费一次 WS 握手, 直接进入退避等待.
+        if not _tcp_ready():
+            if attempt >= max_retries:
+                logger.error(
+                    "[App] connect AgentServer failed after %d tries: port %s not listening  uri=%s",
+                    attempt, port, uri,
+                )
+                raise ConnectionRefusedError(f"AgentServer port {port} not listening")
+            logger.info(
+                "[App] AgentServer port %s not listening yet (%d/%d), retry in %.2fs...",
+                port, attempt, max_retries, backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, interval)
+            continue
         try:
             await client.connect(uri)
             logger.info("[App] connected to AgentServer: %s", uri)
@@ -263,13 +299,14 @@ async def _connect_with_retry(
                 )
                 raise
             logger.warning(
-                "[App] connect AgentServer failed (%d/%d): %s  retry in %s s...",
+                "[App] connect AgentServer failed (%d/%d): %s  retry in %.2fs...",
                 attempt,
                 max_retries,
                 exc,
-                interval,
+                backoff,
             )
-            await asyncio.sleep(interval)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, interval)
 
 
 def _exec_gateway_restart() -> None:
@@ -1401,6 +1438,8 @@ async def _run(
         TelegramChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.discord.discord_connect import DiscordChannel, \
         DiscordChannelConfig
+    from jiuwenswarm.gateway.channel_manager.im_platforms.slack.slack_connect import SlackChannel, \
+        SlackChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
     from jiuwenswarm.common.config import get_config
@@ -1825,6 +1864,8 @@ async def _run(
     telegram_task = None
     discord_channel = None
     discord_task = None
+    slack_channel = None
+    slack_task = None
     whatsapp_channel = None
     whatsapp_task = None
     wecom_channel = None
@@ -1902,6 +1943,7 @@ async def _run(
         nonlocal feishu_channel, feishu_task, xiaoyi_channel, xiaoyi_task
         nonlocal dingtalk_channel, dingtalk_task, telegram_channel, telegram_task
         nonlocal discord_channel, discord_task
+        nonlocal slack_channel, slack_task
         nonlocal whatsapp_channel, whatsapp_task
         nonlocal wecom_channel, wecom_task
         nonlocal wechat_channel, wechat_task
@@ -1929,6 +1971,7 @@ async def _run(
             "telegram",
             "whatsapp",
             "discord",
+            "slack",
             "wecom",
             "wechat",
             "ssh",
@@ -2221,6 +2264,38 @@ async def _run(
             else:
                 logger.info("[App] channels.discord missing or invalid, DiscordChannel disabled")
 
+        if "slack" in changed_channels:
+            slack_conf = conf.get("slack") if isinstance(conf, dict) else None
+            await _stop_channel(slack_channel, slack_task, "slack")
+            slack_channel, slack_task = None, None
+
+            if isinstance(slack_conf, dict):
+                enabled, reason = _is_channel_enabled(slack_conf, ["bot_token", "app_token"])
+                if not enabled:
+                    logger.info("[App] channels.slack.%s, SlackChannel disabled", reason)
+                else:
+                    reply_in_thread_raw = slack_conf.get("reply_in_thread", True)
+                    reply_in_thread = (
+                        str(reply_in_thread_raw).strip().lower() in ("true", "1", "yes", "on")
+                        if isinstance(reply_in_thread_raw, str)
+                        else bool(reply_in_thread_raw)
+                    )
+                    slack_config = SlackChannelConfig(
+                        enabled=True,
+                        bot_token=str(slack_conf.get("bot_token") or "").strip(),
+                        app_token=str(slack_conf.get("app_token") or "").strip(),
+                        allow_from=slack_conf.get("allow_from") or [],
+                        allowed_channel_ids=slack_conf.get("allowed_channel_ids") or [],
+                        default_channel_id=str(slack_conf.get("default_channel_id") or "").strip(),
+                        reply_in_thread=reply_in_thread,
+                    )
+                    slack_channel = SlackChannel(slack_config, _DummyBus())
+                    channel_manager.register_channel(slack_channel)
+                    slack_task = asyncio.create_task(slack_channel.start(), name="slack")
+                    logger.info("[App] SlackChannel registered from config.yaml.channels.slack")
+            else:
+                logger.info("[App] channels.slack missing or invalid, SlackChannel disabled")
+
         if "whatsapp" in changed_channels:
             whatsapp_conf = conf.get("whatsapp") if isinstance(conf, dict) else None
             await _stop_channel(whatsapp_channel, whatsapp_task, "whatsapp")
@@ -2351,8 +2426,24 @@ async def _run(
             if isinstance(ssh_conf, dict):
                 # 南向经 agent client（如 agentos_router -> yuanrong）动态解析。
                 enabled, reason = _is_channel_enabled(ssh_conf, ["listen_port"])
+                full_cfg = get_config()
+                gateway_cfg = full_cfg.get("gateway") if isinstance(full_cfg, dict) else {}
+                agent_client_cfg = (
+                    gateway_cfg.get("agent_client") if isinstance(gateway_cfg, dict) else {}
+                )
+                client_type = (
+                    str(agent_client_cfg.get("type") or "websocket").strip().lower()
+                    if isinstance(agent_client_cfg, dict)
+                    else "websocket"
+                )
                 if not enabled:
                     logger.info("[App] channels.ssh.%s, SshChannel disabled", reason)
+                elif client_type != "agentos_router":
+                    logger.warning(
+                        "[App] channels.ssh.enabled=true but gateway.agent_client.type=%s "
+                        "(require agentos_router); SshChannel will not start",
+                        client_type,
+                    )
                 else:
                     ssh_config = SshChannelConfig.from_dict({**ssh_conf, "enabled": True})
                     ssh_channel = SshChannel(ssh_config, _DummyBus())
@@ -2511,6 +2602,13 @@ async def _run(
             except asyncio.CancelledError:
                 pass
             await discord_channel.stop()
+        if slack_channel is not None and slack_task is not None:
+            slack_task.cancel()
+            try:
+                await slack_task
+            except asyncio.CancelledError:
+                pass
+            await slack_channel.stop()
         if whatsapp_channel is not None and whatsapp_task is not None:
             whatsapp_task.cancel()
             try:

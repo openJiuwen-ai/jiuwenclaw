@@ -179,22 +179,8 @@ class JoinExitHandlers:
                 f"⚠️ {_join_err_mismatch(_join_team_name, sid)}",
             )
             return
-        human_member_names = await self.fetch_team_human_members(
-            msg.channel_id, sid, _join_team_name,
-        )
-        if human_member_names is None:
-            await self._h.send_channel_notice(
-                user_infos, channel_id, msg.session_id,
-                f"⚠️ {_join_err_team_not_exist(_join_team_name)}",
-            )
-            return
-        if parsed.member_name not in human_member_names:
-            await self._h.send_channel_notice(
-                user_infos, channel_id, msg.session_id,
-                f"⚠️ 成员 **{parsed.member_name}** 不存在。可用席位：{', '.join(human_member_names)}",
-            )
-            return
         # 检查席位占用状态（V2 §8.1）
+        # 优先内存判断,同时发多条join将"无需重复加入"提示挤到后面
         joining_user_id = msg.user_id or msg.metadata.get("im_sender_user_id", "")
         existing_subs = self._h.get_session_sharing_registry().lookup_member(sid, parsed.member_name)
         for sub in existing_subs:
@@ -209,6 +195,21 @@ class JoinExitHandlers:
             await self._h.send_channel_notice(
                 user_infos, channel_id, msg.session_id,
                 f"⚠️ 你已是 **{sid}** 的 **{parsed.member_name}**，无需重复加入。",
+            )
+            return
+        human_member_names = await self.fetch_team_human_members(
+            msg.channel_id, sid, _join_team_name,
+        )
+        if human_member_names is None:
+            await self._h.send_channel_notice(
+                user_infos, channel_id, msg.session_id,
+                f"⚠️ {_join_err_team_not_exist(_join_team_name)}",
+            )
+            return
+        if parsed.member_name not in human_member_names:
+            await self._h.send_channel_notice(
+                user_infos, channel_id, msg.session_id,
+                f"⚠️ 成员 **{parsed.member_name}** 不存在。可用席位：{', '.join(human_member_names)}",
             )
             return
         try:

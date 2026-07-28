@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
 _SKILLNET_MAX_RETRIES: int = int(os.environ.get("SKILLNET_MAX_RETRIES", "3"))
+# SkillNet 异步安装 job 必须跨 SkillManager 实例共享：skills.* 无状态 RPC 在
+# AgentManager 缓存未命中时会临时 new JiuWenSwarm()，install 与 install_status
+# 可能落到不同实例；若 job 仅存实例内存会误报「安装会话已过期」。
+_SKILLNET_INSTALL_JOBS: dict[str, dict[str, Any]] = {}
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
 _SKILLNET_PROXY_ENV_KEYS = (
@@ -67,6 +71,8 @@ _TEAM_SKILLS_HUB_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = (
 )
 _IMPORT_LOCAL_REMOTE_TIMEOUT: float = float(os.environ.get("IMPORT_LOCAL_REMOTE_TIMEOUT", "60"))
 _IMPORT_LOCAL_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = ("*.obs.*.myhuaweicloud.com",)
+_ONLINE_SEARCH_RRF_K = 60
+_ONLINE_SEARCH_SOURCE_ORDER = {"skillnet": 0, "clawhub": 1}
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -417,8 +423,12 @@ class SkillManager:
         # local_skills，使其与"导入本地技能"完全等价（可展示/卸载/查看详情/禁用）。
         self._register_unmanaged_local_skills()
         # SkillNet 异步安装：install 立即返回 install_id，后台下载；完成后调用 hook 重载 Agent
-        self._skillnet_install_jobs: dict[str, dict[str, Any]] = {}
         self._skillnet_install_complete_hook: Callable[[], Awaitable[None]] | None = None
+
+    @property
+    def _skillnet_install_jobs(self) -> dict[str, dict[str, Any]]:
+        """进程级共享的 SkillNet 安装任务表（见模块常量 ``_SKILLNET_INSTALL_JOBS``）."""
+        return _SKILLNET_INSTALL_JOBS
 
     def set_skillnet_install_complete_hook(self, hook: Callable[[], Awaitable[None]] | None) -> None:
         """安装成功落盘后回调（通常为重载 Agent 实例）."""
@@ -893,6 +903,195 @@ class SkillManager:
 
         return {"success": True}
 
+    @staticmethod
+    def _normalize_online_search_identifier(source: str, identifier: str) -> str:
+        """Build a conservative identity key for safe result merging."""
+        value = str(identifier or "").strip()
+        if not value:
+            return f"{source}:"
+        parsed = urlparse(value)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            scheme = "https" if parsed.hostname and parsed.hostname.lower() == "github.com" else parsed.scheme.lower()
+            host = parsed.netloc.lower()
+            path = parsed.path.rstrip("/") or "/"
+            return f"url:{scheme}://{host}{path}"
+        return f"{source}:{value.casefold()}"
+
+    @staticmethod
+    def _normalize_online_search_item(source: str, item: dict[str, Any], rank: int) -> dict[str, Any]:
+        if source == "skillnet":
+            name = str(item.get("skill_name") or item.get("name") or "").strip()
+            description = str(item.get("skill_description") or item.get("description") or "").strip()
+            identifier = str(item.get("skill_url") or item.get("url") or "").strip()
+            version = ""
+            author = str(item.get("author") or "").strip()
+            native_score = item.get("score")
+            if native_score is None:
+                native_score = item.get("stars")
+            category = str(item.get("category") or "").strip()
+            updated_at = 0
+        elif source == "clawhub":
+            name = str(item.get("display_name") or item.get("slug") or "").strip()
+            description = str(item.get("summary") or "").strip()
+            identifier = str(item.get("slug") or "").strip()
+            version = str(item.get("version") or "").strip()
+            author = ""
+            native_score = item.get("score")
+            category = ""
+            updated_at = item.get("updated_at") or 0
+        else:
+            raise ValueError(f"unsupported online search source: {source}")
+
+        return {
+            "source": source,
+            "name": name,
+            "description": description,
+            "identifier": identifier,
+            "version": version,
+            "author": author,
+            "native_score": native_score,
+            "category": category,
+            "updated_at": updated_at,
+            "source_rank": rank,
+            "fusion_score": 1.0 / (_ONLINE_SEARCH_RRF_K + rank),
+            "matched_sources": [
+                {
+                    "source": source,
+                    "identifier": identifier,
+                    "source_rank": rank,
+                }
+            ],
+        }
+
+    @classmethod
+    def _aggregate_online_search_results(
+        cls,
+        query: str,
+        source_results: dict[str, list[dict[str, Any]]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for source in sorted(source_results, key=lambda value: _ONLINE_SEARCH_SOURCE_ORDER.get(value, 99)):
+            for rank, raw_item in enumerate(source_results[source], start=1):
+                if not isinstance(raw_item, dict):
+                    continue
+                item = cls._normalize_online_search_item(source, raw_item, rank)
+                if not item["identifier"] and not item["name"]:
+                    continue
+                identity = cls._normalize_online_search_identifier(
+                    source,
+                    item["identifier"] or item["name"],
+                )
+                existing = merged.get(identity)
+                if existing is None:
+                    merged[identity] = item
+                    continue
+                existing["fusion_score"] += item["fusion_score"]
+                existing["matched_sources"].extend(item["matched_sources"])
+                existing["source_rank"] = min(existing["source_rank"], item["source_rank"])
+
+        normalized_query = query.strip().casefold()
+        items = list(merged.values())
+        for item in items:
+            item["exact_match"] = normalized_query in {
+                str(item.get("name") or "").strip().casefold(),
+                str(item.get("identifier") or "").strip().casefold(),
+            }
+            item["matched_source_count"] = len(
+                {entry.get("source") for entry in item.get("matched_sources", []) if entry.get("source")}
+            )
+
+        items.sort(
+            key=lambda item: (
+                not bool(item.get("exact_match")),
+                -float(item.get("fusion_score") or 0.0),
+                -int(item.get("matched_source_count") or 0),
+                int(item.get("source_rank") or 0),
+                _ONLINE_SEARCH_SOURCE_ORDER.get(str(item.get("source") or ""), 99),
+                str(item.get("identifier") or ""),
+            )
+        )
+        return items[:limit]
+
+    async def handle_skills_online_search(self, params: dict) -> dict:
+        """Search the fixed online sources used by the Skills Online Search surface."""
+        query = str(params.get("q", "")).strip()
+        if not query:
+            return {"success": False, "partial": False, "items": [], "sources": [], "detail": "缺少参数: q"}
+        try:
+            limit = int(params.get("limit", 20))
+        except (TypeError, ValueError):
+            return {
+                "success": False,
+                "partial": False,
+                "items": [],
+                "sources": [],
+                "detail": "参数 limit 必须是整数",
+            }
+        limit = min(max(limit, 1), 50)
+        calls: list[tuple[str, Awaitable[dict[str, Any]]]] = [
+            (
+                "skillnet",
+                self.handle_skills_skillnet_search(
+                    {"q": query, "limit": limit, "mode": "keyword"}
+                ),
+            )
+        ]
+        source_statuses: list[dict[str, Any]] = []
+        if self._get_clawhub_token():
+            calls.append(
+                (
+                    "clawhub",
+                    self.handle_skills_clawhub_search({"q": query, "limit": limit}),
+                )
+            )
+        else:
+            source_statuses.append(
+                {
+                    "source": "clawhub",
+                    "status": "skipped",
+                    "count": 0,
+                    "detail_key": "skills.clawhub.errors.tokenNotConfigured",
+                }
+            )
+
+        payloads = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
+        source_results: dict[str, list[dict[str, Any]]] = {}
+        for (source, _), payload in zip(calls, payloads):
+            if isinstance(payload, asyncio.CancelledError):
+                raise payload
+            if isinstance(payload, Exception):
+                logger.error("在线技能聚合搜索失败: source=%s error=%s", source, payload)
+                source_statuses.append(
+                    {"source": source, "status": "error", "count": 0, "detail": str(payload)[:500]}
+                )
+                continue
+            if not payload.get("success"):
+                source_statuses.append(
+                    {
+                        "source": source,
+                        "status": "error",
+                        "count": 0,
+                        "detail": str(payload.get("detail") or "")[:500],
+                        "detail_key": payload.get("detail_key"),
+                    }
+                )
+                continue
+            skills = [item for item in payload.get("skills", []) if isinstance(item, dict)]
+            source_results[source] = skills
+            source_statuses.append({"source": source, "status": "success", "count": len(skills)})
+
+        source_statuses.sort(key=lambda item: _ONLINE_SEARCH_SOURCE_ORDER.get(str(item.get("source") or ""), 99))
+        any_success = any(item.get("status") == "success" for item in source_statuses)
+        any_error = any(item.get("status") == "error" for item in source_statuses)
+        return {
+            "success": any_success,
+            "partial": any_success and any_error,
+            "query": query,
+            "items": self._aggregate_online_search_results(query, source_results, limit),
+            "sources": source_statuses,
+        }
+
     async def handle_skills_skillnet_search(self, params: dict) -> dict:
         """在线搜索 SkillNet 技能."""
         query = str(params.get("q", "")).strip()
@@ -1144,6 +1343,7 @@ class SkillManager:
                             "summary": item.get("summary", ""),
                             "version": item.get("version", ""),
                             "updated_at": item.get("updatedAt", 0),
+                            "owner_handle": item.get("ownerHandle", ""),
                         }
                     )
 
@@ -1174,6 +1374,7 @@ class SkillManager:
 
         params:
             slug: skill slug (必需)
+            owner_handle: 发布者标识 (可选，slug 有多个发布者时必需)
             version: 版本号 (可选，默认 latest)
             tag: 标签 (可选，如 latest)
             force: 强制覆盖 (可选，默认 False)
@@ -1195,6 +1396,7 @@ class SkillManager:
                 "detail_key": "skills.clawhub.errors.tokenNotConfigured",
             }
 
+        owner_handle = str(params.get("owner_handle") or "").strip()
         version = params.get("version")
         tag = params.get("tag")
         force = bool(params.get("force", False))
@@ -1217,6 +1419,8 @@ class SkillManager:
                 headers["Authorization"] = f"Bearer {token}"
 
             download_params = {"slug": slug}
+            if owner_handle:
+                download_params["ownerHandle"] = owner_handle
             if version:
                 download_params["version"] = version
             if tag:

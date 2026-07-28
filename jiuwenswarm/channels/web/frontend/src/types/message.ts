@@ -79,6 +79,14 @@ export interface Message {
   // 主动推荐消息标记
   isProactiveRecommendation?: boolean;
   proactiveType?: 'skill_recommend' | 'task_reminder' | 'need_exploration';
+  /**
+   * 这条用户消息是否曾经用于设置/修改持续目标（"设为目标"徽章）。发送那一刻本地回显消息
+   * 直接置 true；历史消息刷新后重新加载时，靠 goalStore 持久化的 objective 文本列表按
+   * content 一次性回填（history.get 不会回传任何前端专用字段，见 useWebSocket.ts
+   * stampGoalObjectiveMessages）——不能靠实时比对"当前 Goal 的 objective"，目标被清除/
+   * 替换后旧消息也该继续保留这个标记，这是消息自身的历史事实，不是当前 Goal 状态的派生值。
+   */
+  isGoalObjectiveMessage?: boolean;
 }
 
 export interface ToolCall {

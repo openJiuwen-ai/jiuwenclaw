@@ -174,13 +174,6 @@ overflow: hidden;
   border-color: var(--color-feedback-danger) !important;
 }
 
-.chat-input-container--dragging {
-  border-color: var(--color-action-primary);
-  box-shadow:
-    var(--effect-chat-composer-shadow),
-    0 0 0 2px rgba(var(--color-action-primary-rgb), 0.22);
-}
-
 .chat-input-frame {
   position: relative;
   width: 100%;
@@ -906,6 +899,15 @@ overflow: hidden;
   height: 12px;
 }
 
+/* Member/role chips have no leading icon container. Keep their remove action
+   in a reserved trailing slot so it never covers the member name on hover. */
+.chat-input-chip-inline--member .chat-input-chip-inline__remove,
+.chat-input-chip-inline--role .chat-input-chip-inline__remove {
+  position: static;
+  transform: none;
+  color: var(--color-action-primary);
+}
+
 .chat-input-chip-inline:hover .chat-input-chip-inline__icon::before {
   opacity: 0;
 }
@@ -1396,6 +1398,21 @@ overflow: hidden;
 .chat-mode-select__option--active .chat-mode-select__icon,
 .chat-mode-select__option--active .chat-mode-select__check {
   color: var(--color-text-strong);
+}
+
+.chat-mode-select__option:disabled {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
+}
+
+.chat-mode-select__option:disabled:hover,
+.chat-mode-select__option:disabled:focus-visible {
+  background: transparent;
+  color: var(--color-text-placeholder);
+}
+
+.chat-mode-select__option:disabled .chat-mode-select__icon {
+  color: var(--color-text-placeholder);
 }
 
 /* Trigger turns red when full_access is selected */

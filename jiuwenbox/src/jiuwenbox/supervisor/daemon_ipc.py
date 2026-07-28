@@ -65,10 +65,6 @@ REQUEST_TYPE_EXEC_BACKGROUND = "exec_background"
 REQUEST_TYPE_BG_STATUS = "bg_status"
 REQUEST_TYPE_BG_KILL = "bg_kill"
 
-# Background job stdout/stderr files live inside the sandbox (same PID
-# namespace as ``exec``) so ``bg-get`` can read them back via daemon IPC.
-SANDBOX_BG_LOG_DIR = "/tmp/.jiuwenbox-bg"
-
 PROTOCOL_VERSION = 1
 MAX_HEADER_BYTES = 1 * 1024 * 1024          # 1 MiB JSON header upper bound
 MAX_STDIN_BYTES = 64 * 1024 * 1024          # 64 MiB stdin upper bound

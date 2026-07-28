@@ -15,7 +15,7 @@ import pytest
 # Fixtures
 # ---------------------------------------------------------------------------
 class _FakeWebChannel:
-    channel_id = "test-web"
+    channel_id = "web"
 
     def __init__(self):
         self.methods: dict[str, object] = {}
@@ -89,12 +89,12 @@ def _drain():
     _METADATA_QUEUE.join()
 
 
-def _make_session(sid, *, project_dir="", project_id="", pinned=False, pin_order=0, last_user_message_at=None, model="", cron_id=""):
+def _make_session(sid, *, project_dir="", project_id="", pinned=False, pin_order=0, last_user_message_at=None, model="", cron_id="", channel_id="web"):
     """创建一个会话并写入指定元数据,flush 队列确保落盘。"""
     from jiuwenswarm.server.runtime.session.session_metadata import (
         init_session_metadata, update_session_metadata,
     )
-    init_session_metadata(session_id=sid, project_dir=project_dir, project_id=project_id, model=model, cron_id=cron_id)
+    init_session_metadata(session_id=sid, project_dir=project_dir, project_id=project_id, model=model, cron_id=cron_id, channel_id=channel_id)
     if pinned or pin_order:
         update_session_metadata(session_id=sid, pinned=pinned, pin_order=pin_order)
     if last_user_message_at is not None:
@@ -117,8 +117,10 @@ def _make_project(name, project_dir, *, pinned=False, pin_order=0, hidden=False)
 
 
 def _abspath(tmp_path, name):
-    """平台无关的绝对路径,用于 project.create 的 isabs 校验。"""
-    return str(tmp_path / name)
+    """平台无关的已存在目录绝对路径,用于 project.create 的 isabs / isdir 校验。"""
+    path = tmp_path / name
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 # ===========================================================================
@@ -232,6 +234,35 @@ class TestProjectInfo:
         resp_h = await _call(registered_channel, "project.info", {"project_id": hidden_proj.project_id})
         assert resp_h["ok"] is False
         assert resp_h["code"] == "NOT_FOUND"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_real_project_git_payload_backfills_new_error_fields(
+        registered_channel, tmp_path,
+    ):
+        """旧 Project.git 快照缺少 error_code/hint 时,响应层补齐默认值。"""
+        from jiuwenswarm.server.runtime.session.project_store import save_project
+
+        pa = _abspath(tmp_path, "legacy")
+        proj = _make_project("旧项目", pa)
+        proj.git = {
+            "enabled": True,
+            "repo_root": pa,
+            "initialized_by_jiuwenswarm": False,
+            "detected_at": 1,
+            "status": "error",
+            "branch": "",
+            "error": "legacy error",
+            "is_dirty": False,
+        }
+        save_project(proj)
+
+        resp = await _call(registered_channel, "project.info", {"project_id": proj.project_id})
+
+        assert resp["ok"] is True
+        assert resp["payload"]["git"]["error"] == "legacy error"
+        assert resp["payload"]["git"]["error_code"] == ""
+        assert resp["payload"]["git"]["hint"] == ""
 
 
 # ===========================================================================
@@ -373,6 +404,18 @@ class TestProjectCreate:
                 {"name": "", "project_dir": _abspath(tmp_path, "x")},
             )
             assert resp["code"] == "BAD_REQUEST"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_rejects_missing_existing_project_dir(registered_channel, tmp_path):
+        """传 project_dir 表示选择现有项目,目录不存在时拒绝创建项目记录。"""
+        missing = str(tmp_path / "missing")
+        resp = await _call(
+            registered_channel, "project.create", {"name": "P", "project_dir": missing}
+        )
+        assert resp["ok"] is False
+        assert resp["code"] == "PROJECT_DIR_MISSING"
+        assert resp["error"] == "project directory does not exist"
 
 
 # ===========================================================================
@@ -629,7 +672,7 @@ class TestCompat:
         """不传 project_dir → 归入默认项目,project_dir="" 兜底,行为不变。"""
         resp = await _call(
             registered_channel, "session.create",
-            {"session_id": "sess_compat_1", "title": "兼容", "mode": "code.normal"},
+            {"session_id": "sess_compat_1", "title": "兼容", "mode": "code.normal", "channel_id": "web"},
         )
         assert resp["ok"] is True
         assert resp["payload"]["session_id"] == "sess_compat_1"
@@ -729,7 +772,7 @@ class TestSessionCreateProjectIdValidation:
         proj = _make_project("P", pa)
         resp = await _call(
             registered_channel, "session.create",
-            {"session_id": "s_valid", "project_id": proj.project_id},
+            {"session_id": "s_valid", "project_id": proj.project_id, "channel_id": "web"},
         )
         assert resp["ok"] is True
         # 归属到该项目

@@ -81,6 +81,130 @@ async def test_cancel_runs_teardown_when_session_not_in_active_counter(
 
 
 @pytest.mark.asyncio
+async def test_interaction_cancel_pauses_active_goal_before_cancel_round() -> None:
+    """User stop should pause ACTIVE Goal then cancel_round; payload carries goal."""
+    from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
+
+    paused_record = GoalRecord.create(session_id="sess-goal", objective="keep going")
+    paused_record.status = GoalStatus.PAUSED
+    active_record = GoalRecord.create(session_id="sess-goal", objective="keep going")
+    active_record.status = GoalStatus.ACTIVE
+
+    goal_manager = MagicMock()
+    goal_manager.get = AsyncMock(return_value=active_record)
+    goal_manager.pause = AsyncMock(return_value=paused_record)
+
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance.goal_manager = goal_manager
+    instance.cancel_round = AsyncMock(return_value=True)
+
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
+    adapter = _make_adapter(
+        _active_session_ids={"sess-goal": 1},
+        _stream_event_rail=rail,
+        _instance=instance,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+
+    response = await adapter.process_interrupt(
+        AgentRequest(
+            request_id="req-stop",
+            channel_id="web",
+            session_id="sess-goal",
+            req_method=ReqMethod.CHAT_CANCEL,
+            params={"intent": "cancel", "mode": "agent"},
+        )
+    )
+
+    goal_manager.pause.assert_awaited_once()
+    instance.cancel_round.assert_awaited_once_with(reason="user_cancel")
+    rail.abort.assert_called_once_with("sess-goal")
+    rail.collect_cancelled_tool_updates.assert_called_once_with("sess-goal")
+    rail.reset_for_new_task.assert_called_once_with("sess-goal")
+    assert response.payload["event_type"] == "chat.interrupt_result"
+    assert response.payload["goal"]["status"] == "paused"
+    assert response.payload["goal"]["objective"] == "keep going"
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_skips_pause_when_no_goal() -> None:
+    goal_manager = MagicMock()
+    goal_manager.get = AsyncMock(return_value=None)
+    goal_manager.pause = AsyncMock()
+
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance.goal_manager = goal_manager
+    instance.cancel_round = AsyncMock(return_value=True)
+
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
+    adapter = _make_adapter(
+        _active_session_ids={"sess-x": 1},
+        _stream_event_rail=rail,
+        _instance=instance,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+
+    response = await adapter.process_interrupt(_build_cancel_request("sess-x"))
+
+    goal_manager.pause.assert_not_awaited()
+    instance.cancel_round.assert_awaited_once()
+    rail.abort.assert_called_once_with("sess-x")
+    assert "goal" not in response.payload
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_appends_cancelled_tools_to_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interaction cancel must close in_progress tools in history (no spinner on refresh)."""
+    cancelled_tools = [
+        {
+            "tool_name": "task_tool",
+            "tool_call_id": "call_1",
+            "result": "cancelled by user",
+            "status": "error",
+        }
+    ]
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = cancelled_tools
+
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance.goal_manager = None
+    instance.cancel_round = AsyncMock(return_value=True)
+
+    adapter = _make_adapter(
+        _active_session_ids={"sess-tools": 1},
+        _stream_event_rail=rail,
+        _instance=instance,
+        _session_agent_tasks={},
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+    adapter._cancel_session_agent_tasks = AsyncMock(return_value=0)
+
+    append_mock = MagicMock()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.append_history_record",
+        append_mock,
+    )
+
+    response = await adapter.process_interrupt(_build_cancel_request("sess-tools"))
+
+    # Must not cancel stream producer tasks on interaction path
+    adapter._cancel_session_agent_tasks.assert_not_awaited()
+    instance.cancel_round.assert_awaited_once_with(reason="user_cancel")
+    rail.abort.assert_called_once_with("sess-tools")
+    assert response.payload["cancelled_tools"] == cancelled_tools
+    append_mock.assert_called_once()
+    assert append_mock.call_args.kwargs["event_type"] == "chat.tool_result"
+    assert append_mock.call_args.kwargs["extra"]["tool_result"]["tool_call_id"] == "call_1"
+
+
+@pytest.mark.asyncio
 async def test_unmark_skips_rail_cleanup_when_stream_consumer_cancelled() -> None:
     rail = MagicMock()
     adapter = _make_adapter(
@@ -153,6 +277,7 @@ async def test_abort_skipped_when_other_sessions_active_even_if_target_executing
 def test_reset_runtime_cron_context_resets_shell_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
     from openjiuwen.core.sys_operation.shell_process_registry import (
         set_shell_session_id,
     )
@@ -163,6 +288,7 @@ def test_reset_runtime_cron_context_resets_shell_session(
         reset_shell_mock,
     )
     for var_name in (
+        "_CRON_TOOL_BOUND",
         "_CRON_TOOL_MODE",
         "_CRON_TOOL_METADATA",
         "_CRON_TOOL_SESSION_ID",
@@ -175,12 +301,84 @@ def test_reset_runtime_cron_context_resets_shell_session(
 
     shell_token = set_shell_session_id("sess_reset")
     getattr(JiuWenSwarmDeepAdapter, "_reset_runtime_cron_context")(
-        (
-            MagicMock(),
-            MagicMock(),
-            MagicMock(),
-            MagicMock(),
-            shell_token,
+        interface_deep._RuntimeCronContextTokens(
+            channel=MagicMock(),
+            session=MagicMock(),
+            metadata=MagicMock(),
+            mode=MagicMock(),
+            bound=MagicMock(),
+            shell=shell_token,
         )
     )
     reset_shell_mock.assert_called_once_with(shell_token)
+
+
+def test_bind_runtime_cron_context_fills_locked_session_project_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda session_id, cache_bust=False: {
+            "session_id": session_id,
+            "project_id": "proj_locked",
+            "project_dir": "D:\\locked-project",
+            "work_mode": "code",
+        },
+    )
+
+    tokens = JiuWenSwarmDeepAdapter._bind_runtime_cron_context(
+        channel_id="web",
+        session_id="sess_locked",
+        metadata={"request_id": "req-old"},
+        request_id="req-new",
+        mode="agent",
+        project_dir=None,
+    )
+    try:
+        metadata = interface_deep._CRON_TOOL_METADATA.get()
+        assert metadata["request_id"] == "req-new"
+        assert metadata["project_id"] == "proj_locked"
+        assert metadata["project_dir"] == "D:\\locked-project"
+        assert metadata["work_mode"] == "code"
+    finally:
+        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
+
+
+def test_runtime_cron_tool_context_falls_back_to_last_bound_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda session_id, cache_bust=False: {
+            "session_id": session_id,
+            "project_id": "proj_runtime",
+            "project_dir": "D:\\runtime-project",
+            "work_mode": "work",
+        },
+    )
+
+    context = interface_deep._RuntimeCronToolContext(tool_scope="runtime_test")
+    tokens = JiuWenSwarmDeepAdapter._bind_runtime_cron_context(
+        channel_id="web",
+        session_id="sess_runtime",
+        metadata={},
+        request_id="req-runtime",
+        mode="agent",
+        project_dir=None,
+    )
+    try:
+        context.remember_current_binding()
+    finally:
+        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
+
+    assert context.session_id == "sess_runtime"
+    assert context.mode == "agent"
+    metadata = context.metadata
+    assert metadata["request_id"] == "req-runtime"
+    assert metadata["project_id"] == "proj_runtime"
+    assert metadata["project_dir"] == "D:\\runtime-project"
+    assert metadata["work_mode"] == "work"

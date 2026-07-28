@@ -1,8 +1,7 @@
 import type { AppSnapshot } from "../app-state.js";
 import { isTeamMode } from "../core/modes.js";
-import { renderMiniTeamTree, renderTeamPanel } from "./components/team-panel.js";
+import { renderTeamPanel } from "./components/team-panel.js";
 import { isTeamWorking } from "./components/team-shared.js";
-import { renderTeamStatusPill } from "./components/team-status-pill.js";
 import { renderTodoList } from "./components/todo-list.js";
 import { APP_SCREEN_KEY_BINDINGS } from "./keymap.js";
 import { padToWidth, renderWrappedText } from "./rendering/text.js";
@@ -338,15 +337,9 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
     snapshot.teamMemberEvents.length > 0 ||
     snapshot.teamTaskEvents.length > 0 ||
     snapshot.teamMessageEvents.length > 0;
-  const teamStatusLines =
-    hasTeamActivity
-      ? renderTeamStatusPill(
-          snapshot.teamMemberEvents,
-          snapshot.teamTaskEvents,
-          snapshot.teamMessageEvents,
-          options.width,
-        )
-      : [];
+  // Team events remain in the session after a task or mode switch. Keep them
+  // out of the main composer area and render details only when the user opens
+  // the Team panel explicitly with Ctrl+G.
   const teamPanelLines =
     options.showTeamPanel && hasTeamActivity
       ? renderTeamPanel(
@@ -358,23 +351,9 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
           options.viewedTeamMemberId,
         )
       : [];
-  const miniTeamTreeLines =
-    !options.showTeamPanel && hasTeamActivity
-      ? renderMiniTeamTree(
-          snapshot.teamMemberEvents,
-          snapshot.teamTaskEvents,
-          snapshot.teamMessageEvents,
-          options.width,
-        )
-      : [];
   const fixedLinesBeforeBtw = [
     ...todoLines,
-    ...(todoLines.length > 0 &&
-    (teamStatusLines.length > 0 || miniTeamTreeLines.length > 0 || teamPanelLines.length > 0)
-      ? [" ".repeat(options.width)]
-      : []),
-    ...teamStatusLines,
-    ...miniTeamTreeLines,
+    ...(todoLines.length > 0 && teamPanelLines.length > 0 ? [" ".repeat(options.width)] : []),
     ...teamPanelLines,
     ...options.questionLines,
   ];

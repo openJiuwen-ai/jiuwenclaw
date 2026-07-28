@@ -53,7 +53,7 @@
 | `/mode` | 模式切换（支持一级入口与直达写法） |
 | `/switch` | 在当前模式族内切换二级模式 |
 | `/skills` | 技能管理（列表、安装、卸载、市场源、ClawHub、SkillNet） |
-| `/model` | 模型查看、新增、切换（见下文） |
+| `/model` | 模型查看、新增、编辑、删除、切换（见下文） |
 | `/mcp` | MCP 服务管理（见下文） |
 | `/diff` | 交互式改动回顾：按轮次 diff + 未提交工作树改动（见下文） |
 | `/compact` | 压缩当前上下文（见下文） |
@@ -155,17 +155,36 @@
 
 > 完整快捷键与行为详见 [TUI 使用指南](TUI使用指南.md#resume-与-continue-在-tui-中的特殊行为)；自定义快捷键见 [快捷键](TUI使用指南.md#快捷键)。
 
-### `/model`（查看 / 新增 / 切换模型）
+### `/model`（查看 / 新增 / 编辑 / 删除 / 切换模型）
 
-- 用法：
-  - `/model` 或 `/model list`：列出可切换模型（含当前模型标记）；
-  - `/model <name>`：切换到指定模型；
-  - `/model add <name> key=value ...`：新增模型配置（如 `model=...`、`provider=...`、`api_base=...`、`api_key=...`）。
-- 限制：`video` / `audio` / `vision` 不能通过 `/model <name>` 设置为默认聊天模型，需改用 `/config edit` 或 `/config set`。
-- 配置写入行为：
-  - 新增模型会写入 `config.yaml` 的 `models.defaults`（兼容旧结构），并触发 Agent 配置重载；
+管理 `config.yaml` 中 `models.defaults` 下定义的模型配置。支持文本子命令与**交互式列表**两种操作方式，删除/编辑主要通过交互列表完成。
+
+- **文本用法**：
+  - `/model` 或 `/model list`：打开**交互式模型列表**（含当前模型标记），可在列表内完成切换、新增、编辑、删除；
+  - `/model <name>`：按名称直接切换到指定模型；
+  - `/model add <name> key=value ...`：以文本表单新增模型配置（如 `model_name=...`、`provider=...`、`api_base=...`、`api_key=...`、`reasoning_level=...`）。
+- **交互列表快捷键**（`/model` 或 `/model list` 打开列表后）：
+
+  | 按键 | 作用 |
+  | --- | --- |
+  | `↑` / `↓` | 上下选择模型 |
+  | `Enter` | 切换到当前选中的模型 |
+  | `a` | 打开表单**新增**模型 |
+  | `e` | 打开表单**编辑**当前选中的模型 |
+  | `d` | 对当前选中的模型进入**删除确认** |
+  | `Esc` | 关闭列表 / 取消当前操作 |
+
+- **删除流程**（`d` → 确认）：进入 `Delete model: <名称>` 确认页后——
+  - `Enter`：确认删除；后端按模型在 `models.defaults` 中的**原始下标**（`index`，即未过滤 video/audio/vision 等多模态条目前的下标）定位并移除该条目，回写 `config.yaml`，随后触发 Agent 配置重载（`AGENT_RELOAD_CONFIG`）。成功响应为 `{type: "model_deleted", name, current}`。
+  - `Esc`：取消，返回列表。
+- **编辑流程**（`e`）：复用新增表单，但 `api_key` 留空表示**保持原密钥不变**；只提交发生变化的字段。
+- **限制与校验**：
+  - `video` / `audio` / `vision` 为多模态专用键，不能通过 `/model <name>` 设置为默认聊天模型，需改用 `/config edit` 或 `/config set`；
+  - 删除会拒绝移除**最后一个**模型（返回 `Cannot delete the last model`），索引越界返回 `model index not found`；
+- **配置写入行为**：
+  - 新增 / 编辑 / 删除会改写 `config.yaml` 的 `models.defaults`（兼容旧结构），并触发 Agent 配置重载；
   - 切换模型会校验配置与环境变量占位符，更新 `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`，并回写 `.env`。
-- 安全展示：涉及 `api_key`、`token` 等敏感字段会掩码显示。
+- **安全展示**：列表中 `api_key`、`token` 等敏感字段掩码显示；仅当存在**同名且 provider+api_base 完全相同**的模型（真正无法区分）时，才会附带显示密钥末 4 位 `[…xxxx]`。
 
 ### `/diff`（交互式改动回顾）
 

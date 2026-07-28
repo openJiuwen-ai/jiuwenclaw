@@ -1,4 +1,4 @@
-﻿﻿﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
+﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { AtSign, CircleX, FileImage, Loader2, Plus, Square, Target, X } from 'lucide-react';
@@ -26,6 +26,7 @@ import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector';
+import { generateUuidV4 } from '../../utils/uuid';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -157,10 +158,7 @@ function formatAttachmentSize(size: number): string {
 }
 
 function makeAttachmentId(file: File): string {
-  const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${file.name || 'image'}-${file.size}-${random}`;
+  return `${file.name || 'image'}-${file.size}-${generateUuidV4()}`;
 }
 
 function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
@@ -257,7 +255,6 @@ export function InputArea({
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
   const [attachmentAlerts, setAttachmentAlerts] = useState<AttachmentAlert[]>([]);
   const [attachmentMenuId, setAttachmentMenuId] = useState<string | null>(null);
-  const [isDraggingImage, setIsDraggingImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [workMenuOpen, setWorkMenuOpen] = useState<'project' | null>(null);
   const [workDialogOpen, setWorkDialogOpen] = useState(false);
@@ -268,6 +265,13 @@ export function InputArea({
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectDirError || workDialogOpen) return;
+    const timeoutId = window.setTimeout(() => setProjectDirError(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [projectDirError, workDialogOpen]);
+
   const [composerSuggestion, setComposerSuggestion] = useState<ComposerSuggestionState | null>(null);
   const [composerSuggestionIndex, setComposerSuggestionIndex] = useState(0);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
@@ -318,6 +322,8 @@ export function InputArea({
   // 用户明确要求改成这个语义（steer 目前收不到任何反馈，体验上等同于消息发出去石沉大海，
   // 见 backend-requests.md #1）。走排队后消息复用现有的通用队列机制，行为和普通排队一致。
   const isGoalActive = currentGoal?.status === 'active';
+  // 未完成目标：active/paused/blocked 都算，只有 completed（或没有目标）才能再设新目标
+  const hasUnfinishedGoal = currentGoal != null && currentGoal.status !== 'completed';
   const isInterruptible = isProcessing || isPaused || isGoalActive;
   const isAgentMode = mode === 'agent';
   const isTeamMode = mode === 'team';
@@ -434,6 +440,9 @@ export function InputArea({
   });
 
   const imageInputDisabled = isListening || (isInterruptible && !isTeamMode);
+  // "+" 触发按钮本身不跟图片/目标的可用性挂钩：菜单以后可能挂其他跟图片/目标无关的功能，
+  // 触发按钮只要不在录音就该能点开；具体某一项能不能选，交给菜单里每一项各自的禁用态处理。
+  const attachTriggerDisabled = isListening;
   const readyAttachments = useMemo(
     () => attachments.filter((attachment) => attachment.status === 'ready' && attachment.base64Data),
     [attachments],
@@ -817,6 +826,7 @@ export function InputArea({
         role: 'user',
         content: trimmed,
         timestamp: new Date().toISOString(),
+        isGoalObjectiveMessage: true,
       });
       useGoalStore.getState().setArmed(sid, false);
       onSetGoal(sid, trimmed);
@@ -1120,39 +1130,21 @@ export function InputArea({
   }, [appendImageFiles]);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
-    const items = Array.from(event.clipboardData.items);
-    const files = items
-      .filter((item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.has(item.type))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => Boolean(file));
-    if (files.length) {
+    if (Array.from(event.clipboardData.items).some((item) => item.kind === 'file')) {
       event.preventDefault();
-      void appendImageFiles(files);
-    }
-  }, [appendImageFiles]);
-
-  const handleDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    const hasImage = Array.from(event.dataTransfer.items).some(
-      (item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.has(item.type)
-    );
-    if (!hasImage) return;
-    event.preventDefault();
-    setIsDraggingImage(true);
-  }, []);
-
-  const handleDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
-    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-      setIsDraggingImage(false);
     }
   }, []);
 
-  const handleDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
-    setIsDraggingImage(false);
-    const files = Array.from(event.dataTransfer.files).filter((file) => ACCEPTED_IMAGE_TYPES.has(file.type));
-    if (!files.length) return;
+  const handleFileDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
     event.preventDefault();
-    void appendImageFiles(files);
-  }, [appendImageFiles]);
+    event.dataTransfer.dropEffect = 'none';
+  }, []);
+
+  const handleFileDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+  }, []);
 
   /** 在光标处插入技能 chip（不可编辑原子节点） */
   const insertSkillChip = useCallback((skillName: string) => {
@@ -1417,11 +1409,9 @@ export function InputArea({
             (isModeMenuOpen || workMenuOpen) && 'chat-input-container--menu-open',
             composerSuggestion && 'chat-input-container--suggestion-open',
             isListening && 'chat-input-container--recording',
-            isDraggingImage && 'chat-input-container--dragging',
           )}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
+          onDragOver={handleFileDragOver}
+          onDrop={handleFileDrop}
         >
       {isListening && (
         <div className="chat-input-recording-bar">
@@ -1585,19 +1575,19 @@ export function InputArea({
               <button
                 type="button"
                 onClick={() => {
-                  if (imageInputDisabled) return;
+                  if (attachTriggerDisabled) return;
                   if (!attachMenuOpen && attachMenuRef.current) {
                     setAttachMenuAnchor(attachMenuRef.current.getBoundingClientRect());
                   }
                   setAttachMenuOpen((open) => !open);
                 }}
-                disabled={imageInputDisabled}
+                disabled={attachTriggerDisabled}
                 className={cx(
                   'chat-input-btn chat-input-btn--add-file',
-                  imageInputDisabled && 'chat-input-btn--disabled',
+                  attachTriggerDisabled && 'chat-input-btn--disabled',
                 )}
-                title={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
-                aria-label={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+                title={attachTriggerDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+                aria-label={attachTriggerDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
                 aria-haspopup="menu"
                 aria-expanded={attachMenuOpen}
               >
@@ -1636,7 +1626,10 @@ export function InputArea({
                   type="button"
                   className="chat-mode-select__option"
                   role="menuitem"
+                  disabled={imageInputDisabled}
+                  title={imageInputDisabled ? t('chat.addImageDisabled') : undefined}
                   onClick={() => {
+                    if (imageInputDisabled) return;
                     setAttachMenuOpen(false);
                     fileInputRef.current?.click();
                   }}
@@ -1653,7 +1646,10 @@ export function InputArea({
                     type="button"
                     className="chat-mode-select__option"
                     role="menuitem"
+                    disabled={hasUnfinishedGoal}
+                    title={hasUnfinishedGoal ? t('goal.toolbarUnavailable') : undefined}
                     onClick={() => {
+                      if (hasUnfinishedGoal) return;
                       setAttachMenuOpen(false);
                       if (activeSessionId) {
                         useGoalStore.getState().setArmed(activeSessionId, true);
@@ -1833,7 +1829,10 @@ export function InputArea({
             </button>
           )} */}
 
-          <ModelSelector disabled={hasHistory || isProcessing} />
+          <ModelSelector
+            disabled={isTeamMode || hasHistory || isProcessing}
+            lockedToDefault={isTeamMode}
+          />
 
           <button
             type="button"
@@ -1955,7 +1954,11 @@ export function InputArea({
             <CodeBranchSelector project={displayedProject} disabled={isProcessing} compact />
           ) : null}
           {projectDirError && !workDialogOpen ? (
-            <div className="chat-work-select__error" role="alert">{projectDirError}</div>
+            <div className="app-toast-wrapper app-toast-wrapper--top-center">
+              <div className="app-session-toast" role="status" aria-live="polite">
+                {projectDirError}
+              </div>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -2109,10 +2112,17 @@ function ComposerSuggestionMenu({
   );
 }
 
-function ModelSelector({ disabled = false }: { disabled?: boolean }) {
+function ModelSelector({
+  disabled = false,
+  lockedToDefault = false,
+}: {
+  disabled?: boolean;
+  lockedToDefault?: boolean;
+}) {
   const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectedModelName = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.selectedModelName ?? null);
+  const defaultModelName = useSessionStore((s) => s.defaultModelName);
   const setSelectedModelName = useSessionStore((s) => s.setSelectedModelName);
   const { t } = useTranslation();
 
@@ -2136,8 +2146,9 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
 
   if (chatAvailableModels.length === 0) return null;
 
+  const displayedModelName = lockedToDefault ? defaultModelName : selectedModelName;
   const selectedModel =
-    chatAvailableModels.find((m) => (m.alias || m.model_name) === selectedModelName) ??
+    chatAvailableModels.find((m) => (m.alias || m.model_name) === displayedModelName) ??
     chatAvailableModels[0];
 
   const handleSelect = (modelKey: string) => {
@@ -2158,7 +2169,7 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
       <button
         type="button"
         className="chat-mode-select__trigger"
-        title={t('chat.modelSelector.tooltip')}
+        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
         onClick={() => {
           if (disabled) return;
           if (!isOpen && menuRef.current) {
@@ -2169,6 +2180,7 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
           setIsOpen((v) => !v);
         }}
         style={disabled ? { cursor: 'default' } : undefined}
+        aria-disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={isOpen}
         data-testid="chat-model-selector"

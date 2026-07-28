@@ -155,7 +155,7 @@ def test_get_turn_diffs_reads_extra_history_roots(tmp_path, monkeypatch):
     team_hist = team_root / ".agent_history"
     team_hist.mkdir(parents=True)
     target_file = project_root / "team_file.py"
-    internal_file = tmp_path / ".agent_teams" / "unit-team" / "workspaces" / "worker_workspace" / "notes.md"
+    session_file = tmp_path / ".agent_teams" / "unit-team" / "sessions" / "sess-1" / "state.json"
     (team_hist / "file_ops_jiuwen_team_unit_worker_sess-1.json").write_text(
         json.dumps(
             {
@@ -167,7 +167,7 @@ def test_get_turn_diffs_reads_extra_history_roots(tmp_path, monkeypatch):
                         "new_content": "old\nnew\n",
                     },
                 ],
-                str(internal_file): [
+                str(session_file): [
                     {
                         "action": "write",
                         "timestamp": _ts(1784542850.0),
@@ -201,9 +201,357 @@ def test_get_turn_diffs_reads_extra_history_roots(tmp_path, monkeypatch):
 
     assert len(turns) == 1
     expected_path = str(target_file.resolve())
-    internal_path = str(internal_file.resolve())
+    session_path = str(session_file.resolve())
     assert expected_path in turns[0]["files"]
-    assert internal_path not in turns[0]["files"]
+    assert session_path in turns[0]["files"]
+    assert turns[0]["files"][expected_path]["linesAdded"] == 1
+
+
+def test_get_turn_diffs_keeps_default_team_workspace_deliverables(tmp_path, monkeypatch):
+    """默认 .agent_teams/team-workspace 下的 file_ops 条目都应进入 last-turn。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    team_root = tmp_path / ".agent_teams" / "unit-team" / "team-workspace"
+    team_hist = team_root / ".agent_history"
+    team_hist.mkdir(parents=True)
+    deliverable = team_root / "poem-tang.md"
+    bookkeeping = team_root / ".jiuwen" / "state.json"
+    (team_hist / "file_ops_leader_sess-1.json").write_text(
+        json.dumps(
+            {
+                str(deliverable): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": None,
+                        "new_content": "spring rain\n",
+                    },
+                ],
+                str(bookkeeping): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": None,
+                        "new_content": "{}\n",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs(
+            "sess-1",
+            str(project_root),
+            extra_history_roots=[str(team_root)],
+        )
+
+    expected_path = str(deliverable.resolve())
+    bookkeeping_path = str(bookkeeping.resolve())
+    assert len(turns) == 1
+    assert expected_path in turns[0]["files"]
+    assert bookkeeping_path in turns[0]["files"]
+    assert turns[0]["files"][expected_path]["isNewFile"] is True
+
+
+def test_get_turn_diffs_maps_project_worktree_file_ops_to_repo_root(tmp_path, monkeypatch):
+    """成员在 project/.worktrees 中写入的 file_ops 应按主项目路径统计。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    worktree_root = project_root / ".worktrees" / "worker"
+    worktree_hist = worktree_root / ".agent_history"
+    worktree_hist.mkdir(parents=True)
+    worktree_file = worktree_root / "src" / "feature.py"
+    canonical_file = project_root / "src" / "feature.py"
+    (worktree_hist / "file_ops_worker_sess-1.json").write_text(
+        json.dumps(
+            {
+                str(worktree_file): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542850.0),
+                        "old_content": "old\n",
+                        "new_content": "old\nnew\n",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+    monkeypatch.setattr(
+        DiffService,
+        "_get_git_common_worktree_root",
+        staticmethod(lambda root: project_root.resolve() if root.resolve() == worktree_root.resolve() else None),
+    )
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs("sess-1", str(project_root))
+
+    assert len(turns) == 1
+    expected_path = str(canonical_file.resolve())
+    worktree_path = str(worktree_file.resolve())
+    assert expected_path in turns[0]["files"]
+    assert worktree_path not in turns[0]["files"]
+    assert turns[0]["files"][expected_path]["linesAdded"] == 1
+
+
+def test_get_turn_diffs_keeps_nearby_distinct_member_edits(tmp_path, monkeypatch):
+    """不同成员几乎同时改同一文件时,内容不同不应被去重吞掉。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    worktrees_root = project_root / ".worktrees"
+    first_root = worktrees_root / "first"
+    second_root = worktrees_root / "second"
+    (first_root / ".agent_history").mkdir(parents=True)
+    (second_root / ".agent_history").mkdir(parents=True)
+    canonical_file = project_root / "src" / "feature.py"
+    first_file = first_root / "src" / "feature.py"
+    second_file = second_root / "src" / "feature.py"
+    entry_ts = _ts(1784542850.0)
+    (first_root / ".agent_history" / "file_ops_first_sess-1.json").write_text(
+        json.dumps({
+            str(first_file): [{
+                "action": "write",
+                "timestamp": entry_ts,
+                "old_content": "base\n",
+                "new_content": "base\nfirst\n",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (second_root / ".agent_history" / "file_ops_second_sess-1.json").write_text(
+        json.dumps({
+            str(second_file): [{
+                "action": "write",
+                "timestamp": entry_ts,
+                "old_content": "base\n",
+                "new_content": "base\nsecond\n",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+
+    def _fake_common_root(root):
+        resolved = root.resolve()
+        if resolved in {first_root.resolve(), second_root.resolve()}:
+            return project_root.resolve()
+        return None
+
+    monkeypatch.setattr(
+        DiffService,
+        "_get_git_common_worktree_root",
+        staticmethod(_fake_common_root),
+    )
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs("sess-1", str(project_root))
+
+    assert len(turns) == 1
+    expected_path = str(canonical_file.resolve())
+    assert list(turns[0]["files"]) == [expected_path]
+    assert turns[0]["files"][expected_path]["linesAdded"] == 2
+
+
+def test_get_turn_diffs_keeps_distinct_project_and_worktree_edits(tmp_path, monkeypatch):
+    """project 与 worktree 同改 canonical 文件时,低优先级来源不应整文件跳过。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    project_hist = project_root / ".agent_history"
+    worktree_root = project_root / ".worktrees" / "worker"
+    worktree_hist = worktree_root / ".agent_history"
+    project_hist.mkdir(parents=True)
+    worktree_hist.mkdir(parents=True)
+    canonical_file = project_root / "src" / "feature.py"
+    worktree_file = worktree_root / "src" / "feature.py"
+
+    (project_hist / "file_ops_project_sess-1.json").write_text(
+        json.dumps({
+            str(canonical_file): [{
+                "action": "write",
+                "timestamp": _ts(1784542850.0),
+                "old_content": "base\n",
+                "new_content": "base\nproject\n",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (worktree_hist / "file_ops_worker_sess-1.json").write_text(
+        json.dumps({
+            str(worktree_file): [{
+                "action": "write",
+                "timestamp": _ts(1784542852.0),
+                "old_content": "base\nproject\n",
+                "new_content": "base\nproject\nworker\n",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+    monkeypatch.setattr(
+        DiffService,
+        "_get_git_common_worktree_root",
+        staticmethod(lambda root: project_root.resolve() if root.resolve() == worktree_root.resolve() else None),
+    )
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs("sess-1", str(project_root))
+
+    expected_path = str(canonical_file.resolve())
+    assert len(turns) == 1
+    assert list(turns[0]["files"]) == [expected_path]
+    assert turns[0]["files"][expected_path]["linesAdded"] == 2
+
+
+def test_get_turn_diffs_merges_case_variant_paths(tmp_path, monkeypatch):
+    """Windows 上同一路径大小写不同也应归并为同一文件历史。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    project_hist = project_root / ".agent_history"
+    project_hist.mkdir(parents=True)
+    target_file = project_root / "src" / "feature.py"
+    variant_path = str(target_file).upper()
+
+    (project_hist / "file_ops_project_sess-1.json").write_text(
+        json.dumps({
+            str(target_file): [{
+                "action": "write",
+                "timestamp": _ts(1784542850.0),
+                "old_content": "base\n",
+                "new_content": "base\nlower\n",
+            }],
+            variant_path: [{
+                "action": "write",
+                "timestamp": _ts(1784542852.0),
+                "old_content": "base\nlower\n",
+                "new_content": "base\nlower\nupper\n",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs("sess-1", str(project_root))
+
+    assert len(turns) == 1
+    assert len(turns[0]["files"]) == 1
+    entry = next(iter(turns[0]["files"].values()))
+    assert entry["linesAdded"] == 2
+
+
+def test_get_turn_diffs_reads_member_workspace_worktree_file_ops(tmp_path, monkeypatch):
+    """显式 member workspace 下的 .worktrees 也应纳入 last_turn。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    member_root = tmp_path / "member-workspace"
+    worktree_root = member_root / ".worktrees" / "worker"
+    (worktree_root / ".agent_history").mkdir(parents=True)
+    worktree_file = worktree_root / "src" / "feature.py"
+    canonical_file = project_root / "src" / "feature.py"
+    (worktree_root / ".agent_history" / "file_ops_worker_sess-1.json").write_text(
+        json.dumps({
+            str(worktree_file): [{
+                "action": "write",
+                "timestamp": _ts(1784542850.0),
+                "old_content": "old\n",
+                "new_content": "old\nnew\n",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+    monkeypatch.setattr(
+        DiffService,
+        "_get_git_common_worktree_root",
+        staticmethod(lambda root: project_root.resolve() if root.resolve() == worktree_root.resolve() else None),
+    )
+    ph = patch.object(DiffService, "_read_history", return_value=_HISTORY)
+    pl = patch.object(DiffService, "_load_change_sets", return_value=[])
+    ps = patch.object(DiffService, "_save_change_sets", return_value=None)
+
+    with ph, pl, ps:
+        service = DiffService()
+        turns = service.get_turn_diffs(
+            "sess-1",
+            str(project_root),
+            extra_history_roots=[str(member_root)],
+        )
+
+    expected_path = str(canonical_file.resolve())
+    assert len(turns) == 1
+    assert expected_path in turns[0]["files"]
     assert turns[0]["files"][expected_path]["linesAdded"] == 1
 
 
@@ -485,6 +833,58 @@ def test_truncate_file_ops_reads_extra_history_roots(tmp_path, monkeypatch):
     assert entries[0]["new_content"] == "middle\n"
 
 
+def test_truncate_file_ops_reads_worktree_history_roots(tmp_path, monkeypatch):
+    """撤销本轮修改时也应截断 worktree 容器中的 session-specific file_ops。"""
+    agent_ws = tmp_path / "agent-ws"
+    user_ws = tmp_path / "user-ws"
+    project_root = tmp_path / "project"
+    worktree_root = project_root / ".worktrees" / "worker"
+    worktree_hist = worktree_root / ".agent_history"
+    worktree_hist.mkdir(parents=True)
+    history_file = worktree_hist / "file_ops_worker_sess-1.json"
+    history_file.write_text(
+        json.dumps(
+            {
+                str(worktree_root / "src" / "feature.py"): [
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542855.0),
+                        "old_content": "old",
+                        "new_content": "before",
+                    },
+                    {
+                        "action": "write",
+                        "timestamp": _ts(1784542865.0),
+                        "old_content": "before",
+                        "new_content": "after",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_user_workspace_dir",
+        lambda: user_ws,
+    )
+
+    service = DiffService()
+    service.truncate_file_ops_by_timestamp(
+        "sess-1",
+        1784542860.0,
+        project_dir=str(project_root),
+    )
+
+    data = json.loads(history_file.read_text(encoding="utf-8"))
+    remaining = data[str(worktree_root / "src" / "feature.py")]
+    assert len(remaining) == 1
+    assert remaining[0]["timestamp"] == _ts(1784542855.0)
+
+
 def test_turn_diff_list_returns_summaries_with_files_without_hunks():
     ph, pa, pl, ps = _patch_diff_service()
     with ph, pa, pl, ps:
@@ -560,8 +960,84 @@ def test_get_session_extra_history_roots_infers_team_workspaces(tmp_path):
 
     assert str(tmp_path / ".agent_teams" / "unit-team" / "team-workspace") in roots
     assert str(tmp_path / ".agent_teams" / "unit-team" / "workspaces") in roots
+    assert str(tmp_path / ".agent_teams" / "unit-team" / "sessions" / "sess-1" / "worktrees") in roots
     assert str(tmp_path / "team-home" / "team-workspace") in roots
     assert str(tmp_path / "team-home" / "workspaces") in roots
+    assert str(tmp_path / "team-home" / "sessions" / "sess-1" / "worktrees") in roots
+
+
+def test_get_session_extra_history_roots_sanitizes_manual_session_worktree(tmp_path):
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={
+                "team_name": "unit-team",
+                "team_file_monitor_roots": [
+                    str(tmp_path / ".agent_teams" / "unit-team" / "team-workspace"),
+                ],
+            },
+        ),
+        patch(
+            "openjiuwen.agent_teams.paths.team_home",
+            return_value=tmp_path / "team-home",
+        ),
+    ):
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            get_session_extra_history_roots,
+        )
+
+        roots = get_session_extra_history_roots("sess/1:bad")
+
+    assert str(tmp_path / ".agent_teams" / "unit-team" / "sessions" / "sess_1_bad" / "worktrees") in roots
+    assert str(tmp_path / ".agent_teams" / "unit-team" / "sessions" / "sess" / "1:bad" / "worktrees") not in roots
+    assert str(tmp_path / "team-home" / "sessions" / "sess_1_bad" / "worktrees") in roots
+
+
+def test_get_session_extra_history_roots_adds_spawned_member_workspaces(tmp_path):
+    history = [
+        {
+            "role": "assistant",
+            "extra": {
+                "event": {
+                    "type": "team.member.spawned",
+                    "name": "poet-song",
+                    "member_id": "poet-song-id",
+                }
+            },
+        }
+    ]
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={
+                "team_name": "unit-team",
+                "team_file_monitor_roots": [
+                    str(tmp_path / ".agent_teams" / "unit-team" / "team-workspace"),
+                ],
+            },
+        ),
+        patch(
+            "jiuwenswarm.server.runtime.session.session_history.load_history_records",
+            return_value=history,
+        ),
+        patch(
+            "openjiuwen.agent_teams.paths.team_home",
+            return_value=tmp_path / "team-home",
+        ),
+        patch(
+            "openjiuwen.agent_teams.paths.independent_member_workspace",
+            side_effect=lambda name: tmp_path / "independent" / f"{name}_workspace",
+        ),
+    ):
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            get_session_extra_history_roots,
+        )
+
+        roots = get_session_extra_history_roots("sess-1")
+
+    assert str(tmp_path / ".agent_teams" / "unit-team" / "workspaces" / "poet-song_workspace") in roots
+    assert str(tmp_path / "team-home" / "workspaces" / "poet-song_workspace") in roots
+    assert str(tmp_path / "independent" / "poet-song_workspace") in roots
 
 
 def test_is_valid_file_ops_file_uses_suffix_match():
@@ -585,8 +1061,8 @@ def test_is_valid_file_ops_file_uses_suffix_match():
     assert service._is_valid_file_ops_file("file_ops_agent.json", None, require_session=False)
 
 
-def test_multi_history_root_first_wins_priority(tmp_path, monkeypatch):
-    """project_dir 的 file_ops 应优先于 extra_history_roots(first-wins)。"""
+def test_multi_history_root_first_wins_for_duplicate_entries(tmp_path, monkeypatch):
+    """project_dir 的 file_ops 仅在重复 entry 冲突时优先。"""
     agent_ws = tmp_path / "agent-ws"
     user_ws = tmp_path / "user-ws"
     project_root = tmp_path / "project"
@@ -604,10 +1080,10 @@ def test_multi_history_root_first_wins_priority(tmp_path, monkeypatch):
                                     "old_content": "proj-old\n", "new_content": "proj-new\n"}]}),
         encoding="utf-8",
     )
-    # extra_root 记录了不同的 old_content,不应覆盖 project_dir
+    # extra_root 记录了同一条重复 entry,不应让统计翻倍
     (extra_hist / "file_ops_agent_sess-1.json").write_text(
         json.dumps({target_file: [{"action": "write", "timestamp": _ts(1784542850.0),
-                                    "old_content": "extra-old\n", "new_content": "extra-new\n"}]}),
+                                    "old_content": "proj-old\n", "new_content": "proj-new\n"}]}),
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -626,7 +1102,7 @@ def test_multi_history_root_first_wins_priority(tmp_path, monkeypatch):
         )
     assert len(turns) == 1
     entry = turns[0]["files"][target_file]
-    # project_dir 优先, old_content 应为 proj-old
+    # project_dir 优先去重,重复 entry 不应被统计两次。
     assert entry["linesAdded"] == 1
     assert entry["linesRemoved"] == 1
 
@@ -834,6 +1310,53 @@ def test_diff_status_falls_back_to_last_turn_when_git_not_found():
     assert "file_b.py" in result["last_turn"]["files"]
 
 
+def test_diff_status_uses_turn_summaries_for_last_turn_snapshot_fallback():
+    snapshot_turn = {
+        "turnIndex": 3,
+        "timestamp": _ts(1784543000.0),
+        "userPromptPreview": "snapshot only",
+        "stats": {"filesChanged": 1, "linesAdded": 7, "linesRemoved": 2},
+        "files": {
+            "/proj/from_snapshot.py": {
+                "linesAdded": 7,
+                "linesRemoved": 2,
+                "isNewFile": True,
+            },
+        },
+        "change_set_id": "cs-snapshot",
+        "request_id": "req-snapshot",
+        "assistant_message_id": "req-snapshot:assistant",
+        "user_message_id": "req-snapshot:user",
+        "status": "completed",
+    }
+    with (
+        patch.object(DiffService, "get_git_diff", return_value={}),
+        patch.object(DiffService, "get_turn_diffs", return_value=[]) as full_diffs,
+        patch.object(
+            DiffService,
+            "get_turn_diff_summaries",
+            return_value=[snapshot_turn],
+        ) as summaries,
+    ):
+        result = DiffStatusService.get_project_diff_status(
+            project=_PROJECT,
+            session_id="sess-1",
+            include_files=False,
+            include_hunks=False,
+        ).to_dict(include_hunks=False)
+
+    full_diffs.assert_not_called()
+    summaries.assert_called_once()
+    assert result["last_turn"] is not None
+    assert result["last_turn"]["change_set_id"] == "cs-snapshot"
+    assert result["last_turn"]["stats"] == {
+        "files_changed": 1,
+        "lines_added": 7,
+        "lines_removed": 2,
+    }
+    assert result["last_turn"]["files"] == {}
+
+
 def test_turn_diff_list_falls_back_when_not_git_repository():
     ph, pa, pl, ps = _patch_diff_service()
     git_error = GitError("NOT_GIT_REPOSITORY", "not a git repository")
@@ -884,7 +1407,12 @@ def test_turn_diff_detail_can_omit_files():
     assert result["files"] == {}
 
 
-def test_turn_diff_detail_rejects_transient_git_state(monkeypatch):
+def test_turn_diff_detail_tolerates_transient_git_state(monkeypatch):
+    """transient 状态不应阻断历史轮次回放。
+
+    历史轮次基于 file_ops + change_set snapshot,不执行 git 命令。
+    transient 时用 project_dir 兜底 repo_context,历史预览仍可用。
+    """
     service = SimpleNamespace(
         status=lambda project: SimpleNamespace(
             error=None,
@@ -900,11 +1428,82 @@ def test_turn_diff_detail_rejects_transient_git_state(monkeypatch):
     )
     ph, pa, pl, ps = _patch_diff_service()
     with ph, pa, pl, ps:
-        with pytest.raises(GitOperationError) as excinfo:
-            DiffStatusService.get_turn_diff_detail(
-                project=_PROJECT, session_id="sess-1", turn_index=1,
-            )
-    assert excinfo.value.git_error.code == "GIT_TRANSIENT_STATE"
+        result = DiffStatusService.get_turn_diff_detail(
+            project=_PROJECT, session_id="sess-1", turn_index=1,
+        )
+    # 应返回历史数据,而非抛 GIT_TRANSIENT_STATE
+    assert result is not None
+    assert result["turn_index"] == 1
+    # repo_root 用 project_dir 兜底(transient 时无法读 git)
+    assert result["repo_root"] == "/proj"
+    # 历史 turn 的文件应正常返回(路径相对 repo_root)
+    assert "file_a.py" in result["files"]
+
+
+def test_turn_diff_list_tolerates_transient_git_state(monkeypatch):
+    """transient 状态不应阻断历史轮次列表。
+
+    与 turn_diff_detail 同理:list 接口也基于 file_ops + snapshot,
+    transient 时用 project_dir 兜底。
+    """
+    service = SimpleNamespace(
+        status=lambda project: SimpleNamespace(
+            error=None,
+            repo_root="/proj",
+            branch="main",
+            head="abc123",
+            transient=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_git.get_project_git_service",
+        lambda: service,
+    )
+    ph, pa, pl, ps = _patch_diff_service()
+    with ph, pa, pl, ps:
+        result = DiffStatusService.get_turn_diff_list(
+            project=_PROJECT, session_id="sess-1",
+        )
+    # 应返回历史轮次列表,而非抛 GIT_TRANSIENT_STATE
+    assert result["total"] >= 1
+    assert result["turns"]
+    # repo_root 用 project_dir 兜底
+    assert result["repo_root"] == "/proj"
+
+
+def test_turn_diff_detail_tolerates_git_command_failed(monkeypatch):
+    """非 transient 的 git 错误(如 command_failed)也不应阻断历史预览。
+
+    timeout/command_failed 与 file_ops 历史回放无关,应同样用 project_dir 兜底。
+    """
+    from jiuwenswarm.server.runtime.session.project_git import GitError
+    service = SimpleNamespace(
+        status=lambda project: SimpleNamespace(
+            error=GitError(
+                code="GIT_COMMAND_FAILED",
+                message="git command failed",
+                retryable=True,
+            ),
+            repo_root=None,
+            branch=None,
+            head=None,
+            transient=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_git.get_project_git_service",
+        lambda: service,
+    )
+    ph, pa, pl, ps = _patch_diff_service()
+    with ph, pa, pl, ps:
+        result = DiffStatusService.get_turn_diff_detail(
+            project=_PROJECT, session_id="sess-1", turn_index=1,
+        )
+    # 应返回历史数据,而非抛 GitOperationError
+    assert result is not None
+    assert result["turn_index"] == 1
+    # repo_root 用 project_dir 兜底
+    assert result["repo_root"] == "/proj"
 
 
 def test_get_turn_diff_change_set_orphan_snapshot_is_expired(monkeypatch):

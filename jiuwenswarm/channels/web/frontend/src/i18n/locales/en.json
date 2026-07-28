@@ -28,7 +28,6 @@
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
-    "heartbeat": "Heartbeat",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
     "channels": "Channels",
@@ -38,7 +37,7 @@
     "more": "More",
     "settings": "Settings",
     "config": "Configuration",
-    "browser": "Browser Service",
+    "browser": "Browser",
     "logs": "Logs",
     "update": "Updates"
   },
@@ -273,6 +272,7 @@
     "stop": "Stop",
     "modelSelector": {
       "tooltip": "Switch the model used for chat",
+      "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
@@ -427,13 +427,16 @@
     "formCancel": "Cancel",
     "editTitle": "Edit goal",
     "toolbarTag": "Goal",
+    "toolbarUnavailable": "A goal is already in progress. Finish or clear it first.",
     "closeTag": "Cancel goal",
-    "badge": "Set as goal",
+    "badge": "Goal",
     "status": {
       "active": "Active",
       "paused": "Paused",
       "completed": "Completed",
-      "blocked": "Blocked"
+      "blocked": "Blocked",
+      "disconnected": "Disconnected",
+      "unknown": "Status unknown"
     },
     "action": {
       "editTooltip": "Edit goal",
@@ -485,6 +488,7 @@
       "wecom": "WeCom",
       "wechat": "WeChat",
       "discord": "Discord",
+      "slack": "Slack",
       "heartbeat": "Heartbeat",
       "tui": "TUI",
       "unknown": "Unknown"
@@ -493,7 +497,8 @@
       "loadSessions": "Failed to load sessions",
       "loadFiles": "Failed to load session files",
       "deleteSession": "Failed to delete session: {{sessionId}}",
-      "restoreFailed": "Failed to restore session: {{sessionId}}"
+      "restoreFailed": "Failed to restore session: {{sessionId}}",
+      "switchSession": "Failed to switch session. Please try again."
     }
   },
   "sessionSidebar": {
@@ -502,52 +507,6 @@
     "version": "Version",
     "language": "Language",
     "moreSettings": "More Settings"
-  },
-  "heartbeat": {
-    "title": "Heartbeat Management",
-    "subtitle": "Maintain heartbeat settings and instruction files",
-    "configTitle": "Heartbeat Settings",
-    "configSubtitle": "Configure heartbeat interval, target channel, and active hours",
-    "loadingConfig": "Loading heartbeat settings...",
-    "saved": "Heartbeat settings saved",
-    "badges": {
-      "ok": "Recent heartbeat is healthy",
-      "alert": "Recent heartbeat is alerting",
-      "unknown": "No heartbeat result yet"
-    },
-    "everyLabel": "Interval (seconds)",
-    "targetLabel": "Target channel (channel_id)",
-    "enableActiveHours": "Enable active hours",
-    "startTime": "Start time",
-    "endTime": "End time",
-    "recentMessages": "Recent 20 heartbeat messages",
-    "noHistory": "No heartbeat history",
-    "statusOk": "OK",
-    "statusUnknown": "UNKNOWN",
-    "latestTime": "Latest heartbeat time",
-    "latestContent": "Latest heartbeat content",
-    "none": "None",
-    "channels": {
-      "web": "Web (web)",
-      "feishu": "Lark (feishu)",
-      "wechat": "WeChat (wechat)",
-      "xiaoyi": "Xiaoyi (xiaoyi)",
-      "dingtalk": "DingTalk (dingtalk)"
-    },
-    "errors": {
-      "loadConfig": "Failed to load heartbeat settings",
-      "saveConfig": "Failed to save heartbeat settings",
-      "invalidEvery": "Heartbeat interval must be greater than 0",
-      "invalidActiveHours": "active_hours must use HH:MM format (for example 08:00)",
-      "invalidRange": "End time must be later than start time",
-      "feishuNoTarget": "Feishu bot has not had any conversation yet. Heartbeat cannot be sent. Please chat with the bot in Feishu first."
-    }
-  },
-  "heartbeatModal": {
-    "closeAria": "Close heartbeat details dialog",
-    "title": "Heartbeat message",
-    "subtitle": "Message details",
-    "empty": "No detailed content"
   },
   "offloadFiles": {
     "title": "Offload Files",
@@ -573,8 +532,8 @@
   "sourceManager": {
     "closeAria": "Close source manager dialog",
     "title": "Source Manager",
-    "subtitle": "Select online search source and configure",
-    "selectSource": "Select Online Search Source",
+    "subtitle": "Configure online sources",
+    "selectSource": "Configure online sources",
     "skillnetDesc": "Open source skill library",
     "clawhubDesc": "Enterprise skill library",
     "skillnetInfo": "SkillNet Online Search",
@@ -610,6 +569,7 @@
       "dingtalk": "DingTalk",
       "telegram": "Telegram",
       "discord": "Discord",
+      "slack": "Slack",
       "whatsapp": "WhatsApp",
       "wecom": "WeCom",
       "wechat": "WeChat"
@@ -634,6 +594,9 @@
       "discordTitle": "Discord Channel Configuration",
       "discordSubtitle": "Configure Discord bot service settings",
       "discordHint": "Discord Bot messaging is supported. Enable Message Content Intent in Developer Portal and optionally set the target channel, the block_dm toggle can be used to block direct message.",
+      "slackTitle": "Slack Channel Configuration",
+      "slackSubtitle": "Configure Slack Socket Mode bot settings",
+      "slackHint": "Create a Slack app with Socket Mode enabled, an xoxb bot token, and an xapp app token. Subscribe to app_mention and message.im events.",
       "telegramTitle": "Telegram Channel Configuration",
       "telegramSubtitle": "Configure Telegram Bot service settings",
       "whatsappTitle": "WhatsApp Channel Configuration",
@@ -649,6 +612,7 @@
       "feishu": "Loading Lark settings...",
       "telegram": "Loading Telegram settings...",
       "discord": "Loading Discord settings...",
+      "slack": "Loading Slack settings...",
       "whatsapp": "Loading WhatsApp settings...",
       "wecom": "Loading WeCom settings...",
       "wechat": "Loading WeChat settings..."
@@ -665,8 +629,15 @@
       "whatsappJids": "One WhatsApp JID per line (comma-separated is also supported)",
       "wecomDefaultChatId": "userid or chatid (group)",
       "wecomDefaultChatIdHint": "Target for heartbeat/scheduled push. Leave empty to use last chatid",
+      "xiaoyiApiIdHint": "Scheduled task push to Xiaoyi requires api_id. Without it, Xiaoyi cannot be selected as a cron push channel.",
+      "xiaoyiApiIdRequiredForCron": "api_id is not configured: Xiaoyi cannot be selected as a cron push channel.",
       "discordGuildId": "Enter the Discord server ID (direct message still works without this)",
       "discordChannelId": "Enter the Discord server's channel ID (direct message still works without this)",
+      "slackBotToken": "Enter the xoxb bot token",
+      "slackAppToken": "Enter the xapp app token",
+      "slackChannelId": "Enter the fallback Slack channel ID",
+      "slackUserIds": "One Slack user ID per line (empty allows all users)",
+      "slackChannelIds": "One Slack channel ID per line (empty allows all channels)",
       "allowFrom": "One chatid/userid per line (comma-separated is also supported)"
     },
     "saved": {
@@ -675,6 +646,7 @@
       "dingtalk": "DingTalk settings saved",
       "telegram": "Telegram settings saved",
       "discord": "Discord settings saved",
+      "slack": "Slack settings saved",
       "whatsapp": "WhatsApp settings saved",
       "wecom": "WeCom settings saved",
       "wechat": "WeChat settings saved"
@@ -710,6 +682,7 @@
       "loadDingtalk": "Failed to load DingTalk settings",
       "loadTelegram": "Failed to load Telegram settings",
       "loadDiscord": "Failed to load Discord settings",
+      "loadSlack": "Failed to load Slack settings",
       "loadWhatsApp": "Failed to load WhatsApp settings",
       "loadWecom": "Failed to load WeCom settings",
       "loadWechat": "Failed to load WeChat settings",
@@ -732,6 +705,23 @@
       "appIdNotConfigured": "app_id not configured",
       "deleteApp": "Delete app",
       "addApp": "Add app"
+    }
+  },
+  "modelSetupGuide": {
+    "progress": "Step {{current}} of {{total}}",
+    "clickMore": "Select More to continue",
+    "acknowledge": "Got it",
+    "skip": "Skip",
+    "open": "Setup guide",
+    "steps": {
+      "1": {
+        "title": "Configure your first model",
+        "description": "Model settings are under More, in Configuration."
+      },
+      "2": {
+        "title": "Complete model configuration",
+        "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
+      }
     }
   },
   "config": {
@@ -788,6 +778,8 @@
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
       "swarmflowEnabled": "Enable SwarmFlow",
+      "kvCacheReleaseEnabled": "Legacy path (KV release)",
+      "kvCacheAffinityEnabled": "New path (Ascend affinity)",
       "skillRetrievalBuildRootCategoriesPlaceholder": "Edit the YAML/JSON root taxonomy directly",
       "agentSkillsPlaceholder": "Click to select skills",
       "agentSkillsEmpty": "No installed skills",
@@ -970,6 +962,7 @@
       "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only, Team required" },
       "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
+      "kvCacheAffinity": { "label": "Compute Affinity", "hint": "Control Ascend KV Cache affinity" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
       "swarmflow": { "label": "SwarmFlow", "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode." },
@@ -987,7 +980,8 @@
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
       "dynamicGraph": "Enable dynamic graph",
-      "kvCacheAffinity": "Compute affinity (KV cache release)"
+      "kvCacheRelease": "Legacy path (KV release)",
+      "kvCacheAffinity": "New path (Ascend affinity)"
     },
     "permissionsTools": {
       "title": "Tool Guardrail (permissions.tools)",
@@ -1086,6 +1080,15 @@
       "noResults": "No matching templates found. Try a different keyword.",
       "noResultsJobs": "No matching tasks found. Try a different keyword."
     },
+    "pagination": {
+      "pageSize": "Rows per page",
+      "rangeInfo": "{{start}}-{{end}} of {{total}}",
+      "prev": "Previous page",
+      "next": "Next page"
+    },
+    "filter": {
+      "reset": "Reset"
+    },
     "table": {
       "name": "Name",
       "project": "Project",
@@ -1094,7 +1097,7 @@
       "timezone": "Timezone",
       "channel": "Channel",
       "actions": "Actions",
-      "noProject": "–",
+      "noProject": "-",
       "runNow": "Run now",
       "stop": "Stop",
       "edit": "Edit",
@@ -1136,9 +1139,12 @@
       "fieldEnabled": "Enabled",
       "placeholderInput": "Enter",
       "placeholderSelect": "Select",
+      "placeholderProject": "-",
       "placeholderEffectiveDate": "Select effective date",
       "missingFieldsHint": "Still needed: {{fields}}",
-      "scheduleAlreadyExpiredHint": "The selected run time is already in the past, please choose another"
+      "scheduleAlreadyExpiredHint": "The selected run time is already in the past, please choose another",
+      "charCount": "{{count}}/{{max}}",
+      "maxLengthReachedHint": "Maximum length reached ({{max}} characters)"
     },
     "schedule": {
       "title": "Schedule",
@@ -1159,6 +1165,7 @@
       "every": "Every",
       "everyHoursPlaceholder": "Hours",
       "everyMinutesPlaceholder": "Minutes",
+      "integerOnlyHint": "Interval must be an integer of at least 1",
       "hoursUnit": "hours",
       "minutesUnit": "minutes",
       "intervalUnit": {
@@ -1201,7 +1208,10 @@
         "3": "week 3",
         "4": "week 4",
         "last": "last week"
-      }
+      },
+      "wakeOffset": "Wake early",
+      "wakeOffsetUnit": "minutes",
+      "wakeOffsetHelp": "Start the agent this many minutes before the scheduled push time; 0 means run at the scheduled time"
     },
     "modelPicker": {
       "configured": "Configured",
@@ -1261,7 +1271,7 @@
     },
     "placeholders": {
       "name": "Enter task name",
-      "cron": "7 fields (Quartz): second minute hour day month dow year. Ranges: second(0-59), minute(0-59), hour(0-23), day(1-31), month(1-12), dow(1-7 or ?), year(1970-2099 or *). Day and dow cannot both be specific. Examples: daily 9am='0 0 9 * * ? *'; one-shot 2026-04-29 17:30='0 30 17 29 4 ? 2026'",
+      "cron": "7 fields (Quartz): second minute hour day month dow year. Ranges: second(0-59), minute(0-59), hour(0-23), day(1-31), month(1-12), dow(0-6 or ?, 0=Sun, 1=Mon...6=Sat; also accepts SUN/MON/TUE/WED/THU/FRI/SAT, case-insensitive), year(1970-2099 or *). Day and dow can both be specific at once; the job then fires when either matches (e.g. the 15th OR every Monday — an OR, not an AND). Examples: daily 9am='0 0 9 * * ? *'; one-shot 2026-04-29 17:30='0 30 17 29 4 ? 2026'",
       "cronShort": "7 fields (Quartz): second minute hour day month dow year",
       "description": "Enter description",
       "wakeOffset": "Wake offset in seconds"
@@ -1291,7 +1301,9 @@
     "errors": {
       "loadJobs": "Failed to load scheduled tasks",
       "createFailed": "Failed to create task",
+      "createFailedWithReason": "Failed to create task: {{reason}}",
       "updateFailed": "Failed to update task",
+      "updateFailedWithReason": "Failed to update task: {{reason}}",
       "deleteFailed": "Failed to delete task",
       "toggleFailed": "Failed to update task status",
       "previewFailed": "Failed to preview next runs",
@@ -1304,12 +1316,10 @@
       "cronRequired": "Cron expression is required",
       "cronFormat": "Invalid cron format (must be 7 fields: second minute hour day month dow year)",
       "cronSecondOrMinute": "Invalid second/minute field (0-59, supports * / - ,)",
-      "cronSecondOrMinuteStep": "Second/minute step must divide 60",
       "cronHour": "Invalid hour field (0-23, supports * / - ,)",
-      "cronHourStep": "Hour step must divide 24",
       "cronDay": "Invalid day field (1-31, supports * ? - ,)",
       "cronMonth": "Invalid month field (1-12, supports * - ,)",
-      "cronWeek": "Invalid dow field (0-6, supports * ? - ,, 0=Sun, 1=Mon...6=Sat)",
+      "cronWeek": "Invalid dow field (0-6, supports * ? - ,, 0=Sun, 1=Mon...6=Sat; also accepts SUN/MON/TUE/WED/THU/FRI/SAT, case-insensitive)",
       "cronYear": "Invalid year field (1970-2099 or *)",
       "timezoneRequired": "Time zone is required",
       "targetRequired": "Target channel is required",
@@ -1317,32 +1327,20 @@
     }
   },
   "browser": {
-    "title": "Browser Service",
-    "subtitle": "Configure the browser path and start the browser service.",
+    "title": "Browser",
+    "subtitle": "Configure the Chrome path and display mode used by browser agents.",
     "refreshPath": "Refresh Path",
     "savePath": "Save Path",
-    "startService": "Start Browser Service",
-    "starting": "Starting...",
     "pathConfigHelp": "Chrome path configuration (open chrome://version in Chrome and copy the executable path)",
     "examplePath": "Example: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "success": {
-      "pathSaved": "Chrome path saved",
-      "started": "Browser service started successfully"
-    },
-    "tooltips": {
-      "fillPath": "Enter a Chrome path first",
-      "savePath": "Save the Chrome path first"
+      "pathSaved": "Chrome path saved"
     },
     "showBrowser": "Show Browser",
     "showBrowserDesc": "Open a visible browser window when running browser tasks.",
     "errors": {
       "loadPath": "Failed to load Chrome path",
-      "savePath": "Failed to save Chrome path",
-      "pathRequired": "Chrome path cannot be empty",
-      "saveBeforeStart": "Save the Chrome path before starting the browser service",
-      "startFailed": "Failed to start browser service",
-      "startFailedWithCode": "Browser service failed to start, return code {{code}}",
-      "startFailedWithMessage": "Browser service failed to start: {{message}}"
+      "savePath": "Failed to save Chrome path"
     }
   },
   "logsPanel": {
@@ -1391,7 +1389,18 @@
       "searchPlaceholder": "Enter keywords to search SwarmSkills"
     },
     "onlineSearch": {
-      "title": "Skills Online Search"
+      "title": "Skills Online Search",
+      "searchPlaceholder": "Search multiple online skill sources",
+      "searchFailed": "Online skill search failed. Please try again later.",
+      "partialFailure": "Some online sources are unavailable. Results from available sources are shown.",
+      "noResults": "No matching online skills found.",
+      "installFailed": "Failed to install the skill.",
+      "installed": "Installed skill {{name}}",
+      "sourceStatus": {
+        "success": "Available ({{count}})",
+        "error": "Unavailable",
+        "skipped": "Not configured"
+      }
     },
     "actions": {
       "install": "Install",
@@ -1620,7 +1629,7 @@
     "evolution": {
       "closeAria": "Close skill experience dialog",
       "title": "Skill Experience: {{name}}",
-      "subtitle": "You can edit experience content (change.content), delete entries, and save.",
+      "subtitle": "Edit or delete experiences, then save to apply your changes.",
       "empty": "No experience entries",
       "deleteConfirm": "Delete this experience entry?",
       "actions": {
@@ -1629,12 +1638,29 @@
       "fields": {
         "id": "ID",
         "source": "Source",
-        "section": "Section",
-        "target": "Target",
+        "section": "Type",
+        "target": "Improvement target",
         "applied": "Applied",
-        "timestamp": "Timestamp",
+        "timestamp": "Created at",
         "context": "Context",
         "content": "Experience Content"
+      },
+      "values": {
+        "section": {
+          "instructions": "Usage instructions",
+          "examples": "Examples",
+          "troubleshooting": "Troubleshooting",
+          "workflow": "Workflow",
+          "constraints": "Constraints",
+          "roles": "Roles",
+          "collaboration": "Collaboration",
+          "scripts": "Scripts"
+        },
+        "target": {
+          "description": "Skill description",
+          "body": "Skill body",
+          "script": "Skill scripts"
+        }
       },
       "messages": {
         "saved": "Saved successfully"
@@ -2026,9 +2052,6 @@
     "configErrorHint": "Please start the backend first (e.g.",
     "configErrorDefault": ", default port 19000). If backend is remote, set",
     "configErrorEnv": "in",
-    "heartbeatTitle": "Heartbeat message",
-    "heartbeatClose": "Close",
-    "heartbeatViewFull": "Click to view full message",
     "securityAlertTitle": "Security Alert",
     "noContent": "No details",
     "restarting": "Restarting service",
@@ -2105,7 +2128,7 @@
     "workDescription": "Office, collaboration, and general tasks",
     "codeDescription": "Inspect and modify code in a project directory",
     "environment": "Environment",
-    "changes": "Changes",
+    "changes": "Current Turn Changes",
     "review": "Review"
   },
   "multiSession": {
@@ -2164,7 +2187,8 @@
       "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
       "errors": {
         "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project.",
-        "nameExists": "This project name already exists. Please choose another name."
+        "nameExists": "This project name already exists. Please choose another name.",
+        "pathMissing": "Project directory does not exist. Choose an existing directory."
       },
       "cancel": "Cancel",
       "confirm": "Confirm"
@@ -2203,7 +2227,8 @@
     "nextStep": "Next",
     "confirm": "Confirm",
     "customOption": "Custom",
-    "customPlaceholder": "No suitable option? Type your answer..."
+    "customPlaceholder": "No suitable option? Type your answer...",
+    "skippedSummary": "Skipped"
   },
   "qaSummary": {
     "title": "Clarifications"
