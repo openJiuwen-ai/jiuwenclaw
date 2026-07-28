@@ -3630,6 +3630,17 @@ export class AppScreen implements Component, Focusable {
     }
 
     const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
+    // ctrl+p / ctrl+n 翻页（对齐 PgUp/PgDn）
+    if (matchesKey(data, "ctrl+p")) {
+      this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - pageSize);
+      this.tui.requestRender();
+      return true;
+    }
+    if (matchesKey(data, "ctrl+n")) {
+      this.btwOverlayScrollOffset += pageSize;
+      this.tui.requestRender();
+      return true;
+    }
     if (matchesKey(data, "up")) {
       this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - 1);
       this.tui.requestRender();

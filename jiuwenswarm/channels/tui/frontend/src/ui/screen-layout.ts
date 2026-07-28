@@ -275,7 +275,7 @@ function renderBtwOverlay(
   hintParts.push("c copy");
   hintParts.push("x delete");
   if (answerLines.length > bodyHeight) {
-    hintParts.push("↑/↓ scroll", "PgUp/PgDn page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
+    hintParts.push("↑/↓ scroll", "PgUp/PgDn·ctrl+p/n page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
   }
   const scrollHint = hintParts.join(" | ");
 
