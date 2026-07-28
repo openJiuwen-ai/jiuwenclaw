@@ -101,7 +101,7 @@ def _extract_designer_section(text: str, *, include_charts: bool = False) -> str
 
 _PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
 _DEFAULT_GEN_RETRY_ROUND = 1
-_DEFAULT_DENSITY_RETRY_ROUND = 1
+_MAX_PAGE_GENERATION_ATTEMPTS = 3
 
 
 # 页面类型 → 模板 ID 默认映射（当 manifest 无 page_intents 时兜底）
@@ -1891,7 +1891,7 @@ def _build_page_prompt(
 
 @dataclass
 class PageGenContext:
-    """单页生成上下文——_generate_one / _rewrite_one 共享的只读参数。"""
+    """单页生成使用的只读上下文。"""
 
     page_num: int
     style_id: str
@@ -1899,7 +1899,6 @@ class PageGenContext:
     outline_page: str
     research_page: str
     outline_is_full: bool
-    research_is_full: bool
     image_map_page: str  # 本页图片素材描述（空串=无图）
     designer_md_text: str  # references/designer.md 原文（由 PrepareNode 通过 read_file 读取）
     user_query: str = ""  # 用户原始 query（由 collect_user_text 提取）
@@ -2052,17 +2051,16 @@ class PrepareNode(PlanNode):
 
 
 class PageWorkerNode(PlanNode):
-    """P8.1 — per-page 闭环：生成→校验→密度判定→搜索补充→重写，N 页并发。"""
+    """P8.1 — 按新版 pptx-craft 规则并发生成并校验每页 HTML。"""
 
     def __init__(self) -> None:
         super().__init__(
             plan_name="p8_1_page_worker",
             instruction=(
-                "## P8.1 per-page 闭环生成（合并原 P8.1 生成 + P8.2 密度检查与重写）\n"
+                "## P8.1 per-page 页面生成\n"
                 "\n"
                 "### 前置条件\n"
-                "- `read_file` / `write_file` 工具可用\n"
-                "- `web_search` 工具可用（搜索补充，不可用时降级为纯重写）\n"
+                "- `write_file` 工具可用\n"
                 "- P8.0 已产出共享只读数据（outline_pages/research_pages/全文/style_text）\n"
                 "- `pages_dir` 已存在\n"
                 "\n"
@@ -2073,69 +2071,25 @@ class PageWorkerNode(PlanNode):
                 "- `outline_pages` / `research_pages`（来自 P8.0）: 按页拆分片段\n"
                 "- `outline_text` / `style_text`（来自 P8.0）: 全文，拆分失败时回退\n"
                 "- `all_pages`（来自 P8.0）: 1..N 页码列表\n"
-                "- `topic`（可选）: PPT 主题，搜索补充关键词用\n"
-                "- `search_mode`（可选，影响数据可视化阈值）\n"
-                "- `gen_retry_round`（可选，默认 1）\n"
-                "- `density_retry_round`（可选，默认 1）\n"
+                "- `gen_retry_round`（可选，默认 1；含首次生成在内最多尝试 3 次）\n"
                 "\n"
                 "### 输出\n"
                 "- `page_files`: 实际产出的 page-*.pptx.html 列表\n"
                 "- `missing_pages`: 仍缺失的页码（用于上层标 partial）\n"
-                "- `low_density_pages`: 重写后仍未通过的页码\n"
-                "- `density_report`: 每页检查结果摘要\n"
+                "- `low_density_pages` / `density_report`: 兼容历史输出，固定为空\n"
                 "- `outline_text` / `style_text`（透传给 P8.2）\n"
                 "\n"
-                "### 执行流程（per-page 闭环，N 页 asyncio.gather 并发）\n"
+                "### 执行流程（N 页 asyncio.gather 并发）\n"
                 "对每一页独立执行：\n"
                 "1. 生成阶段：用该页 outline 片段 + research 片段 + 风格规范 + 视觉与布局硬约束构造 prompt，"
                 "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
-                "   - 重试后仍失败 → 进 missing_pages，该页闭环终止\n"
-                "2. 密度判定阶段：调 LLM 做 12 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
-                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 留白质量 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整 / 溢出风险\n"
-                "   - 数据可视化阈值：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式降至 2 个）\n"
-                "3. 不通过 → 修复阶段（按 density_retry_round 轮）：\n"
-                "   a. 分析缺失项，判断是否需要搜索补充数据\n"
-                "   b. 若缺数据可视化/缺案例/缺数据来源 → 调用 `web_search` 搜索补充：\n"
-                "      - 缺数据可视化：搜索 `\"{主题} 市场规模 数据\"` / `\"{主题} 增长率 统计\"`，获取可图表化的数据点\n"
-                "      - 缺案例：搜索 `\"{主题} 应用案例 实践\"`，获取真实案例\n"
-                "      - 缺数据来源：搜索 `\"{主题} 行业报告\"`，获取权威机构名称\n"
-                "      - 搜索优先获取最近 1-2 年数据，优先权威来源\n"
-                "      - 数据来源标注使用 research-P{N}.md 中的来源\n"
-                "   c. 将搜索结果 + 原有素材 + 不通过项提示词 + 上次产物构造重写 prompt，调 LLM 重新生成 HTML\n"
-                "   d. 若无需搜索（如缺装饰图标/大段文字/视觉层级/布局错误），直接用原有素材 + 不通过项提示词重写\n"
-                "   e. 重写产物校验通过 → 落盘覆盖 → 复检；仍不通过进 low_density_pages\n"
-                "\n"
-                "### 内容要求（每页 HTML 必须满足）\n"
-                "- 所有文字必须是真实内容，禁止占位文本（TODO、xxx 等）\n"
-                "- 该页 outline + research 中的全部信息点都必须体现\n"
-                "- 数据/对比/趋势页 → 使用 ECharts 绘制实际图表，禁止图片占位\n"
-                "- 步骤/流程页 → 绘制完整节点 + 连线 + 文字标注，禁止纯文字描述\n"
-                "- 关键数字必须有放大数字卡片 + 说明注释\n"
-                "- 结论必须有摘要高亮\n"
-                "- 视觉精细化：三级字体体系（标题 36-48px、副标题 24-28px、正文 16-20px）\n"
-                "- 装饰增强：页面边缘/背景层加轻量几何装饰\n"
-                "\n"
-                "### 数据转换规则（搜索补充后）\n"
-                "| 获取内容 | 转换方式 |\n"
-                "|---|---|\n"
-                "| 时间序列数据（≥3 点） | 折线图（趋势）或柱状图（对比） |\n"
-                "| 类别占比数据（总和 100%） | 饼图/环形图 |\n"
-                "| 对比数据（2-3 类别） | 条形图或对比卡片 |\n"
-                "| 多类别比较（≥4 类别） | 柱状图 |\n"
-                "| 多维能力对比（≥3 维度） | 雷达图(radar) |\n"
-                "| 两变量相关性 | 散点图(scatter) |\n"
-                "| 关键观点 | 带图标的列表项 |\n"
-                "| 真实案例 | 案例卡片（公司名 + 数据 + 效果） |\n"
+                "   - 重试后仍失败 → 进 missing_pages\n"
+                "2. 成功页只保留一个 ppt-slide 容器并直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
                 "\n"
                 "### 失败兜底\n"
                 "- 生成 LLM 调用 raise / 返回空 / HTML 校验失败：进 missing_pages\n"
                 "- 首次落盘 write_file 异常：进 missing_pages\n"
-                "- 检查 LLM 调用失败（含网络/超时/JSON 解析等任意异常）：保守视为通过（避免假阳性触发无意义重写）\n"
-                "- 重检时 read_file 失败：保守判通过，保留当前 HTML\n"
-                "- web_search 不可用或搜索失败：跳过搜索补充，仅用原有素材重写\n"
-                "- 重写 LLM 调用失败 / 重写产物校验失败 / 重写产物落盘失败：保留当前 HTML，进 low_density_pages\n"
-                "- density_retry_round 后仍不通过：保留当前 HTML 供人工排查\n"
                 "- 重试后仍缺失：透传给根节点\n"
             ),
         )
@@ -2143,10 +2097,7 @@ class PageWorkerNode(PlanNode):
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         pages_dir = str(inputs.get("pages_dir") or "").strip()
         style_id = str(inputs.get("style_id") or "").strip()
-        search_mode = str(inputs.get("search_mode") or "auto").strip()
-        topic = str(inputs.get("topic") or "").strip()
         gen_retry_round = int(inputs.get("gen_retry_round") or _DEFAULT_GEN_RETRY_ROUND)
-        density_retry_round = int(inputs.get("density_retry_round") or _DEFAULT_DENSITY_RETRY_ROUND)
 
         outline_pages: dict[int, str] = inputs.get("outline_pages") or {}
         research_pages: dict[int, str] = inputs.get("research_pages") or {}
@@ -2177,11 +2128,7 @@ class PageWorkerNode(PlanNode):
                 outline_page=outline_pages.get(p, outline_full),
                 research_page=research_pages.get(p, ""),
                 outline_is_full=p not in outline_pages,
-                research_is_full=False,
-                search_mode=search_mode,
-                topic=topic,
                 gen_retry_round=gen_retry_round,
-                density_retry_round=density_retry_round,
                 image_map=image_map,
                 designer_md_text=designer_md_text,
                 user_query=user_query,
@@ -2189,37 +2136,33 @@ class PageWorkerNode(PlanNode):
             for p in all_pages
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, (AbortError, asyncio.CancelledError)):
+                raise result
 
         missing_pages: list[int] = []
-        low_density_pages: list[int] = []
-        density_report: dict[int, dict[str, Any]] = {}
         for p, r in zip(all_pages, results):
-            if isinstance(r, Exception):
-                logger.warning("[P8.1] 页面 %d 闭环异常: %s", p, r)
+            if isinstance(r, BaseException):
+                logger.warning("[P8.1] 页面 %d 生成异常: %s", p, r)
                 missing_pages.append(p)
                 continue
             if r.get("missing"):
                 missing_pages.append(p)
-            if r.get("low_density"):
-                low_density_pages.append(p)
-            if r.get("report"):
-                density_report[p] = r["report"]
 
         successful_pages = [p for p in all_pages if p not in missing_pages]
         page_files = [f"page-{p}.pptx.html" for p in successful_pages]
 
         logger.info(
-            "[P8.1] per-page 闭环完成 success=%d/%d missing=%d low_density=%d",
+            "[P8.1] per-page 生成完成 success=%d/%d missing=%d",
             len(successful_pages),
             len(all_pages),
             len(missing_pages),
-            len(low_density_pages),
         )
         return {
             "page_files": page_files,
             "missing_pages": missing_pages,
-            "low_density_pages": low_density_pages,
-            "density_report": density_report,
+            "low_density_pages": [],
+            "density_report": {},
             "outline_text": outline_full,
             "style_text": style_text,
         }
@@ -2234,16 +2177,12 @@ class PageWorkerNode(PlanNode):
         outline_page: str,
         research_page: str,
         outline_is_full: bool,
-        research_is_full: bool,
-        search_mode: str,
-        topic: str,
         gen_retry_round: int,
-        density_retry_round: int,
         image_map: dict[str, Any],
         designer_md_text: str = "",
         user_query: str = "",
     ) -> dict[str, Any]:
-        """单页闭环：生成(含重试) → 密度判定 → 搜索补充+重写(含重试)。"""
+        """生成并校验单页；仅生成失败时按预算重试。"""
         path = f"{pages_dir}/page-{page_num}.pptx.html"
 
         # 从 image_map 中提取本页图片素材描述
@@ -2266,14 +2205,17 @@ class PageWorkerNode(PlanNode):
             outline_page=outline_page,
             research_page=research_page,
             outline_is_full=outline_is_full,
-            research_is_full=research_is_full,
             image_map_page=image_map_page,
             designer_md_text=designer_md_text,
             user_query=user_query,
         )
 
         html = ""
-        for attempt in range(max(gen_retry_round + 1, 1)):
+        attempt_count = min(
+            max(gen_retry_round + 1, 1),
+            _MAX_PAGE_GENERATION_ATTEMPTS,
+        )
+        for attempt in range(attempt_count):
             if attempt > 0:
                 logger.info("[P8.1] 页面 %d 第 %d 轮生成重试", page_num, attempt + 1)
             html = await self._generate_one(ctx)
@@ -2289,53 +2231,10 @@ class PageWorkerNode(PlanNode):
         if not ok:
             return {"missing": True, "low_density": False, "report": {}}
 
-        report: dict[str, Any] = {"pass": True}
-        low_density = False
-        # 与 _build_page_prompt 一致：基于「页研究查询/数据需求」字段判定结构页
-        has_research_need = "✅" in outline_page and (
-            "页研究查询" in outline_page or "数据需求" in outline_page or "研究需求" in outline_page
-        )
-        is_structural = not has_research_need
-        total_rounds = max(density_retry_round + 1, 1)
-        for round_idx in range(total_rounds):
-            current = await self._read_file(path)
-            if not current:
-                logger.warning("[P8.1] 页面 %d 重检时读取失败，保守判通过", page_num)
-                break
-            report = await self._check_one(page_num, current, search_mode, outline_page)
-            if report.get("pass", True):
-                break
-            if round_idx == total_rounds - 1:
-                low_density = True
-                logger.info("[P8.1] 页面 %d 密度重试用尽，进 low_density", page_num)
-                break
-
-            if is_structural:
-                supplement = ""
-            else:
-                supplement = await self._search_supplement_one(
-                    page_num, report, research_page, topic,
-                )
-            rewritten = await self._rewrite_one(
-                ctx,
-                report.get("failed_items") or [], current, supplement,
-            )
-            if not rewritten:
-                low_density = True
-                logger.info("[P8.1] 页面 %d 重写失败，保留当前 HTML，进 low_density", page_num)
-                break
-            # 防御：重写产物也可能包含多个 slide
-            rewritten = _truncate_to_single_slide(rewritten)
-            write_ok = await self._write_file(path, rewritten)
-            if not write_ok:
-                low_density = True
-                logger.info("[P8.1] 页面 %d 重写产物落盘失败，保留当前 HTML，进 low_density", page_num)
-                break
-
         return {
             "missing": False,
-            "low_density": low_density,
-            "report": report,
+            "low_density": False,
+            "report": {},
         }
 
     async def _generate_one(self, ctx: PageGenContext) -> str:
@@ -2372,194 +2271,6 @@ class PageWorkerNode(PlanNode):
         html = _fix_echarts_svg_renderer(html)
         return html
 
-    async def _check_one(
-        self,
-        page_num: int,
-        html: str,
-        search_mode: str,
-        outline_page: str = "",
-    ) -> dict[str, Any]:
-        """单页密度判定（LLM + 程序化后置校验）。LLM 异常保守判通过。"""
-        # 与 _build_page_prompt 一致：基于「页研究查询/数据需求」字段判定结构页
-        has_research_need = outline_page and "✅" in outline_page and (
-            "页研究查询" in outline_page or "数据需求" in outline_page or "研究需求" in outline_page
-        )
-        is_structural = not has_research_need
-
-        if is_structural:
-            checklist = _STRUCTURAL_DENSITY_CHECKLIST
-            failed_enum = "内容被裁切 / 大段文字 / 视觉层级混乱 / 空白失衡 / 内容溢出"
-        else:
-            checklist = _DENSITY_CHECKLIST_DIGEST
-            no_search_hint = ""
-            if search_mode == "no_search":
-                no_search_hint = (
-                    "\n注意：当前为 no_search 模式，标注'数据有限'的页面，"
-                    "数据可视化阈值降至 ≥2 个数据卡片。\n"
-                )
-            failed_enum = (
-                "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / 局部空白失衡 / "
-                "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误 / "
-                "内容被隐藏 / 核心内容缺失 / grid-cols 非法 / "
-                "使用了不支持的Grid布局 / 核心内容被overflow-hidden裁切 / 字号不一致 / "
-                "图例与轴标题重叠 / 图表数据标签重叠风险 / 装饰元素越界 / 内容溢出"
-            )
-
-        prompt = (
-            "请对以下 PPT 单页 HTML 做内容密度检查，按清单逐项判定，仅输出 JSON。\n\n"
-            f"{checklist}"
-            f"{no_search_hint if not is_structural else ''}"
-            "\nHTML 内容：\n"
-            "```html\n"
-            f"{html}\n"
-            "```\n\n"
-            "输出 JSON（受控字段）：\n"
-            '{"pass": true/false, "failed_items": [...], "reason": "简要说明"}\n'
-            f"failed_items 仅可从以下取值：\n{failed_enum}\n"
-            "全部通过则 failed_items: []。只输出 JSON，不输出其他内容。"
-        )
-        try:
-            llm_result = await self.stream_llm_collect(
-                prompt=prompt,
-                system_prompt="你是 PPT 内容密度检查助手，只输出 JSON。",
-                node_name=f"p8_2_density_check_page_{page_num}",
-                concurrent=True,
-            )
-            check = self.extract_json(llm_result, expected_type=dict)
-            if not isinstance(check, dict):
-                return {"pass": True, "reason": "json_parse_failed"}
-            failed_items = list(check.get("failed_items") or [])
-            llm_failed = list(failed_items)
-            if not is_structural:
-                failed_items = _post_check_data_viz(html, failed_items, search_mode)
-                # 主动检测空 SVG 图表：有 echarts-static-svg 容器但 SVG 内无图形元素
-                if _has_empty_chart_svg(html) and "缺数据可视化" not in failed_items:
-                    failed_items.append("缺数据可视化")
-                    logger.info("[P8.1] 页面 %d 检测到空SVG图表，标记缺数据可视化", page_num)
-                # 主动检测图表容器缺初始化：有 echarts.min.js + 空 div 容器但无 echarts.init 调用
-                if _has_chart_without_init(html) and "缺数据可视化" not in failed_items:
-                    failed_items.append("缺数据可视化")
-                    logger.info("[P8.1] 页面 %d 检测到图表容器缺少echarts.init初始化，标记缺数据可视化", page_num)
-                # 程序化布局检查：Grid、裁切、字号、稀疏列表和受限卡片越界风险。
-                before_count = len(failed_items)
-                failed_items = _post_check_layout_issues(html, failed_items)
-                new_issues = failed_items[before_count:]
-                if new_issues:
-                    logger.info("[P8.1] 页面 %d 程序化布局检查发现问题: %s", page_num, new_issues)
-            if len(failed_items) < len(llm_failed):
-                removed = [x for x in llm_failed if x not in failed_items]
-                logger.info(
-                    "[P8.1] 页面 %d 程序化后置校验移除误判项: %s",
-                    page_num,
-                    removed,
-                )
-            return {
-                "pass": bool(check.get("pass", False)) and not failed_items,
-                "failed_items": failed_items,
-                "reason": str(check.get("reason") or ""),
-            }
-        except Exception as e:
-            if isinstance(e, AbortError):
-                raise
-            logger.warning("[P8.1] 页面 %d 密度检查 LLM 失败（保守通过）: %s", page_num, e)
-            return {"pass": True, "reason": f"llm_error: {e}"}
-
-    async def _search_supplement_one(
-        self,
-        page_num: int,
-        report: dict[str, Any],
-        research_page: str,
-        topic: str,
-    ) -> str:
-        """单页搜索补充（原 _search_supplement 的单页版，随 per-page 并发）。"""
-        if not self.has_tool("web_search"):
-            return ""
-        failed_items = set(report.get("failed_items") or [])
-        search_items = failed_items & _SEARCH_NEEDED_ITEMS
-        if not search_items:
-            return ""
-
-        page_keywords = _extract_page_keywords(research_page) if research_page else []
-        snippets: list[str] = []
-        for item in search_items:
-            templates = _SEARCH_QUERY_TEMPLATES.get(item, [])
-            queries = _build_search_queries(templates, topic=topic, page_keywords=page_keywords)
-            if not queries:
-                continue
-            for query in queries[:2]:
-                try:
-                    raw = await self.call_tool("web_search", query=query)
-                    snippet = _extract_search_text(raw)
-                    if snippet:
-                        snippets.append(f"[{item}] 搜索 \"{query}\" 结果：\n{snippet}")
-                        break
-                except Exception as e:
-                    if isinstance(e, AbortError):
-                        raise
-                    logger.warning("[P8.1] 页面 %d 搜索补充失败 item=%s query=%s: %s", page_num, item, query, e)
-        return "\n\n".join(snippets)
-
-    async def _rewrite_one(
-        self,
-        ctx: PageGenContext,
-        failed_items: list[str],
-        original_html: str,
-        supplement: str,
-    ) -> str:
-        """单页重写，返回校验通过的新 html 或空串。"""
-        hint = _build_rewrite_hint(failed_items)
-        if supplement:
-            hint = f"{hint}\n\n### 搜索补充数据\n{supplement}" if hint else f"### 搜索补充数据\n{supplement}"
-        try:
-            result = await self.stream_llm_collect(
-                prompt=_build_page_prompt(
-                    ctx.page_num,
-                    style_id=ctx.style_id,
-                    style_text=ctx.style_text,
-                    outline_page=ctx.outline_page,
-                    research_page=ctx.research_page,
-                    outline_is_full=ctx.outline_is_full,
-                    research_is_full=ctx.research_is_full,
-                    rewrite_hint=hint,
-                    original_html=original_html,
-                    image_map_page=ctx.image_map_page,
-                    designer_md_text=ctx.designer_md_text,
-                    user_query=ctx.user_query,
-                ),
-                system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
-                node_name=f"p8_2_page_{ctx.page_num}",
-                concurrent=True,
-            )
-        except Exception as e:
-            if isinstance(e, AbortError):
-                raise
-            logger.warning("[P8.1] 页面 %d 重写 LLM 失败: %s", ctx.page_num, e)
-            return ""
-        html = _strip_html_fence(result or "")
-        if not _is_valid_html(html):
-            logger.warning("[P8.1] 页面 %d 重写产物 HTML 校验失败", ctx.page_num)
-            return ""
-        # 后置校验：替换「第X页」标题占位符为 outline 中的实际标题
-        html = _replace_placeholder_headings(html, ctx.outline_page)
-        html = _fix_echarts_svg_renderer(html)
-        return html
-
-    async def _read_file(self, path: str) -> str:
-        if not path:
-            return ""
-        if not self.has_tool("read_file"):
-            logger.warning("[P8.1] read_file 工具不可用 %s", path)
-            return ""
-        try:
-            result = await self.call_tool("read_file", file_path=path)
-            content = PptCommon.parse_tool_file_content(result)
-            return content
-        except Exception as e:
-            if isinstance(e, AbortError):
-                raise
-            logger.warning("[P8.1] 读取文件失败 %s: %s", path, e)
-            return ""
-
     async def _write_file(self, path: str, content: str) -> bool:
         if not self.has_tool("write_file"):
             logger.error("[P8.1] write_file 工具不可用 %s", path)
@@ -2576,69 +2287,26 @@ class PageWorkerNode(PlanNode):
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
         missing = result.get("missing_pages", [])
-        low = result.get("low_density_pages", [])
-        status = "ok" if not missing and not low else "warning"
+        status = "ok" if not missing else "warning"
         yield {
             **result,
             "node": self.plan_name,
             "status": status,
             "message": (
-                f"per-page 闭环完成，成功 {len(result.get('page_files', []))} 页，"
-                f"缺失 {len(missing)} 页，低密度 {len(low)} 页"
+                f"per-page 生成完成，成功 {len(result.get('page_files', []))} 页，"
+                f"缺失 {len(missing)} 页"
             ),
         }
 
 
-_LAYOUT_ISSUE_RE = re.compile(
-    r"\[(page-(?P<page>\d+)\.pptx\.html)\]"
-    r"\[(?P<kind>overflow|whitespace)\]\s*(?P<detail>.+)",
-    re.IGNORECASE,
-)
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_LAYOUT_REPAIR_MAX_ROUNDS = 3
-
-
-def _parse_layout_issues(
-    output: str,
-    *,
-    ignore_whitespace_pages: set[int] | None = None,
-) -> dict[int, list[str]]:
-    """解析新版 pptx-craft check-layout 的逐页诊断。
-
-    结构页允许较高留白，但仍必须保留 overflow 门禁。
-    """
-    issues: dict[int, list[str]] = {}
-    ignored = ignore_whitespace_pages or set()
-    clean_output = _ANSI_ESCAPE_RE.sub("", output or "")
-    for line in clean_output.splitlines():
-        match = _LAYOUT_ISSUE_RE.search(line.strip())
-        if not match:
-            continue
-        page_num = int(match.group("page"))
-        kind = match.group("kind").lower()
-        if kind == "whitespace" and page_num in ignored:
-            continue
-        detail = match.group("detail").strip()
-        issues.setdefault(page_num, []).append(f"{kind}: {detail}")
-    return issues
-
-
-def _layout_issue_signature(issues: dict[int, list[str]]) -> tuple[tuple[int, tuple[str, ...]], ...]:
-    """生成稳定签名，用于检测布局修复没有产生任何进展。"""
-    return tuple(
-        (page_num, tuple(sorted(page_issues)))
-        for page_num, page_issues in sorted(issues.items())
-    )
-
-
 class QAFixNode(PlanNode):
-    """P8.2 — 完整性检查、cli.js fix 与官方布局闭环。"""
+    """P8.2 — 按新版 pptx-craft Stage 6 做完整性检查与官方 fix。"""
 
     def __init__(self) -> None:
         super().__init__(
             plan_name="p8_2_qa_fix",
             instruction=(
-                "## P8.2 QA 与自动修复\n"
+                "## P8.2 页面完整性检查与基础修复\n"
                 "\n"
                 "### 前置条件\n"
                 "- `bash` 工具可用\n"
@@ -2651,18 +2319,16 @@ class QAFixNode(PlanNode):
                 "### 输出\n"
                 "- `qa_status`: ok / partial / failed\n"
                 "- `final_page_files`: 修复后的最终文件清单\n"
-                "- `fix_report`: cli.js fix 与 check-layout 输出摘要\n"
+                "- `fix_report`: cli.js fix 输出摘要\n"
                 "\n"
                 "### 执行流程\n"
                 "1. 完整性检查：列 pages_dir 下 page-*.pptx.html，比对数量与 page_count\n"
-                "2. 自动修复：node cli.js fix {pages_dir}/ --fix（标签校验、布局修复、图表修复、CDN 依赖补充）\n"
-                "3. 官方布局门禁：check-layout 检测 overflow / whitespace；"
-                "仅失败页按诊断最多修复三轮，每轮重新执行 fix + check-layout\n"
+                "2. 基础修复：node cli.js fix {pages_dir}/ --fix --style {style_file_path}\n"
+                "3. Stage 6 到此结束；可选 check-layout 按 skill 规则仅在首次导出后且显式启用时执行\n"
                 "\n"
                 "### 失败兜底\n"
                 "- bash 不可用：跳过 fix，仅做完整性检查\n"
                 "- cli.js fix 报错：qa_status = failed，page_files 仍返回\n"
-                "- check-layout 无法运行或修复后仍有问题：qa_status = partial，保留现有页面并报告失败页\n"
                 "- list_dir 不可用：completeness_ok = unknown，不阻塞\n"
             ),
         )
@@ -2694,25 +2360,6 @@ class QAFixNode(PlanNode):
                          for f in page_files if f.startswith("page-") and f.endswith(".pptx.html")]
             page_nums.sort()
             if page_nums:
-                outline_pages = inputs.get("outline_pages") or {}
-                structural_pages: set[int] = set()
-                if isinstance(outline_pages, dict):
-                    for page_num in page_nums:
-                        outline_page = str(
-                            outline_pages.get(page_num)
-                            or outline_pages.get(str(page_num))
-                            or ""
-                        )
-                        if outline_page and not (
-                            "✅" in outline_page
-                            and (
-                                "页研究查询" in outline_page
-                                or "数据需求" in outline_page
-                                or "研究需求" in outline_page
-                            )
-                        ):
-                            structural_pages.add(page_num)
-
                 results = await self._fix_pages(
                     page_nums,
                     pages_dir=pages_dir,
@@ -2741,17 +2388,6 @@ class QAFixNode(PlanNode):
                         pn, ok = 0, False
                     fix_parts.append(f"page-{pn}: {'ok' if ok else 'fail'}")
                 fix_report_parts.append("fix=" + ",".join(fix_parts))
-
-                layout_status, layout_report = await self._run_layout_qa_loop(
-                    page_nums,
-                    pages_dir=pages_dir,
-                    pptx_root=pptx_root,
-                    style_file_path=style_file_path,
-                    ignore_whitespace_pages=structural_pages,
-                )
-                fix_report_parts.append(layout_report)
-                if layout_status != "ok" and qa_status != "failed":
-                    qa_status = "partial"
             else:
                 fix_report_parts.append("fix=no pages")
         except BashExecError as e:
@@ -2812,245 +2448,6 @@ class QAFixNode(PlanNode):
             if isinstance(result, (AbortError, asyncio.CancelledError)):
                 raise result
         return results
-
-    async def _run_layout_qa_loop(
-        self,
-        page_nums: list[int],
-        *,
-        pages_dir: str,
-        pptx_root: str,
-        style_file_path: str,
-        ignore_whitespace_pages: set[int],
-    ) -> tuple[str, str]:
-        """运行官方 check-layout，并仅对失败页做有限、可停止的修复闭环。"""
-        check_status, issues, output = await self._check_layout(
-            page_nums,
-            pages_dir=pages_dir,
-            pptx_root=pptx_root,
-            ignore_whitespace_pages=ignore_whitespace_pages,
-        )
-        if check_status == "ok":
-            logger.info("[P8.2] check-layout 通过 pages=%s", page_nums)
-            return "ok", "layout=ok"
-        if check_status == "error":
-            logger.warning("[P8.2] check-layout 无法完成: %.500s", output)
-            return "partial", "layout=check_error"
-
-        seen_signatures: set[tuple[tuple[int, tuple[str, ...]], ...]] = set()
-        rounds_run = 0
-        while issues and rounds_run < _LAYOUT_REPAIR_MAX_ROUNDS:
-            signature = _layout_issue_signature(issues)
-            if signature in seen_signatures:
-                logger.warning(
-                    "[P8.2] 布局问题无进展或发生振荡，提前停止 pages=%s",
-                    sorted(issues),
-                )
-                break
-            seen_signatures.add(signature)
-            rounds_run += 1
-
-            repair_results = await asyncio.gather(
-                *[
-                    self._repair_layout_page(
-                        page_num,
-                        page_issues,
-                        round_num=rounds_run,
-                        pages_dir=pages_dir,
-                    )
-                    for page_num, page_issues in sorted(issues.items())
-                ],
-                return_exceptions=True,
-            )
-            for repair_result in repair_results:
-                if isinstance(repair_result, (AbortError, asyncio.CancelledError)):
-                    raise repair_result
-            repaired_pages = [
-                page_num
-                for page_num, repair_result in zip(sorted(issues), repair_results)
-                if repair_result is True
-            ]
-            if not repaired_pages:
-                logger.warning(
-                    "[P8.2] 布局修复未产生有效页面，停止 pages=%s",
-                    sorted(issues),
-                )
-                break
-
-            await self._fix_pages(
-                repaired_pages,
-                pages_dir=pages_dir,
-                pptx_root=pptx_root,
-                style_file_path=style_file_path,
-            )
-            check_status, new_issues, output = await self._check_layout(
-                sorted(issues),
-                pages_dir=pages_dir,
-                pptx_root=pptx_root,
-                ignore_whitespace_pages=ignore_whitespace_pages,
-            )
-            if check_status == "ok":
-                logger.info(
-                    "[P8.2] 布局修复通过 rounds=%d pages=%s",
-                    rounds_run,
-                    repaired_pages,
-                )
-                return "ok", f"layout=ok_after_{rounds_run}_rounds"
-            if check_status == "error":
-                logger.warning(
-                    "[P8.2] 布局修复后 check-layout 无法完成: %.500s",
-                    output,
-                )
-                return "partial", f"layout=check_error_after_{rounds_run}_rounds"
-            issues = new_issues
-
-        remaining_pages = sorted(issues)
-        logger.warning(
-            "[P8.2] 布局门禁仍未通过 rounds=%d pages=%s",
-            rounds_run,
-            remaining_pages,
-        )
-        remaining = ",".join(map(str, remaining_pages))
-        return "partial", f"layout=remaining[{remaining}]_after_{rounds_run}_rounds"
-
-    async def _check_layout(
-        self,
-        page_nums: list[int],
-        *,
-        pages_dir: str,
-        pptx_root: str,
-        ignore_whitespace_pages: set[int],
-    ) -> tuple[str, dict[int, list[str]], str]:
-        """调用新版只读 check-layout，区分通过、布局问题与执行异常。"""
-        pages_arg = ",".join(str(page_num) for page_num in sorted(set(page_nums)))
-        cmd = (
-            f"{cli_path('check-layout', pptx_root)} {quote_path(pages_dir + '/')} "
-            f"--pages {pages_arg}"
-        )
-        result = await run_bash(
-            self,
-            cmd,
-            timeout_seconds=300,
-            required=False,
-            workdir=pptx_root,
-        )
-        output = combined_output(result)
-        if result.exit_code == 0:
-            return "ok", {}, output
-        issues = _parse_layout_issues(
-            output,
-            ignore_whitespace_pages=ignore_whitespace_pages,
-        )
-        if issues:
-            logger.info(
-                "[P8.2] check-layout 发现问题 pages=%s issue_count=%d",
-                sorted(issues),
-                sum(len(values) for values in issues.values()),
-            )
-            return "issues", issues, output
-        return "error", {}, output
-
-    async def _repair_layout_page(
-        self,
-        page_num: int,
-        issues: list[str],
-        *,
-        round_num: int,
-        pages_dir: str,
-    ) -> bool:
-        """根据 check-layout 的精确诊断重写单页，只允许布局层面的渐进修复。"""
-        path = f"{pages_dir}/page-{page_num}.pptx.html"
-        original_html = await self._read_page_file(path)
-        if not original_html:
-            return False
-
-        round_rules = {
-            1: (
-                "第一轮：只调整 padding、gap、对齐、行高和同栏 Flex 比例；"
-                "可以把尾部 badge 移入所属卡片标题行，但不得删改任何正文、数字或来源。"
-            ),
-            2: (
-                "第二轮：允许调整 Flex 结构、卡片排列与区域占比；"
-                "页内全部核心内容、数据和叙事顺序必须保留。"
-            ),
-            3: (
-                "第三轮：在前两轮仍无法容纳时，允许合并重复表述并压缩次要说明；"
-                "核心结论、关键数据、必要论据和来源不得删除。"
-            ),
-        }
-        diagnostics = "\n".join(f"- {item}" for item in issues)
-        prompt = (
-            "你是 PPT HTML 布局修复专家。请依据 pptx-craft check-layout 的精确诊断，"
-            "对下面单页做最小修改，并只输出完整 HTML 原文。\n\n"
-            f"### 当前轮次\n{round_rules.get(round_num, round_rules[3])}\n\n"
-            "### 强制约束\n"
-            "- 保持现有风格、配色、字体层级、标题、数据、图表和来源；正常区域不要重写\n"
-            "- 标签、badge、结论条必须完整留在语义所属卡片边框内，不得覆盖相邻卡片\n"
-            "- 表格后的尾部标签若导致溢出，优先移入所属卡片标题行并使用 justify-between，"
-            "或合并为紧凑表格摘要行\n"
-            "- 不得用 absolute/fixed、负 margin、缩小到风格最小字号以下、"
-            "line-clamp、滚动条或 overflow-hidden 掩盖内容\n"
-            "- 修复 overflow 的同时避免制造大片空白；强调色标签可保留，不要通过统一颜色伪装修复重叠\n\n"
-            f"### check-layout 诊断\n{diagnostics}\n\n"
-            "### 原始 HTML\n"
-            "```html\n"
-            f"{original_html}\n"
-            "```\n"
-        )
-        try:
-            result = await self.stream_llm_collect(
-                prompt=prompt,
-                system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
-                node_name=f"p8_2_layout_repair_page_{page_num}_round_{round_num}",
-                concurrent=True,
-            )
-        except Exception as exc:
-            if isinstance(exc, AbortError):
-                raise
-            logger.warning(
-                "[P8.2] 页面 %d 第 %d 轮布局修复 LLM 失败: %s",
-                page_num,
-                round_num,
-                exc,
-            )
-            return False
-
-        repaired_html = _strip_html_fence(result or "")
-        if not _is_valid_html(repaired_html):
-            logger.warning(
-                "[P8.2] 页面 %d 第 %d 轮布局修复 HTML 校验失败",
-                page_num,
-                round_num,
-            )
-            return False
-        repaired_html = _truncate_to_single_slide(repaired_html)
-        repaired_html = _fix_echarts_svg_renderer(repaired_html)
-        return await self._write_page_file(path, repaired_html)
-
-    async def _read_page_file(self, path: str) -> str:
-        if not self.has_tool("read_file"):
-            logger.warning("[P8.2] read_file 工具不可用 %s", path)
-            return ""
-        try:
-            result = await self.call_tool("read_file", file_path=path)
-            return PptCommon.parse_tool_file_content(result)
-        except Exception as exc:
-            if isinstance(exc, AbortError):
-                raise
-            logger.warning("[P8.2] 读取布局修复页面失败 %s: %s", path, exc)
-            return ""
-
-    async def _write_page_file(self, path: str, content: str) -> bool:
-        if not self.has_tool("write_file"):
-            logger.warning("[P8.2] write_file 工具不可用 %s", path)
-            return False
-        try:
-            await self.call_tool("write_file", file_path=path, content=content)
-            return True
-        except Exception as exc:
-            if isinstance(exc, AbortError):
-                raise
-            logger.warning("[P8.2] 写入布局修复页面失败 %s: %s", path, exc)
-            return False
 
     async def _check_completeness(
         self,
@@ -3221,8 +2618,8 @@ class PPTPageGenNode(PlanNode):
                 "\n"
                 "### 节点职责\n"
                 "1. 把 outline.md + research-P{N}.md + 风格文件转成 N 个 page-{N}.pptx.html\n"
-                "2. 三阶段串行编排：预处理 → per-page 闭环生成 → QA 与自动修复\n"
-                "   - per-page 闭环内部 N 页 asyncio.gather 并发，单页内生成→密度判定→搜索补充→重写串行\n"
+                "2. 三阶段串行编排：预处理 → per-page 生成 → 页面完整性检查与官方 fix\n"
+                "   - per-page 生成内部 N 页 asyncio.gather 并发，只有生成失败或 HTML 非法时才重试\n"
                 "3. 不区分单 Agent 模式，LLM 并发度由框架 semaphore 控制\n"
                 "4. `style_mode == template_canvas` 时走模板画布分支：跳过普通三阶段，改由 `_execute_template_pack` 用模板包 + LLM 填充生成页面\n"
                 "\n"
@@ -3233,10 +2630,7 @@ class PPTPageGenNode(PlanNode):
                 "- `pack_dir`（`template_canvas` 分支必填）: 模板包目录绝对路径\n"
                 "- `style_id`（普通分支必填）: 用于预设风格强约束\n"
                 "- `page_count`（必填）: 大纲页数 N\n"
-                "- `topic`（可选）: PPT 主题，密度检查搜索补充用\n"
-                "- `search_mode`（可选）: 密度阈值放宽依据\n"
-                "- `gen_retry_round`（可选，默认 1）\n"
-                "- `density_retry_round`（可选，默认 1）\n"
+                "- `gen_retry_round`（可选，默认 1；含首次生成在内最多尝试 3 次）\n"
                 "\n"
                 "### 输出\n"
                 "```json\n"
@@ -3253,10 +2647,9 @@ class PPTPageGenNode(PlanNode):
                 "1. 输入校验：必填字段任一空 → failed\n"
                 "2. `style_mode == template_canvas` 时走 `_execute_template_pack`：用模板包 + LLM 填充生成页面，不进入普通三阶段\n"
                 "3. 调用 P8.0 PrepareNode → 读资料 + 按页拆分，产出共享只读数据；prepare_status=failed → 直接 failed\n"
-                "4. 调用 P8.1 PageWorkerNode → per-page 闭环"
-                "（生成→密度判定→搜索补充→重写）"
+                "4. 调用 P8.1 PageWorkerNode → per-page 并发生成与 HTML 合法性校验"
                 "→ page_files / missing_pages / low_density_pages\n"
-                "5. 调用 P8.2 QAFixNode → qa_status / final_page_files / fix_report\n"
+                "5. 调用 P8.2 QAFixNode → 完整性检查 + 官方 fix，产出 qa_status / final_page_files / fix_report\n"
                 "6. 汇总状态：missing 空 + low 空 + qa=ok → ok；qa=failed → failed；其余 partial\n"
                 "\n"
                 "### 失败兜底\n"
