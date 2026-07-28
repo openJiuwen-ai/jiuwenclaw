@@ -1783,6 +1783,7 @@ dependencies = [
     { name = "json-repair" },
     { name = "lark-oapi" },
     { name = "loguru" },
+    { name = "lxml" },
     { name = "mutagen" },
     { name = "numpy" },
     { name = "openjiuwen" },
@@ -1791,7 +1792,6 @@ dependencies = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
     { name = "pgvector" },
-    { name = "lxml" },
     { name = "pillow" },
     { name = "portalocker" },
     { name = "psutil" },
@@ -2869,7 +2869,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.16"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#710b2b09963cb2c76ce2189c3f85c9a3a893a9e8" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#788acbd2586aca724332e40f14dd56ebf6cdee49" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
