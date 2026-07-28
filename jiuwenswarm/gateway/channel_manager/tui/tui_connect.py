@@ -1638,7 +1638,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         })
 
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
-        from jiuwenswarm.common.utils import get_agent_sessions_dir
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -1704,7 +1703,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 code="AGENT_UNAVAILABLE",
             )
             return
-        session_dir = get_agent_sessions_dir() / target
+        from jiuwenswarm.common.utils import get_agent_sessions_dir
+        from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
+
+        session_dir, invalid_reason = resolve_session_dir(
+            target, sessions_root=get_agent_sessions_dir()
+        )
+        if session_dir is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=invalid_reason or "invalid session_id", code="BAD_REQUEST"
+            )
+            return
         if not session_dir.exists():
             await channel.send_response(
                 ws, req_id, ok=False, error="session not found", code="NOT_FOUND"

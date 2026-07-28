@@ -3415,8 +3415,20 @@ class AgentWebSocketServer:
                 metadata=request.metadata,
             )
         else:
-            session_dir = get_agent_sessions_dir() / target
-            if not session_dir.exists():
+            from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
+
+            session_dir, invalid_reason = resolve_session_dir(
+                target, sessions_root=get_agent_sessions_dir()
+            )
+            if session_dir is None:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": invalid_reason or "invalid session_id", "code": "BAD_REQUEST"},
+                    metadata=request.metadata,
+                )
+            elif not session_dir.exists():
                 resp = AgentResponse(
                     request_id=request.request_id,
                     channel_id=request.channel_id,

@@ -106,6 +106,45 @@ def _session_dir(session_id: str, *, create: bool = True) -> Path:
     return session_dir
 
 
+def resolve_session_dir(
+    session_id: str, *, create: bool = False, sessions_root: Path | None = None,
+) -> tuple[Path | None, str | None]:
+    """安全解析 session 目录路径（防路径遍历）。
+
+    采用白名单判据：``sanitize_session_id(session_id) == session_id`` 才认为合法，
+    原样使用；否则直接拒绝，根本不拼路径。这样删除类破坏性操作不会因 sanitize 后的
+    字符串（如 ``../config`` -> ``config``）误伤同名合法 session。
+
+    再用 ``resolve()`` + ``relative_to`` 做纵深防御，兜底白名单逻辑被绕过的极端情况。
+
+    Args:
+        session_id: 待校验的 session id（调用方应先 ``.strip()``）。
+        create: 是否创建目录（delete 流程传 False）。
+        sessions_root: sessions 根目录。由调用方传入
+
+    Returns:
+        ``(resolved_path, None)`` —— 合法，返回解析后的绝对路径（确认在 sessions 目录内）。
+        ``(None, error_reason)`` —— 非法，根本未触碰磁盘路径。
+    """
+    from jiuwenswarm.server.runtime.prompt_attachment_loader import sanitize_session_id
+
+    if not session_id or sanitize_session_id(session_id) != session_id:
+        return None, "invalid session_id"
+
+    if sessions_root is None:
+        sessions_root = get_agent_sessions_dir()
+    session_dir = sessions_root / session_id
+    if create:
+        session_dir.mkdir(parents=True, exist_ok=True)
+    # 纵深防御：即便白名单被绕过，也拒绝解析后逃逸出 sessions 目录的路径。
+    try:
+        resolved = session_dir.resolve(strict=False)
+        resolved.relative_to(sessions_root.resolve(strict=False))
+    except (ValueError, OSError):
+        return None, "invalid session_id"
+    return resolved, None
+
+
 def _history_file(session_id: str, *, create: bool = True) -> Path:
     return _session_dir(session_id, create=create) / _LEGACY_HISTORY_FILENAME
 

@@ -2899,8 +2899,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
 
-        workspace_session_dir = get_agent_sessions_dir()
-        session_dir = workspace_session_dir / session_id_to_delete
+        from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
+
+        session_dir, invalid_reason = resolve_session_dir(
+            session_id_to_delete, sessions_root=get_agent_sessions_dir()
+        )
+        if session_dir is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=invalid_reason or "invalid session_id", code="BAD_REQUEST",
+            )
+            return
         if not session_dir.exists():
             await channel.send_response(
                 ws, req_id, ok=False, error="session not found", code="NOT_FOUND",
