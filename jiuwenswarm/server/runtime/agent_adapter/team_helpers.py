@@ -570,6 +570,139 @@ async def query_team_human_members_for_join(
     return members or []
 
 
+# Retry budget for the TeamMonitorHandler mount. A failed first mount used to
+# leave the whole round without live team.member / team.task events (only a
+# single warning was logged), so the sidebar stayed blank until some later
+# snapshot happened to catch it up.
+_MONITOR_MOUNT_RETRY_ATTEMPTS = 3
+_MONITOR_MOUNT_RETRY_DELAY_SEC = 2.0
+# session_id → in-flight background mount-retry task.
+_monitor_mount_retry_tasks: dict[str, asyncio.Task] = {}
+
+
+async def _try_mount_team_monitor(
+    channel_id: str | None,
+    session_id: str,
+    team_name: str,
+    hide_dm: bool,
+) -> bool:
+    """Create, start and register the TeamMonitorHandler once.
+
+    On success also broadcasts a member+task snapshot so events produced
+    before the monitor subscribed are backfilled to the frontend.
+    Returns whether the monitor is mounted and consuming.
+    """
+    tm = get_team_manager(channel_id)
+    # create_monitor inside Runner.get_agent_team_monitor freezes the
+    # current contextvar session_id into the TeamMonitor (self._session_id).
+    # runtime_ready fires before the leader's bind_session, so the
+    # contextvar is empty here; bind the explicit session_id so the
+    # monitor does not hash an empty session id and target non-existent
+    # per-session tables (team_task_<hash> / team_message_<hash>).
+    token = set_session_id(session_id)
+    try:
+        monitor = await Runner.get_agent_team_monitor(
+            team_name=team_name,
+            session_id=session_id,
+            hide_dm=hide_dm,
+        )
+    finally:
+        reset_session_id(token)
+    if monitor is None:
+        logger.warning(
+            "[TeamHelpers] active team monitor unavailable: channel_id=%s session_id=%s team_name=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            team_name,
+        )
+        return False
+
+    monitor_handler = TeamMonitorHandler(monitor, session_id)
+    try:
+        await monitor_handler.start()
+        tm.register_monitor(session_id, monitor_handler)
+        logger.info(
+            "[TeamHelpers] Monitor started: channel_id=%s session_id=%s team_name=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            team_name,
+        )
+        if monitor_handler.is_running:
+            asyncio.create_task(
+                _consume_monitor_events(channel_id, session_id, monitor_handler)
+            )
+    except Exception as exc:
+        logger.warning("[TeamHelpers] Monitor start failed: %s", exc)
+        return False
+
+    # Backfill: the monitor only sees changes made after it subscribed, so
+    # members/tasks created earlier would never reach the sidebar. Push a
+    # full snapshot right away (member events in upsert shape so the
+    # frontend can create members it has never seen).
+    await _broadcast_team_state_snapshot(
+        channel_id, session_id, include_member_upsert=True
+    )
+    return True
+
+
+def _schedule_monitor_mount_retry(
+    channel_id: str | None,
+    session_id: str,
+    team_name: str,
+    hide_dm: bool,
+) -> None:
+    """Retry a failed monitor mount in the background with a bounded budget."""
+    existing = _monitor_mount_retry_tasks.get(session_id)
+    if existing is not None and not existing.done():
+        return
+
+    async def _retry() -> None:
+        tm = get_team_manager(channel_id)
+        for attempt in range(1, _MONITOR_MOUNT_RETRY_ATTEMPTS + 1):
+            await asyncio.sleep(_MONITOR_MOUNT_RETRY_DELAY_SEC)
+            current = tm.get_monitor(session_id)
+            if current is not None and current.is_running:
+                return
+            try:
+                mounted = await _try_mount_team_monitor(
+                    channel_id, session_id, team_name, hide_dm
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[TeamHelpers] monitor mount retry %d/%d failed: "
+                    "session_id=%s error=%s",
+                    attempt,
+                    _MONITOR_MOUNT_RETRY_ATTEMPTS,
+                    session_id,
+                    exc,
+                )
+                mounted = False
+            if mounted:
+                logger.info(
+                    "[TeamHelpers] monitor mounted on retry %d: session_id=%s",
+                    attempt,
+                    session_id,
+                )
+                return
+        logger.error(
+            "[TeamHelpers] monitor mount failed after %d retries: "
+            "session_id=%s team_name=%s — live sidebar events unavailable "
+            "this round",
+            _MONITOR_MOUNT_RETRY_ATTEMPTS,
+            session_id,
+            team_name,
+        )
+
+    task = asyncio.create_task(_retry(), name=f"monitor-mount-retry-{session_id}")
+    _monitor_mount_retry_tasks[session_id] = task
+
+    def _on_done(done_task: asyncio.Task) -> None:
+        if _monitor_mount_retry_tasks.get(session_id) is done_task:
+            _monitor_mount_retry_tasks.pop(session_id, None)
+
+    task.add_done_callback(_on_done)
+
+
 async def ensure_monitor_handlers_for_active_runtime(
     channel_id: str | None,
     session_id: str,
@@ -587,45 +720,15 @@ async def ensure_monitor_handlers_for_active_runtime(
     # --- TeamMonitorHandler ---
     existing_monitor = tm.get_monitor(session_id)
     if existing_monitor is None or not existing_monitor.is_running:
-        # create_monitor inside Runner.get_agent_team_monitor freezes the
-        # current contextvar session_id into the TeamMonitor (self._session_id).
-        # runtime_ready fires before the leader's bind_session, so the
-        # contextvar is empty here; bind the explicit session_id so the
-        # monitor does not hash an empty session id and target non-existent
-        # per-session tables (team_task_<hash> / team_message_<hash>).
-        token = set_session_id(session_id)
         try:
-            monitor = await Runner.get_agent_team_monitor(
-                team_name=team_name,
-                session_id=session_id,
-                hide_dm=hide_dm,
+            mounted = await _try_mount_team_monitor(
+                channel_id, session_id, team_name, hide_dm
             )
-        finally:
-            reset_session_id(token)
-        if monitor is None:
-            logger.warning(
-                "[TeamHelpers] active team monitor unavailable: channel_id=%s session_id=%s team_name=%s",
-                _resolve_channel_id(channel_id),
-                session_id,
-                team_name,
-            )
-        else:
-            monitor_handler = TeamMonitorHandler(monitor, session_id)
-            try:
-                await monitor_handler.start()
-                tm.register_monitor(session_id, monitor_handler)
-                logger.info(
-                    "[TeamHelpers] Monitor started: channel_id=%s session_id=%s team_name=%s",
-                    _resolve_channel_id(channel_id),
-                    session_id,
-                    team_name,
-                )
-                if monitor_handler.is_running:
-                    asyncio.create_task(
-                        _consume_monitor_events(channel_id, session_id, monitor_handler)
-                    )
-            except Exception as exc:
-                logger.warning("[TeamHelpers] Monitor start failed: %s", exc)
+        except Exception as exc:
+            logger.warning("[TeamHelpers] Monitor mount failed: %s", exc)
+            mounted = False
+        if not mounted:
+            _schedule_monitor_mount_retry(channel_id, session_id, team_name, hide_dm)
 
     # --- WorkflowMonitorHandler (only when swarmflow is enabled) ---
     if not enable_swarmflow:
@@ -923,12 +1026,20 @@ def _approval_chunk_from_event(evt: Any) -> dict[str, Any] | None:
 async def _broadcast_team_state_snapshot(
     channel_id: str | None,
     session_id: str,
+    *,
+    include_member_upsert: bool = False,
 ) -> None:
     """Broadcast a snapshot of all member and task states.
 
     Called before ``team.completed`` so the frontend receives the final
     state (e.g. members transitioning from "busy" to "ready") even when
     the monitor events arrive after the has_stream_task loop exits.
+
+    With ``include_member_upsert=True`` (monitor mount backfill), member
+    events are emitted without an event ``type`` so the frontend creates
+    members it has never seen — ``team.member.status_changed`` only updates
+    already-known members. Shut-down members are skipped to avoid
+    resurrecting them on the panel.
 
     Each snapshot event is also persisted via ``_persist_team_history_event``,
     mirroring the behaviour of ``_consume_monitor_events``.
@@ -945,15 +1056,28 @@ async def _broadcast_team_state_snapshot(
 
         # Broadcast member status snapshot
         for m in snapshot.get("members", []):
-            event = {
-                "event_type": "team.member",
-                "session_id": session_id,
-                "event": {
+            if include_member_upsert:
+                if str(m.get("status") or "") == "shut_down":
+                    continue
+                member_event: dict[str, Any] = {
+                    "team_id": team_id,
+                    "member_id": m["member_id"],
+                    "name": m.get("name"),
+                    "status": m["status"],
+                    "execution_status": m.get("execution_status"),
+                    "mode": m.get("mode"),
+                }
+            else:
+                member_event = {
                     "type": "team.member.status_changed",
                     "team_id": team_id,
                     "member_id": m["member_id"],
                     "new_status": m["status"],
-                },
+                }
+            event = {
+                "event_type": "team.member",
+                "session_id": session_id,
+                "event": member_event,
             }
             _persist_team_history_event(channel_id, session_id, event)
             _broadcast_event(channel_id, session_id, event)
