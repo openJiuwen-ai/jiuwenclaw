@@ -693,6 +693,29 @@ function normalizeConfigValue(value: unknown): string {
   }
 }
 
+function configRecordsEqual(
+  left: Record<string, string>,
+  right: Record<string, string>,
+): boolean {
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  for (const key of keys) {
+    if ((left[key] ?? "") !== (right[key] ?? "")) return false;
+  }
+  return true;
+}
+
+function modelListsEqual(left: ModelEntry[], right: ModelEntry[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((model, index) => {
+    const other = right[index];
+    return !!other && modelEntriesEqual(model, other);
+  });
+}
+
+function toDraftModels(models: ModelEntry[]): ModelEntry[] {
+  return models.map((m) => ({ ...m, alias: m.alias || "" }));
+}
+
 function getGroupMeta(t: (key: string) => string): Record<string, { label: string; order: number; hint: string }> {
   return {
     model_default: { label: t('config.groups.modelDefault.label'), order: 0, hint: t('config.groups.modelDefault.hint') },
@@ -3888,28 +3911,44 @@ export function ConfigPanel({
     return false;
   }, [draftAgents, draftTeams, initialAgents, initialTeams]);
   const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
-  const hasChangesRef = useRef(hasChanges);
-  hasChangesRef.current = hasChanges;
   useEffect(() => {
     onHasChangesChange?.(hasChanges);
   }, [hasChanges, onHasChangesChange]);
 
-  // Keep local drafts while the user is editing; resync from the store when clean
-  // or after an explicit allow (initial load / cancel / successful save).
+  // Keep local drafts while the user is editing; resync from the store when the
+  // draft still matches the last synced snapshot (no local edits), or after an
+  // explicit allow (initial load / cancel / successful save).
+  // Do not use hasChanges here: that also becomes true when the store moves
+  // under an unedited draft, which would block the resync we need.
   const allowConfigStoreSyncRef = useRef(true);
   const allowModelsStoreSyncRef = useRef(true);
+  const lastSyncedConfigRef = useRef<Record<string, string> | null>(null);
+  const lastSyncedModelsRef = useRef<ModelEntry[] | null>(null);
+  const draftValuesRef = useRef(draftValues);
+  draftValuesRef.current = draftValues;
+  const draftModelsRef = useRef(draftModels);
+  draftModelsRef.current = draftModels;
   useEffect(() => {
-    if (!allowConfigStoreSyncRef.current && hasChangesRef.current) return;
+    const lastSynced = lastSyncedConfigRef.current;
+    const userEdited =
+      lastSynced !== null && !configRecordsEqual(draftValuesRef.current, lastSynced);
+    if (!allowConfigStoreSyncRef.current && userEdited) return;
     allowConfigStoreSyncRef.current = false;
+    lastSyncedConfigRef.current = normalizedConfig;
     setDraftValues(normalizedConfig);
     setError(null);
     setModelError(null);
   }, [normalizedConfig]);
 
   useEffect(() => {
-    if (!allowModelsStoreSyncRef.current && hasChangesRef.current) return;
+    const nextModels = toDraftModels(storeAvailableModels);
+    const lastSynced = lastSyncedModelsRef.current;
+    const userEdited =
+      lastSynced !== null && !modelListsEqual(draftModelsRef.current, lastSynced);
+    if (!allowModelsStoreSyncRef.current && userEdited) return;
     allowModelsStoreSyncRef.current = false;
-    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    lastSyncedModelsRef.current = nextModels;
+    setDraftModels(nextModels);
     setModelError(null);
   }, [storeAvailableModels]);
 
@@ -4108,8 +4147,11 @@ export function ConfigPanel({
 
   const handleCancel = () => {
     if (!hasChanges) return;
+    const nextModels = toDraftModels(storeAvailableModels);
     setDraftValues(normalizedConfig);
-    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    setDraftModels(nextModels);
+    lastSyncedConfigRef.current = normalizedConfig;
+    lastSyncedModelsRef.current = nextModels;
     setDraftAgents(initialAgents);
     setDraftTeams(initialTeams);
     setAgentsTeamsEdited(false);
