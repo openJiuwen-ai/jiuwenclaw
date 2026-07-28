@@ -9,6 +9,7 @@ from typing import List, Optional, Union, Dict, Any, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.controller.schema.dataframe import DataFrame, TextDataFrame, JsonDataFrame
+from openjiuwen.core.session import InteractiveInput
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.schema.task import Task
@@ -22,11 +23,13 @@ class EventType(str, Enum):
     - TASK_INTERACTION: Task interaction event (requires user interaction during task execution)
     - TASK_COMPLETION: Task completion event
     - TASK_FAILED: Task failed event
+    - FOLLOW_UP: Follow-up event for continuing task loop
     """
     INPUT = "input"
     TASK_INTERACTION = "task_interaction",
     TASK_COMPLETION = "task_completion",
     TASK_FAILED = "task_failed"
+    FOLLOW_UP = "follow_up"
 
 
 class Event(BaseModel):
@@ -61,13 +64,13 @@ class InputEvent(Event):
     input_data: List[DataFrame] = Field(default_factory=list)
 
     @classmethod
-    def from_user_input(cls, user_input: Union[str, dict, 'InputEvent']) -> "InputEvent":
+    def from_user_input(cls, user_input: Union[str, dict, InteractiveInput, 'InputEvent']) -> "InputEvent":
         """Create input event from user input
 
         Convenience method to convert user input to InputEvent.
 
         Args:
-            user_input: User input, supports string, dictionary, and InputEvent
+            user_input: User input, supports string, dictionary, InteractiveInput, and InputEvent
 
         Returns:
             InputEvent: Input event object
@@ -85,8 +88,15 @@ class InputEvent(Event):
                 event_type=EventType.INPUT,
                 input_data=[JsonDataFrame(data=user_input)]
             )
+        if isinstance(user_input, InteractiveInput):
+            return cls(
+                event_type=EventType.INPUT,
+                input_data=[JsonDataFrame(data={"query": user_input})]
+            )
 
-        raise TypeError(f"Unsupported user input type: {type(user_input)}. Must be str, dict, or InputEvent.")
+        raise TypeError(
+            f"Unsupported user input type: {type(user_input)}. Must be str, dict, InteractiveInput, or InputEvent."
+        )
 
 
 class TaskInteractionEvent(Event):
@@ -135,3 +145,25 @@ class TaskFailedEvent(Event):
     event_type: EventType = EventType.TASK_FAILED
     error_message: Optional[str] = None
     task: Optional[Task] = None
+
+
+class FollowUpEvent(Event):
+    """Follow-up Event
+
+    Event for continuing the task loop with new input.
+    Published to the FOLLOW_UP topic, which runs concurrently
+    with INPUT and does not block the current iteration.
+
+    Attributes:
+        event_type: Event type, fixed as EventType.FOLLOW_UP
+        input_data: Follow-up content data list
+    """
+
+    event_type: EventType = EventType.FOLLOW_UP
+    input_data: List[DataFrame] = Field(default_factory=list)
+
+    @classmethod
+    def from_text(cls, text: str) -> "FollowUpEvent":
+        """Create a follow-up event from text."""
+
+        return cls(input_data=[TextDataFrame(text=text)])
