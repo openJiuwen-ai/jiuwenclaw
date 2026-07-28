@@ -286,12 +286,13 @@ def _normalize_nested_stream_chunk(
     if not chunk.is_complete:
         return chunk
     payload = chunk.payload
-    if payload is None or (
-            isinstance(payload, dict)
-            and payload.get("is_complete") is True
-            and not payload.get("event_type")
-    ):
+    if payload is None:
         return None
+    if isinstance(payload, dict):
+        is_complete = payload.get("is_complete") is True
+        has_event_type = bool(payload.get("event_type"))
+        if is_complete and not has_event_type:
+            return None
     return replace(chunk, is_complete=False)
 
 
