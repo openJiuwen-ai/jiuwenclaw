@@ -604,7 +604,7 @@ def _normalize_provider_value(value: str) -> str:
 
 
 
-async def _clear_agent_config_cache(agent_client=None) -> None:
+async def _clear_agent_config_cache(agent_client=None, user_id=None) -> None:
     try:
         if agent_client is not None:
             from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -615,6 +615,7 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
                 request_id=f"cfg-reload-{uuid.uuid4().hex[:8]}",
                 channel_id="",
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                user_id=user_id,
             )
             await _send_tui_agent_request(
                 _resolve_agent_client(agent_client),
@@ -1149,7 +1150,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
             async def _config_set_reload_background() -> None:
                 try:
-                    await _clear_agent_config_cache(real_client)
+                    await _clear_agent_config_cache(
+                        real_client,
+                        user_id=getattr(ws, "_gateway_user_id", None),
+                    )
                 except Exception as _e_reload:
                     logger.warning(
                         "[cli config.set] AGENT_RELOAD_CONFIG failed: %s", _e_reload
@@ -1457,7 +1461,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload={"sessions": cli_sessions, "current_branch": current_branch},
         )
 
-    async def _session_create(ws, req_id, params, session_id):
+    async def _session_create(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.utils import get_agent_sessions_dir
         from jiuwenswarm.server.runtime.session.session_metadata import (
             get_session_metadata,
@@ -1560,6 +1564,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     params=lifecycle_params,
                     is_stream=False,
                     timestamp=time.time(),
+                    user_id=user_id or getattr(ws, "_gateway_user_id", None),
                 )
                 response = await real_client.send_request(env)
                 lifecycle_forwarded = bool(response.ok)
@@ -2286,7 +2291,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if callable(is_bound_to_client):
             owns_session = bool(is_bound_to_client("tui", sid, ws))
         if mh is not None and sid and owns_session:
-            cleaned = await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+            cleaned = await mh.cancel_agent_sessions_on_disconnect(
+                [("tui", sid)],
+                user_id=getattr(ws, "_gateway_user_id", None),
+            )
             if not cleaned:
                 logger.warning(
                     "[tui.disconnect] immediate cleanup failed; "
@@ -3397,13 +3405,19 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         request_keys = stale_request_keys or []
         if not stale_session_keys and not request_keys:
             return
+        _ws_user_id = getattr(_ws, "_gateway_user_id", None)
         if hasattr(mh, "schedule_cancel_agent_sessions_on_disconnect"):
             await mh.schedule_cancel_agent_sessions_on_disconnect(
                 stale_session_keys,
                 stale_request_keys=request_keys,
+                user_id=_ws_user_id,
             )
             return
-        await mh.cancel_agent_sessions_on_disconnect(stale_session_keys, stale_request_keys=request_keys)
+        await mh.cancel_agent_sessions_on_disconnect(
+            stale_session_keys,
+            stale_request_keys=request_keys,
+            user_id=_ws_user_id,
+        )
 
     def _tui_session_bound(channel_id: str, session_id: str) -> None:
         mh = bind.message_handler

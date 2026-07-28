@@ -235,6 +235,40 @@ class TestPortAvailability:
         # Small race window, but in practice the port is free immediately.
         assert is_port_available("127.0.0.1", port) is True
 
+    @staticmethod
+    def test_is_port_available_detects_ipv6_only_listener():
+        """IPv6-only listeners must count as occupied for 127.0.0.1 probes.
+
+        Vite on Windows often binds ``[::1]:5173`` only. An IPv4-only bind
+        probe would miss it, skip jiuwenswarm-start's port-group fallback, and
+        then Vite ``strictPort: true`` fails with "Port 5173 is already in use".
+        """
+        import socket as _socket
+        import pytest
+
+        s = None
+        try:
+            try:
+                s = _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM)
+                # Restrict to IPv6-only so we do not also claim IPv4 via dualstack.
+                if hasattr(_socket, "IPV6_V6ONLY"):
+                    s.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 1)
+                s.bind(("::1", 0))
+                s.listen(1)
+            except OSError:
+                # Must close before skip: an unbound AF_INET6 socket still
+                # triggers ResourceWarning / PytestUnraisableExceptionWarning
+                # on the next test's setup (seen on Linux CI without ::1).
+                if s is not None:
+                    s.close()
+                    s = None
+                pytest.skip("IPv6 loopback unavailable on this host")
+            port = s.getsockname()[1]
+            assert is_port_available("127.0.0.1", port) is False
+        finally:
+            if s is not None:
+                s.close()
+
 
 class TestInstanceConfig:
     """Test InstanceConfig dataclass."""
