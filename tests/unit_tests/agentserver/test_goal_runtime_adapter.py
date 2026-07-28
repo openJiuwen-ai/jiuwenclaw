@@ -317,9 +317,12 @@ async def test_command_goal_unary_response_stays_rpc_payload() -> None:
 
 
 def test_active_goal_demotes_intermediate_chat_final_to_delta() -> None:
+    """Only demote while a goal round is in flight and GoalRecord is ACTIVE."""
     goals = _FakeGoals()
     goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
     adapter = _adapter(goals)
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+    adapter._instance.interaction_started = True
 
     payload = adapter._adapt_goal_intermediate_final(
         {"event_type": "chat.final", "content": "attempt output"}
@@ -329,6 +332,47 @@ def test_active_goal_demotes_intermediate_chat_final_to_delta() -> None:
         "event_type": "chat.delta",
         "content": "attempt output",
         "goal_intermediate": True,
+    }
+
+
+def test_active_goal_keeps_user_round_chat_final_terminal() -> None:
+    """GoalRecord ACTIVE but current round is still user chat — keep chat.final.
+
+    Regression for #2671: command.goal set marks Goal ACTIVE while the prior
+    essay/user round is still finishing; demoting that final lets Goal output
+    overwrite the same frontend bubble.
+    """
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="tell a joke")
+    adapter = _adapter(goals)
+    adapter._instance.active_round = SimpleNamespace(run_kind="user")
+    adapter._instance.interaction_started = True
+
+    payload = adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "essay about the sun"}
+    )
+
+    assert payload == {
+        "event_type": "chat.final",
+        "content": "essay about the sun",
+    }
+
+
+def test_active_goal_without_round_keeps_chat_final_terminal() -> None:
+    """Goal ACTIVE with no in-flight round must not demote a host final."""
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="tell a joke")
+    adapter = _adapter(goals)
+    adapter._instance.active_round = None
+    adapter._instance.interaction_started = True
+
+    payload = adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "essay about the sun"}
+    )
+
+    assert payload == {
+        "event_type": "chat.final",
+        "content": "essay about the sun",
     }
 
 

@@ -5586,9 +5586,10 @@ class JiuWenSwarmDeepAdapter:
         """Whether GoalRecord is ACTIVE (persistent objective still running).
 
         Unlike ``_has_active_goal_interaction``, this ignores an in-flight goal
-        round.  Used when deciding whether to demote ``chat.final``: after user
-        cancel/pause the record is no longer ACTIVE, so a terminal final must
-        reach the frontend even while the aborted round is still unwinding.
+        round.  Combined with ``_has_active_goal_round`` when demoting
+        intermediate ``chat.final``: after user cancel/pause the record is no
+        longer ACTIVE, so a terminal final must reach the frontend even while
+        the aborted round is still unwinding.
         """
         if self._instance is None:
             return False
@@ -5611,16 +5612,25 @@ class JiuWenSwarmDeepAdapter:
             return True
         return self._goal_record_is_active()
 
+    def _should_demote_goal_intermediate_final(self) -> bool:
+        """Whether a host ``chat.final`` is an intermediate Goal attempt.
+
+        Demote only while a **goal** round is in flight *and* the GoalRecord is
+        still ACTIVE.  Keying off GoalRecord alone would demote a concurrent
+        **user** chat final after ``command.goal set`` (Goal ACTIVE, user round
+        still finishing) and let Goal output overwrite that bubble (#2671).
+
+        Pause/cancel clears ACTIVE first, then aborts the round — finals during
+        unwind must stay terminal so the frontend can close the dialog.
+        """
+        return self._has_active_goal_round() and self._goal_record_is_active()
+
     def _adapt_goal_intermediate_final(self, parsed: dict | None) -> dict | None:
         if not isinstance(parsed, dict):
             return parsed
         if parsed.get("event_type") != "chat.final":
             return parsed
-        # Demote only while the GoalRecord remains ACTIVE.  Do not key off an
-        # in-flight goal round: user cancel pauses the record first, then
-        # aborts the round — finals during unwind must stay terminal so the
-        # frontend can close the dialog.
-        if not self._goal_record_is_active():
+        if not self._should_demote_goal_intermediate_final():
             return parsed
         adapted = dict(parsed)
         adapted["event_type"] = "chat.delta"
@@ -8182,10 +8192,10 @@ class JiuWenSwarmDeepAdapter:
 
             if accumulated_text:
                 # Same rule as _adapt_goal_intermediate_final: only keep the
-                # host flush as delta while GoalRecord is still ACTIVE.
+                # host flush as delta while a goal round is mid-attempt.
                 final_event_type = (
                     "chat.delta"
-                    if self._goal_record_is_active()
+                    if self._should_demote_goal_intermediate_final()
                     else "chat.final"
                 )
                 yield AgentResponseChunk(

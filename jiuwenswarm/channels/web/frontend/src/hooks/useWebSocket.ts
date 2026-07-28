@@ -63,6 +63,7 @@ import {
 } from '../features/tool-events/toolEventNormalizer';
 import { findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn } from '../features/teamLeaderMessages';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
+import { shouldFreezeChatStreamOnGoalSnapshot } from './goalStreamGuard';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -1941,6 +1942,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         undefined;
       if (!sessionId) return;
       ensureSessionRuntimes(sessionId);
+      // set/resume：封存当前流式气泡，避免 Goal 输出与前一轮问答共写同一 currentStreamId。
+      if (
+        shouldFreezeChatStreamOnGoalSnapshot(payload) &&
+        useChatStore.getState().getRuntime(sessionId)?.currentStreamId
+      ) {
+        useChatStore.getState().stopStreaming(sessionId);
+      }
       applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
     };
 
