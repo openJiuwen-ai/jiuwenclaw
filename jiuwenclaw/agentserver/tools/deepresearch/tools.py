@@ -36,7 +36,7 @@ from jiuwenclaw.agentserver.tools.deepresearch.tls import (
     DEEPRESEARCH_TLS_ENV_LOCK as _REPORT_STYLE_LLM_INIT_LOCK,
     scoped_deepresearch_tls_env,
 )
-from jiuwenclaw.local_env_config import export_agent_environ
+from jiuwenclaw.local_env_config import export_agent_environ, read_env
 
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
@@ -330,19 +330,26 @@ def _write_report_markdown(
 def _build_styled_export_llm_config() -> dict:
     """Build llm_config dict for the SDK's report_style_llm_context().
 
-    Resolves LLM credentials via the same bridge-env logic
-    (``_build_bridge_env``) used by the skill subprocess, ensuring
-    identical API KEY resolution (DeepSearch-专属 → 项目全局 fallback,
-    provider-to-type mapping, SSL defaults).
+    Resolves LLM credentials from the active request/tenant configuration,
+    using the same DeepSearch-specific to project-global fallback rules as
+    the task manager.
     The SDK's LLMConfig only accepts ``"openai"`` or ``"siliconflow"``
     as model_type; most providers are OpenAI-compatible and default to
     ``"openai"``.
     """
-    bridge_env = _build_bridge_env(os.environ)
-    api_key = bridge_env.get("LLM_API_KEY", "")
-    model_name = bridge_env.get("LLM_MODEL_NAME", "")
-    base_url = bridge_env.get("LLM_BASE_URL", "")
-    model_type = bridge_env.get("LLM_MODEL_TYPE", "openai").lower()
+    resolved = load_deepresearch_config()
+    api_key = resolved["LLM_API_KEY"].strip()
+    model_name = resolved["LLM_MODEL_NAME"].strip()
+    base_url = resolved["LLM_BASE_URL"].strip()
+    model_type = _map_provider_to_type(resolved["LLM_MODEL_TYPE"]).lower()
+
+    if (
+        not api_key
+        or not model_name
+        or not base_url
+        or "example.com" in base_url.lower()
+    ):
+        raise ValueError("styled HTML LLM configuration is invalid")
 
     # LLMConfig.model_type only allows "openai" or "siliconflow";
     # map everything else to "openai" (OpenAI-compatible).
@@ -371,7 +378,7 @@ async def _scoped_report_style_llm_context(context_factory, llm_config):
     async with AsyncExitStack() as stack:
         async with scoped_deepresearch_tls_env(
             lambda: {
-                "LLM_SSL_VERIFY": _build_bridge_env(os.environ)["LLM_SSL_VERIFY"]
+                "LLM_SSL_VERIFY": read_env("LLM_SSL_VERIFY", "false")
             }
         ):
             llm = await stack.enter_async_context(context_factory(llm_config))

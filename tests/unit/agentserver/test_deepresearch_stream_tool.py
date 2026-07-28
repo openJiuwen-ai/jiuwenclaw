@@ -25,6 +25,10 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
+from jiuwenclaw.local_env_config import (
+    bind_task_env_overlay,
+    reset_task_env_overlay,
+)
 
 
 class _Proc:
@@ -150,12 +154,77 @@ class _LargeStdoutLineProc(_Proc):
         return self._stdout
 
 
+def test_styled_export_llm_config_uses_request_overlay_instead_of_process_env(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_NAME", "static-model")
+    monkeypatch.setenv("MODEL_PROVIDER", "OpenAI")
+    monkeypatch.setenv("API_BASE", "https://example.com/compatible-mode/v1")
+    monkeypatch.setenv("API_KEY", "static-key")
+    token = bind_task_env_overlay({
+        "MODEL_NAME": "glm-5.2",
+        "MODEL_PROVIDER": "OpenAI",
+        "API_BASE": "https://client-claw.example/v2",
+        "API_KEY": "request-key",
+    })
+    try:
+        config = dt._build_styled_export_llm_config()
+    finally:
+        reset_task_env_overlay(token)
+
+    assert config["general"]["model_name"] == "glm-5.2"
+    assert config["general"]["model_type"] == "openai"
+    assert config["general"]["base_url"] == "https://client-claw.example/v2"
+    assert config["general"]["api_key"] == bytearray(b"request-key")
+
+
+@pytest.mark.parametrize(
+    "overlay",
+    [
+        {
+            "MODEL_PROVIDER": "OpenAI",
+            "API_BASE": "https://llm.example/v1",
+            "API_KEY": "key",
+        },
+        {
+            "MODEL_NAME": "model",
+            "MODEL_PROVIDER": "OpenAI",
+            "API_KEY": "key",
+        },
+        {
+            "MODEL_NAME": "model",
+            "MODEL_PROVIDER": "OpenAI",
+            "API_BASE": "https://llm.example/v1",
+        },
+        {
+            "MODEL_NAME": "model",
+            "MODEL_PROVIDER": "OpenAI",
+            "API_BASE": "https://example.com/compatible-mode/v1",
+            "API_KEY": "key",
+        },
+    ],
+)
+def test_styled_export_llm_config_rejects_invalid_config_before_client_creation(
+    overlay,
+):
+    token = bind_task_env_overlay(overlay)
+    try:
+        with pytest.raises(
+            ValueError,
+            match="styled HTML LLM configuration is invalid",
+        ):
+            dt._build_styled_export_llm_config()
+    finally:
+        reset_task_env_overlay(token)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raise_during_use", [False, True])
 async def test_styled_report_llm_context_restores_explicit_tls_value(
     monkeypatch, raise_during_use
 ):
     monkeypatch.setenv("LLM_SSL_VERIFY", "true")
+    monkeypatch.setattr(dt, "read_env", lambda _name, _default: "true")
     observed = {}
 
     @asynccontextmanager
@@ -192,30 +261,30 @@ async def test_styled_report_llm_context_restores_explicit_tls_value(
 
 
 @pytest.mark.asyncio
-async def test_styled_report_llm_context_uses_bridge_tls_only_for_entry(monkeypatch):
+async def test_styled_report_llm_context_uses_overlay_tls_only_for_entry(monkeypatch):
     monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
-    bridge_inputs = []
+    read_inputs = []
     observed = {}
 
-    def fake_build_bridge_env(source):
-        bridge_inputs.append(source.get("LLM_SSL_VERIFY"))
-        return {"LLM_SSL_VERIFY": "resolved-by-bridge"}
+    def fake_read_env(name, default):
+        read_inputs.append((name, default))
+        return "resolved-by-overlay"
 
     @asynccontextmanager
     async def fake_context_factory(_llm_config):
         observed["entry"] = os.environ.get("LLM_SSL_VERIFY")
         yield "runtime-llm"
 
-    monkeypatch.setattr(dt, "_build_bridge_env", fake_build_bridge_env)
+    monkeypatch.setattr(dt, "read_env", fake_read_env)
 
     async with dt._scoped_report_style_llm_context(
         fake_context_factory, {"general": {}}
     ):
         observed["yielded"] = os.environ.get("LLM_SSL_VERIFY")
 
-    assert bridge_inputs == ["ambient"]
+    assert read_inputs == [("LLM_SSL_VERIFY", "false")]
     assert observed == {
-        "entry": "resolved-by-bridge",
+        "entry": "resolved-by-overlay",
         "yielded": "ambient",
     }
     assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
@@ -225,8 +294,8 @@ def test_styled_report_llm_context_serializes_concurrent_event_loops(monkeypatch
     monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
     monkeypatch.setattr(
         dt,
-        "_build_bridge_env",
-        lambda _source: {"LLM_SSL_VERIFY": "resolved-by-bridge"},
+        "read_env",
+        lambda _name, _default: "resolved-by-overlay",
     )
     start_barrier = threading.Barrier(3)
     observation_lock = threading.Lock()
@@ -272,7 +341,7 @@ def test_styled_report_llm_context_serializes_concurrent_event_loops(monkeypatch
     assert errors == []
     assert max_active_entries == 1
     assert len(observed) == 4
-    assert observed.count(("entry", "resolved-by-bridge")) == 2
+    assert observed.count(("entry", "resolved-by-overlay")) == 2
     assert observed.count(("yielded", "ambient")) == 2
     assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
 
@@ -401,14 +470,14 @@ async def test_styled_report_llm_context_releases_after_repeated_entry_cancellat
     monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
     monkeypatch.setattr(
         dt,
-        "_build_bridge_env",
-        lambda _source: {"LLM_SSL_VERIFY": "resolved-by-bridge"},
+        "read_env",
+        lambda _name, _default: "resolved-by-overlay",
     )
     entry_started = asyncio.Event()
 
     @asynccontextmanager
     async def blocked_context_factory(_llm_config):
-        assert os.environ.get("LLM_SSL_VERIFY") == "resolved-by-bridge"
+        assert os.environ.get("LLM_SSL_VERIFY") == "resolved-by-overlay"
         entry_started.set()
         await asyncio.Event().wait()
         yield "runtime-llm"  # pragma: no cover
@@ -565,6 +634,10 @@ async def _async_context(value):
     yield value
 
 
+def _valid_styled_export_llm_config():
+    return {"general": {"model_name": "test-model"}}
+
+
 @pytest.mark.asyncio
 async def test_generate_report_html_installs_styled_report(tmp_path):
     report_path_md = tmp_path / "report.md"
@@ -588,6 +661,10 @@ async def test_generate_report_html_installs_styled_report(tmp_path):
     (chart_dir / "existing.png").write_bytes(b"existing chart")
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(llm),
@@ -659,6 +736,10 @@ async def test_generate_report_html_does_not_depend_on_supports_dir_fd(tmp_path)
         return _wrapped
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
@@ -795,6 +876,10 @@ async def test_generate_report_html_does_not_follow_legacy_fixed_temp_symlink(tm
 
     with patch.object(
         dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
+        dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
     ), patch(
@@ -841,6 +926,10 @@ async def test_generate_report_html_does_not_follow_asset_root_symlink(
     )
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
@@ -897,6 +986,10 @@ async def test_generate_report_html_ignores_fixed_asset_root_swapped_to_symlink(
     )
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
@@ -961,6 +1054,10 @@ async def test_generate_report_html_rolls_back_owned_assets_when_install_fails(
 
     with patch.object(
         dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
+        dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
     ), patch(
@@ -1019,6 +1116,10 @@ async def test_generate_report_html_preserves_replaced_published_asset_dir(
         return real_atomic_create(path, payload)
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         return_value=_async_context(object()),
@@ -1086,6 +1187,10 @@ async def test_generate_report_html_propagates_cancellation(tmp_path):
         yield  # pragma: no cover
 
     with patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value=_valid_styled_export_llm_config(),
+    ), patch.object(
         dt,
         "_scoped_report_style_llm_context",
         side_effect=_cancelled_context,
