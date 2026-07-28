@@ -103,7 +103,6 @@ def test_config_explicit_auto_save_true(adapter, monkeypatch):
     config = {
         "evolution": {
             "auto_save": True,
-            "auto_scan": False,
         }
     }
     
@@ -119,7 +118,6 @@ def test_config_explicit_auto_save_false(adapter, monkeypatch):
     config = {
         "evolution": {
             "auto_save": False,
-            "auto_scan": False,
         }
     }
     
@@ -133,9 +131,7 @@ def test_config_default_auto_save_true(adapter, monkeypatch):
     """Test config doesn't set evolution.auto_save, default should be true."""
     captured_args, captured_kwargs = _setup_mocks(monkeypatch)
     config = {
-        "evolution": {
-            "auto_scan": False,
-        }
+        "evolution": {}
     }
     
     adapter.build_skill_evolution_rail_for_test(config)
@@ -182,7 +178,7 @@ def test_build_skill_evolution_rail_wires_file_trajectory_store(adapter, monkeyp
         lambda self: mock_trajectory_dir,
     )
 
-    adapter.build_skill_evolution_rail_for_test({"evolution": {"auto_scan": False}})
+    adapter.build_skill_evolution_rail_for_test({"evolution": {}})
 
     assert captured_trajectory_paths == [mock_trajectory_dir]
     assert captured_kwargs[0]["trajectory_store"]._mock_name == "trajectory_store_instance"

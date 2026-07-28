@@ -463,6 +463,12 @@ def _build_p43_prompt(
         parts.append(f"- presentation_purpose: {presentation_purpose}\n")
     if user_text:
         parts.append(f"- 用户原文：{user_text}\n")
+    # 模板叙事框架注入（template_canvas 模式下由 P3.5 读取 template-spec.json 获得）
+    narrative_framework = str(inputs.get("narrative_framework") or "").strip()
+    if narrative_framework:
+        parts.append(
+            f"- narrative_framework（模板叙事框架，作为软约束注入大纲）：\n{narrative_framework}\n"
+        )
     # 无图片来源：topic 模式下从源头抑制"放图"意图，避免下游页面生成时自行产图。
     # outline/description 模式保留用户原文，不注入此约束。
     if source_type == "topic" and _has_no_image_source(inputs):

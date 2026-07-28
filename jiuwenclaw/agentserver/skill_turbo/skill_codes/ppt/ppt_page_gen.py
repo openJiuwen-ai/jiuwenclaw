@@ -6,7 +6,6 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError, PlanNode
@@ -19,16 +18,14 @@ from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.utils.bash_utils import 
     run_bash,
 )
 
-_PPT_DIR = str(Path(__file__).resolve().parent)
-
 logger = logging.getLogger(__name__)
 
 
 _CHART_CANDIDATE_TYPES = {"data", "comparison", "technology", "trend"}
 
 
-def _extract_designer_section(text: str) -> str:
-    """从 designer/SKILL.md 原文提取布局约束、视觉规范等关键章节。
+def _extract_designer_section(text: str, *, include_charts: bool = False) -> str:
+    """从新版 references/designer.md 提取当前生成链路需要的关键章节。
 
     文件 IO 由 PrepareNode 通过 read_file 工具完成后传入 text，
     skill_code 中禁止直接做文件 IO（校验器禁止 open/read_text 等）。
@@ -36,75 +33,75 @@ def _extract_designer_section(text: str) -> str:
     if not text:
         return ""
 
-    sections: list[str] = []
-
-    def _extract_section(header: str, alt_header: str = "") -> str:
-        """提取从 header 开始到下一个 --- 分隔线或文件末尾的内容。"""
+    def _extract_bounded_section(header: str, end_markers: tuple[str, ...]) -> str:
+        """提取指定标题到最近结束标记之间的内容，避免把无关长章节一并注入。"""
         start = text.find(header)
-        if start == -1 and alt_header:
-            start = text.find(alt_header)
         if start == -1:
             return ""
-        end = text.find("\n---", start)
-        if end == -1:
-            end = len(text)
-        return text[start:end]
+        candidates = []
+        for marker in end_markers:
+            pos = text.find(marker, start + len(header))
+            if pos != -1:
+                candidates.append(pos)
+        end = min(candidates) if candidates else len(text)
+        return text[start:end].rstrip()
 
-    # 1. 防溢出硬性约束（全局 CSS 约束、图表容器约束等）
-    css_section = _extract_section("### 防溢出硬性约束")
-    if css_section:
-        sections.append(css_section)
+    sections = [
+        _extract_bounded_section(
+            "### 页面内容预算契约",
+            ("\n### 阶段 4：交付",),
+        ),
+        _extract_bounded_section(
+            "## 弹性布局模式",
+            ("\n## HTML 代码规范",),
+        ),
+        _extract_bounded_section(
+            "## 页面布局规范",
+            ("\n## 视觉设计规范",),
+        ),
+        _extract_bounded_section(
+            "## 视觉设计规范",
+            ("\n## 图表与数据可视化",),
+        ),
+        _extract_bounded_section(
+            "## 关键原则",
+            ("\n## 质量控制清单",),
+        ),
+    ]
+    if include_charts:
+        chart_section = _extract_bounded_section(
+            "## 图表与数据可视化",
+            # 当前 SkillTurbo 普通分支仍生成完整 HTML，不预铺外部模板中的
+            # CHART_SCAFFOLD；只注入合并后的图表选型和通用规范，避免改变既有链路。
+            ("\n### 激活 content-template", "\n## 图片使用规范"),
+        )
+        chart_section = chart_section.replace(
+            "渲染器、`animation:false`、字体栈合并与容器高度兜底已由模板 CSS 与 "
+            "CHART_SCAFFOLD 固化并强制执行；以下为骨架无法替你决策、需要自觉遵守的规则。",
+            "当前 SkillTurbo 完整 HTML 分支由本提示和 P8 后置校验强制执行渲染器、"
+            "`animation:false`、字体栈与容器高度规则；以下规则必须由页面显式遵守。",
+        ).replace(
+            "骨架已内置 `{ renderer: 'svg' }`，禁止改回 canvas。",
+            "必须显式使用 `{ renderer: 'svg' }`，禁止改用 canvas。",
+        )
+        sections.append(chart_section)
 
-    # 2. 弹性布局约束（Grid/Flex 子元素撑满规则、快速决策表格）
-    flex_section = _extract_section(
-        "### 一、弹性布局约束",
-        "弹性布局约束",
+    selected = [section for section in sections if section]
+    if not selected:
+        logger.warning("[P8.0] designer.md 未匹配到新版关键章节")
+        return ""
+
+    return (
+        "兼容说明：以下 designer 规范中的 Grid 示例在本链路必须用等价 Flex 权重实现；"
+        "不得违反当前提示词的 CSS Grid 禁令，但页面预算、纵向占用率、逐列验收、"
+        "真实语义内容和图表规则保持不变。\n\n"
+        + "\n\n".join(selected)
     )
-    if flex_section:
-        sections.append("\n\n### 弹性布局约束（完整）\n" + flex_section)
-
-    # 3. 固定尺寸约束
-    size_section = _extract_section(
-        "### 二、固定尺寸约束",
-        "固定尺寸约束",
-    )
-    if size_section:
-        sections.append("\n\n### 固定尺寸约束\n" + size_section)
-
-    # 4. 文本重叠避免 + 元素遮挡避免
-    overlap_section = _extract_section("### 三、文本重叠避免")
-    if overlap_section:
-        sections.append("\n\n### 文本重叠避免\n" + overlap_section)
-
-    occlusion_section = _extract_section("### 四、元素遮挡避免")
-    if occlusion_section:
-        sections.append("\n\n### 元素遮挡避免\n" + occlusion_section)
-
-    # 5. 色彩系统
-    color_section = _extract_section("### 色彩系统")
-    if color_section:
-        sections.append("\n\n### 色彩系统\n" + color_section)
-
-    # 6. 字体系统
-    font_section = _extract_section("### 字体系统")
-    if font_section:
-        sections.append("\n\n### 字体系统\n" + font_section)
-
-    # 7. 语义区域划分指南
-    search_end = text.find("### 防溢出硬性约束") if "### 防溢出硬性约束" in text else len(text)
-    sem_start = text.find("✅ 正确示例 - 单一主视觉页面可只有一个语义区域", 0, search_end)
-    if sem_start == -1:
-        sem_start = text.find("main 的直接子元素数量由页面叙事决定", 0, search_end)
-    sem_end = text.find("---", sem_start) if sem_start != -1 else -1
-    if sem_start != -1 and sem_end != -1:
-        sections.append("\n\n### 语义区域划分指南\n" + text[sem_start:sem_end])
-
-    return "\n".join(sections) if sections else ""
 
 
 _PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
 _DEFAULT_GEN_RETRY_ROUND = 1
-_DEFAULT_DENSITY_RETRY_ROUND = 1
+_MAX_PAGE_GENERATION_ATTEMPTS = 3
 
 
 # 页面类型 → 模板 ID 默认映射（当 manifest 无 page_intents 时兜底）
@@ -160,6 +157,7 @@ _DESIGN_RULES_DIGEST = (
     "### 视觉与布局硬约束（精选 22 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
+    "安全区高度固定为 660px，禁止在 `content-safe` 上添加 `h-full`、`h-[720px]` 或 `height:100%`；"
     "子元素禁止额外加 padding，否则导致双重边距\n"
     "3. 字号：严格使用风格规范文件中定义的字号值（如 business-classic.md 定义主标题 37px、正文 19px 等），"
     "不自行调整字号范围（除非用户在原始 query 中明确指定了字号，此时以用户指定值为准）；"
@@ -175,8 +173,16 @@ _DESIGN_RULES_DIGEST = (
     "建议图表可读高度 ≥ 300px，由页面预算保证\n"
     "4.3 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色表，禁止使用相近色；"
     "坐标轴标签用深色，分割线用浅色\n"
-    "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止数据标签重叠\n"
-    "4.5 图例防叠字：图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`，避免水平挤排叠字\n"
+    "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止同系列标签重叠；"
+    "同一分类上的跨系列数据标签文字框必须保留至少 12px 的上下/左右安全距离；"
+    "双轴柱线图必须按各自 yAxis min/max 换算视觉高度后检查，`insideTop` 与 `top` 不同也不代表安全；"
+    "距离不足时调整 `position/offset/distance` 或仅隐藏碰撞点标签，且不得缩小字号；"
+    "`labelLayout` 不能替代跨系列标签间距检查\n"
+    "4.5 图例防叠字：图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`；"
+    "横向图例还必须检查文字长度：任一中文标签超过 6 个字或全部标签合计超过 12 个字时，"
+    "优先在不改变含义的前提下缩短标签，或改为纵向图例；若仍横排，`itemGap` 至少 24，"
+    "并增大 `grid.top` 为图例预留空间；顶部横向图例与 yAxis.name 文字框的净间距必须 ≥18px，"
+    "若图表标题行已写单位，则清空重复的 yAxis.name；否则通过增大 `grid.top` 或移动图例分开两条通道\n"
     "4.6 图表分割线：`splitLine` 建议使用浅色虚线，避免实线在 PPTX 中过于突兀；颜色由风格文件决定\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
     "6. 关键数字必须有放大数字卡片，结论必须有摘要高亮；"
@@ -198,9 +204,11 @@ _DESIGN_RULES_DIGEST = (
     "8.1 禁止使用 CSS Grid：html-to-pptx 转换器不支持 `display:grid`（Grid 仅检测不转换，视为非文本容器），"
     "所有布局必须用 Flexbox（`flex`、`flex-col`、`flex-[N]`）替代 `grid grid-cols-*`；"
     "左右分栏用 `flex` + `flex-[3]` / `flex-[2]` 比例分配，不用 `grid grid-cols-[3fr_2fr]`\n"
-    "9. flex 子元素：必须 `flex-1 min-h-0 min-w-0`（水平布局）或 `flex-1 min-h-0`（垂直布局）；"
+    "9. 需要填满父容器剩余空间的主内容区、图表区可使用 `flex-1 min-h-0 min-w-0`（水平布局）"
+    "或 `flex-1 min-h-0`（垂直布局）；内容较少的纯文字卡片不强制使用 `flex-1`；"
     "禁止使用 `overflow-hidden` 隐藏核心内容\n"
-    "10. flex-col 子元素：必须 `flex-1 min-h-0`；禁止使用 `overflow-hidden` 隐藏核心内容；"
+    "10. flex-col 中需要填满剩余高度的主区域使用 `flex-1 min-h-0`；"
+    "header、footer 和内容较少的纯文字卡片使用 `flex-shrink-0`；禁止使用 `overflow-hidden` 隐藏核心内容；"
     "注意：`overflow-hidden` 在浏览器中裁剪溢出内容，但 PPTX 导出时不被尊重——"
     "超出容器边界的内容会直接溢出；因此卡片内容必须通过控制行数和行高确保不超出容器高度\n"
     "10.1 内容预算：flex-col 中有多个子元素时，禁止把大块内容（如完整表格）设 `flex-shrink-0`，"
@@ -208,7 +216,9 @@ _DESIGN_RULES_DIGEST = (
     "10.2 多栏等高卡片防空白：当使用 `grid-rows-N` + `flex-1` 布局多卡片时，"
     "每个卡片内容（文字行+图标+数据）必须填充容器高度的 60% 以上；"
     "若内容不足，改用 `flex-shrink-0` 让卡片按内容自适应高度，"
-    "或将 `grid-rows-N` 改为 `grid-rows-[auto]` 让容器收缩包裹内容，剩余空间分配给其他区域\n"
+    "或将 `grid-rows-N` 改为 `grid-rows-[auto]` 让容器收缩包裹内容；"
+    "仅含标题和不超过 3 行正文的纯文字卡片，其卡片组和卡片本身均不得使用 `flex-1`，"
+    "剩余高度优先分配给同栏的图表、图片或表格区域\n"
     "10.3 多栏卡片防溢出与行高禁令："
     "① 卡片内正文禁止使用 `leading-loose`（line-height:2），该类使文字高度翻倍，"
     "在 PPTX 导出时极易导致内容超出卡片边界；正文统一使用 `leading-snug`（1.25）或 `leading-normal`（1.5）\n"
@@ -216,14 +226,30 @@ _DESIGN_RULES_DIGEST = (
     "（按 660px 内容区 ÷ 行数 - padding 估算）；宁可精简文字，不可溢出\n"
     "③ 禁止通过添加 `mt-auto` 底部子元素（色块标签、badge 行等）来填充空白——"
     "这些子元素增加总内容高度，在 PPTX 导出时 `overflow-hidden` 不被尊重会导致溢出\n"
+    "10.4 标签归属与卡片闭合：摘要标签、badge、结论条必须完整位于其语义所属卡片的边框内，"
+    "不得越过父卡片底边、贴到下一张卡片或与下一卡片标题重叠；"
+    "高度不足时优先把标签并入所属卡片的标题行（`justify-between`）或表格摘要行，"
+    "其次减小该卡片内部 padding/gap、调整同栏卡片 Flex 比例；"
+    "禁止只删除 `mt-auto` 而不重新核算内容高度，也禁止用绝对定位、负 margin 或 `overflow-hidden` 掩盖越界\n"
+    "10.5 内容页装饰边界：禁止临时创造风格文件未定义的大面积角落装饰；"
+    "明确的背景装饰节点（如 `data-pptx-role=\"decoration\"`、`bg-deco*`、`bg-decoration*`）"
+    "不得使用负 `top/right/bottom/left` 坐标或依赖 `.ppt-slide` 的 `overflow:hidden` 裁切；"
+    "若风格明确要求角落图形，应直接绘制完整位于 1280×720 画布内、边角坐标为 0 的角形，"
+    "不得把完整方形或圆形移出画布后截取一部分\n"
     "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体"
     "（除非用户在原始 query 中明确指定了字体或配色，此时以用户指定值为准）；"
-    "所有页面 `<body>` 背景色必须统一，从风格规范中取一致的背景色，禁止部分页面用浅灰/灰色背景而其他页用白色\n"
+    "所有页面 `<body>` 背景色必须统一，从风格规范中取一致的背景色，禁止部分页面用浅灰/灰色背景而其他页用白色；"
+    "同组、同层级卡片通常保持协调的表面色与强调色；若风格允许深浅区域交替，可继续灵活使用深色卡片，"
+    "但深浅变化应服务于清晰的叙事强调或分组关系，并保持字体、强调色和边界处理一致，避免无缘由的随机跳色；"
+    "**字体强制声明**：风格规范文件 frontmatter 中的 `font-family` 字段声明了字体栈（如 `Noto Sans SC, WenYuan Sans SC, sans-serif`），"
+    "每个页面的 `<style>` 块中必须在 `body` 选择器或 `.ppt-slide` 选择器上声明该完整字体栈，例如："
+    "`body { font-family: 'Noto Sans SC', 'WenYuan Sans SC', sans-serif; }`；"
+    "禁止仅在 CSS 中声明而漏掉 HTML 元素上的字体继承——所有文本元素必须继承 `body` 的 `font-family`，不得单独使用其他字体\n"
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚；"
     "禁止页脚出现纯数字页码编号（除非用户在原始 query 中明确要求页码，此时应在用户指定位置添加页码，格式如 3/12）\n"
-    "13. 布局实现：所有区域用 `flex-1 min-h-0` 自动分配高度，禁止手动计算 px 值；"
-    "子元素用 `flex-1 min-h-0` 弹性填充，禁止使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表/数据卡片等），"
-    "信任 flex 自动布局\n"
+    "13. 布局实现：仅 main、图表或图片等需要承接剩余空间的区域使用 `flex-1 min-h-0`；"
+    "纯文字卡片按内容自适应高度，禁止为了等高而制造大片空白；"
+    "禁止使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表/数据卡片等）\n"
     "13.1 表格禁用 CSS Grid：html-to-pptx 引擎不支持 `display:grid` 渲染表格，grid 表格会被转为低质量截图；"
     "数据表格必须用 `<table><tr><td>` 原生标签或 `flex` 布局替代 `grid grid-cols-N`\n"
     "14. 全局禁止 `rounded-*` 类，所有元素 border-radius:0（饼图/环形图的圆形不受此限制）\n"
@@ -249,7 +275,7 @@ _HTML_SKELETON = (
     "### 标准 HTML 骨架（所有页面必须遵循，禁止改动结构）\n"
     "```html\n"
     '<div class="ppt-slide" type="content" data-page-role="content">\n'
-    '  <div class="content-safe flex flex-col h-full">\n'
+    '  <div class="content-safe flex flex-col">\n'
     '    <header class="flex-shrink-0">标题区</header>\n'
     '    <main class="flex-1 min-h-0 flex gap-3">\n'
     '      <section class="flex-1 min-h-0 min-w-0">左侧内容</section>\n'
@@ -261,7 +287,7 @@ _HTML_SKELETON = (
     "```\n"
     "规则：\n"
     "- 根节点必须同时携带 `class=\"ppt-slide\"`、`type=\"content\"`、`data-page-role=\"content\"`\n"
-    "- `content-safe` 用 `flex flex-col` 纵向排列 header/main/footer 三段\n"
+    "- `content-safe` 用 `flex flex-col` 纵向排列 header/main/footer 三段；高度由安全区固定为 660px，禁止添加 `h-full`\n"
     "- `main` 用 `flex` 左右分列（禁止使用 `grid grid-cols-*`，html-to-pptx 转换器不支持 CSS Grid），恰好 2 个 `<section>` 直接子元素\n"
     "- 禁止把 header/footer 放进 main 内部；禁止 main 只有 1 个子元素\n"
     "- 禁止在子元素上使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表标签/数据卡片等）；overflow-hidden 仅允许用于 `.ppt-slide` 画布边界\n"
@@ -271,7 +297,8 @@ _HTML_SKELETON = (
 _STRUCTURAL_DESIGN_RULES = (
     "### 视觉与布局硬约束（结构页精选 8 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
-    "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`\n"
+    "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`；"
+    "高度固定为 660px，禁止在 `content-safe` 上添加 `h-full`、`h-[720px]` 或 `height:100%`\n"
     "3. 字号：封面标题 48-64px / 副标题 24-28px / 日期 18px；"
     "结束页标题 42-48px / 正文 22px"
     "（除非用户在原始 query 中明确指定了字号，此时以用户指定值为准）\n"
@@ -281,18 +308,26 @@ _STRUCTURAL_DESIGN_RULES = (
     "所有页面背景色必须统一，从风格规范中取一致的背景色，禁止部分页面自行使用不同背景色；"
     "页面背景色必须与风格规范一致，深色主题用深色底色、浅色主题用浅色底色，"
     "禁止自行使用与风格不符的渐变或底色；"
-    "封面/结束页如使用图片背景，`from-black/*` 渐变层是遮罩(overlay)非底色\n"
+    "封面/结束页如使用图片背景，`from-black/*` 渐变层是遮罩(overlay)非底色；"
+    "**字体强制声明**：风格规范文件 frontmatter 中的 `font-family` 字段声明了字体栈，"
+    "每个页面的 `<style>` 块中必须在 `body` 或 `.ppt-slide` 选择器上声明该完整字体栈，例如："
+    "`body { font-family: 'Noto Sans SC', 'WenYuan Sans SC', sans-serif; }`\n"
     "6. 布局：居中排列（`flex flex-col items-center justify-center`），"
     "不强制 grid-cols-2 双栏\n"
-    "7. 留白：允许较高留白，不强制数据卡片、图表或数据来源页脚\n"
+    "7. 留白：允许较高留白，**禁止堆砌数据卡片**：封面页最多保留 3 个数据卡，结束页最多保留 4 个数据回响卡；"
+    "结构页核心是标题+副标题+日期/汇报人信息，不得塞入研究报告中的详细数据或图表\n"
     "8. 全局禁止 `rounded-*` 类，所有元素 border-radius:0\n"
 )
 
 _STRUCTURAL_HTML_SKELETON = (
     "### 标准 HTML 骨架（结构页专用）\n"
     "```html\n"
+    "<style>\n"
+    "body { font-family: 'Noto Sans SC', 'WenYuan Sans SC', sans-serif; margin: 0; }\n"
+    ".ppt-slide { width: 1280px; height: 720px; overflow: hidden; box-sizing: border-box; }\n"
+    "</style>\n"
     '<div class="ppt-slide">\n'
-    '  <div class="content-safe flex flex-col items-center justify-center h-full">\n'
+    '  <div class="content-safe flex flex-col items-center justify-center">\n'
     "    <h1 class=\"text-center\">标题</h1>\n"
     "    <p class=\"text-center mt-4\">副标题</p>\n"
     "  </div>\n"
@@ -300,6 +335,7 @@ _STRUCTURAL_HTML_SKELETON = (
     "```\n"
     "- 居中布局，不使用 grid-cols-2\n"
     "- 无需 header/main/footer 三段式，无需数据来源页脚\n"
+    "- **font-family 必须从风格规范文件 frontmatter 中取完整字体栈**，在 <style> 中声明\n"
 )
 
 
@@ -309,7 +345,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "data": (
         "### 参考布局（data 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <header class="flex-shrink-0">4-6 个关键数字卡片，flex</header>\n'
         '  <main class="flex-1 min-h-0 flex gap-3">\n'
         '    <section class="flex-[3] min-h-0 min-w-0">6 个核心论点卡片，flex flex-col</section>\n'
@@ -323,11 +359,14 @@ _PAGE_LAYOUT_TEMPLATES = {
     "trend": (
         "### 参考布局（trend 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
         '  <main class="flex-1 min-h-0 flex gap-3">\n'
         '    <section class="flex-1 min-h-0 min-w-0">ECharts 折线图（趋势数据）</section>\n'
-        '    <section class="w-[40%] min-h-0 min-w-0">4-6 个核心论点卡片，flex-col</section>\n'
+        '    <section class="w-[40%] min-h-0 min-w-0 flex flex-col gap-2">\n'
+        '      <div class="flex-1 min-h-0">对比表格或迷你图表，承接剩余高度</div>\n'
+        '      <div class="flex-shrink-0">2-4 个紧凑洞察卡片；纯文字卡片不得使用 flex-1</div>\n'
+        '    </section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
@@ -337,7 +376,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "comparison": (
         "### 参考布局（comparison 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <main class="flex-1 min-h-0 flex flex-col">\n'
         '    <div class="flex flex-1 min-h-0 gap-3">\n'
         '      <section class="flex-1 min-h-0 min-w-0">对比对象 A 的卡片（flex flex-col）</section>\n'
@@ -353,7 +392,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "case": (
         "### 参考布局（case 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
         '  <main class="flex-1 min-h-0 flex gap-3">\n'
         '    <section class="flex-[2] min-h-0 min-w-0">6 个核心论点卡片，flex-col</section>\n'
@@ -366,7 +405,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "technology": (
         "### 参考布局（technology 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col h-full">\n'
+        '<div class="content-safe flex flex-col">\n'
         '  <header class="flex-shrink-0">4 个关键数字卡片</header>\n'
         '  <main class="flex-1 min-h-0 flex flex-col gap-3">\n'
         '    <section class="flex-1 min-h-0 min-w-0">ECharts 图表 + 对比表格</section>\n'
@@ -384,7 +423,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "cover": (
         "### 推荐布局（cover 类型，封面页）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col items-center justify-center h-full">\n'
+        '<div class="content-safe flex flex-col items-center justify-center">\n'
         '  <h1 class="text-[48px] font-bold text-center">演示标题</h1>\n'
         '  <p class="text-[24px] text-center mt-4">副标题</p>\n'
         '  <p class="text-[18px] text-center mt-2">日期</p>\n'
@@ -395,7 +434,7 @@ _PAGE_LAYOUT_TEMPLATES = {
     "ending": (
         "### 推荐布局（ending 类型，结束页）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col items-center justify-center h-full">\n'
+        '<div class="content-safe flex flex-col items-center justify-center">\n'
         '  <h2 class="text-[42px] font-bold text-center">感谢聆听</h2>\n'
         '  <p class="text-[22px] text-center mt-4">联系方式（可选）</p>\n'
         '</div>\n'
@@ -424,13 +463,16 @@ _STRUCTURAL_DENSITY_CHECKLIST = (
 )
 
 _DENSITY_CHECKLIST_DIGEST = (
-    "### 内容密度检查（16 项，全部必须通过）\n"
+    "### 内容密度检查（17 项，全部必须通过）\n"
     "1. 数据可视化：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式且页面为'数据有限'时可降至 2 个数据卡片）\n"
     "2. 核心要点：6-10 个列表项或卡片\n"
     "3. 装饰图标：≥3 个 FontAwesome 图标（class 含 `fa-`）\n"
     "4. 留白质量：留白是否服务于层级、聚焦或阅读节奏；"
     "检查 flex-1 或 grid-rows-N 容器内的每个卡片/子元素，"
-    "若内容（文字行+图表+图标）填充不足容器高度的 50%，判定为'局部空白失衡'\n"
+    "若内容（文字行+图表+图标）填充不足容器高度的 50%，判定为'局部空白失衡'；"
+    "若纯文字卡片仅含标题和不超过 3 行正文却使用 `flex-1`，无需估算高度，直接判定为'局部空白失衡'；"
+    "纯文字 `ul/ol` 或卡片组只有 1-5 个短条目、没有图表/图片/表格却使用 `flex-1` 拉满高区域时，"
+    "也直接判定为'局部空白失衡'，不得把空容器、背景或装饰计作内容占用\n"
     "5. 数据来源：页脚有标注（机构名 / 资料名）\n"
     "6. 无大段文字：无连续 > 100 字段落\n"
     "7. 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
@@ -447,11 +489,21 @@ _DENSITY_CHECKLIST_DIGEST = (
     "13. 字号一致性：同级别卡片/模块必须使用相同字号，字号值来自风格文件\n"
     "14. 图表颜色：数据系列颜色来自风格文件图表配色表，坐标轴标签用深色，分割线用浅色\n"
     "15. 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}`；"
-    "图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`\n"
+    "同一分类上的跨系列标签文字框上下/左右安全距离不足 12px 时，"
+    "无论 position 是否不同，均判定为'图表数据标签重叠风险'；"
+    "图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`；"
+    "横向图例任一中文标签超过 6 个字或总长度超过 12 个字时，若未缩短标签、改为纵向布局，"
+    "或仍使用小于 24 的 `itemGap`，判定为'图例与轴标题重叠'；"
+    "顶部横向图例与双Y轴 name 的净间距不足 18px 时也判定为该项\n"
     "16. 溢出风险：检查所有 `flex-col` 或 `flex-1` 容器内的卡片，"
     "若存在 `leading-loose`（line-height:2）或 `mt-auto` 底部子元素（色块标签/badge 行），"
     "且卡片内容总行数可能超过容器可容纳行数，判定为'内容溢出'；"
+    "若 `flex-[N] min-h-0 flex-col` 高度受限卡片内已有不可收缩表格，"
+    "其后又追加 `flex-shrink-0` 标签/结论块，也直接判定为'内容溢出'；"
+    "所有标签必须留在语义所属卡片边框内，不得跨越父卡片底边或覆盖下一张卡片；"
     "PPTX 导出不尊重 overflow-hidden，超出边界的内容会直接溢出\n"
+    "17. 装饰边界：内容页中 `data-pptx-role=\"decoration\"`、`bg-deco*`、`bg-decoration*` 等"
+    "背景装饰不得使用负边界坐标或依赖画布裁切；若存在则判定为'装饰元素越界'\n"
 )
 
 
@@ -697,6 +749,612 @@ def _check_font_size_consistency(html: str) -> bool:
     return False
 
 
+_LIST_BLOCK_RE = re.compile(
+    r"<(?P<tag>ul|ol)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_CLASS_ATTR_RE = re.compile(
+    r"\bclass\s*=\s*(?P<quote>[\"'])(?P<classes>.*?)(?P=quote)",
+    re.IGNORECASE | re.DOTALL,
+)
+_LIST_ITEM_RE = re.compile(r"<li\b[^>]*>(.*?)</li\s*>", re.IGNORECASE | re.DOTALL)
+_NON_TEXT_VISUAL_RE = re.compile(
+    r"<(?:img|picture|table|svg|canvas)\b|echarts(?:-static-svg|\.init)",
+    re.IGNORECASE,
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
+
+
+def _has_sparse_flex_text_list(html: str) -> bool:
+    """检测高置信度的稀疏 flex-1 文字列表，避免把正常长列表误判为空白风险。"""
+    for match in _LIST_BLOCK_RE.finditer(html):
+        class_match = _CLASS_ATTR_RE.search(match.group("attrs"))
+        if not class_match:
+            continue
+        classes = set(class_match.group("classes").split())
+        if "flex-1" not in classes:
+            continue
+
+        body = match.group("body")
+        if _NON_TEXT_VISUAL_RE.search(body):
+            continue
+        items = _LIST_ITEM_RE.findall(body)
+        if not 1 <= len(items) <= 5:
+            continue
+
+        visible_items = [
+            re.sub(r"\s+", "", _HTML_TAG_RE.sub(" ", item)).replace("&nbsp;", "")
+            for item in items
+        ]
+        if (
+            all(visible_items)
+            and max(map(len, visible_items)) <= 80
+            and sum(map(len, visible_items)) <= 240
+        ):
+            return True
+    return False
+
+
+@dataclass
+class _ConstrainedCardState:
+    """高度受限 Flex 卡片的解析状态。"""
+
+    tag: str
+    depth: int
+    has_fixed_table: bool = False
+
+
+_HTML_TAG_TOKEN_RE = re.compile(
+    r"<(?P<closing>/)?(?P<tag>[a-zA-Z][\w:-]*)(?P<attrs>[^>]*)>",
+    re.DOTALL,
+)
+_HTML_CLASS_RE = re.compile(
+    r"\bclass\s*=\s*(?P<quote>[\"'])(?P<classes>.*?)(?P=quote)",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_VOID_TAGS = {
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
+}
+
+
+def _classes_from_tag_attrs(attrs: str) -> set[str]:
+    match = _HTML_CLASS_RE.search(attrs)
+    return set(match.group("classes").split()) if match else set()
+
+
+def _is_constrained_flex_card(classes: set[str]) -> bool:
+    if "flex-col" not in classes or "min-h-0" not in classes:
+        return False
+    return "flex-1" in classes or any(
+        cls.startswith("flex-[") and cls.endswith("]")
+        for cls in classes
+    )
+
+
+def _has_risky_trailing_content_in_constrained_card(html: str) -> bool:
+    """检测本次坏例对应的高置信度卡片越界结构。"""
+    tag_stack: list[str] = []
+    card_stack: list[_ConstrainedCardState] = []
+
+    for match in _HTML_TAG_TOKEN_RE.finditer(html):
+        tag = match.group("tag").lower()
+        if match.group("closing"):
+            current_depth = len(tag_stack) - 1
+            if (
+                card_stack
+                and card_stack[-1].tag == tag
+                and card_stack[-1].depth == current_depth
+            ):
+                card_stack.pop()
+            if tag_stack:
+                tag_stack.pop()
+            continue
+
+        attrs = match.group("attrs") or ""
+        classes = _classes_from_tag_attrs(attrs)
+        if card_stack:
+            card = card_stack[-1]
+            if tag == "table" and "flex-shrink-0" in classes:
+                card.has_fixed_table = True
+            elif (
+                card.has_fixed_table
+                and tag in {"div", "p", "span", "aside"}
+                and "flex-shrink-0" in classes
+            ):
+                return True
+            if "mt-auto" in classes and "flex-shrink-0" in classes:
+                return True
+
+        is_void = tag in _HTML_VOID_TAGS or attrs.rstrip().endswith("/")
+        if is_void:
+            continue
+        tag_stack.append(tag)
+        if _is_constrained_flex_card(classes):
+            card_stack.append(
+                _ConstrainedCardState(tag=tag, depth=len(tag_stack) - 1)
+            )
+    return False
+
+
+_HTML_STYLE_RE = re.compile(
+    r"\bstyle\s*=\s*(?P<quote>[\"'])(?P<style>.*?)(?P=quote)",
+    re.IGNORECASE | re.DOTALL,
+)
+_DECORATION_ROLE_RE = re.compile(
+    r"\bdata-pptx-role\s*=\s*([\"'])decoration\1",
+    re.IGNORECASE,
+)
+_DECORATION_CLASS_RE = re.compile(
+    r"^(?:bg[-_])?(?:deco|decoration)(?:[-_].*)?$",
+    re.IGNORECASE,
+)
+_NEGATIVE_EDGE_STYLE_RE = re.compile(
+    r"(?:^|[;{])\s*(?:top|right|bottom|left)\s*:\s*"
+    r"-\s*(?:\d+(?:\.\d+)?|\.\d+)\s*(?:px|%|rem|em)\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_EDGE_CLASS_RE = re.compile(
+    r"^(?:top|right|bottom|left)-\[-(?:\d+(?:\.\d+)?|\.\d+)(?:px|%|rem|em)\]$",
+    re.IGNORECASE,
+)
+_STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(?P<css>.*?)</style>", re.IGNORECASE | re.DOTALL)
+_CSS_RULE_RE = re.compile(r"(?P<selectors>[^{}]+)\{(?P<body>[^{}]*)\}", re.DOTALL)
+
+
+def _is_explicit_decoration(attrs: str, classes: set[str]) -> bool:
+    """仅识别明确标注的背景装饰，避免误判普通绝对定位内容。"""
+    return bool(_DECORATION_ROLE_RE.search(attrs)) or any(
+        _DECORATION_CLASS_RE.fullmatch(cls)
+        for cls in classes
+    )
+
+
+def _has_negative_edge_in_css(html: str, classes: set[str]) -> bool:
+    """检查装饰类对应 CSS 规则是否将图形部分移出画布。"""
+    if not classes:
+        return False
+    for style_match in _STYLE_BLOCK_RE.finditer(html):
+        css = style_match.group("css")
+        for rule_match in _CSS_RULE_RE.finditer(css):
+            selectors = rule_match.group("selectors")
+            if not any(
+                re.search(
+                    rf"(?<![\w-])\.{re.escape(cls)}(?![\w-])",
+                    selectors,
+                )
+                for cls in classes
+            ):
+                continue
+            if _NEGATIVE_EDGE_STYLE_RE.search("{" + rule_match.group("body")):
+                return True
+    return False
+
+
+def _has_off_canvas_decoration(html: str) -> bool:
+    """检测内容页中依赖负坐标和画布裁切的明确背景装饰。"""
+    for match in _HTML_TAG_TOKEN_RE.finditer(html):
+        if match.group("closing"):
+            continue
+        attrs = match.group("attrs") or ""
+        classes = _classes_from_tag_attrs(attrs)
+        if not _is_explicit_decoration(attrs, classes):
+            continue
+        if any(_NEGATIVE_EDGE_CLASS_RE.fullmatch(cls) for cls in classes):
+            return True
+        style_match = _HTML_STYLE_RE.search(attrs)
+        if style_match and _NEGATIVE_EDGE_STYLE_RE.search("{" + style_match.group("style")):
+            return True
+        decoration_classes = {
+            cls for cls in classes if _DECORATION_CLASS_RE.fullmatch(cls)
+        }
+        if _has_negative_edge_in_css(html, decoration_classes):
+            return True
+    return False
+
+
+_JS_DELIMITER_PAIRS = {"(": ")", "[": "]", "{": "}"}
+_SET_OPTION_RE = re.compile(r"\.setOption\s*\(", re.IGNORECASE)
+_SERIES_ARRAY_RE = re.compile(r"\bseries\s*:\s*\[", re.IGNORECASE)
+_LABEL_OBJECT_RE = re.compile(r"\blabel\s*:\s*\{", re.IGNORECASE)
+_SERIES_TYPE_RE = re.compile(r"\btype\s*:\s*([\"'])(?P<type>bar|line)\1", re.IGNORECASE)
+_LABEL_SHOW_RE = re.compile(r"\bshow\s*:\s*true\b", re.IGNORECASE)
+_LABEL_POSITION_RE = re.compile(
+    r"\bposition\s*:\s*([\"'])(?P<position>[^\"']+)\1",
+    re.IGNORECASE,
+)
+_LABEL_OFFSET_RE = re.compile(r"\boffset\s*:\s*(?P<value>\[[^\]]*\])", re.IGNORECASE)
+_LABEL_DISTANCE_RE = re.compile(
+    r"\bdistance\s*:\s*(?P<value>-?(?:\d+(?:\.\d+)?|\.\d+))",
+    re.IGNORECASE,
+)
+_LABEL_FONT_SIZE_RE = re.compile(
+    r"\bfontSize\s*:\s*(?P<value>-?(?:\d+(?:\.\d+)?|\.\d+))",
+    re.IGNORECASE,
+)
+_LABEL_LINE_HEIGHT_RE = re.compile(
+    r"\blineHeight\s*:\s*(?P<value>-?(?:\d+(?:\.\d+)?|\.\d+))",
+    re.IGNORECASE,
+)
+_NON_PRIMARY_Y_AXIS_RE = re.compile(r"\byAxisIndex\s*:\s*[1-9]\d*\b", re.IGNORECASE)
+_NUMBER_LITERAL = r"-?(?:\d+(?:\.\d+)?|\.\d+)"
+_Y_AXIS_INDEX_RE = re.compile(r"\byAxisIndex\s*:\s*(?P<value>\d+)\b", re.IGNORECASE)
+_CHART_LABEL_REFERENCE_PLOT_HEIGHT_PX = 300.0
+_CHART_LABEL_MIN_GAP_PX = 12.0
+_CHART_TOP_LANE_MIN_GAP_PX = 18.0
+
+
+@dataclass(frozen=True)
+class _ChartLabelPlacement:
+    """ECharts 数据标签的垂直几何参数。"""
+
+    position: str
+    offset_x: float
+    offset_y: float
+    distance: float
+    font_size: float
+    line_height: float
+
+
+def _find_matching_js_delimiter(text: str, start: int) -> int:
+    """返回 JS 对象/数组/调用的闭合位置；忽略字符串和注释中的括号。"""
+    if start >= len(text) or text[start] not in _JS_DELIMITER_PAIRS:
+        return -1
+    stack = [text[start]]
+    quote = ""
+    escaped = False
+    line_comment = False
+    block_comment = False
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if line_comment:
+            if char in "\r\n":
+                line_comment = False
+            index += 1
+            continue
+        if block_comment:
+            if char == "*" and next_char == "/":
+                block_comment = False
+                index += 2
+            else:
+                index += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and next_char == "*":
+            block_comment = True
+            index += 2
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            index += 1
+            continue
+        if char in _JS_DELIMITER_PAIRS:
+            stack.append(char)
+        elif char in _JS_DELIMITER_PAIRS.values():
+            if not stack or _JS_DELIMITER_PAIRS[stack[-1]] != char:
+                return -1
+            stack.pop()
+            if not stack:
+                return index
+        index += 1
+    return -1
+
+
+def _extract_set_option_blocks(html: str) -> list[str]:
+    blocks: list[str] = []
+    for match in _SET_OPTION_RE.finditer(html):
+        open_index = match.end() - 1
+        close_index = _find_matching_js_delimiter(html, open_index)
+        if close_index != -1:
+            blocks.append(html[open_index + 1:close_index])
+    return blocks
+
+
+def _extract_named_js_array(text: str, pattern: re.Pattern[str]) -> str:
+    match = pattern.search(text)
+    if not match:
+        return ""
+    array_start = match.end() - 1
+    array_end = _find_matching_js_delimiter(text, array_start)
+    if array_end == -1:
+        return ""
+    return text[array_start:array_end + 1]
+
+
+def _extract_named_js_object(text: str, name: str) -> str:
+    pattern = re.compile(rf"\b{re.escape(name)}\s*:\s*\{{", re.IGNORECASE)
+    match = pattern.search(text)
+    if not match:
+        return ""
+    object_start = match.end() - 1
+    object_end = _find_matching_js_delimiter(text, object_start)
+    if object_end == -1:
+        return ""
+    return text[object_start:object_end + 1]
+
+
+def _extract_string_property(text: str, name: str) -> str:
+    match = re.search(
+        rf"\b{re.escape(name)}\s*:\s*([\"'])(?P<value>.*?)\1",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return match.group("value") if match else ""
+
+
+def _extract_top_level_js_objects(array_text: str) -> list[str]:
+    if not array_text.startswith("["):
+        return []
+    objects: list[str] = []
+    index = 1
+    array_end = len(array_text) - 1
+    while index < array_end:
+        if array_text[index] != "{":
+            index += 1
+            continue
+        object_end = _find_matching_js_delimiter(array_text, index)
+        if object_end == -1 or object_end > array_end:
+            return []
+        objects.append(array_text[index:object_end + 1])
+        index = object_end + 1
+    return objects
+
+
+def _extract_series_objects(option_block: str) -> list[str]:
+    return _extract_top_level_js_objects(
+        _extract_named_js_array(option_block, _SERIES_ARRAY_RE)
+    )
+
+
+def _extract_numeric_property(text: str, name: str) -> float | None:
+    match = re.search(
+        rf"\b{re.escape(name)}\s*:\s*(?P<value>{_NUMBER_LITERAL})\b",
+        text,
+        re.IGNORECASE,
+    )
+    return float(match.group("value")) if match else None
+
+
+def _extract_series_data(series: str) -> list[float | None]:
+    data_pattern = re.compile(r"\bdata\s*:\s*\[", re.IGNORECASE)
+    array_text = _extract_named_js_array(series, data_pattern)
+    if not array_text:
+        return []
+    values: list[float | None] = []
+    index = 1
+    array_end = len(array_text) - 1
+    while index < array_end:
+        while index < array_end and (array_text[index].isspace() or array_text[index] == ","):
+            index += 1
+        if index >= array_end:
+            break
+        if array_text[index] == "{":
+            object_end = _find_matching_js_delimiter(array_text, index)
+            if object_end == -1:
+                return []
+            value = _extract_numeric_property(array_text[index:object_end + 1], "value")
+            values.append(value)
+            index = object_end + 1
+            continue
+        item_end = array_text.find(",", index, array_end)
+        if item_end == -1:
+            item_end = array_end
+        token = array_text[index:item_end].strip()
+        if token.lower() == "null":
+            values.append(None)
+        elif re.fullmatch(_NUMBER_LITERAL, token):
+            values.append(float(token))
+        else:
+            return []
+        index = item_end + 1
+    return values
+
+
+def _extract_y_axis_bounds(option_block: str) -> list[tuple[float, float]]:
+    y_axis_pattern = re.compile(r"\byAxis\s*:\s*\[", re.IGNORECASE)
+    axis_objects = _extract_top_level_js_objects(
+        _extract_named_js_array(option_block, y_axis_pattern)
+    )
+    bounds: list[tuple[float, float]] = []
+    for axis in axis_objects:
+        maximum = _extract_numeric_property(axis, "max")
+        minimum = _extract_numeric_property(axis, "min")
+        if maximum is None or re.search(r"\bscale\s*:\s*true\b", axis, re.IGNORECASE):
+            return []
+        minimum = 0.0 if minimum is None else minimum
+        if maximum <= minimum:
+            return []
+        bounds.append((minimum, maximum))
+    return bounds
+
+
+def _label_placement_signature(series: str) -> _ChartLabelPlacement | None:
+    """提取启用标签的定位参数，用于估算跨系列文字框。"""
+    for match in _LABEL_OBJECT_RE.finditer(series):
+        object_start = match.end() - 1
+        object_end = _find_matching_js_delimiter(series, object_start)
+        if object_end == -1:
+            continue
+        label = series[object_start:object_end + 1]
+        if not _LABEL_SHOW_RE.search(label):
+            continue
+        position_match = _LABEL_POSITION_RE.search(label)
+        if not position_match:
+            continue
+        offset_match = _LABEL_OFFSET_RE.search(label)
+        distance_match = _LABEL_DISTANCE_RE.search(label)
+        font_size_match = _LABEL_FONT_SIZE_RE.search(label)
+        line_height_match = _LABEL_LINE_HEIGHT_RE.search(label)
+        offset_values = (
+            [float(value) for value in re.findall(_NUMBER_LITERAL, offset_match.group("value"))]
+            if offset_match
+            else []
+        )
+        font_size = float(font_size_match.group("value")) if font_size_match else 12.0
+        line_height = (
+            float(line_height_match.group("value"))
+            if line_height_match
+            else font_size * 1.2
+        )
+        return _ChartLabelPlacement(
+            position=position_match.group("position").lower(),
+            offset_x=offset_values[0] if offset_values else 0.0,
+            offset_y=offset_values[1] if len(offset_values) > 1 else 0.0,
+            distance=float(distance_match.group("value")) if distance_match else 5.0,
+            font_size=font_size,
+            line_height=line_height,
+        )
+    return None
+
+
+def _label_vertical_interval(
+    anchor_height: float,
+    placement: _ChartLabelPlacement,
+) -> tuple[float, float] | None:
+    """按300px参考绘图区估算标签文字框的归一化垂直区间。"""
+    plot_height = _CHART_LABEL_REFERENCE_PLOT_HEIGHT_PX
+    anchor = anchor_height - placement.offset_y / plot_height
+    distance = max(0.0, placement.distance) / plot_height
+    label_height = max(placement.font_size, placement.line_height) / plot_height
+    if placement.position == "top":
+        return anchor + distance, anchor + distance + label_height
+    if placement.position in {"insidetop", "bottom"}:
+        return anchor - distance - label_height, anchor - distance
+    if placement.position in {"left", "right"}:
+        half_height = label_height / 2
+        return anchor - half_height, anchor + half_height
+    return None
+
+
+def _vertical_interval_gap(
+    first: tuple[float, float],
+    second: tuple[float, float],
+) -> float:
+    if first[1] < second[0]:
+        return second[0] - first[1]
+    if second[1] < first[0]:
+        return first[0] - second[1]
+    return 0.0
+
+
+def _has_dual_axis_combo_label_collision_risk(html: str) -> bool:
+    """检测同一双轴柱线图中安全距离不足的数据标签。"""
+    for option_block in _extract_set_option_blocks(html):
+        series_objects = _extract_series_objects(option_block)
+        if not series_objects or not any(
+            _NON_PRIMARY_Y_AXIS_RE.search(series)
+            for series in series_objects
+        ):
+            continue
+        axis_bounds = _extract_y_axis_bounds(option_block)
+        if len(axis_bounds) < 2:
+            continue
+        entries: dict[
+            str,
+            list[tuple[_ChartLabelPlacement, int, list[float | None]]],
+        ] = {
+            "bar": [],
+            "line": [],
+        }
+        for series in series_objects:
+            type_match = _SERIES_TYPE_RE.search(series)
+            if not type_match:
+                continue
+            placement = _label_placement_signature(series)
+            data = _extract_series_data(series)
+            if not placement or not data:
+                continue
+            axis_match = _Y_AXIS_INDEX_RE.search(series)
+            axis_index = int(axis_match.group("value")) if axis_match else 0
+            if axis_index >= len(axis_bounds):
+                continue
+            entries[type_match.group("type").lower()].append(
+                (placement, axis_index, data)
+            )
+        for bar_placement, bar_axis, bar_data in entries["bar"]:
+            for line_placement, line_axis, line_data in entries["line"]:
+                bar_min, bar_max = axis_bounds[bar_axis]
+                line_min, line_max = axis_bounds[line_axis]
+                for bar_value, line_value in zip(bar_data, line_data):
+                    if bar_value is None or line_value is None:
+                        continue
+                    bar_height = (bar_value - bar_min) / (bar_max - bar_min)
+                    line_height = (line_value - line_min) / (line_max - line_min)
+                    bar_interval = _label_vertical_interval(bar_height, bar_placement)
+                    line_interval = _label_vertical_interval(line_height, line_placement)
+                    if not bar_interval or not line_interval:
+                        continue
+                    gap_px = _vertical_interval_gap(bar_interval, line_interval) * (
+                        _CHART_LABEL_REFERENCE_PLOT_HEIGHT_PX
+                    )
+                    if gap_px < _CHART_LABEL_MIN_GAP_PX:
+                        return True
+    return False
+
+
+def _has_chart_top_lane_collision_risk(html: str) -> bool:
+    """检测顶部横向图例与双Y轴名称之间的垂直安全距离。"""
+    y_axis_pattern = re.compile(r"\byAxis\s*:\s*\[", re.IGNORECASE)
+    for option_block in _extract_set_option_blocks(html):
+        axis_objects = _extract_top_level_js_objects(
+            _extract_named_js_array(option_block, y_axis_pattern)
+        )
+        named_axes = [axis for axis in axis_objects if _extract_string_property(axis, "name")]
+        if len(axis_objects) < 2 or not named_axes:
+            continue
+        legend = _extract_named_js_object(option_block, "legend")
+        grid = _extract_named_js_object(option_block, "grid")
+        if not legend or not grid:
+            continue
+        if _extract_string_property(legend, "orient").lower() == "vertical":
+            continue
+        legend_top = _extract_numeric_property(legend, "top")
+        grid_top = _extract_numeric_property(grid, "top")
+        if legend_top is None or grid_top is None:
+            continue
+        legend_text_style = _extract_named_js_object(legend, "textStyle")
+        legend_font_size = _extract_numeric_property(legend_text_style, "fontSize") or 12.0
+        axis_font_sizes = []
+        for axis in named_axes:
+            name_style = _extract_named_js_object(axis, "nameTextStyle")
+            axis_font_sizes.append(
+                _extract_numeric_property(name_style, "fontSize") or 12.0
+            )
+        axis_name_font_size = max(axis_font_sizes)
+        available_gap = grid_top - axis_name_font_size - (
+            legend_top + legend_font_size
+        )
+        if available_gap < _CHART_TOP_LANE_MIN_GAP_PX:
+            return True
+    return False
+
+
 def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -> list[str]:
     """程序化后置校验：对 LLM 判定的'缺数据可视化'做二次确认，移除误判。"""
     if "缺数据可视化" not in failed_items:
@@ -711,9 +1369,10 @@ def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -
 
 
 def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
-    """程序化后置校验：检测 Grid 布局、overflow-hidden、字号不一致、溢出风险等布局问题。
+    """程序化后置校验：检测 Grid、裁切、字号、边界和碰撞风险等布局问题。
 
     leading-loose（line-height:2）使文字高度翻倍，在 PPTX 导出时极易导致内容超出卡片边界。
+    高度受限卡片中的固定表格后追加不可收缩标签，也会把标签挤出父卡片。
     PPTX 不尊重 overflow-hidden，超出边界的内容会直接溢出。
     """
     # 检测 CSS Grid 使用
@@ -725,9 +1384,28 @@ def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
     # 检测字号不一致
     if _check_font_size_consistency(html) and "字号不一致" not in failed_items:
         failed_items.append("字号不一致")
-    # 检测溢出风险：leading-loose 使文字高度翻倍
-    if "内容溢出" not in failed_items and "leading-loose" in html:
+    # 只检测高置信度场景：1-5 个短条目的纯文字列表自身使用 flex-1 拉满高度。
+    # 该结果进入现有重试/low_density 兜底，不新增硬阻断。
+    if _has_sparse_flex_text_list(html) and "局部空白失衡" not in failed_items:
+        failed_items.append("局部空白失衡")
+    # 检测溢出风险：行高翻倍，或固定表格后追加不可收缩尾部内容。
+    if "内容溢出" not in failed_items and (
+        "leading-loose" in html
+        or _has_risky_trailing_content_in_constrained_card(html)
+    ):
         failed_items.append("内容溢出")
+    if _has_off_canvas_decoration(html) and "装饰元素越界" not in failed_items:
+        failed_items.append("装饰元素越界")
+    if (
+        _has_dual_axis_combo_label_collision_risk(html)
+        and "图表数据标签重叠风险" not in failed_items
+    ):
+        failed_items.append("图表数据标签重叠风险")
+    if (
+        _has_chart_top_lane_collision_risk(html)
+        and "图例与轴标题重叠" not in failed_items
+    ):
+        failed_items.append("图例与轴标题重叠")
     return failed_items
 
 
@@ -761,11 +1439,17 @@ _REWRITE_ACTIONS = {
     ),
     "核心要点不足": "将段落拆分为 6-10 个列表项或卡片，每条 1-2 行加图标",
     "缺装饰图标": "为每个核心要点/卡片添加相关 FontAwesome 图标（class 含 fa-）",
-    "空白率过高": "添加总结框（1-2 句概括性陈述），其次添加分隔线、引用块、背景装饰",
+    "空白率过高": (
+        "优先重排并放大已有图表、表格、图片或数据卡片的有效展示区域，"
+        "其次添加包含 1-2 句真实结论的总结框或引用块；"
+        "禁止用背景装饰、空容器或 spacer 冒充内容占用"
+    ),
     "局部空白失衡": (
-        "优先调整布局（第一选择）：将空白卡片的容器从 flex-1 改为 flex-shrink-0"
-        "（按内容自适应高度），或将 grid-rows-N 改为更少的行数，"
-        "缩小该区域占比并放大其他区域以消化多余空间\n"
+        "优先重排已有语义内容（第一选择）：同时移除短文字卡片组及卡片本身不必要的 flex-1，"
+        "改为 flex-shrink-0 按内容自适应高度；1-5 个短条目可改为 2×2/分组布局，"
+        "或用明确 Flex 权重、justify-between 合理分布真实条目；"
+        "同栏已有图表、图片或表格时，将剩余高度分配给这些主区域，或减少等高行数、缩小该区域占比；"
+        "禁止插入空 spacer、空容器或纯装饰元素冒充内容占用\n"
         "若必须补充内容（第二选择）：在卡片内追加 1-2 行精简描述即可，"
         "但禁止使用 leading-loose（line-height:2 会翻倍高度导致溢出），"
         "禁止添加 mt-auto 底部子元素（色块标签/badge 行等，会增加总高度），"
@@ -784,12 +1468,37 @@ _REWRITE_ACTIONS = {
         "仅保留 `.ppt-slide` 画布边界上的 overflow-hidden"
     ),
     "字号不一致": "统一同级别卡片/模块的字号，使用风格文件定义的字号值，确保同级元素字号一致",
-    "图例与轴标题重叠": "图例项过多时设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`，避免与坐标轴标题重叠",
+    "图例与轴标题重叠": (
+        "同时按图例项数量和文字长度处理：任一中文标签超过 6 个字或总长度超过 12 个字时，"
+        "优先在不改变含义的前提下缩短标签，或改为 `legend:{orient:'vertical'}`；"
+        "若仍横排，将 `itemGap` 调到至少 24；"
+        "标题行已标注单位时清空重复的 yAxis.name，否则增大 `grid.top` 或移动图例，"
+        "确保图例文字框底边与轴名称文字框顶边至少相隔 18px；不得缩小字号掩盖"
+    ),
+    "图表数据标签重叠风险": (
+        "仅调整同一双轴柱线图的数据标签定位，不改变数据、坐标轴或图表尺寸："
+        "按各自 yAxis min/max 比较同一分类的数据点视觉高度，并结合 fontSize、lineHeight、"
+        "position、distance、offset 确保两个标签文字框上下/左右至少相隔 12px；"
+        "即使柱形为 `insideTop`、折线为 `top` 也必须验算；"
+        "优先只移动碰撞系列或碰撞数据点，必要时仅隐藏次要点标签；"
+        "保留原字号，`labelLayout` 仅作为补充"
+    ),
+    "装饰元素越界": (
+        "只处理明确的背景装饰节点，不改标题、图表、卡片和正文："
+        "若风格文件没有定义该角落装饰，直接删除；若风格明确要求保留，"
+        "将其重绘为完整位于 1280×720 画布内、相应边角坐标为 0 的角形，"
+        "禁止负 top/right/bottom/left、负 margin 或依赖 overflow-hidden 裁切，"
+        "也不得引入风格文件禁止的渐变或随机形状"
+    ),
     "内容溢出": (
         "移除 `leading-loose`（改为 `leading-snug` 或 `leading-normal`），"
-        "移除 `mt-auto` 底部子元素（色块标签/badge 行等），"
+        "禁止仅删除 `mt-auto` 后把同一标签留在卡片尾部；"
+        "若受限卡片内已有表格/多行正文，将尾部标签移入所属卡片的标题行"
+        "（使用 `justify-between`）或合并为表格摘要行，确保标签四边都在父卡片边框内；"
+        "随后按需减小卡片内部 padding/gap 或调整同栏卡片 Flex 比例，"
         "精简每张卡片的文字行数使其不超过容器可容纳行数；"
-        "若内容确实需要更多空间，将 `flex-col` 改为更少的子元素或改为 `flex-shrink-0` 自适应高度"
+        "若内容确实需要更多空间，将 `flex-col` 改为更少的子元素或改为 `flex-shrink-0` 自适应高度；"
+        "不得用绝对定位、负 margin 或 `overflow-hidden` 掩盖越界"
     ),
 }
 
@@ -996,7 +1705,6 @@ def _build_page_prompt(
     research_page: str,
     *,
     designer_md_text: str = "",
-    charts_md_text: str = "",
     outline_is_full: bool = False,
     research_is_full: bool = False,
     rewrite_hint: str = "",
@@ -1105,17 +1813,16 @@ def _build_page_prompt(
     design_rules = _STRUCTURAL_DESIGN_RULES if is_structural else _DESIGN_RULES_DIGEST
     html_skeleton = _STRUCTURAL_HTML_SKELETON if is_structural else _HTML_SKELETON
 
-    # 注入 skill designer 规范（防溢出 CSS 约束 + 语义区域指南）
+    # 注入新版 skill designer 规范；图表候选页从同一 designer.md 追加图表章节。
     # 文件内容由 PrepareNode 通过 read_file 工具读取后传入
     designer_section = ""
     if not is_structural and designer_md_text:
-        designer_md = _extract_designer_section(designer_md_text)
+        designer_md = _extract_designer_section(
+            designer_md_text,
+            include_charts=page_type in _CHART_CANDIDATE_TYPES,
+        )
         if designer_md:
             designer_section = f"\n### skill designer 约束（必须遵守）\n{designer_md}\n"
-
-    # 图表候选页注入 charts.md（独立判断，不依赖 SKILL.md 读取结果）
-    if not is_structural and page_type in _CHART_CANDIDATE_TYPES and charts_md_text:
-        designer_section += f"\n### ECharts 图表编码规范（必须遵守）\n{charts_md_text}\n"
 
     # 布局多样性约束：禁止连续两页相同布局
     diversity_rule = ""
@@ -1184,7 +1891,7 @@ def _build_page_prompt(
 
 @dataclass
 class PageGenContext:
-    """单页生成上下文——_generate_one / _rewrite_one 共享的只读参数。"""
+    """单页生成使用的只读上下文。"""
 
     page_num: int
     style_id: str
@@ -1192,10 +1899,8 @@ class PageGenContext:
     outline_page: str
     research_page: str
     outline_is_full: bool
-    research_is_full: bool
     image_map_page: str  # 本页图片素材描述（空串=无图）
-    designer_md_text: str  # designer/SKILL.md 原文（由 PrepareNode 通过 read_file 读取）
-    charts_md_text: str  # designer/charts.md 原文（由 PrepareNode 通过 read_file 读取）
+    designer_md_text: str  # references/designer.md 原文（由 PrepareNode 通过 read_file 读取）
     user_query: str = ""  # 用户原始 query（由 collect_user_text 提取）
 
 
@@ -1298,9 +2003,8 @@ class PrepareNode(PlanNode):
                     logger.warning("[P8.0] image_map.json 解析失败: %s", e)
 
         # 读取 skill designer 规范文件（通过 read_file 工具，skill_code 禁止直接 IO）
-        pptx_root = str(inputs.get("pptx_root") or _PPT_DIR)
-        designer_md_text = await self._read_file(f"{pptx_root}/designer/SKILL.md")
-        charts_md_text = await self._read_file(f"{pptx_root}/designer/charts.md")
+        pptx_root = str(inputs.get("pptx_root") or "").strip()
+        designer_md_text = await self._read_file(f"{pptx_root}/references/designer.md")
 
         logger.info(
             "[P8.0] 预处理完成 outline_pages=%d research_pages=%d image_map_pages=%d",
@@ -1317,7 +2021,6 @@ class PrepareNode(PlanNode):
             "all_pages": all_pages,
             "image_map": image_map,
             "designer_md_text": designer_md_text,
-            "charts_md_text": charts_md_text,
         }
 
     async def _read_file(self, path: str) -> str:
@@ -1348,17 +2051,16 @@ class PrepareNode(PlanNode):
 
 
 class PageWorkerNode(PlanNode):
-    """P8.1 — per-page 闭环：生成→校验→密度判定→搜索补充→重写，N 页并发。"""
+    """P8.1 — 按新版 pptx-craft 规则并发生成并校验每页 HTML。"""
 
     def __init__(self) -> None:
         super().__init__(
             plan_name="p8_1_page_worker",
             instruction=(
-                "## P8.1 per-page 闭环生成（合并原 P8.1 生成 + P8.2 密度检查与重写）\n"
+                "## P8.1 per-page 页面生成\n"
                 "\n"
                 "### 前置条件\n"
-                "- `read_file` / `write_file` 工具可用\n"
-                "- `web_search` 工具可用（搜索补充，不可用时降级为纯重写）\n"
+                "- `write_file` 工具可用\n"
                 "- P8.0 已产出共享只读数据（outline_pages/research_pages/全文/style_text）\n"
                 "- `pages_dir` 已存在\n"
                 "\n"
@@ -1369,69 +2071,25 @@ class PageWorkerNode(PlanNode):
                 "- `outline_pages` / `research_pages`（来自 P8.0）: 按页拆分片段\n"
                 "- `outline_text` / `style_text`（来自 P8.0）: 全文，拆分失败时回退\n"
                 "- `all_pages`（来自 P8.0）: 1..N 页码列表\n"
-                "- `topic`（可选）: PPT 主题，搜索补充关键词用\n"
-                "- `search_mode`（可选，影响数据可视化阈值）\n"
-                "- `gen_retry_round`（可选，默认 1）\n"
-                "- `density_retry_round`（可选，默认 1）\n"
+                "- `gen_retry_round`（可选，默认 1；含首次生成在内最多尝试 3 次）\n"
                 "\n"
                 "### 输出\n"
                 "- `page_files`: 实际产出的 page-*.pptx.html 列表\n"
                 "- `missing_pages`: 仍缺失的页码（用于上层标 partial）\n"
-                "- `low_density_pages`: 重写后仍未通过的页码\n"
-                "- `density_report`: 每页检查结果摘要\n"
+                "- `low_density_pages` / `density_report`: 兼容历史输出，固定为空\n"
                 "- `outline_text` / `style_text`（透传给 P8.2）\n"
                 "\n"
-                "### 执行流程（per-page 闭环，N 页 asyncio.gather 并发）\n"
+                "### 执行流程（N 页 asyncio.gather 并发）\n"
                 "对每一页独立执行：\n"
                 "1. 生成阶段：用该页 outline 片段 + research 片段 + 风格规范 + 视觉与布局硬约束构造 prompt，"
                 "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
-                "   - 重试后仍失败 → 进 missing_pages，该页闭环终止\n"
-                "2. 密度判定阶段：调 LLM 做 12 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
-                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 留白质量 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整 / 溢出风险\n"
-                "   - 数据可视化阈值：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式降至 2 个）\n"
-                "3. 不通过 → 修复阶段（按 density_retry_round 轮）：\n"
-                "   a. 分析缺失项，判断是否需要搜索补充数据\n"
-                "   b. 若缺数据可视化/缺案例/缺数据来源 → 调用 `web_search` 搜索补充：\n"
-                "      - 缺数据可视化：搜索 `\"{主题} 市场规模 数据\"` / `\"{主题} 增长率 统计\"`，获取可图表化的数据点\n"
-                "      - 缺案例：搜索 `\"{主题} 应用案例 实践\"`，获取真实案例\n"
-                "      - 缺数据来源：搜索 `\"{主题} 行业报告\"`，获取权威机构名称\n"
-                "      - 搜索优先获取最近 1-2 年数据，优先权威来源\n"
-                "      - 数据来源标注使用 research-P{N}.md 中的来源\n"
-                "   c. 将搜索结果 + 原有素材 + 不通过项提示词 + 上次产物构造重写 prompt，调 LLM 重新生成 HTML\n"
-                "   d. 若无需搜索（如缺装饰图标/大段文字/视觉层级/布局错误），直接用原有素材 + 不通过项提示词重写\n"
-                "   e. 重写产物校验通过 → 落盘覆盖 → 复检；仍不通过进 low_density_pages\n"
-                "\n"
-                "### 内容要求（每页 HTML 必须满足）\n"
-                "- 所有文字必须是真实内容，禁止占位文本（TODO、xxx 等）\n"
-                "- 该页 outline + research 中的全部信息点都必须体现\n"
-                "- 数据/对比/趋势页 → 使用 ECharts 绘制实际图表，禁止图片占位\n"
-                "- 步骤/流程页 → 绘制完整节点 + 连线 + 文字标注，禁止纯文字描述\n"
-                "- 关键数字必须有放大数字卡片 + 说明注释\n"
-                "- 结论必须有摘要高亮\n"
-                "- 视觉精细化：三级字体体系（标题 36-48px、副标题 24-28px、正文 16-20px）\n"
-                "- 装饰增强：页面边缘/背景层加轻量几何装饰\n"
-                "\n"
-                "### 数据转换规则（搜索补充后）\n"
-                "| 获取内容 | 转换方式 |\n"
-                "|---|---|\n"
-                "| 时间序列数据（≥3 点） | 折线图（趋势）或柱状图（对比） |\n"
-                "| 类别占比数据（总和 100%） | 饼图/环形图 |\n"
-                "| 对比数据（2-3 类别） | 条形图或对比卡片 |\n"
-                "| 多类别比较（≥4 类别） | 柱状图 |\n"
-                "| 多维能力对比（≥3 维度） | 雷达图(radar) |\n"
-                "| 两变量相关性 | 散点图(scatter) |\n"
-                "| 关键观点 | 带图标的列表项 |\n"
-                "| 真实案例 | 案例卡片（公司名 + 数据 + 效果） |\n"
+                "   - 重试后仍失败 → 进 missing_pages\n"
+                "2. 成功页只保留一个 ppt-slide 容器并直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
                 "\n"
                 "### 失败兜底\n"
                 "- 生成 LLM 调用 raise / 返回空 / HTML 校验失败：进 missing_pages\n"
                 "- 首次落盘 write_file 异常：进 missing_pages\n"
-                "- 检查 LLM 调用失败（含网络/超时/JSON 解析等任意异常）：保守视为通过（避免假阳性触发无意义重写）\n"
-                "- 重检时 read_file 失败：保守判通过，保留当前 HTML\n"
-                "- web_search 不可用或搜索失败：跳过搜索补充，仅用原有素材重写\n"
-                "- 重写 LLM 调用失败 / 重写产物校验失败 / 重写产物落盘失败：保留当前 HTML，进 low_density_pages\n"
-                "- density_retry_round 后仍不通过：保留当前 HTML 供人工排查\n"
                 "- 重试后仍缺失：透传给根节点\n"
             ),
         )
@@ -1439,10 +2097,7 @@ class PageWorkerNode(PlanNode):
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         pages_dir = str(inputs.get("pages_dir") or "").strip()
         style_id = str(inputs.get("style_id") or "").strip()
-        search_mode = str(inputs.get("search_mode") or "auto").strip()
-        topic = str(inputs.get("topic") or "").strip()
         gen_retry_round = int(inputs.get("gen_retry_round") or _DEFAULT_GEN_RETRY_ROUND)
-        density_retry_round = int(inputs.get("density_retry_round") or _DEFAULT_DENSITY_RETRY_ROUND)
 
         outline_pages: dict[int, str] = inputs.get("outline_pages") or {}
         research_pages: dict[int, str] = inputs.get("research_pages") or {}
@@ -1451,7 +2106,6 @@ class PageWorkerNode(PlanNode):
         all_pages: list[int] = list(inputs.get("all_pages") or [])
         image_map: dict[str, Any] = inputs.get("image_map") or {}
         designer_md_text = str(inputs.get("designer_md_text") or "")
-        charts_md_text = str(inputs.get("charts_md_text") or "")
         user_query = PptCommon.collect_user_text(inputs)
 
         if not pages_dir or not all_pages:
@@ -1474,50 +2128,41 @@ class PageWorkerNode(PlanNode):
                 outline_page=outline_pages.get(p, outline_full),
                 research_page=research_pages.get(p, ""),
                 outline_is_full=p not in outline_pages,
-                research_is_full=False,
-                search_mode=search_mode,
-                topic=topic,
                 gen_retry_round=gen_retry_round,
-                density_retry_round=density_retry_round,
                 image_map=image_map,
                 designer_md_text=designer_md_text,
-                charts_md_text=charts_md_text,
                 user_query=user_query,
             )
             for p in all_pages
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, (AbortError, asyncio.CancelledError)):
+                raise result
 
         missing_pages: list[int] = []
-        low_density_pages: list[int] = []
-        density_report: dict[int, dict[str, Any]] = {}
         for p, r in zip(all_pages, results):
-            if isinstance(r, Exception):
-                logger.warning("[P8.1] 页面 %d 闭环异常: %s", p, r)
+            if isinstance(r, BaseException):
+                logger.warning("[P8.1] 页面 %d 生成异常: %s", p, r)
                 missing_pages.append(p)
                 continue
             if r.get("missing"):
                 missing_pages.append(p)
-            if r.get("low_density"):
-                low_density_pages.append(p)
-            if r.get("report"):
-                density_report[p] = r["report"]
 
         successful_pages = [p for p in all_pages if p not in missing_pages]
         page_files = [f"page-{p}.pptx.html" for p in successful_pages]
 
         logger.info(
-            "[P8.1] per-page 闭环完成 success=%d/%d missing=%d low_density=%d",
+            "[P8.1] per-page 生成完成 success=%d/%d missing=%d",
             len(successful_pages),
             len(all_pages),
             len(missing_pages),
-            len(low_density_pages),
         )
         return {
             "page_files": page_files,
             "missing_pages": missing_pages,
-            "low_density_pages": low_density_pages,
-            "density_report": density_report,
+            "low_density_pages": [],
+            "density_report": {},
             "outline_text": outline_full,
             "style_text": style_text,
         }
@@ -1532,17 +2177,12 @@ class PageWorkerNode(PlanNode):
         outline_page: str,
         research_page: str,
         outline_is_full: bool,
-        research_is_full: bool,
-        search_mode: str,
-        topic: str,
         gen_retry_round: int,
-        density_retry_round: int,
         image_map: dict[str, Any],
         designer_md_text: str = "",
-        charts_md_text: str = "",
         user_query: str = "",
     ) -> dict[str, Any]:
-        """单页闭环：生成(含重试) → 密度判定 → 搜索补充+重写(含重试)。"""
+        """生成并校验单页；仅生成失败时按预算重试。"""
         path = f"{pages_dir}/page-{page_num}.pptx.html"
 
         # 从 image_map 中提取本页图片素材描述
@@ -1565,15 +2205,17 @@ class PageWorkerNode(PlanNode):
             outline_page=outline_page,
             research_page=research_page,
             outline_is_full=outline_is_full,
-            research_is_full=research_is_full,
             image_map_page=image_map_page,
             designer_md_text=designer_md_text,
-            charts_md_text=charts_md_text,
             user_query=user_query,
         )
 
         html = ""
-        for attempt in range(max(gen_retry_round + 1, 1)):
+        attempt_count = min(
+            max(gen_retry_round + 1, 1),
+            _MAX_PAGE_GENERATION_ATTEMPTS,
+        )
+        for attempt in range(attempt_count):
             if attempt > 0:
                 logger.info("[P8.1] 页面 %d 第 %d 轮生成重试", page_num, attempt + 1)
             html = await self._generate_one(ctx)
@@ -1589,53 +2231,10 @@ class PageWorkerNode(PlanNode):
         if not ok:
             return {"missing": True, "low_density": False, "report": {}}
 
-        report: dict[str, Any] = {"pass": True}
-        low_density = False
-        # 与 _build_page_prompt 一致：基于「页研究查询/数据需求」字段判定结构页
-        has_research_need = "✅" in outline_page and (
-            "页研究查询" in outline_page or "数据需求" in outline_page or "研究需求" in outline_page
-        )
-        is_structural = not has_research_need
-        total_rounds = max(density_retry_round + 1, 1)
-        for round_idx in range(total_rounds):
-            current = await self._read_file(path)
-            if not current:
-                logger.warning("[P8.1] 页面 %d 重检时读取失败，保守判通过", page_num)
-                break
-            report = await self._check_one(page_num, current, search_mode, outline_page)
-            if report.get("pass", True):
-                break
-            if round_idx == total_rounds - 1:
-                low_density = True
-                logger.info("[P8.1] 页面 %d 密度重试用尽，进 low_density", page_num)
-                break
-
-            if is_structural:
-                supplement = ""
-            else:
-                supplement = await self._search_supplement_one(
-                    page_num, report, research_page, topic,
-                )
-            rewritten = await self._rewrite_one(
-                ctx,
-                report.get("failed_items") or [], current, supplement,
-            )
-            if not rewritten:
-                low_density = True
-                logger.info("[P8.1] 页面 %d 重写失败，保留当前 HTML，进 low_density", page_num)
-                break
-            # 防御：重写产物也可能包含多个 slide
-            rewritten = _truncate_to_single_slide(rewritten)
-            write_ok = await self._write_file(path, rewritten)
-            if not write_ok:
-                low_density = True
-                logger.info("[P8.1] 页面 %d 重写产物落盘失败，保留当前 HTML，进 low_density", page_num)
-                break
-
         return {
             "missing": False,
-            "low_density": low_density,
-            "report": report,
+            "low_density": False,
+            "report": {},
         }
 
     async def _generate_one(self, ctx: PageGenContext) -> str:
@@ -1652,7 +2251,6 @@ class PageWorkerNode(PlanNode):
                     research_is_full=False,
                     image_map_page=ctx.image_map_page,
                     designer_md_text=ctx.designer_md_text,
-                    charts_md_text=ctx.charts_md_text,
                     user_query=ctx.user_query,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
@@ -1673,195 +2271,6 @@ class PageWorkerNode(PlanNode):
         html = _fix_echarts_svg_renderer(html)
         return html
 
-    async def _check_one(
-        self,
-        page_num: int,
-        html: str,
-        search_mode: str,
-        outline_page: str = "",
-    ) -> dict[str, Any]:
-        """单页密度判定（LLM + 程序化后置校验）。LLM 异常保守判通过。"""
-        # 与 _build_page_prompt 一致：基于「页研究查询/数据需求」字段判定结构页
-        has_research_need = outline_page and "✅" in outline_page and (
-            "页研究查询" in outline_page or "数据需求" in outline_page or "研究需求" in outline_page
-        )
-        is_structural = not has_research_need
-
-        if is_structural:
-            checklist = _STRUCTURAL_DENSITY_CHECKLIST
-            failed_enum = "内容被裁切 / 大段文字 / 视觉层级混乱 / 空白失衡 / 内容溢出"
-        else:
-            checklist = _DENSITY_CHECKLIST_DIGEST
-            no_search_hint = ""
-            if search_mode == "no_search":
-                no_search_hint = (
-                    "\n注意：当前为 no_search 模式，标注'数据有限'的页面，"
-                    "数据可视化阈值降至 ≥2 个数据卡片。\n"
-                )
-            failed_enum = (
-                "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / 局部空白失衡 / "
-                "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误 / "
-                "内容被隐藏 / 核心内容缺失 / grid-cols 非法 / "
-                "使用了不支持的Grid布局 / 核心内容被overflow-hidden裁切 / 字号不一致 / "
-                "图例与轴标题重叠 / 内容溢出"
-            )
-
-        prompt = (
-            "请对以下 PPT 单页 HTML 做内容密度检查，按清单逐项判定，仅输出 JSON。\n\n"
-            f"{checklist}"
-            f"{no_search_hint if not is_structural else ''}"
-            "\nHTML 内容：\n"
-            "```html\n"
-            f"{html}\n"
-            "```\n\n"
-            "输出 JSON（受控字段）：\n"
-            '{"pass": true/false, "failed_items": [...], "reason": "简要说明"}\n'
-            f"failed_items 仅可从以下取值：\n{failed_enum}\n"
-            "全部通过则 failed_items: []。只输出 JSON，不输出其他内容。"
-        )
-        try:
-            llm_result = await self.stream_llm_collect(
-                prompt=prompt,
-                system_prompt="你是 PPT 内容密度检查助手，只输出 JSON。",
-                node_name=f"p8_2_density_check_page_{page_num}",
-                concurrent=True,
-            )
-            check = self.extract_json(llm_result, expected_type=dict)
-            if not isinstance(check, dict):
-                return {"pass": True, "reason": "json_parse_failed"}
-            failed_items = list(check.get("failed_items") or [])
-            llm_failed = list(failed_items)
-            if not is_structural:
-                failed_items = _post_check_data_viz(html, failed_items, search_mode)
-                # 主动检测空 SVG 图表：有 echarts-static-svg 容器但 SVG 内无图形元素
-                if _has_empty_chart_svg(html) and "缺数据可视化" not in failed_items:
-                    failed_items.append("缺数据可视化")
-                    logger.info("[P8.1] 页面 %d 检测到空SVG图表，标记缺数据可视化", page_num)
-                # 主动检测图表容器缺初始化：有 echarts.min.js + 空 div 容器但无 echarts.init 调用
-                if _has_chart_without_init(html) and "缺数据可视化" not in failed_items:
-                    failed_items.append("缺数据可视化")
-                    logger.info("[P8.1] 页面 %d 检测到图表容器缺少echarts.init初始化，标记缺数据可视化", page_num)
-                # 程序化布局检查：Grid 使用、overflow-hidden 裁切、字号不一致、溢出风险（leading-loose）
-                before_count = len(failed_items)
-                failed_items = _post_check_layout_issues(html, failed_items)
-                new_issues = failed_items[before_count:]
-                if new_issues:
-                    logger.info("[P8.1] 页面 %d 程序化布局检查发现问题: %s", page_num, new_issues)
-            if len(failed_items) < len(llm_failed):
-                removed = [x for x in llm_failed if x not in failed_items]
-                logger.info(
-                    "[P8.1] 页面 %d 程序化后置校验移除误判项: %s",
-                    page_num,
-                    removed,
-                )
-            return {
-                "pass": bool(check.get("pass", False)) and not failed_items,
-                "failed_items": failed_items,
-                "reason": str(check.get("reason") or ""),
-            }
-        except Exception as e:
-            if isinstance(e, AbortError):
-                raise
-            logger.warning("[P8.1] 页面 %d 密度检查 LLM 失败（保守通过）: %s", page_num, e)
-            return {"pass": True, "reason": f"llm_error: {e}"}
-
-    async def _search_supplement_one(
-        self,
-        page_num: int,
-        report: dict[str, Any],
-        research_page: str,
-        topic: str,
-    ) -> str:
-        """单页搜索补充（原 _search_supplement 的单页版，随 per-page 并发）。"""
-        if not self.has_tool("web_search"):
-            return ""
-        failed_items = set(report.get("failed_items") or [])
-        search_items = failed_items & _SEARCH_NEEDED_ITEMS
-        if not search_items:
-            return ""
-
-        page_keywords = _extract_page_keywords(research_page) if research_page else []
-        snippets: list[str] = []
-        for item in search_items:
-            templates = _SEARCH_QUERY_TEMPLATES.get(item, [])
-            queries = _build_search_queries(templates, topic=topic, page_keywords=page_keywords)
-            if not queries:
-                continue
-            for query in queries[:2]:
-                try:
-                    raw = await self.call_tool("web_search", query=query)
-                    snippet = _extract_search_text(raw)
-                    if snippet:
-                        snippets.append(f"[{item}] 搜索 \"{query}\" 结果：\n{snippet}")
-                        break
-                except Exception as e:
-                    if isinstance(e, AbortError):
-                        raise
-                    logger.warning("[P8.1] 页面 %d 搜索补充失败 item=%s query=%s: %s", page_num, item, query, e)
-        return "\n\n".join(snippets)
-
-    async def _rewrite_one(
-        self,
-        ctx: PageGenContext,
-        failed_items: list[str],
-        original_html: str,
-        supplement: str,
-    ) -> str:
-        """单页重写，返回校验通过的新 html 或空串。"""
-        hint = _build_rewrite_hint(failed_items)
-        if supplement:
-            hint = f"{hint}\n\n### 搜索补充数据\n{supplement}" if hint else f"### 搜索补充数据\n{supplement}"
-        try:
-            result = await self.stream_llm_collect(
-                prompt=_build_page_prompt(
-                    ctx.page_num,
-                    style_id=ctx.style_id,
-                    style_text=ctx.style_text,
-                    outline_page=ctx.outline_page,
-                    research_page=ctx.research_page,
-                    outline_is_full=ctx.outline_is_full,
-                    research_is_full=ctx.research_is_full,
-                    rewrite_hint=hint,
-                    original_html=original_html,
-                    image_map_page=ctx.image_map_page,
-                    designer_md_text=ctx.designer_md_text,
-                    charts_md_text=ctx.charts_md_text,
-                    user_query=ctx.user_query,
-                ),
-                system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
-                node_name=f"p8_2_page_{ctx.page_num}",
-                concurrent=True,
-            )
-        except Exception as e:
-            if isinstance(e, AbortError):
-                raise
-            logger.warning("[P8.1] 页面 %d 重写 LLM 失败: %s", ctx.page_num, e)
-            return ""
-        html = _strip_html_fence(result or "")
-        if not _is_valid_html(html):
-            logger.warning("[P8.1] 页面 %d 重写产物 HTML 校验失败", ctx.page_num)
-            return ""
-        # 后置校验：替换「第X页」标题占位符为 outline 中的实际标题
-        html = _replace_placeholder_headings(html, ctx.outline_page)
-        html = _fix_echarts_svg_renderer(html)
-        return html
-
-    async def _read_file(self, path: str) -> str:
-        if not path:
-            return ""
-        if not self.has_tool("read_file"):
-            logger.warning("[P8.1] read_file 工具不可用 %s", path)
-            return ""
-        try:
-            result = await self.call_tool("read_file", file_path=path)
-            content = PptCommon.parse_tool_file_content(result)
-            return content
-        except Exception as e:
-            if isinstance(e, AbortError):
-                raise
-            logger.warning("[P8.1] 读取文件失败 %s: %s", path, e)
-            return ""
-
     async def _write_file(self, path: str, content: str) -> bool:
         if not self.has_tool("write_file"):
             logger.error("[P8.1] write_file 工具不可用 %s", path)
@@ -1878,27 +2287,26 @@ class PageWorkerNode(PlanNode):
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
         missing = result.get("missing_pages", [])
-        low = result.get("low_density_pages", [])
-        status = "ok" if not missing and not low else "warning"
+        status = "ok" if not missing else "warning"
         yield {
             **result,
             "node": self.plan_name,
             "status": status,
             "message": (
-                f"per-page 闭环完成，成功 {len(result.get('page_files', []))} 页，"
-                f"缺失 {len(missing)} 页，低密度 {len(low)} 页"
+                f"per-page 生成完成，成功 {len(result.get('page_files', []))} 页，"
+                f"缺失 {len(missing)} 页"
             ),
         }
 
 
 class QAFixNode(PlanNode):
-    """P8.2 — 完整性检查 + cli.js fix（对应 SKILL Stage 7.5）。"""
+    """P8.2 — 按新版 pptx-craft Stage 6 做完整性检查与官方 fix。"""
 
     def __init__(self) -> None:
         super().__init__(
             plan_name="p8_2_qa_fix",
             instruction=(
-                "## P8.2 QA 与自动修复\n"
+                "## P8.2 页面完整性检查与基础修复\n"
                 "\n"
                 "### 前置条件\n"
                 "- `bash` 工具可用\n"
@@ -1915,7 +2323,8 @@ class QAFixNode(PlanNode):
                 "\n"
                 "### 执行流程\n"
                 "1. 完整性检查：列 pages_dir 下 page-*.pptx.html，比对数量与 page_count\n"
-                "2. 自动修复：node cli.js fix {pages_dir}/ --fix（标签校验、布局修复、图表修复、CDN 依赖补充）\n"
+                "2. 基础修复：node cli.js fix {pages_dir}/ --fix --style {style_file_path}\n"
+                "3. Stage 6 到此结束；可选 check-layout 按 skill 规则仅在首次导出后且显式启用时执行\n"
                 "\n"
                 "### 失败兜底\n"
                 "- bash 不可用：跳过 fix，仅做完整性检查\n"
@@ -1942,26 +2351,21 @@ class QAFixNode(PlanNode):
         completeness_ok, page_files = await self._check_completeness(pages_dir, total_pages)
         qa_status = "ok" if completeness_ok else "partial"
 
-        fix_report = ""
+        fix_report_parts: list[str] = []
         try:
-            pptx_root = str(inputs.get("pptx_root") or _PPT_DIR)
+            pptx_root = str(inputs.get("pptx_root") or "").strip()
+            style_file_path = str(inputs.get("style_file_path") or "").strip()
             # 按页并发 fix（1.1.19a+ 支持 --pages 参数）
             page_nums = [int(f.replace("page-", "").replace(".pptx.html", ""))
                          for f in page_files if f.startswith("page-") and f.endswith(".pptx.html")]
             page_nums.sort()
             if page_nums:
-                sem = asyncio.Semaphore(10)
-
-                async def _fix_one(pn: int) -> tuple[int, bool, str]:
-                    async with sem:
-                        cmd = f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} --fix --pages {pn}"
-                        r = await run_bash(self, cmd, timeout_seconds=300, required=False, workdir=pptx_root)
-                        out = combined_output(r)[:500]
-                        ok = r.exit_code == 0
-                        if not ok:
-                            logger.warning("[P8.2] page-%d fix 失败 exit=%d", pn, r.exit_code)
-                        return pn, ok, out
-                results = await asyncio.gather(*[_fix_one(p) for p in page_nums], return_exceptions=True)
+                results = await self._fix_pages(
+                    page_nums,
+                    pages_dir=pages_dir,
+                    pptx_root=pptx_root,
+                    style_file_path=style_file_path,
+                )
                 failed_pages = [
                     r[0] for r in results
                     if isinstance(r, tuple) and not r[1]
@@ -1983,19 +2387,67 @@ class QAFixNode(PlanNode):
                     else:
                         pn, ok = 0, False
                     fix_parts.append(f"page-{pn}: {'ok' if ok else 'fail'}")
-                fix_report = "; ".join(fix_parts)
+                fix_report_parts.append("fix=" + ",".join(fix_parts))
             else:
-                fix_report = "no pages to fix"
+                fix_report_parts.append("fix=no pages")
         except BashExecError as e:
             logger.error("[P8.2] cli.js fix 异常: %s", e)
             qa_status = "failed"
-            fix_report = f"bash_error: {e}"
+            fix_report_parts.append(f"bash_error: {e}")
 
         return {
             "qa_status": qa_status,
             "final_page_files": page_files,
-            "fix_report": fix_report,
+            "fix_report": "; ".join(fix_report_parts),
         }
+
+    async def _fix_pages(
+        self,
+        page_nums: list[int],
+        *,
+        pages_dir: str,
+        pptx_root: str,
+        style_file_path: str,
+    ) -> list[tuple[int, bool, str] | BaseException]:
+        """仅对指定页面并发执行新版 pptx-craft fix。"""
+        sem = asyncio.Semaphore(10)
+
+        async def _fix_one(page_num: int) -> tuple[int, bool, str]:
+            async with sem:
+                style_arg = (
+                    f" --style {quote_path(style_file_path)}"
+                    if style_file_path
+                    else ""
+                )
+                cmd = (
+                    f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} "
+                    f"--fix --pages {page_num}{style_arg}"
+                )
+                result = await run_bash(
+                    self,
+                    cmd,
+                    timeout_seconds=300,
+                    required=False,
+                    workdir=pptx_root,
+                )
+                output = combined_output(result)[:500]
+                ok = result.exit_code == 0
+                if not ok:
+                    logger.warning(
+                        "[P8.2] page-%d fix 失败 exit=%d",
+                        page_num,
+                        result.exit_code,
+                    )
+                return page_num, ok, output
+
+        results = await asyncio.gather(
+            *[_fix_one(page_num) for page_num in page_nums],
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, (AbortError, asyncio.CancelledError)):
+                raise result
+        return results
 
     async def _check_completeness(
         self,
@@ -2166,20 +2618,19 @@ class PPTPageGenNode(PlanNode):
                 "\n"
                 "### 节点职责\n"
                 "1. 把 outline.md + research-P{N}.md + 风格文件转成 N 个 page-{N}.pptx.html\n"
-                "2. 三阶段串行编排：预处理 → per-page 闭环生成 → QA 与自动修复\n"
-                "   - per-page 闭环内部 N 页 asyncio.gather 并发，单页内生成→密度判定→搜索补充→重写串行\n"
+                "2. 三阶段串行编排：预处理 → per-page 生成 → 页面完整性检查与官方 fix\n"
+                "   - per-page 生成内部 N 页 asyncio.gather 并发，只有生成失败或 HTML 非法时才重试\n"
                 "3. 不区分单 Agent 模式，LLM 并发度由框架 semaphore 控制\n"
+                "4. `style_mode == template_canvas` 时走模板画布分支：跳过普通三阶段，改由 `_execute_template_pack` 用模板包 + LLM 填充生成页面\n"
                 "\n"
                 "### 输入\n"
                 "- `output_dir`（必填）: 工作目录（含 outline.md / research-P{N}.md）\n"
                 "- `pages_dir`（必填）: HTML 输出目录\n"
-                "- `style_file_path`（必填）: P7 落盘的风格文件\n"
-                "- `style_id`（必填）: 用于预设风格强约束\n"
+                "- `style_file_path`（普通分支必填）: P7 落盘的风格文件；`template_canvas` 分支为空，改用 `pack_dir`\n"
+                "- `pack_dir`（`template_canvas` 分支必填）: 模板包目录绝对路径\n"
+                "- `style_id`（普通分支必填）: 用于预设风格强约束\n"
                 "- `page_count`（必填）: 大纲页数 N\n"
-                "- `topic`（可选）: PPT 主题，密度检查搜索补充用\n"
-                "- `search_mode`（可选）: 密度阈值放宽依据\n"
-                "- `gen_retry_round`（可选，默认 1）\n"
-                "- `density_retry_round`（可选，默认 1）\n"
+                "- `gen_retry_round`（可选，默认 1；含首次生成在内最多尝试 3 次）\n"
                 "\n"
                 "### 输出\n"
                 "```json\n"
@@ -2194,15 +2645,16 @@ class PPTPageGenNode(PlanNode):
                 "\n"
                 "### 执行流程\n"
                 "1. 输入校验：必填字段任一空 → failed\n"
-                "2. 调用 P8.0 PrepareNode → 读资料 + 按页拆分，产出共享只读数据；prepare_status=failed → 直接 failed\n"
-                "3. 调用 P8.1 PageWorkerNode → per-page 闭环"
-                "（生成→密度判定→搜索补充→重写）"
+                "2. `style_mode == template_canvas` 时走 `_execute_template_pack`：用模板包 + LLM 填充生成页面，不进入普通三阶段\n"
+                "3. 调用 P8.0 PrepareNode → 读资料 + 按页拆分，产出共享只读数据；prepare_status=failed → 直接 failed\n"
+                "4. 调用 P8.1 PageWorkerNode → per-page 并发生成与 HTML 合法性校验"
                 "→ page_files / missing_pages / low_density_pages\n"
-                "4. 调用 P8.2 QAFixNode → qa_status / final_page_files / fix_report\n"
-                "5. 汇总状态：missing 空 + low 空 + qa=ok → ok；qa=failed → failed；其余 partial\n"
+                "5. 调用 P8.2 QAFixNode → 完整性检查 + 官方 fix，产出 qa_status / final_page_files / fix_report\n"
+                "6. 汇总状态：missing 空 + low 空 + qa=ok → ok；qa=failed → failed；其余 partial\n"
                 "\n"
                 "### 失败兜底\n"
                 "- 必填校验失败：直接返回 failed，不进入子节点\n"
+                "- `template_canvas` 分支 `pack_dir` 为空或 `page_count` 非法：直接返回 failed\n"
                 "- P8.0 prepare_status=failed：直接返回 failed，不进入 P8.1\n"
                 "- 子节点透传错误，根节点不阻塞，按汇总规则归并状态\n"
             ),
@@ -2214,13 +2666,13 @@ class PPTPageGenNode(PlanNode):
         )
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        # 模板包分支优先判断：style_mode == template_pack 时走 template-filler 流程
+        # 模板画布分支优先判断：style_mode == template_canvas 时走模板画布流程
         style_mode = str(inputs.get("style_mode") or "").strip()
-        if style_mode == "template_pack":
-            # template_pack 分支只需要 pack_dir，不需要 style_file_path
+        if style_mode == "template_canvas":
+            # template_canvas 分支只需要 pack_dir，不需要 style_file_path
             pack_dir = str(inputs.get("pack_dir") or "").strip()
             if not pack_dir:
-                logger.error("[P8] template_pack 分支必填字段 pack_dir 为空")
+                logger.error("[P8] template_canvas 分支必填字段 pack_dir 为空")
                 return {
                     "pages_dir": str(inputs.get("pages_dir") or ""),
                     "page_files": [],
@@ -2243,7 +2695,7 @@ class PPTPageGenNode(PlanNode):
             )
             return await self._execute_template_pack(inputs, page_count, total_pages)
 
-        # 非 template_pack 分支：需要 style_file_path 等字段
+        # 非 template_canvas 分支：需要 style_file_path 等字段
         required_fields = (
             "output_dir",
             "pages_dir",
@@ -2362,7 +2814,7 @@ class PPTPageGenNode(PlanNode):
         pack_dir = str(inputs.get("pack_dir") or "").strip()
         output_dir = str(inputs.get("output_dir") or "").strip()
         pages_dir = str(inputs.get("pages_dir") or "").strip()
-        pptx_root = str(inputs.get("pptx_root") or _PPT_DIR).strip()
+        pptx_root = str(inputs.get("pptx_root") or "").strip()
 
         if not pack_dir or not pages_dir:
             logger.error("[P8-TP] pack_dir 或 pages_dir 为空")
@@ -2377,7 +2829,7 @@ class PPTPageGenNode(PlanNode):
         # 1. preflight 预检
         try:
             preflight_cmd = (
-                f"{fill_js_path(pptx_root)} preflight "
+                f"{cli_path('preflight', pptx_root)} "
                 f"{quote_path(pack_dir)} {quote_path(output_dir)} {quote_path(pages_dir)}"
             )
             await run_bash(
@@ -2445,9 +2897,9 @@ class PPTPageGenNode(PlanNode):
             check_ok = True
             try:
                 check_cmd = (
-                    f"{fill_js_path(pptx_root)} check "
-                    f"{quote_path(pack_dir)} {quote_path(pages_dir)}"
-                )
+                f"{cli_path('check', pptx_root)} "
+                f"{quote_path(pack_dir)} {quote_path(pages_dir)}"
+            )
                 check_result = await run_bash(
                     self, check_cmd,
                     timeout_seconds=300, required=False, workdir=pptx_root,
@@ -2780,7 +3232,7 @@ class PPTPageGenNode(PlanNode):
         page_path = f"{pages_dir}/page-{page_num}.pptx.html"
         try:
             seed_cmd = (
-                f"{fill_js_path(pptx_root)} seed "
+                f"{cli_path('seed', pptx_root)} "
                 f"{quote_path(pack_dir)} {template_id} {quote_path(page_path)} copy"
             )
             await run_bash(

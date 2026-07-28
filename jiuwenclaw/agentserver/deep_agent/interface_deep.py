@@ -16,7 +16,7 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from contextvars import ContextVar, Token
+from contextvars import ContextVar, Token, copy_context
 from dataclasses import dataclass, field, replace
 
 from pathlib import Path
@@ -2301,6 +2301,15 @@ class JiuWenClawDeepAdapter:
                     "[_build_model_from_entry] 从环境变量 API_BASE 获取到 api_base: model_name=%s",
                     name,
                 )
+            else:
+                # Align with resolve_env_vars: sealed miss may still have bare os.environ.
+                bare = str(os.environ.get("API_BASE") or "").strip()
+                if bare:
+                    mcc["api_base"] = bare
+                    logger.info(
+                        "[_build_model_from_entry] 从进程 os.environ API_BASE 获取到 api_base: model_name=%s",
+                        name,
+                    )
 
         if not name:
             env_model_name = read_env("MODEL_NAME").strip()
@@ -2311,6 +2320,17 @@ class JiuWenClawDeepAdapter:
                     "[_build_model_from_entry] 从环境变量 MODEL_NAME 获取到 model_name: %s",
                     name,
                 )
+
+        if not str(mcc.get("api_base") or "").strip():
+            raise ValueError(
+                f"model client config api_base is required but empty "
+                f"(model_name={name!r}). Set API_BASE in sync/reload env or process environment."
+            )
+        if mcc.get("api_key") == "placeholder-api-key":
+            logger.warning(
+                "[_build_model_from_entry] api_key 仍为占位值，后续调用可能鉴权失败: model_name=%s",
+                name,
+            )
 
         m_config = ModelRequestConfig(
             model=name,
@@ -2728,7 +2748,6 @@ class JiuWenClawDeepAdapter:
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> JiuClawSkillEvolutionRail | None:
         """Build JiuClawSkillEvolutionRail with BOOTSTRAP.md builtin skill exclusion."""
         try:
-            evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
             trajectory_dir = self._resolve_evolution_trajectory_dir()
             registered_skill_dirs = self._registered_skill_dirs_for_rail()
@@ -2736,15 +2755,13 @@ class JiuWenClawDeepAdapter:
                 skills_dir=registered_skill_dirs,
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
-                auto_scan=evolution_auto_scan,
                 auto_save=evolution_auto_save,
                 trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
             logger.info(
-                "[JiuWenClaw] SkillEvolutionRail create success,  trajectory_dir=%s, auto_scan=%r, auto_save=%r",
+                "[JiuWenClaw] SkillEvolutionRail create success,  trajectory_dir=%s, auto_save=%r",
                 trajectory_dir,
-                evolution_auto_scan,
                 evolution_auto_save,
                 extra={'user_visible': 'progress'},
             )
@@ -3489,9 +3506,8 @@ class JiuWenClawDeepAdapter:
             if new_evolution_rail is not None:
                 evolution_rail_action = ("create", new_evolution_rail)
         elif self._skill_evolution_rail is not None and evolution_enabled:
-            # enabled unchanged (on): in-place update LLM / auto_scan / auto_save, rail retained.
+            # enabled unchanged (on): in-place update LLM / auto_save, rail retained.
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
-            self._skill_evolution_rail.auto_scan = config.get("evolution", {}).get("auto_scan", False)
             self._skill_evolution_rail.auto_save = config.get("evolution", {}).get("auto_save", True)
 
         self._skill_rail = self._build_skill_rail(
@@ -3675,7 +3691,9 @@ class JiuWenClawDeepAdapter:
 
         # 小艺手机端工具：由 channels.xiaoyi.phone_tools_enabled 控制
         loop = asyncio.get_running_loop()
-        config_base = await loop.run_in_executor(None, get_config)
+        # Preserve sealed overlay / agent env ns across the executor thread.
+        _cfg_ctx = copy_context()
+        config_base = await loop.run_in_executor(None, _cfg_ctx.run, get_config)
         xiaoyi_phone_tools_enabled = (
             config_base.get("channels", {}).get("xiaoyi", {}).get("phone_tools_enabled", False)
         )
@@ -3871,7 +3889,9 @@ class JiuWenClawDeepAdapter:
         loop = asyncio.get_running_loop()
         # Align with reload: drop stale resolved ${VAR} cache before reading under seal.
         clear_global_config_cache()
-        config_base = await loop.run_in_executor(None, get_config)
+        # Preserve sealed overlay / agent env ns across the executor thread.
+        _cfg_ctx = copy_context()
+        config_base = await loop.run_in_executor(None, _cfg_ctx.run, get_config)
         self._latest_config_base = config_base if isinstance(config_base, dict) else None
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
@@ -6360,6 +6380,8 @@ class JiuWenClawDeepAdapter:
 
     async def _do_evolve_rollback(
         self, skill_name: str, version: str | None,
+        store=None,
+        skill_path: str | None = None,
     ) -> dict[str, Any]:
         """Shared rollback used by slash command and skills.evolution.rollback RPC.
 
@@ -6367,10 +6389,11 @@ class JiuWenClawDeepAdapter:
 
         Returns a structured dict:
         - ``{ok, rolled_back: False, name, versions}`` when *version* is omitted (list only)
-        - ``{ok, rolled_back: True, name, version[, warning]}`` on successful rollback
+        - ``{ok, rolled_back: True, name, version[, warning][, skill_path]}`` on successful rollback
         - ``{ok: False, error}`` on failure
         """
-        store = self._get_disk_evolution_store()
+        if store is None:
+            store = self._get_disk_evolution_store()
 
         guard = self._guard_bootstrap_skill(skill_name)
         if guard:
@@ -6440,6 +6463,8 @@ class JiuWenClawDeepAdapter:
                 "name": skill_name,
                 "version": resolved,
             }
+            if skill_path:
+                result["skill_path"] = skill_path
             if not evo_ok:
                 result["warning"] = (
                     "Skill body 已回滚，但 evolution log 恢复失败，"
@@ -6478,7 +6503,22 @@ class JiuWenClawDeepAdapter:
         raw_version = params.get("version")
         version = str(raw_version).strip() if raw_version is not None and str(raw_version).strip() else None
 
-        result = await self._do_evolve_rollback(skill_name, version)
+        raw_path = params.get("skill_path") or params.get("path")
+        skill_path = str(raw_path).strip() if raw_path is not None and str(raw_path).strip() else None
+
+        store = None
+        if skill_path:
+            skill_path = self._validate_rebuild_skill_path(skill_path)
+            resolved_path = Path(skill_path).expanduser().resolve()
+            if resolved_path.name != "SKILL.md":
+                raise ValueError(f"skill_path 必须指向 SKILL.md，当前为：{skill_path}")
+            skill_dir = resolved_path.parent
+            if skill_dir.name != skill_name:
+                raise ValueError(f"skill_path 目录名必须与 name 一致：name={skill_name}，目录名={skill_dir.name}")
+            skills_base = skill_dir.parent
+            store = EvolutionStore([str(skills_base)])
+
+        result = await self._do_evolve_rollback(skill_name, version, store=store, skill_path=skill_path)
         if not result.get("ok"):
             raise ValueError(str(result.get("error") or "回滚失败"))
 
@@ -6489,6 +6529,8 @@ class JiuWenClawDeepAdapter:
                 "version": result["version"],
                 "rolled_back": True,
             }
+            if result.get("skill_path"):
+                payload["skill_path"] = result["skill_path"]
             if result.get("warning"):
                 payload["warning"] = result["warning"]
             return payload

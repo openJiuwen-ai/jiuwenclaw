@@ -28,6 +28,51 @@ class PromptPriority(IntEnum):
     RESPONSE = 60
     WORKSPACE = 70
     TODO = 85
+    # final_visible_reply 放在 system 最末，强调约束工具/todo 结束后必须再发一轮完整纯文本 final；
+    # UI 主要展示「最后一轮无 tool_calls」的正文。
+    FINAL_VISIBLE_REPLY = 120
+
+
+def _final_visible_reply_prompt(language: str) -> PromptSection:
+    if language == "cn":
+        content = """## 最终可见回复（强制）
+
+**哪一条算「最终可见」**：用户界面主要展示的是你**最后一轮** assistant 回复——即不再附带任何 `tool_calls`、以纯文本结束的那一轮。中间轮次（含工具调用的轮次）在 UI 中可能被折叠、分到另一条气泡，**但不影响你在这些轮次正常输出思考与进展**。
+
+**轮次纪律（硬约束）**：
+- 所有工具执行完毕后，**必须**再发一轮纯文本最终回复，写入完整、可独立理解的结果。
+- 最终纯文本轮**不得**仅用「任务已完成」「以上已整理完毕」等收尾句代替正文；若前面某轮已写过说明，最终轮仍须**完整复述或等价概括**全部实质性结论，使用户只读这一条也能看懂。
+
+**内容要求**（写在最后一轮纯文本中）：
+- 复述或概括用户需要的每一项实质性结果：重要命令输出、检查过的文件路径、变更的文件、发现、结论、错误、未解决风险，以及相关的后续步骤。
+- 若用户要求你运行命令、检查数据、审查代码、比较方案、诊断故障或解释某事，须在最终回复中传达重要细节或概括关键行，使用户无需依赖折叠的工具输出也能理解结果。
+- 若用户提出多部分问题，确保每一部分都有回答，或明确标注为未解决。
+- 若创建或修改了文件，写出具体文件路径及变更内容。
+- 若任务产出了可查看的交付物，仍须在回复中简要说明交付物包含什么或得出什么结论。
+- 勿让回复超过 50–70 行而淹没用户；提供最高信号密度的上下文，而非穷举一切细节。
+"""
+    else:
+        content = """## Final visible reply (mandatory)
+
+**What counts as "final visible"**: The UI mainly shows your **last** assistant turn—the one that ends as plain text with **no** `tool_calls`. Earlier turns (including any that invoke tools) may be collapsed or split into a separate bubble, **but you should still write thinking and progress normally in those turns**.
+
+**Turn discipline (hard rules)**:
+- After all tools finish, you **must** send one more plain-text final turn with the full, self-contained result.
+- The final plain-text turn **must not** be only a closing line such as "All tasks completed" or "Summarized above." If you already wrote the answer in an earlier turn, the final turn must still **fully restate or equivalently summarize** every substantive conclusion so the user understands by reading that turn alone.
+
+**Content requirements** (in the last plain-text turn):
+- Restate or summarize every substantive result the user needs: important command output, inspected file paths, changed files, findings, conclusions, errors, unresolved risks, and next steps when they matter.
+- If the user asked you to run a command, inspect data, review code, compare options, diagnose a failure, or explain something, relay the important details or summarize the key lines in the final reply so the user understands the result without relying on collapsed tool output.
+- If the user asked a multi-part question, make sure each part is answered or explicitly marked as unresolved.
+- If files were created or modified, name the concrete files and what changed.
+- If a task produced a viewable deliverable and present_files was used, still include a concise textual summary of what the deliverable contains or concludes.
+- Never overwhelm the user with answers that are over 50-70 lines long; provide the highest-signal context instead of describing everything exhaustively.
+"""
+    return PromptSection(
+        name="final_visible_reply",
+        content={language: content},
+        priority=PromptPriority.FINAL_VISIBLE_REPLY,
+    )
 
 
 def _response_prompt(language: str) -> PromptSection:
@@ -73,14 +118,6 @@ def _response_prompt(language: str) -> PromptSection:
 {zh_cron_note}- **heartbeat**：心跳任务，如「检查待办」「同步状态」。
 
 系统任务完成后，以回复形式通知用户。
-
-## 任务收尾的结构化输出（强制）
-当一次请求涉及**多步执行型子任务**，在所有执行型子任务完成后、触发收尾前，**必须**先产出一段面向用户的结构化摘要正文，再结束本轮。该正文不得为空，至少包含以下几部分：
-1. **做了什么**：针对用户的问题，你都做了什么事情；
-2. **结论是什么**：针对用户问题，结论是什么；
-3. **后续建议/需用户确认事项**：若有未决项（如待用户选择方案、需复核的改动），显式列出。
-
-禁止只完成任务（包括子任务，主任务）而不进行总结。
 """
     else:
         content = f"""# Message Format
@@ -113,14 +150,6 @@ You receive user messages and system messages; handle each by source and type.
 {en_cron_note}- **heartbeat**: Heartbeat tasks, e.g. "check todos", "sync status".
 
 After completing a system task, notify the user via a reply.
-
-## Structured closing output (mandatory)
-When the current request involves **multi-step execution subtasks** , after all execution subtasks finish and before closing the turn, you **must** produce a structured summary addressed to the user; never end the turn without it. This summary must not be empty and shall include at least the following sections:
-1. **What was done**: What specific actions were performed in response to the user's request;
-2. **The conclusion**: The final conclusion or answer addressing the user's query;
-3. **Next steps / items needing user confirmation**: explicitly list any open items (e.g. pending user choices, changes needing review).
-
-It is strictly prohibited to complete tasks (including subtasks or the main task) without providing such a summary
 """
     return PromptSection(
         name="response",

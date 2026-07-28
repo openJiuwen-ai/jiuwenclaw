@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 from ruamel.yaml import YAML
 import yaml
-from jiuwenclaw.local_env_config import get_local_config
+from jiuwenclaw.local_env_config import get_bound_agent_env_ns, get_local_config, is_task_env_overlay_bound
 
 
 from jiuwenclaw.utils import (
@@ -64,10 +64,11 @@ def get_merged_config_dict() -> dict[str, Any]:
     return merge_template_with_override(template, override)
 
 
-# Module-level cache for get_config() to avoid repeated YAML disk reads.
-# Expired by TTL (_CONFIG_CACHE_TTL_SECONDS) or explicitly via clear_config_cache().
-_config_cache: dict[str, Any] | None = None
-_config_cache_time: float = 0.0
+# Resolved-config cache keyed by bound (service_id, agent_id).
+# ``None`` key = unbound ContextVar (typically default tip / process-shared reads).
+# Expired by TTL or ``clear_config_cache()``. Tip mutations clear the affected slot.
+_ConfigNsKey = tuple[str, str] | None
+_resolved_config_by_ns: dict[_ConfigNsKey, tuple[float, dict[str, Any]]] = {}
 _CONFIG_CACHE_TTL_SECONDS: float = 20.0
 _config_lock = threading.Lock()
 _config_version: int = 0
@@ -76,48 +77,70 @@ _config_version: int = 0
 def get_config():
     """Return the merged, env-var-resolved config dict.
 
-    Results are cached at module level with a TTL of
-    ``_CONFIG_CACHE_TTL_SECONDS`` (default 20s).  The cache is also
-    explicitly invalidated by ``clear_config_cache()`` (called on config
-    reload, set_config, and any _dump_yaml_round_trip write).
+    Results are cached per bound ``(service_id, agent_id)`` (from
+    ``bind_agent_env_ns``) with a TTL of ``_CONFIG_CACHE_TTL_SECONDS``
+    (default 20s). Unbound callers share a separate ``None`` slot.
+
+    When a task env overlay is bound (seal), the cache is bypassed so the
+    overlay is always reflected.
+
+    The cache is invalidated by ``clear_config_cache()`` (config reload /
+    set_config / yaml write, and tip mutations for the affected ns).
 
     **WARNING**: The returned dict is a shared reference. Callers MUST NOT
     mutate it (including nested dicts/lists), as changes will affect all
     other callers within the TTL window. Use ``copy.deepcopy()`` if you
     need to modify the result.
     """
-    global _config_cache, _config_cache_time, _config_version
+    global _config_version
+    ns: _ConfigNsKey = get_bound_agent_env_ns()
+    skip_cache = is_task_env_overlay_bound()
     now = time.monotonic()
 
-    # Fast path: check cache validity under lock
-    with _config_lock:
-        if _config_cache is not None and (now - _config_cache_time) < _CONFIG_CACHE_TTL_SECONDS:
-            return _config_cache
-        read_version = _config_version
+    if not skip_cache:
+        with _config_lock:
+            entry = _resolved_config_by_ns.get(ns)
+            if entry is not None and (now - entry[0]) < _CONFIG_CACHE_TTL_SECONDS:
+                return entry[1]
+            read_version = _config_version
+    else:
+        read_version = -1
 
-    # Slow path: cache expired or missing, recompute (lock released during I/O)
+    # Slow path: cache miss / expired / overlay seal (lock released during I/O)
     config_base = get_merged_config_dict()
     new_cache = resolve_env_vars(config_base)
 
-    # Update cache only if no invalidation occurred during the read
-    with _config_lock:
-        if _config_version == read_version:
-            _config_cache = new_cache
-            _config_cache_time = time.monotonic()
+    if not skip_cache:
+        with _config_lock:
+            if _config_version == read_version:
+                _resolved_config_by_ns[ns] = (time.monotonic(), new_cache)
 
     return new_cache
 
 
-def clear_config_cache() -> None:
-    """Invalidate the module-level config cache.
+def clear_config_cache(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """Invalidate the resolved-config cache.
 
-    The next ``get_config()`` call will re-read from disk.
+    With no args: clear all ns slots (yaml write / full reload).
+    With ``service_id`` / ``agent_id``: clear that slot only (tip mutation).
+    Clearing ``default``/``default`` also clears the unbound (``None``) slot.
     """
-    global _config_cache, _config_cache_time, _config_version
+    global _config_version
     with _config_lock:
-        _config_cache = None
-        _config_cache_time = 0.0
         _config_version += 1
+        if service_id is None and agent_id is None:
+            _resolved_config_by_ns.clear()
+            return
+        from jiuwenclaw.local_env_config import normalize_env_ns_id
+
+        sid = normalize_env_ns_id(service_id, default="default")
+        aid = normalize_env_ns_id(agent_id, default="default")
+        _resolved_config_by_ns.pop((sid, aid), None)
+        if sid == "default" and aid == "default":
+            _resolved_config_by_ns.pop(None, None)
 
 
 def get_config_raw():

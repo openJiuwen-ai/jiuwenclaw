@@ -9,7 +9,7 @@ same as ``jiuwenclaw.config.get_config``. Embedding API settings are in the ``em
 from typing import Any, Optional, Dict, List
 from dataclasses import dataclass, field
 
-from jiuwenclaw.config import get_config
+from jiuwenclaw.config import clear_config_cache as clear_global_config_cache, get_config
 from jiuwenclaw.utils import get_agent_workspace_dir
 from jiuwenclaw.utils import logger
 
@@ -19,13 +19,9 @@ def default_workspace_dir() -> str:
     return str(get_agent_workspace_dir())
 
 
-_config_cache: Optional[Dict[str, Any]] = None
-
-
 def clear_config_cache() -> None:
-    """清除配置缓存，使下次 _load_config() 重新读取合并后的配置（含环境变量解析）。"""
-    global _config_cache
-    _config_cache = None
+    """清除全局 ``get_config()`` 解析缓存（memory 不再维护独立快照）。"""
+    clear_global_config_cache()
 
 
 def _ensure_dotenv_loaded() -> None:
@@ -39,21 +35,19 @@ def _ensure_dotenv_loaded() -> None:
 
 
 def _load_config() -> Dict[str, Any]:
-    """加载包内模板与用户 override 合并后的配置（与 ``get_config()`` 一致）。"""
-    global _config_cache
+    """加载包内模板与用户 override 合并后的配置（与 ``get_config()`` 一致）。
 
-    if _config_cache is not None:
-        return _config_cache
-
+    不再维护独立的已解析快照：直接委托 ``get_config()``（已按 sid/aid 分片缓存），
+    避免 memory 模块二次缓存串 agent。
+    """
     _ensure_dotenv_loaded()
 
     try:
         cfg = get_config()
-        _config_cache = cfg if isinstance(cfg, dict) else {}
+        return cfg if isinstance(cfg, dict) else {}
     except Exception as e:
         logger.warning("Failed to load merged config for memory module: %s", e)
-        _config_cache = {}
-    return _config_cache
+        return {}
 
 
 def get_embed_config() -> Dict[str, str]:

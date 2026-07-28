@@ -36,7 +36,6 @@ SYNC_ENV_SCHEMA: frozenset[str] = frozenset(
         "ENABLED_SKILLS",
         "DISABLED_SKILLS",
         "JIUWENCLAW_DISABLED_SKILLS",
-        "JIUWENCLAW_RUNTIME_SKILLS_DIR",
         "JIUWENCLAW_SHARED_SKILLS_DIRS",
         "BOCHA_API_KEY",
         "JINA_API_KEY",
@@ -177,8 +176,6 @@ def synthesize_config(
 
     memory["engine"] = engine
     evolution["enabled"] = evo_enabled
-    evolution.setdefault("auto_scan", False)
-
     return result
 
 

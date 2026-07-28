@@ -784,7 +784,6 @@ class TestSynthesizeConfigEnvAuthority:
         )
         assert result["memory"]["engine"] == "none"
         assert result["react"]["evolution"]["enabled"] is True
-        assert result["react"]["evolution"]["auto_scan"] is False
         assert "hwocr" in result["react"]["skill_envs"]
 
     @staticmethod
@@ -792,13 +791,12 @@ class TestSynthesizeConfigEnvAuthority:
         result = synthesize_config(
             {
                 "memory": {"engine": "builtin"},
-                "react": {"evolution": {"enabled": False, "auto_scan": True}},
+                "react": {"evolution": {"enabled": False}},
             },
             _full_env(MEMORY_ENGINE="none", EVOLUTION_ENABLED="true"),
         )
         assert result["memory"]["engine"] == "none"
         assert result["react"]["evolution"]["enabled"] is True
-        assert result["react"]["evolution"]["auto_scan"] is True
 
     @staticmethod
     def test_blank_env_falls_back_to_defaults():
@@ -834,12 +832,11 @@ class TestSynthesizeConfigEnvAuthority:
             result = synthesize_config(
                 {
                     "react": {"evolution": {"enabled": True}},
-                    "evolution": {"enabled": False, "auto_scan": True},
+                    "evolution": {"enabled": False},
                 },
             )
         assert "evolution" not in result
         assert result["react"]["evolution"]["enabled"] is True
-        assert result["react"]["evolution"]["auto_scan"] is False
         assert warn.called
         assert "discarding top-level evolution" in warn.call_args[0][0]
 

@@ -52,7 +52,7 @@ import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
-from jiuwenclaw.local_env_config import get_local_config
+from jiuwenclaw.local_env_config import SPAWN_ENV_KEYS, get_local_config
 
 # 尝试导入 pythonjsonlogger（用于 JSON 格式化输出）
 try:
@@ -96,16 +96,22 @@ def resolve_shipped_template_config_path() -> Path:
 
 
 def resolve_env_vars(value: Any) -> Any:
-    """递归解析配置中的环境变量替换语法 ${VAR:-default}."""
+    """递归解析配置中的环境变量替换语法 ${VAR:-default}.
+
+    进程共享键（``SPAWN_ENV_KEYS``）只读 ``os.environ``；智能体隔离键只读
+    tip/ns（``get_local_config``），禁止回退到 bare ``os.environ``，避免单进程
+    多 agent 时串读 spawn 泄漏的凭证（如 API_KEY）。
+    """
     if isinstance(value, str):
         pattern = r'\$\{([^:}]+)(?::-([^}]*))?\}'
 
         def replace_env(match):
             var_name = match.group(1)
             default = match.group(2)
-            current = get_local_config(var_name)
-            if current is None or current == "":
+            if var_name in SPAWN_ENV_KEYS:
                 current = os.environ.get(var_name)
+            else:
+                current = get_local_config(var_name)
             if default is not None:
                 if current is None or current == "":
                     return default

@@ -58,6 +58,8 @@ SPAWN_ENV_KEYS: frozenset[str] = frozenset(
         "OTEL_LOG_MESSAGES",
         "PATH",
         "AGENT_RUNTIME",
+        # launchEnv / config.yaml ${EXTENSION_DIRS}; process-shared (relay RELAYCLAW_SHARED_ENV_KEYS TBD).
+        "EXTENSION_DIRS",
     }
 )
 
@@ -79,7 +81,6 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
         "ENABLED_SKILLS",
         "DISABLED_SKILLS",
         "JIUWENCLAW_DISABLED_SKILLS",
-        "JIUWENCLAW_RUNTIME_SKILLS_DIR",
         "JIUWENCLAW_SHARED_SKILLS_DIRS",
         "BOCHA_API_KEY",
         "JINA_API_KEY",
@@ -282,6 +283,19 @@ def effective_tip(
     return merged
 
 
+def _invalidate_resolved_config_cache(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """Drop get_config() resolved cache for this ns (lazy import avoids cycle)."""
+    try:
+        from jiuwenclaw.config import clear_config_cache
+    except ImportError as e:
+        logger.debug("clear_config_cache unavailable during import: %s", e)
+        return
+    clear_config_cache(service_id=service_id, agent_id=agent_id)
+
+
 def stage_env_overrides(
     env_overrides: dict[str, Any] | None,
     *,
@@ -300,7 +314,10 @@ def stage_env_overrides(
         if env_value is None:
             bag.pop(key, None)
         else:
-            bag[key] = str(env_value)
+            text = str(env_value)
+            if key in _EMPTY_OMIT_ENV_KEYS and not text.strip():
+                continue
+            bag[key] = text
 
 
 def promote_staged_env(
@@ -323,6 +340,20 @@ def promote_staged_env(
             active[name] = value
             _set_ns_os(sid, aid, name, value)
     _staged_bags.pop(key, None)
+    _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
+
+
+# Incremental reload must not seal empty model credentials into tip (OfficeClaw
+# often sends API_BASE="" when callbackEnv is not yet resolved). Null still deletes.
+_EMPTY_OMIT_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "API_BASE",
+        "API_KEY",
+        "MODEL_PROVIDER",
+        "EMBED_API_BASE",
+        "EMBED_API_KEY",
+    }
+)
 
 
 def apply_env_overrides_to_active(
@@ -349,8 +380,11 @@ def apply_env_overrides_to_active(
             _pop_ns_os(sid, aid, name)
         else:
             value = str(env_value)
+            if name in _EMPTY_OMIT_ENV_KEYS and not value.strip():
+                continue
             active[name] = value
             _set_ns_os(sid, aid, name, value)
+    _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
 def replace_active_env(
@@ -382,6 +416,7 @@ def replace_active_env(
         _set_ns_os(sid, aid, name, value)
     if clear_staged:
         _staged_bags.pop(key, None)
+    _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
 def clear_agent_env_ns(service_id: str, agent_id: str) -> None:
@@ -416,6 +451,7 @@ def apply_env_removals(
         # Legacy bare-key cleanup only for default/default (Gateway .env compat).
         if sid == "default" and aid == "default":
             os.environ.pop(name, None)
+    _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
 def build_effective_env_overlay(
@@ -432,7 +468,16 @@ def build_effective_env_overlay(
                 if value is None:
                     merged.pop(k, None)
                 else:
-                    merged[k] = str(value)
+                    text = str(value)
+                    if k in _EMPTY_OMIT_ENV_KEYS and not text.strip():
+                        # Omit empty credentials from sealed overlay so they do not
+                        # block fallthrough; do not actively clear a good tip value.
+                        continue
+                    merged[k] = text
+    # Drop empty credential keys already present in tip so seal does not pin "".
+    for k in _EMPTY_OMIT_ENV_KEYS:
+        if k in merged and not str(merged.get(k) or "").strip():
+            merged.pop(k, None)
     return merged
 
 
@@ -675,6 +720,9 @@ def mirror_bare_business_env_to_default_ns(*, force: bool = False) -> None:
         if key not in os.environ:
             continue
         raw = os.environ[key]
+        # Do not seal empty credentials into default tip (spawn often has API_BASE="").
+        if key in _EMPTY_OMIT_ENV_KEYS and not str(raw).strip():
+            continue
         os.environ[ns_key] = raw
         active = _bag(_active_bags, (_DEFAULT_SERVICE_ID, _DEFAULT_AGENT_ID))
         active.setdefault(key, raw)
@@ -835,3 +883,4 @@ def reset_local_env_state_for_tests() -> None:
     # Best-effort: cannot fully reset ContextVar without tokens; set unbound.
     _task_env_overlay.set(_UNBOUND)
     _agent_env_ns.set(None)
+    _invalidate_resolved_config_cache()

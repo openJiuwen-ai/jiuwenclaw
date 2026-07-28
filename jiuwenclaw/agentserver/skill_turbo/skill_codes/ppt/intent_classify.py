@@ -54,7 +54,8 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
   ②用户仅说页数（"N页"/"做N页PPT"）→ page_count = N；
   ③用户明确说内容页/正文（"内容页N页"/"正文N页"）→ page_count = N。
   示例："10页以内"→8, "总页数8页"→6, "8页"→8
-- style_id 可选值：business-classic / tech-minimal / elegant-narrative / industrial-tech / free / 其他风格名
+- style_id 可选值：business-classic / tech-minimal / elegant-narrative / industrial-tech / custom / 其他风格名
+  用户要求“自由发挥”时填写 custom
 - audience 可选值：公司高管 / 技术团队 / 投资人 / 普通受众 / 其他
 - presentation_purpose 可选值：工作汇报 / 产品展示 / 教学分享 / auto / 其他
 - pack_dir: 用户提供的模板包目录绝对路径（字符串；未知则 ""）。
@@ -190,6 +191,43 @@ def _build_llm_path_and_slots_prompt(text: str) -> str:
 
 class IntentClassifyError(RuntimeError):
     """P1 意图识别失败。"""
+
+
+# 演讲备注触发词（prod Stage 8 契约）
+_SPEAKER_NOTES_KEYWORDS = (
+    "演讲备注", "演讲者备注", "讲稿", "speaker notes", "演讲稿",
+    "口播稿", "旁白", "备注稿", "演讲要点",
+)
+
+# 编辑已有 PPT 触发词
+_EDIT_EXISTING_KEYWORDS = (
+    "修改这个ppt", "编辑这个ppt", "改这个ppt", "调整这个ppt",
+    "修改这份ppt", "编辑这份ppt", "改这份ppt", "调整这份ppt",
+    "modify this ppt", "edit this ppt",
+)
+
+
+def _detect_speaker_notes_request(text: str) -> bool:
+    """检测用户是否要求生成演讲备注。"""
+    if not text:
+        return False
+    lower = text.lower()
+    return any(kw in lower for kw in _SPEAKER_NOTES_KEYWORDS)
+
+
+def _detect_edit_existing_request(text: str, doc_paths: list[str]) -> bool:
+    """检测用户是否要编辑已有 PPT（而非从零生成）。"""
+    if not text:
+        return False
+    lower = text.lower()
+    if any(kw in lower for kw in _EDIT_EXISTING_KEYWORDS):
+        return True
+    # 用户上传了 .pptx 文件且明确要"修改/编辑"
+    for p in doc_paths:
+        if p.lower().endswith(".pptx"):
+            if any(kw in lower for kw in ("修改", "编辑", "改", "调整", "modify", "edit")):
+                return True
+    return False
 
 
 def _parse_slots_from_llm_response(raw: str) -> dict[str, Any]:
@@ -402,6 +440,13 @@ class IntentClassifyNode(PlanNode):
         inputs["doc_paths"] = doc_paths
         inputs["image_paths"] = image_paths
         inputs["has_documents"] = bool(doc_paths)
+
+        # 演讲备注触发词检测（prod Stage 8 契约）
+        user_text = PptCommon.collect_user_text(inputs)
+        inputs["need_speaker_notes"] = _detect_speaker_notes_request(user_text)
+
+        # 编辑已有 PPT 路由检测（prod 路由表：编辑已有页面入口）
+        inputs["edit_existing_ppt"] = _detect_edit_existing_request(user_text, doc_paths)
 
         # 仅在场景 C（无附件、无路径、slots 非空）时写入预填信息
         if not inputs["has_documents"] and slots:

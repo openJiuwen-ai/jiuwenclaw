@@ -587,7 +587,55 @@ class PageWorkerNode(PlanNode):
                 research_paths[page_num] = path
 
         logger.info("[P6.1] per-page 闭环完成，已落盘 %d 个 research-P{N}.md", len(research_paths))
+
+        # validate-research 全量门禁（prod 契约：所有页面写完后统一校验）
+        pptx_root = str(inputs.get("pptx_root") or "").strip()
+        outline_path = str(inputs.get("outline_path") or "").strip()
+        validation_inputs_ready = all((research_paths, output_dir, pptx_root, outline_path))
+        if validation_inputs_ready:
+            validation_ok = await self._run_validate_research(output_dir, pptx_root, outline_path, research_depth)
+            if not validation_ok:
+                logger.warning("[P6.1] validate-research 全量门禁未通过，但不阻塞 pipeline（降级继续）")
+
         return {"research_paths": research_paths}
+
+    async def _run_validate_research(
+        self,
+        output_dir: str,
+        pptx_root: str,
+        outline_path: str,
+        research_depth: str,
+    ) -> bool:
+        """调 cli validate-research 全量门禁，校验所有页面研究质量。
+
+        prod 契约：cli validate-research --dir <dir> --outline <outline.md> --level <L>。
+        CLI 不可用时降级为通过。
+        """
+        try:
+            from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.utils.bash_utils import (
+                cli_path, quote_path, run_bash,
+            )
+            cmd = (
+                f"{cli_path('validate-research', pptx_root)} "
+                f"--dir {quote_path(output_dir)} "
+                f"--outline {quote_path(outline_path)} "
+                f"--level {research_depth}"
+            )
+            result = await run_bash(
+                self, cmd,
+                timeout_seconds=120, required=False, workdir=pptx_root,
+            )
+            if result.exit_code != 0:
+                detail = result.stderr or result.stdout or ""
+                logger.warning("[P6.1] validate-research 门禁返回 exit=%d: %s", result.exit_code, detail[:500])
+                return False
+            logger.info("[P6.1] validate-research 全量门禁通过")
+            return True
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P6.1] validate-research CLI 不可用，降级跳过: %s", e)
+            return True
 
     async def _run_page_pipeline(
         self,

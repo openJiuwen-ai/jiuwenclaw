@@ -14,6 +14,7 @@ import pytest
 
 from jiuwenclaw.local_env_config import (
     apply_env_overrides_to_active,
+    clear_agent_env_ns,
     reset_local_env_state_for_tests,
 )
 
@@ -56,15 +57,31 @@ def _load_browser_tools():
 
 bt = _load_browser_tools()
 
+# Tenants touched by this module; must clear_agent_env_ns *before* bag reset
+# so namespaced os.environ keys are popped while active bags still list them.
+_BROWSER_ENV_NS_PAIRS = (
+    ("default", "default"),
+    ("svc-a", "agent-a"),
+    ("svc-b", "agent-b"),
+)
+
+
+def _clear_browser_env_ns() -> None:
+    for service_id, agent_id in _BROWSER_ENV_NS_PAIRS:
+        clear_agent_env_ns(service_id, agent_id)
+
 
 @pytest.fixture(autouse=True)
 def _reset_browser_runtime_state():
     bt.stop_all_browser_runtime_servers()
     bt.reset_browser_runtime_reload_state_for_tests()
+    _clear_browser_env_ns()
     reset_local_env_state_for_tests()
     yield
     bt.stop_all_browser_runtime_servers()
     bt.reset_browser_runtime_reload_state_for_tests()
+    # Pop ns keys while bags still know them; reset alone leaves os.environ dirty.
+    _clear_browser_env_ns()
     reset_local_env_state_for_tests()
 
 
