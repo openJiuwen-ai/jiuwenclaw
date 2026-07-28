@@ -466,7 +466,7 @@ _RUNNER_SUBCOMMAND_RE = {
     # code_review_runner.py may be invoked via an absolute path wrapped in quotes
     # (e.g. `python "C:\path\code_review_runner.py" collect ...`); tolerate an
     # optional closing quote and whitespace between the module and subcommand.
-    sub: re.compile(r"code_review_runner\.py[\"']*\s+" + re.escape(sub) + r"\b")
+    sub: re.compile(rf"code_review_runner\.py[\"']*\s+{re.escape(sub)}\b")
     for sub in (
         "collect",
         "init-review",
