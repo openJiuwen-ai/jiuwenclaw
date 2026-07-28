@@ -145,8 +145,8 @@ class SwarmSessionTaskNotifier:
 
         await AgentWebSocketServer.get_instance().send_push(msg)
 
+    @staticmethod
     def _persist_history(
-        self,
         notification: SessionTaskNotification,
         payload: dict[str, Any],
     ) -> None:

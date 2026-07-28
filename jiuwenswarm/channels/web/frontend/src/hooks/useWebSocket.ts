@@ -2930,12 +2930,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 最近任务 does not stay stuck on in_progress.
         if (Array.isArray(resultPayload.todos)) {
           useTodoStore.getState().ensureRuntime(sessionId);
-          useTodoStore.getState().setTodos(
-            sessionId,
-            resultPayload.todos as Parameters<
-              ReturnType<typeof useTodoStore.getState>['setTodos']
-            >[1]
-          );
+          useTodoStore.getState().setTodos(sessionId, resultPayload.todos);
         }
         // has_active_task 为 false 表示没有活跃任务（任务已完成）
         const hasActiveTask = resultPayload.has_active_task !== false;

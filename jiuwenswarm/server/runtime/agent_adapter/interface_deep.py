@@ -3642,7 +3642,8 @@ class JiuWenSwarmDeepAdapter:
             return
         self._instance.ability_manager.set_owner_id(tool_agent_id)
 
-    def _build_subagent_rail(self, enable_async_subagent: bool = False) -> SubagentRail | None:
+    @staticmethod
+    def _build_subagent_rail(enable_async_subagent: bool = False) -> SubagentRail | None:
         """Build SubagentRail (async sessions_* when True; else sync task_tool).
 
         Defaults to False for code/plan modes. Agent chat enables async via

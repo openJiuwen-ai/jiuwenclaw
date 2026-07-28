@@ -2,6 +2,8 @@
  * WebSocket 消息类型
  */
 
+import type { TodoItem } from './todo';
+
 export type WebConnectionState =
   | 'idle'
   | 'connecting'
@@ -101,7 +103,7 @@ export interface InterruptResultPayload {
   paused_task?: string;
   has_active_task?: boolean;  // 是否有活跃任务，false 表示任务已完成
   /** Backend may attach refreshed todos after cancel/pause. */
-  todos?: Array<Record<string, unknown>>;
+  todos?: TodoItem[];
 }
 
 /**
