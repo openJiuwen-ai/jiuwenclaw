@@ -356,6 +356,25 @@ def _resolve_enable_permissions(config_base: dict[str, Any], team_raw: dict[str,
     return global_enabled and team_enabled
 
 
+def _build_external_cli_agents(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return enabled external CLI configs without host-only switch fields."""
+    configured = team_raw.get("external_cli_agents", [])
+    if not isinstance(configured, list):
+        return []
+
+    enabled_agents: list[dict[str, Any]] = []
+    for item in configured:
+        if not isinstance(item, dict):
+            continue
+
+        config = deepcopy(item)
+        enabled = bool(config.pop("enabled", False))
+        if enabled:
+            enabled_agents.append(config)
+
+    return enabled_agents
+
+
 def load_team_spec_dict(
     config_base: dict[str, Any] | None = None,
     *,
@@ -393,6 +412,7 @@ def load_team_spec_dict(
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents
     spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()
+    spec_dict["external_cli_agents"] = _build_external_cli_agents(team_raw)
 
     workspace_spec = _build_workspace_spec(team_raw)
     if workspace_spec is not None:

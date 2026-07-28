@@ -204,7 +204,10 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     EvolutionSlashContext,
     handle_evolution_slash_command,
 )
-from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
+from jiuwenswarm.server.utils.stream_utils import (
+    normalize_tool_call_info,
+    parse_ask_user_question_payload,
+)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -8465,7 +8468,10 @@ class JiuWenSwarmDeepAdapter:
                     tool_info = (
                         payload.get("tool_call", payload) if isinstance(payload, dict) else payload
                     )
-                    return {"event_type": "chat.tool_call", "tool_call": tool_info}
+                    return {
+                        "event_type": "chat.tool_call",
+                        "tool_call": normalize_tool_call_info(tool_info),
+                    }
 
                 if chunk_type == "tool_update":
                     if isinstance(payload, dict):

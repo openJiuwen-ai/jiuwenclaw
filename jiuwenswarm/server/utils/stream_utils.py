@@ -7,6 +7,25 @@ from __future__ import annotations
 from typing import Any
 
 
+def normalize_tool_call_info(tool_info: Any) -> Any:
+    """Normalize team/CLI tool-call fields to the Web event contract.
+
+    Agent team runtimes expose ``tool_name`` / ``tool_args`` while regular
+    agent events already use ``name`` / ``arguments``.  Normalize at the
+    server-to-Web boundary so the frontend only needs to consume one shape.
+    Existing canonical fields always take precedence.
+    """
+    if not isinstance(tool_info, dict):
+        return tool_info
+
+    normalized = dict(tool_info)
+    if not normalized.get("name") and isinstance(normalized.get("tool_name"), str):
+        normalized["name"] = normalized["tool_name"]
+    if normalized.get("arguments") is None and "tool_args" in normalized:
+        normalized["arguments"] = normalized["tool_args"]
+    return normalized
+
+
 def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> dict[str, Any] | None:
     """Parse agent output chunk to frontend-consumable payload dict.
 
@@ -252,7 +271,10 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             if isinstance(payload, dict)
             else payload
         )
-        return {"event_type": "chat.tool_call", "tool_call": tool_info}
+        return {
+            "event_type": "chat.tool_call",
+            "tool_call": normalize_tool_call_info(tool_info),
+        }
 
     if chunk_type == "tool_update":
         if isinstance(payload, dict):
