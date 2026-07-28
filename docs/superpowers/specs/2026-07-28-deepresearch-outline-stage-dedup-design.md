@@ -10,6 +10,7 @@ DeepResearch 首次运行到 `outline` 节点时会推进到 Stage 2。随后
 ## 目标
 
 - 一次 DeepResearch 工具调用链中，Stage 2 切换消息只发送一次。
+- Stage 2 的权威名称统一从“大纲生成与确认”改为“大纲生成”。
 - `task.update`、`chat.reasoning` 和 `chat.delta` 继续由同一次
   `advance_stage()` 调用生成，三种界面状态保持一致。
 - 不改变 `deepresearch_stream` 的公开工具参数和返回协议。
@@ -48,11 +49,22 @@ DeepResearch 首次运行到 `outline` 节点时会推进到 Stage 2。随后
 
 外部由模型发起的独立 `resume` 仍按现有逻辑创建新状态，本次不引入跨调用持久化。
 
+## Stage 2 名称
+
+运行时名称在 JiuwenClaw 的 `DEEPRESEARCH_STAGES` 中维护，Skill 章节和流程说明在
+OfficeClaw 的 `office-claw-skills/deepresearch/SKILL.md` 中维护。两个 DeepResearch
+专属位置同步改为“大纲生成”，确保任务列表、思考过程、前台输出消息和 Skill 说明使用
+同一名称。
+
+共享任务组件测试中的“大纲生成与确认”只是通用聚合器输入样例，不是 DeepResearch
+阶段常量，本次不修改，避免把业务文案耦合进公共组件。
+
 ## 测试
 
 在 `test_deepresearch_stream_tool.py` 的自动接受大纲场景中记录推送事件，断言完整内部递归
 调用链只产生一次 Stage 2 `chat.delta`，并同时断言 Stage 2 `task.update` 和
-`chat.reasoning` 也各只有一次。测试先在当前实现上失败，再以最小代码修改使其通过。
+`chat.reasoning` 也各只有一次。路由测试同时断言 Stage 2 的三种事件都使用“大纲生成”。
+测试先在当前实现上失败，再以最小代码修改使其通过。
 
 随后运行：
 
@@ -64,5 +76,6 @@ DeepResearch 首次运行到 `outline` 节点时会推进到 Stage 2。随后
 ## 非目标
 
 - 不处理跨模型工具调用的 Stage 1 恢复去重。
-- 不改变六阶段名称、状态计算或完成后保留任务列表的行为。
+- 除 Stage 2 从“大纲生成与确认”改为“大纲生成”外，不改变其他阶段名称。
+- 不改变六阶段状态计算或完成后保留任务列表的行为。
 - 不改变 `outline_interaction` 静默自动接受策略。
