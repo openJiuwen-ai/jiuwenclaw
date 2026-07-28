@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
 from jiuwenswarm.symphony.evaluation.aggregation import (
@@ -99,7 +99,7 @@ class LLMScoreEvaluator(BaseEvaluator):
 
     def _prompt(self, case: EvaluationCase) -> str:
         if case.event_time is None:
-            reference_time = datetime.now().astimezone()
+            reference_time = datetime.now(timezone.utc)
             reference_time_source = "evaluation_time"
         else:
             reference_time = case.event_time
