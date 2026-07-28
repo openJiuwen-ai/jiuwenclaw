@@ -6,8 +6,6 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeAlias
 
-from json_repair import repair_json
-
 from jiuwenswarm.symphony.evaluation.aggregation import MetricAccumulator
 from jiuwenswarm.symphony.evaluation.evaluators.base import BaseEvaluator
 from jiuwenswarm.symphony.evaluation.interfaces import EvaluationLLM
@@ -81,7 +79,7 @@ class LatencyScenarioClassifier:
     def _parse(response: list[str]) -> dict[str, Any]:
         if not response or not isinstance(response[0], str):
             raise ValueError("Model returned no latency scenario response.")
-        payload = repair_json(response[0], return_objects=True)
+        payload = json.loads(response[0])
         if not isinstance(payload, dict):
             raise ValueError("Latency scenario response must be a JSON object.")
         return payload

@@ -11,10 +11,7 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, Iterator, List, Optional
 
-from json_repair import repair_json
-
 from jiuwenswarm.common.reasoning_injector import inject_reasoning_params
-
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -291,6 +288,8 @@ class JiuwenSwarmChatClient:
         ]
 
     def _json_content_from_response(self, response: Any, error_context: str) -> str:
+        from json_repair import repair_json
+
         content = extract_message_content(response)
         if not content:
             raise RuntimeError(f"{error_context} response content is empty.")

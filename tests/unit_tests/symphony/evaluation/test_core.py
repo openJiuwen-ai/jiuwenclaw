@@ -156,6 +156,15 @@ def test_latency_scenario_classifier_rejects_invalid_response() -> None:
         classifier.classify(fingerprint())
 
 
+def test_latency_scenario_classifier_rejects_malformed_json() -> None:
+    classifier = evaluation.LatencyScenarioClassifier(
+        FakeLLM("{'scenario': 'short_task', 'reason': 'not valid JSON'}")
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        classifier.classify(fingerprint())
+
+
 def test_latency_aggregation_reports_both_distributions_and_grades_p95() -> None:
     evaluator = evaluation.LatencyEvaluator("short_task")
     results = [
