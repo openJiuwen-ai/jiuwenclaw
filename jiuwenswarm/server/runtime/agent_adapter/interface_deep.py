@@ -298,13 +298,6 @@ from jiuwenswarm.common.utils import (
     get_runtime_state_path,
     reset_free_search_runtime_flags,
 )
-from jiuwenswarm.server.runtime.llm_io_trace import (
-    LLM_TRACE_ITERATION,
-    LLM_TRACE_MODEL_NAME,
-    LLM_TRACE_REQUEST_ID,
-    LLM_TRACE_SESSION_ID,
-    log_chat_final,
-)
 
 load_dotenv(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -620,41 +613,6 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
     except Exception as exc:
         logger.warning("[JiuWenSwarmDeepAdapter] ContextProcessorRail create failed: %s", exc)
         return None
-
-
-def _build_subagent_context_processor_rail(
-    config: dict[str, Any] | None,
-) -> ContextProcessorRail | None:
-    """Build configured ContextProcessorRail for TaskTool/spawn/fork subagents.
-
-    A-chain counterpart of enterprise ``minimal=True`` context rail: follow
-    ``react.context_engine_config`` thresholds when enabled, without mounting
-    ContextAssembleRail (tools/context section injection).
-    """
-    if not isinstance(config, dict):
-        return None
-    raw_ctx = config.get("context_engine_config", {})
-    if not isinstance(raw_ctx, dict) or not raw_ctx.get("enabled", False):
-        return None
-    return _build_context_processor_rail(config)
-
-
-def _merge_subagent_rails_with_context_processor(
-    base_rails: list[Any] | None,
-    config: dict[str, Any] | None,
-) -> list[Any] | None:
-    """Append configured ContextProcessorRail to *base_rails* when compression is on.
-
-    Returns *base_rails* unchanged (including ``None``) when disabled / unavailable.
-    """
-    ce_rail = _build_subagent_context_processor_rail(config)
-    if ce_rail is None:
-        return base_rails
-    merged = list(base_rails or [])
-    if any(isinstance(rail, ContextProcessorRail) for rail in merged):
-        return merged
-    merged.append(ce_rail)
-    return merged
 
 
 async def ensure_persistent_checkpointer() -> None:
@@ -1255,6 +1213,27 @@ class JiuWenSwarmDeepAdapter:
     def is_session_active(self, session_id: str) -> bool:
         return self._is_session_active(session_id)
 
+    def has_session_runtime(self, session_id: str | None = None) -> bool:
+        """Return whether this adapter still owns session runtime."""
+        if session_id is not None:
+            sid = self._session_adapter_key(session_id)
+            if self._is_session_scoped_adapter:
+                return self._session_adapter_key(self._parent_session_id) == sid
+            return bool(
+                sid in self._session_adapters
+                or sid in self._session_adapter_locks
+                or self._active_session_ids.get(sid, 0) > 0
+                or sid in self._session_agent_tasks
+            )
+        if self._is_session_scoped_adapter:
+            return True
+        return bool(
+            self._session_adapters
+            or self._session_adapter_locks
+            or self._active_session_ids
+            or self._session_agent_tasks
+        )
+
     def _session_has_registered_tasks(self, session_id: str) -> bool:
         tasks = getattr(self, "_session_agent_tasks", {}).get(session_id)
         return bool(tasks and any(not task.done() for task in tasks))
@@ -1790,10 +1769,6 @@ class JiuWenSwarmDeepAdapter:
         subagents: list[Any] = []
         should_add_general_purpose = False
 
-        # TaskTool/spawn subagents: mount configured A-chain compression when enabled
-        # (enterprise MR-1147 intent; no ContextAssembleRail ≈ minimal).
-        # Fresh ContextProcessorRail per subagent (rail may hold per-agent state).
-
         if isinstance(subagents_cfg, dict):
             general_agent_cfg = subagents_cfg.get("general_agent")
             if self._is_subagent_enabled(general_agent_cfg):
@@ -1801,19 +1776,11 @@ class JiuWenSwarmDeepAdapter:
 
             research_agent_cfg = subagents_cfg.get("research_agent")
             if self._is_subagent_enabled(research_agent_cfg):
-                research_rails = None
-                research_ce = _build_subagent_context_processor_rail(react_cfg)
-                if research_ce is not None:
-                    # Preserve research_agent factory default FileSystemRail when overriding rails.
-                    from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
-
-                    research_rails = [FileSystemRail(), research_ce]
                 subagents.append(
                     build_research_agent_config(
                         model,
                         workspace=workspace,
                         language=resolved_language,
-                        rails=research_rails,
                         max_iterations=parse_int(
                             research_agent_cfg.get("max_iterations"),
                             react_cfg.get("max_iterations", 15),
@@ -1837,13 +1804,11 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
                     "defaulting to managed mode"
                 )
-            browser_rails = _merge_subagent_rails_with_context_processor(None, react_cfg)
             subagents.append(
                 build_browser_agent_config(
                     model,
                     workspace=workspace,
                     language=resolved_language,
-                    rails=browser_rails,
                     max_iterations=parse_int(
                         (
                             browser_agent_cfg.get("max_iterations")
@@ -1870,7 +1835,6 @@ class JiuWenSwarmDeepAdapter:
                 _load_custom_subagents(
                     self._workspace_dir, subagents_cfg, model, workspace,
                     __name__, model_cache=self._model_cache,
-                    react_config=react_cfg,
                 )
             )
         except Exception:
@@ -5491,17 +5455,11 @@ class JiuWenSwarmDeepAdapter:
     ) -> list[dict[str, Any]]:
         """Per-session teardown: rail abort, shell kill, cancelled tool collection."""
         sid = self._resolve_interrupt_session_id(session_id)
-        cancelled_tool_results: list[dict[str, Any]] = []
         cancelled_tasks = await self._cancel_session_agent_tasks(sid)
-        if self._stream_event_rail is not None:
-            self._stream_event_rail.abort(session_id or sid)
-            self._stream_event_rail.collect_cancelled_tool_updates(session_id or sid)
-            cancelled_tool_results = self._stream_event_rail.get_cancelled_tool_results(
-                session_id or sid,
-            )
-            self._stream_event_rail.clear_cancelled_tool_results(session_id or sid)
-            if reset_for_new_task:
-                self._stream_event_rail.reset_for_new_task(session_id or sid)
+        cancelled_tool_results = self._collect_cancelled_tools_for_session(
+            session_id,
+            reset_for_new_task=reset_for_new_task,
+        )
         try:
             from openjiuwen.core.sys_operation.shell_process_registry import (
                 kill_shell_processes_for_session_tree,
@@ -5529,6 +5487,63 @@ class JiuWenSwarmDeepAdapter:
                 sid,
             )
         return cancelled_tool_results
+
+    def _collect_cancelled_tools_for_session(
+        self,
+        session_id: str | None,
+        *,
+        reset_for_new_task: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Abort rail checkpoints and collect in-flight tools for *session_id*.
+
+        Does not cancel asyncio stream producer tasks — safe for interaction
+        cancel, which must keep owning the round via ``cancel_round``.
+        """
+        if self._stream_event_rail is None:
+            return []
+        sid = self._resolve_interrupt_session_id(session_id)
+        self._stream_event_rail.abort(session_id or sid)
+        self._stream_event_rail.collect_cancelled_tool_updates(session_id or sid)
+        cancelled_tool_results = self._stream_event_rail.get_cancelled_tool_results(
+            session_id or sid,
+        )
+        self._stream_event_rail.clear_cancelled_tool_results(session_id or sid)
+        if reset_for_new_task:
+            self._stream_event_rail.reset_for_new_task(session_id or sid)
+        return cancelled_tool_results
+
+    @staticmethod
+    def _append_cancelled_tools_to_history(
+        request: AgentRequest,
+        cancelled_tool_results: list[dict[str, Any]],
+    ) -> None:
+        """Persist cancelled tool results so refresh does not leave spinners."""
+        if not cancelled_tool_results:
+            return
+        mode = (
+            request.params.get("mode", "unknown")
+            if isinstance(request.params, dict)
+            else "unknown"
+        )
+        for tool_info in cancelled_tool_results:
+            append_history_record(
+                session_id=request.session_id,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                role="assistant",
+                event_type="chat.tool_result",
+                content=tool_info.get("result", ""),
+                timestamp=time.time(),
+                extra={
+                    "tool_result": {
+                        "tool_name": tool_info.get("tool_name", ""),
+                        "tool_call_id": tool_info.get("tool_call_id", ""),
+                        "result": tool_info.get("result", ""),
+                        "status": tool_info.get("status", "error"),
+                    },
+                },
+                mode=mode,
+            )
 
     def _has_active_goal_round(self) -> bool:
         """Whether DeepAgent is currently executing a goal round.
@@ -5968,25 +5983,7 @@ class JiuWenSwarmDeepAdapter:
         if cancelled_tool_results:
             payload["cancelled_tools"] = cancelled_tool_results
             # 写入历史记录，确保刷新网页后工具状态正确显示
-            for tool_info in cancelled_tool_results:
-                append_history_record(
-                    session_id=request.session_id,
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    role="assistant",
-                    event_type="chat.tool_result",
-                    content=tool_info.get("result", ""),
-                    timestamp=time.time(),
-                    extra={
-                        "tool_result": {
-                            "tool_name": tool_info.get("tool_name", ""),
-                            "tool_call_id": tool_info.get("tool_call_id", ""),
-                            "result": tool_info.get("result", ""),
-                            "status": tool_info.get("status", "error"),
-                        },
-                    },
-                    mode=request.params.get("mode", "unknown") if isinstance(request.params, dict) else "unknown",
-                )
+            self._append_cancelled_tools_to_history(request, cancelled_tool_results)
 
         return AgentResponse(
             request_id=request.request_id,
@@ -6033,6 +6030,12 @@ class JiuWenSwarmDeepAdapter:
                 )
 
         cancelled = False
+        # Collect in-flight tools without cancelling the stream producer task —
+        # interaction cancel must keep round ownership in cancel_round().
+        cancelled_tool_results = self._collect_cancelled_tools_for_session(
+            request.session_id,
+            reset_for_new_task=(intent == "cancel"),
+        )
         try:
             cancelled = await self._instance.cancel_round(
                 reason="user_cancel",
@@ -6064,6 +6067,9 @@ class JiuWenSwarmDeepAdapter:
             # Web/TUI can refresh GoalBar even when no output lease remains
             # to receive goal.updated.
             payload["goal"] = paused_goal_payload
+        if cancelled_tool_results:
+            payload["cancelled_tools"] = cancelled_tool_results
+            self._append_cancelled_tools_to_history(request, cancelled_tool_results)
 
         # Best-effort todo cancellation for user cancel (does not touch runtime).
         if cancelled and intent == "cancel" and request.session_id:
@@ -7656,12 +7662,6 @@ class JiuWenSwarmDeepAdapter:
                     )
                 else:
                     content = slash_result.get("output", str(slash_result))
-                    log_chat_final(
-                        session_id=session_id,
-                        request_id=rid or "",
-                        iteration=LLM_TRACE_ITERATION.get(),
-                        model_name=LLM_TRACE_MODEL_NAME.get() or self._resolve_model_name(),
-                    )
                     yield AgentResponseChunk(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
@@ -7725,10 +7725,6 @@ class JiuWenSwarmDeepAdapter:
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
         interaction_stream_abort = True
-        token_trace_sid = LLM_TRACE_SESSION_ID.set(session_id)
-        token_trace_rid = LLM_TRACE_REQUEST_ID.set(rid or "")
-        token_trace_iter = LLM_TRACE_ITERATION.set(0)
-        token_trace_model = LLM_TRACE_MODEL_NAME.set(self._resolve_model_name())
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -8056,12 +8052,15 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
-                    if not content or not content.strip():
+                    reasoning_payload = self._stream_text_payload(
+                        "chat.reasoning", content
+                    )
+                    if reasoning_payload is None:
                         continue
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.reasoning", "content": content},
+                        payload=reasoning_payload,
                         is_complete=False,
                     )
                     continue
@@ -8072,7 +8071,8 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
-                    if not content or not content.strip():
+                    delta_payload = self._stream_text_payload("chat.delta", content)
+                    if delta_payload is None:
                         continue
                     has_streamed_content = True
                     if accumulated_reasoning:
@@ -8089,7 +8089,7 @@ class JiuWenSwarmDeepAdapter:
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.delta", "content": content},
+                        payload=delta_payload,
                         is_complete=False,
                     )
                     continue
@@ -8176,13 +8176,6 @@ class JiuWenSwarmDeepAdapter:
                     if self._goal_record_is_active()
                     else "chat.final"
                 )
-                if final_event_type == "chat.final":
-                    log_chat_final(
-                        session_id=session_id,
-                        request_id=rid or "",
-                        iteration=LLM_TRACE_ITERATION.get(),
-                        model_name=LLM_TRACE_MODEL_NAME.get(),
-                    )
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -8261,10 +8254,6 @@ class JiuWenSwarmDeepAdapter:
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
-            LLM_TRACE_SESSION_ID.reset(token_trace_sid)
-            LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
-            LLM_TRACE_ITERATION.reset(token_trace_iter)
-            LLM_TRACE_MODEL_NAME.reset(token_trace_model)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
             # Always clean up rail state — process_interrupt's
@@ -8352,6 +8341,16 @@ class JiuWenSwarmDeepAdapter:
         )
 
     @staticmethod
+    def _stream_text_payload(
+        event_type: str,
+        content: Any,
+    ) -> dict[str, Any] | None:
+        """Build a text event without discarding formatting-only chunks."""
+        if content is None or content == "":
+            return None
+        return {"event_type": event_type, "content": content}
+
+    @staticmethod
     def _parse_stream_chunk(
         chunk,
         *,
@@ -8401,9 +8400,9 @@ class JiuWenSwarmDeepAdapter:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    if not content or not content.strip():
-                        return None
-                    return {"event_type": "chat.delta", "content": content}
+                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                        "chat.delta", content
+                    )
 
                 if chunk_type == "llm_reasoning":
                     content = (
@@ -8411,17 +8410,17 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(payload, dict)
                         else str(payload)
                     )
-                    if not content or not content.strip():
-                        return None
-                    return {"event_type": "chat.reasoning", "content": content}
+                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                        "chat.reasoning", content
+                    )
 
                 if chunk_type == "content_chunk":
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    if not content or not content.strip():
-                        return None
-                    return {"event_type": "chat.delta", "content": content}
+                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                        "chat.delta", content
+                    )
 
                 if chunk_type == "answer":
                     if isinstance(payload, dict):
@@ -8445,23 +8444,9 @@ class JiuWenSwarmDeepAdapter:
                         return None
 
                     if _has_streamed_content and not is_chunked:
-                        # When llm_output has already streamed the full user-facing text,
-                        # keep chat.final as a completion marker; still record the boundary.
-                        log_chat_final(
-                            session_id=LLM_TRACE_SESSION_ID.get(),
-                            request_id=LLM_TRACE_REQUEST_ID.get(),
-                            iteration=LLM_TRACE_ITERATION.get(),
-                            model_name=LLM_TRACE_MODEL_NAME.get(),
-                        )
                         return {"event_type": "chat.final", "content": content}
                     if is_chunked:
                         return {"event_type": "chat.delta", "content": content}
-                    log_chat_final(
-                        session_id=LLM_TRACE_SESSION_ID.get(),
-                        request_id=LLM_TRACE_REQUEST_ID.get(),
-                        iteration=LLM_TRACE_ITERATION.get(),
-                        model_name=LLM_TRACE_MODEL_NAME.get(),
-                    )
                     return {"event_type": "chat.final", "content": content}
 
                 if chunk_type == "tool_call":
@@ -8710,9 +8695,9 @@ class JiuWenSwarmDeepAdapter:
                     content = payload.get("content") or payload.get("output")
                 else:
                     content = str(payload)
-                if not content or not content.strip():
-                    return None
-                return {"event_type": "chat.delta", "content": content}
+                return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    "chat.delta", content
+                )
 
             if isinstance(chunk, dict):
                 if "traceId" in chunk or "invokeId" in chunk:
@@ -9882,7 +9867,6 @@ def _agent_def_to_subagent_config(
     model: Any,
     workspace: str,
     model_cache: dict[str, Any] | None = None,
-    react_config: dict[str, Any] | None = None,
 ) -> SubAgentConfig:
     """将 AgentDefinition 转换为 SubAgentConfig，用于 SubagentRail 注册。
 
@@ -9891,7 +9875,6 @@ def _agent_def_to_subagent_config(
         model: 父 agent 的 Model 实例（作为默认模型）
         workspace: 工作空间路径
         model_cache: 模型缓存字典（用于按名称查找指定模型）
-        react_config: react 配置段；启用上下文压缩时挂载 ContextProcessorRail
     """
     from openjiuwen.harness.schema.config import SubAgentConfig
 
@@ -9918,7 +9901,6 @@ def _agent_def_to_subagent_config(
         skills=agent_def.skills,
         max_iterations=agent_def.max_iterations,
         enable_task_loop=True,
-        rails=_merge_subagent_rails_with_context_processor(None, react_config),
     )
 
 
@@ -9940,14 +9922,13 @@ def _load_custom_subagents(
         model: 模型配置
         workspace: 工作空间路径
         logger_name: 日志记录器名称
-        **kwargs: 额外参数，支持 model_cache / react_config 等
+        **kwargs: 额外参数，支持 model_cache 等
     """
     from jiuwenswarm.server.runtime.agent_config_service import AgentConfigService
 
     _logger = logging.getLogger(logger_name)
     agent_service = AgentConfigService(workspace_dir)
     model_cache: dict | None = kwargs.get("model_cache")
-    react_config: dict | None = kwargs.get("react_config")
     result: list[Any] = []
     for agent_def in agent_service.list_agents():
         if agent_def.source == "builtin":
@@ -9956,9 +9937,7 @@ def _load_custom_subagents(
         # 只有显式 enabled: true 才加载
         if not (isinstance(subagent_cfg, dict) and bool(subagent_cfg.get("enabled", False))):
             continue
-        custom_spec = _agent_def_to_subagent_config(
-            agent_def, model, workspace, model_cache, react_config=react_config
-        )
+        custom_spec = _agent_def_to_subagent_config(agent_def, model, workspace, model_cache)
         custom_spec.factory_kwargs = {"auto_create_workspace": False}
         result.append(custom_spec)
         _logger.info("loaded custom agent '%s' from %s", agent_def.name, agent_def.source)

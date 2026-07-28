@@ -78,6 +78,14 @@ class AgentRuntime:
     info: AgentInfo
     key: AgentKey
     creating_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Sandbox activity accounting: task_count is held for the whole lifetime
+    # of a chat request / stream / SSH relay; the idle clock only starts once
+    # it drops back to zero.
+    task_count: int = 0
+    last_active_at: float = field(default_factory=time.time)
+
+    def touch(self) -> None:
+        self.last_active_at = time.time()
 
     def is_ready(self) -> bool:
         return self.info.status is AgentStatus.READY
@@ -93,7 +101,12 @@ class AgentRuntime:
 
     def snapshot(self) -> AgentRuntime:
         """Return a detached runtime view for callers (info only)."""
-        return AgentRuntime(info=self.info.copy(), key=self.key)
+        return AgentRuntime(
+            info=self.info.copy(),
+            key=self.key,
+            task_count=self.task_count,
+            last_active_at=self.last_active_at,
+        )
 
     def attach_to_envelope(self, envelope: E2AEnvelope) -> None:
         envelope.channel_context["agent_id"] = self.info.agent_id
@@ -252,6 +265,12 @@ class AgentManager:
         values = dict(zip(self._key_fields, key, strict=False))
         return values["user_id"], values["agent_type"]
 
+    @staticmethod
+    def _acquire_locked(runtime: AgentRuntime) -> None:
+        """Increment task holding under ``_runtimes_lock``."""
+        runtime.task_count += 1
+        runtime.touch()
+
     async def get_or_create_agent(
         self,
         user_id: str,
@@ -261,8 +280,15 @@ class AgentManager:
         creator: AgentCreator | None = None,
         timeout_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
+        acquire: bool = False,
     ) -> AgentRuntime:
-        """Get a READY Agent runtime or create one, waiting for in-flight creation."""
+        """Get a READY Agent runtime or create one, waiting for in-flight creation.
+
+        With ``acquire=True`` the stored runtime's ``task_count`` is
+        incremented atomically before the snapshot is returned, so the idle
+        reaper can never reclaim an agent between resolve and use. Callers
+        must pair it with :meth:`release`.
+        """
 
         key = self._make_key(user_id, agent_type, key_values=key_values)
         key_user_id, key_agent_type = self._identity_from_key(key)
@@ -278,6 +304,12 @@ class AgentManager:
             async with self._runtimes_lock:
                 existing = self._runtimes.get(key)
                 if existing is not None and existing.is_ready():
+                    if acquire:
+                        self._acquire_locked(existing)
+                    else:
+                        # Plain resolve (e.g. 3rdagent.switch) still counts as
+                        # activity for the idle clock.
+                        existing.touch()
                     return existing.snapshot()
 
                 if existing is None:
@@ -298,7 +330,11 @@ class AgentManager:
 
             if owner:
                 return await self._run_creator(
-                    key, creator_base, creator, owner_runtime=runtime
+                    key,
+                    creator_base,
+                    creator,
+                    owner_runtime=runtime,
+                    acquire=acquire,
                 )
 
             try:
@@ -335,6 +371,49 @@ class AgentManager:
         if runtime is not None:
             runtime.mark_deleted()
 
+    async def release(self, key: AgentKey) -> None:
+        """Drop one task holding acquired via ``get_or_create_agent(acquire=True)``.
+
+        No-op when the runtime is already gone (e.g. explicitly deleted).
+        """
+        async with self._runtimes_lock:
+            runtime = self._runtimes.get(key)
+            if runtime is None:
+                return
+            runtime.task_count = max(0, runtime.task_count - 1)
+            runtime.touch()
+
+    async def pop_if_idle(
+        self,
+        key: AgentKey,
+        idle_timeout_seconds: float,
+    ) -> AgentRuntime | None:
+        """Atomically remove a READY runtime idle beyond the timeout.
+
+        Returns a detached snapshot (status DELETED) when reclaimed so the
+        caller can release the underlying sandbox, or ``None`` when the
+        runtime is missing, still held (``task_count > 0``), not READY, or
+        not idle long enough.
+        """
+        timeout = float(idle_timeout_seconds)
+        if timeout <= 0:
+            return None
+        async with self._runtimes_lock:
+            runtime = self._runtimes.get(key)
+            if runtime is None or not runtime.is_ready():
+                return None
+            if runtime.task_count > 0:
+                return None
+            if time.time() - runtime.last_active_at < timeout:
+                return None
+            self._runtimes.pop(key, None)
+        runtime.mark_deleted()
+        return runtime.snapshot()
+
+    async def list_keys(self) -> list[AgentKey]:
+        async with self._runtimes_lock:
+            return list(self._runtimes.keys())
+
     async def list_user_agents(self, user_id: str) -> list[AgentRuntime]:
         normalized_user_id = str(user_id or "").strip()
         async with self._runtimes_lock:
@@ -363,6 +442,7 @@ class AgentManager:
         creator: AgentCreator | None,
         *,
         owner_runtime: AgentRuntime,
+        acquire: bool = False,
     ) -> AgentRuntime:
         key_desc = AgentRuntime.format_key(key, self._key_fields)
         try:
@@ -372,6 +452,8 @@ class AgentManager:
                 if self._runtimes.get(key) is not owner_runtime:
                     raise AgentDeleted(f"AGENT_DELETED: {key_desc}")
                 owner_runtime.mark_ready(resolved)
+                if acquire:
+                    self._acquire_locked(owner_runtime)
                 return owner_runtime.snapshot()
         except asyncio.CancelledError as exc:
             await self._mark_creator_failed(

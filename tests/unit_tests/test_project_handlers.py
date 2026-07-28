@@ -117,8 +117,10 @@ def _make_project(name, project_dir, *, pinned=False, pin_order=0, hidden=False)
 
 
 def _abspath(tmp_path, name):
-    """平台无关的绝对路径,用于 project.create 的 isabs 校验。"""
-    return str(tmp_path / name)
+    """平台无关的已存在目录绝对路径,用于 project.create 的 isabs / isdir 校验。"""
+    path = tmp_path / name
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 # ===========================================================================
@@ -402,6 +404,18 @@ class TestProjectCreate:
                 {"name": "", "project_dir": _abspath(tmp_path, "x")},
             )
             assert resp["code"] == "BAD_REQUEST"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_rejects_missing_existing_project_dir(registered_channel, tmp_path):
+        """传 project_dir 表示选择现有项目,目录不存在时拒绝创建项目记录。"""
+        missing = str(tmp_path / "missing")
+        resp = await _call(
+            registered_channel, "project.create", {"name": "P", "project_dir": missing}
+        )
+        assert resp["ok"] is False
+        assert resp["code"] == "PROJECT_DIR_MISSING"
+        assert resp["error"] == "project directory does not exist"
 
 
 # ===========================================================================

@@ -8,6 +8,9 @@ endpoint::
 
     ssh -p 2222 'yr:instance:<instance_id>'@<frontend-host>
 
+Client private keys are loaded from ``client_keys_dir`` (default
+``/root/.ssh``).
+
 ``<instance_id>`` is the instance id returned by the YuanRong agent
 create API (``POST /api/agent``), resolved by the AgentOS Router.
 """
@@ -16,15 +19,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import urllib.parse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SSH_PORT = 2222
 DEFAULT_SSH_USER_TEMPLATE = "yr:instance:{instance}"
+DEFAULT_CLIENT_KEYS_DIR = "/root/.ssh"
 _RELAY_BUFFER_SIZE = 32768
+_USER_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# OpenSSH default IdentityFile basenames (skip *.pub / config / known_hosts).
+_DEFAULT_CLIENT_KEY_NAMES = (
+    "id_ed25519",
+    "id_ed25519_sk",
+    "id_ecdsa",
+    "id_ecdsa_sk",
+    "id_rsa",
+    "id_dsa",
+    "id_ed448",
+)
 
 
 def _raise_missing_asyncssh(exc: ImportError) -> None:
@@ -43,6 +60,31 @@ def _import_asyncssh() -> Any:
     return asyncssh
 
 
+def resolve_client_keys_dir(template: str, user_id: str = "") -> Path:
+    """Resolve ``client_keys_dir``; substitute ``{user_id}`` when present."""
+    safe_user = _USER_ID_SAFE_RE.sub("_", str(user_id or "").strip()) or "default"
+    raw = str(template or DEFAULT_CLIENT_KEYS_DIR).strip() or DEFAULT_CLIENT_KEYS_DIR
+    try:
+        rendered = raw.format(user_id=safe_user)
+    except (KeyError, ValueError) as exc:
+        raise ValueError(
+            f"invalid client_keys_dir template {raw!r}: {exc}"
+        ) from exc
+    return Path(rendered).expanduser()
+
+
+def list_client_key_paths(keys_dir: Path) -> list[str]:
+    """Return existing private-key paths under *keys_dir* (OpenSSH defaults)."""
+    if not keys_dir.is_dir():
+        return []
+    paths: list[str] = []
+    for name in _DEFAULT_CLIENT_KEY_NAMES:
+        path = keys_dir / name
+        if path.is_file():
+            paths.append(str(path))
+    return paths
+
+
 @dataclass(frozen=True)
 class YuanrongSshSettings:
     """Southbound SSH access settings for the YuanRong frontend."""
@@ -50,6 +92,7 @@ class YuanrongSshSettings:
     port: int = DEFAULT_SSH_PORT
     user_template: str = DEFAULT_SSH_USER_TEMPLATE
     connect_timeout_s: float = 30.0
+    client_keys_dir: str = DEFAULT_CLIENT_KEYS_DIR
 
 
 def load_yuanrong_ssh_settings(raw: Any) -> YuanrongSshSettings:
@@ -62,6 +105,10 @@ def load_yuanrong_ssh_settings(raw: Any) -> YuanrongSshSettings:
             raw.get("user_template") or DEFAULT_SSH_USER_TEMPLATE
         ).strip(),
         connect_timeout_s=float(raw.get("connect_timeout_s") or 30.0),
+        client_keys_dir=str(
+            raw.get("client_keys_dir") or DEFAULT_CLIENT_KEYS_DIR
+        ).strip()
+        or DEFAULT_CLIENT_KEYS_DIR,
     )
 
 
@@ -92,15 +139,31 @@ class YuanrongSshRelay:
             raise ValueError("instance_id is required for YuanRong SSH relay")
         return self._settings.user_template.format(instance=instance)
 
-    async def run(self, session: Any, instance_id: str) -> int:
+    async def run(
+        self,
+        session: Any,
+        instance_id: str,
+        *,
+        user_id: str = "",
+    ) -> int:
         """Relay *session* to the YuanRong instance; returns the exit code.
 
         Always resolves ``session.done`` and ``session.exit_code`` so the
         northbound channel waiting in ``_wait_relay_done`` is released.
+        Cancellation (northbound timeout / router disconnect) also releases
+        the waiter and tears down the southbound connection.
         """
         exit_code = 1
         try:
-            exit_code = await self._relay(session, instance_id)
+            exit_code = await self._relay(session, instance_id, user_id=user_id)
+        except asyncio.CancelledError:
+            logger.info(
+                "[YuanrongSshRelay] relay cancelled: session=%s instance=%s",
+                session.session_id,
+                instance_id,
+            )
+            exit_code = 130
+            raise
         except Exception as exc:  # noqa: BLE001 - report any relay failure to the client
             logger.exception(
                 "[YuanrongSshRelay] relay failed: session=%s instance=%s",
@@ -126,7 +189,25 @@ class YuanrongSshRelay:
         except Exception:  # noqa: BLE001 - client may already be gone
             logger.debug("[YuanrongSshRelay] client write failed", exc_info=True)
 
-    async def _relay(self, session: Any, instance_id: str) -> int:
+    def _resolve_client_keys(self, user_id: str) -> list[str]:
+        keys_dir = resolve_client_keys_dir(
+            self._settings.client_keys_dir, user_id
+        )
+        key_paths = list_client_key_paths(keys_dir)
+        if not key_paths:
+            raise ValueError(
+                f"no SSH private keys found in {keys_dir} "
+                f"(expected one of: {', '.join(_DEFAULT_CLIENT_KEY_NAMES)})"
+            )
+        return key_paths
+
+    async def _relay(
+        self,
+        session: Any,
+        instance_id: str,
+        *,
+        user_id: str = "",
+    ) -> int:
         asyncssh = _import_asyncssh()
 
         host = self.backend_host
@@ -136,19 +217,24 @@ class YuanrongSshRelay:
                 "(set gateway.agent_client.frontend_endpoint with a hostname)"
             )
         username = self.backend_username(instance_id)
+        client_keys = self._resolve_client_keys(user_id)
 
         logger.info(
-            "[YuanrongSshRelay] connecting: %s@%s:%s session=%s",
+            "[YuanrongSshRelay] connecting: %s@%s:%s session=%s keys_dir=%s keys=%s",
             username,
             host,
             self._settings.port,
             session.session_id,
+            resolve_client_keys_dir(self._settings.client_keys_dir, user_id),
+            len(client_keys),
         )
         conn = await asyncio.wait_for(
             asyncssh.connect(
                 host,
                 port=self._settings.port,
                 username=username,
+                client_keys=client_keys,
+                agent_path=None,
                 known_hosts=None,
             ),
             timeout=self._settings.connect_timeout_s,
@@ -173,17 +259,77 @@ class YuanrongSshRelay:
         if term_size and term_size[0]:
             kwargs["term_size"] = term_size
         backend = await conn.create_process(**kwargs)
-        try:
-            await asyncio.gather(
+
+        # Either side dying must tear down the other: wait FIRST_COMPLETED,
+        # then cancel remaining pumps and close both ends.
+        pumps = [
+            asyncio.create_task(
                 self._pump_client_to_backend(session, backend),
+                name=f"ssh-pump-n2s-{session.session_id[:16]}",
+            ),
+            asyncio.create_task(
                 self._pump_backend_to_client(backend.stdout, process.stdout),
+                name=f"ssh-pump-s2n-out-{session.session_id[:16]}",
+            ),
+            asyncio.create_task(
                 self._pump_backend_to_client(backend.stderr, process.stderr),
+                name=f"ssh-pump-s2n-err-{session.session_id[:16]}",
+            ),
+        ]
+        try:
+            done, pending = await asyncio.wait(
+                pumps, return_when=asyncio.FIRST_COMPLETED
             )
-            await backend.wait_closed()
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                exc = task.exception() if not task.cancelled() else None
+                if exc is not None:
+                    logger.debug(
+                        "[YuanrongSshRelay] pump ended with error: %s",
+                        exc,
+                        exc_info=exc,
+                    )
+        except asyncio.CancelledError:
+            for task in pumps:
+                task.cancel()
+            await asyncio.gather(*pumps, return_exceptions=True)
+            raise
         finally:
-            backend.close()
+            await self._close_backend(backend)
+            self._exit_northbound(process, backend.exit_status)
+
         exit_status = backend.exit_status
         return int(exit_status) if exit_status is not None else 0
+
+    @staticmethod
+    async def _close_backend(backend: Any) -> None:
+        try:
+            backend.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("[YuanrongSshRelay] backend.close failed", exc_info=True)
+        try:
+            await backend.wait_closed()
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "[YuanrongSshRelay] backend.wait_closed failed", exc_info=True
+            )
+
+    @staticmethod
+    def _exit_northbound(process: Any, exit_status: Any) -> None:
+        """Force-close the northbound SSH process when the southbound ends."""
+        if process is None:
+            return
+        code = int(exit_status) if exit_status is not None else 0
+        try:
+            process.exit(code)
+        except Exception:  # noqa: BLE001 - channel may already be closed
+            logger.debug(
+                "[YuanrongSshRelay] northbound process.exit failed",
+                exc_info=True,
+            )
 
     @staticmethod
     async def _pump_client_to_backend(session: Any, backend: Any) -> None:
@@ -205,7 +351,10 @@ class YuanrongSshRelay:
                     )
                 continue
             except asyncssh.BreakReceived:
-                backend.stdin.write(b"\x03")
+                try:
+                    backend.stdin.write(b"\x03")
+                except (asyncssh.ConnectionLost, ConnectionError):
+                    break
                 continue
             except (asyncssh.ConnectionLost, ConnectionError):
                 break
@@ -217,8 +366,8 @@ class YuanrongSshRelay:
                         "[YuanrongSshRelay] write_eof failed", exc_info=True
                     )
                 break
-            backend.stdin.write(data)
             try:
+                backend.stdin.write(data)
                 await backend.stdin.drain()
             except (asyncssh.ConnectionLost, ConnectionError):
                 break

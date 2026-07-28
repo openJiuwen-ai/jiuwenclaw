@@ -460,8 +460,13 @@ def init_session_metadata(
     model: str = "",
     cron_id: str = "",
     work_mode: str = "",
+    channel_metadata: dict[str, Any] | None = None,
 ) -> None:
-    """初始化会话元数据(同步写,确保创建后立即可读)"""
+    """初始化会话元数据(同步写,确保创建后立即可读)
+
+    ``channel_metadata`` 可选：TUI ``session.create`` 需在首条聊天前写入
+    ``cwd``/``project_dir``，供 ``/resume`` current-dir 过滤（见 Issue #2503）。
+    """
     # work_mode：未传时按 channel_id 推断默认值（tui→code，其他→work）
     resolved_work_mode = (
         normalize_work_mode(work_mode, default=default_work_mode_for_channel(channel_id))
@@ -489,6 +494,8 @@ def init_session_metadata(
         "status": "idle",
         "work_mode": resolved_work_mode,
     }
+    if isinstance(channel_metadata, dict) and channel_metadata:
+        metadata["channel_metadata"] = channel_metadata
     _write_metadata_sync(session_id, metadata)
 
 

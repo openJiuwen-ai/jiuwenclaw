@@ -31,6 +31,18 @@ class SshRelaySession:
     process: Any
     done: asyncio.Event = field(default_factory=asyncio.Event)
     exit_code: int = 0
+    # Background southbound relay task (set by AgentOS Router); cancelled on
+    # northbound timeout or disconnect so the YuanRong SSH connection is
+    # torn down instead of lingering until relay_timeout_sec / TCP timeout.
+    relay_task: asyncio.Task[Any] | None = None
+
+    def cancel_relay(self) -> bool:
+        """Cancel the southbound relay task if it is still running."""
+        task = self.relay_task
+        if task is None or task.done():
+            return False
+        task.cancel()
+        return True
 
 
 @dataclass
@@ -145,7 +157,18 @@ class SshChannel(BaseChannel):
         )
 
     async def _unregister_session(self, session_id: str) -> None:
-        self._sessions.pop(session_id, None)
+        session = self._sessions.pop(session_id, None)
+        relay = session.relay if session is not None else None
+        # Northbound session is over (clean exit, hard disconnect, or the
+        # handler task itself was cancelled by asyncssh on connection loss).
+        # The southbound pumps may never notice a dead client (stdin.read can
+        # block forever), so explicitly cancel the relay task here.
+        if relay is not None and relay.cancel_relay():
+            logger.info(
+                "[SSHChannel] northbound session %s closed; "
+                "cancelled southbound relay",
+                session_id,
+            )
 
     async def _wait_relay_done(self, session_id: str) -> int:
         session = self._sessions.get(session_id)
@@ -157,10 +180,23 @@ class SshChannel(BaseChannel):
         except asyncio.TimeoutError:
             logger.error(
                 "[SSHChannel] relay timeout for session %s "
-                "(no southbound handler completed the relay within %.0fs)",
+                "(no southbound handler completed the relay within %.0fs); "
+                "cancelling southbound relay",
                 session_id,
                 self.config.relay_timeout_sec,
             )
+            if relay.cancel_relay():
+                try:
+                    await asyncio.wait_for(relay.done.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[SSHChannel] southbound relay did not finish after "
+                        "cancel for session %s",
+                        session_id,
+                    )
+            if not relay.done.is_set():
+                relay.exit_code = 124
+                relay.done.set()
             return 124
         return relay.exit_code
 

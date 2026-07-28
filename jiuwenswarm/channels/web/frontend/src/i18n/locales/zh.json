@@ -1209,7 +1209,10 @@
         "3": "第三周",
         "4": "第四周",
         "last": "最后一周"
-      }
+      },
+      "wakeOffset": "提前唤醒",
+      "wakeOffsetUnit": "分钟",
+      "wakeOffsetHelp": "在计划推送时间前启动 Agent 准备结果；0 表示到点执行"
     },
     "modelPicker": {
       "configured": "已配置",
@@ -2188,7 +2191,8 @@
       "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
       "errors": {
         "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",
-        "nameExists": "该项目名已存在，请换个名称"
+        "nameExists": "该项目名已存在，请换个名称",
+        "pathMissing": "项目目录不存在，请选择已存在的目录"
       },
       "cancel": "取消",
       "confirm": "确定"

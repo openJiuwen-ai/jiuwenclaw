@@ -190,23 +190,16 @@ class AgentTool(Tool):
         from openjiuwen.harness.factory import create_deep_agent
         from openjiuwen.harness.schema.config import SubAgentConfig
         from openjiuwen.core.single_agent import AgentCard as OJAgentCard
-        from jiuwenswarm.common.config import get_config
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-            _agent_def_to_subagent_config,
-        )
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import _agent_def_to_subagent_config
 
         parent_config = getattr(self._parent_agent, "deep_config", None)
-        react_config = (get_config() or {}).get("react", {})
-        if not isinstance(react_config, dict):
-            react_config = {}
 
-        # 将 AgentDefinition 转为 SubAgentConfig（含启用时的 ContextProcessorRail）
+        # 将 AgentDefinition 转为 SubAgentConfig
         spec = _agent_def_to_subagent_config(
             agent_def,
             parent_config.model,
             parent_config.workspace.root_path if parent_config.workspace else "./",
             getattr(self._parent_agent, "_model_cache", None),
-            react_config=react_config,
         )
 
         # 子 agent 工具集：继承父 agent 的 ToolCard，过滤 disallowed 工具
@@ -245,7 +238,6 @@ class AgentTool(Tool):
             "system_prompt": spec.system_prompt,
             "tools": parent_tool_cards,
             "mcps": spec.mcps,
-            "rails": list(spec.rails) if spec.rails else [],
             "enable_task_loop": spec.enable_task_loop,
             "max_iterations": spec.max_iterations if spec.max_iterations is not None else parent_config.max_iterations,
             "workspace": workspace,

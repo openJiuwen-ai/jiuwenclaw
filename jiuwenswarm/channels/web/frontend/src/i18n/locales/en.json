@@ -1208,7 +1208,10 @@
         "3": "week 3",
         "4": "week 4",
         "last": "last week"
-      }
+      },
+      "wakeOffset": "Wake early",
+      "wakeOffsetUnit": "minutes",
+      "wakeOffsetHelp": "Start the agent this many minutes before the scheduled push time; 0 means run at the scheduled time"
     },
     "modelPicker": {
       "configured": "Configured",
@@ -2184,7 +2187,8 @@
       "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
       "errors": {
         "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project.",
-        "nameExists": "This project name already exists. Please choose another name."
+        "nameExists": "This project name already exists. Please choose another name.",
+        "pathMissing": "Project directory does not exist. Choose an existing directory."
       },
       "cancel": "Cancel",
       "confirm": "Confirm"

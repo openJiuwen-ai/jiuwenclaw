@@ -1407,7 +1407,12 @@ def test_turn_diff_detail_can_omit_files():
     assert result["files"] == {}
 
 
-def test_turn_diff_detail_rejects_transient_git_state(monkeypatch):
+def test_turn_diff_detail_tolerates_transient_git_state(monkeypatch):
+    """transient 状态不应阻断历史轮次回放。
+
+    历史轮次基于 file_ops + change_set snapshot,不执行 git 命令。
+    transient 时用 project_dir 兜底 repo_context,历史预览仍可用。
+    """
     service = SimpleNamespace(
         status=lambda project: SimpleNamespace(
             error=None,
@@ -1423,11 +1428,82 @@ def test_turn_diff_detail_rejects_transient_git_state(monkeypatch):
     )
     ph, pa, pl, ps = _patch_diff_service()
     with ph, pa, pl, ps:
-        with pytest.raises(GitOperationError) as excinfo:
-            DiffStatusService.get_turn_diff_detail(
-                project=_PROJECT, session_id="sess-1", turn_index=1,
-            )
-    assert excinfo.value.git_error.code == "GIT_TRANSIENT_STATE"
+        result = DiffStatusService.get_turn_diff_detail(
+            project=_PROJECT, session_id="sess-1", turn_index=1,
+        )
+    # 应返回历史数据,而非抛 GIT_TRANSIENT_STATE
+    assert result is not None
+    assert result["turn_index"] == 1
+    # repo_root 用 project_dir 兜底(transient 时无法读 git)
+    assert result["repo_root"] == "/proj"
+    # 历史 turn 的文件应正常返回(路径相对 repo_root)
+    assert "file_a.py" in result["files"]
+
+
+def test_turn_diff_list_tolerates_transient_git_state(monkeypatch):
+    """transient 状态不应阻断历史轮次列表。
+
+    与 turn_diff_detail 同理:list 接口也基于 file_ops + snapshot,
+    transient 时用 project_dir 兜底。
+    """
+    service = SimpleNamespace(
+        status=lambda project: SimpleNamespace(
+            error=None,
+            repo_root="/proj",
+            branch="main",
+            head="abc123",
+            transient=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_git.get_project_git_service",
+        lambda: service,
+    )
+    ph, pa, pl, ps = _patch_diff_service()
+    with ph, pa, pl, ps:
+        result = DiffStatusService.get_turn_diff_list(
+            project=_PROJECT, session_id="sess-1",
+        )
+    # 应返回历史轮次列表,而非抛 GIT_TRANSIENT_STATE
+    assert result["total"] >= 1
+    assert result["turns"]
+    # repo_root 用 project_dir 兜底
+    assert result["repo_root"] == "/proj"
+
+
+def test_turn_diff_detail_tolerates_git_command_failed(monkeypatch):
+    """非 transient 的 git 错误(如 command_failed)也不应阻断历史预览。
+
+    timeout/command_failed 与 file_ops 历史回放无关,应同样用 project_dir 兜底。
+    """
+    from jiuwenswarm.server.runtime.session.project_git import GitError
+    service = SimpleNamespace(
+        status=lambda project: SimpleNamespace(
+            error=GitError(
+                code="GIT_COMMAND_FAILED",
+                message="git command failed",
+                retryable=True,
+            ),
+            repo_root=None,
+            branch=None,
+            head=None,
+            transient=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_git.get_project_git_service",
+        lambda: service,
+    )
+    ph, pa, pl, ps = _patch_diff_service()
+    with ph, pa, pl, ps:
+        result = DiffStatusService.get_turn_diff_detail(
+            project=_PROJECT, session_id="sess-1", turn_index=1,
+        )
+    # 应返回历史数据,而非抛 GitOperationError
+    assert result is not None
+    assert result["turn_index"] == 1
+    # repo_root 用 project_dir 兜底
+    assert result["repo_root"] == "/proj"
 
 
 def test_get_turn_diff_change_set_orphan_snapshot_is_expired(monkeypatch):

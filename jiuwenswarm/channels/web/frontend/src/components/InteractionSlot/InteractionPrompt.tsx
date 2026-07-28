@@ -1,7 +1,7 @@
 /**
  * InteractionPrompt — Agent 主动提问（ask_user）吸附卡
  *
- * 吸附在输入框正上方。支持单选 / 多选 / 自由输入 / 多轮（每题一页，最多 3 页）。
+ * 吸附在输入框正上方。支持单选 / 多选 / 自由输入 / 多轮（每题一页，最多 4 页）。
  * 一次性收集所有页答案后提交；确认后前端合成「问题澄清」卡注入对话流。
  */
 
@@ -17,8 +17,8 @@ import { buildQaSummaryContent, type QaSummaryData, type QaSummaryItem } from '.
 /** 后端为「有选项的问题」追加的自定义输入占位项。 */
 const CUSTOM_OPTION_LABEL = 'Other';
 
-/** 多轮上限（产品约定：多轮确认最多不超过 3 轮）。 */
-const MAX_PAGES = 3;
+/** 多轮上限（产品约定：多轮确认最多不超过 4 轮）。 */
+const MAX_PAGES = 4;
 
 /**
  * 「跳过」/「取消」时回传给后端的标记文本。

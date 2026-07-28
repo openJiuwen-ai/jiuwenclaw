@@ -14,6 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any, ClassVar, Optional
+from weakref import WeakValueDictionary
 
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
@@ -161,7 +162,9 @@ def _log_session_create_kvc_failure(task: asyncio.Task) -> None:
         )
 
 # Serialize plan-mode restore per session to avoid checkpoint races.
-_session_mode_sync_locks: dict[str, asyncio.Lock] = {}
+_session_mode_sync_locks: WeakValueDictionary[str, asyncio.Lock] = (
+    WeakValueDictionary()
+)
 
 # Sessions that have successfully exited plan mode via exit_plan_mode tool.
 # Set by _check_post_process_plan_exit, consumed by _ensure_code_mode_state
@@ -798,6 +801,7 @@ class AgentWebSocketServer:
         self._session_stream_tasks: dict[str, dict[asyncio.Task, asyncio.Event]] = {}
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
+        self._scheduler_agent: Any = None
         # Model cache for scheduled task execution (same approach as interface_deep)
         self._model_cache: dict[str, Any] = {}
         self._default_model: Optional[Any] = None
@@ -1085,13 +1089,34 @@ class AgentWebSocketServer:
 
     async def _stop_scheduler(self) -> None:
         """Stop the auto_harness scheduler."""
-        if self._scheduler_service is not None:
-            try:
+        try:
+            if self._scheduler_service is not None:
                 await self._scheduler_service.stop_scheduler()
                 logger.info("[AgentWebSocketServer] Scheduler stopped")
-            except Exception as e:
-                logger.warning("[AgentWebSocketServer] Failed to stop scheduler: %s", e)
+        except Exception as e:
+            logger.warning("[AgentWebSocketServer] Failed to stop scheduler: %s", e)
+        finally:
             self._scheduler_service = None
+            scheduler_agent = getattr(self, "_scheduler_agent", None)
+            if scheduler_agent is not None:
+                unpin = getattr(self._agent_manager, "unpin_agent", None)
+                if callable(unpin):
+                    unpin(scheduler_agent)
+            self._scheduler_agent = None
+
+    def _set_scheduler_agent(self, agent: Any) -> None:
+        """Pin the facade whose DeepAgent is retained by the scheduler."""
+        previous = getattr(self, "_scheduler_agent", None)
+        if previous is agent:
+            return
+        pin = getattr(self._agent_manager, "pin_agent", None)
+        if callable(pin):
+            pin(agent)
+        self._scheduler_agent = agent
+        if previous is not None:
+            unpin = getattr(self._agent_manager, "unpin_agent", None)
+            if callable(unpin):
+                unpin(previous)
 
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
@@ -1536,14 +1561,16 @@ class AgentWebSocketServer:
                         stream_task.cancel()
                         stream_tasks.append(stream_task)
 
+                cancel_response: AgentResponse | None = None
                 try:
                     # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
                     # allow_create=False：找不到已有 agent 时不 fallback 新建（见 _handle_cancel docstring）。
-                    await self._handle_cancel(
+                    cancel_response = await self._handle_cancel(
                         ws,
                         request,
                         send_lock,
                         allow_create=False,
+                        send_response=not cleanup_after_cancel,
                     )
                 finally:
                     if stream_tasks:
@@ -1558,7 +1585,25 @@ class AgentWebSocketServer:
                                     result,
                                 )
                     if cleanup_after_cancel and intent in ("cancel", "supplement"):
-                        await self._cleanup_client_disconnect_session_runtime(request)
+                        cleanup_succeeded = (
+                            await self._cleanup_client_disconnect_session_runtime(
+                                request
+                            )
+                        )
+                        if cancel_response is not None:
+                            if not cleanup_succeeded:
+                                cancel_response.ok = False
+                                cancel_response.payload = {
+                                    "event_type": "chat.interrupt_result",
+                                    "success": False,
+                                    "error": "session runtime cleanup failed",
+                                }
+                            wire = encode_agent_response_for_wire(
+                                cancel_response,
+                                response_id=request.request_id,
+                            )
+                            async with send_lock:
+                                await send_wire_payload(ws, wire)
                 return
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
@@ -1634,11 +1679,11 @@ class AgentWebSocketServer:
             == E2A_CANCEL_SOURCE_CLIENT_DISCONNECT
         )
 
-    async def _cleanup_client_disconnect_session_runtime(self, request: AgentRequest) -> None:
+    async def _cleanup_client_disconnect_session_runtime(self, request: AgentRequest) -> bool:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = str(request.session_id or params.get("session_id") or "").strip()
         if not session_id:
-            return
+            return False
         channel_id = request.channel_id or "default"
         try:
             cleaned = await self._agent_manager.cleanup_session_runtime(
@@ -1652,6 +1697,7 @@ class AgentWebSocketServer:
                 session_id,
                 cleaned,
             )
+            return True
         except Exception as exc:
             logger.warning(
                 "[AgentWebSocketServer] client disconnect session runtime cleanup failed: "
@@ -1660,6 +1706,13 @@ class AgentWebSocketServer:
                 session_id,
                 exc,
             )
+            return False
+        finally:
+            # Persisted history remains on disk, but this connection-scoped
+            # marker must not grow with every short-lived TUI process. Mode
+            # locks are weakly cached and disappear automatically after their
+            # last active/waiting user releases them.
+            _plan_exited_sessions.discard(session_id)
 
     async def _trigger_before_chat_request_hook(self, request: AgentRequest) -> None:
         if not self._should_trigger_before_chat_request_hook(request):
@@ -1687,7 +1740,8 @@ class AgentWebSocketServer:
         send_lock: asyncio.Lock,
         *,
         allow_create: bool = False,
-    ) -> None:
+        send_response: bool = True,
+    ) -> AgentResponse:
         """处理 CHAT_CANCEL 中断请求：复用已有 agent 实例，避免创建新实例。
 
         cancel 请求的 params 中可能没有 mode 信息，如果走 _handle_unary 的 get_agent(mode) 路径
@@ -1768,9 +1822,14 @@ class AgentWebSocketServer:
         if resp is None:
             resp = await agent.process_message(request)
 
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
+        if send_response:
+            wire = encode_agent_response_for_wire(
+                resp,
+                response_id=request.request_id,
+            )
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+        return resp
 
     @staticmethod
     def _resolve_code_language() -> str:
@@ -7311,6 +7370,7 @@ class AgentWebSocketServer:
                     raise ValueError("Failed to get agent for schedule request")
                 # Set agent on service (service will use it for execution)
                 self._scheduler_service.update_agent_instance(agent)
+                self._set_scheduler_agent(agent)
                 logger.info("[AgentServer] Set agent for schedule action %s: %s", action, agent is not None)
 
             if action == "check_config":

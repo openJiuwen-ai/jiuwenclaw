@@ -1,9 +1,14 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import SimpleSelect from './SimpleSelect';
 import TimePicker from './TimePicker';
 import DatePicker from './DatePicker';
 import { validateCronExpr } from './cronExprValidation';
+import {
+  normalizeWakeOffsetMinutesInput,
+  wakeOffsetMinutesToSeconds,
+  wakeOffsetSecondsToMinutes,
+} from './cronWakeOffset';
 import { scheduleToCronExpr, cronExprToSchedule, nowWallClock } from './scheduleConvert';
 import type { CronSchedule, CronScheduleKind } from '../../types/cron';
 
@@ -11,6 +16,11 @@ interface ScheduleEditorProps {
   value: string; // cron_expr 原文，唯一提交给后端的数据
   onChange: (v: string) => void;
   timezone: string; // "单次"tab 用来算"今天/现在"，禁掉已经过去的日期和时间点（见 2026-07-16 bugfix）
+  /** 提前唤醒秒数（后端 wake_offset_seconds）；UI 以分钟展示 */
+  wakeOffsetSeconds?: number;
+  onWakeOffsetSecondsChange?: (seconds: number) => void;
+  /** 仅锁定提前唤醒（proactive.tick 等不允许改 wake_offset） */
+  wakeOffsetDisabled?: boolean;
 }
 
 type TopMode = 'period' | 'interval' | 'once' | 'cronExpr';
@@ -88,11 +98,25 @@ function WeekdayPicker({ selected, onToggle }: { selected: number[]; onToggle: (
 // 高保真设计的执行计划编辑器有 4 个 tab：周期/按间隔/单次/Cron表达式。前 3 个是结构化编辑，
 // 最后一个是直接编辑 cron_expr 原文的兜底/高级模式（编辑任务时若原表达式无法结构化识别，
 // 或用户手动切到这个 tab，都以它为准，见 scheduleConvert.ts 的反向解析策略）。
-export default function ScheduleEditor({ value, onChange, timezone }: ScheduleEditorProps) {
+export default function ScheduleEditor({
+  value,
+  onChange,
+  timezone,
+  wakeOffsetSeconds = 0,
+  onWakeOffsetSecondsChange,
+  wakeOffsetDisabled = false,
+}: ScheduleEditorProps) {
   const { t } = useTranslation();
   const initialParsed = cronExprToSchedule(value);
   const initialSchedule = initialParsed ?? { kind: 'daily', time: '' };
   const [schedule, setSchedule] = useState<CronSchedule>(initialSchedule);
+  // 分钟输入单独用文本态，便于清空重输；能解析成非负整数才回写秒数
+  const wakeMinutesFromProps = wakeOffsetSecondsToMinutes(wakeOffsetSeconds);
+  const [wakeOffsetMinutesText, setWakeOffsetMinutesText] = useState(() => String(wakeMinutesFromProps));
+  // 父表单换任务 / 外部改秒数时，把展示文本同步回来（本组件自身 onChange 写回的同值不会抖动）
+  useEffect(() => {
+    setWakeOffsetMinutesText(String(wakeMinutesFromProps));
+  }, [wakeMinutesFromProps]);
   // 默认 tab：能解析出结构化 schedule 就跟它走；解析不出来时，创建任务（value 为空）默认落在
   // "周期"而不是"Cron表达式"（更符合大多数人的心智，表达式 tab 留给"手写/编辑一条解析不了的旧
   // 表达式"这种进阶场景）；编辑一条解析不出来的已有表达式（value 非空但 parse 失败）则仍然落在
@@ -488,6 +512,38 @@ export default function ScheduleEditor({ value, onChange, timezone }: ScheduleEd
           {!validation.valid && (
             <p className="mt-1 text-xs text-danger">{t(validation.error || 'cron.errors.cronFormat')}</p>
           )}
+        </div>
+      )}
+
+      {/* 提前唤醒：与 cron_expr 同属执行计划；对话创建任务常带 300s（5 分钟），面板需可改/可清零 */}
+      {onWakeOffsetSecondsChange && (
+        <div className="mt-3">
+          <div className="mb-1.5 flex items-center gap-1.5 text-sm font-bold text-text-strong">
+            {t('cron.schedule.wakeOffset')}
+            <span
+              className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-border text-[10px] font-normal text-text-muted cursor-help"
+              title={t('cron.schedule.wakeOffsetHelp') ?? undefined}
+            >
+              ?
+            </span>
+          </div>
+          <div className="flex flex-nowrap items-center gap-2">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={wakeOffsetMinutesText}
+              disabled={wakeOffsetDisabled}
+              title={wakeOffsetDisabled ? (t('cron.autoManagedToggleDisabled') ?? undefined) : undefined}
+              onChange={(e) => {
+                const normalized = normalizeWakeOffsetMinutesInput(e.target.value);
+                setWakeOffsetMinutesText(normalized);
+                onWakeOffsetSecondsChange(wakeOffsetMinutesToSeconds(normalized));
+              }}
+              placeholder="0"
+              className="w-28 shrink-0 rounded-md border border-border bg-card px-3 py-1.5 text-sm text-text outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50"
+            />
+            <span className="shrink-0 text-sm text-text-muted">{t('cron.schedule.wakeOffsetUnit')}</span>
+          </div>
         </div>
       )}
     </div>

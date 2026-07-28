@@ -109,9 +109,6 @@ from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     root_categories_to_text,
 )
 
-from jiuwenswarm.openjiuwen_logging import configure_openjiuwen_logging_under_jiuwenswarm
-
-configure_openjiuwen_logging_under_jiuwenswarm()
 for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.INFO)
 
@@ -2014,7 +2011,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """
         if max_tokens_bounds is None:
             max_tokens_bounds = {
-                "infimum_max_tokens": 1,
+                "infimum_max_tokens": 3,
                 "supremum_max_tokens": 16,
             }
 
@@ -2022,8 +2019,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             infimum_max_tokens = max_tokens_bounds.get("infimum_max_tokens")
             supremum_max_tokens = max_tokens_bounds.get("supremum_max_tokens")
         else:
-            infimum_max_tokens = 1
+            infimum_max_tokens = 3
             supremum_max_tokens = 16
+        infimum_max_tokens = max(infimum_max_tokens, 3)
 
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
@@ -3217,6 +3215,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ok=False,
                 error="project_dir must be an absolute path",
                 code="BAD_REQUEST",
+            )
+            return
+        if project_dir and not os.path.isdir(project_dir):
+            await channel.send_response(
+                ws, req_id,
+                ok=False,
+                error="project directory does not exist",
+                code="PROJECT_DIR_MISSING",
             )
             return
         # 解析 work_mode(严格校验:非法值返回 BAD_REQUEST,不静默回落)

@@ -1088,7 +1088,6 @@ export function ConversationSidebar({
           onClick={() => setWorkModeMenuOpen((open) => !open)}
           aria-haspopup="menu"
           aria-expanded={workModeMenuOpen}
-          disabled={Boolean(activeSessionId && runtimes[activeSessionId]?.isProcessing)}
         >
           <span>{workMode === 'code' ? t('codeMode.code') : t('codeMode.work')}</span>
           <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />

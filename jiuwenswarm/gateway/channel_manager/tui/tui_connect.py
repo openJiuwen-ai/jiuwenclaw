@@ -684,6 +684,86 @@ def _load_env_from_file() -> dict[str, str]:
     return result
 
 
+def resolve_tui_session_project_path(session: dict[str, Any] | None) -> str:
+    """解析 TUI session 的项目路径，供 /resume current-dir 过滤与展示。
+
+    优先 ``channel_metadata.project_dir`` / ``cwd``（与历史 chat 落盘一致），
+    回退顶层 ``project_dir``（``session.create`` / ``/clear`` 写入）。
+    修复 Issue #2503：创建后尚未发聊时 channel_metadata 为空导致 current-dir 漏列。
+    """
+    if not isinstance(session, dict):
+        return ""
+    ch_meta = session.get("channel_metadata")
+    if isinstance(ch_meta, dict):
+        for key in ("project_dir", "cwd"):
+            raw = ch_meta.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    top = session.get("project_dir")
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+    return ""
+
+
+def tui_session_matches_project_dir(
+    session: dict[str, Any] | None,
+    project_dir: str,
+    *,
+    show_all_projects: bool = False,
+) -> bool:
+    """判断 session 是否属于 ``project_dir``（current-dir resume 过滤）。"""
+    if show_all_projects:
+        return True
+    project_dir = str(project_dir or "").strip()
+    if not project_dir:
+        return True
+    session_project = resolve_tui_session_project_path(session)
+    if not session_project:
+        return False
+    try:
+        project_dir = os.path.realpath(project_dir)
+    except OSError:
+        pass
+    try:
+        session_project = os.path.realpath(session_project)
+    except OSError:
+        pass
+    session_norm = os.path.normcase(os.path.normpath(session_project))
+    project_norm = os.path.normcase(os.path.normpath(project_dir))
+    if session_norm == project_norm:
+        return True
+    return session_norm.startswith(project_norm + os.sep)
+
+
+def build_tui_session_create_channel_metadata(
+    params: dict[str, Any] | None,
+    resolved_project_dir: str = "",
+) -> dict[str, Any] | None:
+    """为 TUI ``session.create`` 构造应同步落盘的 ``channel_metadata``。
+
+    路径优先用项目预解析结果，否则回退请求中的 ``project_dir`` / ``cwd``。
+    """
+    seed = str(resolved_project_dir or "").strip()
+    if not seed and isinstance(params, dict):
+        for key in ("project_dir", "cwd"):
+            raw = params.get(key)
+            if isinstance(raw, str) and raw.strip():
+                seed = raw.strip()
+                break
+    if not seed:
+        return None
+    meta: dict[str, Any] = {"project_dir": seed, "cwd": seed}
+    try:
+        from jiuwenswarm.common.utils import resolve_git_branch
+
+        meta["git_branch"] = resolve_git_branch(seed)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "[TUI] session.create resolve_git_branch failed for %s", seed, exc_info=True
+        )
+    return meta
+
+
 def resolve_3rdagent_switch_session_id(params: dict | None) -> str:
     """Explicit ``params.session_id`` for 3rdagent.switch (never gateway req_id fallback)."""
     if not isinstance(params, dict):
@@ -1322,31 +1402,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 pass
         current_sid = str(session_id or "").strip()
 
-        def _session_matches_project(s):
-            if show_all_projects:
-                return True
-            if not project_dir:
-                return True
-            ch_meta = s.get("channel_metadata") or {}
-            session_project = (
-                ch_meta.get("project_dir") or ch_meta.get("cwd") or ""
-            ).strip()
-            if not session_project:
-                return False  # 无项目信息的会话无法匹配当前项目，排除
-            try:
-                session_project = os.path.realpath(session_project)
-            except OSError:
-                pass
-            return (
-                session_project == project_dir
-                or session_project.startswith(project_dir + "/")
-            )
-
         cli_sessions = []
         for s in all_sessions:
             if s.get("channel_id", "") != "tui":
                 continue
-            if not _session_matches_project(s):
+            if not tui_session_matches_project_dir(
+                s, project_dir, show_all_projects=show_all_projects
+            ):
                 continue
             if s.get("session_id", "") == current_sid:
                 continue
@@ -1359,8 +1421,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         # 附带每个会话的 project_dir / git_branch 供前端判断跨项目恢复 + 按分支过滤
         for s in cli_sessions:
-            ch_meta = s.get("channel_metadata") or {}
-            sp = (ch_meta.get("project_dir") or ch_meta.get("cwd") or "").strip()
+            ch_meta = s.get("channel_metadata") if isinstance(s.get("channel_metadata"), dict) else {}
+            sp = resolve_tui_session_project_path(s)
             if sp:
                 try:
                     sp = os.path.realpath(sp)
@@ -1429,8 +1491,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 work_mode = proj.work_mode or "code"
         except Exception:  # noqa: BLE001
             # 解析失败(冲突/权限等)不阻断会话创建,会话归 default_code
-            logger.debug(
-                "[TUI] session.create project pre-resolution failed",
+            logger.warning(
+                "[TUI] session.create project pre-resolution failed: "
+                "session_id=%s project_dir=%r cwd=%r",
+                target,
+                params.get("project_dir") if isinstance(params, dict) else None,
+                params.get("cwd") if isinstance(params, dict) else None,
                 exc_info=True,
             )
         workspace_session_dir = get_agent_sessions_dir()
@@ -1446,15 +1512,24 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             return
         session_dir.mkdir()
-        # 初始化元数据（与 web channel 对齐）
+        # 初始化元数据（与 web channel 对齐）；同步写入 channel_metadata，
+        # 避免 /clear 后立刻 /resume（current dir）因缺少路径而被过滤（Issue #2503）
+        channel_meta = build_tui_session_create_channel_metadata(
+            params, resolved_project_dir
+        )
+        # 预解析失败但请求仍带路径时，顶层 project_dir 也用请求路径，便于读侧回退
+        top_project_dir = resolved_project_dir or (
+            (channel_meta or {}).get("project_dir") or ""
+        )
         init_session_metadata(
             session_id=target,
             channel_id="tui",
             title=str(params.get("title") or "").strip(),
             mode=params.get("mode", "code.normal"),
-            project_dir=resolved_project_dir,
+            project_dir=top_project_dir,
             project_id=resolved_project_id,
             work_mode=work_mode,
+            channel_metadata=channel_meta,
         )
         # 触发 SessionStart hook
         mh = bind.message_handler
@@ -1543,7 +1618,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload={
             "session_id": target,
             "project_id": resolved_project_id or DEFAULT_PROJECT_ID_CODE,
-            "project_dir": resolved_project_dir,
+            "project_dir": top_project_dir,
             "work_mode": work_mode,
         })
 
@@ -2198,11 +2273,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _tui_disconnect_request(ws, req_id, params, session_id):
-        try:
-            setattr(ws, "_jiuwenswarm_tui_user_exit", True)
-        except Exception:
-            logger.debug("[tui.disconnect] mark user exit flag failed", exc_info=True)
-
         payload = {"accepted": True, "session_id": session_id}
         try:
             await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -2216,7 +2286,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if callable(is_bound_to_client):
             owns_session = bool(is_bound_to_client("tui", sid, ws))
         if mh is not None and sid and owns_session:
-            await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+            cleaned = await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+            if not cleaned:
+                logger.warning(
+                    "[tui.disconnect] immediate cleanup failed; "
+                    "transport-close fallback remains enabled: session_id=%s",
+                    sid,
+                )
+                return
+            # Only suppress the transport-close fallback after the immediate
+            # cleanup has completed.  The TUI process can disappear after the
+            # acknowledgement and cancel this handler; marking the websocket
+            # earlier would make _tui_disconnect skip the only remaining
+            # cleanup path and leak the session runtime.
+            try:
+                setattr(ws, "_jiuwenswarm_tui_user_exit", True)
+            except Exception:
+                logger.debug(
+                    "[tui.disconnect] mark completed user exit failed",
+                    exc_info=True,
+                )
 
     async def _chat_user_answer(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}

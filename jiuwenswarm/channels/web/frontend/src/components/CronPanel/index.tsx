@@ -9,6 +9,7 @@ import type { ProjectInfo } from '../../features/workspace/projectTypes';
 import type { Session } from '../../types';
 import type { CronJobDTO, CronTaskUI, CronTemplateUI } from '../../types/cron';
 import { CRON_TEMPLATES } from './constants';
+import { normalizeWakeOffsetSeconds } from './cronWakeOffset';
 import { cronExprToSchedule, summarizeSchedule } from './scheduleConvert';
 import StatusBadge, { BoldRingIcon, RunningIcon } from './StatusBadge';
 import ConfirmDialog from './ConfirmDialog';
@@ -193,6 +194,7 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
     modelName: job.model_name ?? null,
     cronExpr: job.cron_expr,
     timezone: job.timezone,
+    wakeOffsetSeconds: normalizeWakeOffsetSeconds(job.wake_offset_seconds),
     enabled: job.enabled,
     expired: job.expired,
     deliveryChannel: job.targets,
@@ -513,6 +515,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         timezone: value.timezone,
         targets: value.targets.trim() || 'web',
         enabled: value.enabled,
+        wake_offset_seconds: normalizeWakeOffsetSeconds(value.wakeOffsetSeconds),
         // 始终显式带上 project_dir（未选项目传空串），不能省略这个 key——后端
         // gateway/channel_manager/web/app_web_handlers.py 的 _cron_job_create 用
         // "key 是否存在"区分"用户显式选了默认项目"（key 存在、值为空串，不可覆盖）和
@@ -560,6 +563,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             timezone: value.timezone,
             targets: value.targets.trim() || 'web',
             enabled: value.enabled,
+            wake_offset_seconds: normalizeWakeOffsetSeconds(value.wakeOffsetSeconds),
             ...(value.modelName ? { model_name: value.modelName } : {}),
             mode,
           };

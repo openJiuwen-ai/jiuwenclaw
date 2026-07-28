@@ -20,7 +20,10 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentRuntime,
     THIRD_PARTY_AGENT_TYPES,
 )
-from jiuwenswarm.extensions.agentos.agentos_router.config import SshChannelEndpoint
+from jiuwenswarm.extensions.agentos.agentos_router.config import (
+    DEFAULT_AGENT_WORKSPACE_ROOT,
+    SshChannelEndpoint,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.models import (
     AgentInfo,
     AgentStatus,
@@ -58,19 +61,16 @@ def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
 def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) -> str:
     """Resolve host workspace bind path for one agent user.
 
-    Default: ``/home/<user_id>``. Optional ``workspace_root`` overrides the
-    parent directory (``{workspace_root}/<user_id>``).
+    Default: ``/home/agentos/users/<user_id>``. Optional ``workspace_root``
+    overrides the parent directory (``{workspace_root}/<user_id>``).
 
     Best-effort ``mkdir``: permission errors are ignored so callers (and unit
     tests) can still pass the path to YuanRong create; the host/deploy side
     remains responsible for a writable mount source.
     """
     safe_user = _WORKSPACE_NAME_RE.sub("_", str(user_id or "").strip()) or "default"
-    if workspace_root:
-        root = Path(workspace_root).expanduser()
-        workspace = (root / safe_user).resolve()
-    else:
-        workspace = Path("/home") / safe_user
+    root = Path(workspace_root or DEFAULT_AGENT_WORKSPACE_ROOT).expanduser()
+    workspace = (root / safe_user).resolve()
     try:
         workspace.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -92,12 +92,24 @@ class AgentOSRouterClient(AgentServerClient):
         agent_manager: AgentManager,
         ssh_relay: YuanrongSshRelay | None = None,
         ssh_channel_endpoint: SshChannelEndpoint | None = None,
+        workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
+        sandbox_idle_timeout_seconds: float = 600.0,
+        sandbox_idle_check_interval_seconds: float = 30.0,
     ) -> None:
         self._yuanrong = yuanrong
         self._registry = registry
         self._agent_manager = agent_manager
         self._ssh_relay = ssh_relay
         self._ssh_channel_endpoint = ssh_channel_endpoint
+        self._workspace_root = (
+            str(workspace_root or "").strip() or DEFAULT_AGENT_WORKSPACE_ROOT
+        )
+        # <= 0 disables idle sandbox reclamation entirely.
+        self._sandbox_idle_timeout_seconds = float(sandbox_idle_timeout_seconds)
+        self._sandbox_idle_check_interval_seconds = max(
+            1.0, float(sandbox_idle_check_interval_seconds)
+        )
+        self._idle_reaper_task: asyncio.Task[None] | None = None
         self._server_ready = False
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._closed = False
@@ -122,12 +134,14 @@ class AgentOSRouterClient(AgentServerClient):
         await self._yuanrong.connect(uri)
         self._closed = False
         self._server_ready = True
+        self._ensure_idle_reaper_task()
 
     async def disconnect(self) -> None:
         if self._closed:
             return
         self._closed = True
         self._server_ready = False
+        await self._stop_idle_reaper_task()
         await self._drain_background_tasks()
         try:
             await self._yuanrong.disconnect()
@@ -160,11 +174,14 @@ class AgentOSRouterClient(AgentServerClient):
             if self._uses_direct_yuanrong(agent_type):
                 envelope.channel_context["agent_type"] = agent_type
                 return await self._yuanrong.send_request(envelope)
-            runtime = await self._resolve_agent(envelope)
+            runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout) as exc:
             return self._routing_error_response(envelope, str(exc))
-        runtime.attach_to_envelope(envelope)
-        return await self._yuanrong.send_request(envelope)
+        try:
+            runtime.attach_to_envelope(envelope)
+            return await self._yuanrong.send_request(envelope)
+        finally:
+            await self._agent_manager.release(runtime.key)
 
     async def send_request_stream(
         self, envelope: E2AEnvelope
@@ -176,13 +193,16 @@ class AgentOSRouterClient(AgentServerClient):
                 async for chunk in self._yuanrong.send_request_stream(envelope):
                     yield chunk
                 return
-            runtime = await self._resolve_agent(envelope)
+            runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout) as exc:
             yield self._routing_error_chunk(envelope, str(exc))
             return
-        runtime.attach_to_envelope(envelope)
-        async for chunk in self._yuanrong.send_request_stream(envelope):
-            yield chunk
+        try:
+            runtime.attach_to_envelope(envelope)
+            async for chunk in self._yuanrong.send_request_stream(envelope):
+                yield chunk
+        finally:
+            await self._agent_manager.release(runtime.key)
 
     async def thirdagent_list(
         self,
@@ -357,6 +377,7 @@ class AgentOSRouterClient(AgentServerClient):
             self._run_ssh_relay(envelope, relay_session),
             name=f"agentos-ssh-relay-{session_id[:24]}",
         )
+        relay_session.relay_task = task
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return AgentResponse(
@@ -383,7 +404,7 @@ class AgentOSRouterClient(AgentServerClient):
                     "sandbox for SSH; switch to a third-party agent_type first",
                 )
                 return
-            runtime = await self._resolve_agent(envelope)
+            runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentDeleted) as exc:
             ssh_relay.fail_session(
                 relay_session, f"agent resolve failed: {exc}"
@@ -399,22 +420,31 @@ class AgentOSRouterClient(AgentServerClient):
             )
             return
 
-        instance_id = str(runtime.info.sandbox_id or "").strip()
-        if not instance_id:
-            ssh_relay.fail_session(
-                relay_session,
-                f"agent has no yuanrong instance_id: user={runtime.info.user_id}",
-            )
-            return
+        # Hold the task count for the whole SSH session so the idle reaper
+        # never reclaims a sandbox with a live (even silent) SSH connection.
+        try:
+            instance_id = str(runtime.info.sandbox_id or "").strip()
+            if not instance_id:
+                ssh_relay.fail_session(
+                    relay_session,
+                    f"agent has no yuanrong instance_id: user={runtime.info.user_id}",
+                )
+                return
 
-        runtime.attach_to_envelope(envelope)
-        logger.info(
-            "[AgentOSRouter] ssh relay start: session=%s user=%s instance=%s",
-            relay_session.session_id,
-            runtime.info.user_id,
-            instance_id,
-        )
-        await ssh_relay.run(relay_session, instance_id)
+            runtime.attach_to_envelope(envelope)
+            logger.info(
+                "[AgentOSRouter] ssh relay start: session=%s user=%s instance=%s",
+                relay_session.session_id,
+                runtime.info.user_id,
+                instance_id,
+            )
+            await ssh_relay.run(
+                relay_session,
+                instance_id,
+                user_id=runtime.info.user_id,
+            )
+        finally:
+            await self._agent_manager.release(runtime.key)
 
     def _apply_current_agent_type_for_ssh(self, envelope: E2AEnvelope) -> None:
         """SSH 接入跟随用户当前 agent_type（由 3rdagent.switch 记录）。"""
@@ -434,11 +464,20 @@ class AgentOSRouterClient(AgentServerClient):
         )
 
     async def _drain_background_tasks(self) -> None:
-        if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        if not self._background_tasks:
+            return
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
 
-    async def _resolve_agent(self, envelope: E2AEnvelope) -> AgentRuntime:
+    async def _resolve_agent(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        acquire: bool = False,
+    ) -> AgentRuntime:
         user_id = self._extract_user_id(envelope)
         agent_type = self._extract_agent_type(envelope)
         return await self._agent_manager.get_or_create_agent(
@@ -447,7 +486,78 @@ class AgentOSRouterClient(AgentServerClient):
             key_values={"session_id": envelope.session_id},
             creator=self._create_agent,
             metadata={"session_id": envelope.session_id},
+            acquire=acquire,
         )
+
+    # ---------- idle sandbox reclamation ----------
+
+    def _idle_reaper_enabled(self) -> bool:
+        return self._sandbox_idle_timeout_seconds > 0
+
+    def _ensure_idle_reaper_task(self) -> None:
+        if self._closed or not self._idle_reaper_enabled():
+            return
+        if self._idle_reaper_task is not None and not self._idle_reaper_task.done():
+            return
+        self._idle_reaper_task = asyncio.create_task(
+            self._idle_reaper_loop(),
+            name="agentos-sandbox-idle-reaper",
+        )
+
+    async def _stop_idle_reaper_task(self) -> None:
+        task = self._idle_reaper_task
+        self._idle_reaper_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _idle_reaper_loop(self) -> None:
+        while not self._closed:
+            await asyncio.sleep(self._sandbox_idle_check_interval_seconds)
+            try:
+                await self._reap_idle_once()
+            except Exception:  # noqa: BLE001 - one bad pass must not kill the loop
+                logger.exception("[AgentOSRouter] idle sandbox reap pass failed")
+
+    async def _reap_idle_once(self) -> int:
+        """Reclaim agents idle beyond the timeout; returns the reclaimed count.
+
+        ``pop_if_idle`` re-checks READY / ``task_count == 0`` / staleness under
+        the manager lock, so a concurrent acquire can never lose its sandbox.
+        """
+        if not self._idle_reaper_enabled():
+            return 0
+        reaped = 0
+        for key in await self._agent_manager.list_keys():
+            runtime = await self._agent_manager.pop_if_idle(
+                key, self._sandbox_idle_timeout_seconds
+            )
+            if runtime is None:
+                continue
+            reaped += 1
+            info = runtime.info
+            logger.info(
+                "[AgentOSRouter] reclaiming idle agent sandbox: user=%s "
+                "agent_type=%s sandbox_id=%s idle_timeout=%.0fs",
+                info.user_id,
+                info.agent_type,
+                info.sandbox_id,
+                self._sandbox_idle_timeout_seconds,
+            )
+            if not info.sandbox_id:
+                continue
+            try:
+                await self._yuanrong.delete_sandbox(info.sandbox_id)
+            except Exception:  # noqa: BLE001 - keep reaping other agents
+                logger.exception(
+                    "[AgentOSRouter] delete idle sandbox failed: sandbox_id=%s",
+                    info.sandbox_id,
+                )
+        return reaped
 
     async def _create_agent(self, agent_info: AgentInfo) -> AgentInfo:
         if agent_info.agent_type not in THIRD_PARTY_AGENT_TYPES:
@@ -458,7 +568,10 @@ class AgentOSRouterClient(AgentServerClient):
 
         image_info = await self._registry.get_image_info(agent_info.agent_type)
         runtime_spec = build_inline_runtime_spec(image_info)
-        workspace = resolve_agent_workspace(agent_info.user_id)
+        workspace = resolve_agent_workspace(
+            agent_info.user_id,
+            workspace_root=self._workspace_root,
+        )
         env_raw = image_info.metadata.get("env_vars")
         env_vars = (
             {str(k): str(v) for k, v in dict(env_raw).items()}

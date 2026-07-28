@@ -23,7 +23,11 @@ export class UiLifecyclePortImpl implements UiLifecyclePort {
 
   constructor(private readonly deps: UiLifecycleDeps) {}
 
-  async closeUi(options: { reason: UiExitReason; exitCode: number }): Promise<void> {
+  async closeUi(options: {
+    reason: UiExitReason;
+    exitCode: number;
+    handoffMessage?: string;
+  }): Promise<void> {
     // 并发保护：正在关闭时第二次调用直接返回已存在的 Promise。
     if (this.closed) {
       return this.closingPromise ?? Promise.resolve();
@@ -59,7 +63,17 @@ export class UiLifecyclePortImpl implements UiLifecyclePort {
       } catch {
         // ignore — 进程即将退出
       }
-      // 5. process.exit — 使用 launcher 注入的动作退出码
+      // 5. stdout handoff JSON — 供 launcher 读取（仅 switch reason）
+      //    必须在 screen.dispose 之后输出，避免污染 alternate screen；
+      //    必须在 process.exit 之前输出，确保 launcher 能从 stdout 管道读取。
+      if (options.handoffMessage) {
+        try {
+          process.stdout.write(options.handoffMessage + "\n");
+        } catch {
+          // ignore — 进程即将退出
+        }
+      }
+      // 6. process.exit — 使用 launcher 注入的动作退出码
       process.exit(options.exitCode);
     })();
     return this.closingPromise;

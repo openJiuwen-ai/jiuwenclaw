@@ -63,8 +63,6 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 
-from jiuwenswarm.openjiuwen_logging import configure_openjiuwen_logging_under_jiuwenswarm
-
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
     from openjiuwen.core.common.logging.log_config import configure_log
@@ -74,8 +72,6 @@ else:
     # Reduce openjiuwen internal logs (keep Gateway logs)
     for _lg in LogManager.get_all_loggers().values():
         _lg.set_level(logging.CRITICAL)
-
-configure_openjiuwen_logging_under_jiuwenswarm()
 
 load_dotenv(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -2430,8 +2426,24 @@ async def _run(
             if isinstance(ssh_conf, dict):
                 # 南向经 agent client（如 agentos_router -> yuanrong）动态解析。
                 enabled, reason = _is_channel_enabled(ssh_conf, ["listen_port"])
+                full_cfg = get_config()
+                gateway_cfg = full_cfg.get("gateway") if isinstance(full_cfg, dict) else {}
+                agent_client_cfg = (
+                    gateway_cfg.get("agent_client") if isinstance(gateway_cfg, dict) else {}
+                )
+                client_type = (
+                    str(agent_client_cfg.get("type") or "websocket").strip().lower()
+                    if isinstance(agent_client_cfg, dict)
+                    else "websocket"
+                )
                 if not enabled:
                     logger.info("[App] channels.ssh.%s, SshChannel disabled", reason)
+                elif client_type != "agentos_router":
+                    logger.warning(
+                        "[App] channels.ssh.enabled=true but gateway.agent_client.type=%s "
+                        "(require agentos_router); SshChannel will not start",
+                        client_type,
+                    )
                 else:
                     ssh_config = SshChannelConfig.from_dict({**ssh_conf, "enabled": True})
                     ssh_channel = SshChannel(ssh_config, _DummyBus())
