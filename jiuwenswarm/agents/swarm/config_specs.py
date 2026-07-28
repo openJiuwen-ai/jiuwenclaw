@@ -351,6 +351,19 @@ def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _agent_dropout_rail_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the AgentDropout rail (resolved via team_pruning)."""
+    from jiuwenswarm.agents.dropout.resolve import resolve_agent_dropout_config
+
+    dropout_cfg = resolve_agent_dropout_config(config)
+    return {
+        "agent_dropout_config": dropout_cfg,
+        "active_members": int(dropout_cfg.get("active_members") or 2),
+        # Serializable model config only; live LLM is built in the provider.
+        "auditor_model_config": _evolution_model_config(config),
+    }
+
+
 # Per-element attribute params, keyed by provider name; empty for parameterless.
 _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     registry.CONTEXT_PROCESSOR: _context_processor_params,
@@ -364,6 +377,7 @@ _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     registry.TEAM_PERMISSION_POLICY: lambda c: {
         "permissions_config": _config_section(c, "permissions"),
     },
+    registry.AGENT_DROPOUT: _agent_dropout_rail_params,
     registry.CODE_CODING_MEMORY: lambda c: {
         "embed_config": _config_section(c, "embed")
     },
@@ -501,12 +515,30 @@ def _build_team_capability_specs(
         )
 
     rails_specs.extend(_role_evolution_rails(config, role))
+    rails_specs.extend(_agent_dropout_rails(config, role))
 
     tool_specs: list[BuiltinToolSpec] = [
         BuiltinToolSpec(type=name, params=_tool_params(name, config))
         for name in _COMMON_TOOL_NAMES
     ]
     return rails_specs, tool_specs
+
+
+def _agent_dropout_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
+    """Append AgentDropout rail when team pruning selects that strategy."""
+    from jiuwenswarm.agents.dropout.resolve import resolve_agent_dropout_config
+
+    dropout_cfg = resolve_agent_dropout_config(config)
+    if not dropout_cfg.get("enabled"):
+        return []
+    if role == "leader" and not dropout_cfg.get("apply_to_leader", False):
+        return []
+    return [
+        RailSpec(
+            type=registry.AGENT_DROPOUT,
+            params=_rail_params(registry.AGENT_DROPOUT, config),
+        )
+    ]
 
 
 def _build_code_capability_specs(
@@ -571,6 +603,7 @@ def _build_code_capability_specs(
         for name in _CODE_SHARED_RAIL_NAMES
     )
     rails_specs.extend(_role_evolution_rails(config, role))
+    rails_specs.extend(_agent_dropout_rails(config, role))
 
     tool_specs: list[BuiltinToolSpec] = [
         BuiltinToolSpec(type=name, params=_tool_params(name, config))

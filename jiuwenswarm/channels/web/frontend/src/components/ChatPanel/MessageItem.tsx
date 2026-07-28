@@ -37,6 +37,7 @@ import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
+import { AgentDropoutNotice, isAgentDropoutNotice } from './AgentDropoutNotice';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -383,6 +384,9 @@ export const MessageItem = memo(function MessageItem({
 
   // 系统消息
   if (role === 'system') {
+    if (isAgentDropoutNotice(id)) {
+      return <AgentDropoutNotice messageId={id} content={content || ''} />;
+    }
  	     // 检查是否为 chat.session_result 事件
  	     if (content && content.startsWith('chat.session_result:')) {
  	       console.log('chat.session_result event:', content);

@@ -61,6 +61,7 @@ from jiuwenswarm.common.config import (
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
+    update_team_pruning_in_config,
     update_setup_guide_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
@@ -791,6 +792,8 @@ _CONFIG_YAML_KEYS = frozenset({
     "kv_cache_release_enabled",
     "kv_cache_affinity_enabled",
     "permissions_enabled",
+    "team_pruning_enabled",
+    "team_pruning_strategy",
     "memory_forbidden_enabled",
     "memory_forbidden_description",
     "a2ui_enabled",
@@ -1605,6 +1608,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             perm_cfg = raw.get("permissions") or {}
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
+            from jiuwenswarm.agents.dropout.resolve import (
+                DEFAULT_TEAM_PRUNING_STRATEGY,
+                resolve_team_pruning,
+            )
+            pruning = resolve_team_pruning(raw)
+            payload["team_pruning_enabled"] = "true" if pruning.get("enabled") else "false"
+            payload["team_pruning_strategy"] = str(
+                pruning.get("strategy") or DEFAULT_TEAM_PRUNING_STRATEGY
+            )
             # skill_create / evolution_auto_scan: env var takes precedence, fallback to config.yaml
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
             skill_create_env = os.getenv("SKILL_CREATE")
@@ -1642,6 +1654,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
+            payload.setdefault("team_pruning_enabled", "false")
+            payload.setdefault("team_pruning_strategy", "agent_dropout")
             payload.setdefault("setup_guide_enabled", "true")
             payload.setdefault("skill_create", "false")
             payload.setdefault("evolution_auto_scan", "false")
@@ -1792,6 +1806,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
                     update_permissions_enabled_in_config(parsed)
+                elif param_key == "team_pruning_enabled":
+                    update_team_pruning_in_config({"enabled": parsed})
+                elif param_key == "team_pruning_strategy":
+                    strategy = str(val or "").strip() or "agent_dropout"
+                    from jiuwenswarm.agents.dropout.resolve import TEAM_PRUNING_STRATEGIES
+                    if strategy not in TEAM_PRUNING_STRATEGIES:
+                        raise _ConfigBadRequest(
+                            f"unsupported team_pruning_strategy: {strategy}"
+                        )
+                    update_team_pruning_in_config({"strategy": strategy})
                 elif param_key == "setup_guide_enabled":
                     update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_enabled":

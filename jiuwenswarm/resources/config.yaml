@@ -660,6 +660,32 @@ execution_guard:
     # 未知/错误工具连续调用达到该次数时停止重试并中断
     unknown_tool_threshold: 10
 
+# AgentDropout (team mode): rectify-or-reject teammate contributions, then drop
+# members that keep failing after correction. Off by default.
+# Prefer team_pruning as the multi-strategy gate; agent_dropout holds strategy knobs.
+team_pruning:
+  enabled: false
+  strategy: agent_dropout   # registered strategies: agent_dropout (more later)
+  strategies:
+    agent_dropout:
+      max_rectify_attempts: 2
+      pass_rate: 1.0
+      drop_after_failures: 2
+      min_active_members: 2
+      use_simple_audit: true
+      apply_to_leader: false
+
+# Legacy / strategy-parameter mirror (kept for compatibility and deep knobs).
+agent_dropout:
+  enabled: false
+  max_rectify_attempts: 2
+  pass_rate: 1.0
+  drop_after_failures: 2
+  min_active_members: 2
+  use_simple_audit: true
+  # When true, also mount the rail on the leader (default: teammates only).
+  apply_to_leader: false
+
 channels:
   web:
     send_file_allowed: true

@@ -10,7 +10,7 @@ import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types'
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
 import { projectCreateErrorKey } from '../../multi-session/sidebar/projectCreateErrors';
-import { AGENT_MODE_OPTIONS, PERMISSION_OPTIONS } from '../../config/chatConfig';
+import { AGENT_MODE_OPTIONS, PERMISSION_OPTIONS, TEAM_PRUNING_OPTIONS, type TeamPruningStrategy } from '../../config/chatConfig';
 import clsx from 'clsx';
 import { PermissionWarningDialog } from './PermissionWarningDialog';
 import { ModelProviderIcon } from '../ModelProviderIcon';
@@ -107,6 +107,9 @@ interface InputAreaProps {
   onNavigateToSkills?: () => void;
   permissionsEnabled: boolean;
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
+  /** Team pruning strategy when cluster mode is on; '' means off */
+  teamPruningStrategy?: TeamPruningStrategy;
+  onSaveTeamPruning?: (updates: Record<string, string>) => Promise<void>;
   /** 目标待设置态（"+"菜单选了「目标」）下发送时调用，取代普通 onSubmit/排队逻辑 */
   onSetGoal?: (sessionId: string, objective: string) => void;
   /** 工具栏"目标"标签的 × 按钮：目标已存在时点击等同删除目标 */
@@ -246,6 +249,8 @@ export function InputArea({
   onNavigateToSkills,
   permissionsEnabled,
   onSavePermission,
+  teamPruningStrategy = '',
+  onSaveTeamPruning,
   onSetGoal,
   onClearGoal,
   onDrainTaskQueueIfIdle,
@@ -1763,6 +1768,14 @@ export function InputArea({
           </div>
           <PermissionSelector permissionsEnabled={permissionsEnabled} onSavePermission={onSavePermission} />
 
+          {isTeamMode && onSaveTeamPruning && (
+            <TeamPruningSelector
+              strategy={teamPruningStrategy}
+              onSave={onSaveTeamPruning}
+              disabled={hasHistory || isProcessing}
+            />
+          )}
+
           {!isTeamMode && <SkillSelector
             onNavigateToSkills={onNavigateToSkills}
             onInsertSkill={insertSkillChip}
@@ -2398,6 +2411,141 @@ function PermissionSelector({
         />
       )}
     </>
+  );
+}
+
+/** Cluster-mode team pruning strategy selector (Off / AgentDropout / future). */
+function TeamPruningSelector({
+  strategy,
+  onSave,
+  disabled = false,
+}: {
+  strategy: TeamPruningStrategy;
+  onSave: (updates: Record<string, string>) => Promise<void>;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation();
+  const [isOpen, setIsOpen] = useState(false);
+  const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
+  const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuPortalRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handler = (e: PointerEvent) => {
+      if (
+        !menuRef.current?.contains(e.target as Node) &&
+        !menuPortalRef.current?.contains(e.target as Node)
+      ) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handler);
+    return () => document.removeEventListener('pointerdown', handler);
+  }, [isOpen]);
+
+  const current =
+    TEAM_PRUNING_OPTIONS.find((o) => o.value === strategy) ?? TEAM_PRUNING_OPTIONS[0];
+
+  const handleSelect = useCallback(
+    (value: TeamPruningStrategy) => {
+      setIsOpen(false);
+      if (value === strategy) return;
+      if (!value) {
+        void onSave({ team_pruning_enabled: 'false' });
+        return;
+      }
+      void onSave({
+        team_pruning_enabled: 'true',
+        team_pruning_strategy: value,
+      });
+    },
+    [onSave, strategy],
+  );
+
+  return (
+    <div
+      ref={menuRef}
+      className={clsx('chat-mode-select', isOpen && 'chat-mode-select--open')}
+      data-testid="chat-team-pruning"
+    >
+      <button
+        type="button"
+        className="chat-mode-select__trigger"
+        disabled={disabled}
+        title={disabled ? t('chat.configLockedHistory') : t('chat.config.pruning.tooltip')}
+        onClick={() => {
+          if (disabled) return;
+          if (!isOpen && menuRef.current) {
+            const rect = menuRef.current.getBoundingClientRect();
+            setMenuDirection(window.innerHeight - rect.bottom >= 160 ? 'down' : 'up');
+            setMenuAnchor(rect);
+          }
+          setIsOpen((v) => !v);
+        }}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+      >
+        <span className="chat-mode-select__value">
+          <span className="chat-mode-select__icon" aria-hidden="true">
+            <current.icon className="w-4 h-4" />
+          </span>
+          <span className="chat-mode-select__label">{t(current.i18nKey)}</span>
+        </span>
+        {!disabled && (
+          <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+          </svg>
+        )}
+      </button>
+
+      {isOpen && menuAnchor && createPortal(
+        <div
+          ref={menuPortalRef}
+          className="chat-mode-select__menu perm-select__menu"
+          role="menu"
+          style={menuDirection === 'up'
+            ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
+            : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
+          }
+        >
+          {TEAM_PRUNING_OPTIONS.map((opt) => (
+            <button
+              type="button"
+              key={opt.value || 'off'}
+              onClick={() => handleSelect(opt.value)}
+              className={clsx(
+                'chat-mode-select__option',
+                'perm-select__option',
+                strategy === opt.value && 'chat-mode-select__option--active',
+              )}
+              role="menuitemradio"
+              aria-checked={strategy === opt.value}
+              data-testid={`chat-team-pruning-option-${opt.value || 'off'}`}
+            >
+              <span className="perm-select__option-main">
+                <span className="chat-mode-select__icon" aria-hidden="true">
+                  <opt.icon className="w-4 h-4" />
+                </span>
+                <span className="perm-select__text">
+                  <span className="chat-mode-select__label">{t(opt.i18nKey)}</span>
+                  {opt.descriptionI18nKey && (
+                    <span className="perm-select__desc">{t(opt.descriptionI18nKey)}</span>
+                  )}
+                </span>
+              </span>
+              {strategy === opt.value && (
+                <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
+                </svg>
+              )}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </div>
   );
 }
 

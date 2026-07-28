@@ -2172,6 +2172,12 @@ function AppContent() {
                       onOpenCodeReview={handleOpenCodeReview}
                       permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
                       onSavePermission={savePermissionSilent}
+                      teamPruningStrategy={
+                        serverConfig?.team_pruning_enabled === 'true'
+                          ? (String(serverConfig?.team_pruning_strategy || 'agent_dropout') as 'agent_dropout')
+                          : ''
+                      }
+                      onSaveTeamPruning={savePermissionSilent}
                       historyPager={chatHistoryPager}
                       isHistoryRestoring={isRestoringHistorySession}
                       onSetGoal={setGoalObjective}

@@ -415,6 +415,7 @@ function classifyKey(key: string): string {
   if (key === "context_engine_enabled") return "context_engine";
   if (key === "kv_cache_release_enabled" || key === "kv_cache_affinity_enabled") return "kv_cache_affinity";
   if (key === "permissions_enabled") return "permissions";
+  if (key === "team_pruning_enabled" || key === "team_pruning_strategy") return "team_pruning";
   if (key.startsWith("feishu")) return "feishu";
   return "other";
 }
@@ -426,7 +427,7 @@ type ConfigMainTab = "model" | "agent" | "security" | "other";
 
 function configTabForGroupTag(tag: string): ConfigMainTab {
   if (MODEL_GROUP_TAGS.has(tag) || tag === "embed") return "model";
-  if (tag === "agents" || tag === "team") return "agent";
+  if (tag === "agents" || tag === "team" || tag === "team_pruning") return "agent";
   if (SECURITY_GROUP_TAGS.has(tag)) return "security";
   return "other";
 }
@@ -595,6 +596,7 @@ function isBooleanKey(key: string): boolean {
     key === "kv_cache_release_enabled" ||
     key === "kv_cache_affinity_enabled" ||
     key === "permissions_enabled" ||
+    key === "team_pruning_enabled" ||
     key === "memory_forbidden_enabled" ||
     key === "a2ui_enabled" ||
     key === "swarmflow_enabled" ||
@@ -655,6 +657,7 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     kv_cache_release_enabled: t('config.booleanLabels.kvCacheRelease'),
     kv_cache_affinity_enabled: t('config.booleanLabels.kvCacheAffinity'),
     permissions_enabled: t('config.booleanLabels.enabled'),
+    team_pruning_enabled: t('config.booleanLabels.enabled'),
     memory_forbidden_enabled: t('config.booleanLabels.enabled'),
     a2ui_enabled: t('config.booleanLabels.enabled'),
     swarmflow_enabled: t('config.booleanLabels.enabled'),
@@ -705,6 +708,7 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     evolution: { label: t('config.groups.evolution.label'), order: 7, hint: t('config.groups.evolution.hint') },
     agents: { label: t('config.groups.agents.label'), order: 7.5, hint: t('config.groups.agents.hint') },
     team: { label: t('config.groups.team.label'), order: 7.6, hint: t('config.groups.team.hint') },
+    team_pruning: { label: t('config.groups.teamPruning.label'), order: 7.7, hint: t('config.groups.teamPruning.hint') },
     context_engine: { label: t('config.groups.contextEngine.label'), order: 8, hint: t('config.groups.contextEngine.hint') },
     kv_cache_affinity: { label: t('config.groups.kvCacheAffinity.label'), order: 8.5, hint: t('config.groups.kvCacheAffinity.hint') },
     permissions: { label: t('config.groups.permissions.label'), order: 9, hint: t('config.groups.permissions.hint') },
@@ -732,6 +736,8 @@ function isProviderKey(key: string): boolean {
 const KEY_DISPLAY_I18N: Record<string, string> = {
   memory_forbidden_enabled: "config.keys.memoryForbiddenEnabled",
   memory_forbidden_description: "config.keys.memoryForbiddenDescription",
+  team_pruning_enabled: "config.keys.teamPruningEnabled",
+  team_pruning_strategy: "config.keys.teamPruningStrategy",
   swarmflow_enabled: "config.keys.swarmflowEnabled",
   kv_cache_release_enabled: "config.keys.kvCacheReleaseEnabled",
   kv_cache_affinity_enabled: "config.keys.kvCacheAffinityEnabled",
@@ -769,6 +775,8 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
   skill_create: "config.keyHelp.skillCreate",
   symphony_dynamic_graph_enabled: "config.keyHelp.symphonyDynamicGraphEnabled",
   skill_retrieval_build_root_categories: "config.keyHelp.skillRetrievalBuildRootCategories",
+  team_pruning_enabled: "config.keyHelp.teamPruningEnabled",
+  team_pruning_strategy: "config.keyHelp.teamPruningStrategy",
 };
 
 /** 组内字段排序优先级，数字越小越靠前 */
@@ -791,6 +799,8 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   skill_retrieval_build_classification_batch_limit: 24,
   memory_forbidden_enabled: 0,
   memory_forbidden_description: 1,
+  team_pruning_enabled: 0,
+  team_pruning_strategy: 1,
   kv_cache_release_enabled: 0,
   kv_cache_affinity_enabled: 1,
   model: 0,
@@ -967,6 +977,20 @@ function GroupSection({
                                 <option value="OpenRouter">OpenRouter</option>
                               </>
                             )}
+                          </select>
+                        </div>
+                      </div>
+                    ) : key === "team_pruning_strategy" ? (
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none text-transparent" aria-hidden="true">*</span>
+                        <div className="flex-1">
+                          <select
+                            value={draftValues[key] ?? value}
+                            onChange={(e) => onChange(key, e.target.value)}
+                            className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                            data-testid="config-team-pruning-strategy"
+                          >
+                            <option value="agent_dropout">{t("config.teamPruning.strategies.agentDropout")}</option>
                           </select>
                         </div>
                       </div>

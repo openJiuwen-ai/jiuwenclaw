@@ -317,6 +317,13 @@
           "cancel": "Cancel",
           "confirm": "Continue Anyway"
         }
+      },
+      "pruning": {
+        "tooltip": "Team pruning strategy for cluster mode",
+        "off": "Pruning Off",
+        "offDesc": "Share teammate contributions without rectify-or-reject auditing",
+        "agentDropout": "AgentDropout",
+        "agentDropoutDesc": "Audit teammate shares, request corrections, then drop persistently bad members"
       }
     }
   },
@@ -777,6 +784,8 @@
       "memoryForbiddenEnabled": "Enable",
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
+      "teamPruningEnabled": "Enable team pruning",
+      "teamPruningStrategy": "Pruning strategy",
       "swarmflowEnabled": "Enable SwarmFlow",
       "kvCacheReleaseEnabled": "Legacy path (KV release)",
       "kvCacheAffinityEnabled": "New path (Ascend affinity)",
@@ -832,7 +841,14 @@
     "keyHelp": {
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
       "symphonyDynamicGraphEnabled": "When disabled, planning uses only the static graph. Existing runtime data is retained.",
-      "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path."
+      "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path.",
+      "teamPruningEnabled": "When enabled in cluster mode, teammate shares are audited before broadcast",
+      "teamPruningStrategy": "Select which pruning algorithm to use; new strategies can be added later"
+    },
+    "teamPruning": {
+      "strategies": {
+        "agentDropout": "AgentDropout (rectify → reject → drop)"
+      }
     },
     "hideValue": "Hide value",
     "showValue": "Show value",
@@ -961,6 +977,7 @@
       "evolution": { "label": "Evolution Settings", "hint": "Online skill evolution settings" },
       "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only, Team required" },
       "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
+      "teamPruning": { "label": "Team Pruning", "hint": "Choose how cluster-mode teammates are audited and dropped" },
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
       "kvCacheAffinity": { "label": "Compute Affinity", "hint": "Control Ascend KV Cache affinity" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
@@ -1851,6 +1868,19 @@
     "waitingTasks": "Waiting Tasks",
     "messageQueue": "Message Queue",
     "parallelProgress": "Parallel tasks running ({{completedCount}}/{{total}} complete)",
+    "agentDropout": {
+      "brand": "Pruning",
+      "phases": {
+        "check": "checking",
+        "pass": "passed",
+        "rectify": "rectify",
+        "reject": "rejected",
+        "drop": "dropped",
+        "blocked": "blocked",
+        "error": "error",
+        "unknown": "audit"
+      }
+    },
     "subtask": {
       "starting": "Starting...",
       "toolCall": "Calling {{tool}} (#{{count}})",

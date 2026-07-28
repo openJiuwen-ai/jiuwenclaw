@@ -66,6 +66,7 @@ PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
 SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
+AGENT_DROPOUT = "swarm.agent_dropout"
 
 
 def _workspace_root(ctx: SwarmBuildContext) -> str | None:
@@ -427,6 +428,7 @@ __all__ = [
     "SYMPHONY_ORCHESTRATION_PROMPT",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
+    "AGENT_DROPOUT",
 ]
 
 
@@ -551,4 +553,136 @@ def _build_team_permission_rail(params: dict[str, Any], context: Any) -> Any | N
     return TeamPermissionRail(
         config=narrowed_config,
         host=host,
+    )
+
+
+# ---------------------------------------------------------------------------
+# swarm.agent_dropout — AgentDropoutRail (teammate rectify-or-reject)
+# ---------------------------------------------------------------------------
+
+
+class AgentDropoutInput(ConstructionInput):
+    """Construction inputs for the AgentDropout rail."""
+
+    agent_dropout_config: dict[str, Any] = param_field(
+        default_factory=dict,
+        description="agent_dropout section from config.yaml.",
+    )
+    auditor_model_config: dict[str, Any] = param_field(
+        default_factory=dict,
+        description=(
+            "Serializable default-model config for the rectify-or-reject auditor "
+            "(live LLM is built at rail construction time)."
+        ),
+    )
+    member_name: str = context_field(
+        attr="member_name",
+        default="teammate",
+        description="Per-member display name.",
+    )
+    role: str = context_field(
+        attr="role",
+        default="teammate",
+        description="Member role (leader / teammate).",
+    )
+    active_members: int = param_field(
+        default=2,
+        description="Active team size used for collapse-fallback checks.",
+    )
+
+
+def _resolve_auditor_model_config(
+    baked: dict[str, Any] | None,
+    context: SwarmBuildContext,
+) -> dict[str, Any]:
+    """Prefer baked params; fall back to live swarm config."""
+    if isinstance(baked, dict) and baked.get("model_client_config"):
+        return baked
+    live = getattr(context, "config", None)
+    if not isinstance(live, dict):
+        return baked if isinstance(baked, dict) else {}
+    from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
+        resolve_model_config,
+    )
+
+    model_client_config, model_config_obj, model_name = resolve_model_config(live)
+    return {
+        "model_client_config": model_client_config,
+        "model_config_obj": model_config_obj,
+        "model_name": model_name,
+    }
+
+
+def _build_auditor_llm(model_config: dict[str, Any] | None) -> Any | None:
+    """Build ``async (prompt) -> str`` for RectifyOrRejectAuditor from model config."""
+    if not isinstance(model_config, dict) or not model_config.get("model_client_config"):
+        return None
+    try:
+        from jiuwenswarm.agents.swarm.providers.evolution_rails import (
+            _build_evolution_llm_from,
+        )
+
+        model, model_name = _build_evolution_llm_from(model_config)
+
+        async def _llm(prompt: str) -> str:
+            response = await model.invoke(prompt)
+            content = getattr(response, "content", None)
+            return str(content if content is not None else response or "")
+
+        logger.info("[swarm.agent_dropout] auditor LLM wired: model=%s", model_name)
+        return _llm
+    except Exception as exc:
+        logger.warning(
+            "[swarm.agent_dropout] failed to build auditor LLM: %s",
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=AGENT_DROPOUT,
+    description="Rectify-or-reject teammate contributions; drop after failed corrections.",
+    input_model=AgentDropoutInput,
+)
+def _build_agent_dropout_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> Any | None:
+    """Build AgentDropoutRail when ``agent_dropout.enabled`` is true (teammates)."""
+    inp = AgentDropoutInput.resolve(params, context)
+    cfg = inp.agent_dropout_config if isinstance(inp.agent_dropout_config, dict) else {}
+    # Params already carry resolved enabled flag from config_specs.
+    if not cfg.get("enabled"):
+        # Fallback: resolve from live context config when params are stale/empty.
+        from jiuwenswarm.agents.dropout.resolve import resolve_agent_dropout_config
+
+        live = getattr(context, "config", None)
+        cfg = resolve_agent_dropout_config(live if isinstance(live, dict) else {})
+        if not cfg.get("enabled"):
+            return None
+    # Primarily for teammates; leaders skip unless explicitly allowed.
+    role = str(inp.role or "teammate").strip().lower()
+    if role == "leader" and not cfg.get("apply_to_leader", False):
+        return None
+
+    from jiuwenswarm.agents.harness.team.rails.agent_dropout_rail import (
+        build_agent_dropout_rail,
+    )
+
+    model_cfg = _resolve_auditor_model_config(inp.auditor_model_config, context)
+    llm = _build_auditor_llm(model_cfg)
+    if llm is None:
+        logger.warning(
+            "[swarm.agent_dropout] no auditor LLM available; audits will presume "
+            "validity (PASS). Check models.defaults / models.default."
+        )
+
+    return build_agent_dropout_rail(
+        config=cfg,
+        member_name=str(inp.member_name or "teammate"),
+        role=role or "teammate",
+        active_members=int(inp.active_members or 2),
+        llm=llm,
     )
