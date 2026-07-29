@@ -185,7 +185,6 @@ def test_rollback_skill_via_store_continues_when_evo_restore_fails(monkeypatch):
     store.archive_current_state = AsyncMock()
     store.write_skill_content = AsyncMock()
     store.restore_evolution_log_from_archive = AsyncMock(return_value=False)
-    store.render_evolution_markdown = AsyncMock()
     store.delete_archive_version = AsyncMock(return_value=True)
 
     ok, evo_ok = asyncio.run(
@@ -195,7 +194,6 @@ def test_rollback_skill_via_store_continues_when_evo_restore_fails(monkeypatch):
     assert evo_ok is False
     store.write_skill_content.assert_awaited_once_with("daily-weather", "# archived body\n")
     store.restore_evolution_log_from_archive.assert_awaited_once()
-    store.render_evolution_markdown.assert_awaited_once_with("daily-weather")
     store.delete_archive_version.assert_awaited_once_with(
         "daily-weather", "SKILL.v1.0.0.md"
     )

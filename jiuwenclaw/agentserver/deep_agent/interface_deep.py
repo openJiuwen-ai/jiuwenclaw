@@ -6351,10 +6351,6 @@ class JiuWenClawDeepAdapter:
         else:
             await store.clear_evolutions(skill_name)
 
-        render = getattr(store, "render_evolution_markdown", None)
-        if callable(render):
-            await render(skill_name)
-
         deleted = await store.delete_archive_version(skill_name, body_archive.name)
         if not deleted:
             logger.warning(
