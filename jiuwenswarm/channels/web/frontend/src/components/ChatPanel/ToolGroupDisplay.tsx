@@ -361,11 +361,15 @@ export function ToolGroupDisplay({
                   </span>
                 </button>
 
-                {open && line.executions[0] && (
-                  <div className="tool-tree-item__detail-wrap">
-                    <ToolExecutionDetails execution={line.executions[0]} />
+                <div className={clsx('tool-tree-item__collapse', open && 'is-open')}>
+                  <div className="tool-tree-item__collapse-inner">
+                    {line.executions[0] ? (
+                      <div className="tool-tree-item__detail-wrap">
+                        <ToolExecutionDetails execution={line.executions[0]} />
+                      </div>
+                    ) : null}
                   </div>
-                )}
+                </div>
               </div>
             );
           })}

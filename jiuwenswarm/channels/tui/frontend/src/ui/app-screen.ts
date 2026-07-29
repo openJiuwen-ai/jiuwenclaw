@@ -126,15 +126,18 @@ const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
 
 /**
  * Terminal mouse reporting takes ownership of drag events, which prevents the
- * terminal's native text selection and copy behaviour. Keep it scoped to UI
- * states that actually need mouse events; a scrollable transcript can still be
- * navigated with the keyboard without making the whole chat unselectable.
+ * terminal's native text selection and copy behaviour. Scope it to UI states
+ * that actually need mouse events (pending questions / interactive overlays)
+ * AND to scrollable transcripts: a transcript taller than the viewport needs
+ * mouse tracking so the wheel can page history, which costs native selection
+ * only while content overflows. Short transcripts stay selectable.
  */
 export function shouldCaptureTerminalMouse(
   pendingQuestionActive: boolean,
   interactiveOverlayActive: boolean,
+  transcriptMayScroll: boolean,
 ): boolean {
-  return pendingQuestionActive || interactiveOverlayActive;
+  return pendingQuestionActive || interactiveOverlayActive || transcriptMayScroll;
 }
 const CONFIRM_ACTION_RE = /\*\*(?:Agent wants to|Tool `[^`]+` requires your approval)([^*]*)\*\*/i;
 const PLAN_REJECT_INPUT_RE = /(\s+\[ .+ \])$/;
@@ -3041,6 +3044,10 @@ export class AppScreen implements Component, Focusable {
       pendingInput,
       pendingInputBaseline,
     ).length;
+    const approximateFixedHeight =
+      questionLines.length + editorLines.length + composerPreviewLines.length + 2;
+    const transcriptMayScroll =
+      transcriptLineCount > Math.max(0, this.tui.terminal.rows - approximateFixedHeight);
     const interactiveOverlayActive =
       this.startupPromptList !== null ||
       this.resumeSessionList !== null ||
@@ -3055,7 +3062,11 @@ export class AppScreen implements Component, Focusable {
       this.configEditorState !== null ||
       this.questionList !== null;
     this.setMouseTrackingEnabled(
-      shouldCaptureTerminalMouse(snapshot.pendingQuestion !== null, interactiveOverlayActive),
+      shouldCaptureTerminalMouse(
+        snapshot.pendingQuestion !== null,
+        interactiveOverlayActive,
+        transcriptMayScroll,
+      ),
     );
     if (
       this.transcriptScrollOffset > 0 &&

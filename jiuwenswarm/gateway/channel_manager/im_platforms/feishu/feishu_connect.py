@@ -1566,7 +1566,11 @@ class FeishuChannel(BaseChannel):
                 route_mention_member_ids = list(routing_target.mention_member_ids or [])
                 route_mention_all = routing_target.mention_all
 
-            # 跳过 reasoning 信息 
+            # 跳过 keepalive 心跳消息 — 仅用于 WebSocket 连接保活，无需投递到飞书
+            if event_name == "keepalive":
+                return
+
+            # 跳过 reasoning 信息
             if msg.event_type == EventType.CHAT_REASONING:
                 return
 
