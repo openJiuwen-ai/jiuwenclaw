@@ -341,7 +341,12 @@ async def _invoke_model_image_generation(prompt: str, size: str = "1024x1024", q
     from jiuwenswarm.common.config import get_config
     mc = _get_model_config(get_config() or {}, "image_gen")
     api_key = str(mc.get("api_key") or os.getenv("IMAGE_GEN_API_KEY") or os.getenv("API_KEY") or "").strip()
-    api_base = str(mc.get("api_base") or os.getenv("IMAGE_GEN_API_BASE") or os.getenv("API_BASE") or "").strip()
+    api_base = str(
+        mc.get("api_base")
+        or os.getenv("IMAGE_GEN_API_BASE")
+        or os.getenv("API_BASE")
+        or "https://dashscope.aliyuncs.com/api/v1"
+    ).strip()
     if not api_key:
         return {"error": "[ERROR]: IMAGE_GEN_API_KEY or API_KEY is not configured for image generation."}
 
