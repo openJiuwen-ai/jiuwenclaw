@@ -355,9 +355,9 @@ export function mergePersistedGoalCompletionMessages(sessionId: string, messages
 
 /**
  * 会话历史加载完成后调用：给命中 goalStore 持久化 objective 文本列表的 user 消息回填
- * `isGoalObjectiveMessage`（见 goalStore.ts objectiveMessageTexts 的注释）。history.get
- * 返回的消息不带任何前端专属字段，本地回显时打的标记刷新后会被这批新对象整体替换掉，只能
- * 在这里按 content 重新核对一次——不依赖当前 Goal 状态，即使目标已被清除/替换也照样命中。
+ * `isGoalObjectiveMessage`（见 goalStore.ts objectiveMessageTexts 的注释）。优先尊重后端
+ * history 已下发的 `is_goal_objective_message`（historyRestore 已映射到该字段）；没有后端
+ * 标记时再按 content 与本地 objective 文本列表核对——兼容旧会话 / 清过缓存前的数据。
  */
 export function stampGoalObjectiveMessages(sessionId: string, messages: Message[]): Message[] {
   const objectiveTexts = useGoalStore.getState().getGoalObjectiveTextsForSession(sessionId);
