@@ -81,13 +81,14 @@ export function ClawHubSearchModal({
         withSession()
       );
       if (data.success) {
-        setToken(data.token || "");
-        const hasToken = data.has_token || false;
-        setHasToken(hasToken);
-        // 弹窗模式下：如果没有 token，显示配置弹�?
-        // 内嵌模式下：不自动显示配置界面，只记录状�?
+        const tokenValue = data.token || "";
+        setToken(tokenValue);
+        // 与 SourceManagerModal 一致：优先 has_token，缺失时回退到 token 字符串
+        const nextHasToken = Boolean(data.has_token ?? tokenValue);
+        setHasToken(nextHasToken);
+        // 弹窗模式下：如果没有 token，显示配置界面；内嵌模式只记录状态
         if (!embedded) {
-          setShowTokenConfig(!hasToken);
+          setShowTokenConfig(!nextHasToken);
         }
       }
     } catch (error) {
@@ -194,20 +195,21 @@ export function ClawHubSearchModal({
   }, [query, t, withSession, showMessage]);
 
   const handleSaveToken = useCallback(async () => {
+    const nextToken = token.trim();
     setLoading(true);
     setMessage(null);
     try {
       const data = await webRequest<{ success: boolean; token: string }>(
         "skills.clawhub.set_token",
-        withSession({ token })
+        withSession({ token: nextToken })
       );
       if (data.success) {
         setToken(data.token || "");
-        setHasToken(true);
-        setShowTokenConfig(false);
+        setHasToken(!!nextToken);
+        setShowTokenConfig(!nextToken);
         showMessage("success", t("skills.clawhub.messages.tokenSaved"));
-        // 保存后自动开始搜�?
-        if (query.trim()) {
+        // 保存后自动开始搜索
+        if (nextToken && query.trim()) {
           await handleSearch();
         }
       }
@@ -449,6 +451,25 @@ export function ClawHubSearchModal({
           onClick={onClose}
           aria-label={t("common.close")}
         />
+        {message && message.type === "success" && (
+          <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
+            <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
+              <svg className="w-3 h-3 text-text-inverse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+              </svg>
+            </span>
+            {message.text.replace("√", "")}
+            <button
+              type="button"
+              onClick={() => showMessage("success", "")}
+              className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-card/30 rounded-full "
+            >
+              <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        )}
         <div className="relative p-6 border border-border bg-card animate-rise" style={{ width: "642px", height: "246px", borderRadius: "8px" }}>
           <h3 className="text-lg font-semibold text-text mb-3">
             {t("skills.clawhub.configTitle")}
@@ -456,6 +477,11 @@ export function ClawHubSearchModal({
           <p className="text-sm text-text-muted mb-4">
             {t("skills.clawhub.configDescription")}
           </p>
+          {message && message.type === "error" && (
+            <div className="mb-3 px-3 py-2.5 rounded-lg text-sm leading-snug border border-danger/40 bg-danger/10 text-danger">
+              {message.text}
+            </div>
+          )}
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-text mb-2">
@@ -499,9 +525,9 @@ export function ClawHubSearchModal({
               <button
                 type="button"
                 onClick={handleSaveToken}
-                disabled={loading || !token.trim()}
+                disabled={loading || (!hasToken && !token.trim())}
                 className={`w-[76px] h-[28px] rounded-[24px] text-sm  ${
-                  loading || !token.trim()
+                  loading || (!hasToken && !token.trim())
                     ? "bg-gray-300 text-gray-500 cursor-not-allowed"
                     : "bg-control-emphasis text-control-emphasis-foreground hover:bg-control-emphasis-hover"
                 }`}

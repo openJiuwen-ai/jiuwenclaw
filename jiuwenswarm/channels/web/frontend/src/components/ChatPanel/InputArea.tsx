@@ -1833,7 +1833,7 @@ export function InputArea({
           )} */}
 
           <ModelSelector
-            disabled={isTeamMode || hasHistory || isProcessing}
+            disabled={isTeamMode || isProcessing}
             lockedToDefault={isTeamMode}
           />
 

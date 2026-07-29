@@ -36,13 +36,13 @@ export function SourceManagerModal({
   const fetchClawhubToken = useCallback(async () => {
     setTokenLoading(true);
     try {
-      const data = await webRequest<{ token?: string }>(
+      const data = await webRequest<{ token?: string; has_token?: boolean }>(
         "skills.clawhub.get_token",
         withSession()
       );
       const token = data.token || "";
       setClawhubToken(token);
-      setHasToken(!!token);
+      setHasToken(Boolean(data.has_token ?? token));
     } catch (error) {
       console.error("Failed to load ClawHub token:", error);
       setClawhubToken("");
