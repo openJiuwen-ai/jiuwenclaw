@@ -31,7 +31,7 @@ import { isQaSummaryContent } from '../InteractionSlot/qaSummary';
 import { GoalCompletedCard } from '../GoalBar/GoalCompletedCard';
 import { isGoalCompletedContent } from '../GoalBar/goalCompletedMessage';
 import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
-import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
+import { copyText, formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
 import { useSpeechSynthesis } from '../../hooks';
 import clsx from 'clsx';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
@@ -255,6 +255,7 @@ export const MessageItem = memo(function MessageItem({
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // TTS
@@ -335,17 +336,11 @@ export const MessageItem = memo(function MessageItem({
     const raw = role === 'user' ? stripUploadDocumentBlocks(content) : content;
     if (!raw) return;
     const copyContent = a2uiContentToText(raw) || raw;
-    try {
-      await navigator.clipboard.writeText(copyContent);
-    } catch {
-      const textarea = document.createElement('textarea');
-      textarea.value = copyContent;
-      textarea.style.position = 'fixed';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textarea);
+    const succeeded = await copyText(copyContent);
+    if (!succeeded) {
+      setCopyFailed(true);
+      window.setTimeout(() => setCopyFailed(false), 2000);
+      return;
     }
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
@@ -679,9 +674,9 @@ export const MessageItem = memo(function MessageItem({
 
             {showCopy && (
               <div className="relative">
-                {copied && (
+                {(copied || copyFailed) && (
                   <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md">
-                    {t('chatUi.copied')}
+                    {copied ? t('chatUi.copied') : t('chatUi.copyFailed')}
                   </span>
                 )}
                 <button
