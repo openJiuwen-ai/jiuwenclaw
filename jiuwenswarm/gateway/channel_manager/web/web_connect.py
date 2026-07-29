@@ -13,10 +13,12 @@ import inspect
 import json
 import logging
 import os
+import re
 import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
@@ -45,6 +47,11 @@ from jiuwenswarm.common.ws_diagnostics import (
 logger = logging.getLogger(__name__)
 
 _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
+
+# ── 文件下载安全限制 ──
+_SAFE_DOWNLOAD_FILENAME_RE = re.compile(r"[\x00-\x1f\x7f/\\]+")
+_MAX_DOWNLOAD_FILE_BYTES = 50 * 1024 * 1024
+_ALLOWED_DOWNLOAD_SCHEMES = {"http", "https"}
 
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
@@ -513,11 +520,35 @@ class WebChannel(BaseWsChannel):
             file_name = file_info.get("name") or file_info.get("filename") or "unknown_file"
 
             if file_url:
+                # URL scheme validation
+                parsed = urlparse(file_url)
+                if parsed.scheme not in _ALLOWED_DOWNLOAD_SCHEMES:
+                    logger.warning("WebChannel 文件下载被拒绝（不允许的 URL scheme）: %s", file_url)
+                    downloaded_files.append(file_info)
+                    continue
+
                 file_content = await self._download_file(file_url)
                 if file_content:
+                    # File size limit
+                    if len(file_content) > _MAX_DOWNLOAD_FILE_BYTES:
+                        logger.warning(
+                            "WebChannel 文件下载被拒绝（大小超限 %d > %d）: %s",
+                            len(file_content), _MAX_DOWNLOAD_FILE_BYTES, file_url,
+                        )
+                        downloaded_files.append(file_info)
+                        continue
+
                     try:
                         os.makedirs(workspace_dir, exist_ok=True)
-                        file_path = os.path.join(workspace_dir, file_name)
+                        # Filename sanitization: strip path components and unsafe chars
+                        safe_name = os.path.basename(file_name) or "unknown_file"
+                        safe_name = _SAFE_DOWNLOAD_FILENAME_RE.sub("_", safe_name).strip("._") or "unknown_file"
+                        file_path = os.path.join(workspace_dir, safe_name)
+                        # Ensure the resolved path is still under workspace_dir
+                        if not os.path.abspath(file_path).startswith(os.path.abspath(workspace_dir)):
+                            logger.warning("WebChannel 文件保存被拒绝（路径越界）: %s", file_path)
+                            downloaded_files.append(file_info)
+                            continue
                         with open(file_path, "wb") as f:
                             f.write(file_content)
                         file_info["path"] = file_path
