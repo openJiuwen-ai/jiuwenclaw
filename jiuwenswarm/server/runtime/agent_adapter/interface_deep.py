@@ -7424,6 +7424,7 @@ class JiuWenSwarmDeepAdapter:
         image_files_token = None
         _run_span: Any = None
         collected_content: list[str] = []
+        error_text: str | None = None
         interaction_stream = None
         interaction_stream_abort = True
         try:
@@ -7517,21 +7518,18 @@ class JiuWenSwarmDeepAdapter:
                     metadata=request.metadata,
                 )
             async for chunk in interaction_stream:
-                if hasattr(chunk, "type") and hasattr(chunk, "payload"):
-                    if chunk.type in ("llm_output", "answer"):
-                        text = (
-                            chunk.payload.get("content", "")
-                            if isinstance(chunk.payload, dict)
-                            else str(chunk.payload)
-                        )
-                        if text:
-                            collected_content.append(text)
-                else:
-                    parsed = self._parse_stream_chunk(chunk)
-                    if parsed is not None:
-                        text = parsed.get("content", "")
-                        if text:
-                            collected_content.append(text)
+                parsed = self._parse_stream_chunk(chunk)
+                if parsed is None:
+                    continue
+                event_type = str(parsed.get("event_type") or "").strip()
+                if event_type in ("chat.error", "error"):
+                    err = parsed.get("error") or parsed.get("message") or ""
+                    if err:
+                        error_text = str(err)
+                elif event_type != "chat.reasoning":
+                    text = parsed.get("content", "")
+                    if text:
+                        collected_content.append(text)
             interaction_stream_abort = False
         except asyncio.CancelledError:
             logger.info(
@@ -7565,6 +7563,15 @@ class JiuWenSwarmDeepAdapter:
             self._unmark_session_active(session_id)
 
         content = "".join(collected_content) if collected_content else ""
+
+        if not content and error_text:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": error_text},
+                metadata=request.metadata,
+            )
 
         return AgentResponse(
             request_id=request.request_id,
