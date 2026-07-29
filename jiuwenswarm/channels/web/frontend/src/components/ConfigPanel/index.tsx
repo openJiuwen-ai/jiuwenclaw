@@ -4383,9 +4383,16 @@ export function ConfigPanel({
           payload.team = agentsTeamsPayload.team;
         }
         await onSaveAllConfig(payload);
-        allowConfigStoreSyncRef.current = true;
-        allowModelsStoreSyncRef.current = true;
-        if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
+        // Mark current drafts as the synced baseline so later store updates use the
+        // normal userEdited check instead of an unconditional allow bypass.
+        lastSyncedConfigRef.current = { ...draftValues };
+        lastSyncedModelsRef.current = toDraftModels(draftModels);
+        if (hasModelChanges && onModelsRefresh) {
+          // onModelsRefresh only updates the models store — do not set
+          // allowConfigStoreSyncRef here or it can linger and wipe later config edits.
+          allowModelsStoreSyncRef.current = true;
+          await onModelsRefresh();
+        }
         if (hasAgentsTeamsChanges) {
           setAgentsTeamsJustSaved(true);
           // 记录保存后的配置到ref，用于后续比较
@@ -4399,8 +4406,11 @@ export function ConfigPanel({
         // 兼容旧后端：按旧接口顺序保存，但只在普通配置实际变化时调用 config.set。
         if (hasModelChanges && onModelsReplaceAll) {
           await onModelsReplaceAll(draftModels);
-          allowModelsStoreSyncRef.current = true;
-          if (onModelsRefresh) await onModelsRefresh();
+          lastSyncedModelsRef.current = toDraftModels(draftModels);
+          if (onModelsRefresh) {
+            allowModelsStoreSyncRef.current = true;
+            await onModelsRefresh();
+          }
         }
         if (hasAgentsTeamsChanges && onAgentsTeamsSave) {
           const agentsTeamsPayload = buildAgentsTeamsPayload(draftAgents, draftTeams);
@@ -4416,7 +4426,9 @@ export function ConfigPanel({
         }
         if (hasConfigChanges) {
           await onSaveConfig(configUpdates);
-          allowConfigStoreSyncRef.current = true;
+          // No immediate store refresh on this path — update the synced baseline
+          // so a later store update won't bypass the userEdited check.
+          lastSyncedConfigRef.current = { ...draftValues };
         }
       }
     } catch (saveError) {
