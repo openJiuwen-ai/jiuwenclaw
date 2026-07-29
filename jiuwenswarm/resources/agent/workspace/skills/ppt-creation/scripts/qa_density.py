@@ -29,6 +29,11 @@ FLOOR_WARN = 400
 TARGET = "400-700"
 
 
+def emit(line):
+    """报告正文写 stdout —— 这是工具的输出，不是日志。"""
+    sys.stdout.write(f"{line}\n")
+
+
 def vis_len(text):
     return sum(1.0 if ord(c) > 0x2E80 else 0.5 for c in text if not c.isspace())
 
@@ -60,8 +65,8 @@ def main():
         if len(pages) == len(chars):
             roles = [p.get("role") for p in pages]
         else:
-            print(f"qa_density: WARNING lock has {len(pages)} pages but deck has "
-                  f"{len(chars)} slides; falling back to role-less judgement")
+            emit(f"qa_density: WARNING lock has {len(pages)} pages but deck has "
+                 f"{len(chars)} slides; falling back to role-less judgement")
             args.lock = None
 
     rows, errors, warnings = [], 0, 0
@@ -83,13 +88,13 @@ def main():
         rows.append({"page": i, "role": role or "-", "vis_chars": n, "verdict": verdict})
 
     if args.json:
-        print(json.dumps({"pages": rows, "errors": errors, "warnings": warnings,
-                          "target": TARGET}, ensure_ascii=False, indent=2))
+        emit(json.dumps({"pages": rows, "errors": errors, "warnings": warnings,
+                         "target": TARGET}, ensure_ascii=False, indent=2))
     else:
         for r in rows:
-            print(f"  p{r['page']:>2}  {r['vis_chars']:>5}  {r['verdict']:<11} {r['role']}")
-        print(f"qa_density: {errors} EMPTY (<{FLOOR_HARD}), {warnings} LOW "
-              f"(<{FLOOR_WARN}); content-page target {TARGET} visual chars")
+            emit(f"  p{r['page']:>2}  {r['vis_chars']:>5}  {r['verdict']:<11} {r['role']}")
+        emit(f"qa_density: {errors} EMPTY (<{FLOOR_HARD}), {warnings} LOW "
+             f"(<{FLOOR_WARN}); content-page target {TARGET} visual chars")
     sys.exit(1 if errors else 0)
 
 

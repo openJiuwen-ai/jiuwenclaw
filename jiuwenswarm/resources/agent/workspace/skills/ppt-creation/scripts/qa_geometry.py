@@ -31,6 +31,11 @@ NS = {
 }
 
 
+def emit(line: str) -> None:
+    """报告正文写 stdout —— 这是工具的输出，不是日志。"""
+    sys.stdout.write(f"{line}\n")
+
+
 @dataclass(frozen=True)
 class Offset:
     """group 造成的坐标偏移（已换算为英寸）。"""
@@ -448,19 +453,19 @@ def main():
     rep = analyze(args.pptx, args.slide)
 
     if args.json:
-        print(json.dumps(rep, ensure_ascii=False, indent=2))
+        emit(json.dumps(rep, ensure_ascii=False, indent=2))
         return 1 if rep["errors"] else 0
 
-    print(f"qa-geometry: {rep['errors']} error(s), {rep['warnings']} warning(s), "
-          f"slides={rep['slides']}, 坐标已换算回 10×5.625")
+    emit(f"qa-geometry: {rep['errors']} error(s), {rep['warnings']} warning(s), "
+         f"slides={rep['slides']}, 坐标已换算回 10×5.625")
     by_slide = {}
     for f in rep["findings"]:
         by_slide.setdefault(f["slide"], []).append(f)
     for slide_no, slide_findings in sorted(by_slide.items()):
-        print(f"\n— slide {slide_no}")
+        emit(f"\n— slide {slide_no}")
         for f in slide_findings:
             mark = "✗" if f["severity"] == "error" else "!"
-            print(f"  {mark} [{f['type']}] {f['detail']}")
+            emit(f"  {mark} [{f['type']}] {f['detail']}")
     return 1 if rep["errors"] else 0
 
 

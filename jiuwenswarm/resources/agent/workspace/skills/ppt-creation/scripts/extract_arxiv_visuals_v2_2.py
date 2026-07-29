@@ -31,6 +31,7 @@ import hashlib
 import importlib
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -55,8 +56,21 @@ DEPENDENCIES = {
 }
 
 
+LOGGER = logging.getLogger("extract_arxiv_visuals")
+
+# Configured at import time, not in main(): ensure_dependencies() below runs
+# during module import and logs there. Diagnostics keep their historical stderr
+# destination and exact wording; only the transport changes from print.
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(message)s")
+
+
+def emit(line: str) -> None:
+    """Final summary is program output on stdout, not a diagnostic."""
+    sys.stdout.write(f"{line}\n")
+
+
 def eprint(*args: object) -> None:
-    print(*args, file=sys.stderr)
+    LOGGER.info(" ".join(str(arg) for arg in args))
 
 
 def log(message: str) -> None:
@@ -1424,18 +1438,18 @@ def main() -> int:
             ),
         )
         summary = manifest["summary"]
-        print(f"\n完成。输出目录：{output}")
-        print(
+        emit(f"\n完成。输出目录：{output}")
+        emit(
             "结果："
             f"Figure {summary['figure_count']}，"
             f"Table {summary['table_count']}，"
             f"总计 {summary['visual_count']}，"
             f"失败 {summary['failure_count']}"
         )
-        print(f"Manifest：{output / 'manifest.json'}")
+        emit(f"Manifest：{output / 'manifest.json'}")
         contact_sheet = output / "contact_sheet.png"
         if contact_sheet.exists():
-            print(f"总览图：{contact_sheet}")
+            emit(f"总览图：{contact_sheet}")
         return 0
     except KeyboardInterrupt:
         eprint("\n用户中断。")

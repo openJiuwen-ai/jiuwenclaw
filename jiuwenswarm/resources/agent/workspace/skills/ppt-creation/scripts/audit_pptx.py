@@ -11,12 +11,21 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import posixpath
 import re
 import sys
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+# Diagnostics go to stderr through logging; the audit report itself is program
+# output and goes to stdout via emit().
+LOGGER = logging.getLogger("audit_pptx")
+
+
+def emit(line: str) -> None:
+    sys.stdout.write(f"{line}\n")
 
 
 NS = {
@@ -471,6 +480,8 @@ def audit(args: argparse.Namespace) -> dict:
 
 
 def main() -> int:
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO,
+                        format="[%(levelname)s] %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("pptx")
     parser.add_argument("--template")
@@ -490,7 +501,7 @@ def main() -> int:
     # ValueError already covers json.JSONDecodeError; listing both trips the
     # "parent and child exception" rule.
     except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as cause:
-        print(f"[ERROR] audit failed: {cause}", file=sys.stderr)
+        LOGGER.error("audit failed: %s", cause)
         return 1
 
     if args.report:
@@ -499,10 +510,10 @@ def main() -> int:
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     for message in report["warnings"]:
-        print(f"[WARN] {message}")
+        emit(f"[WARN] {message}")
     for message in report["errors"]:
-        print(f"[ERROR] {message}", file=sys.stderr)
-    print(
+        LOGGER.error("%s", message)
+    emit(
         "pptx-audit: "
         f"{len(report['errors'])} error(s), {len(report['warnings'])} warning(s), "
         f"slides={report['slides']}, masters={report['masters']}, layouts={report['layouts']}, "

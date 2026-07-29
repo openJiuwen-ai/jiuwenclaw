@@ -12,12 +12,21 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import re
 import shutil
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+
+# Diagnostics go to stderr through logging; the completion line is program
+# output and goes to stdout via emit().
+LOGGER = logging.getLogger("prepare_evidence")
+
+
+def emit(line: str) -> None:
+    sys.stdout.write(f"{line}\n")
 
 
 FILE_COPY_ROUTES = {
@@ -246,8 +255,7 @@ def make_contact_sheet(plan: dict, root: Path, analysis_root: Path) -> None:
             except (OSError, ValueError) as cause:
                 # A single unreadable asset must not sink the whole sheet; name it
                 # on stderr so the missing tile is traceable.
-                print(f"[WARN] contact sheet skipped {item.get('id')}: {cause}",
-                      file=sys.stderr)
+                LOGGER.warning("contact sheet skipped %s: %s", item.get("id"), cause)
     if not entries:
         return
     cell_w, cell_h, label_h, cols = 360, 220, 34, 3
@@ -267,6 +275,10 @@ def make_contact_sheet(plan: dict, root: Path, analysis_root: Path) -> None:
 
 
 def main() -> int:
+    # Keep the historical "[WARN]" tag rather than logging's default "WARNING".
+    logging.addLevelName(logging.WARNING, "WARN")
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO,
+                        format="[%(levelname)s] %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("project")
     parser.add_argument("--plan", default="evidence-plan.json")
@@ -279,7 +291,7 @@ def main() -> int:
     root = Path(args.project).resolve()
     plan_path = resolve(root, args.plan)
     if plan_path is None or not plan_path.exists():
-        print(f"[ERROR] evidence plan not found: {plan_path}", file=sys.stderr)
+        LOGGER.error("evidence plan not found: %s", plan_path)
         return 1
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     asset_root = resolve(root, plan.get("asset_root")) or root / "assets"
@@ -288,7 +300,7 @@ def main() -> int:
         try:
             directory.relative_to(root)
         except ValueError:
-            print(f"[ERROR] {name} must stay inside project: {directory}", file=sys.stderr)
+            LOGGER.error("%s must stay inside project: %s", name, directory)
             return 1
     selected = set(args.item)
     approvals = set(args.approve)
@@ -326,8 +338,9 @@ def main() -> int:
     save_plan(plan_path, plan)
     make_contact_sheet(plan, root, analysis_root)
     for message in errors:
-        print(f"[WARN] {message}", file=sys.stderr)
-    print(f"evidence preparation complete: {len(plan.get('items', []))} item(s), {len(errors)} warning(s)")
+        LOGGER.warning("%s", message)
+    emit(f"evidence preparation complete: {len(plan.get('items', []))} item(s), "
+         f"{len(errors)} warning(s)")
     return 0
 
 
