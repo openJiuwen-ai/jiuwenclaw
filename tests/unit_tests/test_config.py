@@ -331,6 +331,51 @@ class TestConfigFunctions:
         assert get_config()["model"] == "new"
 
     @staticmethod
+    def test_dump_main_config_invalidates_get_config_cache(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: old\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        assert get_config()["model"] == "old"
+
+        data = config_mod.load_yaml_round_trip(config_file)
+        data["model"] = "new"
+        config_mod.dump_yaml_round_trip(config_file, data)
+
+        assert get_config()["model"] == "new"
+
+    @staticmethod
+    def test_dump_other_yaml_preserves_get_config_cache(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: main\n", encoding="utf-8")
+        other_file = tmp_path / "other.yaml"
+        other_file.write_text("value: old\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        load_calls = 0
+        original_safe_load = config_mod.yaml.safe_load
+
+        def counting_safe_load(*args, **kwargs):
+            nonlocal load_calls
+            load_calls += 1
+            return original_safe_load(*args, **kwargs)
+
+        monkeypatch.setattr(config_mod.yaml, "safe_load", counting_safe_load)
+
+        assert get_config()["model"] == "main"
+        config_mod.dump_yaml_round_trip(other_file, {"value": "new"})
+        assert get_config()["model"] == "main"
+        assert load_calls == 1
+
+    @staticmethod
     def test_get_config_cache_invalidates_when_env_value_changes(
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,

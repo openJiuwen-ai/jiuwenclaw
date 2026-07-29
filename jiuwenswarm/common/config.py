@@ -362,7 +362,8 @@ def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             rt.dump(data, f)
         _atomic_replace(tmp, config_path)
-        invalidate_config_cache()
+        if config_path.resolve() == get_config_file().resolve():
+            invalidate_config_cache()
     except BaseException:
         try:
             os.unlink(tmp)
