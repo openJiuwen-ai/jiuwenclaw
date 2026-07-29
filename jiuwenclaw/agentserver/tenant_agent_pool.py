@@ -1048,10 +1048,28 @@ class TenantAgentPool:
         agent_id, service_id = self.resolve_control_rpc_tenant(request, agent_id, service_id)
         cache_key = self._build_cache_key(agent_id, service_id)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        params = request.params if isinstance(request.params, dict) else {}
+        mode_full = params.get("mode", "agent.plan")
+        mode = str(mode_full).split(".")[0] if mode_full else "agent"
+        workspace_dir = params.get("workspace_dir")
+        session_id = getattr(request, "session_id", None)
+        agent = await agent_manager.get_agent(
+            channel_id=request.channel_id,
+            mode=mode,
+            workspace_dir=workspace_dir,
+            session_id=session_id,
+            request=request,
+        )
+        tenant_tokens = None
+        mem_token = None
+        if agent is not None:
+            tenant_tokens, mem_token = agent._bind_tenant_request_context()  # pylint: disable=protected-access
         try:
             async for chunk in agent_manager.process_message_stream(request):
                 yield chunk
         finally:
+            if agent is not None and tenant_tokens is not None:
+                agent._reset_tenant_request_context(tenant_tokens, mem_token)  # pylint: disable=protected-access
             await self._refresh_agent_manager_cache(cache_key, agent_manager)
 
     @staticmethod
