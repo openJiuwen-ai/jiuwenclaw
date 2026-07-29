@@ -127,7 +127,6 @@ def _get_state_file() -> "Path":
 
 
 from jiuwenswarm.server.runtime.skill.skilldev.state_utils import (
-    get_registered_skill_names,
     get_skill_enabled,
     get_state_file,
     list_disabled_skills,
@@ -514,10 +513,15 @@ class SkillManager:
         返回字段转换：body -> content, path -> file_path
         """
         name = params.get("name")
+        raw_origin = str(params.get("origin", "") or "").strip()
         if not name:
             raise ValueError("缺少参数: name")
 
-        # 先在本地 skills 目录中查找
+        # 收集本地 skills 目录中所有同 name 的目录（重名技能可能多个并存）
+        matched_children: list[Path] = []
+        # child -> (meta, local_skill 记录)。第一遍已读盘解析 meta，选中后直接复用，
+        # 不再二次 _try_find_skill_file + _parse_skill_md（避免重复 I/O）。
+        child_records: dict[Path, tuple[dict, dict | None]] = {}
         for child in self._skills_dir.iterdir():
             if child.name.startswith("_") or not child.is_dir():
                 continue
@@ -528,15 +532,58 @@ class SkillManager:
             if meta is None:
                 continue
             # 与 _scan_local_skills 保持一致：无 frontmatter 时 name 退化为文件名(SKILL)，
-            # 此处用目录名修正，否则前端列表(目录名)与详情(文件名)对不上导致“未找到 skill”
+            # 此处用目录名修正，否则前端列表(目录名)与详情(文件名)对不上导致"未找到 skill"
             if meta.get("name") == md.stem:
                 meta["name"] = child.name
             if meta.get("name") == name:
+                matched_children.append(child)
+                # 复用 _find_local_skill_for_dir：origin 精确匹配，避免重名串成同一条记录
+                child_records[child] = (meta, self._find_local_skill_for_dir(child, meta))
+
+        # origin 优先：若前端传了 origin，按 origin 在候选目录中精确定位对应的那一个，
+        # 而不是返回遍历到的第一个——这是"重名技能点哪个详情就显示哪个"的关键。
+        chosen: Path | None = None
+        if raw_origin and matched_children:
+            for child in matched_children:
+                rec = child_records.get(child)
+                ls_rec = rec[1] if rec else None
+                rec_origin = str(ls_rec.get("origin", "") or "").strip() if isinstance(ls_rec, dict) else ""
+                if rec_origin == raw_origin:
+                    chosen = child
+                    break
+        if chosen is None and matched_children:
+            # 没传 origin 或没匹配上：退回首条（保留原行为，向后兼容）
+            chosen = matched_children[0]
+
+        if len(matched_children) > 1:
+            logger.debug(
+                "[SkillDedup] skills.get name=%s 命中 %d 个同名磁盘目录: %s "
+                "origin_param=%s 选中=%s",
+                name, len(matched_children), [c.name for c in matched_children],
+                raw_origin or "(none)", chosen.name if chosen else "(none)",
+            )
+
+        if chosen is not None:
+            child = chosen
+            rec = child_records.get(child)
+            # 第一遍已读盘解析 meta 并修正过 name，这里直接复用，不再二次 I/O
+            if rec is not None:
+                meta, ls_rec = rec
+                # 回填展示字段并取 origin：让前端详情页拿到准确信息，卸载时能按 origin
+                # 精确定位目录，不再退回按 name 删（重名会误删另一个）
+                rec_origin = (
+                    self._apply_local_skill_meta(meta, ls_rec)
+                    if isinstance(ls_rec, dict) else ""
+                )
                 # 字段转换以符合前端期望
                 meta["content"] = meta.pop("body", "")
                 meta["file_path"] = meta.pop("path", "")
-                meta["source"] = self._resolve_skill_source(meta.get("name", ""))
-                meta["display_name"] = self._resolve_skill_display_name(meta.get("name", ""))
+                # origin 传给 _resolve_skill_source，确保同名不同源时返回该技能自己的 source，
+                # 而不是遍历到的第一个同名 plugin。
+                meta["source"] = self._resolve_skill_source(meta.get("name", ""), origin=rec_origin or None)
+                meta["display_name"] = meta.get(
+                    "display_name"
+                ) or self._resolve_skill_display_name(meta.get("name", ""))
                 meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
                 builtin_dir = get_builtin_skills_dir()
                 if builtin_dir.exists():
@@ -580,8 +627,16 @@ class SkillManager:
         raise ValueError(f"未找到 skill: {name}")
 
     async def handle_skills_toggle(self, params: dict) -> dict:
-        """切换已安装本地 skill 的 enabled 状态。"""
+        """切换已安装本地 skill 的 enabled 状态。
+
+        params:
+            name: skill 名称
+            origin: 可选，技能来源标识。提供时按 origin 精确定位 installed_plugin
+                记录，避免重名技能误操作另一条。
+            enabled: 目标状态
+        """
         name = params.get("name", "")
+        origin = str(params.get("origin", "") or "").strip() or None
         enabled = params.get("enabled")
         if not name:
             return {"success": False, "detail": "缺少参数: name"}
@@ -594,6 +649,7 @@ class SkillManager:
             return {"success": False, "detail": str(exc)}
 
         self.set_skill_enabled(name, enabled)
+        self._set_plugin_enabled(name, enabled, origin=origin)
         return {
             "success": True,
             "name": name,
@@ -795,7 +851,7 @@ class SkillManager:
             builtin_dir = get_builtin_skills_dir()
             builtin_path = _safe_child_path(builtin_dir, safe_name, "skill")
             if builtin_path.exists() and builtin_path.is_dir():
-                return await self.handle_skills_install_builtin({"name": safe_name})
+                return await self.handle_skills_install_builtin({"name": safe_name, "force": force})
             return {"success": False, "detail": "spec 格式应为 skill@marketplace，内置技能可直接使用名称安装"}
 
         plugin_name, marketplace_name = spec.rsplit("@", 1)
@@ -809,7 +865,7 @@ class SkillManager:
             return {"success": False, "detail": str(exc)}
 
         if marketplace_name == "builtin":
-            return await self.handle_skills_install_builtin({"name": plugin_name})
+            return await self.handle_skills_install_builtin({"name": plugin_name, "force": force})
 
         # 查找 marketplace 配置
         marketplace = None
@@ -850,7 +906,11 @@ class SkillManager:
         dest = _safe_child_path(self._skills_dir, plugin_name, "skill")
         if dest.exists():
             if not force:
-                return {"success": False, "detail": f"skill {plugin_name} 已存在"}
+                return {
+                    "success": False,
+                    "detail": f"skill {plugin_name} 已存在",
+                    "detail_key": "skills.marketplace.errors.skillAlreadyInstalled",
+                }
             _safe_rmtree(dest)
         shutil.copytree(plugin_src, dest)
 
@@ -876,8 +936,10 @@ class SkillManager:
 
         params:
             name: skill 名称
+            force: 可选，是否强制覆盖重装。冲突时传 force=True 会删除旧目录后重新安装。
         """
         name = params.get("name", "")
+        force = bool(params.get("force", False))
         if not name:
             return {"success": False, "detail": "缺少参数: name"}
         try:
@@ -897,13 +959,19 @@ class SkillManager:
         # 检查是否已经安装
         dest = _safe_child_path(self._skills_dir, name, "skill")
         if dest.exists() and dest.is_dir():
-            return {"success": False, "detail": f"技能 {name} 已经安装"}
+            if not force:
+                return {
+                    "success": False,
+                    "detail": f"技能 {name} 已经安装",
+                    "detail_key": "skills.builtin.errors.skillAlreadyInstalled",
+                }
+            _safe_rmtree(dest)
 
         # 复制技能到用户目录
         try:
             shutil.copytree(src, dest)
         except Exception as exc:
-            logger.error("安装内置技能失败: %s", exc)
+            logger.error("安装内置技能 copytree 失败: %s", exc)
             return {"success": False, "detail": f"安装失败: {exc}"}
 
         # 记录安装信息到状态文件
@@ -1412,6 +1480,8 @@ class SkillManager:
             force: 强制覆盖 (可选，默认 False)
         """
         slug = str(params.get("slug", "")).strip()
+        force = bool(params.get("force", False))
+        owner_handle = str(params.get("owner_handle") or "").strip()
         if not slug:
             return {"success": False, "detail": "缺少参数: slug"}
         try:
@@ -1428,11 +1498,9 @@ class SkillManager:
                 "detail_key": "skills.clawhub.errors.tokenNotConfigured",
             }
 
-        owner_handle = str(params.get("owner_handle") or "").strip()
         display_name = str(params.get("display_name") or "").strip()
         version = params.get("version")
         tag = params.get("tag")
-        force = bool(params.get("force", False))
 
         # 检查 skill 是否已安装
         dest = _safe_child_path(self._skills_dir, slug, "skill")
@@ -1546,6 +1614,12 @@ class SkillManager:
                             "version": meta.get("version", ""),
                             "commit": "",
                             "source": "clawhub",
+                            # origin 与同处 _add_local_skill 一致，供身份键区分重名不同发布者
+                            "origin": (
+                                f"clawhub:{owner_handle}/{slug}"
+                                if owner_handle
+                                else f"clawhub:{slug}"
+                            ),
                             "installed_at": datetime.now(timezone.utc).isoformat(),
                         }
                     )
@@ -1889,6 +1963,12 @@ class SkillManager:
         version = params.get("version")
         version_str = str(version).strip() if version is not None else ""
 
+        # 前端在搜索结果里已拿到市场的展示文案，随 install 请求一起传入，落盘后
+        # 供「我的技能」页显示与搜索页一致的描述（short_desc 字段名对齐市场原始字段，
+        # 前端 TeamSkillsHubSkillItem 里它叫 summary）。缺省时回退 SKILL.md description。
+        market_short_desc = str(params.get("short_desc", "") or "").strip()[:500]
+        market_display_name = str(params.get("display_name", "") or "").strip()[:200]
+
         try:
             base_url = self._get_team_skills_hub_base_url(str(params.get("market_url") or "").strip() or None)
             artifact_data = await self._team_skills_hub_http_get_data(
@@ -1930,7 +2010,11 @@ class SkillManager:
                 dest = install_root / skill_name
                 if dest.exists():
                     if not force:
-                        return {"success": False, "detail": f"技能 {skill_name} 已安装"}
+                        return {
+                            "success": False,
+                            "detail": f"技能 {skill_name} 已安装",
+                            "detail_key": "skills.teamskillshub.errors.skillAlreadyInstalled",
+                        }
                     _safe_rmtree(dest)
 
                 shutil.copytree(skill_dir, dest)
@@ -1954,12 +2038,34 @@ class SkillManager:
                     shutil.copytree(skill_dir, mirror_dest)
 
                 installed_at = datetime.now(timezone.utc).isoformat()
+                # force 覆盖时：清理同 name 同 source 的旧 origin 记录，避免 asset_id 不同导致残留
+                if force:
+                    for ls in list(self._state.get("local_skills", [])):
+                        if (
+                            isinstance(ls, dict)
+                            and ls.get("name") == skill_name
+                            and ls.get("source") == "teamskillshub"
+                        ):
+                            old_origin = str(ls.get("origin", "") or "").strip()
+                            if old_origin:
+                                self._remove_local_skill(skill_name, origin=old_origin)
+                    for p in list(self._state.get("installed_plugins", [])):
+                        if isinstance(p, dict) and p.get("name") == skill_name and p.get("source") == "teamskillshub":
+                            old_origin = str(p.get("origin", "") or "").strip()
+                            if old_origin:
+                                self._remove_installed_plugin(skill_name, origin=old_origin)
+
                 self._add_local_skill(
                     {
                         "name": skill_name,
                         "origin": f"teamskillshub:{asset_id}",
                         "source": "teamskillshub",
                         "installed_at": installed_at,
+                        # 市场展示文案落盘：供「我的技能」页显示与搜索页一致的描述
+                        "market_short_desc": market_short_desc,
+                        "market_display_name": market_display_name or str(
+                            artifact_data.get("display_name", "") or ""
+                        ).strip(),
                     }
                 )
                 self._add_installed_plugin(
@@ -1970,6 +2076,8 @@ class SkillManager:
                         or str(artifact_data.get("version", "")).strip(),
                         "commit": "",
                         "source": "teamskillshub",
+                        # origin 与同处 _add_local_skill 一致，供身份键精确区分
+                        "origin": f"teamskillshub:{asset_id}",
                         "installed_at": installed_at,
                     }
                 )
@@ -2133,6 +2241,8 @@ class SkillManager:
                     "version": meta.get("version", ""),
                     "commit": "",
                     "source": "skillnet",
+                    # origin 与同处 _add_local_skill 一致（skill_url），供身份键精确区分
+                    "origin": skill_url_stored,
                     "installed_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -2263,35 +2373,49 @@ class SkillManager:
 
         params:
             name: skill 名称
+            origin: 可选，技能来源标识（如 ``clawhub:owner/slug``、URL）。提供时按
+                origin 精确定位目录与记录，避免重名技能误删另一个。
         """
         raw_name = params.get("name", "")
+        raw_origin = str(params.get("origin", "") or "").strip()
         if not raw_name:
             return {"success": False, "detail": "缺少参数: name"}
-        try:
-            name = _safe_path_name(raw_name, "skill")
-        except ValueError as exc:
-            # name 含不安全字符（如 /），从 local_skills 的 origin 提取 slug
-            slug = ""
-            for ls in self._state.get("local_skills", []):
-                if isinstance(ls, dict) and ls.get("name") == raw_name:
-                    origin = str(ls.get("origin", ""))
-                    if ":" in origin:
-                        slug = origin.rsplit(":", 1)[-1]
-                    break
-            if slug:
-                try:
-                    name = _safe_path_name(slug, "skill")
-                except ValueError:
+
+        # 优先用 origin 精确定位目录（ClawHub 目录名 = slug，可由 origin 直推）
+        dest = None
+        name = ""
+        if raw_origin:
+            dest = self._resolve_local_skill_dir_by_origin(raw_origin)
+            # origin 命中时 name 用于 builtin 校验/记录回退
+            name = raw_name
+
+        if dest is None:
+            try:
+                name = _safe_path_name(raw_name, "skill")
+            except ValueError as exc:
+                # name 含不安全字符（如 /），从 local_skills 的 origin 提取 slug
+                slug = ""
+                for ls in self._state.get("local_skills", []):
+                    if isinstance(ls, dict) and ls.get("name") == raw_name:
+                        origin = str(ls.get("origin", ""))
+                        if ":" in origin:
+                            slug = origin.rsplit(":", 1)[-1]
+                        break
+                if slug:
+                    try:
+                        name = _safe_path_name(slug, "skill")
+                    except ValueError:
+                        _log_rejected_name("skills.uninstall", "skill", raw_name, exc)
+                        return {"success": False, "detail": str(exc)}
+                else:
                     _log_rejected_name("skills.uninstall", "skill", raw_name, exc)
                     return {"success": False, "detail": str(exc)}
-            else:
-                _log_rejected_name("skills.uninstall", "skill", raw_name, exc)
-                return {"success": False, "detail": str(exc)}
 
-        # 使用 _resolve_local_skill_dir 正确解析技能目录（处理 name 与文件夹名称不一致的情况）
-        dest = self._resolve_local_skill_dir(name)
+            # 使用 _resolve_local_skill_dir 正确解析技能目录（处理 name 与文件夹名称不一致的情况）
+            dest = self._resolve_local_skill_dir(name)
+
         if dest is None:
-            return {"success": False, "detail": f"未找到 skill: {name}"}
+            return {"success": False, "detail": f"未找到 skill: {name or raw_name}"}
 
         # 检查是否为真正的内置技能（源码目录中的，不允许删除）
         builtin_dir = get_builtin_skills_dir()
@@ -2326,8 +2450,9 @@ class SkillManager:
             if mirror_dest.exists() and mirror_dest.is_dir():
                 _safe_rmtree(mirror_dest)
 
-        self._remove_installed_plugin(raw_name)
-        self._remove_local_skill(raw_name)
+        # 按身份删除记录：origin 优先，避免误删同名另一条
+        self._remove_installed_plugin(raw_name, origin=raw_origin or None)
+        self._remove_local_skill(raw_name, origin=raw_origin or None)
         # 卸载时一并清掉该 skill 的 enabled 配置，避免重装同名 skill 时沿用旧的禁用状态。
         self.remove_skill_config(raw_name)
         self._refresh_agent_data_indexes()
@@ -2492,7 +2617,6 @@ class SkillManager:
                 return {"success": False, "detail": "下载内容不完整，未找到 SKILL.md"}
             logger.info("[SkillManager] remote import extracted: url=%s skill_dir=%s", download_url, skill_dir)
             return self._import_local_from_path(skill_dir, force=force, origin=download_url)
-
 
     async def handle_skills_marketplace_add(self, params: dict) -> dict:
         """添加 marketplace 源.
@@ -2777,6 +2901,89 @@ class SkillManager:
         except Exception:
             return False
 
+    @staticmethod
+    def _slug_from_clawhub_origin(origin: str) -> str:
+        """从 ClawHub origin 中提取 slug（最后 / 后的部分）。
+
+        origin 可能有两种形态：
+        - ``clawhub:owner/slug``（有发布者）
+        - ``clawhub:slug``（无发布者）
+        磁盘目录名恒为 slug，因此取最后一个 ``/`` 后的部分即可。
+        非 ClawHub origin（不以 clawhub: 开头）返回空字符串——调用方应
+        先确认 ``origin.startswith("clawhub:")`` 再调用此方法。
+        """
+        origin = origin.strip()
+        if not origin.startswith("clawhub:"):
+            return ""
+        raw = origin.split(":", 1)[1].strip()
+        if not raw:
+            return ""
+        return raw.rsplit("/", 1)[-1]
+
+    @staticmethod
+    def _dir_origin_candidates(child: Path) -> list[str]:
+        """磁盘 skill 目录可能对应的 origin 候选（用于在 local_skills 中精确匹配）。
+
+        ClawHub 装的目录名是 slug，其 local_skill.origin = ``clawhub:owner/slug`` 或
+        ``clawhub:slug``，可反推出 ``clawhub:{目录名}`` 候选。其余来源（SkillNet URL、
+        teamskillshub:asset_id）的目录名是 skill_name，无法由目录名反推 origin，这里
+        只给 ClawHub 候选，不命中再由调用方按 name 回退。
+        """
+        slug = child.name
+        if slug and not slug.startswith("_"):
+            return [f"clawhub:{slug}"]
+        return []
+
+    def _find_local_skill_for_dir(self, child: Path, meta: dict) -> dict | None:
+        """定位磁盘目录对应的 local_skill 记录，优先按 origin 精确匹配，再按 name 回退。
+
+        重名技能（如两个 ClawHub slug 不同但 SKILL.md name 相同）必须按 origin
+        精确区分，否则两条目录会串台成同一条 origin。origin 匹配失败时回退到
+        按 name 取首条——SkillNet/TeamSkillsHub 用 skill_name 做目录名，重名时
+        装不进两个（目录碰撞），所以 name 回退不会错配到另一个来源。
+        """
+        local = self._state.get("local_skills", [])
+        if not isinstance(local, list):
+            return None
+        name = str(meta.get("name") or "").strip()
+        # 1) origin 精确匹配（ClawHub 目录名 = slug）
+        candidates = self._dir_origin_candidates(child)
+        for candidate in candidates:
+            for ls in local:
+                if isinstance(ls, dict) and str(ls.get("origin", "") or "").strip() == candidate:
+                    return ls
+        # 2) 按 name 回退（SkillNet / TeamSkillsHub / import_local）
+        if name:
+            for ls in local:
+                if isinstance(ls, dict) and str(ls.get("name", "") or "").strip() == name:
+                    return ls
+        return None
+
+    def _find_installed_plugin_for_dir(
+        self, child: Path, meta: dict, ls_record: dict | None
+    ) -> dict | None:
+        """定位磁盘目录对应的 installed_plugin 记录，origin 优先、name 回退."""
+        plugins = self._get_installed_plugins()
+        # 1) 用 local_skill 的 origin 精确匹配（ClawHub/teamskillshub/skillnet）
+        if ls_record is not None and isinstance(ls_record, dict):
+            origin = str(ls_record.get("origin", "") or "").strip()
+            if origin:
+                for p in plugins:
+                    if isinstance(p, dict) and str(p.get("origin", "") or "").strip() == origin:
+                        return p
+        # 2) origin 候选（ClawHub 目录名 = slug）
+        for candidate in self._dir_origin_candidates(child):
+            for p in plugins:
+                if isinstance(p, dict) and str(p.get("origin", "") or "").strip() == candidate:
+                    return p
+        # 3) 按 name 回退
+        name = str(meta.get("name") or "").strip()
+        if name:
+            for p in plugins:
+                if isinstance(p, dict) and str(p.get("name", "") or "").strip() == name:
+                    return p
+        return None
+
     # -----------------------------------------------------------------------
     # 目录扫描
     # -----------------------------------------------------------------------
@@ -2800,27 +3007,25 @@ class SkillManager:
             if meta.get("name") == md.stem:
                 meta["name"] = child.name
 
-            # 判断 source 类型
-            installed = self._get_installed_plugins()
+            # 优先按 origin 精确匹配磁盘目录，避免同名技能串台
+            ls_record = self._find_local_skill_for_dir(child, meta)
+            plugin_record = self._find_installed_plugin_for_dir(child, meta, ls_record)
+
+            # source 语义与原逻辑一致：先取 installed_plugins 的 source，再用
+            # local_skills 覆盖；local_skills 同时回填 origin / display_name 供前端对照。
             source = "project"
-            for p in installed:
-                if p.get("name") == meta.get("name"):
-                    source = p.get("source", "project")
-                    if source == "project" and p.get("marketplace"):
-                        source = p.get("marketplace", "project")
-                    break
-            # 检查是否通过 import_local / SkillNet 等写入 local_skills（含 origin 供前端对照 skill_url）
-            for ls in self._state.get("local_skills", []):
-                if ls.get("name") == meta.get("name"):
-                    source = ls.get("source", "local") if isinstance(ls, dict) else "local"
-                    if isinstance(ls, dict):
-                        origin = ls.get("origin")
-                        if isinstance(origin, str) and origin.strip():
-                            meta["origin"] = origin.strip()
-                        display_name = ls.get("display_name")
-                        if isinstance(display_name, str) and display_name.strip():
-                            meta["display_name"] = display_name.strip()
-                    break
+            if plugin_record is not None:
+                p_source = plugin_record.get("source", "project")
+                if p_source == "project" and plugin_record.get("marketplace"):
+                    source = plugin_record.get("marketplace", "project")
+                else:
+                    source = p_source
+            if ls_record is not None and isinstance(ls_record, dict):
+                ls_source = ls_record.get("source", "local")
+                if ls_source:
+                    source = ls_source
+                # 回填展示字段（origin 精确匹配保证同名不同来源各拿各的，不串台）
+                self._apply_local_skill_meta(meta, ls_record)
 
             meta["source"] = source
             if not str(meta.get("display_name") or "").strip():
@@ -2884,13 +3089,29 @@ class SkillManager:
 
         return results
 
-    def _resolve_skill_source(self, skill_name: str) -> str:
-        """解析 skill 来源（local / project / marketplace 名称）."""
+    def _resolve_skill_source(self, skill_name: str, origin: str | None = None) -> str:
+        """解析 skill 来源（local / project / marketplace 名称）.
+
+        若传入了 origin，优先按 origin 精确匹配 installed_plugin 记录，避免
+        重名技能（SKILL.md name 同但来源不同）拿到错误的 source。
+        """
         if not skill_name:
             return "project"
 
         for plugin in self._get_installed_plugins():
-            if plugin.get("name") == skill_name:
+            if origin:
+                plugin_origin = str(plugin.get("origin", "") or "").strip()
+                if plugin_origin and plugin_origin == origin and plugin.get("name") == skill_name:
+                    source = plugin.get("source")
+                    marketplace = plugin.get("marketplace")
+                    if source == "project" and isinstance(marketplace, str) and marketplace:
+                        return marketplace
+                    if isinstance(source, str) and source:
+                        return source
+                    if isinstance(marketplace, str) and marketplace:
+                        return marketplace
+                    return "project"
+            elif plugin.get("name") == skill_name:
                 source = plugin.get("source")
                 marketplace = plugin.get("marketplace")
                 if source == "project" and isinstance(marketplace, str) and marketplace:
@@ -2902,7 +3123,11 @@ class SkillManager:
                 return "project"
 
         for local_skill in self._state.get("local_skills", []):
-            if local_skill.get("name") == skill_name:
+            if origin:
+                ls_origin = str(local_skill.get("origin", "") or "").strip()
+                if ls_origin and ls_origin == origin and local_skill.get("name") == skill_name:
+                    return "local"
+            elif local_skill.get("name") == skill_name:
                 return "local"
 
         return "project"
@@ -2946,6 +3171,48 @@ class SkillManager:
             meta = self._parse_skill_md(md)
             if meta and meta.get("name") == skill_name:
                 return child
+        return None
+
+    def _resolve_local_skill_dir_by_origin(self, origin: str) -> Path | None:
+        """根据 origin 精确定位本地技能目录.
+
+        ClawHub 的目录名 = slug，origin 形如 ``clawhub:owner/slug`` 或
+        ``clawhub:slug``，可通过 slug 直连 ``_skills_dir/{slug}``，无需遍历、
+        不受同名干扰。其余来源（SkillNet URL、``teamskillshub:{asset_id}``）
+        的目录名是 skill_name，无法由 origin 反推，这里通过 local_skills
+        记录里的 name 间接解析。
+        """
+        origin = (origin or "").strip()
+        if not origin:
+            return None
+        # ClawHub: origin = ``clawhub:owner/slug`` 或 ``clawhub:slug``，目录名 = slug
+        if origin.startswith("clawhub:"):
+            slug = self._slug_from_clawhub_origin(origin)
+            if not slug:
+                return None
+            try:
+                direct = _safe_child_path(self._skills_dir, slug, "skill")
+            except ValueError:
+                return None
+            if direct.is_dir():
+                return direct
+            # 兜底：遍历按 origin 匹配 local_skill 的 name 再解析
+            ls_name = ""
+            for ls in self._state.get("local_skills", []):
+                if isinstance(ls, dict) and str(ls.get("origin", "") or "").strip() == origin:
+                    ls_name = str(ls.get("name", "") or "").strip()
+                    break
+            if ls_name:
+                return self._resolve_local_skill_dir(ls_name)
+            return None
+        # 其余来源：从 local_skills 找到该 origin 记录的 name，再按 name 解析目录
+        ls_name = ""
+        for ls in self._state.get("local_skills", []):
+            if isinstance(ls, dict) and str(ls.get("origin", "") or "").strip() == origin:
+                ls_name = str(ls.get("name", "") or "").strip()
+                break
+        if ls_name:
+            return self._resolve_local_skill_dir(ls_name)
         return None
 
     def _get_skill_evolution_path(self, skill_name: str) -> Path | None:
@@ -4149,6 +4416,7 @@ class SkillManager:
         state["local_skills"] = normalize_local_skills(
             state.get("local_skills"),
             self._collect_existing_local_skill_names(),
+            self._collect_existing_clawhub_origins(),
         )
         state["skill_configs"] = normalize_skill_configs(state.get("skill_configs"))
 
@@ -4200,6 +4468,25 @@ class SkillManager:
                 names.add(name)
         return names
 
+    def _collect_existing_clawhub_origins(self) -> set[str]:
+        """磁盘上可由目录名反推的 ClawHub origin 集合（``clawhub:{slug}``）。
+
+        ClawHub 装的目录名 = slug，其记录 origin = ``clawhub:owner/slug`` 或
+        ``clawhub:slug``，可由目录名反推出 ``clawhub:{slug}`` 作为存活证据。
+        重名下若某 slug 目录被删（卸载另一来源覆盖等），对应 origin 不在此集合，
+        但 clawhub 记录 origin 可能带 owner，需按 slug 后缀匹配而非全等（见
+        normalize_local_skills）。其余来源的目录名是 skill_name，反推出的
+        ``clawhub:{skill_name}`` 不会与任何真实记录 origin 相等，无副作用。
+        """
+        origins: set[str] = set()
+        if not self._skills_dir.exists():
+            return origins
+        for child in self._skills_dir.iterdir():
+            if not child.is_dir() or child.name.startswith("_"):
+                continue
+            origins.add(f"clawhub:{child.name}")
+        return origins
+
     def _register_unmanaged_local_skills(self) -> None:
         """Auto-register skills that exist on disk but were never recorded.
 
@@ -4214,11 +4501,37 @@ class SkillManager:
         imported via the UI. Built-in skills (folders that also exist under the
         package builtin dir) are deliberately excluded so their source/behavior
         is preserved.
+
+        判断"是否已登记"用 origin 优先：两个重名 ClawHub 技能（SKILL.md name 相同
+        但 slug 不同）此前会被旧逻辑（按 name）误判为"已登记"而跳过，导致第二条
+        成为孤儿。改用 origin 集合判断后，每个目录都能独立补登。孤儿目录的 origin
+        用 ``local:{目录名}`` 兜底，确保身份唯一且不与真实 clawhub origin 混淆。
         """
         if not self._skills_dir.exists():
             return
 
-        registered = get_registered_skill_names(self._state)
+        local = self._state.get("local_skills", [])
+        registered_origins: set[str] = set()
+        registered_names: set[str] = set()
+        for ls in local:
+            if not isinstance(ls, dict):
+                continue
+            origin = str(ls.get("origin", "") or "").strip()
+            if origin:
+                registered_origins.add(origin)
+            name = str(ls.get("name", "") or "").strip()
+            if name:
+                registered_names.add(name)
+
+        plugins = self._get_installed_plugins()
+        # installed_plugins 里已登记的 name 集合（旧式记录可能无 origin，按 name 认领）
+        plugin_registered_names: set[str] = set()
+        for p in plugins:
+            if isinstance(p, dict):
+                pname = str(p.get("name", "") or "").strip()
+                if pname:
+                    plugin_registered_names.add(pname)
+
         builtin_dir = get_builtin_skills_dir()
         builtin_exists = builtin_dir.exists()
         changed = False
@@ -4233,13 +4546,25 @@ class SkillManager:
             if not isinstance(meta, dict):
                 continue
             name = self._resolve_skill_name(child, md, meta)
-            if not name or name in registered:
+            if not name:
                 continue
             # 排除内置技能（用户目录下与 builtin 目录同名的文件夹），避免改变其来源/行为。
             if builtin_exists and (builtin_dir / child.name).is_dir():
                 continue
-            self._add_local_skill({"name": name, "origin": "local", "source": "local"})
-            registered.add(name)
+            # 已被 local_skills 或 installed_plugins 认领的 name 跳过。
+            # 注意：历史重名 ClawHub 孤儿（两条 slug 目录但记录被覆盖只剩一条）
+            # 在此会被漏登——属边缘历史脏数据，用户重新卸载重装即走新逻辑修正。
+            if name in registered_names or name in plugin_registered_names:
+                continue
+            # 兜底 origin：local:{目录名}，确保身份唯一且不与真实 clawhub origin 混淆
+            inferred_origin = f"local:{child.name}"
+            if inferred_origin in registered_origins:
+                continue
+            self._add_local_skill(
+                {"name": name, "origin": inferred_origin, "source": "local"}
+            )
+            registered_origins.add(inferred_origin)
+            registered_names.add(name)
             changed = True
 
         if changed:
@@ -4314,25 +4639,43 @@ class SkillManager:
     def _add_installed_plugin(self, plugin: dict) -> None:
         plugins = self._state.setdefault("installed_plugins", [])
         plugin = self._normalize_plugin(plugin)
+        key = self._record_identity_key(plugin)
         for i, p in enumerate(plugins):
-            if p.get("name") == plugin.get("name"):
+            if self._record_identity_key(p) == key:
                 plugins[i] = plugin
                 self._save_state()
                 return
         plugins.append(plugin)
         self._save_state()
 
-    def _remove_installed_plugin(self, name: str) -> None:
+    def _remove_installed_plugin(self, name: str, origin: str | None = None) -> None:
         plugins = self._state.get("installed_plugins", [])
-        self._state["installed_plugins"] = [p for p in plugins if p.get("name") != name]
+        # origin 优先：按身份删除，避免重名技能误删另一条
+        if origin is not None:
+            self._state["installed_plugins"] = [
+                p for p in plugins
+                if not self._record_matches(p, name=name, origin=origin)
+            ]
+        else:
+            self._state["installed_plugins"] = [p for p in plugins if p.get("name") != name]
         self._save_state()
 
-    def _set_plugin_enabled(self, name: str, enabled: bool) -> bool:
-        """设置插件的启用/禁用状态."""
+    def _set_plugin_enabled(self, name: str, enabled: bool, origin: str | None = None) -> bool:
+        """设置插件的启用/禁用状态。
+
+        若传入了 origin，优先按 origin 精确匹配 installed_plugin 记录（避免重名
+        技能误操作另一条）。无 origin 时按 name 回退（向后兼容）。
+        """
         plugins = self._state.get("installed_plugins", [])
         updated = False
         for p in plugins:
-            if p.get("name") == name:
+            if origin is not None:
+                rec_origin = str(p.get("origin", "") or "").strip()
+                if rec_origin and rec_origin == origin and p.get("name") == name:
+                    p["enabled"] = bool(enabled)
+                    updated = True
+                    break
+            elif p.get("name") == name:
                 p["enabled"] = bool(enabled)
                 updated = True
                 break
@@ -4349,19 +4692,76 @@ class SkillManager:
 
     def _add_local_skill(self, skill: dict) -> None:
         local = self._state.setdefault("local_skills", [])
+        key = self._record_identity_key(skill)
         # 更新已有记录
         for i, s in enumerate(local):
-            if s.get("name") == skill.get("name"):
+            if self._record_identity_key(s) == key:
                 local[i] = skill
                 self._save_state()
                 return
         local.append(skill)
         self._save_state()
 
-    def _remove_local_skill(self, name: str) -> None:
+    def _remove_local_skill(self, name: str, origin: str | None = None) -> None:
         local = self._state.get("local_skills", [])
-        self._state["local_skills"] = [s for s in local if s.get("name") != name]
+        # origin 优先：按身份删除，避免重名技能误删另一条
+        if origin is not None:
+            self._state["local_skills"] = [
+                s for s in local
+                if not self._record_matches(s, name=name, origin=origin)
+            ]
+        else:
+            self._state["local_skills"] = [s for s in local if s.get("name") != name]
         self._save_state()
+
+    @staticmethod
+    def _record_identity_key(record: dict) -> str:
+        """记录身份键：优先 origin（区分同名不同来源），origin 为空时回退 name.
+
+        不同来源的两个技能可能 SKILL.md name 相同但 origin 不同（如
+        ``clawhub:owner/slug-a`` 与 ``clawhub:owner/slug-b``）。用 origin 作身份键
+        才能让两者并存于 local_skills / installed_plugins 而不互相覆盖。
+        无 origin 的历史记录（local/import_local 的 URL 等）回退到 name。
+        """
+        origin = str(record.get("origin", "") or "").strip()
+        if origin:
+            return f"origin:{origin}"
+        return f"name:{str(record.get('name', '') or '').strip()}"
+
+    @classmethod
+    def _record_matches(cls, record: dict, *, name: str, origin: str) -> bool:
+        """判断记录是否匹配给定 name+origin 身份。origin 优先，name 作兜底.
+
+        origin 形如 ``clawhub:owner/slug`` / ``clawhub:slug`` / ``teamskillshub:asset_id`` / URL。
+        name 是 SKILL.md 里的技能名。
+        """
+        rec_origin = str(record.get("origin", "") or "").strip()
+        rec_name = str(record.get("name", "") or "").strip()
+        if rec_origin:
+            return rec_origin == origin and (not name or rec_name == name)
+        # 无 origin 的历史记录：按 name 兜底匹配（向后兼容）
+        return bool(name) and rec_name == name
+
+    @staticmethod
+    def _apply_local_skill_meta(meta: dict, ls_rec: dict) -> str:
+        """把 local_skill 记录上的展示字段回填到 meta，并返回 origin.
+
+        回填 origin / display_name / market_short_desc / market_display_name，
+        供「我的技能」页与详情页显示与安装来源一致的信息。origin 精确匹配保证
+        同名不同来源的两条各拿各的，不串台。返回 origin 供调用方做 source 解析。
+        """
+        rec_origin = str(ls_rec.get("origin", "") or "").strip()
+        if rec_origin:
+            meta["origin"] = rec_origin
+        for field, target in (
+            ("display_name", "display_name"),
+            ("market_short_desc", "market_short_desc"),
+            ("market_display_name", "market_display_name"),
+        ):
+            val = ls_rec.get(field)
+            if isinstance(val, str) and val.strip():
+                meta[target] = val.strip()
+        return rec_origin
 
     # -----------------------------------------------------------------------
     # ClawHub 相关方法

@@ -130,6 +130,46 @@ def test_get_skill_enabled_defaults_true_for_legacy_state():
     assert get_skill_enabled(legacy_state, "legacy-local") is True
 
 
+def test_normalize_local_skills_dedupes_clawhub_by_origin_not_name():
+    # 两个 ClawHub 技能 SKILL.md name 相同但 slug 不同，磁盘上只留下 slug-a
+    # （slug-b 被卸载/覆盖）。name 集合仍含 X（slug-a 解析出 X），若按 name 筛
+    # 会误留 slug-b 那条孤儿。按 origin 应准确 drop 被删的那条。
+    local_skills = [
+        {"name": "X", "origin": "clawhub:slug-a", "source": "clawhub"},
+        {"name": "X", "origin": "clawhub:slug-b", "source": "clawhub"},
+    ]
+
+    normalized = normalize_local_skills(
+        local_skills,
+        existing_local_skill_names={"X"},
+        existing_clawhub_origins={"clawhub:slug-a"},
+    )
+
+    assert normalized == [
+        {"name": "X", "origin": "clawhub:slug-a", "source": "clawhub"},
+    ]
+
+
+def test_normalize_local_skills_dedupes_clawhub_by_origin_with_owner():
+    # 带 owner 的 ClawHub 记录：origin = ``clawhub:owner/slug``，磁盘反推的
+    # existing_clawhub_origins = ``clawhub:{slug}``（仅有 slug）。按 slug 后缀
+    # 匹配，带 owner 的记录也能正确判存活。
+    local_skills = [
+        {"name": "X", "origin": "clawhub:owner/slug-a", "source": "clawhub"},
+        {"name": "X", "origin": "clawhub:other/slug-b", "source": "clawhub"},
+    ]
+
+    normalized = normalize_local_skills(
+        local_skills,
+        existing_local_skill_names={"X"},
+        existing_clawhub_origins={"clawhub:slug-a"},
+    )
+
+    assert normalized == [
+        {"name": "X", "origin": "clawhub:owner/slug-a", "source": "clawhub"},
+    ]
+
+
 def _make_skill_dir(skills_dir, name, body="# skill\n"):
     skill_dir = skills_dir / name
     skill_dir.mkdir(parents=True, exist_ok=True)

@@ -1861,12 +1861,26 @@
       "searchPlaceholder": "输入关键词搜索 TeamSkills",
       "noResults": "未找到相关技能，可换个关键词再试。",
       "installing": "安装中…",
+      "replaceConfirm": "已安装同名技能「{{name}}」，继续安装将卸载已安装的版本并替换为当前选择的版本。是否继续？",
       "messages": {
         "installed": "已安装：{{name}}"
       },
       "errors": {
         "searchFailed": "搜索失败",
-        "installFailed": "安装失败"
+        "installFailed": "安装失败",
+        "skillAlreadyInstalled": "该技能已安装。"
+      }
+    },
+    "marketplace": {
+      "replaceConfirm": "已安装同名技能「{{name}}」，继续安装将卸载已安装的版本并替换为当前选择的版本。是否继续？",
+      "errors": {
+        "skillAlreadyInstalled": "该技能已安装。"
+      }
+    },
+    "builtin": {
+      "replaceConfirm": "已安装同名技能「{{name}}」，继续安装将卸载已安装的版本并替换为当前选择的版本。是否继续？",
+      "errors": {
+        "skillAlreadyInstalled": "该技能已安装。"
       }
     },
     "marketplacesAvailable": "可用 marketplace: {{names}}",
