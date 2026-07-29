@@ -218,20 +218,21 @@ export function ClawHubSearchModal({
   }, [query, t, withSession, showMessage]);
 
   const handleSaveToken = useCallback(async () => {
+    const nextToken = token.trim();
     setLoading(true);
     setMessage(null);
     try {
       const data = await webRequest<{ success: boolean; token: string }>(
         "skills.clawhub.set_token",
-        withSession({ token })
+        withSession({ token: nextToken })
       );
       if (data.success) {
         setToken(data.token || "");
-        setHasToken(true);
-        setShowTokenConfig(false);
+        setHasToken(!!nextToken);
+        setShowTokenConfig(!nextToken);
         showMessage("success", t("skills.clawhub.messages.tokenSaved"));
-        // 保存后自动开始搜�?
-        if (query.trim()) {
+        // 保存后自动开始搜索
+        if (nextToken && query.trim()) {
           await handleSearch();
         }
       }
@@ -514,9 +515,9 @@ export function ClawHubSearchModal({
               <button
                 type="button"
                 onClick={handleSaveToken}
-                disabled={loading || !token.trim()}
+                disabled={loading || (!hasToken && !token.trim())}
                 className={`w-[76px] h-[28px] rounded-[24px] text-sm  ${
-                  loading || !token.trim()
+                  loading || (!hasToken && !token.trim())
                     ? "bg-gray-300 text-gray-500 cursor-not-allowed"
                     : "bg-control-emphasis text-control-emphasis-foreground hover:bg-control-emphasis-hover"
                 }`}
