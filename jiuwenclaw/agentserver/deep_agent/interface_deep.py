@@ -11,9 +11,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token, copy_context
@@ -1565,8 +1567,14 @@ class JiuWenClawDeepAdapter:
 
     def _resolve_model_name(self) -> str:
         """Resolve current model name from model request config."""
-        if self._model_request_config and hasattr(self._model_request_config, 'model'):
-            return self._model_request_config.model or "unknown"
+        cfg = self._model_request_config
+        if cfg is None:
+            return "unknown"
+        # ModelRequestConfig field is ``model_name`` (alias ``model``); do not use
+        # ``.model`` — that can confuse with pydantic's ``model_config``.
+        name = getattr(cfg, "model_name", None) or getattr(cfg, "model", None)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
         return "unknown"
 
     def _make_rebuild_service(self, store: Any) -> Any:
@@ -6645,6 +6653,36 @@ class JiuWenClawDeepAdapter:
           - bump SemVer / append changelog
           - clear live evolutions.json
         """
+        # Control-plane rebuild / auto-rebuild do not go through chat request start,
+        # so bind tip env (default_headers → Authorization) for LLM rewrite + changelog.
+        sid, aid = self._env_ns_ids()
+        ns_token = bind_agent_env_ns(sid, aid)
+        overlay = build_effective_env_overlay(service_id=sid, agent_id=aid)
+        env_token = bind_task_env_overlay(overlay)
+        try:
+            return await self._generate_evolution_merge_version_impl(
+                skill_name=skill_name,
+                skill_path=skill_path,
+                record_ids=record_ids,
+                user_intent=user_intent,
+                min_score=min_score,
+                stream_ctx=stream_ctx,
+            )
+        finally:
+            reset_task_env_overlay(env_token)
+            reset_agent_env_ns(ns_token)
+
+    async def _generate_evolution_merge_version_impl(
+        self,
+        *,
+        skill_name: str,
+        skill_path: str | None = None,
+        record_ids: Sequence[str] | None = None,
+        user_intent: str | None = None,
+        min_score: float = 0.5,
+        stream_ctx: MergeVersionStreamContext | None = None,
+    ) -> dict[str, Any]:
+        """Inner merge-version flow (caller must bind env overlay for LLM auth)."""
         prepared = await self._prepare_rebuild_followup(
             skill_name,
             skill_path=skill_path,
@@ -6679,6 +6717,7 @@ class JiuWenClawDeepAdapter:
         rewrite_ok = await self._execute_merge_version_rewrite(
             prompt=prompt,
             skill_name=resolved_name,
+            skill_md_path=resolved_path,
             stream_ctx=stream_ctx,
         )
         if not rewrite_ok:
@@ -6767,6 +6806,15 @@ class JiuWenClawDeepAdapter:
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid min_score: {params.get('min_score')}") from exc
 
+        logger.info(
+            "[JiuWenClawDeepAdapter] skills.evolution.rebuild start: skill=%s "
+            "record_ids=%s skill_path=%s min_score=%s",
+            skill_name,
+            len(record_ids) if record_ids else 0,
+            skill_path,
+            min_score,
+            extra={"user_visible": "progress"},
+        )
         result = await self.generate_evolution_merge_version(
             skill_name=skill_name,
             skill_path=skill_path,
@@ -6776,7 +6824,7 @@ class JiuWenClawDeepAdapter:
         )
         if not result.get("ok"):
             raise ValueError(str(result.get("error") or "生成合并版本失败"))
-        return {
+        payload = {
             "success": True,
             "name": result.get("skill_name") or skill_name,
             "skill_path": result.get("skill_path"),
@@ -6784,6 +6832,16 @@ class JiuWenClawDeepAdapter:
             "new_version": result.get("new_version"),
             "cleared": bool(result.get("cleared")),
         }
+        logger.info(
+            "[JiuWenClawDeepAdapter] skills.evolution.rebuild done: skill=%s "
+            "version=%s cleared=%s archive=%s",
+            payload["name"],
+            payload["new_version"],
+            payload["cleared"],
+            payload["archive_path"],
+            extra={"user_visible": "progress"},
+        )
+        return payload
 
     async def _prepare_rebuild_followup(
         self,
@@ -6864,16 +6922,29 @@ class JiuWenClawDeepAdapter:
             "result_type": "followup",
         }
 
+    @staticmethod
+    def _skill_md_fingerprint(skill_md_path: str | None) -> str | None:
+        """Return sha256 of SKILL.md body, or None when path missing/unreadable."""
+        if not skill_md_path or not str(skill_md_path).strip():
+            return None
+        try:
+            data = Path(skill_md_path).expanduser().read_bytes()
+        except OSError:
+            return None
+        return hashlib.sha256(data).hexdigest()
+
     async def _execute_merge_version_rewrite(
         self,
         *,
         prompt: str,
         skill_name: str,
+        skill_md_path: str | None = None,
         stream_ctx: MergeVersionStreamContext | None,
     ) -> bool:
         """Run agent rewrite of SKILL.md; return True on success."""
         if stream_ctx is not None:
             rebuild_ok = True
+            before_fp = self._skill_md_fingerprint(skill_md_path)
             try:
                 async for follow_chunk in self._iter_skill_creator_follow_up_stream(
                     base_inputs=stream_ctx.base_inputs,
@@ -6896,6 +6967,29 @@ class JiuWenClawDeepAdapter:
                     extra={"user_visible": "progress"},
                 )
                 return False
+            after_fp = self._skill_md_fingerprint(skill_md_path)
+            if rebuild_ok and before_fp is not None and after_fp == before_fp:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] merge-version rewrite failed: skill=%s "
+                    "error=SKILL.md unchanged after stream rewrite",
+                    skill_name,
+                    extra={"user_visible": "progress"},
+                )
+                rebuild_ok = False
+            if rebuild_ok:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] merge-version LLM rewrite ok: skill=%s mode=%s",
+                    skill_name,
+                    "stream",
+                    extra={"user_visible": "progress"},
+                )
+            else:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] merge-version rewrite failed: skill=%s error=%s",
+                    skill_name,
+                    "chat.error in stream or SKILL.md unchanged",
+                    extra={"user_visible": "progress"},
+                )
             return rebuild_ok
 
         if self._instance is None:
@@ -6904,12 +6998,12 @@ class JiuWenClawDeepAdapter:
                 skill_name,
             )
             return False
+        before_fp = self._skill_md_fingerprint(skill_md_path)
         try:
             await Runner.run_agent(
                 agent=self._instance,
                 inputs={"query": prompt},
             )
-            return True
         except Exception as exc:
             logger.warning(
                 "[JiuWenClawDeepAdapter] merge-version non-stream rewrite failed: skill=%s error=%s",
@@ -6918,6 +7012,24 @@ class JiuWenClawDeepAdapter:
                 exc_info=True,
             )
             return False
+
+        after_fp = self._skill_md_fingerprint(skill_md_path)
+        if before_fp is not None and after_fp == before_fp:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] merge-version non-stream rewrite failed: "
+                "skill=%s error=SKILL.md unchanged (LLM may have failed silently)",
+                skill_name,
+                extra={"user_visible": "progress"},
+            )
+            return False
+
+        logger.info(
+            "[JiuWenClawDeepAdapter] merge-version LLM rewrite ok: skill=%s mode=%s",
+            skill_name,
+            "non_stream",
+            extra={"user_visible": "progress"},
+        )
+        return True
 
     async def _finalize_rebuild_followup(
         self, rebuild_result: dict[str, Any] | None,

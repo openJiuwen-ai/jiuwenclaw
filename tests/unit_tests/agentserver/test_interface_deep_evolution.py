@@ -711,14 +711,18 @@ async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch, tmp_pat
         staticmethod(lambda _name: None),
     )
 
-    payload = await adapter.handle_skills_evolution_rebuild(
-        {
-            "name": "demo-skill",
-            "skill_path": str(skill_md),
-            "record_ids": ["ev_1", "ev_2"],
-            "user_intent": "merge notes",
-        }
-    )
+    records, detach = _attach_capture_handler(interface_deep_module.logger)
+    try:
+        payload = await adapter.handle_skills_evolution_rebuild(
+            {
+                "name": "demo-skill",
+                "skill_path": str(skill_md),
+                "record_ids": ["ev_1", "ev_2"],
+                "user_intent": "merge notes",
+            }
+        )
+    finally:
+        detach()
 
     assert payload == {
         "success": True,
@@ -735,6 +739,9 @@ async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch, tmp_pat
         user_intent="merge notes",
         min_score=0.5,
     )
+    messages = [record.getMessage() for record in records if record.levelno == logging.INFO]
+    assert any("skills.evolution.rebuild start" in msg for msg in messages)
+    assert any("skills.evolution.rebuild done" in msg for msg in messages)
 
 
 @pytest.mark.asyncio
