@@ -7902,15 +7902,16 @@ class JiuWenClawDeepAdapter:
             channel_id: str,
     ) -> tuple[AgentResponseChunk, ...]:
         if result.status == "completed":
-            content = result.message
+            payload = {"event_type": "chat.final", "content": result.message}
         else:
             code = result.error_code or "INTERNAL_ERROR"
             content = f"改写失败（{code}）：{result.message}"
+            payload = {"event_type": "chat.error", "error": content}
         return (
             AgentResponseChunk(
                 request_id=request_id,
                 channel_id=channel_id,
-                payload={"event_type": "chat.final", "content": content},
+                payload=payload,
                 is_complete=False,
             ),
         )

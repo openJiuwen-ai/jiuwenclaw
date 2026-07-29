@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -280,6 +281,35 @@ async def test_run_rewrite_fast_path_retries_invalid_output_and_sums_usage():
     assert model.await_count == 2
     assert "Strict retry:" in model.await_args_list[1].args[0][0]["content"]
     commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_repairs_unescaped_quotes_before_retry():
+    malformed = (
+        '{"units":[{"unit_id":"unit_1","slots":[{"slot_id":"slot_1",'
+        '"text":"品牌在"向上冲高"与"向下兼容"之间形成张力"}]}],'
+        '"facts_added":false}'
+    )
+    model = AsyncMock(return_value=SimpleNamespace(content=malformed))
+    commit = AsyncMock(return_value=_json_result(_COMPLETED))
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=model,
+        commit_invoke=commit,
+    )
+
+    assert result is not None
+    assert result.status == "completed"
+    assert result.model_calls == 1
+    assert result.model_output_adjustments == ("json_repair",)
+    assert commit.await_args.kwargs["structured_result"]["units"][0]["slots"] == [
+        {
+            "slot_id": "slot_1",
+            "text": '品牌在"向上冲高"与"向下兼容"之间形成张力',
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -661,6 +691,109 @@ async def test_run_rewrite_fast_path_maps_model_exception_without_committing():
     assert result.message == "rewrite model call failed"
     assert result.model_calls == 1
     commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_ends_on_model_call_timeout():
+    async def model_never_returns(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    commit = AsyncMock()
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=model_never_returns,
+        commit_invoke=commit,
+        model_call_timeout_seconds=0.01,
+        total_timeout_seconds=1.0,
+    )
+
+    assert result is not None
+    assert result.status == "error"
+    assert result.error_code == "MODEL_CALL_TIMEOUT"
+    assert result.message == "rewrite model call timed out"
+    assert result.model_calls == 1
+    commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_ends_when_total_deadline_expires_during_retry():
+    model_calls = 0
+
+    async def invalid_then_never_returns(*_args, **_kwargs):
+        nonlocal model_calls
+        model_calls += 1
+        if model_calls == 1:
+            return SimpleNamespace(content="not json")
+        await asyncio.Event().wait()
+
+    commit = AsyncMock()
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=invalid_then_never_returns,
+        commit_invoke=commit,
+        model_call_timeout_seconds=1.0,
+        total_timeout_seconds=0.01,
+    )
+
+    assert result is not None
+    assert result.status == "error"
+    assert result.error_code == "REWRITE_TIMEOUT"
+    assert result.message == "rewrite task timed out"
+    assert result.model_calls == 2
+    commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_applies_total_deadline_to_prepare():
+    async def prepare_never_returns(**_kwargs):
+        await asyncio.Event().wait()
+
+    model = AsyncMock()
+    commit = AsyncMock()
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=prepare_never_returns,
+        model_invoke=model,
+        commit_invoke=commit,
+        model_call_timeout_seconds=1.0,
+        total_timeout_seconds=0.01,
+    )
+
+    assert result is not None
+    assert result.status == "error"
+    assert result.error_code == "REWRITE_TIMEOUT"
+    assert result.message == "rewrite task timed out"
+    assert result.model_calls == 0
+    model.assert_not_awaited()
+    commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_applies_total_deadline_to_commit():
+    async def commit_never_returns(**_kwargs):
+        await asyncio.Event().wait()
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=AsyncMock(
+            return_value=SimpleNamespace(content=_json_result(_STRUCTURED_RESULT))
+        ),
+        commit_invoke=commit_never_returns,
+        model_call_timeout_seconds=1.0,
+        total_timeout_seconds=0.01,
+    )
+
+    assert result is not None
+    assert result.status == "error"
+    assert result.error_code == "REWRITE_TIMEOUT"
+    assert result.message == "rewrite task timed out"
+    assert result.model_calls == 1
 
 
 @pytest.mark.asyncio

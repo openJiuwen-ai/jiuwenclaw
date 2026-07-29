@@ -193,7 +193,7 @@ def test_adapter_fast_path_success_chunk_uses_fixed_invitation():
     assert chunks[0].is_complete is False
 
 
-def test_adapter_fast_path_error_chunk_contains_only_safe_error():
+def test_adapter_fast_path_terminal_error_chunk_marks_protocol_error():
     chunks = JiuWenClawDeepAdapter._fast_path_chunks(
         _result(
             status="error",
@@ -206,10 +206,39 @@ def test_adapter_fast_path_error_chunk_contains_only_safe_error():
 
     assert len(chunks) == 1
     assert chunks[0].payload == {
-        "event_type": "chat.final",
-        "content": "改写失败（MODEL_OUTPUT_INVALID）：invalid structured rewrite result",
+        "event_type": "chat.error",
+        "error": "改写失败（MODEL_OUTPUT_INVALID）：invalid structured rewrite result",
     }
-    assert "原句" not in chunks[0].payload["content"]
+    assert "原句" not in chunks[0].payload["error"]
+    assert chunks[0].is_complete is False
+
+
+@pytest.mark.parametrize(
+    ("error_code", "message"),
+    [
+        ("MODEL_CALL_TIMEOUT", "rewrite model call timed out"),
+        ("REWRITE_TIMEOUT", "rewrite task timed out"),
+    ],
+)
+def test_adapter_fast_path_timeout_chunk_marks_protocol_error(
+    error_code,
+    message,
+):
+    chunks = JiuWenClawDeepAdapter._fast_path_chunks(
+        _result(
+            status="error",
+            error_code=error_code,
+            message=message,
+        ),
+        request_id="request-1",
+        channel_id="web",
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].payload == {
+        "event_type": "chat.error",
+        "error": f"改写失败（{error_code}）：{message}",
+    }
     assert chunks[0].is_complete is False
 
 
@@ -461,7 +490,11 @@ async def test_process_stream_skips_runner_for_recognized_fast_path(
 
     assert runner_calls == []
     event_types = [chunk.payload["event_type"] for chunk in chunks if chunk.payload]
-    assert event_types[0] == "chat.final"
+    assert event_types[0] == (
+        "chat.final"
+        if fast_path_result.status == "completed"
+        else "chat.error"
+    )
     assert ("chat.usage_summary" in event_types) is bool(
         fast_path_result.usage_metadata
     )

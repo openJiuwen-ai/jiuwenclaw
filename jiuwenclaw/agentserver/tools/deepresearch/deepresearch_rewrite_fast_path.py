@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
+
+import json_repair
 
 
 _ENVELOPE_RE = re.compile(
@@ -89,6 +92,8 @@ _SUCCESS_MESSAGE = (
     "如需继续改写，可直接选择下一处内容。"
 )
 _DELIVERY_FAILURE_MESSAGE = "改写版本已成功保留，但报告文件交付失败。"
+_MODEL_CALL_TIMEOUT_SECONDS = 180.0
+_TOTAL_TIMEOUT_SECONDS = 360.0
 
 
 class RewriteFastPathError(ValueError):
@@ -182,6 +187,10 @@ def _milliseconds(start: float) -> float:
     return round((time.perf_counter() - start) * 1_000, 3)
 
 
+def _remaining_seconds(deadline: float) -> float:
+    return max(0.0, deadline - time.perf_counter())
+
+
 def _result(
     *,
     started_at: float,
@@ -255,17 +264,27 @@ def _decode_model_result(
     if not isinstance(content, str) or not content.strip():
         raise ModelOutputError("content_unavailable")
     adjustments = []
+    candidate = content
     try:
-        payload = json.loads(content)
+        payload = json.loads(candidate)
     except json.JSONDecodeError as bare_error:
         fence = _JSON_FENCE_RE.fullmatch(content)
-        if fence is None:
-            raise ModelOutputError("json_invalid") from bare_error
+        if fence is not None:
+            candidate = fence.group("body")
+            adjustments.append("json_fence")
         try:
-            payload = json.loads(fence.group("body"))
-        except json.JSONDecodeError as fence_error:
-            raise ModelOutputError("json_invalid") from fence_error
-        adjustments.append("json_fence")
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as strict_error:
+            stripped = candidate.strip()
+            if not (stripped.startswith("{") and stripped.endswith("}")):
+                raise ModelOutputError("json_invalid") from bare_error
+            try:
+                payload = json_repair.loads(stripped)
+            except Exception as repair_error:
+                raise ModelOutputError("json_invalid") from repair_error
+            if not isinstance(payload, dict):
+                raise ModelOutputError("json_invalid") from strict_error
+            adjustments.append("json_repair")
     if (
         not isinstance(payload, dict)
         or set(payload) != {"units", "facts_added"}
@@ -364,6 +383,8 @@ async def run_rewrite_fast_path(
     prepare_invoke: Callable[..., Awaitable[object]],
     model_invoke: Callable[..., Awaitable[object]],
     commit_invoke: Callable[..., Awaitable[object]],
+    model_call_timeout_seconds: float = _MODEL_CALL_TIMEOUT_SECONDS,
+    total_timeout_seconds: float = _TOTAL_TIMEOUT_SECONDS,
 ) -> RewriteFastPathResult | None:
     """Run a recognized rewrite request without entering the Agent loop."""
     started_at = time.perf_counter()
@@ -380,15 +401,28 @@ async def run_rewrite_fast_path(
     if request is None:
         return None
 
+    deadline = started_at + total_timeout_seconds
     prepare_started = time.perf_counter()
     try:
         prepared = _decode_tool_result(
-            await prepare_invoke(
-                report_path=request.report_path,
-                action=request.action,
-                selection=request.selection,
-                instruction=request.instruction,
+            await asyncio.wait_for(
+                prepare_invoke(
+                    report_path=request.report_path,
+                    action=request.action,
+                    selection=request.selection,
+                    instruction=request.instruction,
+                ),
+                timeout=_remaining_seconds(deadline),
             )
+        )
+    except TimeoutError:
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code="REWRITE_TIMEOUT",
+            message="rewrite task timed out",
+            prepare_ms=_milliseconds(prepare_started),
         )
     except Exception:  # pylint: disable=broad-exception-caught
         return _result(
@@ -465,7 +499,37 @@ async def run_rewrite_fast_path(
             ]
         try:
             model_calls += 1
-            response = await model_invoke(attempt_messages, **model_kwargs)
+            remaining_seconds = _remaining_seconds(deadline)
+            call_timeout_seconds = min(
+                model_call_timeout_seconds,
+                remaining_seconds,
+            )
+            response = await asyncio.wait_for(
+                model_invoke(attempt_messages, **model_kwargs),
+                timeout=call_timeout_seconds,
+            )
+        except TimeoutError:
+            task_timed_out = remaining_seconds <= model_call_timeout_seconds
+            return _result(
+                started_at=started_at,
+                status="error",
+                action=request.action,
+                error_code=(
+                    "REWRITE_TIMEOUT"
+                    if task_timed_out
+                    else "MODEL_CALL_TIMEOUT"
+                ),
+                message=(
+                    "rewrite task timed out"
+                    if task_timed_out
+                    else "rewrite model call timed out"
+                ),
+                usage_metadata=usage_metadata,
+                prepare_ms=prepare_ms,
+                model_ms=_milliseconds(model_started),
+                model_calls=model_calls,
+                model_output_error_reason=model_output_error_reason,
+            )
         except Exception:  # pylint: disable=broad-exception-caught
             return _result(
                 started_at=started_at,
@@ -510,10 +574,27 @@ async def run_rewrite_fast_path(
     commit_started = time.perf_counter()
     try:
         committed = _decode_tool_result(
-            await commit_invoke(
-                context_token=context_token,
-                structured_result=structured_result,
+            await asyncio.wait_for(
+                commit_invoke(
+                    context_token=context_token,
+                    structured_result=structured_result,
+                ),
+                timeout=_remaining_seconds(deadline),
             )
+        )
+    except TimeoutError:
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code="REWRITE_TIMEOUT",
+            message="rewrite task timed out",
+            usage_metadata=usage_metadata,
+            prepare_ms=prepare_ms,
+            model_ms=model_ms,
+            commit_ms=_milliseconds(commit_started),
+            model_calls=model_calls,
+            model_output_adjustments=model_output_adjustments,
         )
     except Exception:  # pylint: disable=broad-exception-caught
         return _result(
