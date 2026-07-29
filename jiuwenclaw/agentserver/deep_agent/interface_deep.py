@@ -385,6 +385,15 @@ from jiuwenclaw.agentserver.tools.deepresearch.deepresearch_rewrite_fast_path im
     RewriteFastPathResult,
     run_rewrite_fast_path,
 )
+from jiuwenclaw.agentserver.tools.deepresearch.deepresearch_rewrite_html_followup import (
+    PENDING_HTML_EXPORT_STATE_KEY,
+    RewriteHtmlFollowupResult,
+    RewriteHtmlTarget,
+    decode_html_tool_result,
+    is_html_followup_request,
+    target_from_commit_result,
+    target_from_state,
+)
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
@@ -7736,6 +7745,74 @@ class JiuWenClawDeepAdapter:
             is_complete=True,
         )
 
+    async def _load_deepresearch_rewrite_html_target(
+            self,
+            session_id: str,
+    ) -> RewriteHtmlTarget | None:
+        """Restore the trusted HTML target from this adapter's checkpointer."""
+        instance = getattr(self, "_instance", None)
+        checkpointer = getattr(self, "_checkpointer", None)
+        if instance is None or checkpointer is None or not session_id:
+            return None
+
+        try:
+            session = create_agent_session(
+                session_id=session_id,
+                card=instance.card,
+            )
+            # Deliberately bypass Session.pre_run(), which uses the global
+            # default checkpointer instead of this tenant adapter's store.
+            await checkpointer.pre_agent_execute(
+                session._inner,  # pylint: disable=protected-access
+                None,
+            )
+            return target_from_state(
+                session.get_state(PENDING_HTML_EXPORT_STATE_KEY)
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "[DeepResearchRewriteHtmlFollowup] restore target failed "
+                "session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+            return None
+
+    async def _try_deepresearch_rewrite_html_followup(
+            self,
+            query: object,
+            session_id: str,
+    ) -> RewriteHtmlFollowupResult | None:
+        """Handle an explicit HTML follow-up without routing through the LLM."""
+        if not is_html_followup_request(query):
+            return None
+
+        target = await self._load_deepresearch_rewrite_html_target(session_id)
+        if target is None:
+            return RewriteHtmlFollowupResult(
+                status="error",
+                error_code="TARGET_UNAVAILABLE",
+                message="未找到可生成 HTML 的已完成改写版本。",
+            )
+
+        from jiuwenclaw.agentserver.tools.deepresearch import rewrite_tools
+
+        try:
+            html_tool = rewrite_tools.deepresearch_generate_rewrite_html
+            raw_result = await html_tool._func(  # pylint: disable=protected-access
+                report_path=target.report_path,
+                revision_id=target.revision_id,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "[DeepResearchRewriteHtmlFollowup] HTML tool failed "
+                "session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+            raw_result = None
+        return decode_html_tool_result(raw_result)
+
     async def _try_deepresearch_rewrite_fast_path(
             self,
             query: object,
@@ -7763,7 +7840,8 @@ class JiuWenClawDeepAdapter:
             or not isinstance(query, str)
         ):
             return False
-        if not isinstance(result.commit_result, dict):
+        html_target = target_from_commit_result(result.commit_result)
+        if html_target is None:
             return False
 
         context_engine = resolve_context_engine(self._instance)
@@ -7800,6 +7878,9 @@ class JiuWenClawDeepAdapter:
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
+            session.update_state({
+                PENDING_HTML_EXPORT_STATE_KEY: html_target.to_state(),
+            })
             await context.add_messages([
                 UserMessage(content=query),
                 AssistantMessage(content="", tool_calls=[tool_call]),
@@ -7838,15 +7919,35 @@ class JiuWenClawDeepAdapter:
             channel_id: str,
     ) -> tuple[AgentResponseChunk, ...]:
         if result.status == "completed":
-            content = result.message
+            payload = {"event_type": "chat.final", "content": result.message}
         else:
             code = result.error_code or "INTERNAL_ERROR"
             content = f"改写失败（{code}）：{result.message}"
+            payload = {"event_type": "chat.error", "error": content}
         return (
             AgentResponseChunk(
                 request_id=request_id,
                 channel_id=channel_id,
-                payload={"event_type": "chat.final", "content": content},
+                payload=payload,
+                is_complete=False,
+            ),
+        )
+
+    @staticmethod
+    def _rewrite_html_followup_chunks(
+            result: RewriteHtmlFollowupResult,
+            *,
+            request_id: str,
+            channel_id: str,
+    ) -> tuple[AgentResponseChunk, ...]:
+        return (
+            AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={
+                    "event_type": "chat.final",
+                    "content": result.message,
+                },
                 is_complete=False,
             ),
         )
@@ -7951,10 +8052,35 @@ class JiuWenClawDeepAdapter:
         )
 
         perf_summary_status = "ok"
+        response_ok = True
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
-            result = await Runner.run_agent(agent=self._instance, inputs=inputs)
+            html_followup_result = (
+                await self._try_deepresearch_rewrite_html_followup(
+                    query,
+                    session_id,
+                )
+            )
+            if html_followup_result is not None:
+                result = html_followup_result.message
+                response_ok = html_followup_result.status == "completed"
+                if not response_ok:
+                    perf_summary_status = "error"
+                logger.info(
+                    "[DeepResearchRewriteHtmlFollowup] request_id=%s "
+                    "session_id=%s status=%s error_code=%s",
+                    request.request_id,
+                    session_id,
+                    html_followup_result.status,
+                    html_followup_result.error_code,
+                    extra={"user_visible": "critical"},
+                )
+            else:
+                result = await Runner.run_agent(
+                    agent=self._instance,
+                    inputs=inputs,
+                )
         except asyncio.CancelledError:
             perf_summary_status = "cancelled"
             logger.info("[JiuWenClawDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s", request.request_id,
@@ -8000,7 +8126,7 @@ class JiuWenClawDeepAdapter:
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
-            ok=True,
+            ok=response_ok,
             payload={"content": content},
             metadata=request.metadata,
         )
@@ -8171,8 +8297,40 @@ class JiuWenClawDeepAdapter:
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
-            fast_path_result = await self._try_deepresearch_rewrite_fast_path(query)
-            fast_path_handled = fast_path_result is not None
+            html_followup_result = (
+                await self._try_deepresearch_rewrite_html_followup(
+                    query,
+                    session_id,
+                )
+            )
+            fast_path_result = None
+            fast_path_handled = html_followup_result is not None
+            if html_followup_result is not None:
+                has_streamed_content = True
+                _mark_first_byte_once()
+                if html_followup_result.status != "completed":
+                    perf_summary_status = "error"
+                logger.info(
+                    "[DeepResearchRewriteHtmlFollowup] request_id=%s "
+                    "session_id=%s status=%s error_code=%s",
+                    rid,
+                    session_id,
+                    html_followup_result.status,
+                    html_followup_result.error_code,
+                    extra={"user_visible": "critical"},
+                )
+                for html_chunk in self._rewrite_html_followup_chunks(
+                    html_followup_result,
+                    request_id=rid,
+                    channel_id=cid,
+                ):
+                    yield html_chunk
+            else:
+                fast_path_result = await self._try_deepresearch_rewrite_fast_path(
+                    query
+                )
+                fast_path_handled = fast_path_result is not None
+
             if fast_path_result is not None:
                 has_streamed_content = True
                 _mark_first_byte_once()
@@ -8207,7 +8365,8 @@ class JiuWenClawDeepAdapter:
                 logger.info(
                     "[DeepResearchRewriteFastPath] request_id=%s session_id=%s "
                     "action=%s status=%s error_code=%s prepare_ms=%.3f "
-                    "model_ms=%.3f commit_ms=%.3f total_ms=%.3f model_calls=%d",
+                    "model_ms=%.3f commit_ms=%.3f total_ms=%.3f model_calls=%d "
+                    "output_adjustments=%s model_output_error_reason=%s",
                     rid,
                     session_id,
                     fast_path_result.action,
@@ -8218,6 +8377,8 @@ class JiuWenClawDeepAdapter:
                     fast_path_result.commit_ms,
                     fast_path_result.total_ms,
                     fast_path_result.model_calls,
+                    ",".join(fast_path_result.model_output_adjustments) or "none",
+                    fast_path_result.model_output_error_reason,
                     extra={'user_visible': 'critical'},
                 )
                 for fast_path_chunk in self._fast_path_chunks(

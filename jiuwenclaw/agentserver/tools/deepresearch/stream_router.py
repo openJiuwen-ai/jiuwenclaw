@@ -51,6 +51,12 @@ _SECTION_PROCESS_NODES = {
     "collector_summary",
     "sub_reporter",
 }
+_FINAL_REPORT_NODES = {
+    "reporter",
+    "vlm_chart_generator",
+    "source_tracer",
+    "source_tracer_infer",
+}
 
 _CONTROL_PROCESS_VALUES = {"SUCCESS", "ALL END", "SECTION END"}
 _QUESTION_NODES = {"question_generator", "generate_questions"}
@@ -61,8 +67,6 @@ DEEPRESEARCH_STAGES: tuple[str, ...] = (
     "研究主题澄清",
     "大纲生成",
     "并行调研与章节撰写",
-    "报告整合",
-    "引用溯源与校验",
     "报告交付",
 )
 
@@ -74,10 +78,10 @@ _NODE_STAGE: dict[str, int] = {
     "outline": 2,
     "outline_interaction": 2,
     "editor_team": 3,
-    "reporter": 4,
-    "vlm_chart_generator": 4,
-    "source_tracer": 5,
-    "source_tracer_infer": 5,
+    "reporter": 3,
+    "vlm_chart_generator": 3,
+    "source_tracer": 3,
+    "source_tracer_infer": 3,
 }
 
 
@@ -96,6 +100,12 @@ class RouterState:
     interrupt_conversation_id: str = ""
     section_titles: dict[str, str] = field(default_factory=dict)
     authoritative_section_indices: set[str] = field(default_factory=set)
+    started_section_indices: set[str] = field(default_factory=set)
+    completed_section_indices: set[str] = field(default_factory=set)
+    expected_section_total: int = 0
+    final_report_started: bool = False
+    final_report_completed: bool = False
+    pending_final_report_frames: list[dict] = field(default_factory=list)
     question_parts: dict[str, list[str]] = field(default_factory=dict)
     question_order: list[str] = field(default_factory=list)
     current_stage: int = 0
@@ -431,6 +441,71 @@ def _section_reasoning(state: RouterState, chunk: dict, content: str) -> dict:
     return payload
 
 
+def _section_boundary(state: RouterState, chunk: dict, event_type: str) -> dict:
+    payload = _section_reasoning(state, chunk, "")
+    payload["event_type"] = event_type
+    payload.pop("content")
+    return payload
+
+
+def _remember_expected_sections(state: RouterState, chunk: dict) -> None:
+    total = _positive_int(chunk.get("section_total"))
+    if total is not None:
+        state.expected_section_total = max(state.expected_section_total, total)
+
+
+def _all_sections_completed(state: RouterState) -> bool:
+    if state.expected_section_total:
+        expected = {str(index) for index in range(1, state.expected_section_total + 1)}
+    else:
+        expected = set(state.authoritative_section_indices)
+    return bool(expected) and expected.issubset(state.completed_section_indices)
+
+
+def _final_report_boundary(event_type: str) -> dict:
+    return {
+        "event_type": event_type,
+        "task_id": "deepresearch_stage_4",
+        "task_content": "最终报告处理",
+        "stream_source_id": "deepresearch_final_report",
+    }
+
+
+def start_final_report_processing(state: RouterState) -> list[dict]:
+    if state.final_report_started:
+        return []
+    state.final_report_started = True
+    frames = advance_stage(state, 4)
+    frames.append(_final_report_boundary("task.start"))
+    frames.extend(state.pending_final_report_frames)
+    state.pending_final_report_frames.clear()
+    return frames
+
+
+def complete_final_report_processing(state: RouterState) -> list[dict]:
+    if state.final_report_completed or not state.final_report_started:
+        return []
+    state.final_report_completed = True
+    return [_final_report_boundary("task.complete")]
+
+
+def _node_reasoning(
+    stage: int,
+    agent: str,
+    display: tuple[str, str],
+    content: str,
+) -> dict:
+    if agent not in _FINAL_REPORT_NODES:
+        return _stage_child_reasoning(stage, agent, display, content)
+    return {
+        "event_type": "chat.reasoning",
+        "task_id": "deepresearch_stage_4",
+        "task_content": "最终报告处理",
+        "stream_source_id": "deepresearch_final_report",
+        "content": content,
+    }
+
+
 def is_outline_status_placeholder(val: Any) -> bool:
     """Return whether SDK content is only the outline interaction status prompt."""
     text = _as_text(val).strip()
@@ -523,6 +598,8 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
         return frames  # 未知节点不推(避免噪声)
 
     if agent in _SECTION_PROCESS_NODES and section_idx != "0":
+        _remember_expected_sections(state, chunk)
+        start_final_report = False
         process_parts = _raw_process_parts(
             chunk,
             content,
@@ -530,6 +607,9 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
             include_content=agent != "sub_reporter",
         )
         _remember_section_title(state, section_idx, chunk.get("section_title"))
+        if section_idx not in state.started_section_indices:
+            state.started_section_indices.add(section_idx)
+            frames.append(_section_boundary(state, chunk, "task.start"))
         node_state = state.active_nodes.get(key)
         if node_state is None:
             node_state = {
@@ -545,9 +625,16 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
         if event == "done" and not node_state["done"]:
             node_state["done"] = True
             frames.append(_section_reasoning(state, chunk, f"{display[0]}完成\n"))
+            if agent == "sub_reporter" and section_idx not in state.completed_section_indices:
+                state.completed_section_indices.add(section_idx)
+                frames.append(_section_boundary(state, chunk, "task.complete"))
+                if _all_sections_completed(state):
+                    start_final_report = True
 
         for process_content in process_parts:
             frames.append(_section_reasoning(state, chunk, process_content))
+        if start_final_report:
+            frames.extend(start_final_report_processing(state))
         return frames
 
     # 大纲正文只读展示在思考过程；其他非并行节点维持 reasoning_content 通用透传。
@@ -563,7 +650,10 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
             })
         return frames
 
-    if target_stage in {1, 2, 3, 4, 5}:
+    if target_stage in {1, 2, 3}:
+        if agent in _FINAL_REPORT_NODES and _all_sections_completed(state):
+            frames.extend(start_final_report_processing(state))
+        node_frames: list[dict] = []
         node_state = state.active_nodes.get(key)
         if node_state is None:
             node_state = {
@@ -574,15 +664,25 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
             }
             state.active_nodes[key] = node_state
             if event != "done":
-                frames.append(_stage_child_reasoning(target_stage, agent, display, f"{display[0]}开始\n"))
+                node_frames.append(
+                    _node_reasoning(target_stage, agent, display, f"{display[0]}开始\n")
+                )
 
         reasoning = _chunk_reasoning_content(chunk, content)
         if reasoning:
-            frames.append(_stage_child_reasoning(target_stage, agent, display, _as_text(reasoning)))
+            node_frames.append(
+                _node_reasoning(target_stage, agent, display, _as_text(reasoning))
+            )
 
         if event == "done" and not node_state["done"]:
             node_state["done"] = True
-            frames.append(_stage_child_reasoning(target_stage, agent, display, f"{display[0]}完成\n"))
+            node_frames.append(
+                _node_reasoning(target_stage, agent, display, f"{display[0]}完成\n")
+            )
+        if agent in _FINAL_REPORT_NODES and not state.final_report_started:
+            state.pending_final_report_frames.extend(node_frames)
+        else:
+            frames.extend(node_frames)
         return frames
 
     reasoning = _chunk_reasoning_content(chunk, content)

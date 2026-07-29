@@ -7,6 +7,7 @@ from jiuwenclaw.agentserver.tools.deepresearch.stream_router import (
     advance_stage,
     build_interrupt_prompt,
     collected_questions,
+    complete_final_report_processing,
     route_chunk,
 )
 
@@ -15,8 +16,6 @@ STAGE_TITLES = [
     "研究主题澄清",
     "大纲生成",
     "并行调研与章节撰写",
-    "报告整合",
-    "引用溯源与校验",
     "报告交付",
 ]
 
@@ -38,20 +37,20 @@ def _process_reasoning(frames):
 def _assert_stage(update, active_stage):
     assert update is not None
     assert [task["task_id"] for task in update["tasks"]] == [
-        f"deepresearch_stage_{index}" for index in range(1, 7)
+        f"deepresearch_stage_{index}" for index in range(1, 5)
     ]
     assert [task["task_content"] for task in update["tasks"]] == STAGE_TITLES
     expected = [
         "completed" if index < active_stage
         else "in_progress" if index == active_stage
         else "pending"
-        for index in range(1, 7)
+        for index in range(1, 5)
     ]
     assert [task["status"] for task in update["tasks"]] == expected
-    assert update["total_tasks"] == 6
+    assert update["total_tasks"] == 4
     assert update["completed_tasks"] == active_stage - 1
     assert update["in_progress_tasks"] == 1
-    assert update["pending_tasks"] == 6 - active_stage
+    assert update["pending_tasks"] == 4 - active_stage
 
 
 def test_advance_stage_emits_ordered_task_reasoning_and_foreground_events():
@@ -77,14 +76,11 @@ def test_advance_stage_emits_ordered_task_reasoning_and_foreground_events():
 
 
 def test_advance_stage_backfills_every_missing_stage_in_event_order():
-    state = RouterState(current_stage=3)
+    state = RouterState(current_stage=2)
 
-    frames = advance_stage(state, 6)
+    frames = advance_stage(state, 4)
 
     assert [frame["event_type"] for frame in frames] == [
-        "task.update",
-        "chat.reasoning",
-        "chat.delta",
         "task.update",
         "chat.reasoning",
         "chat.delta",
@@ -102,17 +98,16 @@ def test_advance_stage_backfills_every_missing_stage_in_event_order():
             if task["status"] == "in_progress"
         )
         for update in updates
-    ] == [4, 5, 6]
+    ] == [3, 4]
     assert [
         frame["content"]
         for frame in frames
         if frame["event_type"] == "chat.delta"
     ] == [
-        "[DeepResearch 阶段切换] 开始 Stage 4：报告整合\n",
-        "[DeepResearch 阶段切换] 开始 Stage 5：引用溯源与校验\n",
-        "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
+        "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
+        "[DeepResearch 阶段切换] 开始 Stage 4：报告交付\n",
     ]
-    assert state.current_stage == 6
+    assert state.current_stage == 4
 
 
 def test_stage_2_uses_outline_generation_title_on_all_surfaces():
@@ -125,11 +120,11 @@ def test_stage_2_uses_outline_generation_title_on_all_surfaces():
     assert frames[2]["content"] == "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n"
 
 
-def test_advance_stage_completion_keeps_all_six_completed_tasks_visible():
+def test_advance_stage_completion_keeps_all_four_completed_tasks_visible():
     state = RouterState()
-    advance_stage(state, 6)
+    advance_stage(state, 4)
 
-    frames = advance_stage(state, 6, complete=True)
+    frames = advance_stage(state, 4, complete=True)
 
     assert [frame["event_type"] for frame in frames] == [
         "task.update",
@@ -137,13 +132,13 @@ def test_advance_stage_completion_keeps_all_six_completed_tasks_visible():
         "chat.delta",
     ]
     update = frames[0]
-    assert len(update["tasks"]) == 6
+    assert len(update["tasks"]) == 4
     assert [task["task_id"] for task in update["tasks"]] == [
-        f"deepresearch_stage_{index}" for index in range(1, 7)
+        f"deepresearch_stage_{index}" for index in range(1, 5)
     ]
     assert all(task["status"] == "completed" for task in update["tasks"])
-    assert frames[1]["content"] == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
-    assert frames[2]["content"] == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+    assert frames[1]["content"] == "[DeepResearch 阶段完成] Stage 4：报告交付\n"
+    assert frames[2]["content"] == "[DeepResearch 阶段完成] Stage 4：报告交付\n"
 
 
 def test_advance_stage_does_not_repeat_or_regress_transition_messages():
@@ -154,17 +149,18 @@ def test_advance_stage_does_not_repeat_or_regress_transition_messages():
     assert advance_stage(state, 2) == []
 
 
-def test_workflow_nodes_advance_six_stage_snapshot():
+def test_workflow_nodes_advance_four_stage_snapshot():
     state = RouterState()
 
     for agent, stage in (
         ("intent_recognition", 1),
         ("outline", 2),
         ("editor_team", 3),
-        ("reporter", 4),
-        ("source_tracer", 5),
     ):
         _assert_stage(_stage_update(route_chunk({"agent": agent}, state)), stage)
+
+    assert _stage_update(route_chunk({"agent": "reporter"}, state)) is None
+    assert _stage_update(route_chunk({"agent": "source_tracer"}, state)) is None
 
 
 def test_interrupt_nodes_advance_stage_before_raw_chunk_is_suppressed():
@@ -183,7 +179,7 @@ def test_interrupt_nodes_advance_stage_before_raw_chunk_is_suppressed():
 
 def test_stage_snapshot_never_regresses_on_late_earlier_node():
     state = RouterState()
-    route_chunk({"agent": "source_tracer"}, state)
+    advance_stage(state, 4)
 
     frames = route_chunk({"agent": "outline", "content": "迟到的大纲事件"}, state)
 
@@ -249,7 +245,7 @@ def test_stage_one_event_done_emits_stage_scoped_reasoning():
     assert not any(frame["event_type"] == "task.complete" for frame in frames)
 
 
-def test_parallel_section_nodes_emit_nested_reasoning_without_node_task_frames():
+def test_parallel_section_nodes_emit_one_section_boundary():
     expected = {
         "plan_reasoning": "规划调研",
         "collector_query_generation": "生成检索词",
@@ -295,14 +291,19 @@ def test_parallel_section_nodes_emit_nested_reasoning_without_node_task_frames()
             "content": f"{display_name}完成\n",
         }]
         _assert_stage(_stage_update(started), 3)
-        assert not any(
-            frame["event_type"] == "task.start"
-            and frame["task_id"] != "deepresearch_stage_3"
-            for frame in started + completed
-        )
+        starts = [frame for frame in started if frame["event_type"] == "task.start"]
+        assert starts == [{
+            "event_type": "task.start",
+            "task_id": "deepresearch_stage_3",
+            "task_content": "真实章节标题",
+            "task_index": 3,
+            "stream_source_id": "deepresearch_section_3",
+        }]
+        completes = [frame for frame in completed if frame["event_type"] == "task.complete"]
+        assert len(completes) == (1 if agent == "sub_reporter" else 0)
 
 
-def test_parallel_sections_use_explicit_stage_three_parent_without_boundaries():
+def test_parallel_sections_use_explicit_stage_three_parent_with_own_boundary():
     state = RouterState()
 
     section_frames = route_chunk(
@@ -314,28 +315,177 @@ def test_parallel_sections_use_explicit_stage_three_parent_without_boundaries():
         },
         state,
     )
-    reporter_frames = route_chunk({"agent": "reporter", "event": "start"}, state)
-
-    assert not any(frame["event_type"] in {"task.start", "task.complete"} for frame in section_frames)
+    section_boundaries = [
+        frame for frame in section_frames
+        if frame["event_type"] in {"task.start", "task.complete"}
+    ]
+    assert [frame["event_type"] for frame in section_boundaries] == ["task.start"]
+    assert section_boundaries[0]["task_id"] == "deepresearch_stage_3"
+    assert section_boundaries[0]["stream_source_id"] == "deepresearch_section_1"
     section_reasoning = _process_reasoning(section_frames)
     assert all(frame["task_id"] == "deepresearch_stage_3" for frame in section_reasoning)
     assert all(frame["stream_source_id"] == "deepresearch_section_1" for frame in section_reasoning)
-    assert reporter_frames[0]["event_type"] == "task.update"
-    assert not any(frame["event_type"] in {"task.start", "task.complete"} for frame in reporter_frames)
 
 
-def test_stage_internal_nodes_use_explicit_parent_without_task_boundaries():
+def test_final_report_nodes_share_stage_four_aggregate_stream():
+    state = RouterState(section_titles={"1": "第一章"})
+    route_chunk(
+        {
+            "agent": "sub_reporter",
+            "section_idx": "1",
+            "section_total": 1,
+            "event": "done",
+        },
+        state,
+    )
     frames = route_chunk(
         {"agent": "reporter", "event": "start", "reasoning_content": "整合报告"},
-        RouterState(),
+        state,
     )
 
     reasoning = _process_reasoning(frames)
     assert [frame["content"] for frame in reasoning] == ["报告整合开始\n", "整合报告"]
     assert all(frame["task_id"] == "deepresearch_stage_4" for frame in reasoning)
-    assert all(frame["task_content"] == "报告整合 - 整合最终报告" for frame in reasoning)
-    assert all(frame["stream_source_id"] == "dr_reporter" for frame in reasoning)
+    assert all(frame["task_content"] == "最终报告处理" for frame in reasoning)
+    assert all(frame["stream_source_id"] == "deepresearch_final_report" for frame in reasoning)
     assert not any(frame["event_type"].startswith("task.") and frame["event_type"] != "task.update" for frame in frames)
+
+
+def test_final_report_aggregate_starts_only_after_all_sections_complete():
+    state = RouterState(section_titles={"1": "第一章", "2": "第二章"})
+    first = route_chunk(
+        {"agent": "sub_reporter", "section_idx": "1", "section_total": 2, "event": "done"},
+        state,
+    )
+    second = route_chunk(
+        {"agent": "sub_reporter", "section_idx": "2", "section_total": 2, "event": "done"},
+        state,
+    )
+
+    assert not any(
+        frame.get("stream_source_id") == "deepresearch_final_report"
+        for frame in first
+    )
+    assert [
+        (frame["event_type"], frame["stream_source_id"])
+        for frame in second
+        if frame["event_type"] in {"task.start", "task.complete"}
+    ] == [
+        ("task.start", "deepresearch_section_2"),
+        ("task.complete", "deepresearch_section_2"),
+        ("task.start", "deepresearch_final_report"),
+    ]
+    stage_four_update_index = next(
+        index for index, frame in enumerate(second)
+        if frame["event_type"] == "task.update"
+        and frame["tasks"][3]["status"] == "in_progress"
+    )
+    aggregate_start_index = next(
+        index for index, frame in enumerate(second)
+        if frame["event_type"] == "task.start"
+        and frame.get("stream_source_id") == "deepresearch_final_report"
+    )
+    assert stage_four_update_index < aggregate_start_index
+    assert second[aggregate_start_index]["task_id"] == "deepresearch_stage_4"
+
+
+def test_final_report_reasoning_waits_for_all_sections_then_follows_start_boundary():
+    state = RouterState(section_titles={"1": "第一章", "2": "第二章"})
+    route_chunk(
+        {"agent": "sub_reporter", "section_idx": "1", "section_total": 2, "event": "done"},
+        state,
+    )
+
+    early = route_chunk(
+        {"agent": "reporter", "event": "start", "reasoning_content": "提前到达的整合内容"},
+        state,
+    )
+    assert not any(
+        frame.get("stream_source_id") == "deepresearch_final_report"
+        for frame in early
+    )
+
+    released = route_chunk(
+        {"agent": "sub_reporter", "section_idx": "2", "section_total": 2, "event": "done"},
+        state,
+    )
+    aggregate = [
+        frame
+        for frame in released
+        if frame.get("stream_source_id") == "deepresearch_final_report"
+    ]
+    assert aggregate[0]["event_type"] == "task.start"
+    assert [frame["content"] for frame in aggregate[1:]] == [
+        "报告整合开始\n",
+        "提前到达的整合内容",
+    ]
+
+
+def test_final_report_aggregate_completes_after_stage_four_starts():
+    state = RouterState(section_titles={"1": "第一章"})
+    frames = route_chunk(
+        {"agent": "sub_reporter", "section_idx": "1", "section_total": 1, "event": "done"},
+        state,
+    )
+
+    frames.extend(complete_final_report_processing(state))
+
+    stage_four = next(
+        index for index, frame in enumerate(frames)
+        if frame["event_type"] == "task.update"
+        and frame["tasks"][3]["status"] == "in_progress"
+    )
+    aggregate_start = next(
+        index for index, frame in enumerate(frames)
+        if frame["event_type"] == "task.start"
+        and frame.get("stream_source_id") == "deepresearch_final_report"
+    )
+    aggregate_complete = next(
+        index for index, frame in enumerate(frames)
+        if frame["event_type"] == "task.complete"
+        and frame.get("stream_source_id") == "deepresearch_final_report"
+    )
+    assert stage_four < aggregate_start < aggregate_complete
+    assert frames[aggregate_complete]["task_id"] == "deepresearch_stage_4"
+
+
+def test_last_section_reasoning_finishes_before_stage_four_transition():
+    state = RouterState()
+    base = {
+        "agent": "sub_reporter",
+        "section_idx": "1",
+        "section_title": "第一章",
+        "section_total": 1,
+    }
+    route_chunk({**base, "event": "start"}, state)
+
+    frames = route_chunk(
+        {
+            **base,
+            "event": "done",
+            "reasoning_content": "正在完成章节最终检查",
+        },
+        state,
+    )
+
+    final_section_reasoning = next(
+        index for index, frame in enumerate(frames)
+        if frame.get("content") == "正在完成章节最终检查"
+    )
+    stage_four_update = next(
+        index for index, frame in enumerate(frames)
+        if frame["event_type"] == "task.update"
+        and frame["tasks"][3]["status"] == "in_progress"
+    )
+    assert final_section_reasoning < stage_four_update
+
+
+def test_final_report_aggregate_cannot_complete_before_it_starts():
+    state = RouterState(section_titles={"1": "第一章"})
+
+    assert complete_final_report_processing(state) == []
+    assert state.final_report_started is False
+    assert state.final_report_completed is False
 
 
 def test_parallel_section_reasoning_preserves_known_title_when_later_chunk_omits_it():
