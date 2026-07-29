@@ -1523,6 +1523,14 @@ def get_cron_jobs_path() -> Path:
     return get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
 
 
+def get_heartbeat_jobs_path() -> Path:
+    """Canonical path for heartbeat_jobs.json (new thread-automation heartbeat jobs).
+
+    与 ``get_cron_jobs_path`` 同目录(``agent/home``),禁止在业务代码中硬编码该路径。
+    """
+    return get_agent_home_dir() / "heartbeat_jobs.json"
+
+
 def get_deepagent_todo_dir() -> Path:
     """Get the DeepAgent todo directory path.
 

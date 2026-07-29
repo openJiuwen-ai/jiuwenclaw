@@ -1447,6 +1447,10 @@ async def _run(
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
     from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
     from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
+    from jiuwenswarm.gateway.heartbeat.controller import HeartbeatController
+    from jiuwenswarm.gateway.heartbeat.scheduler import HeartbeatSchedulerService
+    from jiuwenswarm.gateway.heartbeat.store import HeartbeatJobStore
+    from jiuwenswarm.common.utils import get_heartbeat_jobs_path
     from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
     from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
         WebHandlersBindParams,
@@ -1535,6 +1539,21 @@ async def _run(
     cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
     message_handler.set_cron_controller(cron_controller)
 
+    # ---- 新 Heartbeat 任务(线程续跑)构造 ----
+    # 与旧探活(HealthCheck,下方 heartbeat_service)严格区分:
+    # 新 Heartbeat 绑定原 session 投递 CHAT_SEND,不创建临时会话、不读 HEARTBEAT.md。
+    # config 段 heartbeat.jobs.* 独立于旧探活的 heartbeat.every/target/active_hours。
+    hb_job_store = HeartbeatJobStore(path=get_heartbeat_jobs_path())
+    heartbeat_scheduler_service = HeartbeatSchedulerService(
+        store=hb_job_store,
+        message_handler=message_handler,
+    )
+    heartbeat_controller = HeartbeatController.get_instance(
+        store=hb_job_store, scheduler=heartbeat_scheduler_service
+    )
+    message_handler.set_heartbeat_controller(heartbeat_controller)
+    message_handler._heartbeat_scheduler_service = heartbeat_scheduler_service
+
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None
     channels_cfg: dict | None = None
@@ -1582,6 +1601,33 @@ async def _run(
         message_handler=message_handler,
     )
     await heartbeat_service.start()
+
+    # 新 Heartbeat 任务:读取 heartbeat.jobs.* 资源限制,启动 scheduler。
+    # 该段独立于旧探活 heartbeat.every/target/active_hours(后者将迁移到 health_check 段)。
+    try:
+        hb_jobs_cfg = (
+            full_cfg.get("heartbeat", {}).get("jobs")
+            if isinstance(full_cfg, dict) and isinstance(full_cfg.get("heartbeat"), dict)
+            else None
+        )
+    except Exception:  # noqa: BLE001
+        hb_jobs_cfg = None
+    hb_limits: dict[str, Any] = {}
+    if isinstance(hb_jobs_cfg, dict):
+        for k in (
+            "min_interval_seconds",
+            "max_active_jobs_per_session",
+            "max_active_jobs_global",
+            "default_max_runs",
+            "default_concurrency_policy",
+            "default_session_deleted_policy",
+        ):
+            if k in hb_jobs_cfg:
+                hb_limits[k] = hb_jobs_cfg[k]
+    if hb_limits:
+        heartbeat_controller.set_limits(hb_limits)
+    await heartbeat_scheduler_service.start()
+    logger.info("[App] HeartbeatSchedulerService started (thread-automation heartbeat jobs)")
 
     _cleanup_task = start_background_cleanup()
 
@@ -1697,6 +1743,7 @@ async def _run(
             on_config_saved=_on_config_saved,
             heartbeat_service=heartbeat_service,
             cron_controller=cron_controller,
+            heartbeat_controller=heartbeat_controller,
             updater_service=updater_service,
         )
     )
@@ -2640,6 +2687,7 @@ async def _run(
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
+        await heartbeat_scheduler_service.stop()
         await message_handler.stop_forwarding()
         await client.disconnect()
 

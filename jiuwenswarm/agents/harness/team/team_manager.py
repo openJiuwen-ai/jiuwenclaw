@@ -2152,6 +2152,22 @@ class TeamManager:
                 session_id,
                 team_name,
             )
+            # 通知 Heartbeat scheduler 清理绑定该 session 的心跳任务(方案 §5.2)。
+            # 延迟导入 + 单例获取,避免 agents 层 ↔ gateway 层循环依赖。
+            try:
+                from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+
+                mh = MessageHandler.get_instance()
+                if mh is not None and hasattr(mh, "get_heartbeat_scheduler_service"):
+                    hb_svc = mh.get_heartbeat_scheduler_service()
+                    if hb_svc is not None and hasattr(hb_svc, "on_session_deleted"):
+                        await hb_svc.on_session_deleted(session_id)
+            except Exception as _hb_exc:  # noqa: BLE001
+                logger.debug(
+                    "[TeamManager] heartbeat on_session_deleted hook failed: session_id=%s error=%s",
+                    session_id,
+                    _hb_exc,
+                )
             return True
         except Exception as exc:
             logger.warning(

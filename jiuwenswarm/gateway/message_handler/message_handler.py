@@ -242,6 +242,9 @@ class MessageHandler(ABC):
         # 组合：/join /exit 团队成员管理逻辑（独立文件维护，通过 self._h 访问宿主能力）
         self._join_exit = JoinExitHandlers(self)
         self._cron_controller = None
+        # 新 Heartbeat(线程续跑)controller + scheduler,由 app_gateway 注入。
+        self._heartbeat_controller = None
+        self._heartbeat_scheduler_service = None
 
         # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
@@ -2693,6 +2696,17 @@ class MessageHandler(ABC):
 
     def set_cron_controller(self, controller: Any) -> None:
         self._cron_controller = controller
+
+    def set_heartbeat_controller(self, controller: Any) -> None:
+        """注入新 Heartbeat(线程续跑)controller,供 web handler / Agent Tool 使用。"""
+        self._heartbeat_controller = controller
+
+    def get_heartbeat_controller(self) -> Any:
+        return self._heartbeat_controller
+
+    def get_heartbeat_scheduler_service(self) -> Any:
+        return self._heartbeat_scheduler_service
+
 
     async def _handle_cron_push_payload(
         self,
