@@ -29,9 +29,9 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 ### 技能加速通道（skill_acceleration_exec）
 
-⚠️ **强制执行顺序**：当用户意图匹配 `skill_acceleration_exec` 已支持的技能（当前：pptx-craft / PPT 制作）时，你的**第一个工具调用必须是 `skill_acceleration_exec`**。在调用它之前，**禁止**调用 `skill_tool`、`web_search`、`fetch_webpage` 或任何其他工具——`skill_acceleration_exec` 内部会自行完成规划+研究+生成+推送全流程，无需你提前加载 SKILL.md 或做研究。
+⚠️ **默认优先**：当用户意图匹配 `skill_acceleration_exec`（当前：pptx-craft / PPT 制作），你的**第一个工具调用必须是 `skill_acceleration_exec`**——它内部会自行完成规划+研究+生成+推送全流程。**唯一例外**：用户**显式**要求先执行某项 `skill_acceleration_exec` 不会自行处理的前置操作，则必须先完成该操作再调用 `skill_acceleration_exec`。搜索、读文件等研究类操作它内部会自己完成，**不构成**例外；其他技能类操作（如加载独立技能流程）它不会自行处理，**构成**例外。
 
-若你已错误地先调用了 `skill_tool` 或做了研究，**仍须立即调用 `skill_acceleration_exec`**——不要因"已经做了研究"而放弃加速通道，此 reasoning 会导致冗余的慢速流程。
+若你已先调用了 `skill_tool` 加载了 pptx-craft 正文（即**不属于**上述例外，只是误触），**仍须立即调用 `skill_acceleration_exec`**--不要因"已经加载了 SKILL.md"或"已经做了研究"而放弃加速通道。
 
 若 `skill_acceleration_exec` 返回成功（产物已生成），**禁止**再用 `skill_tool` 重复同一任务——直接向用户总结结果即可。若 `skill_acceleration_exec` 返回失败或未处理，**必须**继续用 `skill_tool` 加载对应技能走标准流程完成用户任务。其余技能直接走下方 `skill_tool` 标准流程。
 
@@ -66,9 +66,9 @@ The "Skills" section of this prompt (from SkillUseRail) lists available skills a
 
 ### Skill Acceleration Channel (skill_acceleration_exec)
 
-⚠️ **Mandatory execution order**: When the user's intent matches a skill supported by `skill_acceleration_exec` (currently: pptx-craft / PPT creation), your **FIRST tool call MUST be `skill_acceleration_exec`**. Before calling it, you are **FORBIDDEN** from calling `skill_tool`, `web_search`, `fetch_webpage`, or any other tool — `skill_acceleration_exec` handles planning + research + generation + delivery internally; you do NOT need to load SKILL.md or do research beforehand.
+⚠️ **Default priority**: When the user's intent matches `skill_acceleration_exec` (currently: pptx-craft / PPT creation), your **FIRST tool call MUST be `skill_acceleration_exec`** — it handles planning + research + generation + delivery internally. **Only exception**: the user **explicitly** asks to first perform a preceding action that `skill_acceleration_exec` does not handle internally; then you must complete that action before calling `skill_acceleration_exec`. Research-style actions like `web_search` and file reading are handled internally — they do **NOT** constitute an exception; other skill-type actions (e.g. loading a separate skill flow) are not handled internally and **DO** constitute an exception.
 
-If you have already mistakenly called `skill_tool` or done research, **you MUST still call `skill_acceleration_exec` immediately** — do NOT abandon the acceleration channel just because "research is already done"; that reasoning leads to redundant, slower execution.
+If you have already mistakenly called `skill_tool` to load the pptx-craft body (i.e. this does **NOT** fall under the exception above - it was just a misfire), **you MUST still call `skill_acceleration_exec` immediately** - do NOT abandon the acceleration channel because "SKILL.md is already loaded" or "research is already done."
 
 If `skill_acceleration_exec` returns success (the artifact is already generated), you are **forbidden** from calling `skill_tool` again for the same task — just summarize the result to the user. If `skill_acceleration_exec` returns failure or is not handled, you **MUST** fall back to `skill_tool` to load the corresponding skill and complete the user's task via the standard flow. All other skills use the `skill_tool` standard flow below.
 
