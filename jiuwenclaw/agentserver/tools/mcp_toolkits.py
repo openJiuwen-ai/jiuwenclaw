@@ -20,9 +20,10 @@ from jiuwenclaw.agentserver.tools.web_search import web_search
 
 
 def _normalize_stdio_command_kind(command: str) -> str:
-    """将 command 归一化为 'node' 或 'python'。
+    """将 command 归一化为 'node'、'python'、'npx' 或 'uvx'。
 
     支持绝对路径如 /usr/local/bin/node、C:\\Program Files\\node.exe 等。
+    npx/uvx为包运行器，参数为包名而非本地脚本路径，安全模型与 node/python 不同。
     """
     raw = str(command or "").strip()
     if not raw:
@@ -33,7 +34,11 @@ def _normalize_stdio_command_kind(command: str) -> str:
         return "node"
     if normalized.startswith("python"):
         return "python"
-    raise ValueError(f"不支持的 command 类型: '{command}'，目前仅支持 node/python 及其绝对路径")
+    if normalized in ("npx", "npx.exe", "npx.cmd", "npx.bat"):
+        return "npx"
+    if normalized in ("uvx", "uvx.exe"):
+        return "uvx"
+    raise ValueError(f"不支持的 command 类型: '{command}'，目前仅支持 node/python/npx/uvx 及其绝对路径")
 
 
 def _normalize_mcp_client_type(raw_type: object) -> str:
@@ -104,8 +109,8 @@ def create_mcp_tool(config_str: str) -> McpServerConfig:
         config_str: JSON 格式配置字符串，格式为：
             {
                 "name": "tool_name",
-                "command": "node" | "python",
-                "args": ["xxx.js"] | ["xxx.py"]
+                "command": "node" | "python" | "npx" | "uvx",
+                "args": ["xxx.js"] | ["xxx.py"] | ["-y", "@scope/pkg"] | ["pkg"]
             }
 
         2.streamable-http类型:
