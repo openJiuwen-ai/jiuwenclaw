@@ -228,7 +228,11 @@ def _path_is_under_trusted_root(path: Path, roots: list[Path]) -> bool:
 
 
 def _validate_cat_cafe_request_scoped_stdio(params: dict[str, Any]) -> None:
-    """限制请求级 stdio：禁止内联代码执行面，脚本路径须在受信根目录下。"""
+    """限制请求级 stdio：禁止内联代码执行面，脚本路径须在受信根目录下。
+
+    npx/uvx 为包运行器，参数为包名及其参数，不适用本地脚本路径受信根校验
+    （代码来源为包仓库而非本地文件，信任决策在于包名而非路径）。
+    """
     cmd = str(params.get("command") or "").strip()
     args = params.get("args") or []
     if not isinstance(args, list):
@@ -241,6 +245,9 @@ def _validate_cat_cafe_request_scoped_stdio(params: dict[str, Any]) -> None:
         raise ValueError("请求级 cat_cafe_mcp 禁止使用 python -c / --command")
     if kind == "node" and any(x in ("-e", "--eval") for x in lowered):
         raise ValueError("请求级 cat_cafe_mcp 禁止使用 node -e / --eval")
+
+    if kind in ("npx", "uvx"):
+        return
 
     cwd_path: Path | None = None
     cwd_raw = params.get("cwd")
