@@ -64,6 +64,41 @@ async def test_sync_serializes_concurrent_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_close_waits_for_active_sync() -> None:
+    manager = MemoryIndexManager("test-agent", ".", create_settings())
+    manager.db = sqlite3.connect(":memory:")
+
+    sync_entered = asyncio.Event()
+    release_sync = asyncio.Event()
+
+    async def should_full_reindex() -> bool:
+        sync_entered.set()
+        await release_sync.wait()
+        manager.db.execute("SELECT 1")
+        return False
+
+    with patch.object(
+        manager,
+        "_should_full_reindex",
+        side_effect=should_full_reindex,
+    ):
+        sync_task = asyncio.create_task(manager.sync(reason="test"))
+        await sync_entered.wait()
+        close_task = asyncio.create_task(manager.close())
+        await asyncio.sleep(0)
+
+        assert not close_task.done()
+        assert not manager.closed
+
+        release_sync.set()
+        await asyncio.gather(sync_task, close_task)
+
+    assert manager.closed
+    with pytest.raises(sqlite3.ProgrammingError):
+        manager.db.execute("SELECT 1")
+
+
+@pytest.mark.asyncio
 async def test_get_embedding_commits_cache_write() -> None:
     class Provider:
         id = "test-provider"
