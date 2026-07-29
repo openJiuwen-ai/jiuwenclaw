@@ -3896,10 +3896,6 @@ class JiuWenSwarmDeepAdapter:
                 # 注意：当前 27 个工具中无独立 web_search，
                 #       如需添加请确认工具已注册到 ability_manager
                 progressive_tool_default_visible_tools=[],
-                # v3.2 已删除 LRU/cap；此字段仅为基类 __init__ 读取（不再用于淘汰）。
-                progressive_tool_max_loaded_tools=int(
-                    react_cfg.get("progressive_tool_max_loaded_tools", 8)
-                ),
                 language="cn",
                 # 按需检索算法旋钮（react.tool_retrieval.*）
                 tool_retrieval_desc_cap=int(tr_cfg.get("desc_cap", 256)),

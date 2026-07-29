@@ -1,9 +1,9 @@
 # coding: utf-8
-"""JiuWenSwarm's ProgressiveToolRail subclass.
+"""JiuWenSwarm's self-contained on-demand tool-retrieval rail.
 
-ALL jiuwenswarm-specific changes live here — agent-core stays upstream-clean.
-Overrides via MRO: base class calls self._search_tools / self._init_visible_tools /
-self._build_navigation_section → Python resolves to our subclass versions.
+Decoupled from openjiuwen's ProgressiveToolRail: extends DeepAgentRail directly
+and inlines the subset of base helpers we use (see the class docstring). ALL
+jiuwenswarm-specific changes live here — agent-core stays upstream-clean.
 
 What's here (nothing in agent-core is modified):
 - Dense retrieval (_dense_search, _ensure_embedding_model, _precompute_tool_embeddings)
@@ -22,18 +22,24 @@ cap or evict.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Set
 
-from openjiuwen.harness.rails.progressive_tool_rail import (
-    ProgressiveToolRail,
-    _VISIBLE_TOOLS_KEY,
-    _DISCOVERY_TRACE_KEY,
-)
+from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenswarm.common import tool_retrieval
 
 logger = logging.getLogger("jiuwenswarm.harness.common.rails.search_tool_rail")
+
+# Session-state keys (previously imported from openjiuwen's ProgressiveToolRail;
+# inlined here so this rail no longer depends on that base class, which may be
+# removed during swarm slimming).
+_VISIBLE_TOOLS_KEY = "__progressive_visible_tool_names__"
+_DISCOVERY_TRACE_KEY = "__progressive_tool_discovery_trace__"
 
 _HIDDEN_CATEGORY_CN: Dict[str, tuple[str, str]] = {
     "todo": ("待办管理", "创建、查看、修改、获取待办事项"),
@@ -73,8 +79,16 @@ _HIDDEN_CATEGORY_EN: Dict[str, tuple[str, str]] = {
 }
 
 
-class JiuWenProgressiveToolRail(ProgressiveToolRail):
-    """All jiuwenswarm-specific overrides. agent-core base class stays untouched."""
+class JiuWenProgressiveToolRail(DeepAgentRail):
+    """Self-contained on-demand tool-retrieval rail.
+
+    Decoupled from openjiuwen's ProgressiveToolRail: extends DeepAgentRail
+    directly and inlines the subset of base helpers we actually use (tool
+    inventory, visible-tools session state, prompt-builder access, navigation
+    entries). Drops the v1 baggage (load_tools / LRU / three-tier demotion)
+    we never used, and removes the dependency on the upstream ProgressiveToolRail
+    base (which may be deleted during swarm slimming).
+    """
 
     priority = 80
     _navigation_extra_tools: Set[str] = {"code"}
@@ -120,7 +134,15 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
     )
 
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
+        # Base scaffolding (previously inherited from ProgressiveToolRail).
+        self._config = config
+        self.default_visible_tools = set(getattr(config, "progressive_tool_default_visible_tools", []) or [])
+        self.always_visible_tools = set(getattr(config, "progressive_tool_always_visible_tools", []) or [])
+        self._meta_tool_names: Set[str] = set()
+        self._owned_tool_names: Set[str] = set()
+        self._cached_all_tool_infos: List[ToolInfo] = []
+        # JiuWen retrieval knobs.
         self._desc_cap = int(getattr(config, "tool_retrieval_desc_cap", 256))
         self._embedding_model_name = getattr(
             config, "tool_retrieval_embedding_model", "BAAI/bge-small-zh-v1.5"
@@ -136,17 +158,53 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
             self._ensure_embedding_model()
 
     # ------------------------------------------------------------------
-    # Lifecycle overrides
+    # Lifecycle (inlined from base; no longer inherits ProgressiveToolRail)
     # ------------------------------------------------------------------
 
     async def before_invoke(self, ctx):
-        await super().before_invoke(ctx)
+        # Refresh the full tool inventory from ability_manager (each turn).
+        self._cached_all_tool_infos = await self._list_tool_infos(ctx.agent)
+        session = getattr(ctx, "session", None)
+        self._init_visible_tools(
+            session, default_visible_tools=list(self.default_visible_tools)
+        )
         self._build_executable_corpus(ctx)
-        self._precompute_tool_embeddings()
+        await asyncio.to_thread(self._precompute_tool_embeddings)
 
     async def before_model_call(self, ctx):
-        await super().before_model_call(ctx)
+        session = getattr(ctx, "session", None)
         builder = self._get_prompt_builder(ctx)
+
+        # Inject navigation + rules sections (our overrides).
+        navigation_section = await self._build_navigation_section(session)
+        rules_section = self._build_progressive_tool_rules_section()
+        builder.add_section(navigation_section)
+        builder.add_section(rules_section)
+
+        # Filter inputs.tools: keep only meta + baseline(always-visible) +
+        # session-visible. search never mutates session_visible (v3 name-based
+        # direct call; results stay in the ToolMessage only), so tools[] stays
+        # constant across turns → prompt-cache stable.
+        inputs = getattr(ctx, "inputs", None)
+        tools = getattr(inputs, "tools", None)
+        if isinstance(tools, list):
+            keep = (
+                set(self._meta_tool_names)
+                | set(self.always_visible_tools)
+                | set(self._get_visible_tools(session))
+            )
+
+            def _tool_name(t):
+                n = getattr(t, "name", "")
+                if n:
+                    return str(n)
+                if isinstance(t, dict):
+                    return str((t.get("function", {}) or {}).get("name", "") or "")
+                return ""
+
+            inputs.tools = [t for t in tools if _tool_name(t) in keep]
+
+        # Remove the static "tools" section (nav replaces it).
         builder.remove_section("tools")
         session = getattr(ctx, "session", None)
 
@@ -181,12 +239,6 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
                 language=language,
                 agent_id=agent_id,
                 top_k_max=self._top_k_max,
-                # load_fn=None: search results stay in the ToolMessage only;
-                # they never enter session_visible, so tools[] (prefill) stays
-                # constant across turns for prompt-cache stability. The LLM
-                # calls matched tools by name directly — ability_manager
-                # resolves by name regardless of the tools[] parameter.
-                load_fn=None,
             ),
         ]
         self._meta_tool_names = {tool.card.name for tool in tools}
@@ -214,16 +266,205 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
         session.update_state({_DISCOVERY_TRACE_KEY: []})
 
     # ------------------------------------------------------------------
-    # _search_tools — Dense + keyword fallback + shadow A/B
+    # Tool inventory + session state + prompt builder
+    # (ported from openjiuwen ProgressiveToolRail; only what we use)
+    # ------------------------------------------------------------------
+
+    def uninit(self, agent) -> None:
+        """Remove meta tools registered by this rail (teardown)."""
+        if hasattr(agent, "ability_manager"):
+            for tool_name in list(self._owned_tool_names):
+                try:
+                    agent.ability_manager.remove_ability(tool_name)
+                except Exception as exc:
+                    logger.warning("[JiuWenRail] failed to remove '%s': %s", tool_name, exc)
+        self._owned_tool_names.clear()
+        self._meta_tool_names.clear()
+        self._cached_all_tool_infos = []
+
+    async def _list_tool_infos(self, agent) -> List[ToolInfo]:
+        """List all tool infos currently registered on the agent."""
+        if not hasattr(agent, "ability_manager"):
+            return []
+        try:
+            tool_infos = await agent.ability_manager.list_tool_info()
+            return list(tool_infos or [])
+        except Exception as exc:
+            logger.warning("[JiuWenRail] failed to list tool infos: %s", exc)
+            return []
+
+    async def _list_all_tool_infos(self) -> List[ToolInfo]:
+        """Return cached full tool inventory."""
+        return list(self._cached_all_tool_infos or [])
+
+    async def _get_real_tool_infos(self) -> List[ToolInfo]:
+        """Return non-meta tools from the cached inventory."""
+        infos = await self._list_all_tool_infos()
+        return [
+            tool
+            for tool in infos
+            if getattr(tool, "name", "") not in self._meta_tool_names
+        ]
+
+    def _get_visible_tools(self, session) -> List[str]:
+        """Read current session-visible tool names."""
+        if session is None:
+            return []
+        state = session.get_state(_VISIBLE_TOOLS_KEY)
+        if isinstance(state, list):
+            return [str(item).strip() for item in state if str(item).strip()]
+        return []
+
+    def _append_trace(self, session, event) -> None:
+        """Append progressive-tool discovery trace into session state."""
+        if session is None:
+            return
+        trace = session.get_state(_DISCOVERY_TRACE_KEY)
+        if not isinstance(trace, list):
+            trace = []
+        trace.append(event)
+        session.update_state({_DISCOVERY_TRACE_KEY: trace})
+
+    @staticmethod
+    def _get_prompt_builder(ctx: AgentCallbackContext) -> SystemPromptBuilder:
+        """Fetch persistent SystemPromptBuilder from agent."""
+        agent = getattr(ctx, "agent", None)
+        if agent is None:
+            raise RuntimeError("JiuWenProgressiveToolRail requires ctx.agent to exist.")
+        builder = getattr(agent, "system_prompt_builder", None)
+        if not isinstance(builder, SystemPromptBuilder):
+            raise RuntimeError(
+                "JiuWenProgressiveToolRail requires agent.system_prompt_builder "
+                "to be a SystemPromptBuilder instance."
+            )
+        return builder
+
+    # ------------------------------------------------------------------
+    # Navigation entries (ported from base; build_navigation_entry inlined)
+    # ------------------------------------------------------------------
+
+    async def _build_navigation_entries(self, session, language: str = "cn") -> List[str]:
+        all_tools = await self._get_real_tool_infos()
+        loaded = set(self._get_visible_tools(session))
+        baseline = (
+            set(self.always_visible_tools)
+            | set(self.default_visible_tools)
+            | set(self._navigation_extra_tools)
+        )
+        entries: List[str] = []
+        seen: Set[str] = set()
+
+        def include_tool(name: str) -> bool:
+            if name in seen:
+                return False
+            if name in baseline:
+                return True
+            if name in loaded:
+                return True
+            if name in {"code", "read_file", "bash", "list_skill", "pdf", "xlsx"}:
+                return True
+            return False
+
+        sorted_tools = sorted(
+            all_tools,
+            key=lambda t: (
+                self._tool_group_rank(t),
+                str(getattr(t, "name", "") or ""),
+            ),
+        )
+
+        for tool in sorted_tools:
+            name = str(getattr(tool, "name", "") or "")
+            if not name or not include_tool(name):
+                continue
+            seen.add(name)
+            summary = self._tool_summary_for_navigation(tool)
+            group = self._tool_group_for_navigation(tool)
+            if language == "en":
+                status = (
+                    "callable"
+                    if name in loaded or name in self.always_visible_tools
+                    else "navigation-only"
+                )
+                group_label = group
+            else:
+                status = (
+                    "可调用"
+                    if name in loaded or name in self.always_visible_tools
+                    else "仅导航"
+                )
+                group_label = self._tool_group_to_cn(group)
+            entries.append(
+                self._format_nav_entry(
+                    name=name,
+                    group=group_label,
+                    status=status,
+                    summary=summary,
+                    language=language,
+                )
+            )
+        return entries
+
+    @staticmethod
+    def _format_nav_entry(*, name, group, status, summary, language="cn") -> str:
+        if language == "en":
+            return f"- {name} [{group}, {status}]: {summary}"
+        return f"- {name} [{group}, {status}]：{summary}"
+
+    @staticmethod
+    def _tool_summary_for_navigation(tool) -> str:
+        description = str(getattr(tool, "description", "") or "").strip()
+        if not description:
+            return "No summary available."
+        line = description.splitlines()[0].strip()
+        return line[:160]
+
+    @staticmethod
+    def _tool_group_for_navigation(tool) -> str:
+        name = str(getattr(tool, "name", "") or "").lower()
+        description = str(getattr(tool, "description", "") or "").lower()
+        if any(k in name for k in ["read", "write", "edit", "file", "bash", "code"]):
+            return "runtime"
+        if any(k in name for k in ["pdf", "invoice", "document"]):
+            return "document"
+        if any(k in name for k in ["xlsx", "excel", "sheet", "spreadsheet"]):
+            return "spreadsheet"
+        if "skill" in name:
+            return "skill"
+        if any(k in description for k in ["pdf", "invoice", "document"]):
+            return "document"
+        if any(k in description for k in ["xlsx", "excel", "spreadsheet"]):
+            return "spreadsheet"
+        return "general"
+
+    @staticmethod
+    def _tool_group_to_cn(group: str) -> str:
+        return {
+            "skill": "技能",
+            "runtime": "运行时",
+            "document": "文档",
+            "spreadsheet": "表格",
+            "general": "通用",
+        }.get(group, "通用")
+
+    @staticmethod
+    def _tool_group_rank(tool) -> int:
+        group = JiuWenProgressiveToolRail._tool_group_for_navigation(tool)
+        return {"skill": 0, "runtime": 1, "document": 2, "spreadsheet": 3, "general": 9}.get(group, 99)
+
+    # ------------------------------------------------------------------
+    # _search_tools — Dense only (keyword fallback dropped post-decouple;
+    # the embedding model is loaded eagerly in __init__, so dense is the
+    # only path; returns [] if the model isn't ready yet).
     # ------------------------------------------------------------------
 
     async def _search_tools(self, query, limit=10, detail_level=1):
         query = (query or "").strip()
         if not query:
             return []
-        if self._embedding_model is not None and self._cached_tool_embeddings:
-            return self._dense_search(query, limit, detail_level)
-        return await super()._search_tools(query, limit, detail_level)
+        if self._embedding_model is None or not self._cached_tool_embeddings:
+            return []
+        return await asyncio.to_thread(self._dense_search, query, limit, detail_level)
 
     def _dense_search(self, query, limit, detail_level):
         return tool_retrieval.dense_search(

@@ -12,6 +12,10 @@ def ensure_embedding_model(model_name: str = "BAAI/bge-small-zh-v1.5"):
     """Load the embedding model via fastembed; return model or None."""
     if not os.environ.get("HF_ENDPOINT"):
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+        logger.info(
+            "[tool_retrieval] HF_ENDPOINT not set; defaulting to CN mirror "
+            "(https://hf-mirror.com). Set HF_ENDPOINT explicitly to override."
+        )
     try:
         from fastembed import TextEmbedding
 

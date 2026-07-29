@@ -78,8 +78,8 @@ class DenseSearchTool(Tool):
     returns full tool definitions (including JSON Schema parameters) in the
     result. The LLM calls matched tools by name directly — they are resolved
     by ability_manager regardless of the request tools[] list, so the
-    prefill stays cache-stable. Auto-load into session_visible is opt-in
-    via load_fn (disabled by default).
+    prefill stays cache-stable. Matched tools never enter session_visible
+    (v3 name-based direct call; no load/evict).
     """
 
     TOOL_NAME = "search_tools"
@@ -91,7 +91,6 @@ class DenseSearchTool(Tool):
         append_trace: Callable[[Any, Dict[str, Any]], None],
         language: str = "cn",
         agent_id: Optional[str] = None,
-        load_fn: Optional[Callable[[Any, List[str]], Any]] = None,
         top_k_max: int = 3,
     ):
         self._language = language
@@ -104,7 +103,6 @@ class DenseSearchTool(Tool):
         )
         super().__init__(card)
         self._search_fn = search_fn
-        self._load_fn = load_fn
         self._append_trace = append_trace
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
@@ -120,31 +118,6 @@ class DenseSearchTool(Tool):
             )
 
             session = kwargs.get("session")
-            loaded_names: List[str] = []
-            evicted_names: List[str] = []
-            load_ok = True
-            # Auto-load is opt-in (load_fn provided). When disabled (the default),
-            # matched tools stay out of session_visible so the request "tools"
-            # list (prefill) stays constant for prompt-cache stability. The LLM
-            # calls them by name directly — ability_manager resolves by name
-            # regardless of the tools[] parameter.
-            if self._load_fn is not None and session is not None and results:
-                loaded_names = [
-                    r.get("name", "") for r in results if r.get("name")
-                ]
-                if loaded_names:
-                    try:
-                        _next, _added, evicted = self._load_fn(
-                            session, loaded_names
-                        )
-                        evicted_names = evicted
-                    except Exception as load_exc:
-                        load_ok = False
-                        logger.warning(
-                            "[DenseSearchTool] auto-load failed (search OK): %s",
-                            load_exc,
-                        )
-
             self._append_trace(
                 session,
                 {
@@ -152,21 +125,14 @@ class DenseSearchTool(Tool):
                     "query": parsed.query,
                     "top_k": top_k,
                     "match_count": len(results),
-                    "auto_loaded": loaded_names if load_ok else [],
-                    "evicted": evicted_names,
-                    "load_error": not load_ok,
                 },
             )
 
             logger.info(
-                "[DenseSearchTool] query=%r | top_k=%d | found=%d | "
-                "loaded=%s | evicted=%s | load_ok=%s",
+                "[DenseSearchTool] query=%r | top_k=%d | found=%d",
                 parsed.query,
                 top_k,
                 len(results),
-                loaded_names[:3] if load_ok else [],
-                evicted_names,
-                load_ok,
             )
 
             is_cn = self._language != "en"
@@ -176,30 +142,9 @@ class DenseSearchTool(Tool):
                     if is_cn
                     else "No matching tools found. Try a different description."
                 )
-            elif not load_ok:
-                note = (
-                    f"找到 {len(results)} 个工具，但自动加载失败，请稍后重试搜索。"
-                    if is_cn
-                    else f"Found {len(results)} tools, but auto-load failed. "
-                    "Please try searching again later."
-                )
-            elif self._load_fn is not None:
-                # Auto-load path (legacy): tools are loaded into session_visible.
-                note = (
-                    "以上工具已自动加载，下一轮可直接调用。"
-                    if is_cn
-                    else "The above tools have been auto-loaded and are "
-                    "callable in the next turn."
-                )
-                if evicted_names:
-                    note += (
-                        f"（为腾出空间，已移除：{', '.join(evicted_names)}）"
-                        if is_cn
-                        else f" (Evicted to make room: {', '.join(evicted_names)})"
-                    )
             else:
-                # Default path: full definitions returned in the result; the LLM
-                # calls tools by name directly. tools[] (prefill) is unchanged.
+                # v3 default path: full definitions returned in the result; the
+                # LLM calls tools by name directly. tools[] (prefill) is unchanged.
                 note = (
                     "以上工具已找到（含完整参数定义）。这些工具不在你的 "
                     "tools 列表中，但已注册可直接按 name 调用。"
