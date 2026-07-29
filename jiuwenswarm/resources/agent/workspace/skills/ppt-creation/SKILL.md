@@ -154,7 +154,7 @@ node scripts/validate-execution-lock.js <project>/execution-lock.json --phase de
 
 论文 `paper-figure` 路线必须复用 `scripts/extract_arxiv_visuals_v2_2.py`：准备脚本会读取其 manifest，按 Figure/Table 标签和 Caption 关键词选择；选择不唯一时查看论文 contact sheet 后再批准。不得重新实现一套论文裁图器。
 
-素材状态只使用 `planned / acquiring / ready / used / needs-manual / skipped`。运行 `prepare-evidence.py` 后必须查看 `analysis/evidence-contact-sheet.jpg` 或论文专属 contact sheet，再用 `--approve <id>` 将项目置为 ready。素材实际进入 PPT 后用 `--used <id>` 记录使用状态。视觉方案发生变化时同步修改 `design-spec.md`、`evidence-plan.json` 与 `execution-lock.json`，不允许资源仍标记为 planned 而页面静默改走其他路径。
+素材状态只使用 `planned / acquiring / ready / used / needs-manual / skipped`。运行 `prepare_evidence.py` 后必须查看 `analysis/evidence-contact-sheet.jpg` 或论文专属 contact sheet，再用 `--approve <id>` 将项目置为 ready。素材实际进入 PPT 后用 `--used <id>` 记录使用状态。视觉方案发生变化时同步修改 `design-spec.md`、`evidence-plan.json` 与 `execution-lock.json`，不允许资源仍标记为 planned 而页面静默改走其他路径。
 
 ### 5. Executor：在空白内容母版内逐页生成
 

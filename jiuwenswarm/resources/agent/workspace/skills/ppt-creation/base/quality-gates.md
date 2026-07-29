@@ -81,7 +81,7 @@ soffice --version >/dev/null 2>&1 && pdftoppm -v >/dev/null 2>&1 && echo FULL ||
 ## 推荐检查顺序
 
 1. `validate-execution-lock.js --phase design`；
-2. `validate-evidence-plan.js --phase design`，运行 `prepare-evidence.py`；
+2. `validate-evidence-plan.js --phase design`，运行 `prepare_evidence.py`；
 3. 查看 evidence contact sheet，批准合格项并执行两个 `--phase generate` 校验；
 4. 生成固定封面和一张代表性复杂内容页；
 5. 构建并处理所有硬错误；
@@ -92,7 +92,7 @@ soffice --version >/dev/null 2>&1 && pdftoppm -v >/dev/null 2>&1 && echo FULL ||
 10. 主 Agent 必须打开缩略图总览，逐页检查标题截断、视觉重心、构图重复、证据可读性和底部框架；只生成图片但不查看不算视觉 QA；
 11. 几何 error 清零后，代表性页面还需单页高清渲染确认（`pdftoppm -r 130`）；缩略图只用于看整体节奏，不用于判断单页质量；
 12. 修复硬错误，再处理真正影响表达的软建议；
-13. 用 `python3 scripts/prepare-evidence.py . --used <id>` 将实际使用的证据标为 used，执行两个 `--phase deliver` 校验。
+13. 用 `python3 scripts/prepare_evidence.py . --used <id>` 将实际使用的证据标为 used，执行两个 `--phase deliver` 校验。
 
 ## 常用命令
 

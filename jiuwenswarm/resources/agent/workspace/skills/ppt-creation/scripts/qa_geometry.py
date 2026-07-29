@@ -31,6 +31,13 @@ NS = {
 }
 
 
+@dataclass(frozen=True)
+class Offset:
+    """group 造成的坐标偏移（已换算为英寸）。"""
+    dx: float = 0.0
+    dy: float = 0.0
+
+
 @dataclass
 class Element:
     z: int                      # 文档顺序 = z-order，越大越靠上
@@ -139,8 +146,8 @@ def _text_and_fonts(node):
     return "".join(txt), fonts
 
 
-def _walk(container, scale, elements, z_start=0, dx=0.0, dy=0.0):
-    """递归收集元素。dx/dy 是 group 造成的偏移（已换算为英寸）。"""
+def _walk(container, scale, elements, z_start=0, offset=Offset()):
+    """递归收集元素。offset 是 group 造成的偏移（已换算为英寸）。"""
     z = z_start
     for node in container:
         ln = _lname(node.tag)
@@ -150,7 +157,7 @@ def _walk(container, scale, elements, z_start=0, dx=0.0, dy=0.0):
         if geom is None:
             continue
         x, y, cx, cy = [v / EMU_PER_INCH / scale for v in geom]
-        x, y = x + dx, y + dy
+        x, y = x + offset.dx, y + offset.dy
 
         nv = node.find(f"p:nv{'Grp' if ln == 'grpSp' else ''}SpPr/p:cNvPr", NS)
         if nv is None:
@@ -162,7 +169,7 @@ def _walk(container, scale, elements, z_start=0, dx=0.0, dy=0.0):
 
         if ln == "grpSp":
             # group 内部坐标需按 chOff/chExt 映射；这里做常见情况的近似处理
-            z = _walk(node, scale, elements, z, dx=x - 0, dy=y - 0)
+            z = _walk(node, scale, elements, z, Offset(dx=x, dy=y))
             continue
 
         text, fonts = _text_and_fonts(node)
@@ -178,10 +185,10 @@ def _walk(container, scale, elements, z_start=0, dx=0.0, dy=0.0):
 def parse_slide(xml_bytes, scale):
     import xml.etree.ElementTree as ET
     root = ET.fromstring(xml_bytes)
-    spTree = root.find(".//p:cSld/p:spTree", NS)
+    sp_tree = root.find(".//p:cSld/p:spTree", NS)
     elements = []
-    if spTree is not None:
-        _walk(spTree, scale, elements)
+    if sp_tree is not None:
+        _walk(sp_tree, scale, elements)
     return elements
 
 
@@ -342,7 +349,9 @@ def check_occlusion(els, min_area=0.02, min_frac=0.10):
 def check_bounds(els, tol=0.02):
     out = []
     for e in els:
-        if e.x < -tol or e.y < -tol or e.x2 > AUTHOR_W + tol or e.y2 > AUTHOR_H + tol:
+        starts_off_canvas = e.x < -tol or e.y < -tol
+        ends_off_canvas = e.x2 > AUTHOR_W + tol or e.y2 > AUTHOR_H + tol
+        if starts_off_canvas or ends_off_canvas:
             out.append({
                 "type": "out-of-bounds",
                 "severity": "error",
@@ -447,9 +456,9 @@ def main():
     by_slide = {}
     for f in rep["findings"]:
         by_slide.setdefault(f["slide"], []).append(f)
-    for s in sorted(by_slide):
-        print(f"\n— slide {s}")
-        for f in by_slide[s]:
+    for slide_no, slide_findings in sorted(by_slide.items()):
+        print(f"\n— slide {slide_no}")
+        for f in slide_findings:
             mark = "✗" if f["severity"] == "error" else "!"
             print(f"  {mark} [{f['type']}] {f['detail']}")
     return 1 if rep["errors"] else 0

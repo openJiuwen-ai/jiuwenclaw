@@ -73,9 +73,11 @@ def main():
         if not judged:
             verdict = "exempt" if args.lock or i in (1, len(chars)) else "structural?"
         elif n < FLOOR_HARD:
-            verdict = "EMPTY"; errors += 1
+            verdict = "EMPTY"
+            errors += 1
         elif n < FLOOR_WARN:
-            verdict = "LOW"; warnings += 1
+            verdict = "LOW"
+            warnings += 1
         else:
             verdict = "OK"
         rows.append({"page": i, "role": role or "-", "vis_chars": n, "verdict": verdict})

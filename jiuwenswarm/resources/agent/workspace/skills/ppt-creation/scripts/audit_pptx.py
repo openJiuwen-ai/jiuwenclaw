@@ -258,7 +258,12 @@ def summary_band(root: ET.Element, width: int, height: int, fill: str) -> bool:
         x, y, w, h = rect
         color = shape.find("./p:spPr/a:solidFill/a:srgbClr", NS)
         value = (color.get("val", "").upper() if color is not None else "")
-        if value == wanted and y > height * 0.75 and w > width * 0.75 and h > height * 0.035:
+        if value != wanted:
+            continue
+        sits_in_footer_band = y > height * 0.75
+        spans_page_width = w > width * 0.75
+        thick_enough = h > height * 0.035
+        if sits_in_footer_band and spans_page_width and thick_enough:
             return True
     return False
 
@@ -290,18 +295,30 @@ def audit(args: argparse.Namespace) -> dict:
         if args.template:
             with zipfile.ZipFile(Path(args.template).resolve()) as tz:
                 template_size = slide_size(tz)
-                template_masters = [name for name in tz.namelist() if re.fullmatch(r"ppt/slideMasters/slideMaster\d+\.xml", name)]
-                template_layouts = [name for name in tz.namelist() if re.fullmatch(r"ppt/slideLayouts/slideLayout\d+\.xml", name)]
+                template_masters = [
+                    name for name in tz.namelist()
+                    if re.fullmatch(r"ppt/slideMasters/slideMaster\d+\.xml", name)
+                ]
+                template_layouts = [
+                    name for name in tz.namelist()
+                    if re.fullmatch(r"ppt/slideLayouts/slideLayout\d+\.xml", name)
+                ]
                 template_layout_names = {posixpath.basename(name) for name in template_layouts}
             if (width, height) != template_size:
-                errors.append(f"canvas {width}x{height} does not match official template {template_size[0]}x{template_size[1]}")
+                errors.append(
+                    f"canvas {width}x{height} does not match official template "
+                    f"{template_size[0]}x{template_size[1]}"
+                )
             if len(masters) < len(template_masters):
                 errors.append(f"only {len(masters)} masters; official template has {len(template_masters)}")
             if len(layouts) < len(template_layouts):
                 errors.append(f"only {len(layouts)} layouts; official template has {len(template_layouts)}")
 
         if lock and len(slides) != len(lock.get("pages", [])):
-            errors.append(f"slide count {len(slides)} does not match execution lock page count {len(lock.get('pages', []))}")
+            errors.append(
+                f"slide count {len(slides)} does not match execution lock "
+                f"page count {len(lock.get('pages', []))}"
+            )
 
         paper_digests: dict[str, str] = {}
         if args.evidence_plan:
@@ -346,7 +363,10 @@ def audit(args: argparse.Namespace) -> dict:
             all_sizes.extend(sizes)
             below_absolute = sorted(size for size in sizes if size < args.absolute_min_font)
             if below_absolute:
-                errors.append(f"slide {index} has explicit font size below {args.absolute_min_font}pt: {below_absolute[0]:g}pt")
+                errors.append(
+                    f"slide {index} has explicit font size below "
+                    f"{args.absolute_min_font}pt: {below_absolute[0]:g}pt"
+                )
             # Footer chrome is excluded here on purpose -- see body_font_sizes.
             # The absolute floor above still applies to every run on the page.
             below_body = [size for size in body_font_sizes(root, height) if size < args.body_min_font]
@@ -362,7 +382,9 @@ def audit(args: argparse.Namespace) -> dict:
                     if not rect:
                         continue
                     x, y, w, h = rect
-                    if x < -1000 or y < -1000 or x + w > width + 1000 or y + h > height + 1000:
+                    starts_off_canvas = x < -1000 or y < -1000
+                    ends_off_canvas = x + w > width + 1000 or y + h > height + 1000
+                    if starts_off_canvas or ends_off_canvas:
                         out_of_bounds += 1
                     if text_of(shape) and y < height * 0.14:
                         top_text_sizes.extend(explicit_font_sizes(shape))
@@ -377,7 +399,8 @@ def audit(args: argparse.Namespace) -> dict:
                     band_fill = lock.get("brand", {}).get("summary_banner", {}).get("fill", "4472C4")
                     if not summary_band(root, width, height, band_fill):
                         errors.append(f"slide {index} standard-content page is missing the fixed summary band")
-                    title_min = lock.get("deck", {}).get("typography_policy", {}).get("title_min_pt", args.title_min_font)
+                    typography = lock.get("deck", {}).get("typography_policy", {})
+                    title_min = typography.get("title_min_pt", args.title_min_font)
                     if not top_text_sizes or max(top_text_sizes) < title_min:
                         errors.append(f"slide {index} content title is missing or below {title_min}pt")
                     # Under footer_mode "master" the page must not draw its own
@@ -464,7 +487,9 @@ def main() -> int:
 
     try:
         report = audit(args)
-    except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError, json.JSONDecodeError) as cause:
+    # ValueError already covers json.JSONDecodeError; listing both trips the
+    # "parent and child exception" rule.
+    except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as cause:
         print(f"[ERROR] audit failed: {cause}", file=sys.stderr)
         return 1
 

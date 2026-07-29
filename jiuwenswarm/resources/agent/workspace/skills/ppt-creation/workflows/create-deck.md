@@ -96,13 +96,13 @@ node ../scripts/validate-evidence-plan.js evidence-plan.json --phase design
 按 `acquire-visuals.md` 获取用户素材、论文图、网络图或其他视觉。先执行：
 
 ```bash
-python3 ../scripts/prepare-evidence.py .
+python3 ../scripts/prepare_evidence.py .
 ```
 
 论文路线会调用现有 Figure/Table 提取器并生成 `analysis/papers/<id>/contact_sheet.png`；通用素材总览为 `analysis/evidence-contact-sheet.jpg`。主 Agent 必须查看总览，再批准合格项：
 
 ```bash
-python3 ../scripts/prepare-evidence.py . --approve <evidence-id>
+python3 ../scripts/prepare_evidence.py . --approve <evidence-id>
 node ../scripts/validate-evidence-plan.js evidence-plan.json --phase generate
 ```
 
@@ -149,4 +149,4 @@ python3 ../scripts/finalize_deck.py output/content.pptx output/final.pptx \
 
 ## 9. QA 与交付
 
-按 `../base/quality-gates.md` 执行。页面真正使用素材后运行 `python3 ../scripts/prepare-evidence.py . --used <evidence-id>`。交付前运行 evidence plan、execution lock、`audit_pptx.py` 和缩略图总览检查，输出 PPTX、QA 说明、素材来源和回退清单。
+按 `../base/quality-gates.md` 执行。页面真正使用素材后运行 `python3 ../scripts/prepare_evidence.py . --used <evidence-id>`。交付前运行 evidence plan、execution lock、`audit_pptx.py` 和缩略图总览检查，输出 PPTX、QA 说明、素材来源和回退清单。

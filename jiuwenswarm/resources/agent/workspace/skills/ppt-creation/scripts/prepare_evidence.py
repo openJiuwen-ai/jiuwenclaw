@@ -25,6 +25,12 @@ FILE_COPY_ROUTES = {
     "official-logo", "formula", "manual",
 }
 
+# Routes that land a file on disk, so their "path" must stay under the asset root.
+PATH_BEARING_ROUTES = FILE_COPY_ROUTES | {"paper-figure", "web", "ai-illustration"}
+
+# A planned item is (re)prepared only from one of these states.
+PREPARABLE_STATUSES = {"planned", "acquiring", "needs-manual"}
+
 
 def nonempty(value) -> bool:
     return isinstance(value, str) and bool(value.strip())
@@ -122,7 +128,8 @@ def prepare_paper(item: dict, root: Path, analysis_root: Path, force: bool) -> N
         item["status"] = "needs-manual"
         item["review"] = {
             "status": "pending",
-            "notes": "Automatic selection was ambiguous; inspect the paper contact sheet and set a label/caption selector.",
+            "notes": "Automatic selection was ambiguous; inspect the paper contact "
+                     "sheet and set a label/caption selector.",
         }
         return
     include_caption = bool((item.get("paper_selector") or {}).get("include_caption", False))
@@ -135,7 +142,8 @@ def prepare_paper(item: dict, root: Path, analysis_root: Path, force: bool) -> N
     item["status"] = "acquiring"
     item["review"] = {
         "status": "pending",
-        "notes": f"Selected {selected.get('type')} {selected.get('label')} from page {selected.get('page_number')}; visual review required.",
+        "notes": f"Selected {selected.get('type')} {selected.get('label')} from "
+                 f"page {selected.get('page_number')}; visual review required.",
     }
     item["result"].update({
         "selected_id": selected.get("id"),
@@ -165,14 +173,20 @@ def prepare_item(item: dict, root: Path, analysis_root: Path, force: bool) -> No
             raise ValueError("web requires a confirmed source_url and path")
         download_asset(item["source_url"], destination, force)
         item["status"] = "acquiring"
-        item["review"] = {"status": "pending", "notes": "Downloaded from confirmed URL; verify identity, quality, and rights."}
+        item["review"] = {
+            "status": "pending",
+            "notes": "Downloaded from confirmed URL; verify identity, quality, and rights.",
+        }
         return
     if route == "native-chart":
         source = resolve(root, item.get("source_path"))
         if source is None or not source.exists():
             raise ValueError("native-chart requires an existing source_path")
         item["status"] = "ready"
-        item["review"] = {"status": "not-required", "notes": "Data source is ready; chart rendering is handled in slides.js."}
+        item["review"] = {
+            "status": "not-required",
+            "notes": "Data source is ready; chart rendering is handled in slides.js.",
+        }
         return
     if route == "native-drawing":
         item["status"] = "ready"
@@ -184,7 +198,11 @@ def prepare_item(item: dict, root: Path, analysis_root: Path, force: bool) -> No
         prompt_path = prompt_dir / f"{item['id']}.md"
         prompt_path.write_text(item.get("query") or item.get("reference") or item.get("purpose"), encoding="utf-8")
         item["status"] = "needs-manual"
-        item["review"] = {"status": "pending", "notes": f"Generate with the host image tool using {prompt_path.relative_to(root)}; AI cannot serve as factual evidence."}
+        item["review"] = {
+            "status": "pending",
+            "notes": f"Generate with the host image tool using "
+                     f"{prompt_path.relative_to(root)}; AI cannot serve as factual evidence.",
+        }
         return
     raise ValueError(f"unsupported acquire_via: {route}")
 
@@ -225,8 +243,11 @@ def make_contact_sheet(plan: dict, root: Path, analysis_root: Path) -> None:
         if path and path.exists():
             try:
                 entries.append((item["id"], path, Image.open(path).convert("RGB")))
-            except Exception:
-                pass
+            except (OSError, ValueError) as cause:
+                # A single unreadable asset must not sink the whole sheet; name it
+                # on stderr so the missing tile is traceable.
+                print(f"[WARN] contact sheet skipped {item.get('id')}: {cause}",
+                      file=sys.stderr)
     if not entries:
         return
     cell_w, cell_h, label_h, cols = 360, 220, 34, 3
@@ -238,7 +259,9 @@ def make_contact_sheet(plan: dict, root: Path, analysis_root: Path) -> None:
         x = (index % cols) * cell_w + (cell_w - image.width) // 2
         y = (index // cols) * (cell_h + label_h) + (cell_h - image.height) // 2
         sheet.paste(image, (x, y))
-        draw.text(((index % cols) * cell_w + 10, (index // cols) * (cell_h + label_h) + cell_h + 5), label, fill="black")
+        label_x = (index % cols) * cell_w + 10
+        label_y = (index // cols) * (cell_h + label_h) + cell_h + 5
+        draw.text((label_x, label_y), label, fill="black")
     analysis_root.mkdir(parents=True, exist_ok=True)
     sheet.save(analysis_root / "evidence-contact-sheet.jpg", quality=92)
 
@@ -272,23 +295,29 @@ def main() -> int:
     used = set(args.used)
     rejections = set(args.reject)
     errors = []
+    # --approve / --used / --reject act on named items only; a bare run prepares.
+    review_pass = bool(approvals or used or rejections)
     for item in plan.get("items", []):
+        item_id = item.get("id")
+        in_scope = not selected or item_id in selected
         try:
-            if item.get("acquire_via") in FILE_COPY_ROUTES | {"paper-figure", "web", "ai-illustration"} and nonempty(item.get("path")):
+            if item.get("acquire_via") in PATH_BEARING_ROUTES and nonempty(item.get("path")):
                 destination = resolve(root, item.get("path"))
                 if destination is not None:
                     destination.relative_to(asset_root)
-            if item.get("id") in used:
+            if item_id in used:
                 use_item(item, root)
-            elif item.get("id") in approvals:
+            elif item_id in approvals:
                 approve_item(item, root)
-            elif item.get("id") in rejections:
+            elif item_id in rejections:
                 item["status"] = "needs-manual"
                 item["review"] = {"status": "rejected", "notes": "Rejected during visual review."}
-            elif not approvals and not used and not rejections and (not selected or item.get("id") in selected):
+            elif not review_pass and in_scope:
                 status = item.get("status")
-                requested_retry = bool(selected and item.get("id") in selected)
-                if status in {"planned", "acquiring", "needs-manual"} and (status == "planned" or requested_retry or args.force):
+                requested_retry = bool(selected and item_id in selected)
+                preparable = status in PREPARABLE_STATUSES
+                wanted = status == "planned" or requested_retry or args.force
+                if preparable and wanted:
                     prepare_item(item, root, analysis_root, args.force)
         except Exception as cause:
             item["status"] = "needs-manual"

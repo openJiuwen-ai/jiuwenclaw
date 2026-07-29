@@ -258,7 +258,9 @@ def download_pdf(url: str, destination: Path, retries: int = 3) -> None:
                 raise ValueError("下载内容不是 PDF，可能是 HTML 错误页或受限页面。")
             temp_path.replace(destination)
             return
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        # OSError already covers urllib.error.URLError and TimeoutError; listing
+        # them alongside it trips the "parent and child exception" rule.
+        except (OSError, ValueError) as exc:
             last_error = exc
             temp_path.unlink(missing_ok=True)
             if attempt < retries:
@@ -471,7 +473,7 @@ def trim_white_border(
         top = max(0, min(ys) - border)
         right = min(width, max(xs) + border + 1)
         bottom = min(height, max(ys) + border + 1)
-        if left == 0 and top == 0 and right == width and bottom == height:
+        if (left, top, right, bottom) == (0, 0, width, height):
             return width, height
         cropped = image.crop((left, top, right, bottom))
         cropped.save(path)
@@ -514,17 +516,20 @@ def column_bounds(page: pymupdf.Page, caption: pymupdf.Rect) -> tuple[float, flo
 
 def graphical_regions(page: pymupdf.Page) -> list[tuple[float, float, float, float]]:
     regions: list[tuple[float, float, float, float]] = []
+    # Both probes are best-effort enrichment: PyMuPDF raises on malformed or
+    # unusual content streams, and one failing probe must not lose the other's
+    # regions. Report which one dropped out instead of swallowing it silently.
     try:
         regions.extend(normalize_rect(rect) for rect in page.cluster_drawings())
-    except Exception:
-        pass
+    except Exception as cause:
+        log(f"page {page.number}: cluster_drawings unavailable ({cause})")
     try:
         for info in page.get_image_info():
             bbox = rect_tuple(info.get("bbox"))
             if bbox is not None:
                 regions.append(normalize_rect(bbox))
-    except Exception:
-        pass
+    except Exception as cause:
+        log(f"page {page.number}: get_image_info unavailable ({cause})")
     return [rect for rect in regions if area(rect) >= 350]
 
 
@@ -640,7 +645,8 @@ def infer_figure_region(
                 current_bottom = max(current_bottom, graphic[3])
 
         merged = union_rect(*selected)
-        assert merged is not None
+        if merged is None:
+            raise RuntimeError("union_rect returned None for a non-empty selection")
         x0 = max(left, merged[0])
         x1 = min(right, merged[2])
         y0 = max(page.rect.y0, merged[1])
@@ -800,13 +806,13 @@ def caption_heuristic_candidates(
             kind, label = parsed
             caption_bbox = normalize_rect(tuple(caption_rect))
 
-            same_label = [
-                candidate
-                for candidate in existing + out
-                if candidate.page_index == page_index
-                and candidate.kind == kind
-                and safe_label(candidate.label).lower() == safe_label(label).lower()
-            ]
+            wanted_label = safe_label(label).lower()
+            same_label = []
+            for candidate in existing + out:
+                if candidate.page_index != page_index or candidate.kind != kind:
+                    continue
+                if safe_label(candidate.label).lower() == wanted_label:
+                    same_label.append(candidate)
             if same_label:
                 for candidate in same_label:
                     if candidate.caption_bbox is None:
@@ -818,7 +824,8 @@ def caption_heuristic_candidates(
                 if kind == "figure":
                     continue
                 combined_existing = union_rect(*(candidate.region_bbox for candidate in same_label))
-                assert combined_existing is not None
+                if combined_existing is None:
+                    raise RuntimeError("union_rect returned None for a non-empty label group")
                 above_gap = combined_existing[1] - caption_rect.y1
                 below_gap = caption_rect.y0 - combined_existing[3]
                 nearest_gap = min(
@@ -908,7 +915,8 @@ def merge_same_label_tables(candidates: Iterable[Candidate]) -> list[Candidate]:
             merged.append(group[0])
             continue
         region = union_rect(*(item.region_bbox for item in group))
-        assert region is not None
+        if region is None:
+            raise RuntimeError("union_rect returned None for a non-empty table group")
         caption_item = next((item for item in group if item.caption_bbox), group[0])
         merged.append(
             Candidate(
@@ -955,7 +963,10 @@ def deduplicate(candidates: Iterable[Candidate]) -> list[Candidate]:
             containment = intersection_area(old.region_bbox, candidate.region_bbox) / max(
                 1.0, min(area(old.region_bbox), area(candidate.region_bbox))
             )
-            if overlap > 0.42 or containment > 0.78 or (same_label and overlap > 0.04):
+            strong_overlap = overlap > 0.42
+            mostly_contained = containment > 0.78
+            same_label_touching = same_label and overlap > 0.04
+            if strong_overlap or mostly_contained or same_label_touching:
                 is_duplicate = True
                 break
         if not is_duplicate:
@@ -1002,19 +1013,35 @@ def clipped_rect(
     return rect & page.rect
 
 
+@dataclass(frozen=True)
+class RenderSettings:
+    """Raster settings shared by every region render."""
+    dpi: int
+    padding: float
+
+
+@dataclass(frozen=True)
+class ExtractOptions:
+    """Everything extract_visuals needs beyond the paper itself."""
+    render: RenderSettings
+    keep_pages: bool
+    debug_dpi: int
+    pdffigures_json: Path | None
+    include_uncaptioned_tables: bool
+
+
 def render_region(
     page: pymupdf.Page,
     bbox: Sequence[float],
     output: Path,
-    dpi: int,
-    padding: float,
+    settings: RenderSettings,
     avoid_bbox: Sequence[float] | None = None,
 ) -> tuple[int, int]:
-    clip = clipped_rect(page, bbox, padding, avoid_bbox=avoid_bbox)
+    clip = clipped_rect(page, bbox, settings.padding, avoid_bbox=avoid_bbox)
     if clip.is_empty or clip.width <= 2 or clip.height <= 2:
         raise ValueError(f"无效裁剪区域：{list(bbox)}")
     pixmap = page.get_pixmap(
-        dpi=dpi,
+        dpi=settings.dpi,
         clip=clip,
         colorspace=pymupdf.csRGB,
         alpha=False,
@@ -1052,8 +1079,10 @@ def load_font(size: int) -> ImageFont.ImageFont:
         if path.is_file():
             try:
                 return ImageFont.truetype(str(path), size=size)
-            except Exception:
-                continue
+            except OSError as cause:
+                # Present but unusable (wrong format, unreadable): try the next
+                # candidate rather than falling straight back to the tiny default.
+                log(f"font unusable, skipping {path}: {cause}")
     return ImageFont.load_default()
 
 
@@ -1137,13 +1166,9 @@ def extract_visuals(
     pdf_path: Path,
     output: Path,
     resource: InputResource,
-    dpi: int,
-    padding: float,
-    keep_pages: bool,
-    debug_dpi: int,
-    pdffigures_json: Path | None,
-    include_uncaptioned_tables: bool,
+    options: ExtractOptions,
 ) -> dict[str, Any]:
+    dpi = options.render.dpi
     doc = pymupdf.open(pdf_path)
     if doc.page_count == 0:
         doc.close()
@@ -1151,8 +1176,8 @@ def extract_visuals(
 
     try:
         candidates: list[Candidate] = []
-        candidates.extend(load_pdffigures_json(pdffigures_json))
-        candidates.extend(find_table_candidates(doc, include_uncaptioned_tables))
+        candidates.extend(load_pdffigures_json(options.pdffigures_json))
+        candidates.extend(find_table_candidates(doc, options.include_uncaptioned_tables))
         candidates.extend(caption_heuristic_candidates(doc, candidates))
         candidates = merge_same_label_tables(candidates)
         candidates = deduplicate(candidates)
@@ -1180,8 +1205,8 @@ def extract_visuals(
                 )
                 continue
             page = doc[candidate.page_index]
-            counters[candidate.kind] += 1
-            ordinal = counters[candidate.kind]
+            ordinal = counters.get(candidate.kind, 0) + 1
+            counters[candidate.kind] = ordinal
             label = safe_label(candidate.label)
             stem = f"{candidate.kind}_{ordinal:03d}_{label}"
             base_dir = output / ("tables" if candidate.kind == "table" else "figures")
@@ -1198,8 +1223,7 @@ def extract_visuals(
                     page,
                     candidate.region_bbox,
                     image_path,
-                    dpi,
-                    padding,
+                    options.render,
                     avoid_bbox=candidate.caption_bbox,
                 )
                 # Remove residual blank gutter after the PDF-coordinate crop.
@@ -1209,7 +1233,7 @@ def extract_visuals(
                 combined = union_rect(candidate.region_bbox, candidate.caption_bbox)
                 if combined is not None:
                     try:
-                        render_region(page, combined, caption_path, dpi, padding)
+                        render_region(page, combined, caption_path, options.render)
                     except Exception:
                         shutil.copy2(image_path, caption_path)
                 else:
@@ -1245,10 +1269,10 @@ def extract_visuals(
                 )
             )
 
-        if keep_pages:
+        if options.keep_pages:
             render_all_pages(doc, output / "pages", dpi)
 
-        make_debug_pages(doc, candidates, output / "debug", debug_dpi)
+        make_debug_pages(doc, candidates, output / "debug", options.debug_dpi)
         make_contact_sheet(contact_paths, output / "contact_sheet.png")
 
         metadata = doc.metadata or {}
@@ -1391,12 +1415,13 @@ def main() -> int:
             pdf_path=pdf_path,
             output=output,
             resource=resource,
-            dpi=args.dpi,
-            padding=args.padding,
-            keep_pages=args.keep_pages,
-            debug_dpi=args.debug_dpi,
-            pdffigures_json=args.pdffigures_json,
-            include_uncaptioned_tables=args.include_uncaptioned_tables,
+            options=ExtractOptions(
+                render=RenderSettings(dpi=args.dpi, padding=args.padding),
+                keep_pages=args.keep_pages,
+                debug_dpi=args.debug_dpi,
+                pdffigures_json=args.pdffigures_json,
+                include_uncaptioned_tables=args.include_uncaptioned_tables,
+            ),
         )
         summary = manifest["summary"]
         print(f"\n完成。输出目录：{output}")

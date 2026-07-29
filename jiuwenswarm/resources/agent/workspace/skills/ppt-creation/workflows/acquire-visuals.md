@@ -4,7 +4,7 @@
 
 ## 可执行契约
 
-所有非临时视觉先写入项目 `evidence-plan.json`，再运行 `prepare-evidence.py`。`design-spec.md` 解释为什么需要，evidence plan 记录怎样获取和当前事实状态，execution lock 只保存逐页允许使用的 `asset_ids`。
+所有非临时视觉先写入项目 `evidence-plan.json`，再运行 `prepare_evidence.py`。`design-spec.md` 解释为什么需要，evidence plan 记录怎样获取和当前事实状态，execution lock 只保存逐页允许使用的 `asset_ids`。
 
 典型论文项：
 
@@ -42,11 +42,11 @@
 准备脚本复用 `extract_arxiv_visuals_v2_2.py`，不会重新实现裁图。自动选择不唯一时保留 manifest 和 contact sheet，状态转为 `needs-manual`。
 
 ```bash
-python3 ../scripts/prepare-evidence.py .
+python3 ../scripts/prepare_evidence.py .
 # 查看 analysis/evidence-contact-sheet.jpg 或论文专属 contact sheet 后：
-python3 ../scripts/prepare-evidence.py . --approve reasoningbank-architecture
+python3 ../scripts/prepare_evidence.py . --approve reasoningbank-architecture
 # 素材真正加入幻灯片后：
-python3 ../scripts/prepare-evidence.py . --used reasoningbank-architecture
+python3 ../scripts/prepare_evidence.py . --used reasoningbank-architecture
 ```
 
 文件视觉只有经过 `review.approved` 才能标为 `ready/used`。原生图表和原生绘制不需要图像审核，但仍需在交付前标为 `used`。
@@ -66,7 +66,7 @@ python3 ../scripts/prepare-evidence.py . --used reasoningbank-architecture
 适用：页面解释一篇具体论文的机制、架构或实验结果，原图能直接作为证据。
 
 - 可使用 `../scripts/extract_arxiv_visuals_v2_2.py` 提取；
-- 默认由 `prepare-evidence.py` 的 `paper-figure` 路由调用该脚本并解析 manifest；
+- 默认由 `prepare_evidence.py` 的 `paper-figure` 路由调用该脚本并解析 manifest；
 - 根据图注、尺寸和页面核心信息选择，不按置信度机械排序；
 - 先确认可读性，再决定使用 1–3 张或改为自绘；
 - 原图保持比例和内部视觉，外围使用本 deck 模板语言；
