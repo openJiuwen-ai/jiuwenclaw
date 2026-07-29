@@ -1832,12 +1832,26 @@
       "searchPlaceholder": "Search TeamSkills by keyword",
       "noResults": "No matching skills. Try different keywords.",
       "installing": "Installing…",
+      "replaceConfirm": "A skill named \"{{name}}\" is already installed. Continuing will uninstall the current version and replace it with the selected one. Continue?",
       "messages": {
         "installed": "Installed: {{name}}"
       },
       "errors": {
         "searchFailed": "Search failed",
-        "installFailed": "Install failed"
+        "installFailed": "Install failed",
+        "skillAlreadyInstalled": "This skill is already installed."
+      }
+    },
+    "marketplace": {
+      "replaceConfirm": "A skill named \"{{name}}\" is already installed. Continuing will uninstall the current version and replace it with the selected one. Continue?",
+      "errors": {
+        "skillAlreadyInstalled": "This skill is already installed."
+      }
+    },
+    "builtin": {
+      "replaceConfirm": "A skill named \"{{name}}\" is already installed. Continuing will uninstall the current version and replace it with the selected one. Continue?",
+      "errors": {
+        "skillAlreadyInstalled": "This skill is already installed."
       }
     },
     "marketplacesAvailable": "Available marketplaces: {{names}}",

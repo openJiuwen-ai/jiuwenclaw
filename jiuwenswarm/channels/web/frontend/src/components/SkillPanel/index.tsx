@@ -39,6 +39,10 @@ type SkillItem = {
   marketplace?: string;
   /** SkillNet 等安装来源 URL，与在线搜索 skill_url 对照「已安装」 */
   origin?: string;
+  /** TeamSkillsHub 安装时落盘的市场卡片描述，供「我的技能」页与搜索页显示一致 */
+  market_short_desc?: string;
+  /** TeamSkillsHub 安装时的市场展示名 */
+  market_display_name?: string;
   /** 是否为内置技能（不允许删除） */
   is_builtin?: boolean;
   /** 是否为内置技能的来源（源码中存在内置版本） */
@@ -170,6 +174,15 @@ function normalizeSkillItem<T extends SkillItem>(raw: T): T {
     tags: coerceStringList(raw.tags),
     allowed_tools: coerceStringList(raw.allowed_tools),
   };
+}
+
+/**
+ * 「我的技能」页的展示描述：优先用 TeamSkillsHub 安装时落盘的市场卡片描述
+ * （与搜索页 short_desc 一致），缺省回退 SKILL.md 的 description，再缺省走占位文案。
+ * 来自 teamskillshub 来源的技能会带 market_short_desc；其余来源不受影响。
+ */
+function skillDisplayDesc(skill: SkillItem, fallback: string): string {
+  return skill.market_short_desc || skill.description || fallback;
 }
 
 function buildSkillIndexTree(nodes: SkillIndexNode[]): SkillIndexTreeNode[] {
@@ -820,12 +833,12 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [fetchMarketplaces, withSession]);
 
   const fetchSkillDetail = useCallback(
-    async (skillName: string) => {
+    async (skillName: string, origin?: string) => {
       setDetailState("loading");
       try {
         const data = await webRequest<SkillDetail>(
           "skills.get",
-          withSession({ name: skillName })
+          withSession({ name: skillName, ...(origin ? { origin } : {}) })
         );
         setSelectedSkill(normalizeSkillItem(data));
         setDetailState("success");
@@ -1037,8 +1050,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [fetchRetrievalStatus, withSession]);
 
   const handleOpenSkill = useCallback(
-    (skillName: string) => {
-      fetchSkillDetail(skillName);
+    (skillName: string, origin?: string) => {
+      fetchSkillDetail(skillName, origin);
     },
     [fetchSkillDetail]
   );
@@ -1059,10 +1072,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, []);
 
   const handleInstall = useCallback(
-    async (skillName?: string) => {
+    async (skillName?: string, forceParam?: boolean) => {
       const targetSkill = skillName
         ? skills.find((skill) => skill.name === skillName)
         : undefined;
+      const isForce = forceParam === true;
 
       // 内置技能的安装：自动使用 builtin marketplace，不需要用户输入
       if (targetSkill?.is_builtin && targetSkill?.is_builtin_source) {
@@ -1070,20 +1084,38 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         setActionTarget(spec);
         setMessage(t('skills.messages.installing', { name: skillName }));
         setMessageType("loading");
+        let force = isForce;
+        let retry = false;
         try {
-          const data = await webRequest<{
-            success: boolean;
-            detail?: string;
-            message?: string;
-          }>("skills.install", withSession({ spec, force: false }));
-          if (!data.success) {
-            throw new Error(data.detail || data.message || t('skills.errors.installFailed'));
-          }
-          showMessage("success", t('skills.messages.installed', { spec: skillName }));
-          await fetchSkills();
-          if (selectedSkill) {
-            await fetchSkillDetail(selectedSkill.name);
-          }
+          do {
+            retry = false;
+            const data = await webRequest<{
+              success: boolean;
+              detail?: string;
+              detail_key?: string;
+              message?: string;
+            }>("skills.install", withSession({ spec, force }));
+            if (!data.success) {
+              // 同名冲突：弹确认框询问是否覆盖
+              if (!force && data.detail_key === "skills.builtin.errors.skillAlreadyInstalled") {
+                const confirmed = window.confirm(
+                  t('skills.builtin.replaceConfirm', { name: skillName })
+                );
+                if (confirmed) {
+                  force = true;
+                  retry = true;
+                  continue;
+                }
+                break;
+              }
+              throw new Error(data.detail || data.message || t('skills.errors.installFailed'));
+            }
+            showMessage("success", t('skills.messages.installed', { spec: skillName }));
+            await fetchSkills();
+            if (selectedSkill) {
+              await fetchSkillDetail(selectedSkill.name);
+            }
+          } while (retry);
         } catch (error) {
           console.error(error);
           const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1117,23 +1149,42 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       );
       if (!spec) return;
 
+      const pluginName = spec.split('@')[0];
       setActionTarget(spec);
       setMessage(t('skills.messages.installing', { name: spec }));
       setMessageType("loading");
+      let force = isForce;
+      let retry = false;
       try {
-        const data = await webRequest<{
-          success: boolean;
-          detail?: string;
-          message?: string;
-        }>("skills.install", withSession({ spec, force: false }));
-        if (!data.success) {
-          throw new Error(data.detail || data.message || t('skills.errors.installFailed'));
-        }
-        showMessage("success", t('skills.messages.installed', { spec: skillName || spec.split('@')[0] }));
-        await fetchSkills();
-        if (selectedSkill) {
-          await fetchSkillDetail(selectedSkill.name);
-        }
+        do {
+          retry = false;
+          const data = await webRequest<{
+            success: boolean;
+            detail?: string;
+            detail_key?: string;
+            message?: string;
+          }>("skills.install", withSession({ spec, force }));
+          if (!data.success) {
+            // 同名冲突：弹确认框询问是否覆盖
+            if (!force && data.detail_key === "skills.marketplace.errors.skillAlreadyInstalled") {
+              const confirmed = window.confirm(
+                t('skills.marketplace.replaceConfirm', { name: targetSkill?.display_name || pluginName })
+              );
+              if (confirmed) {
+                force = true;
+                retry = true;
+                continue;
+              }
+              break;
+            }
+            throw new Error(data.detail || data.message || t('skills.errors.installFailed'));
+          }
+          showMessage("success", t('skills.messages.installed', { spec: skillName || pluginName }));
+          await fetchSkills();
+          if (selectedSkill) {
+            await fetchSkillDetail(selectedSkill.name);
+          }
+        } while (retry);
       } catch (error) {
         console.error(error);
         showMessage("error", t('skills.errors.installFailedHint'));
@@ -1181,7 +1232,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [fetchSkills, fetchSkillDetail, t, withSession]);
 
   const handleUninstall = useCallback(
-    async (pluginName: string) => {
+    async (pluginName: string, origin?: string) => {
       if (!pluginName) return;
       const confirmed = window.confirm(t('skills.uninstallConfirm', { pluginName }));
       if (!confirmed) return;
@@ -1196,6 +1247,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
           message?: string;
         }>("skills.uninstall", withSession({
           name: pluginName,
+          // 传 origin 让后端按来源精确定位目录与记录，避免重名技能误删另一个
+          ...(origin ? { origin } : {}),
         }));
         if (!data.success) {
           throw new Error(data.detail || data.message || t('skills.errors.uninstallFailed'));
@@ -1243,7 +1296,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         <button
           onClick={(event) => {
             event.stopPropagation();
-            handleUninstall(skill.name);
+            handleUninstall(skill.name, skill.origin);
           }}
           className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary "
           disabled={isLoading}
@@ -1305,7 +1358,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         <button
           onClick={(event) => {
             event.stopPropagation();
-            handleUninstall(skill.name);
+            handleUninstall(skill.name, skill.origin);
           }}
           className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary "
           disabled={isLoading}
@@ -1359,13 +1412,14 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     return filtered;
   }, [visibleSkills, mySkillsSubTab, installedSkillMap]);
 
-  const toggleSkillDisabled = async (skillName: string) => {
-    const skill = skills.find(s => s.name === skillName);
+  const toggleSkillDisabled = async (skillName: string, origin?: string) => {
+    // 找技能时优先按 origin 定位（同名不同源时精确匹配），无 origin 时按 name 回退
+    const skill = skills.find(s => s.name === skillName && (!origin || s.origin === origin));
     const newEnabled = skill?.enabled === false ? true : false;
-    
-    const toggleKey = `toggle:${skillName}`;
+
+    const toggleKey = `toggle:${origin || skillName}`;
     setActionTarget(toggleKey);
-    
+
     try {
       const result = await webRequest<{
         success: boolean;
@@ -1374,20 +1428,27 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         detail?: string;
       }>(
         "skills.toggle",
-        withSession({ name: skillName, enabled: newEnabled })
+        withSession({
+          name: skillName,
+          enabled: newEnabled,
+          // 传 origin 让后端按身份精确匹配 installed_plugin 记录
+          ...(origin ? { origin } : {}),
+        })
       );
-      
+
       if (!result.success) {
         throw new Error(result.detail || 'Failed to toggle skill');
       }
-      
-      setSkills((prev) => 
-        prev.map(s => 
-          s.name === skillName ? { ...s, enabled: newEnabled } : s
+
+      setSkills((prev) =>
+        prev.map(s =>
+          (s.name === skillName && (!origin || s.origin === origin))
+            ? { ...s, enabled: newEnabled }
+            : s
         )
       );
-      
-      if (selectedSkill && selectedSkill.name === skillName) {
+
+      if (selectedSkill && selectedSkill.name === skillName && (!origin || selectedSkill.origin === origin)) {
         setSelectedSkill({ ...selectedSkill, enabled: newEnabled });
       }
     } catch (error) {
@@ -1964,8 +2025,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       const isInstalling = actionTarget === `${skill.name}@builtin`;
                       return (
                         <div
-                          key={skill.name}
-                          onClick={() => handleOpenSkill(skill.name)}
+                          key={skill.origin || skill.name}
+                          onClick={() => handleOpenSkill(skill.name, skill.origin)}
                           className={`text-left border border-border bg-panel hover:bg-card  cursor-pointer ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
                           style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
                         >
@@ -1980,7 +2041,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                     {displayName}
                                   </div>
                                   <div className="text-sm text-text-muted mt-1 line-clamp-3">
-                                    {skill.description || t('skills.noDescription')}
+                                    {skillDisplayDesc(skill, t('skills.noDescription'))}
                                   </div>
                                 </div>
                               </div>
@@ -1999,7 +2060,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 ) : (
                                   <Switch
                                     checked={!isDisabled}
-                                    onChange={() => toggleSkillDisabled(skill.name)}
+                                    onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
                                     disabled={isToggling}
                                   />
                                 )}
@@ -2016,7 +2077,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                     {displayName}
                                   </div>
                                   <div className="text-xs text-text-muted mt-1 line-clamp-2">
-                                    {skill.description || t('skills.noDescription')}
+                                    {skillDisplayDesc(skill, t('skills.noDescription'))}
                                   </div>
                                 </div>
                               </div>
@@ -2049,7 +2110,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                     embedded={true}
                     sessionId={sessionId}
                     externalSearchQuery={debouncedSearch}
-                    installedSkillNames={installedSkillNames}
+                    installedSkillOrigins={installedSkillOrigins}
                     viewMode={viewMode}
                     onClose={() => {}}
                     onInstalled={(_skillName: string) => {
@@ -2110,7 +2171,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                           {selectedSkill.display_name || selectedSkill.name}
                         </div>
                         <div className="text-sm text-text-muted mt-1">
-                          {selectedSkill.description || t('skills.noDescription')}
+                          {skillDisplayDesc(selectedSkill, t('skills.noDescription'))}
                         </div>
                         <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
                           <span className="px-2 py-1 rounded-full bg-secondary border border-border">
@@ -2132,8 +2193,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                           <span className="text-sm whitespace-nowrap" style={{ color: 'var(--color-text-primary)' }}>{selectedSkill.enabled === false ? t('skills.mySkillsTabs.disabled') : t('skills.mySkillsTabs.enabled')}</span>
                           <Switch
                             checked={selectedSkill.enabled !== false}
-                            onChange={() => toggleSkillDisabled(selectedSkill.name)}
-                            disabled={actionTarget === `toggle:${selectedSkill.name}`}
+                            onChange={() => toggleSkillDisabled(selectedSkill.name, selectedSkill.origin)}
+                            disabled={actionTarget === `toggle:${selectedSkill.origin || selectedSkill.name}`}
                           />
                         </div>
                         {renderActionButton(selectedSkill)}
@@ -2241,11 +2302,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       const avatar = getSkillAvatar(skill.name);
                       const displayName = skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
-                      const isToggling = actionTarget === `toggle:${skill.name}`;
+                      const isToggling = actionTarget === `toggle:${skill.origin || skill.name}`;
                       return (
                         <div
-                          key={skill.name}
-                          onClick={() => handleOpenSkill(skill.name)}
+                          key={skill.origin || skill.name}
+                          onClick={() => handleOpenSkill(skill.name, skill.origin)}
                           className={`text-left border border-border bg-panel hover:bg-card  cursor-pointer ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
                           style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
                         >
@@ -2260,7 +2321,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                     {displayName}
                                   </div>
                                   <div className="text-sm text-text-muted mt-1 line-clamp-3">
-                                    {skill.description || t('skills.noDescription')}
+                                    {skillDisplayDesc(skill, t('skills.noDescription'))}
                                   </div>
                                   <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
                                     <span className="px-2 py-1 rounded-full bg-secondary border border-border">
@@ -2277,7 +2338,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 <div className="flex items-center gap-2">
                                   <Switch
                                     checked={!isDisabled}
-                                    onChange={() => toggleSkillDisabled(skill.name)}
+                                    onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
                                     disabled={isToggling}
                                   />
                                 </div>
@@ -2294,7 +2355,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                     {displayName}
                                   </div>
                                   <div className="text-xs text-text-muted mt-1 line-clamp-2">
-                                    {skill.description || t('skills.noDescription')}
+                                    {skillDisplayDesc(skill, t('skills.noDescription'))}
                                   </div>
                                 </div>
                               </div>
@@ -2313,7 +2374,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 <div className="flex items-center gap-2">
                                   <Switch
                                     checked={!isDisabled}
-                                    onChange={() => toggleSkillDisabled(skill.name)}
+                                    onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
                                     disabled={isToggling}
                                   />
                                 </div>
@@ -2365,7 +2426,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       <TeamSkillsHubModal
         open={teamSkillsHubModalOpen}
         sessionId={sessionId}
-        installedSkillNames={installedSkillNames}
+        installedSkillOrigins={installedSkillOrigins}
         onClose={() => setTeamSkillsHubModalOpen(false)}
         onInstalled={async () => {
           await fetchSkills();
