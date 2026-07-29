@@ -83,7 +83,7 @@ description: Imperative description of when to trigger and what to do.
 ```
 
 - `name`: machine-readable ID, not a display title. It must match `^[a-z0-9-]+$`, use lowercase letters / digits / hyphens only, be ≤ 64 chars, not start/end with `-`, not contain `--`, and exactly match the skill directory name. If the user asks for a Chinese name, keep or choose a valid ASCII kebab-case name instead; Chinese belongs in `description` or the body, not `name`.
-- `description`: This is the **only triggering mechanism** — all "when to use" guidance goes here, not the body. Pure Chinese MUST be ≤ 512 chars; pure English MUST be ≤ 1024 chars; mixed Chinese/English uses weighted length (CJK=2, others=1) and MUST be ≤ 1024. Also MUST be ≤ 300 tokens (CJK 0.6 / others 0.3 token per char). Make it slightly pushy: instead of `"Builds dashboards for internal data"`, write `"Builds dashboards for internal data. Use whenever the user mentions dashboards, metrics, or wants to display company data — even if they don't say 'dashboard' explicitly."`
+- `description`: This is the **only triggering mechanism** — all "when to use" guidance goes here, not the body. Chinese SHOULD be ≤ 256 chars and MUST be ≤ 512 chars; English SHOULD be ≤ 512 chars and MUST be ≤ 1024 chars. Make it slightly pushy: instead of `"Builds dashboards for internal data"`, write `"Builds dashboards for internal data. Use whenever the user mentions dashboards, metrics, or wants to display company data — even if they don't say 'dashboard' explicitly."`
 - Allowed keys only: `name`, `description`, `license`, `allowed-tools`, `metadata`, `compatibility`. No duplicates.
 - External dependencies belong in `metadata`: `metadata.tools` for function tools, `metadata.agents` for agent tools, and `metadata.clis` for CLI tools. Function tool entries must include `bundleName` and `toolName`; CLI entries use `name` as described in `references/usage_clis.md`.
 - If the skill uses function tools, agent tools, or CLI tools, read the matching usage reference before writing instructions and include one concrete example instruction sentence in the skill body.
@@ -91,7 +91,7 @@ description: Imperative description of when to trigger and what to do.
 ### Progressive disclosure
 
 - Metadata (name + description) is always in context — keep it lean and trigger-accurate.
-- Body is loaded on trigger — keep it under ~300 lines and ≤ 5000 tokens (CJK 0.6 / others 0.3 per char).
+- Body is loaded on trigger — keep it under ~300 lines.
 - Large reference material (API specs, schemas, variant docs) lives in `references/` and is read on demand. For multi-domain skills, split by variant (`aws.md`, `gcp.md`, …).
 - Repeated, deterministic, error-prone operations belong in `scripts/`.
 - Packaged external dependency definitions are copied into `references/` automatically by the packager.
@@ -125,7 +125,7 @@ Local-execution skills must not generate `scripts/` by default. If a script is g
 - Create or update the skill under the current workspace's `skill/<skill-name>` directory: `<workspace>/skill/<skill-name>/`.
 - `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
 - If the skill declares `metadata.tools` / `metadata.agents` / `metadata.clis`: confirm you read the matching usage reference(s) in the pre-write step above. The body must include a single **tool definitions** section listing every registered tool, formatted per the reference file.
-- Body is under 500 lines and ≤ 5000 tokens; bulky reference material moved to `references/`.
+- Body is under 500 lines; bulky reference material moved to `references/`.
 - Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
 - No stray files outside the skill folder.
 - No prohibited environment tools (`Read`, `Write`, `Edit`, `file_glob`, `file_grep`, `file_listdir`, `shell`, `code_execute`, `WebFetch`, `ask_user_question`, `upload_file`, `spawn_subagent`, `fork_agent`, `task_tool`, `skill_tool`, `skill_complete`, `todo_create`, `todo_start`, `todo_complete`, `todo_modify`, `todo_list`, `present_files`) appear in the skill body, `allowed-tools`, or `metadata`.This entry itself must not appear in the generated skill.
