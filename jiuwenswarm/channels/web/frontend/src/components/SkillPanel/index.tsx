@@ -891,21 +891,9 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       fetchSkills();
     }
 
-    // 场景3：重新激活且处于 index 页签，立即刷新状态和树
-    if (isActive && !prevIsActive && activeTab === "index") {
-      void fetchRetrievalStatus();
-      void fetchRetrievalTree();
-    }
-
     // 更新 ref
     prevIsActiveRef.current = isActive;
-  }, [
-    isActive,
-    activeTab,
-    fetchSkills,
-    fetchRetrievalStatus,
-    fetchRetrievalTree,
-  ]);
+  }, [isActive, activeTab, fetchSkills]);
 
   useEffect(() => {
     fetchRetrievalStatus();
