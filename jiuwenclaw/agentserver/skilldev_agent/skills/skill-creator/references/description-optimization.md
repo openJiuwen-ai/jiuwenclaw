@@ -100,7 +100,7 @@ Per-query `results` are required — they're the only diagnostic record across i
 - Positives that missed: what about the description fails to evoke the skill for these phrasings?
 - Negatives that fired: what's too broad or too keyword-heavy?
 
-Write a new `current_description`. It must obey the description limits from the skill-creator SKILL.md "Frontmatter — hard constraints" section (Chinese MUST ≤ 512 chars, English MUST ≤ 1024 chars). Aim for 100–200 words:
+Write a new `current_description`. It must obey the description limits from the skill-creator SKILL.md "Frontmatter — hard constraints" section (pure Chinese MUST ≤ 512 chars, pure English MUST ≤ 1024 chars, mixed: CJK=2 / others=1 and weighted total MUST ≤ 1024; also MUST ≤ 300 tokens with CJK 0.6 / others 0.3 per char). Aim for 100–200 words:
 - Generalize from failures — don't enumerate specific queries.
 - **Structurally different phrasing each iteration.** With only 3 iterations, don't make iteration 2 a small tweak of iteration 1 — diversify aggressively.
 - Imperative form ("Use this skill for...").

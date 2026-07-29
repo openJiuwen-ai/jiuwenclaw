@@ -87,6 +87,7 @@ ALLOWED_FRONTMATTER_KEYS = {
 
 DESCRIPTION_MAX_CHARS_CJK = 512
 DESCRIPTION_MAX_CHARS_EN = 1024
+DESCRIPTION_MAX_WEIGHTED = 1024
 DESCRIPTION_MAX_TOKENS = 300
 BODY_MAX_LINES = 500
 BODY_MAX_TOKENS = 5000
@@ -94,17 +95,26 @@ FRONTMATTER_RE = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re
 
 
 def _estimate_tokens(text: str) -> int:
+    """按字符估算 token：CJK 0.6 / 其余 0.3，结果向上取整。"""
     if not text:
         return 0
-    # 快速估算：只判断是否包含中文，避免逐字符统计的开销
-    # - 包含中文：按 0.6 token/字符估算
-    # - 不包含中文：按 0.3 token/字符估算
-    factor = 0.6 if _contains_cjk(text) else 0.3
-    return int(math.ceil(len(text) * factor))
+    total = sum(
+        0.6 if _is_cjk_char(ch) else 0.3
+        for ch in text
+    )
+    return int(math.ceil(total))
 
 
-def _contains_cjk(text: str) -> bool:
-    return any("\u4e00" <= char <= "\u9fff" for char in text)
+def _is_cjk_char(char: str) -> bool:
+    return "\u4e00" <= char <= "\u9fff"
+
+
+def _description_weighted_len(text: str) -> int:
+    """description 加权长度：CJK 计 2，其余计 1。
+
+    等价于：纯中文 ≤512、纯英文 ≤1024、中英混杂加权总和 ≤1024。
+    """
+    return sum(2 if _is_cjk_char(ch) else 1 for ch in text)
 
 
 def _read_utf8_text(path: Path) -> tuple[str | None, bool]:
@@ -281,18 +291,22 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
         if not description:
             errors.append("Description cannot be empty")
         else:
-            max_chars = DESCRIPTION_MAX_CHARS_CJK if _contains_cjk(description) else DESCRIPTION_MAX_CHARS_EN
-            if len(description) > max_chars:
+            weighted_len = _description_weighted_len(description)
+            if weighted_len > DESCRIPTION_MAX_WEIGHTED:
                 errors.append(
-                    f"Description is too long ({len(description)} characters). "
-                    f"Maximum is {max_chars} characters."
+                    f"Description is too long (weighted length {weighted_len}). "
+                    f"Maximum weighted length is {DESCRIPTION_MAX_WEIGHTED} "
+                    f"(CJK counts as 2, others as 1; "
+                    f"pure Chinese ≤{DESCRIPTION_MAX_CHARS_CJK}, "
+                    f"pure English ≤{DESCRIPTION_MAX_CHARS_EN})."
                 )
-            # desc_tokens = _estimate_tokens(description)
-            # if desc_tokens > DESCRIPTION_MAX_TOKENS:
-            #     errors.append(
-            #         f"Description token count too high (~{desc_tokens} tokens). "
-            #         f"Maximum is {DESCRIPTION_MAX_TOKENS} tokens."
-            #     )
+            desc_tokens = _estimate_tokens(description)
+            if desc_tokens > DESCRIPTION_MAX_TOKENS:
+                errors.append(
+                    f"Description token count too high (~{desc_tokens} tokens). "
+                    f"Maximum is {DESCRIPTION_MAX_TOKENS} tokens "
+                    f"(CJK 0.6 / others 0.3 token per char)."
+                )
     elif description is not None and "description" in frontmatter:
         errors.append(f"Description must be a string, got {type(description).__name__}")
 
@@ -306,12 +320,13 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
                 f"SKILL.md body is too long ({len(body_lines)} lines). "
                 f"Maximum is {BODY_MAX_LINES} lines."
             )
-        # body_tokens = _estimate_tokens(body)
-        # if body_tokens > BODY_MAX_TOKENS:
-        #     errors.append(
-        #         f"SKILL.md body token count too high (~{body_tokens} tokens). "
-        #         f"Maximum is {BODY_MAX_TOKENS} tokens."
-        #     )
+        body_tokens = _estimate_tokens(body)
+        if body_tokens > BODY_MAX_TOKENS:
+            errors.append(
+                f"SKILL.md body token count too high (~{body_tokens} tokens). "
+                f"Maximum is {BODY_MAX_TOKENS} tokens "
+                f"(CJK 0.6 / others 0.3 token per char)."
+            )
 
     # --- static security ---
     sec_errors = _validate_static_security_all(skill_path, content)

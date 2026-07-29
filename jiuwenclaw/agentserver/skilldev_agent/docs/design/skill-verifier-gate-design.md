@@ -98,7 +98,7 @@ flowchart TD
 
 - 以 verifier 的 `validate` 为唯一真源，替代并删除现存三套校验器。
 - 口径统一：采用"**字符 + token 双限**"的较严口径。
-  - 现状 `validate.py`：字符制（description CJK≤512 / 其他≤1024、正文≤500 行）。
+  - 现状 `validate.py`：字符+token 双限（description 加权≤1024 且 token≤300；正文≤500 行且 token≤5000；CJK 字符 0.6 / 其余 0.3 token）。
   - 现状 `direct_import.py`：token 制（description≤300 token、正文≤5000 token、CJK≤256 字）。
 - `package` 必须包含 `package_skill.py` 的 `copy_dependency_references`（standardizer 旧 `package.py` 缺该步）。
 - 结构规范知识、description 上限规则抽到 `skill-verifier/references`，供 creator 与导入修复引用。

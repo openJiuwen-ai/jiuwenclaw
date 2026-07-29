@@ -19,6 +19,7 @@ ALLOWED_FRONTMATTER_KEYS = {
 
 DESCRIPTION_MAX_CHARS_CJK = 512
 DESCRIPTION_MAX_CHARS_EN = 1024
+DESCRIPTION_MAX_WEIGHTED = 1024
 DESCRIPTION_MAX_TOKENS = 300
 BODY_MAX_LINES = 500
 BODY_MAX_TOKENS = 5000
@@ -60,18 +61,54 @@ _PLACEHOLDER_SUBSTRINGS = (
 )
 
 
-def _estimate_tokens(text: str) -> int:
+TOKEN_PER_CJK_CHAR = 0.6
+TOKEN_PER_OTHER_CHAR = 0.3
+
+
+def estimate_skill_tokens(text: str) -> int:
+    """按字符估算 token：CJK 0.6 / 其余 0.3，结果向上取整。"""
     if not text:
         return 0
-    # 快速估算：只判断是否包含中文，避免逐字符统计开销
-    # - 包含中文：按 0.6 token/字符
-    # - 不包含中文：按 0.3 token/字符
-    factor = 0.6 if _contains_cjk(text) else 0.3
-    return int(math.ceil(len(text) * factor))
+    total = sum(
+        TOKEN_PER_CJK_CHAR if _is_cjk_char(ch) else TOKEN_PER_OTHER_CHAR
+        for ch in text
+    )
+    return int(math.ceil(total))
 
 
-def _contains_cjk(text: str) -> bool:
-    return any("\u4e00" <= char <= "\u9fff" for char in text)
+def _is_cjk_char(char: str) -> bool:
+    return "\u4e00" <= char <= "\u9fff"
+
+
+def description_weighted_len(text: str) -> int:
+    """description 加权长度：CJK 计 2，其余计 1。
+
+    等价于：纯中文 ≤512、纯英文 ≤1024、中英混杂加权总和 ≤1024。
+    """
+    return sum(2 if _is_cjk_char(ch) else 1 for ch in text)
+
+
+def truncate_description_to_weighted_limit(
+    text: str,
+    limit: int = DESCRIPTION_MAX_WEIGHTED,
+    token_limit: int = DESCRIPTION_MAX_TOKENS,
+) -> str:
+    """按加权字符数与 token 双限截断 description。"""
+    weighted = 0
+    tokens = 0.0
+    chars: list[str] = []
+    for ch in text:
+        is_cjk = _is_cjk_char(ch)
+        w = 2 if is_cjk else 1
+        t = TOKEN_PER_CJK_CHAR if is_cjk else TOKEN_PER_OTHER_CHAR
+        if weighted + w > limit:
+            break
+        if math.ceil(tokens + t) > token_limit:
+            break
+        chars.append(ch)
+        weighted += w
+        tokens += t
+    return "".join(chars).rstrip()
 
 
 def _find_duplicate_frontmatter_key(frontmatter_text: str) -> str | None:
@@ -201,8 +238,9 @@ def validate_skill_md_content(content: str) -> str | None:
             if not description:
                 hit_codes.add(ERR_FW_SKILLMD_DESC_EMPTY)
             else:
-                max_chars = DESCRIPTION_MAX_CHARS_CJK if _contains_cjk(description) else DESCRIPTION_MAX_CHARS_EN
-                if len(description) > max_chars:
+                if description_weighted_len(description) > DESCRIPTION_MAX_WEIGHTED:
+                    hit_codes.add(ERR_FW_SKILLMD_DESC_TOO_LONG)
+                elif estimate_skill_tokens(description) > DESCRIPTION_MAX_TOKENS:
                     hit_codes.add(ERR_FW_SKILLMD_DESC_TOO_LONG)
 
     # --- body ---
@@ -211,6 +249,8 @@ def validate_skill_md_content(content: str) -> str | None:
     else:
         body_lines = body.splitlines()
         if len(body_lines) > BODY_MAX_LINES:
+            hit_codes.add(ERR_FW_SKILLMD_BODY_TOO_LONG)
+        elif estimate_skill_tokens(body) > BODY_MAX_TOKENS:
             hit_codes.add(ERR_FW_SKILLMD_BODY_TOO_LONG)
 
     # --- credential leak ---

@@ -15,9 +15,18 @@ from typing import Any
 
 import yaml
 
-from jiuwenclaw.agentserver.memory.internal import estimate_tokens
 from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip
 from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
+from jiuwenclaw.agentserver.skilldev.utils.skill_md_validation import (
+    BODY_MAX_LINES,
+    BODY_MAX_TOKENS,
+    DESCRIPTION_MAX_CHARS_CJK,
+    DESCRIPTION_MAX_CHARS_EN,
+    DESCRIPTION_MAX_TOKENS,
+    DESCRIPTION_MAX_WEIGHTED,
+    description_weighted_len,
+    estimate_skill_tokens,
+)
 from jiuwenclaw.agentserver.skilldev.utils.skill_description_fix import (
     normalize_skill_description,
     parse_frontmatter,
@@ -26,11 +35,6 @@ from jiuwenclaw.agentserver.skilldev.utils.skill_description_fix import (
 logger = logging.getLogger(__name__)
 
 SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9-]{1,64}$")
-DESCRIPTION_MAX_TOKENS = 300
-BODY_MAX_TOKENS = 5000
-BODY_MAX_LINES = 500
-DESCRIPTION_MAX_CHARS_CJK = 512
-DESCRIPTION_MAX_CHARS_EN = 1024
 
 EXCLUDE_DIRS = {"__pycache__", "node_modules", ".trash"}
 EXCLUDE_GLOBS = {"*.pyc", "*.swp"}
@@ -113,10 +117,6 @@ def find_skill_root(skill_dir: Path) -> Path | None:
     return None
 
 
-def _contains_cjk(text: str) -> bool:
-    return any("\u4e00" <= char <= "\u9fff" for char in text)
-
-
 def _parse_skill_md(skill_md: Path) -> tuple[dict[str, str], str]:
     content = skill_md.read_text(encoding="utf-8")
     if not content.startswith("---"):
@@ -162,17 +162,18 @@ def validate_direct_import_skill(skill_root: Path) -> tuple[bool, str]:
     if not description:
         errors.append("description 不能为空")
     else:
-        max_chars = (
-            DESCRIPTION_MAX_CHARS_CJK if _contains_cjk(description) else DESCRIPTION_MAX_CHARS_EN
-        )
-        if len(description) > max_chars:
+        weighted_len = description_weighted_len(description)
+        if weighted_len > DESCRIPTION_MAX_WEIGHTED:
             errors.append(
-                f"description 字符数超限（{len(description)} > {max_chars}）"
+                f"description 加权字符数超限（{weighted_len} > {DESCRIPTION_MAX_WEIGHTED}；"
+                f"中文计2、英文计1；纯中文≤{DESCRIPTION_MAX_CHARS_CJK}，"
+                f"纯英文≤{DESCRIPTION_MAX_CHARS_EN}）"
             )
-        desc_tokens = estimate_tokens(description)
+        desc_tokens = estimate_skill_tokens(description)
         if desc_tokens > DESCRIPTION_MAX_TOKENS:
             errors.append(
-                f"description token 数超限（约 {desc_tokens} > {DESCRIPTION_MAX_TOKENS}）"
+                f"description token 数超限（约 {desc_tokens} > {DESCRIPTION_MAX_TOKENS}；"
+                f"中文 0.6 / 英文 0.3 token/字符）"
             )
 
     body_lines = body.splitlines()
@@ -181,10 +182,11 @@ def validate_direct_import_skill(skill_root: Path) -> tuple[bool, str]:
     else:
         if len(body_lines) > BODY_MAX_LINES:
             errors.append(f"正文行数超限（{len(body_lines)} > {BODY_MAX_LINES}）")
-        body_tokens = estimate_tokens(body)
+        body_tokens = estimate_skill_tokens(body)
         if body_tokens > BODY_MAX_TOKENS:
             errors.append(
-                f"正文 token 数超限（约 {body_tokens} > {BODY_MAX_TOKENS}）"
+                f"正文 token 数超限（约 {body_tokens} > {BODY_MAX_TOKENS}；"
+                f"中文 0.6 / 英文 0.3 token/字符）"
             )
 
     if errors:
@@ -202,7 +204,7 @@ def build_direct_import_fix_query(user_query: str, validation_message: str) -> s
         "## 修改原则\n"
         "- 最小改动：只做满足规范所必需的修改，不改变原 skill 用途与行为。\n"
         "- name 须为合法 kebab-case 且与目录名一致。\n"
-        "- description 超长则压缩（中文 ≤512 字符且 ≤300 token，英文 ≤1024 字符且 ≤300 token）；不含尖括号。\n"
+        "- description 超长则压缩（纯中文 ≤512，纯英文 ≤1024，中英混杂时中文计2/英文计1且加权总和 ≤1024，且 ≤300 token）；不含尖括号。\n"
         "- 正文 ≤500 行且 ≤5000 token；超长则拆到 references/ 并用相对路径引用。\n\n"
         "完成修改后运行完整闸门：\n"
         '- cd "<skill-verifier-dir>" && python3 -m scripts.gate <workspace>'

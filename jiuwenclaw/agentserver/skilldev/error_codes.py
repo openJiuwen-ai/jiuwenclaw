@@ -39,13 +39,13 @@ ERR_FW_SKILLMD_NAME_TOO_LONG = "999001269"  # SKILL.md name 超过 64 字符长�
 
 ERR_FW_SKILLMD_DESC_MISSING = "999001270"  # SKILL.md description 字段缺失
 ERR_FW_SKILLMD_DESC_EMPTY = "999001271"  # SKILL.md description 为空字符串
-ERR_FW_SKILLMD_DESC_TOO_LONG = "999001272"  # SKILL.md description 字符数超限（中文 512 / 英文 1024）
+ERR_FW_SKILLMD_DESC_TOO_LONG = "999001272"  # SKILL.md description 超限（加权字符≤1024 或 token≤300）
 ERR_FW_SKILLMD_DESC_INVALID_TYPE = "999001273"  # SKILL.md description 字段类型非字符串（如整数、列表等）
 
 # -- SKILL.md body 校验 (274-275) --------------------------------------------
 
 ERR_FW_SKILLMD_BODY_EMPTY = "999001274"  # SKILL.md 正文（frontmatter 之后的内容）为空
-ERR_FW_SKILLMD_BODY_TOO_LONG = "999001275"  # SKILL.md 正文行数超过 500 行限制
+ERR_FW_SKILLMD_BODY_TOO_LONG = "999001275"  # SKILL.md 正文超限（行数>500 或 token>5000）
 
 # -- SKILL.md 凭据泄露 (276) -------------------------------------------------
 
