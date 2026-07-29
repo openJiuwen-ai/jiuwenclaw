@@ -114,7 +114,7 @@ function matchProviderField(provider: string): ProviderSpec | null {
  * 仍未命中则默认 OpenAI（与配置表单默认值一致）。
  * alias / api_base 不参与匹配。
  */
-export function findProvider(model: ModelLike): ProviderSpec | null {
+export function findProvider(model: ModelLike): ProviderSpec {
   return (
     matchExactModelName(model.model_name ?? '')
     ?? matchProviderField(model.model_provider ?? '')
@@ -125,7 +125,6 @@ export function findProvider(model: ModelLike): ProviderSpec | null {
 /** 获取厂商图标 URL（本地静态资源），PNG 优先，SVG 兜底，未知厂商返回 undefined */
 export function getProviderIconUrl(model: ModelLike): string | undefined {
   const spec = findProvider(model);
-  if (!spec) return undefined;
   return (
     PROVIDER_ICONS_PNG[`../../assets/providers/${spec.key}.png`] ??
     PROVIDER_ICONS_SVG[`../../assets/providers/${spec.key}.svg`]
