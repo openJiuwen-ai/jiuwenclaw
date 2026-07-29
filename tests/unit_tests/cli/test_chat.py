@@ -23,6 +23,7 @@ from jiuwenswarm.cli.chat import (
     _generate_session_id,
     _get_persisted_external_dirs,
     _load_state,
+    _normalize_dir,
     _remove_dir_from_config,
     _save_state,
     _validate_args,
@@ -1041,11 +1042,46 @@ class TestExternalDirs:
         )
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
         dirs = _get_persisted_external_dirs()
-        assert "/Users/hwz/mcore/foo" in dirs
-        assert "/opt/baz" in dirs
-        assert "/tmp/bar" not in dirs
+        assert _normalize_dir("/Users/hwz/mcore/foo") in dirs
+        assert _normalize_dir("/opt/baz") in dirs
+        assert _normalize_dir("/tmp/bar") not in dirs
         assert "*" not in dirs
         assert len(dirs) == 2
+
+    @staticmethod
+    def test_get_persisted_dirs_from_file_guard_paths(monkeypatch, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.dump(
+            {
+                "permissions": {
+                    "external_directory": {"*": "ask"},
+                    "file_guard": {
+                        "enabled": True,
+                        "paths": [
+                            {
+                                "path": "/trusted/a",
+                                "read": "allow",
+                                "write": "allow",
+                                "exec": "ask",
+                            },
+                            {
+                                "path": "/trusted/ro",
+                                "read": "allow",
+                                "write": "ask",
+                                "exec": "ask",
+                            },
+                        ],
+                    },
+                }
+            },
+            cfg_path,
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
+        dirs = _get_persisted_external_dirs()
+        assert _normalize_dir("/trusted/a") in dirs
+        assert _normalize_dir("/trusted/ro") not in dirs
 
     @staticmethod
     def test_remove_dir_from_config(monkeypatch, tmp_path):
@@ -1066,6 +1102,33 @@ class TestExternalDirs:
         )
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", save_cfg_path)
         assert _remove_dir_from_config("/Users/hwz/mcore/foo") is True
+        assert _get_persisted_external_dirs() == []
+
+    @staticmethod
+    def test_remove_dir_from_file_guard_paths(monkeypatch, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.dump(
+            {
+                "permissions": {
+                    "file_guard": {
+                        "enabled": True,
+                        "paths": [
+                            {
+                                "path": "/trusted/a",
+                                "read": "allow",
+                                "write": "allow",
+                                "exec": "ask",
+                            }
+                        ],
+                    }
+                }
+            },
+            cfg_path,
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
+        assert _remove_dir_from_config("/trusted/a") is True
         assert _get_persisted_external_dirs() == []
 
     @staticmethod

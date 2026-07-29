@@ -1589,6 +1589,11 @@ overflow: hidden;
   width: 9px;
   height: 9px;
   flex: 0 0 auto;
+  transition: transform 0.2s ease;
+}
+
+.chat-work-select--open .chat-work-select__chevron {
+  transform: rotate(180deg);
 }
 
 .chat-work-select__trigger:disabled {

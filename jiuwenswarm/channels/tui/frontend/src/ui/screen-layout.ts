@@ -270,12 +270,12 @@ function renderBtwOverlay(
   const showHistory = total > 1;
   const posLabel = showHistory ? `${(overlayIndex ?? 0) + 1}/${total}` : "";
   // 用数组拼接避免尾部多余管道符（不可滚动分支末尾不再出现 " | "）
-  const hintParts = ["Esc dismiss"];
+  const hintParts = ["Esc/Enter/Space/ctrl+c dismiss"];
   if (showHistory) hintParts.push(`←/→ history ${posLabel}`);
   hintParts.push("c copy");
   hintParts.push("x delete");
   if (answerLines.length > bodyHeight) {
-    hintParts.push("↑/↓ scroll", "PgUp/PgDn page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
+    hintParts.push("↑/↓ scroll", "PgUp/PgDn·ctrl+p/n page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
   }
   const scrollHint = hintParts.join(" | ");
 

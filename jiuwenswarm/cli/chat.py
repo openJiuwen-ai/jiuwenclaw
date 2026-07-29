@@ -84,7 +84,7 @@ def _save_state(state: dict[str, bool]) -> None:
 
 
 def _get_persisted_external_dirs() -> list[str]:
-    """Read config.yaml for external_directory entries with value 'allow' (excluding '*' wildcard)."""
+    """读取已信任目录：优先 ``file_guard.paths``（read/write allow），过渡期兼容 ``external_directory`` allow。"""
     from jiuwenswarm.common.config import CONFIG_YAML_PATH, load_yaml_round_trip
 
     cfg_path = Path(CONFIG_YAML_PATH) if not isinstance(CONFIG_YAML_PATH, Path) else CONFIG_YAML_PATH
@@ -99,18 +99,45 @@ def _get_persisted_external_dirs() -> list[str]:
     perms = data.get("permissions")
     if not isinstance(perms, dict):
         return []
+
+    result: list[str] = []
+    seen: set[str] = set()
+
+    fg = perms.get("file_guard")
+    if isinstance(fg, dict):
+        paths = fg.get("paths")
+        if isinstance(paths, list):
+            for item in paths:
+                if not isinstance(item, dict):
+                    continue
+                raw = item.get("path")
+                if not isinstance(raw, str) or not raw.strip():
+                    continue
+                # 信任目录约定：read+write allow（exec 可为 ask）
+                if str(item.get("read") or "").lower() != "allow":
+                    continue
+                if str(item.get("write") or "").lower() != "allow":
+                    continue
+                if str(item.get("match") or "prefix") == "glob":
+                    continue
+                norm = _normalize_dir(raw)
+                if norm and norm not in seen:
+                    seen.add(norm)
+                    result.append(norm)
+
     ext = perms.get("external_directory")
-    if not isinstance(ext, dict):
-        return []
-    result = []
-    for k, v in ext.items():
-        if str(k) != "*" and str(v) == "allow":
-            result.append(_normalize_dir(str(k)))
+    if isinstance(ext, dict):
+        for k, v in ext.items():
+            if str(k) != "*" and str(v) == "allow":
+                norm = _normalize_dir(str(k))
+                if norm and norm not in seen:
+                    seen.add(norm)
+                    result.append(norm)
     return result
 
 
 def _remove_dir_from_config(dir_path: str) -> bool:
-    """Remove a single directory entry from config.yaml's external_directory."""
+    """从 config.yaml 移除信任目录（``file_guard.paths`` 及过渡期 ``external_directory``）。"""
     from jiuwenswarm.common.config import CONFIG_YAML_PATH, load_yaml_round_trip, dump_yaml_round_trip
 
     cfg_path = Path(CONFIG_YAML_PATH) if not isinstance(CONFIG_YAML_PATH, Path) else CONFIG_YAML_PATH
@@ -125,19 +152,40 @@ def _remove_dir_from_config(dir_path: str) -> bool:
     perms = data.get("permissions")
     if not isinstance(perms, dict):
         return False
-    ext = perms.get("external_directory")
-    if not isinstance(ext, dict):
-        return False
 
     target = _normalize_dir(dir_path)
-    key_to_remove = None
-    for key in list(ext.keys()):
-        if _normalize_dir(str(key)) == target:
-            key_to_remove = key
-            break
-    if key_to_remove is None:
+    removed = False
+
+    fg = perms.get("file_guard")
+    if isinstance(fg, dict):
+        paths = fg.get("paths")
+        if isinstance(paths, list):
+            new_paths = []
+            for item in paths:
+                if not isinstance(item, dict):
+                    new_paths.append(item)
+                    continue
+                raw = item.get("path")
+                if isinstance(raw, str) and _normalize_dir(raw) == target:
+                    removed = True
+                    continue
+                new_paths.append(item)
+            if removed:
+                fg["paths"] = new_paths
+
+    ext = perms.get("external_directory")
+    if isinstance(ext, dict):
+        key_to_remove = None
+        for key in list(ext.keys()):
+            if _normalize_dir(str(key)) == target:
+                key_to_remove = key
+                break
+        if key_to_remove is not None:
+            del ext[key_to_remove]
+            removed = True
+
+    if not removed:
         return False
-    del ext[key_to_remove]
     try:
         dump_yaml_round_trip(cfg_path, data)
     except Exception:

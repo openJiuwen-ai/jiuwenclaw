@@ -35,6 +35,8 @@ export interface FileDownloadItem {
   mime_type: string;
   download_url: string;
   download_token: string;
+  /** 工作区绝对/相对路径；用于去重身份（优先于 downloadUrl 中的 exp token） */
+  path?: string;
 }
 
 export interface ContextCompressionRuntime {
@@ -95,6 +97,7 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
   description?: string;  // 操作描述，如 "创建 3 个任务"
   formatted_args?: string;  // 格式化参数摘要
+  display_name?: string;  // 后端下发的可读展示名，前端优先直接展示
   memberName?: string;
 }
 

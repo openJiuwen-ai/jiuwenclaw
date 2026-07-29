@@ -19,7 +19,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from dotenv import load_dotenv
 try:
     import psutil as _psutil
     _HAS_PSUTIL = True
@@ -91,6 +90,7 @@ from jiuwenswarm.common.utils import (
     get_root_dir,
     get_user_workspace_dir
 )
+from jiuwenswarm.dotenv_early import load_dotenv_runtime
 from jiuwenswarm.common.work_mode import (
     DEFAULT_PROJECT_ID_CODE,
     DEFAULT_PROJECT_ID_WORK,
@@ -185,7 +185,7 @@ class _ConfigChangeSet:
 
 _PROJECT_ROOT = get_root_dir()
 _ENV_FILE = get_env_file()
-load_dotenv(dotenv_path=_ENV_FILE, override=True)
+load_dotenv_runtime(dotenv_path=_ENV_FILE, override=True)
 
 
 _ENV_VAR_PLACEHOLDER_RE = re.compile(r"^\$\{([^:}]+)(?::-([^}]*))?\}$")
@@ -623,6 +623,11 @@ _FORWARD_REQ_METHODS = frozenset({
     "extensions.import",
     "extensions.delete",
     "extensions.toggle",
+    "team.templates.list",
+    "team.bindings.list",
+    "team.binding.create",
+    "team.binding.generate",
+    "team.session.bind",
     "team.snapshot",
     "team.history.get",
     "team.mq.publish",
@@ -656,6 +661,11 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "session.create",
     "session.switch",
     "acp.tool_response",
+    "team.templates.list",
+    "team.bindings.list",
+    "team.binding.create",
+    "team.binding.generate",
+    "team.session.bind",
     "team.delete",
     "command.goal",
     "team.snapshot",
@@ -1737,6 +1747,51 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 encrypted[key] = ExtensionRegistry.get_instance().get_crypto_provider().encrypt(val)
         return encrypted
 
+    def _front_team_template_ids(params: dict[str, Any]) -> set[str] | None:
+        teams_raw = params.get("team")
+        if teams_raw is None:
+            return None
+        if not isinstance(teams_raw, list):
+            return set()
+        template_ids: set[str] = set()
+        for team_raw in teams_raw:
+            if not isinstance(team_raw, dict):
+                continue
+            template_id = str(team_raw.get("team_name") or "").strip()
+            if template_id:
+                template_ids.add(template_id)
+        return template_ids
+
+    def _preserve_deleted_team_entities(params: dict[str, Any]) -> None:
+        next_template_ids = _front_team_template_ids(params)
+        if next_template_ids is None:
+            return
+
+        from jiuwenswarm.agents.harness.team import list_team_template_summaries
+        from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
+        from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity_for_binding
+
+        config_base = get_config()
+        current_template_ids = {
+            str(item.get("template_id") or "").strip()
+            for item in list_team_template_summaries(config_base)
+            if str(item.get("source") or "").startswith("modes.team.")
+        }
+        deleted_template_ids = current_template_ids - next_template_ids
+        if not deleted_template_ids:
+            return
+
+        failed_team_names: list[str] = []
+        for binding in get_team_binding_store().list():
+            if binding.template_id not in deleted_template_ids:
+                continue
+            if ensure_team_entity_for_binding(binding, config_base=config_base) is None:
+                failed_team_names.append(binding.team_name)
+        if failed_team_names:
+            raise _ConfigInternalError(
+                "failed to preserve team entity config: " + ", ".join(sorted(failed_team_names))
+            )
+
     def _apply_config_payload(params: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
         """Apply config.set-style payload to .env/config.yaml without triggering reload."""
         params = _encrypt_config_params(params)
@@ -1770,6 +1825,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         if "agents" in params or "team" in params:
             try:
+                if "team" in params:
+                    _preserve_deleted_team_entities(params)
                 replace_teams_in_config(params)
                 yaml_updated.append("modes.team")
             except ValueError as exc:

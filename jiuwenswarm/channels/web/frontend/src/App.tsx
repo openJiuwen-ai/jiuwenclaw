@@ -513,6 +513,7 @@ function AppContent() {
   const messages = useChatStore((s) => s.runtimes[sessionId]?.messages ?? []);
   const isLoadingHistory = useChatStore((s) => s.runtimes[sessionId]?.isLoadingHistory ?? false);
   const replaceHistoryMessages = useChatStore((s) => s.replaceHistoryMessages);
+  const restoreReasoningSegments = useChatStore((s) => s.restoreReasoningSegments);
   const isRestoringHistorySession = isLoadingHistory && !historyPagerMeta && messages.length === 0;
   const isRestoringTeamHistory = mode === 'team' && isRestoringHistorySession;
 
@@ -632,6 +633,7 @@ function AppContent() {
             arguments: n.arguments,
             description: n.description,
             formatted_args: n.formatted_args,
+            display_name: n.display_name,
             memberName: n.memberName,
           },
           { startedAt: item.at }
@@ -690,6 +692,16 @@ function AppContent() {
           });
         }
       }
+    }
+
+    if (result.reasoningReplay.length > 0) {
+      const store = useChatStore.getState();
+      const current = store.runtimes[sid]?.reasoningSegments ?? [];
+      const currentItems = current.map((segment) => ({
+        at: new Date(segment.startedAt + 1).toISOString(),
+        text: segment.text,
+      }));
+      store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
     }
   }, [addToolCall, addToolResult, prependMessages]);
 
@@ -1365,6 +1377,7 @@ function AppContent() {
                 arguments: n.arguments,
                 description: n.description,
                 formatted_args: n.formatted_args,
+                display_name: n.display_name,
                 memberName: n.memberName,
               },
               { startedAt: item.at }
@@ -1427,6 +1440,9 @@ function AppContent() {
           }
         }
       },
+      onReasoningReplay: (items) => {
+        restoreReasoningSegments(sessionId, items);
+      },
       onError: (message) => {
         console.warn('[history.restore]', message);
         setLoadingHistory(sessionId, false);
@@ -1478,6 +1494,7 @@ function AppContent() {
     setLoadingHistory,
     setHistoryPagerMeta,
     replaceHistoryMessages,
+    restoreReasoningSegments,
     startBackgroundHistoryPrefetch,
   ]);
 
@@ -1521,7 +1538,7 @@ function AppContent() {
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
     const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
-    const projectDir = selectedProject?.project_dir ?? currentRuntime?.projectDirectory ?? null;
+    const projectDir = options.project?.project_dir ?? selectedProject?.project_dir ?? null;
     disposeInFlightHistoryHandles(
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );

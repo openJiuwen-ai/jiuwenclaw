@@ -1590,6 +1590,7 @@ export class AppScreen implements Component, Focusable {
   private runningStoppedAtMs: number | null = null;
   /** Whether the eager skill-cache fetch on first WebSocket connection has already been fired. */
   private didEagerFetchSkills = false;
+  private didEagerFetchSandboxMeta = false;
   private pendingSubmittedInput: string | null = null;
   private pendingSubmittedBaseline = 0;
   private pendingSubmittedSessionId: string | null = null;
@@ -1764,7 +1765,8 @@ export class AppScreen implements Component, Focusable {
     this.startupPromptList.onSelect = (item) => {
       if (item.value === "yes") {
         addTrustedDir(cwd);
-        // Sync to server so the dir lands in permissions.external_directory
+        // Sync to server so the dir lands in permissions.file_guard.paths
+        // (read/write allow, exec ask; Legacy readers may still see external_directory)
         // allow-list (persist_cli_trusted_directory), otherwise external_dir
         // checks would still intercept paths under this trusted directory.
         // Mirrors /workspace add (workspace-dir.ts).
@@ -3413,8 +3415,8 @@ export class AppScreen implements Component, Focusable {
           enterConfigEditor: (focusKey, configPayload, mode) => {
             this.openConfigEditor(focusKey, configPayload, mode);
           },
-          openInEditor: (filePath: string) => {
-            openInExternalEditor(this.tui, filePath);
+          openInEditor: (filePath: string, onDone?: () => void) => {
+            openInExternalEditor(this.tui, filePath, onDone);
           },
           openFolder: (folderPath: string) => {
             return openFolderInExplorer(folderPath);
@@ -3476,6 +3478,21 @@ export class AppScreen implements Component, Focusable {
     if (!this.didEagerFetchSkills && snapshot.connectionStatus === "connected") {
       this.didEagerFetchSkills = true;
       void this.commands.refreshSkills(this.state.getCommandContext());
+    }
+    // Hide /sandbox subcommand inline hints when sandbox.type=yuanrong.
+    if (!this.didEagerFetchSandboxMeta && snapshot.connectionStatus === "connected") {
+      this.didEagerFetchSandboxMeta = true;
+      void import("../core/commands/builtins/sandbox.js")
+        .then(({ refreshSandboxCommandPresentation }) =>
+          refreshSandboxCommandPresentation(this.state.getCommandContext()),
+        )
+        .then(() => {
+          this.composerAutocompleteProvider = this.rebuildAutocompleteProvider();
+          this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
+        })
+        .catch(() => {
+          // Best-effort; /sandbox action still probes on use.
+        });
     }
     if (
       this.pendingSubmittedInput &&
@@ -3586,6 +3603,21 @@ export class AppScreen implements Component, Focusable {
       return true;
     }
 
+    // Enter / Space / ctrl+c 关闭 btw 浮层（对齐 Esc：关闭 overlay + 取消进行中的 btw 请求）
+    if (
+      matchesKey(data, "enter") ||
+      matchesKey(data, "return") ||
+      matchesKey(data, "space") ||
+      matchesKey(data, "ctrl+c")
+    ) {
+      this.state.clearBtwOverlay();
+      this.btwOverlayScrollOffset = 0;
+      this.state.requestLocalInterrupt();
+      this.state.setBtwActive(false);
+      this.tui.requestRender();
+      return true;
+    }
+
     // ←/→ 在 btw 历史间切换（必须在 scroll 之前消费，避免落入 composer）
     if (matchesKey(data, "left")) {
       this.state.navigateBtw(-1);
@@ -3615,6 +3647,17 @@ export class AppScreen implements Component, Focusable {
     }
 
     const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
+    // ctrl+p / ctrl+n 翻页（对齐 PgUp/PgDn）
+    if (matchesKey(data, "ctrl+p")) {
+      this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - pageSize);
+      this.tui.requestRender();
+      return true;
+    }
+    if (matchesKey(data, "ctrl+n")) {
+      this.btwOverlayScrollOffset += pageSize;
+      this.tui.requestRender();
+      return true;
+    }
     if (matchesKey(data, "up")) {
       this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - 1);
       this.tui.requestRender();

@@ -2,6 +2,10 @@
    MarkdownRenderer Component Styles
    =========================================== */
 
+.chat-bubble-wrapper:has(.chat-markdown-table-wrap) {
+  max-width: min(100%, 52rem);
+}
+
 /* Toolbar button */
 .markdown-toolbar-btn {
   display: inline-flex;

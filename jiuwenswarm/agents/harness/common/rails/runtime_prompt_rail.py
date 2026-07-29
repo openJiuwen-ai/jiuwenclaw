@@ -51,6 +51,7 @@ class RuntimePromptRail(DeepAgentRail):
         self._trusted_dirs: list[str] | None = None
         self._cwd: str | None = None
         self._project_dir: str | None = None
+        self._workspace_dir: str | None = None
         self._model_name: str = ""
         self._mode: str = ""
         self._session_id: str | None = None
@@ -86,12 +87,31 @@ class RuntimePromptRail(DeepAgentRail):
         """per-request 更新可信目录。"""
         self._trusted_dirs = trusted_dirs
 
-    def set_runtime_paths(self, *, cwd: str | None = None, project_dir: str | None = None) -> None:
-        """Per-request stable project identity and dynamic cwd."""
+    def set_runtime_paths(
+        self,
+        *,
+        cwd: str | None = None,
+        project_dir: str | None = None,
+        workspace_dir: str | None = None,
+    ) -> None:
+        """Per-request stable project identity, dynamic cwd and own workspace.
+
+        Args:
+            cwd: Working directory shell runs in and relative paths resolve against.
+            project_dir: Project root, when the request is bound to one.
+            workspace_dir: This agent's own workspace (artifacts, memory, skills
+                view). Team members each have their own; falls back to the
+                process-wide agent workspace when unset.
+        """
         self._cwd = cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
         self._project_dir = (
             project_dir.strip()
             if isinstance(project_dir, str) and project_dir.strip()
+            else None
+        )
+        self._workspace_dir = (
+            workspace_dir.strip()
+            if isinstance(workspace_dir, str) and workspace_dir.strip()
             else None
         )
 
@@ -421,46 +441,6 @@ class RuntimePromptRail(DeepAgentRail):
                 "page inspection, or extracting data from a live website, use `task_tool` with "
                 '`subagent_type` set to `"browser_agent"` and put the full browser objective in '
                 "`task_description`.\n"
-                "- Before spawning `browser_agent` for booking, ticketing, purchasing, reservation, or "
-                "form-filling tasks, check whether the user has supplied enough confirmed details. "
-                "If required details are missing and A2UI is available, render a preflight A2UI form "
-                "with action name `browser_preflight_submit` instead of starting browser automation. "
-                "Do not use plain natural-language questions or `ask_user` for those missing "
-                "browser-task details when A2UI is available on the Web channel.\n"
-                "- Mandatory Web A2UI account-action gate: Gmail, email, mailbox cleanup, social "
-                "media posting, comments, and other externally visible account actions MUST use A2UI "
-                "when A2UI is available. Do not use `todo_create`, `todo_modify`, `memory_search`, "
-                "`task_tool`, plain text, Markdown, or `ask_user` as a substitute for A2UI preflight, "
-                "candidate selection, draft review, or final confirmation. For requests such as "
-                "finding emails and replying to the ones that need a reply, first use A2UI preflight "
-                "if filters or reply preferences are incomplete; after Gmail search, show the "
-                "emails/threads as A2UI candidates before opening, summarizing multiple messages, "
-                "drafting replies, or modifying mail; and show final A2UI confirmation before any "
-                "send, archive, delete, unsubscribe, label, mark-read, post, publish, comment, like, "
-                "follow, or delete action.\n"
-                "- For hotel booking flows, after `browser_agent` returns candidate hotels, render the "
-                "candidate list with A2UI selection actions named `hotel_option_select`. Include "
-                "`next_action=\"continue_hotel_booking\"`, the selected hotel identity, and the "
-                "confirmed city/date/guest context in each action context. When the user selects a "
-                "hotel, call `browser_agent` to continue from the current browser state and selected "
-                "candidate; do not restart the broad hotel search unless browser-state recovery is "
-                "needed. At the payment/order summary page, render a final A2UI confirmation using "
-                "`hotel_payment_confirm` and `hotel_payment_cancel` actions.\n"
-                "- For Gmail search, summarization, reply drafting, and cleanup flows, render search "
-                "results with `gmail_email_select` actions and cleanup candidates with "
-                "`gmail_cleanup_select` actions. When the user selects an email, continue from the "
-                "current Gmail browser state; do not repeat the broad Gmail search unless recovery is "
-                "needed. Filling a reply draft must use `gmail_reply_draft_select` and must stop "
-                "before sending. After `gmail_send_confirm`, send the email only if the visible "
-                "Gmail compose state matches the confirmed context. Final cleanup requires "
-                "`gmail_cleanup_confirm`. Respect `gmail_send_cancel` and `gmail_cleanup_cancel` "
-                "by stopping without side effects.\n"
-                "- For social media posting flows, render draft variants with "
-                "`social_post_draft_select`. After draft selection, use `browser_agent` to fill the "
-                "current platform compose UI but stop before any externally visible action. Final "
-                "publishing requires `social_post_confirm`; after confirmation, publish only if "
-                "the visible compose state matches the confirmed context. `social_post_cancel` "
-                "stops without publishing.\n"
                 "- Do not use bash, execute_code, subprocess, shell commands, or direct Chrome/Edge launches "
                 "for browser automation.\n"
                 "- If `task_tool` or `browser_agent` is unavailable, say that the browser "
@@ -475,7 +455,10 @@ class RuntimePromptRail(DeepAgentRail):
         if self._channel in ("tui", "web"):
             # Trusted directories policy for TUI and Web mode
             trusted_dirs = self._existing_dirs(self._trusted_dirs)
-            agent_workspace_dir = str(get_agent_workspace_dir())
+            # This agent's own workspace. Team members each own one; without
+            # it (single-agent runs) the process-wide agent workspace is the
+            # same directory anyway.
+            agent_workspace_dir = self._existing_dir(self._workspace_dir) or str(get_agent_workspace_dir())
             config_dir = str(get_user_workspace_dir() / "config")
             project_dir = self._existing_dir(self._project_dir)
             runtime_cwd = (

@@ -808,10 +808,10 @@ permissions:
     bash: ask
     mcp_exec_command: ask
     create_terminal: ask
-    write: ask
-    write_file: ask
-    edit_file: ask
-    search_replace: ask
+    write: allow
+    write_file: allow
+    edit_file: allow
+    search_replace: allow
     # ask_user 只向用户提问，不修改系统，自动放行避免权限中断阻塞问题选项呈现
     ask_user: allow
     write_memory: allow
@@ -936,20 +936,39 @@ permissions:
       tools: [bash, mcp_exec_command, create_terminal]
       pattern: 're:(?i)(^|[\s;&|()])((cat|type|less|more|head|tail|grep|find|Get-Content|Select-String)\b[^;&|]*(id_rsa|id_ed25519|\.pem\b|\.pfx\b|\.key\b|\.kube/config|\.aws/(credentials|config)|\.npmrc\b|\.env(\.[A-Za-z0-9_-]+)?\b|authorized_keys|\.ssh/))'
       severity: HIGH
-    - id: path_ask_ssh
-      tools: [read_file, write_file, edit_file, read_text_file, write_text_file, write, read, glob_file_search, glob, list_dir, list_files, grep, search_replace]
-      pattern: "**/.ssh/**"
-      severity: HIGH
-    - id: path_ask_env
-      tools: [read_file, write_file, edit_file, read_text_file, write_text_file, write, read, glob_file_search, glob, list_dir, list_files, grep, search_replace]
-      pattern: "**/.env*"
-      severity: HIGH
+    # path_ask_* 已迁到 file_guard.paths（match: glob）；Pipeline A 不再重复匹配。
+    # - id: path_ask_ssh / path_ask_env → 见下方 file_guard.paths
 
   # 数字分身 owner-scoped 权限（默认空，不生效）
   owner_scopes: {}
   deny_guidance_message: ""
 
-  # 外部目录访问 (访问 workspace 外路径时的权限)
+  # Native 路径层（agent-core FileGuard）：defaults + workspace 绑定运行时 workspace_root
+  # trusted_dirs（TUI 项目 cwd / /add-dir）由引擎运行时编译，不必写进 YAML。
+  file_guard:
+    enabled: true
+    defaults:
+      read: ask
+      write: ask
+      exec: ask
+    workspace:
+      read: allow
+      write: allow
+      exec: ask
+    paths:
+      - path: "**/.ssh/**"
+        match: glob
+        read: ask
+        write: ask
+        exec: ask
+      - path: "**/.env*"
+        match: glob
+        read: ask
+        write: ask
+        exec: ask
+
+  # Legacy external_directory：仅作兼容；启用上方 Native file_guard 后 "*" 不再驱动路径层。
+  # 新信任目录写入 file_guard.paths（/add-dir），勿再写本键具名 allow。
   external_directory:
     "*": "ask"
 

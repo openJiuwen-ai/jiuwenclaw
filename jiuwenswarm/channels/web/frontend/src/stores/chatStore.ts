@@ -28,9 +28,20 @@ import {
   mergeToolResultProgress,
   shouldDropToolResult,
 } from './toolResultLifecycle';
+import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
 const EVOLUTION_STATUS_END_VISIBLE_MS = 3_000;
+
+let reasoningSegmentSeq = 0;
+
+function createReasoningSegmentId(): string {
+  reasoningSegmentSeq += 1;
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `rsn-${crypto.randomUUID()}`;
+  }
+  return `rsn-${Date.now()}-${reasoningSegmentSeq}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function computeTimeoutAt(baseIso: string): string {
   return new Date(Date.parse(baseIso) + TOOL_TIMEOUT_MS).toISOString();
@@ -70,6 +81,15 @@ export interface HistoryPagerMeta {
  * 单个 session 的对话运行态。
  * 原全局字段全部迁移到这里，按 session 隔离。
  */
+export interface ReasoningSegment {
+  id: string;
+  text: string;
+  startedAt: number;
+  closed: boolean;
+  /** 收尾时刻；用于延迟折进 streak。历史可省略。 */
+  closedAt?: number;
+}
+
 export interface ChatRuntime {
   messages: Message[];
   isProcessing: boolean;
@@ -85,6 +105,11 @@ export interface ChatRuntime {
   isNewSession: boolean;
   currentStreamContent: string;
   currentStreamId: string | null;
+  /** 本轮是否已按工具边界分段（chat.final 去重）。 */
+  assistantStreamSplit: boolean;
+  reasoningSegments: ReasoningSegment[];
+  /** 「思考中」耗时锚点：仅在可见文字产出时前移。 */
+  thinkingAnchorAt: number;
   messageRenderKeySeq: number;
   /** 最近一次 chat.error 的错误信息，用于会话列表展示异常标记 */
   error: string | null;
@@ -125,6 +150,9 @@ function createEmptyRuntime(): ChatRuntime {
     isNewSession: false,
     currentStreamContent: '',
     currentStreamId: null,
+    assistantStreamSplit: false,
+    reasoningSegments: [],
+    thinkingAnchorAt: Date.now(),
     messageRenderKeySeq: 0,
     error: null,
     streamBuffers: new Map(),
@@ -183,8 +211,19 @@ interface ChatState {
   replaceHistoryMessages: (sessionId: string, messages: Message[]) => void;
   updateMessage: (sessionId: string, id: string, updates: Partial<Message>) => void;
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
+  appendReasoning: (sessionId: string, content: string, options?: { atMs?: number }) => void;
+  closeReasoning: (sessionId: string, options?: { atMs?: number }) => void;
+  restoreReasoningSegments: (sessionId: string, items: { at: string; text: string }[]) => void;
   startStreaming: (sessionId: string, messageId: string, streamKey?: string) => void;
   stopStreaming: (sessionId: string, streamKey?: string) => void;
+  finalizeStreamSegment: (sessionId: string, streamKey?: string) => void;
+  finalizeTeamLeaderSegment: (sessionId: string) => void;
+  clearStreamSplit: (sessionId: string) => void;
+  collapseTurnFinal: (
+    sessionId: string,
+    opts: { kind: 'agent' | 'team'; content: string; finalId: string; timestampIso: string }
+  ) => void;
+  bumpThinkingAnchor: (sessionId: string) => void;
   setExecutionError: (sessionId: string, error: string | null) => void;
   setProcessing: (sessionId: string, status: boolean) => void;
   setThinking: (sessionId: string, status: boolean) => void;
@@ -277,6 +316,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             ...runtime,
             messages: [...runtime.messages, ...messages],
             messageRenderKeySeq,
+            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: [] } : {}),
           },
         },
       };
@@ -300,6 +340,8 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             messageRenderKeySeq: assigned.messageRenderKeySeq,
             currentStreamContent: '',
             currentStreamId: null,
+            assistantStreamSplit: false,
+            reasoningSegments: [],
             streamBuffers: new Map(),
             evolutionStatus: null,
             evolutionStatusClearTimer: null,
@@ -369,6 +411,97 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
+  appendReasoning: (sessionId, content, options) => {
+    if (!content) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const segments = runtime.reasoningSegments;
+      const last = segments[segments.length - 1];
+      const atMs =
+        typeof options?.atMs === 'number' && Number.isFinite(options.atMs)
+          ? options.atMs
+          : Date.now();
+      let next: ReasoningSegment[];
+      if (last && !last.closed) {
+        next = segments.slice(0, -1).concat({ ...last, text: last.text + content });
+      } else {
+        next = segments.concat({
+          id: createReasoningSegmentId(),
+          text: content,
+          startedAt: atMs,
+          closed: false,
+        });
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, reasoningSegments: next },
+        },
+      };
+    });
+  },
+
+  closeReasoning: (sessionId, options) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const segments = runtime.reasoningSegments;
+      const last = segments[segments.length - 1];
+      if (!last || last.closed) return state;
+      const atMs =
+        typeof options?.atMs === 'number' && Number.isFinite(options.atMs)
+          ? options.atMs
+          : Date.now();
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            reasoningSegments: segments.slice(0, -1).concat({
+              ...last,
+              closed: true,
+              closedAt: atMs,
+            }),
+          },
+        },
+      };
+    });
+  },
+
+  restoreReasoningSegments: (sessionId, items) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const segments: ReasoningSegment[] = [];
+      const seen = new Set<string>();
+      items.forEach((item, index) => {
+        const text = item.text?.trim();
+        if (!text || seen.has(text)) return;
+        seen.add(text);
+        const parsed = Date.parse(item.at);
+        // 历史里思考与同一步 final/tool_call 共用落盘时间；减 1ms 仅补齐缺失的独立时间戳，
+        // 使时间线能分出「先思考、后动作」，不做跨步骤重排。
+        const startedAt = Number.isFinite(parsed) ? parsed - 1 : index;
+        segments.push({
+          id: `hist-rsn-${sessionId}-${index}-${createReasoningSegmentId()}`,
+          text,
+          startedAt,
+          closed: true,
+          // 历史已结束：closedAt 用 startedAt，立刻 settled，且比魔法 0 更可解释。
+          closedAt: startedAt,
+        });
+      });
+      segments.sort((a, b) => a.startedAt - b.startedAt);
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, reasoningSegments: segments },
+        },
+      };
+    });
+  },
+
   startStreaming: (sessionId, messageId, streamKey = 'default') => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -408,6 +541,146 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
+  finalizeStreamSegment: (sessionId, streamKey = 'default') => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || !runtime.currentStreamId) return state;
+      const streamingMessage = runtime.messages.find(
+        (msg) => msg.id === runtime.currentStreamId
+      );
+      const hasVisibleText = Boolean(streamingMessage?.content?.trim());
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: runtime.messages.map((msg) =>
+              msg.id === runtime.currentStreamId ? { ...msg, isStreaming: false } : msg
+            ),
+            currentStreamId: null,
+            currentStreamContent: '',
+            assistantStreamSplit: runtime.assistantStreamSplit || hasVisibleText,
+            streamBuffers: new Map(runtime.streamBuffers).set(streamKey, ''),
+          },
+        },
+      };
+    });
+  },
+
+  finalizeTeamLeaderSegment: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      let latestUserIndex = -1;
+      for (let i = runtime.messages.length - 1; i >= 0; i -= 1) {
+        if (runtime.messages[i].role === 'user') {
+          latestUserIndex = i;
+          break;
+        }
+      }
+      let target: Message | undefined;
+      for (let i = runtime.messages.length - 1; i > latestUserIndex; i -= 1) {
+        const msg = runtime.messages[i];
+        if (msg.id.startsWith('team-leader-') && msg.isStreaming) {
+          target = msg;
+          break;
+        }
+      }
+      if (!target || !target.content?.trim()) return state;
+      const targetId = target.id;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: runtime.messages.map((msg) =>
+              msg.id === targetId ? { ...msg, isStreaming: false } : msg
+            ),
+            assistantStreamSplit: true,
+          },
+        },
+      };
+    });
+  },
+
+  clearStreamSplit: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || !runtime.assistantStreamSplit) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, assistantStreamSplit: false },
+        },
+      };
+    });
+  },
+
+  collapseTurnFinal: (sessionId, { kind, content, finalId, timestampIso }) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const msgs = runtime.messages;
+      let turnStart = 0;
+      for (let i = msgs.length - 1; i >= 0; i -= 1) {
+        if (msgs[i].role === 'user') {
+          turnStart = i + 1;
+          break;
+        }
+      }
+      const isTarget = (m: Message) =>
+        kind === 'team'
+          ? m.role === 'system' && typeof m.id === 'string' && m.id.startsWith('team-leader-')
+          : m.role === 'assistant';
+      const kept: Message[] = [];
+      let removed = 0;
+      for (let i = 0; i < msgs.length; i += 1) {
+        if (i >= turnStart && isTarget(msgs[i])) {
+          removed += 1;
+          continue;
+        }
+        kept.push(msgs[i]);
+      }
+      if (removed === 0) return state;
+      const displayContent =
+        kind === 'team'
+          ? `team.leader:${JSON.stringify({ content, timestamp: Date.parse(timestampIso) || Date.now() })}`
+          : content;
+      kept.push({
+        id: finalId,
+        role: kind === 'team' ? 'system' : 'assistant',
+        content: displayContent,
+        timestamp: timestampIso,
+        isStreaming: false,
+      });
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: kept,
+            assistantStreamSplit: false,
+            currentStreamId: null,
+            currentStreamContent: '',
+          },
+        },
+      };
+    });
+  },
+
+  bumpThinkingAnchor: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, thinkingAnchorAt: Date.now() },
+        },
+      };
+    });
+  },
+
   setExecutionError: (sessionId, error) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -425,6 +698,8 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      // 新一轮开始（false→true）：把「思考中」耗时锚点归到轮次起点。
+      const turnStart = status && !runtime.isProcessing;
       return {
         runtimes: {
           ...state.runtimes,
@@ -433,6 +708,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             isProcessing: status,
             executionError: status ? null : runtime.executionError,
             ...(status ? { error: null } : {}),
+            ...(turnStart ? { thinkingAnchorAt: Date.now() } : {}),
           },
         },
       };
@@ -842,6 +1118,13 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       const execution = runtime.toolExecutions.get(toolCallId);
       if (!execution) return state;
       const nextExecutions = new Map(runtime.toolExecutions);
+      // 进度更新不得把已完成/失败/超时打回 pending，否则 UI 会误显示「执行中」。
+      const keepStatus =
+        execution.status === 'completed' ||
+        execution.status === 'error' ||
+        execution.status === 'timeout'
+          ? execution.status
+          : 'pending';
       nextExecutions.set(toolCallId, {
         ...execution,
         result: {
@@ -852,8 +1135,9 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           ...execution.result,
           ...progress,
         },
-        status: 'pending',
-        updatedAt: new Date().toISOString(),
+        status: keepStatus,
+        updatedAt:
+          keepStatus === 'pending' ? new Date().toISOString() : execution.updatedAt,
       });
       return {
         runtimes: {
@@ -1239,7 +1523,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             ...runtime,
             messages: runtime.messages.map((msg) =>
               msg.id === targetId
-                ? { ...msg, fileItems: [...(msg.fileItems || []), ...files] }
+                ? { ...msg, fileItems: mergeFileDownloadItems(msg.fileItems, files) }
                 : msg
             ),
           },

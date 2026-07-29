@@ -5,7 +5,7 @@ import { AtSign, CircleX, FileImage, Loader2, Plus, Square, Target, X } from 'lu
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
-import { useChatStore, useGoalStore, useSessionStore, useWorkspaceStore } from '../../stores';
+import { useChatStore, useGoalStore, useSessionStore, useWorkspaceStore, resolveEffectiveModel } from '../../stores';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
@@ -1872,10 +1872,9 @@ export function InputArea({
             >
               <WorkIcon name="folder" className="chat-work-select__root-icon" />
               <span>{getProjectLabel(displayedProject, t('multiSession.project.chooseProjectDirectory'))}</span>
-              <WorkIcon
-                className="chat-work-select__chevron"
-                name={workMenuOpen === 'project' ? 'collapse' : 'expand'}
-              />
+              <svg className="chat-work-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+              </svg>
             </button>
             {displayedProject && !isWorkContextLocked ? (
               <span className="chat-work-select__clear-wrap" aria-hidden="false">
@@ -2150,9 +2149,10 @@ function ModelSelector({
   // 该会话实际记录的模型（如定时任务在集群模式下显式指定了非默认模型，后端也确实
   // 按该模型执行——见 bug002 回归），而不是不管三七二十一恒显示全局默认模型；
   // 从未指定过模型的会话 selectedModelName 本就兜底等于默认模型，行为不变。
-  const displayedModelName = selectedModelName || defaultModelName;
+  // 与实际发给后端的 model_name（sessionStore.getEffectiveModelName）复用同一套解析逻辑，
+  // 避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的兜底结果（bug003）。
   const selectedModel =
-    chatAvailableModels.find((m) => (m.alias || m.model_name) === displayedModelName) ??
+    resolveEffectiveModel(chatAvailableModels, selectedModelName, defaultModelName) ??
     chatAvailableModels[0];
 
   const handleSelect = (modelKey: string) => {

@@ -187,6 +187,44 @@ def calculate_instance_ports(index: int) -> Dict[str, int]:
     return {k: _resolved_base_port(k) + index * 1000 for k in BASE_PORTS}
 
 
+def _bind_listen_probe(host: str, port: int, family: int) -> bool | None:
+    """Try bind()+listen() on ``host:port``.
+
+    Returns:
+        True if the port can be bound, False if occupied, None if this address
+        family / host is unsupported on the machine (caller should ignore).
+    """
+    try:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    # Intentionally NOT setting SO_REUSEADDR: on Windows it permits multiple
+    # sockets to bind the same port, which would mask an occupied port and
+    # reproduce the very 10048 crash we are trying to avoid. The real services
+    # do not set it either.
+    try:
+        sock.bind((host, port))
+        sock.listen(1)
+        return True
+    except OSError as exc:
+        # Windows: WinError 10022/10049; POSIX: EADDRNOTAVAIL / EAFNOSUPPORT
+        # when IPv6 is disabled — treat as "family unavailable", not occupied.
+        winerr = getattr(exc, "winerror", None)
+        errno = getattr(exc, "errno", None)
+        if winerr in (10022, 10049) or errno in (
+            getattr(socket, "EADDRNOTAVAIL", 99),
+            getattr(socket, "EAFNOSUPPORT", 97),
+            getattr(socket, "EPROTONOSUPPORT", 93),
+        ):
+            return None
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def is_port_available(host: str, port: int) -> bool:
     """Check if a port is available for binding on the given host.
 
@@ -205,6 +243,11 @@ def is_port_available(host: str, port: int) -> bool:
     held by a dead-but-listening socket, causing the real service to crash
     with ``OSError [Errno 10048]`` on its own bind.
 
+    When ``host`` is IPv4 loopback / wildcard, also probes ``::1``: Vite on
+    Windows often listens on ``[::1]:5173`` only. An IPv4-only probe would
+    report the port free, skip ``jiuwenswarm-start`` port-group fallback, and
+    then ``strictPort: true`` would fail with "Port 5173 is already in use".
+
     Args:
         host: Host address to check
         port: Port number to check
@@ -212,22 +255,20 @@ def is_port_available(host: str, port: int) -> bool:
     Returns:
         True if the port can be bound (available), False if occupied.
     """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Intentionally NOT setting SO_REUSEADDR: on Windows it permits multiple
-    # sockets to bind the same port, which would mask an occupied port and
-    # reproduce the very 10048 crash we are trying to avoid. The real services
-    # do not set it either.
-    try:
-        sock.bind((host, port))
-        sock.listen(1)
-        return True  # Port is available (we could bind it)
-    except OSError:
-        return False  # Port is occupied
-    finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
+    family = socket.AF_INET6 if ":" in host and host.count(":") >= 2 else socket.AF_INET
+    primary = _bind_listen_probe(host, port, family)
+    if primary is False:
+        return False
+    if primary is None and family == socket.AF_INET6:
+        # Explicit IPv6 host but stack unavailable — fall back to IPv4 view.
+        return bool(_bind_listen_probe("127.0.0.1", port, socket.AF_INET))
+
+    # Dual-stack localhost: Vite / Node frequently bind ::1 only.
+    if host in ("127.0.0.1", "0.0.0.0", "", "localhost"):
+        ipv6 = _bind_listen_probe("::1", port, socket.AF_INET6)
+        if ipv6 is False:
+            return False
+    return primary is not False
 
 
 def check_port_conflicts(
