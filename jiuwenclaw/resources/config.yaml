@@ -637,7 +637,7 @@ react:
       - reload_original_context_messages
       - load_qa_index                 # 展开指定 QA 块内「概览+逐 round 目录」；非 Selector 选块
       - deepresearch_run_task
-      - skill_acceleration_exec
+      - skill_turbo_tool
     subagents:
       enabled: true
       inherit_parent_eager_tools: true
@@ -662,6 +662,9 @@ react:
     # 计算方法（注意：导入 environment 而非 pipeline_init；Windows 路径需用 r'' 原始字符串）：
     #   python -c "from jiuwenclaw.agentserver.skill_turbo.environment import _compute_dir_checksum; print(_compute_dir_checksum(r'<skill_root>\pptx-craft-skill_turbo'))"
     skill_checksum: 03fdacfcc92207294e226671066e5c6b8c7b64187ce6d47f1844d59f2a90a0dc
+    # 旧通道 skill_acceleration_exec 开关。false=关闭旧通道，走 skill_turbo_tool 在线执行；
+    # true=灰度回退时临时开启旧通道。Phase 2 完全去除旧通道后删除此字段。
+    legacy_acceleration_channel: false
 
   # LLM 调用重试配置（应用层；OpenAI SDK 重试见 models.*.model_client_config.max_retries）
   llm_retry:
@@ -947,7 +950,7 @@ permissions:
     cron_delete_job: allow
     cron_toggle_job: allow
     cron_preview_job: allow
-    skill_acceleration_exec: ask
+    skill_turbo_tool: allow
 
   rules:
     - id: shell_allow_dir

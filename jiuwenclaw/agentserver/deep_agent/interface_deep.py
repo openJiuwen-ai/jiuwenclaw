@@ -609,6 +609,7 @@ _DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
     "code",
     "skill_tool",
     "skill_complete",
+    "skill_turbo_tool",
     "todo_create",
     "todo_list",
     "todo_modify",
@@ -1332,6 +1333,7 @@ class JiuWenClawDeepAdapter:
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
         self._skill_protocol_prompt_rail: SkillProtocolPromptRail | None = None
+        self._skill_turbo_rail: Any | None = None
         self._skill_compliance_rail: SkillComplianceRail | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
@@ -3094,6 +3096,27 @@ class JiuWenClawDeepAdapter:
             )
             return None
 
+    @staticmethod
+    def _build_skill_turbo_rail() -> Any | None:
+        """Build SkillTurboRail: turbo 加速面渐进式注入 + skill_complete 释放."""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.rails.skill_turbo_rail import (
+                SkillTurboRail,
+            )
+
+            rail = SkillTurboRail()
+            logger.info(
+                "[JiuWenClawDeepAdapter] SkillTurboRail create success",
+                extra={'user_visible': 'progress'}
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] SkillTurboRail create failed: %s", exc,
+                extra={'user_visible': 'progress'}
+            )
+            return None
+
     def _build_skill_compliance_rail(self) -> SkillComplianceRail | None:
         """Build SkillComplianceRail：硬绑 SKILL.md usage lifecycle。"""
         try:
@@ -4061,14 +4084,45 @@ class JiuWenClawDeepAdapter:
                 return
 
             from openjiuwen.core.runner import Runner as RunnerClass
-            from jiuwenclaw.agentserver.skill_turbo.skill_turbo_tools import get_skill_turbo_tools
+            from jiuwenclaw.agentserver.skill_turbo.skill_turbo_tools import (
+                get_skill_turbo_online_tools,
+                get_skill_turbo_tools,
+            )
 
-            for tool in get_skill_turbo_tools():
+            # 旧通道 skill_acceleration_exec 受开关控制，默认关闭。
+            # Phase 1: legacy_acceleration_channel=True 时注册旧工具，便于灰度回退。
+            # Phase 2: 完全去除旧通道后删除此块。
+            legacy_channel = (
+                skill_turbo_config.get("legacy_acceleration_channel", False)
+                if isinstance(skill_turbo_config, dict)
+                else False
+            )
+            if legacy_channel:
+                for tool in get_skill_turbo_tools():
+                    try:
+                        RunnerClass.resource_mgr.add_tool(tool)
+                    except Exception as e:
+                        if "already exist" not in str(e):
+                            logger.warning("[JiuWenClawDeepAdapter] Failed to register skill_turbo tool: %s", e)
+                            continue
+                    self._instance.ability_manager.add(tool.card)
+                logger.info(
+                    "[JiuWenClawDeepAdapter] legacy skill_acceleration_exec channel registered "
+                    "(legacy_acceleration_channel=True)"
+                )
+            else:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] legacy skill_acceleration_exec channel disabled "
+                    "(legacy_acceleration_channel=False), using skill_turbo_tool online execution"
+                )
+
+            # 注册在线执行工具 skill_turbo_tool（新通道，始终注册）
+            for tool in get_skill_turbo_online_tools():
                 try:
                     RunnerClass.resource_mgr.add_tool(tool)
                 except Exception as e:
                     if "already exist" not in str(e):
-                        logger.warning("[JiuWenClawDeepAdapter] Failed to register skill_turbo tool: %s", e)
+                        logger.warning("[JiuWenClawDeepAdapter] Failed to register skill_turbo_tool: %s", e)
                         continue
                 self._instance.ability_manager.add(tool.card)
 
@@ -4641,6 +4695,14 @@ class JiuWenClawDeepAdapter:
                 await self._instance.register_rail(self._skill_protocol_prompt_rail)
                 logger.info(
                     "[JiuWenClawDeepAdapter] SkillProtocolPromptRail registered for plan mode"
+                )
+        # 注册 SkillTurboRail（turbo 加速面渐进式注入 + skill_complete 释放）
+        if self._skill_turbo_rail is None:
+            self._skill_turbo_rail = self._build_skill_turbo_rail()
+            if self._skill_turbo_rail is not None:
+                await self._instance.register_rail(self._skill_turbo_rail)
+                logger.info(
+                    "[JiuWenClawDeepAdapter] SkillTurboRail registered for plan mode"
                 )
         if self._skill_compliance_rail is None:
             self._skill_compliance_rail = self._build_skill_compliance_rail()

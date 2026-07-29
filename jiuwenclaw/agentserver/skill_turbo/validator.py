@@ -123,6 +123,8 @@ class CodeValidationPolicy:
             name="builtin_skill_code",
             allow_import=True,
             allow_import_from=True,
+            # turbo_codes 为自包含包，包内模块间使用相对导入（from .ppt_common import ...）
+            deny_relative_import=False,
             allowed_import_exact=(
                 "__future__",
                 "asyncio",
@@ -302,6 +304,11 @@ class PlanCodeValidator:
     def _check_import_from(self, node: ast.ImportFrom, errors: list[str]) -> None:
         if node.level and node.level > 0 and self._policy.deny_relative_import:
             errors.append(f"禁止相对 import (行 {node.lineno})")
+            return
+
+        # 相对导入（level > 0）是包内导入，仅可访问同包其他模块，inherently safe，
+        # 跳过模块名白名单检查（相对模块名如 "ppt_common" 不可能匹配绝对前缀）
+        if node.level and node.level > 0:
             return
 
         module = node.module or ""

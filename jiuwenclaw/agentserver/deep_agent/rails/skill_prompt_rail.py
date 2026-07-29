@@ -27,13 +27,30 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 可用技能清单与加载/释放约定见本 prompt 的「技能」段（SkillUseRail 注入），**须与该段一致**。
 
-### 技能加速通道（skill_acceleration_exec）
+### Skill Turbo 在线执行通道（skill_turbo_tool）
 
-⚠️ **默认优先**：当用户意图匹配 `skill_acceleration_exec`（当前：pptx-craft / PPT 制作），你的**第一个工具调用必须是 `skill_acceleration_exec`**——它内部会自行完成规划+研究+生成+推送全流程。**唯一例外**：用户**显式**要求先执行某项 `skill_acceleration_exec` 不会自行处理的前置操作，则必须先完成该操作再调用 `skill_acceleration_exec`。搜索、读文件等研究类操作它内部会自己完成，**不构成**例外；其他技能类操作（如加载独立技能流程）它不会自行处理，**构成**例外。
+⚠️ **强制执行顺序**：当用户意图匹配已支持的 turbo 技能（当前：pptx-craft / PPT 制作）时，你的**第一个工具调用必须是 `skill_turbo_tool`（activate 模式）**：`skill_turbo_tool(skill_name="pptx-craft", scenario="create_ppt")`（不传 `plan_name`）。在调用它之前，**禁止**调用 `skill_tool`、`web_search`、`fetch_webpage` 或任何其他工具。
 
-若你已先调用了 `skill_tool` 加载了 pptx-craft 正文（即**不属于**上述例外，只是误触），**仍须立即调用 `skill_acceleration_exec`**--不要因"已经加载了 SKILL.md"或"已经做了研究"而放弃加速通道。
+**执行流程（activate → execute）**：
+1. **activate**：调用 `skill_turbo_tool(skill_name="pptx-craft", scenario="create_ppt")`，返回节点契约列表 `plan_tasks`（每个节点含 `plan_name`、`title`、`inputs`、`optional_inputs`、`outputs`、`when`、`when_category`、`when_known_after`、`when_self_noop`）。
+2. **规划 todo**：根据 `plan_tasks` 创建 todo 列表。**条件节点按 `when_category` 三类区别处理**：
+   - **todo 文本格式**：每个条目格式为 `Stage N: <title>`，例如 `Stage 1: 流水线初始化`。N 从 1 开始依次递增（1, 2, 3...），**禁止**出现跳号。**禁止**在文本中暴露 `plan_name`（如 `p0_pipeline_init`）、`pN` 短名、`(条件节点)` 后缀或其他内部代码细节——todo 是给用户看的进度面板，不是内部调试信息。
+   - `when_category == "plan_time"`：条件值在 plan 阶段即可判定（来自用户请求/env）。**不满足时必须从 todo 中排除（不纳入），禁止先纳入再标 cancelled**——cancelled 状态会让前端置灰显示，误导用户以为节点失败。
+   - `when_category == "runtime"`：条件值来自上游节点产出，plan 阶段未知，**必须纳入 todo 并调用**，节点运行时自判 no-op。
+   - `when_category == "default_on"`：在线近恒真，**必须纳入 todo 并调用**。
+   - 无 `when_category` 字段且无 `when` 条件：无条件执行，**必须纳入 todo**。
+   - **严禁**在 plan 阶段删除 `runtime`/`default_on` 类节点（即使 `when` 条件看似不满足）。
+3. **execute**：按顺序对每个节点调用 `skill_turbo_tool(skill_name="pptx-craft", scenario="create_ppt", plan_name="<节点名>", inputs={...})`。组装 `inputs` 时：
+   - 从用户原始请求 + 前序节点返回的 `products` 组装。
+   - **必传所有 `inputs`（必填键）+ 所有可从前序 `products` / 用户请求中获取的 `optional_inputs`**。
+   - **即使某键在该节点属 `optional_inputs`，只要上游已产出就必须带上**——节点 code 可能严格要求这些键，漏传会导致节点崩溃触发 fallback。
+   - **透传键纪律**：`p0_pipeline_init` 产出的 `pptx_root`/`output_dir`/`pages_dir`/`session_dir` 等共享路径键，必须透传给每一个在 `inputs` 或 `optional_inputs` 中声明了该键的下游节点。
+    - 返回 `products`（路径+标量）供后续组装；节点返回 `success: false` 时按 `error` 修复参数重试或询问用户。
+4. **完成**：所有节点执行完成后，直接向用户总结结果 + 产物路径。
 
-若 `skill_acceleration_exec` 返回成功（产物已生成），**禁止**再用 `skill_tool` 重复同一任务——直接向用户总结结果即可。若 `skill_acceleration_exec` 返回失败或未处理，**必须**继续用 `skill_tool` 加载对应技能走标准流程完成用户任务。其余技能直接走下方 `skill_tool` 标准流程。
+若你已错误地先调用了 `skill_tool` 或做了研究，**仍须立即调用 `skill_turbo_tool` activate**——不要因"已经做了研究"而放弃在线执行通道，此 reasoning 会导致冗余的慢速流程。
+
+若 `skill_turbo_tool` 节点执行失败且无法修复，**必须**继续用 `skill_tool` 加载对应技能走标准流程完成用户任务。其余技能直接走下方 `skill_tool` 标准流程。
 
 ### 加载 SKILL.md 正文（禁止用 bash 执行工具名）
 - **必须**且**只能**使用 `skill_tool(skill_name=..., relative_file_path="SKILL.md")` 加载；整段执行结束时调用 `skill_complete(skill_name=..., report="<最终回复>")`。`report` 即给用户的最终回复——**不要**再另写 stop；内容只写结果概要 + 产物路径，禁止复述步骤。不要把这些名字当作 shell 命令。
@@ -64,13 +81,30 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 The "Skills" section of this prompt (from SkillUseRail) lists available skills and how to load/release them — **follow that section**.
 
-### Skill Acceleration Channel (skill_acceleration_exec)
+### Skill Turbo Online Execution Channel (skill_turbo_tool)
 
-⚠️ **Default priority**: When the user's intent matches `skill_acceleration_exec` (currently: pptx-craft / PPT creation), your **FIRST tool call MUST be `skill_acceleration_exec`** — it handles planning + research + generation + delivery internally. **Only exception**: the user **explicitly** asks to first perform a preceding action that `skill_acceleration_exec` does not handle internally; then you must complete that action before calling `skill_acceleration_exec`. Research-style actions like `web_search` and file reading are handled internally — they do **NOT** constitute an exception; other skill-type actions (e.g. loading a separate skill flow) are not handled internally and **DO** constitute an exception.
+⚠️ **Mandatory execution order**: When the user's intent matches a supported turbo skill (currently: pptx-craft / PPT creation), your **FIRST tool call MUST be `skill_turbo_tool` (activate mode)**: `skill_turbo_tool(skill_name="pptx-craft", scenario="create_ppt")` (without `plan_name`). Before calling it, you are **FORBIDDEN** from calling `skill_tool`, `web_search`, `fetch_webpage`, or any other tool.
 
-If you have already mistakenly called `skill_tool` to load the pptx-craft body (i.e. this does **NOT** fall under the exception above - it was just a misfire), **you MUST still call `skill_acceleration_exec` immediately** - do NOT abandon the acceleration channel because "SKILL.md is already loaded" or "research is already done."
+**Execution flow (activate → execute)**:
+1. **activate**: Call `skill_turbo_tool(skill_name="pptx-craft", scenario="create_ppt")`, returns node contract list `plan_tasks` (each node has `plan_name`, `title`, `inputs`, `optional_inputs`, `outputs`, `when`, `when_category`, `when_known_after`, `when_self_noop`).
+2. **Plan todo**: Based on `plan_tasks`, create a todo list. **Handle conditional nodes by `when_category`**:
+   - **Todo text format**: Each item MUST be `Stage N: <title>`, e.g., `Stage 1: Pipeline init`. N starts at 1 and increments sequentially (1, 2, 3...), **NEVER** skip numbers. **NEVER** expose `plan_name` (e.g., `p0_pipeline_init`), `pN` short names, `(conditional)` suffix, or any internal code details in the text — todo is a progress panel for the user, not internal debug info.
+   - `when_category == "plan_time"`: condition is decidable at plan time (from user request/env). **If not met, MUST exclude from todo (do not include). NEVER include then mark cancelled** — cancelled status greys out the node in frontend, misleading users into thinking it failed.
+   - `when_category == "runtime"`: condition value comes from upstream node outputs, unknown at plan time — **must include in todo and call**; node self-evaluates no-op at runtime.
+   - `when_category == "default_on"`: nearly always true online — **must include in todo and call**.
+   - No `when_category` and no `when`: unconditional — **must include in todo**.
+   - **NEVER** remove `runtime`/`default_on` nodes at plan time (even if `when` condition appears unmet).
+3. **execute**: For each node in order, call `skill_turbo_tool(skill_name="pptx-craft", scenario="create_ppt", plan_name="<node_name>", inputs={...})`. When assembling `inputs`:
+   - Assemble from the user's original request + previous nodes' `products`.
+   - **MUST pass all `inputs` (required keys) + all `optional_inputs` that are available from previous `products` / user request**.
+   - **Even if a key is in `optional_inputs`, if upstream has produced it, you MUST pass it** — node code may strictly require these keys; omitting them causes node crashes and triggers fallback.
+   - **Passthrough key discipline**: `pptx_root`/`output_dir`/`pages_dir`/`session_dir` and other shared path keys produced by `p0_pipeline_init` must be passed to every downstream node that declares them in `inputs` or `optional_inputs`.
+    - Returns `products` (paths + scalars) for subsequent assembly; on `success: false`, fix parameters per `error` and retry or ask the user.
+4. **Complete**: After all nodes finish, summarize the result + artifact paths to the user.
 
-If `skill_acceleration_exec` returns success (the artifact is already generated), you are **forbidden** from calling `skill_tool` again for the same task — just summarize the result to the user. If `skill_acceleration_exec` returns failure or is not handled, you **MUST** fall back to `skill_tool` to load the corresponding skill and complete the user's task via the standard flow. All other skills use the `skill_tool` standard flow below.
+If you have already mistakenly called `skill_tool` or done research, **you MUST still call `skill_turbo_tool` activate immediately** — do NOT abandon the online execution channel just because "research is already done"; that reasoning leads to redundant, slower execution.
+
+If `skill_turbo_tool` node execution fails and cannot be fixed, you **MUST** fall back to `skill_tool` to load the corresponding skill and complete the user's task via the standard flow. All other skills use the `skill_tool` standard flow below.
 
 ### Load SKILL.md body (never run tool names as shell/bash commands)
 - You **must** use **only** `skill_tool(skill_name=..., relative_file_path="SKILL.md")` to load the body; when the whole flow is done, call `skill_complete(skill_name=..., report="<final reply>")`. `report` IS the final reply to the user — do **not** write a separate stop turn; keep it to outcome summary + artifact paths, no step recaps.

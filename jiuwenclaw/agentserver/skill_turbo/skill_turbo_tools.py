@@ -402,3 +402,45 @@ async def skill_turbo(query: str) -> dict[str, Any]:
 def get_skill_turbo_tools() -> list:
     """返回 SkillTurbo 工具列表，供 interface_deep.py 注册。"""
     return [skill_turbo]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# skill_turbo_tool — 在线执行薄工具（activate + execute 单 PlanNode）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@tool(
+    name="skill_turbo_tool",
+    description=(
+        "Skill Turbo 在线执行工具。用于加速执行已有 turbo 产物的 skill（如 pptx-craft）。\n"
+        "两种模式：\n"
+        "1. activate（plan_name 省略）：返回 schema 概览（plan_tasks），*供规划 todo*\n"
+        "2. execute（plan_name 非空）：执行单个 PlanNode，返回产物摘要（路径+标量）\n"
+        "参数：skill_name（源 skill 名）、scenario（任务切面）、plan_name（节点名，None=activate）、"
+        "inputs（节点输入 dict）"
+    ),
+)
+async def skill_turbo_tool_entry(
+    skill_name: str,
+    scenario: str,
+    plan_name: str | None = None,
+    inputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """在线执行 skill turbo 的单个 PlanNode.
+
+    Args:
+        skill_name: 源 skill 名，如 "pptx-craft"
+        scenario: 任务切面，如 "create_ppt"
+        plan_name: None=activate（返回 schema 概览）；非空=execute（跑单节点）
+        inputs: execute 时该节点所需输入（Agent 从历史工具结果组装）
+    """
+    from jiuwenclaw.agentserver.skill_turbo.online.skill_turbo_tool import (
+        skill_turbo_tool,
+    )
+
+    return await skill_turbo_tool(skill_name, scenario, plan_name, inputs)
+
+
+def get_skill_turbo_online_tools() -> list:
+    """返回在线执行工具列表，供 interface_deep.py 注册。"""
+    return [skill_turbo_tool_entry]

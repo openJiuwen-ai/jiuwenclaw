@@ -12,6 +12,7 @@ from jiuwenclaw.agentserver.deep_agent.rails.skill_credential_injection_rail imp
     SkillCredentialInjectionRail,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.skill_prompt_rail import SkillProtocolPromptRail
+from jiuwenclaw.agentserver.deep_agent.rails.skill_turbo_rail import SkillTurboRail
 from jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail import (
     MemberSkillToolkitRail,
 )
@@ -37,5 +38,6 @@ __all__ = [
     "SkillComplianceRail",
     "SkillCredentialInjectionRail",
     "SkillProtocolPromptRail",
+    "SkillTurboRail",
     "MemberSkillToolkitRail",
 ]
