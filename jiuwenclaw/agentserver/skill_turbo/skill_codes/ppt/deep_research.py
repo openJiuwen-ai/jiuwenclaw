@@ -27,9 +27,12 @@ _WORD_COUNT_MAP = {"L1": 1200, "L2": 2000, "L3": 3500}
 _WORD_COUNT_NO_SEARCH_MAP = {"L1": 800, "L2": 1200, "L3": 2000}
 
 _PAGE_HEADER_RE = re.compile(r"^###\s*P(\d+)\s*[:：]", re.MULTILINE)
-_RESEARCH_QUERY_RE = re.compile(r"研究查询[：:]\s*(.+)", re.IGNORECASE)
-_DATA_NEED_RE = re.compile(r"数据需求[：:]\s*(.+)", re.IGNORECASE)
-_PAGE_TYPE_RE = re.compile(r"类型[：:]\s*(\w+)", re.IGNORECASE)
+_TITLE_FIELD_RE = re.compile(r"\*\*标题\*\*[：:]\s*(.+)", re.IGNORECASE)
+_DATA_NEED_RE = re.compile(r"\*\*数据需求\*\*[：:]\s*(.+)", re.IGNORECASE)
+_PAGE_TYPE_RE = re.compile(r"\*\*类型\*\*[：:]\s*(\w+)", re.IGNORECASE)
+_RESEARCH_QUERY_HEADER_RE = re.compile(r"\*\*研究查询\*\*[：:]\s*", re.IGNORECASE)
+_LIST_ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(.+)$", re.MULTILINE)
+_NEXT_FIELD_RE = re.compile(r"\*\*[^*]+\*\*[：:]")
 _SEARCHED_SOURCES_RE = re.compile(r"^##\s*已搜索来源", re.MULTILINE)
 _URL_RE = re.compile(r"https?://[^\s\])>\"']+")
 
@@ -164,7 +167,7 @@ class PrepareNode(PlanNode):
             return ""
 
     async def _parse_outline_pages(self, outline_text: str) -> list[dict[str, Any]]:
-        prompt = (
+        base_prompt = (
             "你是一个大纲解析助手。请从以下 PPT 大纲中提取所有研究需求为 ✅ 的页面信息。\n"
             "对每个页面，提取：\n"
             "- page_number: 页码（整数）\n"
@@ -172,18 +175,35 @@ class PrepareNode(PlanNode):
             "- page_type: 页面类型（如 trend/data/case/comparison/technology 等）\n"
             "- research_queries: 研究查询列表（字符串数组）\n"
             "- data_needs: 数据需求列表（字符串数组）\n\n"
-            "以 JSON 数组格式输出，不要输出其他内容。如果没有需要研究的页面，输出空数组 []。\n\n"
+            "以 JSON 数组格式输出，不要输出其他内容。如果没有需要研究的页面，输出空数组 []。\n"
+            "重要：JSON 字符串值中如果包含双引号，必须用 \\\" 转义。\n\n"
             f"大纲内容：\n{outline_text}"
         )
-        result = await self.stream_llm_collect(prompt=prompt, system_prompt="只输出 JSON 数组，不要输出其他内容")
-        try:
-            pages = self.extract_json(result, expected_type=list)
-            if isinstance(pages, list) and pages:
-                return pages
-            if isinstance(pages, list) and not pages:
-                logger.warning("[P6.0] LLM 返回空列表，尝试正则回退")
-        except (ValueError, TypeError):
-            logger.warning("[P6.0] LLM 解析大纲页面失败，尝试正则回退")
+        max_attempts = 3
+        last_error: str | None = None
+        for attempt in range(max_attempts):
+            prompt = base_prompt
+            if attempt > 0 and last_error:
+                prompt = (
+                    f"{base_prompt}\n\n"
+                    f"上次输出的 JSON 存在格式错误：\n{last_error}\n"
+                    "请修正格式后重新输出完整的 JSON 数组。"
+                )
+            result = await self.stream_llm_collect(
+                prompt=prompt,
+                system_prompt="只输出 JSON 数组，不要输出其他内容",
+            )
+            try:
+                pages = self.extract_json(result, expected_type=list)
+                if isinstance(pages, list) and pages:
+                    return pages
+                if isinstance(pages, list) and not pages:
+                    logger.warning("[P6.0] LLM 返回空列表（第%d次）", attempt + 1)
+                    last_error = "返回了空数组，但大纲中存在 ✅ 页面"
+            except (ValueError, TypeError) as e:
+                last_error = str(e)
+                logger.warning("[P6.0] LLM 解析大纲页面失败（第%d次）：%s", attempt + 1, last_error)
+        logger.warning("[P6.0] LLM 解析大纲页面失败（%d次重试均失败），尝试正则回退", max_attempts)
         return self._parse_outline_pages_fallback(outline_text)
 
     def _parse_outline_pages_fallback(self, outline_text: str) -> list[dict[str, Any]]:
@@ -197,12 +217,15 @@ class PrepareNode(PlanNode):
             if "✅" not in section:
                 continue
 
-            title = section.split("\n")[0].strip().lstrip(":：").strip()
+            title_m = _TITLE_FIELD_RE.search(section)
+            title = title_m.group(1).strip() if title_m else ""
             page_type_m = _PAGE_TYPE_RE.search(section)
             page_type = page_type_m.group(1) if page_type_m else "data"
 
-            queries = [m2.group(1).strip() for m2 in _RESEARCH_QUERY_RE.finditer(section)]
-            data_needs = [m2.group(1).strip() for m2 in _DATA_NEED_RE.finditer(section)]
+            queries = self._extract_multi_line_list(section, "研究查询")
+            dn_m = _DATA_NEED_RE.search(section)
+            dn_str = dn_m.group(1).strip() if dn_m else ""
+            data_needs = [s.strip() for s in re.split(r"[、,，]", dn_str) if s.strip()] if dn_str else []
 
             pages.append({
                 "page_number": page_num,
@@ -212,6 +235,27 @@ class PrepareNode(PlanNode):
                 "data_needs": data_needs,
             })
         return pages
+
+    @staticmethod
+    def _extract_multi_line_list(section: str, field_name: str) -> list[str]:
+        """提取 **字段名**： 后的多行 - 列表项或单行值。"""
+        header = re.compile(
+            rf"\*\*{re.escape(field_name)}\*\*[：:]\s*",
+            re.IGNORECASE,
+        )
+        m = header.search(section)
+        if not m:
+            return []
+        after = section[m.end():]
+        next_field = _NEXT_FIELD_RE.search(after)
+        block = after[:next_field.start()] if next_field else after
+        items = [mi.group(1).strip() for mi in _LIST_ITEM_RE.finditer(block)]
+        if items:
+            return items
+        first_line = block.strip().split("\n")[0].strip() if block.strip() else ""
+        if first_line and first_line not in ("-", "—", "无", "N/A"):
+            return [s.strip() for s in re.split(r"[、,，]", first_line) if s.strip()]
+        return []
 
     def _extract_searched_urls(self, outline_text: str) -> list[str]:
         m = _SEARCHED_SOURCES_RE.search(outline_text)
@@ -703,6 +747,7 @@ class PageWorkerNode(PlanNode):
 
         queries = self._build_page_queries(page, coverage_info)
         if not queries:
+            logger.warning("[P6.1] 页面 P%d 无搜索查询（research_queries 和 data_needs 均为空），跳过搜索", page["page_number"])
             return []
 
         logger.info("[P6.1] 页面 P%d 搜索 %d 个查询", page["page_number"], len(queries))
