@@ -362,6 +362,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float,
         help="Total response timeout in seconds.",
     )
+    p.add_argument(
+        "--swarmflow-max-workflows", type=int,
+        help="Team session cap for concurrent SwarmFlow runs.",
+    )
+    p.add_argument(
+        "--swarmflow-max-agents", type=int,
+        help="Team session cap for concurrent SwarmFlow worker agents.",
+    )
     return p
 
 
@@ -379,6 +387,17 @@ def _validate_args(args: argparse.Namespace) -> int | None:
     if args.timeout is not None and args.timeout <= 0:
         logger.error("--timeout must be positive")
         return 2
+    swarmflow_limits = (
+        getattr(args, "swarmflow_max_workflows", None),
+        getattr(args, "swarmflow_max_agents", None),
+    )
+    if any(value is not None for value in swarmflow_limits):
+        if args.mode not in ("team", "team.plan", "code.team"):
+            logger.error("--swarmflow-* options require a Team mode")
+            return 2
+        if any(value is not None and value <= 0 for value in swarmflow_limits):
+            logger.error("--swarmflow-* values must be positive")
+            return 2
     return None
 
 
@@ -399,7 +418,7 @@ def _build_request(args: argparse.Namespace, prompt: str) -> dict:
         if pd not in trusted_dirs:
             trusted_dirs.append(pd)
 
-    return {
+    request = {
         "type": "req",
         "id": f"chat-{uuid_module.uuid4().hex[:12]}",
         "method": "chat.send",
@@ -418,6 +437,16 @@ def _build_request(args: argparse.Namespace, prompt: str) -> dict:
             "agent_ref": {"mode": args.mode, "id": "default"},
         },
     }
+    swarmflow_concurrency = {}
+    max_workflows = getattr(args, "swarmflow_max_workflows", None)
+    if max_workflows is not None:
+        swarmflow_concurrency["max_workflows"] = max_workflows
+    max_agents = getattr(args, "swarmflow_max_agents", None)
+    if max_agents is not None:
+        swarmflow_concurrency["max_agents_total"] = max_agents
+    if swarmflow_concurrency:
+        request["params"]["swarmflow_concurrency"] = swarmflow_concurrency
+    return request
 
 
 async def _spinner_loop(renderer: HumanRenderer) -> None:

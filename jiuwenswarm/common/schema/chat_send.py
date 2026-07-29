@@ -75,6 +75,9 @@ class ChatSendParams(TypedDict, total=False):
     model_name: NotRequired[str]
     """模型名称（Web 前端可选传递）。"""
 
+    swarmflow_concurrency: NotRequired[dict]
+    """本次 Team 会话创建时使用的 SwarmFlow 并发上限。"""
+
     request_id: NotRequired[str]
     """请求 ID（interrupt resume / 问答回复场景关联）。"""
 

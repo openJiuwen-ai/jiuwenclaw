@@ -487,6 +487,7 @@ class TeamManager:
         session_id: str,
         *,
         requested_model_name: str | None = None,
+        swarmflow_concurrency: dict[str, Any] | None = None,
     ) -> TeamAgentSpec:
         config_base = get_config()
         # Keep dependency checks scoped to distributed mode to make the
@@ -513,6 +514,7 @@ class TeamManager:
         spec_dict = load_team_spec_dict(
             config_base=config_base,
             requested_model_name=requested_model_name,
+            swarmflow_concurrency=swarmflow_concurrency,
         )
         spec_dict = TeamManager._normalize_team_identity_fields(spec_dict)
         if TeamManager._is_distributed_mode(config_base):
@@ -573,6 +575,7 @@ class TeamManager:
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
+        swarmflow_concurrency: dict[str, Any] | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -587,6 +590,7 @@ class TeamManager:
             request_id: Originating request id, if any.
             channel_id: Raw channel id from the request, if any.
             request_metadata: Request metadata mapping.
+            swarmflow_concurrency: Optional session-start SwarmFlow caps.
 
         Returns:
             The enriched ``TeamAgentSpec`` ready to build (``build_context`` set;
@@ -599,6 +603,7 @@ class TeamManager:
         spec = self._load_team_spec(
             session_id,
             requested_model_name=requested_model_name,
+            swarmflow_concurrency=swarmflow_concurrency,
         )
         self._apply_session_scoped_team_name(spec, session_id=session_id)
         self.apply_team_plan_mode(spec, request_metadata=request_metadata)
