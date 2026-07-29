@@ -1817,7 +1817,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                 if action == "resume" and node == "outline_interaction":
                     initial_stage = 2
                 elif action == "resume" and node == "user_feedback_processor":
-                    initial_stage = 3
+                    initial_stage = 4
                 for stage_payload in advance_stage(state, initial_stage):
                     await _send(stage_payload)
                 await _send({"event_type": "chat.processing_status",

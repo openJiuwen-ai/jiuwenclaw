@@ -722,8 +722,27 @@ async def test_tool_sends_ordered_stage_surfaces_and_retains_completed_snapshot(
         if payload.get("event_type") == "task.complete"
         and payload.get("stream_source_id") == "deepresearch_final_report"
     )
+    aggregate_start_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "task.start"
+        and payload.get("stream_source_id") == "deepresearch_final_report"
+    )
     stage_four_update_index = payloads.index(task_updates[-2])
-    assert aggregate_complete_index < stage_four_update_index < file_index
+    assert (
+        stage_four_update_index
+        < aggregate_start_index
+        < aggregate_complete_index
+        < file_index
+    )
+    aggregate_payloads = [
+        payload for payload in payloads
+        if payload.get("stream_source_id") == "deepresearch_final_report"
+    ]
+    assert aggregate_payloads
+    assert all(
+        payload.get("task_id") == "deepresearch_stage_4"
+        for payload in aggregate_payloads
+    )
 
     for update in task_updates[:-1]:
         active_stage = _active_stage(update)
@@ -2964,6 +2983,18 @@ async def test_user_feedback_resume_can_complete_existing_final_report_node(tmp_
         (payload.get("event_type"), payload.get("stream_source_id"))
         for payload in payloads
     ]
+    final_report_complete_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "task.complete"
+        and payload.get("stream_source_id") == "deepresearch_final_report"
+    )
+    stage_four_update_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "task.update"
+        and payload["tasks"][3]["status"] == "in_progress"
+    )
+    assert stage_four_update_index < final_report_complete_index
+    assert payloads[final_report_complete_index]["task_id"] == "deepresearch_stage_4"
 
 
 @pytest.mark.asyncio

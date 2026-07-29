@@ -465,7 +465,7 @@ def _all_sections_completed(state: RouterState) -> bool:
 def _final_report_boundary(event_type: str) -> dict:
     return {
         "event_type": event_type,
-        "task_id": "deepresearch_stage_3",
+        "task_id": "deepresearch_stage_4",
         "task_content": "最终报告处理",
         "stream_source_id": "deepresearch_final_report",
     }
@@ -475,7 +475,8 @@ def start_final_report_processing(state: RouterState) -> list[dict]:
     if state.final_report_started:
         return []
     state.final_report_started = True
-    frames = [_final_report_boundary("task.start")]
+    frames = advance_stage(state, 4)
+    frames.append(_final_report_boundary("task.start"))
     frames.extend(state.pending_final_report_frames)
     state.pending_final_report_frames.clear()
     return frames
@@ -498,7 +499,7 @@ def _node_reasoning(
         return _stage_child_reasoning(stage, agent, display, content)
     return {
         "event_type": "chat.reasoning",
-        "task_id": "deepresearch_stage_3",
+        "task_id": "deepresearch_stage_4",
         "task_content": "最终报告处理",
         "stream_source_id": "deepresearch_final_report",
         "content": content,
@@ -598,6 +599,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
 
     if agent in _SECTION_PROCESS_NODES and section_idx != "0":
         _remember_expected_sections(state, chunk)
+        start_final_report = False
         process_parts = _raw_process_parts(
             chunk,
             content,
@@ -627,10 +629,12 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
                 state.completed_section_indices.add(section_idx)
                 frames.append(_section_boundary(state, chunk, "task.complete"))
                 if _all_sections_completed(state):
-                    frames.extend(start_final_report_processing(state))
+                    start_final_report = True
 
         for process_content in process_parts:
             frames.append(_section_reasoning(state, chunk, process_content))
+        if start_final_report:
+            frames.extend(start_final_report_processing(state))
         return frames
 
     # 大纲正文只读展示在思考过程；其他非并行节点维持 reasoning_content 通用透传。

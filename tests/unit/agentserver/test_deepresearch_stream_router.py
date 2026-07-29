@@ -327,7 +327,7 @@ def test_parallel_sections_use_explicit_stage_three_parent_with_own_boundary():
     assert all(frame["stream_source_id"] == "deepresearch_section_1" for frame in section_reasoning)
 
 
-def test_final_report_nodes_share_stage_three_aggregate_stream():
+def test_final_report_nodes_share_stage_four_aggregate_stream():
     state = RouterState(section_titles={"1": "第一章"})
     route_chunk(
         {
@@ -345,7 +345,7 @@ def test_final_report_nodes_share_stage_three_aggregate_stream():
 
     reasoning = _process_reasoning(frames)
     assert [frame["content"] for frame in reasoning] == ["报告整合开始\n", "整合报告"]
-    assert all(frame["task_id"] == "deepresearch_stage_3" for frame in reasoning)
+    assert all(frame["task_id"] == "deepresearch_stage_4" for frame in reasoning)
     assert all(frame["task_content"] == "最终报告处理" for frame in reasoning)
     assert all(frame["stream_source_id"] == "deepresearch_final_report" for frame in reasoning)
     assert not any(frame["event_type"].startswith("task.") and frame["event_type"] != "task.update" for frame in frames)
@@ -375,6 +375,18 @@ def test_final_report_aggregate_starts_only_after_all_sections_complete():
         ("task.complete", "deepresearch_section_2"),
         ("task.start", "deepresearch_final_report"),
     ]
+    stage_four_update_index = next(
+        index for index, frame in enumerate(second)
+        if frame["event_type"] == "task.update"
+        and frame["tasks"][3]["status"] == "in_progress"
+    )
+    aggregate_start_index = next(
+        index for index, frame in enumerate(second)
+        if frame["event_type"] == "task.start"
+        and frame.get("stream_source_id") == "deepresearch_final_report"
+    )
+    assert stage_four_update_index < aggregate_start_index
+    assert second[aggregate_start_index]["task_id"] == "deepresearch_stage_4"
 
 
 def test_final_report_reasoning_waits_for_all_sections_then_follows_start_boundary():
@@ -409,26 +421,63 @@ def test_final_report_reasoning_waits_for_all_sections_then_follows_start_bounda
     ]
 
 
-def test_final_report_aggregate_completes_before_stage_four_starts():
+def test_final_report_aggregate_completes_after_stage_four_starts():
     state = RouterState(section_titles={"1": "第一章"})
-    route_chunk(
+    frames = route_chunk(
         {"agent": "sub_reporter", "section_idx": "1", "section_total": 1, "event": "done"},
         state,
     )
 
-    frames = complete_final_report_processing(state)
-    frames.extend(advance_stage(state, 4))
+    frames.extend(complete_final_report_processing(state))
 
+    stage_four = next(
+        index for index, frame in enumerate(frames)
+        if frame["event_type"] == "task.update"
+        and frame["tasks"][3]["status"] == "in_progress"
+    )
+    aggregate_start = next(
+        index for index, frame in enumerate(frames)
+        if frame["event_type"] == "task.start"
+        and frame.get("stream_source_id") == "deepresearch_final_report"
+    )
     aggregate_complete = next(
         index for index, frame in enumerate(frames)
         if frame["event_type"] == "task.complete"
         and frame.get("stream_source_id") == "deepresearch_final_report"
     )
-    stage_four = next(
+    assert stage_four < aggregate_start < aggregate_complete
+    assert frames[aggregate_complete]["task_id"] == "deepresearch_stage_4"
+
+
+def test_last_section_reasoning_finishes_before_stage_four_transition():
+    state = RouterState()
+    base = {
+        "agent": "sub_reporter",
+        "section_idx": "1",
+        "section_title": "第一章",
+        "section_total": 1,
+    }
+    route_chunk({**base, "event": "start"}, state)
+
+    frames = route_chunk(
+        {
+            **base,
+            "event": "done",
+            "reasoning_content": "正在完成章节最终检查",
+        },
+        state,
+    )
+
+    final_section_reasoning = next(
+        index for index, frame in enumerate(frames)
+        if frame.get("content") == "正在完成章节最终检查"
+    )
+    stage_four_update = next(
         index for index, frame in enumerate(frames)
         if frame["event_type"] == "task.update"
+        and frame["tasks"][3]["status"] == "in_progress"
     )
-    assert aggregate_complete < stage_four
+    assert final_section_reasoning < stage_four_update
 
 
 def test_final_report_aggregate_cannot_complete_before_it_starts():
