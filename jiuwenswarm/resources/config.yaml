@@ -456,7 +456,7 @@ react:
       # max_iterations: 15
     browser_agent:
       enabled: true
-      # max_iterations: 15
+      max_iterations: 15
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
