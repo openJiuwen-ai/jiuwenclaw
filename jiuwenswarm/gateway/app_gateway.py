@@ -1446,7 +1446,10 @@ async def _run(
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
     from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
-    from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
+    from jiuwenswarm.gateway.health_check import (
+        GatewayHealthCheckService,
+        HealthCheckConfig,
+    )
     from jiuwenswarm.gateway.heartbeat.controller import HeartbeatController
     from jiuwenswarm.gateway.heartbeat.scheduler import HeartbeatSchedulerService
     from jiuwenswarm.gateway.heartbeat.store import HeartbeatJobStore
@@ -1589,13 +1592,13 @@ async def _run(
         str(cfg_target) if cfg_target is not None else "web"
     )
 
-    heartbeat_config = HeartbeatConfig(
+    heartbeat_config = HealthCheckConfig(
         interval_seconds=heartbeat_interval,
         timeout_seconds=heartbeat_timeout,
         relay_channel_id=heartbeat_relay_channel,
         active_hours=cfg_active_hours if isinstance(cfg_active_hours, dict) else None,
     )
-    heartbeat_service = GatewayHeartbeatService(
+    heartbeat_service = GatewayHealthCheckService(
         client,
         heartbeat_config,
         message_handler=message_handler,
