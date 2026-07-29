@@ -1959,6 +1959,7 @@
     "toolGroup": {
       "running": "Running {{label}}",
       "completed": "Completed {{label}}",
+      "denied": "Denied {{label}}",
       "category": {
         "file": "file operations",
         "search": "searches",

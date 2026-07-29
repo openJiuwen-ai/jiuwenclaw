@@ -1960,6 +1960,7 @@
     "toolGroup": {
       "running": "正在{{label}}",
       "completed": "已完成{{label}}",
+      "denied": "已拒绝{{label}}",
       "category": {
         "file": "文件操作",
         "search": "搜索",

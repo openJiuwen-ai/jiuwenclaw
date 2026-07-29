@@ -1815,6 +1815,11 @@ select {
     color: var(--color-text-secondary);
   }
 
+  .tool-tree-item__detail-badge.is-denied {
+    background: var(--color-feedback-warning-subtle);
+    color: var(--color-feedback-warning);
+  }
+
   .tool-tree-item__detail-pre {
     margin: 0;
     max-height: 168px;
@@ -1830,6 +1835,18 @@ select {
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: anywhere;
+  }
+
+  .tool-tree-item__detail-pre.is-denied {
+    color: var(--color-feedback-warning);
+  }
+
+  .tool-tree-item__detail-pre.is-error {
+    color: var(--color-feedback-danger);
+  }
+
+  .tool-tree__header-line-text.is-denied {
+    color: var(--color-feedback-warning);
   }
 
   .tool-tree-item__detail-status {
