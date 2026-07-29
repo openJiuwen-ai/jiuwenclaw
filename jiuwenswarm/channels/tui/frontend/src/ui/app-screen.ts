@@ -4304,19 +4304,17 @@ export class AppScreen implements Component, Focusable {
     const snapshot = this.state.getSnapshot();
     try {
       const payload = await this.state.request<ModelListPayload>("command.model", {});
-      const models = payload.available_models ?? [];
       const current = payload.current ?? "unknown";
-      if (models.length === 0) {
+      const modelsMeta = payload.models ?? [];
+      const skipped = modelsMeta.filter((m) => isReservedMultimodalModelKey(m.name));
+      const selectableWithOrigIdx = modelsMeta
+        .filter((meta) => meta.name && !isReservedMultimodalModelKey(meta.name))
+        .map((meta) => ({ name: meta.name, origIdx: meta.index, meta }));
+      const selectable = selectableWithOrigIdx.map((entry) => entry.name);
+      if (modelsMeta.length === 0) {
         this.openEmptyModelList(current, "No models configured");
         return;
       }
-
-      const skipped = models.filter((m) => isReservedMultimodalModelKey(m));
-      // 构建 selectable 时保留在完整 models 列表中的原始索引，避免 reserved 模型过滤后索引错位
-      const selectableWithOrigIdx = models
-        .map((m, i) => ({ name: m, origIdx: i }))
-        .filter((entry) => !isReservedMultimodalModelKey(entry.name));
-      const selectable = selectableWithOrigIdx.map((entry) => entry.name);
       if (skipped.length > 0) {
         this.state.addItem(
           addInfo(
@@ -4331,18 +4329,16 @@ export class AppScreen implements Component, Focusable {
         return;
       }
 
-      const modelsMeta = payload.models ?? [];
       // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
       // 回退到 name-matching（兼容不带 is_current 的旧后端）
       const currentIdx = selectableWithOrigIdx.findIndex((entry) => {
-        const meta = modelsMeta[entry.origIdx];
-        return meta?.is_current === true;
+        return entry.meta?.is_current === true;
       });
       const fallbackCurrentIdx = currentIdx < 0 ? selectable.findIndex((m) => m === current) : currentIdx;
       const nameOccurrence: Record<string, number> = {};
       const items = selectableWithOrigIdx.map((entry, i) => {
         const m = entry.name;
-        const meta = modelsMeta[entry.origIdx];
+        const meta = entry.meta;
         const isCurrent = i === fallbackCurrentIdx;
         const seq = (nameOccurrence[m] ?? 0) + 1;
         nameOccurrence[m] = seq;
@@ -4364,9 +4360,8 @@ export class AppScreen implements Component, Focusable {
           const _mk = (mm: ModelMeta | undefined) =>
             `${mm?.model_provider ?? ""}|${mm?.api_base ?? ""}`;
           const myFingerprint = _mk(meta);
-          // selectableWithOrigIdx 与 selectable 同序，origIdx 索引回 modelsMeta
           const conflictCount = selectableWithOrigIdx.reduce((acc, ent) => {
-            const xm = modelsMeta[ent.origIdx];
+            const xm = ent.meta;
             return xm && _mk(xm) === myFingerprint ? acc + 1 : acc;
           }, 0);
           if (conflictCount > 1) {
@@ -4526,7 +4521,7 @@ export class AppScreen implements Component, Focusable {
   }
 
   private createModelForm(mode: "add" | "edit", target?: { index: number }): ModelFormState {
-    const meta = target ? this.modelList?.modelsMeta[target.index] : undefined;
+    const meta = target ? this.modelList?.modelsMeta.find((m) => m.index !== undefined && m.index === target.index) : undefined;
     const fields: Record<ModelFormField, string> = {
       model_name: mode === "edit" ? meta?.model_name ?? "" : "",
       alias: mode === "edit" ? meta?.alias ?? "" : "",
@@ -4814,8 +4809,8 @@ export class AppScreen implements Component, Focusable {
       return "reasoning_level must be default, off, low, medium, or high";
     }
     if (trimmed.alias) {
-      const conflict = state.modelsMeta.find((model, index) => {
-        if (state.inputMode === "edit" && index === state.target?.index) return false;
+      const conflict = state.modelsMeta.find((model) => {
+        if (state.inputMode === "edit" && model.index !== undefined && model.index === state.target?.index) return false;
         return (model.alias || "") === trimmed.alias || model.model_name === trimmed.alias;
       });
       if (conflict) {

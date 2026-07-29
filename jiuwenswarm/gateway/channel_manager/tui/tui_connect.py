@@ -2750,6 +2750,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _model_name = resolve_env_vars(str(mcc.get("model_name", "")))
                     _api_key = resolve_env_vars(str(mcc.get("api_key", "")))
                     return {
+                        "index": i,
                         "name": _resolved_alias or _model_name,
                         "alias": _resolved_alias,
                         "model_name": _model_name,
