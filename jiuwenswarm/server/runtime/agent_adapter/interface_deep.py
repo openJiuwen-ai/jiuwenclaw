@@ -2772,20 +2772,30 @@ class JiuWenSwarmDeepAdapter:
         inputs: dict[str, Any],
     ) -> dict[str, Any]:
         from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+            extract_document_files,
             extract_multimodal_image_files,
         )
 
         image_files = extract_multimodal_image_files(request.params)
-        if not image_files:
+        document_files = extract_document_files(request.params)
+        if not image_files and not document_files:
             return inputs
 
         updated = dict(inputs)
-        updated["_multimodal_image_files"] = image_files
-        logger.info(
-            "[JiuWenSwarmDeepAdapter] Prepared %d image attachment(s) "
-            "for Core multimodal context-window injection",
-            len(image_files),
-        )
+        if image_files:
+            updated["_multimodal_image_files"] = image_files
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] Prepared %d image attachment(s) "
+                "for Core multimodal context-window injection",
+                len(image_files),
+            )
+        if document_files:
+            updated["_multimodal_document_files"] = document_files
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] Prepared %d document attachment(s) "
+                "for path annotation injection",
+                len(document_files),
+            )
         return updated
 
     @staticmethod
@@ -2856,6 +2866,67 @@ class JiuWenSwarmDeepAdapter:
             query
             + "\n\n图片附件上下文（供 ReAct 选择图片理解工具使用）：\n"
             + json.dumps(tool_context, ensure_ascii=False)
+        )
+        return updated
+
+    @staticmethod
+    def _prepare_document_file_annotations(
+        request: AgentRequest,
+        inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Inject document file path/MIME/URL annotations into the query text.
+
+        Documents are NOT auto-parsed. The agent/LLM receives file metadata
+        as a JSON array and can use tools to read files if needed.
+        """
+        document_files = inputs.get("_multimodal_document_files")
+        if not isinstance(document_files, list) or not document_files:
+            from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                extract_document_files,
+            )
+            document_files = extract_document_files(request.params)
+        if not document_files:
+            return inputs
+
+        file_annotations: list[dict[str, Any]] = []
+        for doc in document_files:
+            path = str(doc.get("path") or "").strip()
+            if not path:
+                continue
+            entry: dict[str, Any] = {
+                "filename": doc.get("filename") or Path(path).name,
+                "path": path,
+                "mime_type": doc.get("mime_type") or "",
+            }
+            url = doc.get("url")
+            if isinstance(url, str) and url.strip():
+                entry["url"] = url.strip()
+            file_annotations.append(entry)
+
+        if not file_annotations:
+            return inputs
+
+        query = inputs.get("query")
+        if not isinstance(query, str):
+            query = ""
+        if "jiuwenswarm_document_context" in query:
+            return inputs
+
+        annotation = {
+            "marker": "jiuwenswarm_document_context",
+            "files": file_annotations,
+            "toolHint": (
+                "用户上传了以上文件附件。文件未自动解析，你可以使用工具读取文件内容。"
+                "例如使用 read_file(file_path=path) 读取文件，或根据 MIME 类型选择合适的工具。"
+            ),
+        }
+
+        updated = dict(inputs)
+        updated.pop("_multimodal_document_files", None)
+        updated["query"] = (
+            query
+            + "\n\n文件附件上下文（路径标注，未自动解析）：\n"
+            + json.dumps(annotation, ensure_ascii=False)
         )
         return updated
 
@@ -7455,6 +7526,10 @@ class JiuWenSwarmDeepAdapter:
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
             )
+            inputs = self._prepare_document_file_annotations(
+                request,
+                inputs,
+            )
             await self._sync_prompt_attachments_for_request(session_id)
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
@@ -7463,6 +7538,7 @@ class JiuWenSwarmDeepAdapter:
             image_files_token = set_current_multimodal_image_files(
                 inputs.pop("_multimodal_image_files", []) or []
             )
+            inputs.pop("_multimodal_document_files", None)
             # Sync single-agent / coding-agent observability with current
             # config before running, and open a root span so OtelCallbackHandler
             # has a parent for LLM/tool spans (see streaming path for details).
@@ -7923,6 +7999,10 @@ class JiuWenSwarmDeepAdapter:
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
             )
+            inputs = self._prepare_document_file_annotations(
+                request,
+                inputs,
+            )
             if image_tool_fallback_notice is not None:
                 yield AgentResponseChunk(
                     request_id=rid,
@@ -7938,6 +8018,7 @@ class JiuWenSwarmDeepAdapter:
             image_files_token = set_current_multimodal_image_files(
                 inputs.pop("_multimodal_image_files", []) or []
             )
+            inputs.pop("_multimodal_document_files", None)
             # Resolve debug-trace settings early: its otel_enabled drives the
             # OTel force-enable below. Best-effort (config read never raises).
             from jiuwenswarm.server.runtime.debug_trace.config import (

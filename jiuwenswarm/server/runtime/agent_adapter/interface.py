@@ -180,6 +180,15 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
                     image_items.append(item)
             if image_items:
                 files["uploaded_images"] = image_items
+        uploaded_documents = raw_files.get("uploaded_documents")
+        if isinstance(uploaded_documents, list):
+            doc_items: list[dict[str, Any]] = []
+            for raw_item in uploaded_documents:
+                item = _history_media_record(raw_item, default_type="document")
+                if item is not None:
+                    doc_items.append(item)
+            if doc_items:
+                files["uploaded_documents"] = doc_items
         if files:
             extra["files"] = files
 

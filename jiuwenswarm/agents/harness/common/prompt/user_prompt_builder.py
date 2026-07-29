@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""User prompt helpers for multimodal image attachments."""
+"""User prompt helpers for multimodal image and document attachments."""
 
 from __future__ import annotations
 
@@ -72,6 +72,41 @@ def extract_multimodal_image_files(params: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def extract_document_files(params: Any) -> list[dict[str, Any]]:
+    """Return normalized document-file records from a request payload.
+
+    Document files are NOT auto-parsed. Only path/MIME/URL annotations are
+    provided to the agent/LLM so it can use tools to read them if needed.
+    """
+
+    if not isinstance(params, dict):
+        return []
+
+    candidates: list[Any] = []
+    raw_media_items = params.get("media_items")
+    if isinstance(raw_media_items, list):
+        candidates.extend(raw_media_items)
+
+    files = params.get("files")
+    if isinstance(files, dict):
+        uploaded_documents = files.get("uploaded_documents")
+        if isinstance(uploaded_documents, list):
+            candidates.extend(uploaded_documents)
+
+    normalized: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for item in candidates:
+        doc = _normalize_document_file(item)
+        if not doc:
+            continue
+        path = doc["path"]
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        normalized.append(doc)
+    return normalized
+
+
 def set_current_multimodal_image_files(image_files: list[dict[str, Any]]) -> Any:
     """Bind request image files to the current Core model-call task."""
 
@@ -89,9 +124,11 @@ def current_multimodal_image_files() -> list[dict[str, Any]]:
 def prepare_multimodal_image_messages(
     messages: list[Any],
     image_files: list[dict[str, Any]] | None = None,
+    document_files: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Any], int]:
     images = _normalize_image_files(image_files or current_multimodal_image_files())
-    if not images:
+    documents = _normalize_document_files(document_files or [])
+    if not images and not documents:
         return messages, 0
 
     target_index = _latest_user_message_index(messages)
@@ -104,7 +141,7 @@ def prepare_multimodal_image_messages(
         if isinstance(message, dict)
         else getattr(message, "content", None)
     )
-    updated_content, injected = _append_image_files_to_content(content, images)
+    updated_content, injected = _append_image_files_to_content(content, images, documents)
     if not injected:
         return messages, 0
 
@@ -156,11 +193,13 @@ def strip_image_content_from_model_context(context: Any) -> int:
 def prepare_multimodal_image_context_window(
     window: Any,
     image_files: list[dict[str, Any]] | None = None,
+    document_files: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, int]:
     context_messages = list(getattr(window, "context_messages", []) or [])
     updated_messages, injected = prepare_multimodal_image_messages(
         context_messages,
         image_files,
+        document_files,
     )
     if not injected:
         return window, 0
@@ -175,6 +214,7 @@ def prepare_multimodal_image_context_window(
 def ensure_multimodal_image_window_mutator(
     context: Any,
     image_files: list[dict[str, Any]] | None = None,
+    document_files: list[dict[str, Any]] | None = None,
 ) -> bool:
     mutators = getattr(context, "_window_mutators", None)
     if not isinstance(mutators, list):
@@ -183,16 +223,17 @@ def ensure_multimodal_image_window_mutator(
     images = _normalize_image_files(
         image_files if image_files is not None else current_multimodal_image_files()
     )
+    documents = _normalize_document_files(document_files or [])
     mutators[:] = [
         mutator
         for mutator in mutators
         if not bool(getattr(mutator, _MULTIMODAL_IMAGE_WINDOW_MUTATOR_ATTR, False))
     ]
-    if not images:
+    if not images and not documents:
         return False
 
     async def multimodal_image_window_mutator(_context: Any, window: Any) -> Any:
-        return prepare_multimodal_image_context_window(window, images)[0]
+        return prepare_multimodal_image_context_window(window, images, documents)[0]
 
     setattr(
         multimodal_image_window_mutator,
@@ -215,6 +256,21 @@ def _normalize_image_files(image_files: list[dict[str, Any]] | tuple[Any, ...]) 
             continue
         seen_paths.add(path)
         normalized.append(image)
+    return normalized
+
+
+def _normalize_document_files(document_files: list[dict[str, Any]] | tuple[Any, ...]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for item in document_files:
+        doc = _normalize_document_file(item)
+        if not doc:
+            continue
+        path = doc["path"]
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        normalized.append(doc)
     return normalized
 
 
@@ -248,6 +304,40 @@ def _normalize_image_file(item: Any) -> dict[str, Any] | None:
     return image
 
 
+def _normalize_document_file(item: Any) -> dict[str, Any] | None:
+    """Normalize a document file record. Documents are NOT inlined as base64;
+    only path/MIME/URL metadata is provided to the agent/LLM.
+    """
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if item_type is not None and item_type != "document":
+        return None
+
+    path = str(item.get("path") or "").strip()
+    if not path:
+        return None
+
+    mime_type = str(item.get("mime_type") or item.get("mimeType") or "").strip().lower()
+    if not mime_type:
+        mime_type = mimetypes.guess_type(path)[0] or ""
+
+    filename = str(item.get("filename") or Path(path).name).strip() or Path(path).name
+    doc: dict[str, Any] = {
+        "type": "document",
+        "filename": filename,
+        "path": path,
+        "mime_type": mime_type,
+    }
+    url = item.get("url")
+    if isinstance(url, str) and url.strip():
+        doc["url"] = url.strip()
+    size_bytes = item.get("size_bytes")
+    if isinstance(size_bytes, int):
+        doc["size_bytes"] = size_bytes
+    return doc
+
+
 def _latest_user_message_index(messages: list[Any]) -> int:
     for index in range(len(messages) - 1, -1, -1):
         if _is_user_message(messages[index]):
@@ -269,38 +359,59 @@ def _is_user_message(message: Any) -> bool:
 def _append_image_files_to_content(
     content: Any,
     image_files: list[dict[str, Any]],
+    document_files: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, int]:
+    document_files = document_files or []
     image_url_parts: list[Any] = []
-    injected_files: list[dict[str, Any]] = []
+    injected_images: list[dict[str, Any]] = []
     for image_file in image_files:
         data_uri = _image_data_uri_from_path(image_file["path"], image_file["mime_type"])
         if _append_image_url_part(image_url_parts, data_uri):
-            injected_files.append(image_file)
-    if not injected_files:
+            injected_images.append(image_file)
+    injected_count = len(injected_images) + len(document_files)
+    if not injected_count:
         return content, 0
 
-    parts: list[Any] = [{"type": "text", "text": _build_query_file_text(content, injected_files)}]
+    parts: list[Any] = [{"type": "text", "text": _build_query_file_text(content, injected_images, document_files)}]
     parts.extend(image_url_parts)
-    return parts, len(injected_files)
+    return parts, injected_count
 
 
-def _build_query_file_text(content: Any, image_files: list[dict[str, Any]]) -> str:
-    """Serialize the user query and attached images as a ``{query, file}`` JSON text block.
+def _build_query_file_text(
+    content: Any,
+    image_files: list[dict[str, Any]],
+    document_files: list[dict[str, Any]] | None = None,
+) -> str:
+    """Serialize the user query and attached files as a ``{query, file}`` JSON text block.
 
     The multimodal image content parts are appended separately; this text block gives the
-    model both the original query and the image file paths in a single serialized payload.
+    model both the original query and the file paths in a single serialized payload.
+    Document files are NOT auto-parsed; only path/MIME/URL annotations are provided.
     """
+
+    document_files = document_files or []
+    file_entries: list[dict[str, Any]] = []
+
+    for image_file in image_files:
+        file_entries.append({
+            "filename": image_file["filename"],
+            "path": image_file["path"],
+            "mime_type": image_file["mime_type"],
+        })
+
+    for doc_file in document_files:
+        entry: dict[str, Any] = {
+            "filename": doc_file["filename"],
+            "path": doc_file["path"],
+            "mime_type": doc_file["mime_type"],
+        }
+        if "url" in doc_file:
+            entry["url"] = doc_file["url"]
+        file_entries.append(entry)
 
     payload = {
         "query": _content_to_query_text(content),
-        "file": [
-            {
-                "filename": image_file["filename"],
-                "path": image_file["path"],
-                "mime_type": image_file["mime_type"],
-            }
-            for image_file in image_files
-        ],
+        "file": file_entries,
     }
     return json.dumps(payload, ensure_ascii=False)
 

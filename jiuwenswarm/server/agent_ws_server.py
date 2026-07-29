@@ -393,6 +393,9 @@ def _is_restorable_history_record(record: Any) -> bool:
         has_media = has_media or (
             isinstance(files.get("uploaded_images"), list)
             and bool(files["uploaded_images"])
+        ) or (
+            isinstance(files.get("uploaded_documents"), list)
+            and bool(files["uploaded_documents"])
         )
 
     if role == "user":

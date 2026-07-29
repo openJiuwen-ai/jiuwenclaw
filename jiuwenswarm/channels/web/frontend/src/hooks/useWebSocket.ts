@@ -562,14 +562,27 @@ function toPersistedMediaRecord(item: MediaItem): Record<string, unknown> {
 }
 
 function buildPersistedMediaFiles(mediaItems: MediaItem[]): Record<string, unknown> {
-  return {
-    uploaded_images: mediaItems.map((item) => ({
+  const imageItems = mediaItems.filter((item) => item.type === 'image');
+  const documentItems = mediaItems.filter((item) => item.type === 'document');
+  const result: Record<string, unknown> = {};
+  if (imageItems.length) {
+    result.uploaded_images = imageItems.map((item) => ({
       filename: item.filename,
       path: item.path,
       mime_type: getMediaMimeType(item),
       size_bytes: item.size_bytes ?? item.sizeBytes,
-    })),
-  };
+    }));
+  }
+  if (documentItems.length) {
+    result.uploaded_documents = documentItems.map((item) => ({
+      filename: item.filename,
+      path: item.path,
+      mime_type: getMediaMimeType(item),
+      size_bytes: item.size_bytes ?? item.sizeBytes,
+      ...(item.url ? { url: item.url } : {}),
+    }));
+  }
+  return result;
 }
 
 function getSessionWorkContext(sessionId: string): Record<string, unknown> {

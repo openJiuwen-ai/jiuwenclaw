@@ -16,6 +16,7 @@ export interface MediaItem {
   base64_data?: string;
   url?: string;
   path?: string;
+  targetPath?: string;
   sizeBytes?: number;
   size_bytes?: number;
 }

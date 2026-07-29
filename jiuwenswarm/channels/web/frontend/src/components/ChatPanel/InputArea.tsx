@@ -1,7 +1,7 @@
 ﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { AtSign, CircleX, FileImage, Loader2, Plus, Square, Target, X } from 'lucide-react';
+import { AtSign, CircleX, FileImage, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -124,7 +124,23 @@ interface InputAreaProps {
 }
 
 const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const ACCEPTED_DOCUMENT_TYPES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'text/plain',
+  'text/csv',
+  'text/markdown',
+  'application/json',
+  'application/zip',
+]);
+const ACCEPTED_FILE_TYPES = new Set([...ACCEPTED_IMAGE_TYPES, ...ACCEPTED_DOCUMENT_TYPES]);
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
 const MAX_IMAGE_COUNT = 20;
 
 type AttachmentStatus = 'uploading' | 'ready' | 'error';
@@ -169,8 +185,9 @@ function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
   const filename = pickString(persisted?.filename) || attachment.filename;
   const mimeType = pickString(persisted?.mime_type, persisted?.mimeType) || attachment.mimeType;
   const sizeBytes = pickNumber(persisted?.size_bytes, persisted?.sizeBytes) ?? attachment.size;
+  const isImage = ACCEPTED_IMAGE_TYPES.has(mimeType);
   return {
-    type: 'image',
+    type: isImage ? 'image' : 'document',
     mimeType,
     mime_type: mimeType,
     filename,
@@ -182,8 +199,9 @@ function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
 }
 
 function buildUploadMediaItem(attachment: AttachmentDraft, payload: Pick<AttachmentDraft, 'base64Data'>): MediaItem {
+  const isImage = ACCEPTED_IMAGE_TYPES.has(attachment.mimeType);
   return {
-    type: 'image',
+    type: isImage ? 'image' : 'document',
     mimeType: attachment.mimeType,
     filename: attachment.filename,
     base64Data: payload.base64Data,
@@ -208,18 +226,20 @@ function pickNumber(...values: unknown[]): number | undefined {
   return undefined;
 }
 
-function getImageValidationError(file: File): string | null {
-  if (!ACCEPTED_IMAGE_TYPES.has(file.type)) {
+function getFileValidationError(file: File): string | null {
+  if (!ACCEPTED_FILE_TYPES.has(file.type)) {
     return `文件类型不支持：${file.name || '未命名文件'}`;
   }
-  if (file.size > MAX_IMAGE_BYTES) {
-    return `文件大小超出限制：${file.name || '未命名文件'}（最大${formatAttachmentSize(MAX_IMAGE_BYTES)}）`;
+  const isImage = ACCEPTED_IMAGE_TYPES.has(file.type);
+  const maxBytes = isImage ? MAX_IMAGE_BYTES : MAX_DOCUMENT_BYTES;
+  if (file.size > maxBytes) {
+    return `文件大小超出限制：${file.name || '未命名文件'}（最大${formatAttachmentSize(maxBytes)}）`;
   }
   return null;
 }
 
-function readImageFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
-  if (getImageValidationError(file)) {
+function readFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
+  if (getFileValidationError(file)) {
     return Promise.resolve(null);
   }
   return new Promise((resolve) => {
@@ -231,7 +251,8 @@ function readImageFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' |
         resolve(null);
         return;
       }
-      resolve({ base64Data, previewUrl: result });
+      const isImage = ACCEPTED_IMAGE_TYPES.has(file.type);
+      resolve({ base64Data, previewUrl: isImage ? result : undefined });
     };
     reader.onerror = () => resolve(null);
     reader.readAsDataURL(file);
@@ -546,14 +567,14 @@ export function InputArea({
 
   const uploadAttachment = useCallback((attachment: AttachmentDraft) => {
     if (!attachment.file) return;
-    const validationError = getImageValidationError(attachment.file);
+    const validationError = getFileValidationError(attachment.file);
     if (validationError) {
       pushAttachmentAlert(validationError);
       updateAttachment(attachment.id, { status: 'error', error: validationError });
       return;
     }
     updateAttachment(attachment.id, { status: 'uploading', error: undefined });
-    void readImageFile(attachment.file).then(async (payload) => {
+    void readFile(attachment.file).then(async (payload) => {
       if (!payload) {
         updateAttachment(attachment.id, {
           status: 'error',
@@ -573,7 +594,7 @@ export function InputArea({
         const persisted = await onPersistMedia('', [buildUploadMediaItem(attachment, payload)]);
         const persistedMediaItem = persisted.media_items?.[0];
         if (!persistedMediaItem || !pickString(persistedMediaItem.path)) {
-          throw new Error('media.persist did not return image path');
+          throw new Error('media.persist did not return file path');
         }
         updateAttachment(attachment.id, {
           ...payload,
@@ -619,7 +640,7 @@ export function InputArea({
         size: file.size,
         file,
       };
-      const validationError = getImageValidationError(file);
+      const validationError = getFileValidationError(file);
       if (validationError) {
         pushAttachmentAlert(validationError);
         items.push({
@@ -1133,21 +1154,31 @@ export function InputArea({
   }, [appendImageFiles]);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
-    if (Array.from(event.clipboardData.items).some((item) => item.kind === 'file')) {
+    const items = Array.from(event.clipboardData.items);
+    const files = items
+      .filter((item) => item.kind === 'file' && ACCEPTED_FILE_TYPES.has(item.type))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (files.length) {
       event.preventDefault();
     }
   }, []);
 
   const handleFileDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    const hasFile = Array.from(event.dataTransfer.items).some(
+      (item) => item.kind === 'file' && ACCEPTED_FILE_TYPES.has(item.type)
+    );
+    if (!hasFile) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'none';
   }, []);
 
   const handleFileDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
-    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    const files = Array.from(event.dataTransfer.files).filter((file) => ACCEPTED_FILE_TYPES.has(file.type));
+    if (!files.length) return;
     event.preventDefault();
-  }, []);
+    void appendImageFiles(files);
+  }, [appendImageFiles]);
 
   /** 在光标处插入技能 chip（不可编辑原子节点） */
   const insertSkillChip = useCallback((skillName: string) => {
@@ -1443,8 +1474,10 @@ export function InputArea({
                 <div className="chat-input-attachment-preview" aria-hidden="true">
                   {attachment.previewUrl ? (
                     <img src={attachment.previewUrl} alt="" />
-                  ) : (
+                  ) : ACCEPTED_IMAGE_TYPES.has(attachment.mimeType) ? (
                     <FileImage size={18} strokeWidth={1.8} />
+                  ) : (
+                    <FileText size={18} strokeWidth={1.8} />
                   )}
                 </div>
                 <div className="chat-input-attachment-main">
@@ -1568,7 +1601,7 @@ export function InputArea({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
+            accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-powerpoint,.ppt,application/vnd.openxmlformats-officedocument.presentationml.presentation,.pptx,text/plain,.txt,text/csv,.csv,text/markdown,.md,application/json,.json,application/zip,.zip"
             multiple
             className="hidden"
             onChange={handleFileInputChange}
