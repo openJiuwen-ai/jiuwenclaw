@@ -48,7 +48,7 @@ from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_peer,
     format_ws_diagnostics,
 )
-from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
+from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES, get_ws_max_message_bytes
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
@@ -913,7 +913,7 @@ class AgentWebSocketServer:
                 process_request=self._process_request,
                 ping_interval=self._ping_interval,
                 ping_timeout=self._ping_timeout,
-                max_size=AGENT_WS_MAX_MESSAGE_BYTES,
+                max_size=get_ws_max_message_bytes(),
             )
         except ImportError:
             import websockets
@@ -924,7 +924,7 @@ class AgentWebSocketServer:
                 process_request=self._process_request,
                 ping_interval=self._ping_interval,
                 ping_timeout=self._ping_timeout,
-                max_size=AGENT_WS_MAX_MESSAGE_BYTES,
+                max_size=get_ws_max_message_bytes(),
             )
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port

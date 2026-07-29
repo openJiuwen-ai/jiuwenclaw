@@ -14,7 +14,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_response_for_wire,
 )
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
-from jiuwenswarm.common.ws_limits import AGENT_WS_SEND_BUDGET_BYTES
+from jiuwenswarm.common.ws_limits import get_ws_send_budget_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def _oversized_payload(actual_bytes: int) -> dict[str, Any]:
         "error": "AgentServer response exceeds WebSocket send budget",
         "code": "response_too_large",
         "actual_bytes": actual_bytes,
-        "max_bytes": AGENT_WS_SEND_BUDGET_BYTES,
+        "max_bytes": get_ws_send_budget_bytes(),
     }
 
 
@@ -97,7 +97,8 @@ async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
     """Send one bounded wire payload, replacing oversized data with an error."""
     serialized = json.dumps(wire, ensure_ascii=False)
     actual_bytes = len(serialized.encode("utf-8"))
-    if actual_bytes <= AGENT_WS_SEND_BUDGET_BYTES:
+    send_budget = get_ws_send_budget_bytes()
+    if actual_bytes <= send_budget:
         await ws.send(serialized)
         return True
 
@@ -115,17 +116,17 @@ async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
         wire.get("is_stream"),
         wire.get("response_kind"),
         actual_bytes,
-        AGENT_WS_SEND_BUDGET_BYTES,
+        send_budget,
         _preview,
     )
     fallback = _build_oversized_fallback(wire, actual_bytes)
     fallback_json = json.dumps(fallback, ensure_ascii=False)
     fallback_bytes = len(fallback_json.encode("utf-8"))
-    if fallback_bytes > AGENT_WS_SEND_BUDGET_BYTES:
+    if fallback_bytes > send_budget:
         raise RuntimeError(
             "oversized fallback exceeds WebSocket send budget: "
             f"actual_bytes={fallback_bytes} "
-            f"max_bytes={AGENT_WS_SEND_BUDGET_BYTES}"
+            f"max_bytes={send_budget}"
         )
     await ws.send(fallback_json)
     return False

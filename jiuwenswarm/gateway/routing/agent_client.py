@@ -22,7 +22,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
     parse_agent_server_wire_unary,
 )
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
-from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
+from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES, get_ws_max_message_bytes
 from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_exception,
     describe_ws_peer,
@@ -190,7 +190,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             ping_interval=self._ping_interval,
             ping_timeout=self._ping_timeout,
             close_timeout=5.0,
-            max_size=AGENT_WS_MAX_MESSAGE_BYTES,
+            max_size=get_ws_max_message_bytes(),
         )
         logger.info("[WebSocketAgentServerClient] 已连接: %s", uri)
 

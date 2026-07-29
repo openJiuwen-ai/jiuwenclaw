@@ -32,7 +32,7 @@ class FakeWebSocket:
 
 @pytest.mark.asyncio
 async def test_send_wire_payload_sends_small_wire_unchanged(monkeypatch):
-    monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 1024)
+    monkeypatch.setattr(ws_send, "get_ws_send_budget_bytes", lambda: 1024)
     ws = FakeWebSocket()
     wire = {"request_id": "r1", "body": {"result": "ok"}}
 
@@ -45,7 +45,7 @@ async def test_send_wire_payload_counts_utf8_bytes(monkeypatch):
     wire = {"request_id": "r1", "body": {"result": "你" * 400}}
     character_size = len(json.dumps(wire, ensure_ascii=False))
     byte_size = len(json.dumps(wire, ensure_ascii=False).encode("utf-8"))
-    monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 1200)
+    monkeypatch.setattr(ws_send, "get_ws_send_budget_bytes", lambda: 1200)
     ws = FakeWebSocket()
 
     assert character_size < 1200 < byte_size
@@ -55,7 +55,7 @@ async def test_send_wire_payload_counts_utf8_bytes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_oversized_unary_sends_e2a_error(monkeypatch):
-    monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 2048)
+    monkeypatch.setattr(ws_send, "get_ws_send_budget_bytes", lambda: 2048)
     source = encode_agent_response_for_wire(
         AgentResponse(
             request_id="r-unary",
@@ -84,7 +84,7 @@ async def test_oversized_unary_sends_e2a_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_oversized_stream_sends_final_error_chunk(monkeypatch):
-    monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 2048)
+    monkeypatch.setattr(ws_send, "get_ws_send_budget_bytes", lambda: 2048)
     source = encode_agent_chunk_for_wire(
         AgentResponseChunk(
             request_id="r-stream",
@@ -112,7 +112,7 @@ async def test_oversized_stream_sends_final_error_chunk(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_oversized_server_push_preserves_push_marker(monkeypatch):
-    monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 2048)
+    monkeypatch.setattr(ws_send, "get_ws_send_budget_bytes", lambda: 2048)
     source = build_server_push_wire(
         {
             "request_id": "push-1",

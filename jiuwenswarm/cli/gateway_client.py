@@ -12,12 +12,13 @@ logger = logging.getLogger(__name__)
 
 
 def _connect_ws(url: str):
+    from jiuwenswarm.common.ws_limits import get_ws_max_message_bytes
     try:
         from websockets.legacy.client import connect as legacy_connect
         return legacy_connect(
             url,
             close_timeout=2.0,
-            max_size=8 * 2**20,
+            max_size=get_ws_max_message_bytes(),
             ping_interval=20,
             ping_timeout=60,
         )
@@ -26,7 +27,7 @@ def _connect_ws(url: str):
         return websockets.connect(
             url,
             close_timeout=2.0,
-            max_size=8 * 2**20,
+            max_size=get_ws_max_message_bytes(),
             ping_interval=20,
             ping_timeout=60,
         )

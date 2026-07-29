@@ -547,7 +547,8 @@ class WebChannel(BaseWsChannel):
 
             ws_serve = websockets.serve
 
-        ws_max_size = 8 * 2**20  # 8 MB — matches AgentServer link
+        from jiuwenswarm.common.ws_limits import get_ws_max_message_bytes
+        ws_max_size = get_ws_max_message_bytes()
 
         self._server = await ws_serve(
             self._connection_handler,

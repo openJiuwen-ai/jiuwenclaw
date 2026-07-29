@@ -4,7 +4,11 @@ import logging
 import pytest
 from websockets.exceptions import ConnectionClosedError
 
-from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
+from jiuwenswarm.common.ws_limits import (
+    AGENT_WS_MAX_MESSAGE_BYTES,
+    DEFAULT_WS_MAX_MESSAGE_BYTES,
+    get_ws_max_message_bytes,
+)
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
@@ -87,7 +91,8 @@ class ReconnectingAgentClientHarness(AgentClientHarness):
 
 def test_agent_client_uses_shared_websocket_limit():
     assert not hasattr(agent_client, "_WS_MAX_SIZE")
-    assert agent_client.AGENT_WS_MAX_MESSAGE_BYTES == AGENT_WS_MAX_MESSAGE_BYTES
+    assert hasattr(agent_client, "get_ws_max_message_bytes")
+    assert agent_client.get_ws_max_message_bytes() == DEFAULT_WS_MAX_MESSAGE_BYTES
 
 
 @pytest.mark.asyncio

@@ -211,11 +211,13 @@ class WhatsAppChannel(BaseChannel):
     async def _connect_once(self) -> None:
         import websockets
 
+        from jiuwenswarm.common.ws_limits import get_ws_max_message_bytes
+
         async with websockets.connect(
                 self.config.bridge_ws_url,
                 ping_interval=20,
                 ping_timeout=20,
-                max_size=8 * 1024 * 1024,
+                max_size=get_ws_max_message_bytes(),
         ) as ws:
             self._ws = ws
             self._set_connection_state("bridge_connected", bridge_ws_connected=True)
