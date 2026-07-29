@@ -418,6 +418,7 @@ debug_trace:
     include_reasoning: true         # 记录推理片段
     include_tool_args: true         # 记录工具参数
     include_tool_result: true       # 记录工具结果
+    include_subagent_flow: true     # 采集子 agent chunk 进同一 dump（内置 task / 自定义 / 后台子 agent）
   code:                             # code 模式（code.normal / code.plan …）
     enabled: false
     dump_enabled: true
@@ -426,6 +427,7 @@ debug_trace:
     include_reasoning: true
     include_tool_args: true
     include_tool_result: true
+    include_subagent_flow: true     # 采集子 agent chunk 进同一 dump（内置 task / 自定义 / 后台子 agent）
   limits:
     tool_args_max_chars: 2000       # 工具参数截断阈值
     tool_result_max_chars: 8000     # 工具结果截断阈值

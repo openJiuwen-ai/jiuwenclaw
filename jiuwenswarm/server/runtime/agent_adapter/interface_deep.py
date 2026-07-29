@@ -7423,7 +7423,7 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
-            close_agent_run_span(_run_span)
+            close_agent_run_span(_run_span, session_id=session_id)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,
@@ -7815,6 +7815,7 @@ class JiuWenSwarmDeepAdapter:
                     pass
             try:
                 from jiuwenswarm.server.runtime.debug_trace.context import (
+                    register_debug_trace_logger,
                     set_debug_trace_logger,
                 )
                 from jiuwenswarm.server.runtime.debug_trace.paths import debug_trace_file
@@ -7839,6 +7840,12 @@ class JiuWenSwarmDeepAdapter:
                     # streams into this same dump. asyncio.create_task copies the
                     # current ContextVar, so background subagents inherit it too.
                     _debug_trace_token = set_debug_trace_logger(_debug_logger)
+                    # Also register by session_id: TaskTool.invoke runs in the
+                    # DeepAgent's supervisor task (created at session setup, before
+                    # any /debug request), so the per-request ContextVar above
+                    # can't reach it. Dispatch sites fall back to this registry
+                    # via get_debug_trace_logger_for_session.
+                    register_debug_trace_logger(session_id, _debug_logger)
             except Exception as _dbg_exc:
                 logger.warning("[JiuWenSwarmDeepAdapter] debug trace init failed: %s", _dbg_exc)
                 _debug_logger = None
@@ -7996,9 +8003,15 @@ class JiuWenSwarmDeepAdapter:
                         mode=self._resolve_input_dispatch_mode(request.params),
                     )
                 )
+            run_failure: tuple[str, str] | None = None
             async for chunk in interaction_stream:
                 if _debug_logger is not None:
                     _debug_logger.feed(chunk)
+                    # Surface run-level terminal failures (model/task_failed,
+                    # error answer) on the /debug run-end status instead of a
+                    # blanket "ok"; recoverable tool_result errors stay "ok".
+                    if run_failure is None:
+                        run_failure = self._run_failure(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
                     parsed = self._adapt_goal_intermediate_final(parsed)
@@ -8209,7 +8222,14 @@ class JiuWenSwarmDeepAdapter:
                 task.add_done_callback(self._on_evolution_watcher_done)
                 self._evolution_watcher_tasks.add(task)
             if _debug_logger is not None:
-                _debug_logger.end_run(status="ok")
+                if run_failure is not None:
+                    _debug_logger.end_run(
+                        status="error",
+                        error_type=run_failure[0],
+                        error_message=run_failure[1],
+                    )
+                else:
+                    _debug_logger.end_run(status="ok")
             interaction_stream_abort = False
         except asyncio.CancelledError:
             stream_consumer_cancelled = True
@@ -8242,14 +8262,16 @@ class JiuWenSwarmDeepAdapter:
                 is_complete=False,
             )
         finally:
-            close_agent_run_span(_run_span)
+            close_agent_run_span(_run_span, session_id=session_id)
             if _debug_logger is not None:
                 _debug_logger.flush()
             if _debug_trace_token is not None:
                 from jiuwenswarm.server.runtime.debug_trace.context import (
                     reset_debug_trace_logger,
+                    unregister_debug_trace_logger,
                 )
                 reset_debug_trace_logger(_debug_trace_token)
+                unregister_debug_trace_logger(session_id)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,
@@ -8361,6 +8383,55 @@ class JiuWenSwarmDeepAdapter:
         if content is None or content == "":
             return None
         return {"event_type": event_type, "content": content}
+
+    @staticmethod
+    def _run_failure(chunk) -> tuple[str, str] | None:
+        """Return ``(error_type, message)`` if *chunk* is a run-level terminal failure.
+
+        These are failures that end the round and are surfaced to the user as a
+        ``chat.error`` by :meth:`_parse_stream_chunk` — a
+        ``controller_output``/``task_failed`` (e.g. model call failed) or an
+        ``answer`` whose ``result_type`` is ``"error"``. Recoverable
+        ``tool_result`` errors are intentionally excluded: the agent loop may
+        still retry them, so they must not flip the run status.
+
+        Used only to give the /debug ``run end`` ``status`` triage value; the
+        chunk still flows through ``_parse_stream_chunk`` unchanged.
+        """
+        ctype = getattr(chunk, "type", None)
+        payload = getattr(chunk, "payload", None)
+
+        def _get(key, default=None):
+            if isinstance(payload, dict):
+                return payload.get(key, default)
+            return getattr(payload, key, default)
+
+        if ctype == "controller_output" and payload is not None:
+            inner_t = getattr(payload, "type", None)
+            inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
+            if inner_val == "task_failed":
+                data = getattr(payload, "data", None) or []
+                msg = next(
+                    (
+                        getattr(item, "text", None)
+                        for item in data
+                        if hasattr(item, "text")
+                    ),
+                    None,
+                )
+                return "task_failed", (msg or "task failed")
+            return None
+
+        if ctype == "answer" and _get("result_type") == "error":
+            out = _get("output")
+            if isinstance(out, dict):
+                out = out.get("output")
+            return "answer_error", (str(out) if out else "task failed")
+
+        if isinstance(chunk, dict) and chunk.get("result_type") == "error":
+            return "answer_error", str(chunk.get("output") or "task failed")
+
+        return None
 
     @staticmethod
     def _parse_stream_chunk(
