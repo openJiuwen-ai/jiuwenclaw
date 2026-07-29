@@ -1765,7 +1765,8 @@ export class AppScreen implements Component, Focusable {
     this.startupPromptList.onSelect = (item) => {
       if (item.value === "yes") {
         addTrustedDir(cwd);
-        // Sync to server so the dir lands in permissions.external_directory
+        // Sync to server so the dir lands in permissions.file_guard.paths
+        // (read/write allow, exec ask; Legacy readers may still see external_directory)
         // allow-list (persist_cli_trusted_directory), otherwise external_dir
         // checks would still intercept paths under this trusted directory.
         // Mirrors /workspace add (workspace-dir.ts).
@@ -3414,8 +3415,8 @@ export class AppScreen implements Component, Focusable {
           enterConfigEditor: (focusKey, configPayload, mode) => {
             this.openConfigEditor(focusKey, configPayload, mode);
           },
-          openInEditor: (filePath: string) => {
-            openInExternalEditor(this.tui, filePath);
+          openInEditor: (filePath: string, onDone?: () => void) => {
+            openInExternalEditor(this.tui, filePath, onDone);
           },
           openFolder: (folderPath: string) => {
             return openFolderInExplorer(folderPath);
@@ -3602,16 +3603,21 @@ export class AppScreen implements Component, Focusable {
       return true;
     }
 
-    // Enter / Space / ctrl+c 关闭 btw 浮层（对齐 Esc：关闭 overlay + 取消进行中的 btw 请求）
-    if (
-      matchesKey(data, "enter") ||
-      matchesKey(data, "return") ||
-      matchesKey(data, "space") ||
-      matchesKey(data, "ctrl+c")
-    ) {
+    // 输入框为空时，Enter / Space 关闭 btw 浮层；输入框有内容时保留原有 composer 行为。
+    // ctrl+c 始终优先关闭浮层，但只在确有 btw 请求进行中时发送中断。
+    const dismissWithCtrlC = matchesKey(data, "ctrl+c");
+    const dismissWithEnterOrSpace =
+      this.editor.getText().length === 0 &&
+      (matchesKey(data, "enter") ||
+        matchesKey(data, "return") ||
+        matchesKey(data, "space"));
+    if (dismissWithCtrlC || dismissWithEnterOrSpace) {
+      const hasPendingBtwRequest = this.state.getSnapshot().btwPendingQuestion !== null;
       this.state.clearBtwOverlay();
       this.btwOverlayScrollOffset = 0;
-      this.state.requestLocalInterrupt();
+      if (hasPendingBtwRequest) {
+        this.state.requestLocalInterrupt();
+      }
       this.state.setBtwActive(false);
       this.tui.requestRender();
       return true;

@@ -7424,6 +7424,7 @@ class JiuWenSwarmDeepAdapter:
         image_files_token = None
         _run_span: Any = None
         collected_content: list[str] = []
+        error_text: str | None = None
         interaction_stream = None
         interaction_stream_abort = True
         try:
@@ -7526,6 +7527,15 @@ class JiuWenSwarmDeepAdapter:
                         )
                         if text:
                             collected_content.append(text)
+                    else:
+                        # check for error in other typed chunks (e.g. controller_output.task_failed)
+                        parsed = self._parse_stream_chunk(chunk)
+                        if parsed is not None:
+                            event_type = str(parsed.get("event_type") or "").strip()
+                            if event_type in ("chat.error", "error"):
+                                err = parsed.get("error") or parsed.get("message") or ""
+                                if err:
+                                    error_text = str(err)
                 else:
                     parsed = self._parse_stream_chunk(chunk)
                     if parsed is not None:
@@ -7565,6 +7575,15 @@ class JiuWenSwarmDeepAdapter:
             self._unmark_session_active(session_id)
 
         content = "".join(collected_content) if collected_content else ""
+
+        if not content and error_text:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": error_text},
+                metadata=request.metadata,
+            )
 
         return AgentResponse(
             request_id=request.request_id,

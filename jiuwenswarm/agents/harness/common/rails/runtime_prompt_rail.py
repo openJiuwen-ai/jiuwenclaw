@@ -51,6 +51,7 @@ class RuntimePromptRail(DeepAgentRail):
         self._trusted_dirs: list[str] | None = None
         self._cwd: str | None = None
         self._project_dir: str | None = None
+        self._workspace_dir: str | None = None
         self._model_name: str = ""
         self._mode: str = ""
         self._session_id: str | None = None
@@ -86,12 +87,31 @@ class RuntimePromptRail(DeepAgentRail):
         """per-request 更新可信目录。"""
         self._trusted_dirs = trusted_dirs
 
-    def set_runtime_paths(self, *, cwd: str | None = None, project_dir: str | None = None) -> None:
-        """Per-request stable project identity and dynamic cwd."""
+    def set_runtime_paths(
+        self,
+        *,
+        cwd: str | None = None,
+        project_dir: str | None = None,
+        workspace_dir: str | None = None,
+    ) -> None:
+        """Per-request stable project identity, dynamic cwd and own workspace.
+
+        Args:
+            cwd: Working directory shell runs in and relative paths resolve against.
+            project_dir: Project root, when the request is bound to one.
+            workspace_dir: This agent's own workspace (artifacts, memory, skills
+                view). Team members each have their own; falls back to the
+                process-wide agent workspace when unset.
+        """
         self._cwd = cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
         self._project_dir = (
             project_dir.strip()
             if isinstance(project_dir, str) and project_dir.strip()
+            else None
+        )
+        self._workspace_dir = (
+            workspace_dir.strip()
+            if isinstance(workspace_dir, str) and workspace_dir.strip()
             else None
         )
 
@@ -435,7 +455,10 @@ class RuntimePromptRail(DeepAgentRail):
         if self._channel in ("tui", "web"):
             # Trusted directories policy for TUI and Web mode
             trusted_dirs = self._existing_dirs(self._trusted_dirs)
-            agent_workspace_dir = str(get_agent_workspace_dir())
+            # This agent's own workspace. Team members each own one; without
+            # it (single-agent runs) the process-wide agent workspace is the
+            # same directory anyway.
+            agent_workspace_dir = self._existing_dir(self._workspace_dir) or str(get_agent_workspace_dir())
             config_dir = str(get_user_workspace_dir() / "config")
             project_dir = self._existing_dir(self._project_dir)
             runtime_cwd = (

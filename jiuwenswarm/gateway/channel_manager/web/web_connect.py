@@ -56,6 +56,7 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "connection.ack",
         "todo.updated",
         "chat.tool_call",
+        "chat.tool_update",
         "chat.tool_result",
         "chat.processing_status",
         "chat.interrupt_result",

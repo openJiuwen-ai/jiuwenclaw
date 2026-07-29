@@ -39,6 +39,7 @@ from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.chat_final import ensure_final_mode_inplace
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
@@ -1383,7 +1384,13 @@ class JiuWenSwarm:
                 "persist_allow": False,
                 "feedback": "",
             }
-        elif value in ("always_allow", "永久记住", "Always Allow"):
+        elif value in (
+            "always_allow",
+            "allow_always",
+            "永久记住",
+            "总是允许",
+            "Always Allow",
+        ):
             confirm_payload = {
                 "approved": True,
                 "auto_confirm": True,
@@ -2474,6 +2481,8 @@ class JiuWenSwarm:
                             elif et == "chat.tool_call":
                                 _persist_pending_final_text()
                             elif et == "chat.final":
+                                if isinstance(data.payload, dict):
+                                    ensure_final_mode_inplace(data.payload)
                                 if suppress_a2ui_stream or a2ui_split is not None:
                                     first_a2ui_suppression = not suppress_a2ui_stream
                                     if first_a2ui_suppression:
@@ -2553,6 +2562,8 @@ class JiuWenSwarm:
                                 rid,
                             )
                             continue
+                        if et == "chat.final":
+                            ensure_final_mode_inplace(data)
                         if et == "chat.delta":
                             final_answer_chunks.append(payload_content)
                             if suppress_a2ui_stream or a2ui_split is not None:

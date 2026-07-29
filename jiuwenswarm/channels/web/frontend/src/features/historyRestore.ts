@@ -1,8 +1,9 @@
-import { Message, MessageRole, UsageSummary, FileDownloadItem, MediaItem, WsEvent } from '../types';
+import { Message, MessageRole, UsageSummary, FileDownloadItem, MediaItem, WsEvent, ToolExecution } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
 import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
+import { normalizeToolCallPayload, normalizeToolResultPayload } from './tool-events/toolEventNormalizer';
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -29,6 +30,12 @@ export interface HistoryToolReplayItem {
   kind: 'tool_call' | 'tool_result';
   at: string;
   payload: Record<string, unknown>;
+}
+
+/** 历史中随 chat.final / chat.tool_call 落盘的模型思考（reasoning_content），用于刷新后重建思考块。 */
+export interface HistoryReasoningReplayItem {
+  at: string;
+  text: string;
 }
 
 export interface HistoryHarnessReplayItem {
@@ -61,7 +68,8 @@ type HistoryTimelineEntry =
   | { kind: 'team_member'; at: string; payload: { event: Record<string, unknown> } }
   | { kind: 'team_task'; at: string; payload: { event: Record<string, unknown> } }
   | { kind: 'harness_message'; at: string; content: string; stage?: string }
-  | { kind: 'harness_stage_result'; at: string; stage: string; status: string; error: string; messages: string[]; metrics: Record<string, unknown> };
+  | { kind: 'harness_stage_result'; at: string; stage: string; status: string; error: string; messages: string[]; metrics: Record<string, unknown> }
+  | { kind: 'reasoning'; at: string; text: string };
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
@@ -72,6 +80,8 @@ interface BeginHistoryRestoreOptions {
   onHarnessReplay?: (items: HistoryHarnessReplayItem[]) => void;
   /** 与消息同一时间线顺序，用于恢复 Team 成员/任务状态 */
   onTeamReplay?: (items: HistoryTeamReplayItem[]) => void;
+  /** 与消息同一时间线顺序，用于恢复模型思考块（chat.reasoning） */
+  onReasoningReplay?: (items: HistoryReasoningReplayItem[]) => void;
   /** 无消息且无工具回放时调用；`totalPages` 来自流中最后一帧（若有） */
   onEmpty?: (totalPages: number | null) => void;
   onError?: (message: string) => void;
@@ -100,6 +110,22 @@ function replaceActiveHistoryRequest(key: string): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** 从历史记录中提取随本步落盘的模型思考文本（reasoning_content 可能在顶层或 payload 内）。 */
+function extractHistoryReasoningText(record: Record<string, unknown>): string {
+  const direct = record.reasoning_content;
+  if (typeof direct === 'string' && direct.trim()) {
+    return direct.trim();
+  }
+  const payload = record.payload;
+  if (isRecord(payload)) {
+    const nested = payload.reasoning_content;
+    if (typeof nested === 'string' && nested.trim()) {
+      return nested.trim();
+    }
+  }
+  return '';
 }
 
 function pickFirstString(input: Record<string, unknown>, keys: string[]): string | undefined {
@@ -460,10 +486,30 @@ function parseHistoryTimelineEntry(
   }
 
   if (eventType === 'chat.tool_call') {
+    // 与实时一致：team 成员工具不进主聊天时间线（侧栏 teamHistoryPanelRestore 另有回放）。
+    if (isHiddenTeamTeammateMessageRecord(record)) {
+      return null;
+    }
+    // 把顶层 member/role 带进 payload，供 normalize 识别（即便未隐藏也能对齐展示）。
+    if (typeof record.member_name === 'string' && record.member_name.trim() && payload.member_name == null) {
+      payload.member_name = record.member_name;
+    }
+    if (typeof record.role === 'string' && payload.role == null) {
+      payload.role = record.role;
+    }
     return { kind: 'tool_call', at, payload };
   }
 
   if (eventType === 'chat.tool_result') {
+    if (isHiddenTeamTeammateMessageRecord(record)) {
+      return null;
+    }
+    if (typeof record.member_name === 'string' && record.member_name.trim() && payload.member_name == null) {
+      payload.member_name = record.member_name;
+    }
+    if (typeof record.role === 'string' && payload.role == null) {
+      payload.role = record.role;
+    }
     return { kind: 'tool_result', at, payload };
   }
 
@@ -528,22 +574,160 @@ export function parseHistoryJsonFileToPreviewMessages(
   parsed: unknown,
   sessionId: string
 ): Message[] {
+  return parseHistoryJsonFileToTimelinePreview(parsed, sessionId).messages;
+}
+
+export interface HistoryTimelinePreview {
+  messages: Message[];
+  executions: ToolExecution[];
+  reasoningSegments: { id: string; text: string; startedAt: number; closed: true; closedAt?: number }[];
+  mode: 'team' | null;
+}
+
+/**
+ * 历史文件完整时间线预览：消息 + 工具执行 + 思考段，供 ChatTimelineList 与会话页同一套折叠逻辑使用。
+ */
+export function parseHistoryJsonFileToTimelinePreview(
+  parsed: unknown,
+  sessionId: string
+): HistoryTimelinePreview {
   if (!Array.isArray(parsed)) {
-    return [];
+    return { messages: [], executions: [], reasoningSegments: [], mode: null };
   }
 
   const messages: Message[] = [];
+  const toolReplay: HistoryToolReplayItem[] = [];
+  const reasoningReplay: HistoryReasoningReplayItem[] = [];
+  let isTeam = false;
+
   for (const item of parsed) {
     if (!isRecord(item)) {
       continue;
     }
+    if (isTeamModeRecord(item)) {
+      isTeam = true;
+    }
     const entry = parseHistoryTimelineEntry(item, sessionId);
     if (entry?.kind === 'message') {
       messages.push(entry.message);
+    } else if (entry?.kind === 'tool_call' || entry?.kind === 'tool_result') {
+      toolReplay.push({ kind: entry.kind, at: entry.at, payload: entry.payload });
+    }
+    const reasoningText = extractHistoryReasoningText(item);
+    if (reasoningText) {
+      reasoningReplay.push({ at: recordTimestampIso(item), text: reasoningText });
     }
   }
 
-  return messages.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  messages.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+
+  const executions = buildToolExecutionsFromReplay(toolReplay);
+  const reasoningSegments = buildReasoningSegmentsFromReplay(sessionId, reasoningReplay);
+
+  return {
+    messages,
+    executions,
+    reasoningSegments,
+    mode: isTeam ? 'team' : null,
+  };
+}
+
+function buildReasoningSegmentsFromReplay(
+  sessionId: string,
+  items: HistoryReasoningReplayItem[]
+): HistoryTimelinePreview['reasoningSegments'] {
+  const segments: HistoryTimelinePreview['reasoningSegments'] = [];
+  const seen = new Set<string>();
+  items.forEach((item, index) => {
+    const text = item.text?.trim();
+    if (!text || seen.has(text)) {
+      return;
+    }
+    seen.add(text);
+    const parsed = Date.parse(item.at);
+    const startedAt = Number.isFinite(parsed) ? parsed - 1 : index;
+    segments.push({
+      id: `hist-preview-rsn-${sessionId}-${index}`,
+      text,
+      startedAt,
+      closed: true,
+      closedAt: startedAt,
+    });
+  });
+  segments.sort((a, b) => a.startedAt - b.startedAt);
+  return segments;
+}
+
+function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): ToolExecution[] {
+  const byId = new Map<string, ToolExecution>();
+  const order: string[] = [];
+
+  for (const item of toolReplay) {
+    if (item.kind === 'tool_call') {
+      const n = normalizeToolCallPayload(item.payload);
+      if (!n.id || byId.has(n.id)) {
+        continue;
+      }
+      const startedAt = item.at;
+      byId.set(n.id, {
+        toolCallId: n.id,
+        toolCall: {
+          id: n.id,
+          name: n.name,
+          arguments: n.arguments,
+          description: n.description,
+          formatted_args: n.formatted_args,
+          display_name: n.display_name,
+          memberName: n.memberName,
+        },
+        status: 'pending',
+        startedAt,
+        updatedAt: startedAt,
+        timeoutAt: startedAt,
+      });
+      order.push(n.id);
+      continue;
+    }
+
+    const n = normalizeToolResultPayload(item.payload);
+    if (!n.toolCallId) {
+      continue;
+    }
+    const existing = byId.get(n.toolCallId);
+    const result = {
+      toolName: n.toolName,
+      result: n.result,
+      success: n.success,
+      toolCallId: n.toolCallId,
+      summary: n.summary,
+      skillTree: n.skillTree,
+    };
+    if (!existing) {
+      byId.set(n.toolCallId, {
+        toolCallId: n.toolCallId,
+        toolCall: {
+          id: n.toolCallId,
+          name: n.toolName || 'tool',
+          arguments: {},
+        },
+        result,
+        status: n.success ? 'completed' : 'error',
+        startedAt: item.at,
+        updatedAt: item.at,
+        timeoutAt: item.at,
+      });
+      order.push(n.toolCallId);
+      continue;
+    }
+    byId.set(n.toolCallId, {
+      ...existing,
+      result,
+      status: n.success ? 'completed' : 'error',
+      updatedAt: item.at,
+    });
+  }
+
+  return order.map((id) => byId.get(id)).filter((item): item is ToolExecution => Boolean(item));
 }
 
 export function parseHistoryJsonFilePreviewMode(parsed: unknown): 'team' | null {
@@ -625,6 +809,10 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
       if (entry) {
         entries.unshift(entry);
       }
+      const reasoningText = extractHistoryReasoningText(record);
+      if (reasoningText) {
+        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record), text: reasoningText });
+      }
     }
 
     if (isHistoryBatchEnd(payload)) {
@@ -648,6 +836,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     const toolReplay: HistoryToolReplayItem[] = [];
     const harnessReplay: HistoryHarnessReplayItem[] = [];
     const teamReplay: HistoryTeamReplayItem[] = [];
+    const reasoningReplay: HistoryReasoningReplayItem[] = [];
     let pendingFileItems: FileDownloadItem[] | null = null;
     for (const e of entries) {
       if (e.kind === 'message') {
@@ -696,6 +885,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
         pendingFileItems = mergeFileDownloadItems(pendingFileItems, e.files);
       } else if (e.kind === 'team_member' || e.kind === 'team_task') {
         teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
+      } else if (e.kind === 'reasoning') {
+        reasoningReplay.push({ at: e.at, text: e.text });
       } else {
         toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
       }
@@ -717,6 +908,9 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     if (teamReplay.length > 0) {
       options.onTeamReplay?.(teamReplay);
     }
+    if (reasoningReplay.length > 0) {
+      options.onReasoningReplay?.(reasoningReplay);
+    }
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
@@ -729,6 +923,7 @@ export interface FetchHistoryPageResult {
   toolReplay: HistoryToolReplayItem[];
   harnessReplay: HistoryHarnessReplayItem[];
   teamReplay: HistoryTeamReplayItem[];
+  reasoningReplay: HistoryReasoningReplayItem[];
   totalPages: number | null;
 }
 
@@ -781,6 +976,10 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
       if (entry) {
         entries.unshift(entry);
       }
+      const reasoningText = extractHistoryReasoningText(record);
+      if (reasoningText) {
+        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record), text: reasoningText });
+      }
     }
 
     if (isHistoryBatchEnd(payload)) {
@@ -804,6 +1003,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     const toolReplay: HistoryToolReplayItem[] = [];
     const harnessReplay: HistoryHarnessReplayItem[] = [];
     const teamReplay: HistoryTeamReplayItem[] = [];
+    const reasoningReplay: HistoryReasoningReplayItem[] = [];
     let pendingFileItems: FileDownloadItem[] | null = null;
     for (const e of entries) {
       if (e.kind === 'message') {
@@ -851,6 +1051,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
         pendingFileItems = mergeFileDownloadItems(pendingFileItems, e.files);
       } else if (e.kind === 'team_member' || e.kind === 'team_task') {
         teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
+      } else if (e.kind === 'reasoning') {
+        reasoningReplay.push({ at: e.at, text: e.text });
       } else {
         toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
       }
@@ -862,7 +1064,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
       options.onEmpty?.(totalPages);
       return;
     }
-    options.onReady({ messages, toolReplay, harnessReplay, teamReplay, totalPages });
+    options.onReady({ messages, toolReplay, harnessReplay, teamReplay, reasoningReplay, totalPages });
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
