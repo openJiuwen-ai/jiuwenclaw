@@ -309,14 +309,19 @@ def apply_sandbox_acl(
             mode="ALLOW",
             recursive=recursive,
         )
-        # venv_dir (runner python 所在目录) 落在 allow_write, 第一跳 runner 用
-        # jbx-sandbox 真实 SID token 读不了只授合成 SID 的路径 → CreateProcessWithLogonW
-        # WinError 5. 给真实 SID 也 grant Read+Execute (FILE_GENERIC_READ 已含),
-        # Write 仍只给合成 SID (受限 token 第二跳才写), 真实 SID 能读能执行不能写.
+        # 第一跳 runner 进程用 jbx-sandbox 真实 SID、token 未受限
+        # (CreateProcessWithLogonW 拉起), 合成 SID 的 ACE 对它不生效. runner 负责
+        # upload 文件进沙箱 (AGENT.md/SOUL.md/产物等), 是写操作 — 真实 SID 必须
+        # 有 Write 才能写 allow_write 路径. 旧版只给真实 SID grant Read, 导致
+        # upload 全部 [Errno 13] Permission denied (实测). 现给真实 SID 也 grant
+        # 同样的 ALLOW_WRITE_RIGHTS (Write+Execute+Delete), 和合成 SID 一致.
+        # 安全权衡: runner 是 box-server 自己起的可信代理进程, 它的写操作就是
+        # upload/文件操作, 给它写权限符合预期. 真正执行用户代码的是 runner 用
+        # 受限 token 起的 child (第二跳), 那层仍受合成 SID 双重 ACL 检查约束.
         if sandbox_user_sid:
             grant_ace(
                 expanded, sandbox_user_sid,
-                rights=const.FILE_GENERIC_READ,
+                rights=const.ALLOW_WRITE_RIGHTS,
                 mode="ALLOW",
                 recursive=recursive,
             )

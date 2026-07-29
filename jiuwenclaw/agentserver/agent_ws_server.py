@@ -412,6 +412,12 @@ class AgentWebSocketServer:
                 port=port,
                 startup_mode="internal",
                 policy_path=policy_path,
+                # Windows 沙箱首次起 box-server 时, lifespan 的 ensure_windows_setup
+                # 同步阻塞等 install 子进程 (UAC 弹窗 + 用户安装几十秒). 旧默认 30s
+                # 会在 install 未完成时把 box-server 判为不健康而杀掉 (实测日志:
+                # "health check timeout after 30.0s" → SetEvent 日志没打出主进程就
+                # 被杀). 提到 2min, 给 install 足够时间完成 SetEvent 解除阻塞.
+                timeout=120.0,
             )
             if not ok:
                 stderr_tail = runner.get_stderr_tail(20)

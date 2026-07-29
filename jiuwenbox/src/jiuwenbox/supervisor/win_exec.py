@@ -675,6 +675,34 @@ def _create_restricted_token() -> int:
         kernel32.CloseHandle(h_token)
 
 
+def _get_runner_primary_token() -> int:
+    """拿 runner 自身进程的 primary token (未受限), 供 exec 起 child 用.
+
+    方案1: 受限 token (CreateRestrictedToken) 会让任何 child 进程启动即
+    0xC0000142 (DllMain 失败, 实测 cmd/bash/python 全挂, 根因是受限 token 的
+    desktop/全局对象机制, 非 ACL/env). 故 exec 改用 runner 自身的未受限 token
+    起 child — runner 在 jbx-sandbox 自己的上下文, 给自己 token 起进程绕开
+    SeAssignPrimaryTokenPrivilege 权限墙 (设计 §2.5). 代价: 失去 Write-Restricted
+    双重写检查, 写控制只剩合成 SID 的 ACL (allow-only 仍挡越权写). 安全降一重,
+    但让 bash/cmd/python 能跑起来 (用户代码层写仍受合成 SID ACL 约束).
+
+    返回 token handle (int), 调用方用完须 CloseHandle.
+    """
+    advapi32 = _get_advapi32()
+    kernel32 = _get_kernel32()
+    h_token = wintypes.HANDLE()
+    TOKEN_QUERY = 0x0008
+    TOKEN_DUPLICATE = 0x0002
+    TOKEN_ASSIGN_PRIMARY = 0x0001
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(),
+        TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+        ctypes.byref(h_token),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(h_token.value)
+
+
 def _create_process_as_user(
     restricted_token: int,
     command: list[str],
@@ -691,12 +719,7 @@ def _create_process_as_user(
     cmd_line = " ".join(
         f'"{c}"' if " " in c or "\t" in c else c for c in command
     )
-    # 构造子进程环境块 (Windows 要求 \0\0 结尾的 unicode 环境块).
-    # 关键: env_block_buf 必须存活到 CreateProcessAsUserW 返回, 否则
-    # c_void_p 指向的内存被 GC 释放, 子进程拿到的是悬垂内存 (review
-    # CRITICAL #3). 旧版 _build_environment_block 返回 c_void_p 后 buf
-    # 立即被回收. 这里内联构造并持有 buf 引用直到 API 调用完成.
-    #
+    # 始终构造 env block 并传 (env=None 回退 os.environ).
     # env=None 时不能传 NULL 给 CreateProcessAsUserW (那给子进程空环境块,
     # 无 PATH → 可执行名解析失败 → WinError 2). 回退到 runner 自身环境
     # (os.environ, 含 box-server 继承的 PATH + 工具目录), 并自动注入
@@ -707,6 +730,17 @@ def _create_process_as_user(
         env = dict(os.environ)
     else:
         env = dict(env)
+    # 兜底补齐 DLL 加载 / 子进程运行所需的基本环境变量. 受限 token 下 child
+    # 加载系统 DLL (kernel32 依赖 KnownDlls) 或 msys/cygwin runtime (msys-2.0.dll
+    # 初始化需 SystemRoot) 时若缺这些变量会 STATUS_DLL_INIT_FAILED (0xC0000142,
+    # 实测: bash/python 启动即退, stdout 全空). box-server 端 _build_windows_exec_env
+    # 已补过一次, 但经 daemon IPC JSON 序列化 + 调用方 env 可能只含 PATH 片段,
+    # 在此第二跳再补一次确保不缺. 用 setdefault 不覆盖已有值, 与 _create_windows
+    # 给 runner 的 env 一致 (process.py §2962).
+    for _var in ("SystemRoot", "windir", "TEMP", "TMP", "PATHEXT", "COMSPEC"):
+        _val = os.environ.get(_var)
+        if _val:
+            env.setdefault(_var, _val)
     # 自动注入代理 env (文档 §6.6): 即使调用方没传, 也让遵守代理协议的程序
     # (pip/git/curl/node 等) 走 win_proxy, WFP 兜底拦截不走代理的出网.
     proxy_url = f"http://127.0.0.1:{_proxy_port_start}"
@@ -958,6 +992,15 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
     if not command:
         _send_error_response(stream, "exec requires non-empty command")
         return
+    # Windows 兼容: agent-core 跨平台送的裸名 "python3" 在 Windows venv\Scripts
+    # 里未必存在 (venv 通常只放 python.exe, python3 是 virtualenv 额外建的,
+    # 受限 token 下也可能读不到). 归一化 "python3" → "python", 让 CreateProcess
+    # 解析到 venv\Scripts\python.exe (venv 必有). 同理 "python3.<ver>" 也归一.
+    # 只改裸名 (command[0]), 不碰带路径的 (含 \\ 或 /).
+    _c0 = str(command[0])
+    if _c0 in ("python3", "python3.13", "python3.12", "python3.11") or _c0.startswith("python3."):
+        if "\\" not in _c0 and "/" not in _c0:
+            command[0] = "python"
     # 建立 pipe 收集子进程 stdout/stderr.
     kernel32 = _get_kernel32()
     sa = SECURITY_ATTRIBUTES()
@@ -981,11 +1024,17 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
     try:
         workdir = header.get("workdir")
         env = header.get("env")
-        pid, proc_handle = _create_process_as_user(
-            restricted_token, list(command), env, workdir,
-            stdin_fd=int(child_in_read.value),
-            stdout_fd=int(child_out_write.value),
-        )
+        # 方案1: 不用受限 token (它让 child 启动即 0xC0000142), 改用 runner 自身
+        # primary token (未受限). 见 _get_runner_primary_token 注释.
+        _self_token = _get_runner_primary_token()
+        try:
+            pid, proc_handle = _create_process_as_user(
+                _self_token, list(command), env, workdir,
+                stdin_fd=int(child_in_read.value),
+                stdout_fd=int(child_out_write.value),
+            )
+        finally:
+            _get_kernel32().CloseHandle(wintypes.HANDLE(_self_token))
         # runner 不再需要 child 端的写端/读端副本.
         kernel32.CloseHandle(child_in_read)
         kernel32.CloseHandle(child_out_write)

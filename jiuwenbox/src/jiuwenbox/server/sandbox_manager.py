@@ -57,29 +57,51 @@ def _is_daemon_ipc_file_op_failure(result: RuntimeFileOpResult) -> bool:
     return result.error in ("daemon_unavailable", "transport_failure")
 
 
-def _build_windows_exec_env(env: dict[str, str] | None) -> dict[str, str]:
+def _build_windows_exec_env(
+    env: dict[str, str] | None,
+    tool_paths=None,
+) -> dict[str, str]:
     """为 Windows 沙箱子进程补 PATH, 使裸名 ``bash``/``python``/``cmd`` 可解析.
 
     docs §4.0: jbx-sandbox 子进程的 PATH 默认空 (LOGON_WITH_PROFILE 加载的
     profile 无 PATH), agent-core 送的 ``command[0]`` 是裸名 (``bash``/``python``
     /``cmd``), 靠子进程 PATH 解析。本函数把等价 PATH 塞进 env:
-      <venv>\\Scripts        # python/pip 裸名解析到 venv (G3 落点, 见 docs §4.3)
-      %ProgramFiles%\\Git\\bin  # bash 裸名解析 (装了 Git 时)
-      %SystemRoot%\\System32    # cmd/powershell + 系统 dll 裸名解析
+      tool_paths 展开的目录    # bash/git/node/python 真实安装目录 (D:\\Files\\Git 等)
+                               # 必须用 policy 的 tool_paths, 不能写死 %ProgramFiles%\\Git\\bin
+                               # — Git 装在 D:\\Files\\Git 时前者解析到不存在路径 → 0xC0000142
+                               # (实测: install 预装了 D:\\Files\\Git 的读 ACL 但 PATH 没含它,
+                               #  预装白费, bash 裸名解析失败). 含 git_dir 的 usr/bin + bin 子目录.
+      <venv>\\Scripts          # python/pip 裸名解析到 venv (G3 落点, 见 docs §4.3)
+      %SystemRoot%\\System32    # cmd/powershell + 系统 dll 裸名解析 (默认 ACL 已允许读)
+      %SystemRoot%\\WindowsPowerShell\\v1.0
       <打包 python 目录>        # python 裸名兜底
 
-    venv 目录与打包 python 目录由 agent-server 经 env 注入
+    tool_paths 由 policy.windows.filesystem.tool_paths 传入 (exec 调用方
+    self.policy 取). venv 目录与打包 python 目录由 agent-server 经 env 注入
     (``JIUWENBOX_VENV_DIR`` / ``JIUWENBOX_BUNDLED_PYTHON``, 见 docs §4.3),
     缺失则跳过对应段。PATH 放最前, 覆盖 profile 任何残留。
     """
     base = dict(env) if env else {}
     parts: list[str] = []
+    # tool_paths 展开 (和 _create_windows 给 runner 的 PATH 一致, 确保 exec
+    # 子进程能解析到与预装 ACL 匹配的工具可执行). git_dir 含 usr/bin + bin.
+    if tool_paths is not None:
+        _tp = tool_paths
+        for i, _attr in enumerate(("git_dir", "node_dir", "python_dir")):
+            _d = (getattr(_tp, _attr, "") or "").strip()
+            if _d:
+                parts.append(_d)
+                if _attr == "git_dir":
+                    parts.append(f"{_d}\\usr\\bin")
+                    parts.append(f"{_d}\\bin")
+        _bash_p = (getattr(_tp, "bash_path", "") or "").strip()
+        if _bash_p:
+            _parent = os.path.dirname(_bash_p)
+            if _parent:
+                parts.append(_parent)
     venv_dir = (os.environ.get("JIUWENBOX_VENV_DIR") or "").strip()
     if venv_dir:
         parts.append(f"{venv_dir}\\Scripts")
-    program_files = (os.environ.get("ProgramFiles") or "").strip()
-    if program_files:
-        parts.append(f"{program_files}\\Git\\bin")
     system_root = (os.environ.get("SystemRoot") or "").strip()
     if system_root:
         parts.append(f"{system_root}\\System32")
@@ -92,6 +114,16 @@ def _build_windows_exec_env(env: dict[str, str] | None) -> dict[str, str]:
         parts.append(existing_path)
     if parts:
         base["PATH"] = os.pathsep.join(parts)
+    # 补齐进程加载 DLL / 运行所需的基本环境变量. agent-core 传来的 env
+    # (request.env) 通常只有 PATH 片段, 缺 SystemRoot/TEMP 等 — 受限 token
+    # 子进程加载系统 DLL (kernel32 依赖 KnownDlls) 或 msys/cygwin runtime
+    # (msys-2.0.dll 初始化需 SystemRoot) 时会 STATUS_DLL_INIT_FAILED
+    # (0xC0000142, 实测: bash/python 启动即退). 用 setdefault 不覆盖已有值,
+    # 缺失则从本进程环境补 (和 _create_windows 给 runner 的 env 一致).
+    for _var in ("SystemRoot", "windir", "TEMP", "TMP", "PATHEXT", "COMSPEC"):
+        _val = os.environ.get(_var)
+        if _val and _var not in base:
+            base[_var] = _val
     return base
 
 from jiuwenbox.logging_config import configure_logging
@@ -747,8 +779,11 @@ class SandboxManager:
         # 见 docs §4.3)。Linux 不动 (R5)。
         exec_env = request.env
         if sys.platform == "win32":
-            exec_env = _build_windows_exec_env(request.env)
-            logger.debug(
+            exec_env = _build_windows_exec_env(
+                request.env,
+                tool_paths=self.policy.windows.filesystem.tool_paths,
+            )
+            logger.info(
                 "[SandboxWin] exec sandbox=%s cmd=%s workdir=%s PATH=%s",
                 sandbox_id, request.command, request.workdir,
                 exec_env.get("PATH", ""),

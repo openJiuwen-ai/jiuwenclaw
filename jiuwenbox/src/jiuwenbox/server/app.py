@@ -283,7 +283,12 @@ async def lifespan(_application: FastAPI):
             # (review MAJOR #7: WFP Permit 端口必须与 win_proxy 监听端口一致).
             try:
                 _root_policy = policy_reader.load_policy()
-                _preinstall = _root_policy.windows.filesystem.read_acl_preinstall
+                # preinstall = read_acl_preinstall + tool_paths 展开, 用
+                # collect_preinstall_paths 与 _create_windows (process.py) 算同一
+                # 集合, 保证 lifespan install 记录的 REG_VALUE_PREINSTALLED_PATHS
+                # 和后续创建沙箱时比对的集合一致 → 不因 tool_paths "新增" 而每次
+                # 创建沙箱都弹 UAC (实测问题).
+                _preinstall = win_setup.collect_preinstall_paths(_root_policy)
                 _proxy_start = _root_policy.windows.proxy.port_range_start
                 _proxy_end = _root_policy.windows.proxy.port_range_end
             except Exception:  # noqa: BLE001

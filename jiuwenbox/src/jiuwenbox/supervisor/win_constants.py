@@ -72,7 +72,7 @@ WRITE_RESTRICTED = 0x8
 
 # CreateRestrictedToken 组合: 文档 6.5 要求的受限 SID 列表 =
 # [Everyone, 当前 LogonSession, JHXSandboxWrite].
-RESTRICTED_TOKEN_FLAGS = DISABLE_MAX_PRIVILEGE | SANDBOX_INERT | WRITE_RESTRICTED
+RESTRICTED_TOKEN_FLAGS = DISABLE_MAX_PRIVILEGE | SANDBOX_INERT  # 临时去掉 WRITE_RESTRICTED(0x8) 定位 0xC0000142
 
 # ---------------------------------------------------------------------------
 # WellKnownSid 类型 (CreateWellKnownSid 的枚举值).

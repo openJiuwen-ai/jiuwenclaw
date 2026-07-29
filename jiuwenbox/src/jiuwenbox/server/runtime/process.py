@@ -2838,34 +2838,26 @@ class ProcessRuntime(RuntimeAdapter):
         # win_proxy 监听端口一致, 否则代理路径被 Block 拦截; review MAJOR #7).
         policy_pre = self._load_policy(policy_path)
         # ensure_windows_setup 是同步函数 (def, 非 async def): 内部读注册表
-        # 幂等检查 + 必要时阻塞跑 UAC 提权子进程. 原代码 `await` 它的返回值
-        # (None) → "object NoneType can't be used in 'await' expression".
-        # 该 bug 之前被 WinError 5 (注册表读权限) 掩在 ensure_windows_setup
-        # 内部, 修复注册表后此 bug 暴露. 去掉 await, 直接同步调用.
+        # 幂等检查; 必要时 (installed!=1 或检测到新增预装路径) 阻塞跑 UAC 提权
+        # 子进程. _elevate_and_run_install 用原版 ShellExecuteW 弹 UAC + 命名
+        # Event 同步: 主进程创建非信号态 Event, 名字经 --install-done-event
+        # 传给 install 子进程; ShellExecuteW 拉起子进程后
+        # WaitForSingleObject(event, INFINITE) 阻塞, 等 install 跑完所有步骤
+        # (用户/密码/installed 标记/PREINSTALLED_PATHS 全部就位) 后 SetEvent
+        # 通知才返回 — 否则主进程读到半成品状态, CreateProcessWithLogonW 会
+        # 1326 (旧版 ShellExecuteW 异步返回、不等 install 完成的根因).
+        # 注意: 此调用在 UAC 弹窗确认 + install 执行期间会阻塞本协程 (可能数十
+        # 秒). 由于 _create_windows 跑在 ensure_windows_setup 之后的代码全在等它,
+        # 这是预期行为: 沙箱创建完成前必须等 install 就绪.
         # tool_paths 目录的读 ACL 在 install 阶段 (管理员) 预装, 不能在运行时
         # (普通用户) 改外部目录 DACL — D:\Files\Git 等 owner 是 Administrators,
         # 运行时进程无 WRITE_DAC 权限 → SetNamedSecurityInfo 返回 WinError 5
-        # (实跑证实). 这里把 tool_paths 目录合并进 ensure_windows_setup 的
-        # preinstall_paths, 让 install 提权子进程一次性预装 Allow Read ACE
-        # (对齐文档 §6.4.3). 运行时只把它们拼进 PATH, 不改 ACL.
-        _tp = policy_pre.windows.filesystem.tool_paths
-        _tool_preinstall: list[str] = []
-        for _d in (_tp.git_dir, _tp.node_dir, _tp.python_dir):
-            _d = (_d or "").strip()
-            if _d:
-                _tool_preinstall.append(_d)
-                if _d is _tp.git_dir:
-                    _tool_preinstall.append(os.path.join(_d, "usr", "bin"))
-                    _tool_preinstall.append(os.path.join(_d, "bin"))
-        _bash_p = (_tp.bash_path or "").strip()
-        if _bash_p:
-            _tool_preinstall.append(os.path.dirname(_bash_p))
-        _read_preinstall = list(
-            policy_pre.windows.filesystem.read_acl_preinstall or []
-        )
-        for _d in _tool_preinstall:
-            if _d and _d not in _read_preinstall:
-                _read_preinstall.append(_d)
+        # (实跑证实). 这里用 collect_preinstall_paths 算 preinstall 集合
+        # (read_acl_preinstall + tool_paths 展开), 与 app.py lifespan 算同一集合,
+        # 让 install 一次性预装 + 记录进 REG_VALUE_PREINSTALLED_PATHS, 后续
+        # 创建沙箱比对差集为空 → 不再因 tool_paths 弹 UAC. 运行时只把工具目录
+        # 拼进 PATH, 不改 ACL.
+        _read_preinstall = win_setup.collect_preinstall_paths(policy_pre)
         win_setup.ensure_windows_setup(
             preinstall_paths=_read_preinstall or None,
             proxy_port_start=policy_pre.windows.proxy.port_range_start,
@@ -3036,44 +3028,58 @@ class ProcessRuntime(RuntimeAdapter):
 
         # 3. Job Object (可选). runner 当前处于 SUSPENDED, assign 无竞态;
         #    assign 后 resume, 再 CloseHandle thread (设计 6.8 SUSPEND→Assign→Resume).
-        resource = policy.windows.resource
-        if not resource.is_empty():
-            try:
-                job = win_job.create_job(
-                    resource.memory_max, resource.cpu_rate, resource.max_processes,
-                )
-                win_job.assign_process_by_pid(job, runner_pid)
-                # assign 成功后 resume runner 主线程, 让它在 Job 内开始执行.
-                try:
-                    win_job.resume_process(thread_handle)
-                except Exception:  # noqa: BLE001 - resume 失败不致命, TerminateProcess 仍可清理
-                    logger.warning(
-                        "Windows runner resume 失败 (sandbox=%s)", sandbox_id,
-                        exc_info=True,
-                    )
-                self._win_job_handles[sandbox_id] = job
-            except Exception:  # noqa: BLE001 - Job 失败不阻断沙箱创建
-                logger.warning(
-                    "Windows Job Object 创建失败 (sandbox=%s); 沙箱将不受资源限制",
-                    sandbox_id, exc_info=True,
-                )
-                # 即使 Job 失败也要 resume runner, 否则进程永久挂起.
-                try:
-                    win_job.resume_process(thread_handle)
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "Windows runner resume (无 Job) 失败 (sandbox=%s)",
-                        sandbox_id, exc_info=True,
-                    )
-        else:
-            # 无 Job 限制也要 resume runner, 否则进程永久挂起.
-            try:
-                win_job.resume_process(thread_handle)
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Windows runner resume 失败 (sandbox=%s)", sandbox_id,
-                    exc_info=True,
-                )
+        #
+        # 本版本禁用 Job Object 资源限制 (memory/cpu/进程数上限): assign 跨用户
+        # OpenProcess(jbx-sandbox 进程) 拿不到 PROCESS_SET_QUOTA → WinError 5
+        # (见 3447 日志). Job 失败本就不阻断沙箱创建 (原 except 吞掉只 warning),
+        # 且隔离核心 (文件 ACL + 受限 token + WFP) 不依赖 Job, 故此处直接跳过
+        # Job 创建/assign, 仅保留必需的 resume (否则 CREATE_SUSPENDED runner
+        # 永久挂起). resource 配置保留在 policy 但运行时忽略. 后续若需资源限制,
+        # 改回: 用 two_hop_spawn 返回的 proc_handle 直接 assign (而非 pid
+        # OpenProcess) 以绕过跨用户 ACL.
+        # resource = policy.windows.resource
+        # if not resource.is_empty():
+        #     try:
+        #         job = win_job.create_job(
+        #             resource.memory_max, resource.cpu_rate, resource.max_processes,
+        #         )
+        #         win_job.assign_process_by_pid(job, runner_pid)
+        #         try:
+        #             win_job.resume_process(thread_handle)
+        #         except Exception:  # noqa: BLE001
+        #             logger.warning(
+        #                 "Windows runner resume 失败 (sandbox=%s)", sandbox_id,
+        #                 exc_info=True,
+        #             )
+        #         self._win_job_handles[sandbox_id] = job
+        #     except Exception:  # noqa: BLE001 - Job 失败不阻断沙箱创建
+        #         logger.warning(
+        #             "Windows Job Object 创建失败 (sandbox=%s); 沙箱将不受资源限制",
+        #             sandbox_id, exc_info=True,
+        #         )
+        #         try:
+        #             win_job.resume_process(thread_handle)
+        #         except Exception:  # noqa: BLE001
+        #             logger.warning(
+        #                 "Windows runner resume (无 Job) 失败 (sandbox=%s)",
+        #                 sandbox_id, exc_info=True,
+        #             )
+        # else:
+        #     try:
+        #         win_job.resume_process(thread_handle)
+        #     except Exception:  # noqa: BLE001
+        #         logger.warning(
+        #             "Windows runner resume 失败 (sandbox=%s)", sandbox_id,
+        #             exc_info=True,
+        #         )
+        # 禁用 Job 后: 无条件 resume runner 主线程 (CREATE_SUSPENDED 必须被唤醒).
+        try:
+            win_job.resume_process(thread_handle)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Windows runner resume 失败 (sandbox=%s)", sandbox_id,
+                exc_info=True,
+            )
         # thread_handle resume 后不再需要, 关闭避免句柄泄漏.
         try:
             kernel32.CloseHandle(wintypes.HANDLE(thread_handle))

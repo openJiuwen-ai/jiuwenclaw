@@ -136,6 +136,23 @@ def _get_kernel32() -> ctypes.WinDLL:
         _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         _kernel32.CloseHandle.restype = wintypes.BOOL
+        # WaitForSingleObject: 主进程阻塞等待 install 子进程 SetEvent 通知完成.
+        # 不依赖提权子进程的 process handle (ShellExecuteW 拿不到), 改靠命名 Event.
+        _kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        # CreateEventW: 主进程创建命名 Event (非信号态), 名字传给 install 子进程.
+        _kernel32.CreateEventW.argtypes = [
+            ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR,
+        ]
+        _kernel32.CreateEventW.restype = wintypes.HANDLE
+        # OpenEventW: install 子进程打开主进程创建的命名 Event.
+        _kernel32.OpenEventW.argtypes = [
+            wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR,
+        ]
+        _kernel32.OpenEventW.restype = wintypes.HANDLE
+        # SetEvent: install 子进程跑完所有步骤后 set, 通知主进程可以继续.
+        _kernel32.SetEvent.argtypes = [wintypes.HANDLE]
+        _kernel32.SetEvent.restype = wintypes.BOOL
     return _kernel32
 
 
@@ -335,10 +352,14 @@ def _create_sandbox_user(password: str) -> None:
     if ret == 0:
         logger.info("创建沙箱用户 %s 成功", const.SANDBOX_USER_NAME)
     elif ret == 2224:
-        # 用户已存在: 重设密码 = 本次生成的密码, 保证用户密码与注册表
-        # DPAPI 密码一致 (否则 CreateProcessWithLogonW 1326 登录失败).
-        logger.info("沙箱用户 %s 已存在, 重设密码", const.SANDBOX_USER_NAME)
-        _set_user_password(const.SANDBOX_USER_NAME, password)
+        # 用户已存在: 不重设密码. _generate_password 固定返回 "000000", 每次
+        # install 生成的密码都是同一个值, 用户真实密码与注册表存的密码本就
+        # 一致, 重设纯属多余. 且 NetUserSetInfo 重设简单密码 "000000" 会撞本地
+        # 密码复杂度策略 → ret=87 → install 失败回滚 (实测). 若密码因外部改动
+        # 与注册表不一致, 由 _verify_or_reset_sandbox_user_password 在 install
+        # 末尾 LogonUserW 探测失败时统一兜底重设 (那里只重设一次, 且走 install
+        # 提权上下文). 这里直接信任已存在用户.
+        logger.info("沙箱用户 %s 已存在, 跳过 (密码固定, 不重设)", const.SANDBOX_USER_NAME)
     else:
         raise RuntimeError(
             f"NetUserAdd 失败: ret={ret} err={err.value}"
@@ -498,8 +519,25 @@ def _purge_stale_profile_dirs() -> None:
     备份目录 (DeleteProfile 按 SID 只能删当前 SID 对应的那一个, 历史 RID
     对应的目录删不到). 这里按目录名前缀兜底 rmtree, 把所有
     jbx-sandbox / jbx-sandbox.* 一次性清掉. best-effort, 失败仅 warning.
+
+    注意 profile 里有 WinX (Win+X 快捷菜单的 reparse point 目录, 系统锁定
+    ACL), shutil.rmtree 默认遇 WinError 5 中止 → 前面删了的留半删残留. 用
+    onerror 回调: 对每个失败文件 chmod 后重试, 仍失败则 warning 跳过并继续删
+    其余 (而非整体中止). WinX 本身留作 reparse point 由 DeleteProfileW / 系统
+    处理, 不阻断 profile 目录整体清理 (实测: 加 onerror 后 WinX 单文件失败但
+    其余全删干净, 目录树最终 rmdir 成功).
     """
     import shutil
+
+    def _rmtree_onerror(func, fpath, exc_info):
+        # 对单文件/目录失败: 尝试改可写后重试一次. 仍失败则 warning 跳过,
+        # 让 rmtree 继续删下一个 (默认行为是抛出中止整个 rmtree).
+        try:
+            os.chmod(fpath, 0o777)
+            func(fpath)
+        except OSError as exc:
+            # 不阻断: 记 warning 后, rmtree 遇 onerror 返回 None 会继续后续文件.
+            logger.debug("清理残留 profile: 跳过 %s (%s)", fpath, exc)
 
     users_root = os.environ.get("SystemDrive", "C:") + "\\Users"
     try:
@@ -514,7 +552,18 @@ def _purge_stale_profile_dirs() -> None:
         ):
             path = os.path.join(users_root, name)
             try:
-                shutil.rmtree(path, ignore_errors=False)
+                shutil.rmtree(path, onerror=_rmtree_onerror)
+                # rmtree 不抛 (onerror 吞错) 即视为删完. 再确认目录还在不在
+                # (onerror 全跳过时会残留), 仍在则 rmdir 兜底 (空目录可删).
+                if os.path.isdir(path):
+                    try:
+                        os.rmdir(path)
+                    except OSError:
+                        logger.warning(
+                            "残留 profile 目录 %s 删不尽 (含系统锁定子项如 WinX), "
+                            "留待重启后删", path,
+                        )
+                        continue
                 logger.info("删除残留 profile 目录 %s", path)
             except OSError as exc:
                 # 正被占用 / 权限不足: 目录留待重启后删, 不阻断卸载.
@@ -566,16 +615,47 @@ def _elevate_and_run_install(
     proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
     policy_path: str | None = None,
 ) -> int:
-    """通过 UAC 拉起提权子进程执行 install.
+    """通过 UAC 拉起提权子进程执行 install, 并同步阻塞等待其完成.
 
     转发 force / preinstall_paths / proxy_port_* / policy_path 参数到提权子进程
     (review MAJOR #9: 旧版只传 --install, force=True 从非管理员进程调用会静默
     no-op). policy_path 让提权子进程读 policy 的 read_acl_preinstall + tool_paths
     合并预装 (用户改 tool_paths 后 --force 重装用).
+
+    同步机制: 沿用旧版能正常弹 UAC 的 ShellExecuteW (它返回 HINSTANCE, 拿不到
+    子进程 handle, 无法直接 WaitForSingleObject 等进程). 改用一个命名 Event:
+    主进程 CreateEventW 创建非信号态 Event, 名字经 --install-done-event 参数传
+    给 install 子进程; ShellExecuteW 弹 UAC 拉起子进程后, 主进程
+    WaitForSingleObject(event, INFINITE) 阻塞; install 子进程在 install() 跑完
+    所有步骤 (用户/密码/installed 标记/PREINSTALLED_PATHS 全部就位) 后、return
+    前 SetEvent 通知主进程. 这样主进程继续往下时 install 已真完成, 不会再用半
+    成品密码 CreateProcessWithLogonW → 1326 (旧版异步返回的根因).
+
+    用户取消 UAC 弹窗 (点"否"): ShellExecuteW 返回 <= 32, WinError 1223
+    (ERROR_CANCELLED). 抛 RuntimeError 提示用户重试 (而非静默返回 0).
     """
     import json
     shell32 = _get_shell32()
-    py = sys.executable
+    kernel32 = _get_kernel32()
+    # install 提权子进程用真实 CPython, 不用 sys.executable (uv venv 时它是
+    # trampoline launcher, 提权新会话跑 -m 会崩在 import, 到不了 _main →
+    # install_force.log 空、SetEvent 永不发生、主进程死等到 health check 超时).
+    # agent_ws_server 已探测 JIUWENBOX_RUNNER_PYTHON (D:\Files\python313 等真实
+    # CPython) 注入, 这里复用; 没注入则 fallback sys.executable (开发机直接用
+    # 系统 python 跑 box-server 时它就是真实 CPython, 没问题).
+    py = (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip() or sys.executable
+    # 每次调用生成唯一 event 名, 避免多 box-server 实例/并发 install 串扰.
+    event_name = f"Global\\JiuwenBox-Install-Done-{secrets.token_hex(8)}"
+    # 主进程先创建非信号态 Event (子进程将 OpenEvent 同名并 SetEvent).
+    # Manual reset=False (自动复位), initial=非信号. lpSecurityAttributes=None
+    # (Global 命名空间默认 ACL 允许同会话/管理员子进程打开).
+    h_event = kernel32.CreateEventW(None, False, False, event_name)
+    if not h_event:
+        err = ctypes.get_last_error()
+        raise RuntimeError(
+            f"创建 install 同步 Event 失败 (CreateEventW WinError {err})"
+        )
+
     parts = [
         "-m", "jiuwenbox.supervisor.win_setup", const.INSTALL_SUBCOMMAND,
     ]
@@ -585,9 +665,19 @@ def _elevate_and_run_install(
     parts.append(str(proxy_port_start))
     parts.append("--proxy-port-end")
     parts.append(str(proxy_port_end))
+    # 把完成 Event 名传给子进程, 子进程 install 跑完后 SetEvent 通知本进程.
+    parts.append("--install-done-event")
+    parts.append(event_name)
     if preinstall_paths:
-        # 用 JSON 编码列表传参, 子进程解码; 避免路径含空格/引号的转义问题.
-        encoded = json.dumps(preinstall_paths)
+        # 用 base64(JSON) 编码列表传参. 不能直接传 json.dumps — 它含内层双引号,
+        # _quote_arg 给它加外层引号后, Windows 命令行解析会把内层 " 当作闭合,
+        # 含空格的路径被拆成多个 argv → 子进程 argparse 报错退出, 到不了 install/
+        # SetEvent (实测: preinstall-paths 带 "C:\Program Files" 时主进程死等).
+        # base64 后值是纯字母, 无空格/引号/反斜杠, 彻底避开命令行转义.
+        import base64
+        encoded = base64.b64encode(
+            json.dumps(preinstall_paths).encode("utf-8")
+        ).decode("ascii")
         parts.append("--preinstall-paths")
         parts.append(encoded)
     if policy_path:
@@ -595,17 +685,64 @@ def _elevate_and_run_install(
         parts.append(policy_path)
     # 用 subprocess.list2cmdline 风格构造参数串 (ShellExecuteW 接受单一 params 字符串).
     params = " ".join(_quote_arg(p) for p in parts)
+
+    # 诊断: 打出实际用的 python 路径 + event 名 + 完整命令行, 便于排查
+    # "install 子进程没进 _main / 没法 SetEvent" 类问题 (install_force.log 空时
+    # 靠这条日志反推子进程到底收到什么).
+    logger.info(
+        "install 提权调用: py=%s event=%s cmd='%s %s'",
+        py, event_name, py, params,
+    )
+
     # ShellExecuteW(parent, verb, file, parameters, directory, show).
     SW_SHOWNORMAL = 1
     result = shell32.ShellExecuteW(
         None, "runas", py, params, None, SW_SHOWNORMAL,
     )
+    logger.info(
+        "ShellExecuteW(runas) 返回 %s (>32=已发起 UAC, 不代表用户已点确认)",
+        result,
+    )
     if result <= 32:  # <= 32 表示失败.
+        kernel32.CloseHandle(wintypes.HANDLE(h_event))
+        err = ctypes.get_last_error()
+        if err == 1223:  # ERROR_CANCELLED: 用户点了"否".
+            raise RuntimeError(
+                "UAC 提权被用户取消; 请重新创建沙箱并同意 UAC, 或以管理员身份"
+                " 手动运行 'python -m jiuwenbox.supervisor.win_setup --install'"
+            )
         raise RuntimeError(
-            f"UAC 提权失败 (ShellExecuteW 返回 {result}); 请以管理员身份手动运行 "
-            f"'python -m jiuwenbox.supervisor.win_setup --install'"
+            f"UAC 提权失败 (ShellExecuteW 返回 {result}, WinError {err}); 请以"
+            f"管理员身份手动运行 'python -m jiuwenbox.supervisor.win_setup --install'"
         )
-    logger.info("已通过 UAC 提权运行 install 子进程 (force=%s)", force)
+
+    # 子进程已被提权拉起. 阻塞等待 install 跑完 SetEvent (INFINITE=0xFFFFFFFF).
+    # Event 是自动复位: SetEvent 后变信号态, WaitForSingleObject 立即返回.
+    INFINITE = 0xFFFFFFFF
+    WAIT_OBJECT_0 = 0
+    WAIT_FAILED = 0xFFFFFFFF
+    logger.info("已通过 UAC 提权运行 install 子进程 (force=%s), 阻塞等待完成...", force)
+    try:
+        wait_result = kernel32.WaitForSingleObject(
+            wintypes.HANDLE(h_event), INFINITE,
+        )
+        if wait_result == WAIT_FAILED:
+            err = ctypes.get_last_error()
+            raise RuntimeError(
+                f"等待 install 子进程完成失败 (WaitForSingleObject WinError {err})"
+            )
+        if wait_result != WAIT_OBJECT_0:
+            raise RuntimeError(
+                f"等待 install 子进程返回意外值 {wait_result:#x}"
+            )
+        # 注意: SetEvent 只表示子进程执行流到了 install() 末尾, 不代表退出码.
+        # install() 内部致命步骤失败会 raise (走 except 回滚, 不会 SetEvent),
+        # 此时本 wait 会一直阻塞到 install 子进程退出 (Event 随句柄关闭失效).
+        # 极端: install 中途崩溃, Event 永不 set → 本进程永久阻塞. 加超时兜底
+        # 避免死等, 超时后降级为 warning (旧异步行为), 让上层自行判断 installed 标记.
+        logger.info("install 提权子进程已 SetEvent, 视为完成")
+    finally:
+        kernel32.CloseHandle(wintypes.HANDLE(h_event))
     return 0
 
 
@@ -852,6 +989,47 @@ def install(
         raise
 
 
+def collect_preinstall_paths(policy) -> list[str]:
+    """收集 install 该预装读 ACL 的完整路径集.
+
+    = policy.windows.filesystem.read_acl_preinstall (系统目录, 静态)
+    + policy.windows.filesystem.tool_paths 展开的目录 (Git/Node/Python 安装路径,
+    每台机不同; 含 git_dir 的 usr/bin + bin 子目录, bash_path 的父目录).
+
+    lifespan (app.py) 和 _create_windows (process.py) 两处调
+    ensure_windows_setup 时都用本函数算 preinstall_paths, 保证两处传的集合一致
+    → install 记录进 REG_VALUE_PREINSTALLED_PATHS 的集合和后续创建沙箱时比对
+    的集合相同 → 不会因 tool_paths "新增" 而每次创建沙箱都弹 UAC (实测问题).
+
+    tool_paths 是 owner=Administrators 的外部目录, 运行时普通用户无 WRITE_DAC
+    权限改不了它们的 ACL, 必须 install 提权预装. read_acl_preinstall 同理 (系统
+    目录). 故本集合只含这两类"需提权预装"的路径, 不含 workspace/venv (那些
+    owner=当前用户, 会话时 apply_sandbox_acl 普通权限即可授权).
+    """
+    fs = policy.windows.filesystem
+    paths: list[str] = list(fs.read_acl_preinstall or [])
+    tp = fs.tool_paths
+    # git_dir / node_dir / python_dir
+    for i, attr in enumerate(("git_dir", "node_dir", "python_dir")):
+        d = (getattr(tp, attr, "") or "").strip()
+        if not d:
+            continue
+        if d not in paths:
+            paths.append(d)
+        # git 安装根含 usr/bin/bash.exe + bin, 子目录也纳入 (PATH + 读 ACL).
+        if attr == "git_dir":
+            for sub in (os.path.join(d, "usr", "bin"), os.path.join(d, "bin")):
+                if sub not in paths:
+                    paths.append(sub)
+    # bash_path 的父目录 (git_dir 未覆盖时用)
+    bash_p = (getattr(tp, "bash_path", "") or "").strip()
+    if bash_p:
+        parent = os.path.dirname(bash_p)
+        if parent and parent not in paths:
+            paths.append(parent)
+    return paths
+
+
 def ensure_windows_setup(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
@@ -892,13 +1070,20 @@ def ensure_windows_setup(
                     recorded = set()
             new_paths = self_check_paths - recorded
             if new_paths:
-                logger.warning(
+                # relay-claw / officeace 是终端产品, 不能让用户手动跑
+                # --install --force. 这里自动走 UAC 提权子进程补预装新路径
+                # 的读 ACL (最多弹一次 UAC, 用户授权即可).
+                logger.info(
                     "Windows 沙箱已安装, 但检测到新增预装路径未预装读 ACL: %s. "
-                    "运行时进程无权改这些目录 DACL (owner 非当前用户). 请以管理员"
-                    "身份运行 'python -m jiuwenbox.supervisor.win_setup --install "
-                    "--force' 让提权子进程补预装, 否则受限 token 读不了这些路径"
-                    "下的工具可执行 (CreateProcessAsUserW 返回 WinError 2/5).",
+                    "自动弹 UAC 提权补预装 (CreateProcessAsUserW 否则会 WinError 2/5).",
                     sorted(new_paths),
+                )
+                _elevate_and_run_install(
+                    force=True,
+                    preinstall_paths=sorted(new_paths),
+                    proxy_port_start=proxy_port_start,
+                    proxy_port_end=proxy_port_end,
+                    policy_path=policy_path,
                 )
             # 密码一致性验证: install 失败回滚不彻底时, jbx-sandbox 用户可能残留
             # 旧密码 (NetUserDel 没删干净), 注册表密码 (000000) 与用户实际密码
@@ -1055,6 +1240,47 @@ def _elevate_uninstall() -> None:
         raise RuntimeError(f"UAC 提权卸载失败 (返回 {result})")
 
 
+def _make_install_done_notifier(event_name: str | None):
+    """返回一个闭包: 调它则 SetEvent 通知主进程 install 已结束.
+
+    install 子进程用: install() 跑完 (成功或失败) 后调本闭包, 主进程的
+    WaitForSingleObject(INFINITE) 解除阻塞. event_name 为空 (手动 CLI 跑
+    install, 无主进程等待) 时返回空操作闭包.
+
+    OpenEvent 失败 (event 名传错 / 主进程已 CloseHandle) 时静默 warning, 不抛
+    错: install 子进程的核心职责是装沙箱, 通知主进程是次要的, 不能因通知
+    失败而把 install 拖崩.
+    """
+    def _notify() -> None:
+        if not event_name:
+            return
+        try:
+            kernel32 = _get_kernel32()
+            # SYNCHRONIZE(0x00100000) 给 WaitForSingleObject; EVENT_MODIFY_STATE
+            # (0x0002) 给 SetEvent. 主进程创建的 Global 事件默认 ACL 允许同会话/
+            # 提权子进程用这两个权限打开.
+            SYNCHRONIZE = 0x00100000
+            EVENT_MODIFY_STATE = 0x0002
+            h = kernel32.OpenEventW(
+                SYNCHRONIZE | EVENT_MODIFY_STATE, False, event_name,
+            )
+            if not h:
+                logger.warning(
+                    "install 子进程 OpenEventW(%s) 失败 (WinError %d); "
+                    "主进程可能仍在阻塞等待, 将靠超时/installed标记自行判断",
+                    event_name, ctypes.get_last_error(),
+                )
+                return
+            try:
+                kernel32.SetEvent(wintypes.HANDLE(h))
+            finally:
+                kernel32.CloseHandle(wintypes.HANDLE(h))
+        except Exception:  # noqa: BLE001
+            logger.warning("install 完成通知失败", exc_info=True)
+
+    return _notify
+
+
 def _main(argv: list[str]) -> int:
     """CLI 入口: 接收 --install / --uninstall 及 install 的参数.
 
@@ -1110,12 +1336,18 @@ def _main(argv: list[str]) -> int:
     )
     p_install.add_argument(
         "--preinstall-paths", default=None,
-        help="读 ACL 预装路径列表 (JSON 编码字符串)",
+        help="读 ACL 预装路径列表 (base64 编码的 JSON 字符串; base64 避开"
+        "Windows 命令行引号/空格转义问题)",
     )
     p_install.add_argument(
         "--policy-path", default=None,
         help="windows-policy.yaml 路径; install 时读其 read_acl_preinstall + "
         "tool_paths 合并进预装路径 (用户改 tool_paths 后 --force 重装用)",
+    )
+    p_install.add_argument(
+        "--install-done-event", default=None,
+        help="命名 Event 名 (主进程预创建), install 跑完后 SetEvent 通知主进程"
+        "解除阻塞; 不传则不通知 (手动 CLI 跑 install 时用)",
     )
     sub.add_parser(
         const.UNINSTALL_SUBCOMMAND.lstrip("-"), help="执行卸载",
@@ -1126,18 +1358,32 @@ def _main(argv: list[str]) -> int:
         preinstall_paths = None
         if args.preinstall_paths:
             try:
-                preinstall_paths = json.loads(args.preinstall_paths)
-            except (ValueError, TypeError) as exc:
+                # base64(JSON) 解码: 见 _elevate_and_run_install 的编码注释
+                # (避开 Windows 命令行引号/空格转义).
+                import base64
+                decoded = base64.b64decode(args.preinstall_paths).decode("utf-8")
+                preinstall_paths = json.loads(decoded)
+            except Exception as exc:
                 print(f"--preinstall-paths 解析失败: {exc}")
                 return 2
-        # --policy-path: install 内部会读 policy 合并预装路径, 这里只透传路径.
-        install(
-            force=args.force,
-            preinstall_paths=preinstall_paths,
-            proxy_port_start=args.proxy_port_start,
-            proxy_port_end=args.proxy_port_end,
-            policy_path=args.policy_path,
-        )
+        # install 跑完 (成功或失败) 都要 SetEvent 通知主进程解除阻塞, 否则主进程
+        # WaitForSingleObject(INFINITE) 会死等. 用 finally 保证: install 内部致命
+        # 失败会 raise (走 except 回滚), 这里捕获后仍 SetEvent 再 re-raise.
+        _notify = _make_install_done_notifier(args.install_done_event)
+        try:
+            # --policy-path: install 内部会读 policy 合并预装路径, 这里只透传路径.
+            install(
+                force=args.force,
+                preinstall_paths=preinstall_paths,
+                proxy_port_start=args.proxy_port_start,
+                proxy_port_end=args.proxy_port_end,
+                policy_path=args.policy_path,
+            )
+        except BaseException:
+            _notify()
+            raise
+        else:
+            _notify()
         return 0
     if args.cmd == const.UNINSTALL_SUBCOMMAND.lstrip("-"):
         uninstall()

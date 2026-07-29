@@ -76,20 +76,28 @@ windows:
     port_range_end: 60089
 
   filesystem:
-    # 一次性预装读 ACL 的路径 (安装阶段, jbx-sandbox 用户默认读不了这些目录).
-    # 预装给合成 SID + jbx-sandbox 真实 SID (runner 第一跳用真实 SID token,
-    # 合成 SID 的 ACE 对它不生效). 补 node.exe / 工程仓库 / openjiuwen venv:
-    # skill 脚本调 node cli.js, runner 读不了 node 或 skills 目录 → exit=1
-    # 且 stderr 被吞 (日志只看到空 stderr), 必须预装读权限.
-    read_acl_preinstall:
-      - "%USERPROFILE%"
-      - "%SystemRoot%"
-      - "%ProgramFiles%"
-      - "%ProgramData%"
-      # node.js 安装目录 (skill 脚本 node cli.js 依赖). 默认安装路径,
-      # 不存在时 apply_sandbox_acl 跳过 (os.path.exists 守护).
-      - "%ProgramFiles%/nodejs"
-      - "%APPDATA%/npm"
+    # 一次性预装读 ACL 的路径 (安装阶段, 需提权, 只预装 jbx-sandbox 默认读不了
+    # 且沙箱运行必需的目录).
+    #
+    # 不预装系统/用户大目录 (实测 icacls 确认它们的 Windows 默认 DACL 已给
+    # BUILTIN\Users 组授 GR/GE 且继承, jbx-sandbox 作为本地用户默认在 Users 组,
+    # 靠默认 ACL 就能读, 无需也不该递归预装):
+    #   - "%USERPROFILE%"   # 巨型目录 (几十万文件), 递归 grant ACE 极慢会卡死
+    #                        # install; 且沙箱不该读整个用户 profile (安全+最小权限).
+    #                        # 沙箱要读的 workspace/venv/产物由会话时 apply_sandbox_acl
+    #                        # 精确授权, 不靠预装整个 USERPROFILE.
+    #   - "%SystemRoot%"    # C:\WINDOWS: 默认 ACL 已给 Users 组 (RX)+(GR,GE) 继承,
+    #                        # jbx-sandbox 能读 System32 的 dll/cmd/powershell.
+    #   - "%ProgramFiles%"  # 默认 ACL 已给 Users 组读权限继承, 能读已装软件 exe/dll.
+    #   - "%ProgramData"    # 默认 ACL 已给 Users 组 (RX) 继承.
+    #   - "%ProgramFiles%/nodejs"  # Program Files 子树, 被其默认 ACL 覆盖.
+    #   - "%APPDATA%/npm"          # USERPROFILE 子树, 非必需.
+    #
+    # 留空: 实际预装的只有 tool_paths 展开的工具目录 (D:\Files\Git 等,
+    # owner=Administrators 且不在系统目录下, 默认 ACL 不放行 Users → 需预装;
+    # 目录小递归快). 由 collect_preinstall_paths 自动合并 read_acl_preinstall +
+    # tool_paths, 故这里留空即可.
+    read_acl_preinstall: []
     # 沙箱可写路径 (合成 SID 授 Allow Write+Execute+Delete). 第一个路径作为
     # 沙箱 workspace 根.
     allow_write:
