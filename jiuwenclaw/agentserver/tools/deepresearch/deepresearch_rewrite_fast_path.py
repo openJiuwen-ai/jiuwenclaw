@@ -314,7 +314,10 @@ def _decode_model_result(
             if (
                 not {"slot_id", "text"} <= keys
                 or not keys <= {"slot_id", "text"} | _IGNORED_SLOT_OUTPUT_KEYS
-                or slot.get("slot_id") != expected_slot["slot_id"]
+            ):
+                raise ModelOutputError("slot_shape")
+            if (
+                slot.get("slot_id") != expected_slot["slot_id"]
                 or not isinstance(slot.get("text"), str)
             ):
                 raise ModelOutputError("slot_shape")

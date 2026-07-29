@@ -39,15 +39,15 @@ def _existing_created_at(todo_path: Path) -> dict[str, str]:
         return {}
     if not isinstance(data, list):
         return {}
-    return {
-        str(item.get("id")): item["createdAt"]
-        for item in data
+    created_at_by_id = {}
+    for item in data:
         if (
             isinstance(item, dict)
             and isinstance(item.get("id"), str)
             and isinstance(item.get("createdAt"), str)
-        )
-    }
+        ):
+            created_at_by_id[str(item.get("id"))] = item["createdAt"]
+    return created_at_by_id
 
 
 def _deepresearch_tasks(payload: dict[str, Any]) -> list[dict[str, str]] | None:

@@ -1478,7 +1478,8 @@ def _validate_deepresearch_search_env(env: dict[str, str]) -> str | None:
     engine = env.get("WEB_SEARCH_ENGINE_NAME", "").strip().lower()
     search_key = env.get("WEB_SEARCH_API_KEY", "").strip()
     search_url = env.get("WEB_SEARCH_URL", "").strip()
-    if engine and search_key and (engine != "petal" or search_url):
+    has_credentials = bool(engine and search_key)
+    if has_credentials and (engine != "petal" or search_url):
         return None
     return (
         "DeepResearch 搜索配置缺失：请配置完整的 Petal（URL 与凭据）"
