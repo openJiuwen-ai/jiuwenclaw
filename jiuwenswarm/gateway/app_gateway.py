@@ -1816,6 +1816,7 @@ async def _run(
                 path="/tui",
                 channel_id="tui",
                 cron_controller=cron_controller,
+                heartbeat_controller=heartbeat_controller,
                 ws_channel=tui_channel,
             )
         ),

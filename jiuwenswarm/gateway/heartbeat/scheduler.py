@@ -472,6 +472,16 @@ class HeartbeatSchedulerService:
         job = await self._store.get_job(job_id)
         if job is None:
             raise KeyError("job not found")
+        # 与 _handle_due_job 一致:先校验 session 存在性。
+        session = self._session_resolver.resolve(job.channel_id, job.session_id)
+        if session is None:
+            await self._handle_missing_session(job, self._now_fn())
+            return {
+                "accepted": False,
+                "run_id": "",
+                "session_id": job.session_id,
+                "reason": "session_missing",
+            }
         now = self._now_fn()
         run_id = self._new_run_id(job, now)
         # run_now 受并发策略约束

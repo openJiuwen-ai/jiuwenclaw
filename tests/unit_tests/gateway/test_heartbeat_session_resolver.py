@@ -1,0 +1,94 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""HeartbeatSessionResolver 单元测试.
+
+对应方案 §12:
+  - 会话生命周期: session metadata 不可读/目录不存在时返回 None。
+  - 会话生命周期: on_session_deleted 回调转交 scheduler。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from jiuwenswarm.gateway.heartbeat.session_resolver import (
+    HeartbeatSessionResolver,
+    SessionSummary,
+)
+
+
+class _FakeScheduler:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def on_session_deleted(self, session_id: str) -> None:
+        self.calls.append(session_id)
+
+
+def test_resolve_returns_none_for_missing_session() -> None:
+    r = HeartbeatSessionResolver()
+    assert r.resolve("web", "nonexistent-session-xyz") is None
+
+
+def test_resolve_returns_none_for_empty_session_id() -> None:
+    r = HeartbeatSessionResolver()
+    assert r.resolve("web", "") is None
+    assert r.resolve("", "s1") is None
+
+
+def test_resolve_returns_summary_for_existing_session(monkeypatch) -> None:
+    r = HeartbeatSessionResolver()
+
+    def _fake_read(self_or_sid, sid=None):
+        # 兼容 staticmethod patch 后以实例方法调用与直接调用两种形式
+        actual_sid = sid if sid is not None else self_or_sid
+        if actual_sid == "real-session":
+            return {"title": "我的会话"}
+        return None
+
+    monkeypatch.setattr(HeartbeatSessionResolver, "_read_session_metadata", _fake_read, raising=False)
+    summary = r.resolve("web", "real-session")
+    assert summary is not None
+    assert isinstance(summary, SessionSummary)
+    assert summary.session_id == "real-session"
+    assert summary.channel_id == "web"
+    assert summary.title == "我的会话"
+
+
+def test_resolve_returns_none_when_metadata_unreadable(monkeypatch) -> None:
+    r = HeartbeatSessionResolver()
+
+    def _fake_read(self_or_sid, sid=None):
+        return None
+
+    monkeypatch.setattr(HeartbeatSessionResolver, "_read_session_metadata", _fake_read, raising=False)
+    assert r.resolve("web", "broken-session") is None
+
+
+async def test_on_session_deleted_forwards_to_scheduler() -> None:
+    sched = _FakeScheduler()
+    r = HeartbeatSessionResolver(scheduler=sched)
+    await r.on_session_deleted("sess-1")
+    assert sched.calls == ["sess-1"]
+
+
+async def test_on_session_deleted_no_scheduler_does_not_raise() -> None:
+    """无 scheduler 时 on_session_deleted 应记 warning 且不抛异常。"""
+    r = HeartbeatSessionResolver(scheduler=None)
+    # 核心:不抛异常即可(warning 日志在不同 pytest capture 下不稳定,不硬断言)。
+    await r.on_session_deleted("sess-1")
+
+
+async def test_on_session_deleted_empty_session_id_noop() -> None:
+    sched = _FakeScheduler()
+    r = HeartbeatSessionResolver(scheduler=sched)
+    await r.on_session_deleted("")
+    assert sched.calls == []
+
+
+def test_set_scheduler_allows_deferred_injection() -> None:
+    r = HeartbeatSessionResolver()
+    assert r._scheduler is None
+    sched = _FakeScheduler()
+    r.set_scheduler(sched)
+    assert r._scheduler is sched
