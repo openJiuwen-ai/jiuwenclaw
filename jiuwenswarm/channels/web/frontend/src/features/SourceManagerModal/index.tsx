@@ -190,9 +190,9 @@ export function SourceManagerModal({
                       <button
                         type="button"
                         onClick={() => void handleSaveToken()}
-                        disabled={tokenSaving || !clawhubToken.trim()}
+                        disabled={tokenSaving || (!hasToken && !clawhubToken.trim())}
                         className={`ml-auto w-[76px] h-[28px] rounded-[24px] text-sm  ${
-                          tokenSaving || !clawhubToken.trim()
+                          tokenSaving || (!hasToken && !clawhubToken.trim())
                             ? "bg-gray-300 text-gray-500 cursor-not-allowed"
                             : "bg-control-emphasis text-control-emphasis-foreground hover:bg-control-emphasis-hover"
                         }`}
