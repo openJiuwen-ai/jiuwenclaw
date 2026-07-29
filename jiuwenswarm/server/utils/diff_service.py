@@ -618,6 +618,10 @@ class DiffService:
         文件名约定: ``file_ops_{agent_id}_{session_id}.json``,其中 session_id
         始终是 ``.json`` 前的最后一段。使用 ``_{session_id}.json`` 后缀匹配替代
         子串匹配,避免短 session_id 误匹配其他 agent 的 file_ops 文件。
+
+        当 session_id 对应的是父会话时,也接受子 agent 会话(后缀形如
+        ``_sub_{type}_{suffix}``)的 file_ops 文件,使 diff 统计能覆盖子 agent
+        的文件变更。
         """
         if not name.startswith("file_ops_"):
             return False
@@ -625,7 +629,15 @@ class DiffService:
             return False
         if not session_id:
             return not require_session
-        return name.endswith(f"_{session_id}.json")
+        suffix = f"_{session_id}.json"
+        if name.endswith(suffix):
+            return True
+        sub_marker = f"_{session_id}_sub_"
+        marker_pos = name.find(sub_marker, len("file_ops_"))
+        if marker_pos < 0:
+            return False
+        agent_id = name[len("file_ops_"):marker_pos]
+        return bool(agent_id) and "_" not in agent_id
 
     @staticmethod
     def _agent_history_dirs_for_roots(
