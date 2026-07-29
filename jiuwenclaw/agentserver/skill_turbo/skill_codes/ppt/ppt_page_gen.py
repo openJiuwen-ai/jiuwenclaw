@@ -103,6 +103,140 @@ _PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "i
 _DEFAULT_GEN_RETRY_ROUND = 1
 _MAX_PAGE_GENERATION_ATTEMPTS = 3
 
+_VISIBLE_PAGE_NUMBER_RULE = (
+    "- 可见运行页码禁令（所有页型）：页码只用于文件名、任务定位和完整性校验，"
+    "不得成为观众可见文字；禁止在 header、footer、封面、结束页或其他 Page Chrome 中"
+    "生成 `P3`、`P03 / 10`、`Page 3`、`3 / 10`、`第 3 页 / 共 10 页` 等运行页码。"
+    "用户要求“生成 N 页”只表示页数，不等于要求显示页码；agenda 正文中的章节目标页码"
+    "属于导航内容，可以保留。\n"
+)
+
+_EDITABLE_LAYERING_RULES = (
+    "- 可编辑图层约束（所有页型）：半透明遮罩仅在本页确有背景 `<img>`、且当前 "
+    "style.md 明确允许时使用；DOM 与层级顺序必须是“背景图片 → 遮罩 → `relative z-10` "
+    "内容层”。遮罩只能覆盖背景图片，禁止放在 main、header、footer、图表、表格、卡片、"
+    "文字等语义内容上方，禁止给语义内容的父容器设置 `opacity`，也禁止把全页透明元素作为"
+    "内容容器或选择代理层。\n"
+    "- 图表可编辑性约束：ECharts 必须使用 SVG renderer；禁止在 `areaStyle.color`、"
+    "`itemStyle.color`、`lineStyle.color`、`visualMap.inRange.color` 等配置中使用 "
+    "`colorStops`、渐变 `type: 'linear'/'radial'` 或 "
+    "`echarts.graphic.LinearGradient/RadialGradient`，这些写法会使图表在 PPTX 中转成位图；"
+    "需要透明面积色时使用当前风格允许的纯色 `rgba(...)`。\n"
+)
+
+
+@dataclass(frozen=True)
+class _PageNumberPolicy:
+    """用户显式可见页码要求；默认关闭。"""
+
+    enabled: bool
+    position: str = "bottom-right"
+    format_kind: str = "fraction"
+    zero_pad: bool = False
+
+
+_PAGE_NUMBER_NEGATIVE_RE = re.compile(
+    r"(?:不(?:要|需要|显示|生成|添加|保留)|无需|无须|禁止|取消|去掉|移除|删除|隐藏|关闭)"
+    r".{0,8}(?:页码|页面编号)"
+    r"|(?:页码|页面编号).{0,8}(?:不要|无需|无须|禁止|取消|去掉|移除|删除|隐藏|关闭)"
+    r"|\b(?:no|without|hide|remove)\s+(?:page|slide)\s+numbers?\b",
+    re.IGNORECASE,
+)
+_PAGE_NUMBER_POSITIVE_RE = re.compile(
+    r"(?:显示|生成|添加|加上|加入|带上?|保留|标注|放置|设置).{0,10}(?:页码|页面编号)"
+    r"|(?:页码|页面编号).{0,12}(?:显示|生成|添加|加上|加入|保留|标注|放在|放到|位于|置于|设置)"
+    r"|(?:右下角|左下角|右上角|左上角).{0,8}(?:页码|页面编号)"
+    r"|(?:页码|页面编号).{0,8}(?:右下角|左下角|右上角|左上角)"
+    r"|\b(?:show|add|include|display)\s+(?:page|slide)\s+numbers?\b",
+    re.IGNORECASE,
+)
+
+
+def _resolve_page_number_policy(user_query: str) -> _PageNumberPolicy:
+    """仅把明确的可见页码请求识别为开启；“生成 N 页”不触发。"""
+    query = str(user_query or "").strip()
+    if not query or _PAGE_NUMBER_NEGATIVE_RE.search(query):
+        return _PageNumberPolicy(enabled=False)
+    if not _PAGE_NUMBER_POSITIVE_RE.search(query):
+        return _PageNumberPolicy(enabled=False)
+
+    if "左下" in query:
+        position = "bottom-left"
+    elif "右上" in query:
+        position = "top-right"
+    elif "左上" in query:
+        position = "top-left"
+    else:
+        # 未指定位置时使用稳定默认值；也覆盖用户常见的“右下角页码”要求。
+        position = "bottom-right"
+
+    if re.search(r"第\s*(?:N|\d+)\s*页.{0,8}(?:共|总共|总页)", query, re.IGNORECASE):
+        format_kind = "chinese-total"
+    elif re.search(r"第\s*(?:N|\d+)\s*页", query, re.IGNORECASE):
+        format_kind = "chinese"
+    elif re.search(r"(?:格式|样式).{0,8}\bPage\s*(?:N|\d+)", query, re.IGNORECASE):
+        format_kind = "english"
+    elif re.search(r"(?:格式|样式).{0,8}\bP\s*(?:N|\d+)\b", query, re.IGNORECASE):
+        format_kind = "p-prefix"
+    elif re.search(r"(?:仅|只).{0,6}(?:当前页|数字)|不显示.{0,4}总页数", query):
+        format_kind = "current"
+    else:
+        format_kind = "fraction"
+
+    zero_pad = bool(re.search(r"两位|2\s*位|补零|零填充|(?:^|\D)0[1-9](?:\D|$)", query))
+    return _PageNumberPolicy(
+        enabled=True,
+        position=position,
+        format_kind=format_kind,
+        zero_pad=zero_pad,
+    )
+
+
+def _format_visible_page_number(
+    policy: _PageNumberPolicy,
+    page_number: int,
+    total_pages: int,
+) -> str:
+    total = max(int(total_pages or 0), int(page_number or 0), 1)
+    width = max(2, len(str(total))) if policy.zero_pad else 1
+    current_text = str(page_number).zfill(width)
+    total_text = str(total).zfill(width)
+    if policy.format_kind == "chinese-total":
+        return f"第 {current_text} 页 / 共 {total_text} 页"
+    if policy.format_kind == "chinese":
+        return f"第 {current_text} 页"
+    if policy.format_kind == "english":
+        return f"Page {current_text}"
+    if policy.format_kind == "p-prefix":
+        return f"P{current_text}"
+    if policy.format_kind == "current":
+        return current_text
+    return f"{current_text} / {total_text}"
+
+
+def _build_visible_page_number_rule(
+    user_query: str,
+    page_number: int,
+    total_pages: int,
+) -> str:
+    policy = _resolve_page_number_policy(user_query)
+    if not policy.enabled:
+        return _VISIBLE_PAGE_NUMBER_RULE
+    marker = _format_visible_page_number(policy, page_number, total_pages)
+    position_label = {
+        "bottom-right": "右下角",
+        "bottom-left": "左下角",
+        "top-right": "右上角",
+        "top-left": "左上角",
+    }[policy.position]
+    return (
+        "- 用户显式页码要求（优先于默认禁令）：最终页面必须且只能显示 1 个运行页码，"
+        f"固定在{position_label}，文字逐字为 `{marker}`。当前页面生成阶段不得自行创建页码，"
+        "避免产生重复或格式漂移；"
+        "agenda 正文中的章节目标页码仍属于导航内容，不计入这个运行页码。"
+        "SkillTurbo 会在写盘前插入统一的可编辑文本页码，禁止用图片或透明罩模拟页码。\n"
+    )
+
 
 # 页面类型 → 模板 ID 默认映射（当 manifest 无 page_intents 时兜底）
 _PAGE_TYPE_TO_TEMPLATE: dict[str, str] = {
@@ -246,7 +380,7 @@ _DESIGN_RULES_DIGEST = (
     "`body { font-family: 'Noto Sans SC', 'WenYuan Sans SC', sans-serif; }`；"
     "禁止仅在 CSS 中声明而漏掉 HTML 元素上的字体继承——所有文本元素必须继承 `body` 的 `font-family`，不得单独使用其他字体\n"
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚；"
-    "禁止页脚出现纯数字页码编号（除非用户在原始 query 中明确要求页码，此时应在用户指定位置添加页码，格式如 3/12）\n"
+    "禁止在页脚追加任何运行页码；页数只用于任务定位和文件完整性校验\n"
     "13. 布局实现：仅 main、图表或图片等需要承接剩余空间的区域使用 `flex-1 min-h-0`；"
     "纯文字卡片按内容自适应高度，禁止为了等高而制造大片空白；"
     "禁止使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表/数据卡片等）\n"
@@ -291,6 +425,20 @@ _HTML_SKELETON = (
     "- `main` 用 `flex` 左右分列（禁止使用 `grid grid-cols-*`，html-to-pptx 转换器不支持 CSS Grid），恰好 2 个 `<section>` 直接子元素\n"
     "- 禁止把 header/footer 放进 main 内部；禁止 main 只有 1 个子元素\n"
     "- 禁止在子元素上使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表标签/数据卡片等）；overflow-hidden 仅允许用于 `.ppt-slide` 画布边界\n"
+)
+
+
+_AUDIENCE_VISIBLE_TEXT_RULES = (
+    "### 观众可见文字来源契约（所有页型，强制）\n"
+    "1. 观众可见文字只能来自用户原始 query、本页 outline、本页 research（结构页无 research）"
+    "或已批准模板中的固定文案；风格名、模型提示词和制作过程信息不得写入页面。\n"
+    "2. 页眉、页脚、角标、徽章、状态条、导航标签和装饰性文字同样受来源契约约束；"
+    "输入没有提供对应语义时直接省略，不得为了构图、填白或强化可信感自行补充。\n"
+    "3. 不得根据幻灯片页码、页面类型、研究完成状态、数据存在性、内部核对结果或生成流程"
+    "推导任何观众可见标签、编号、状态或制作标记。\n"
+    "4. section/chapter 仅在用户 query 或 outline 明确给出章节层级或要求显示章节编号时才显示"
+    "章节导航信息；编号必须来自章节顺序语义，禁止把幻灯片页码改写为章节编号。非章节页不得"
+    "自行创建章节导航信息。\n"
 )
 
 
@@ -540,8 +688,155 @@ def _is_valid_html(text: str) -> bool:
     return True
 
 
-# 匹配含 ppt-slide 的 div 开始标签
-_PPT_SLIDE_DIV_RE = re.compile(r'<div[^>]*\bclass="[^"]*ppt-slide[^"]*"', re.IGNORECASE)
+_VISIBLE_PAGE_MARKER_RE = re.compile(
+    r"^\s*(?:"
+    r"第\s*0*\d+\s*页(?:\s*(?:(?:[/／]|of)\s*(?:共\s*)?0*\d+\s*页|"
+    r"[（(]\s*共\s*0*\d+\s*页\s*[）)]))?"
+    r"|(?:page|p|页码)\s*[:：#]?\s*0*\d+(?:\s*(?:[/／]|of)\s*0*\d+)?"
+    r"|0*\d+\s*[/／]\s*0*\d+"
+    r")\s*$",
+    re.IGNORECASE,
+)
+_VISIBLE_TEXT_LEAF_RE = re.compile(
+    r"<(?P<tag>span|p|div|small)\b[^>]*>"
+    r"(?P<text>[^<>]*)</(?P=tag)>",
+    re.IGNORECASE,
+)
+_MAIN_BLOCK_RE = re.compile(r"<main\b[^>]*>.*?</main\s*>", re.IGNORECASE | re.DOTALL)
+_PAGE_MARKER_SPACE_ENTITY_RE = re.compile(
+    r"&(?:nbsp|#0*(?:32|160)|#x0*(?:20|a0));",
+    re.IGNORECASE,
+)
+_PAGE_MARKER_SLASH_ENTITY_RE = re.compile(
+    r"&(?:sol|#0*47|#x0*2f);",
+    re.IGNORECASE,
+)
+
+
+def _normalize_page_marker_text(text: str) -> str:
+    """仅还原页码识别所需的空白与斜杠实体，不依赖白名单外模块。"""
+    normalized = _PAGE_MARKER_SPACE_ENTITY_RE.sub(" ", text)
+    normalized = _PAGE_MARKER_SLASH_ENTITY_RE.sub("/", normalized)
+    return normalized.replace("\xa0", " ").strip()
+
+
+def _strip_visible_page_markers(html_text: str) -> str:
+    """移除 Page Chrome 中的可见运行页码，保留 main 内的导航/业务内容。"""
+    if not html_text:
+        return html_text
+
+    main_ranges = tuple(
+        (match.start(), match.end())
+        for match in _MAIN_BLOCK_RE.finditer(html_text)
+    )
+    removed_markers: list[str] = []
+
+    def _replace_marker(match: re.Match[str]) -> str:
+        # agenda 章节目标页码和可能的业务型号位于 main，不能按运行页码误删。
+        if any(start <= match.start() < end for start, end in main_ranges):
+            return match.group(0)
+        marker = _normalize_page_marker_text(match.group("text"))
+        if not _VISIBLE_PAGE_MARKER_RE.fullmatch(marker):
+            return match.group(0)
+        removed_markers.append(marker)
+        return ""
+
+    normalized = _VISIBLE_TEXT_LEAF_RE.sub(_replace_marker, html_text)
+    if removed_markers:
+        logger.info("[P8.1] 已移除可见运行页码 markers=%s", removed_markers)
+    return normalized
+
+
+# 匹配含 ppt-slide 的 div 开始标签（兼容单双引号）。
+_PPT_SLIDE_DIV_RE = re.compile(
+    r"<div[^>]*\bclass\s*=\s*(?:\"[^\"]*\bppt-slide\b[^\"]*\"|'[^']*\bppt-slide\b[^']*')",
+    re.IGNORECASE,
+)
+_DIV_TAG_RE = re.compile(r"<div\b[^>]*>|</div\s*>", re.IGNORECASE)
+_PAGE_NUMBER_POSITION_CSS = {
+    "bottom-right": "right:30px;bottom:16px;text-align:right;",
+    "bottom-left": "left:30px;bottom:16px;text-align:left;",
+    "top-right": "right:30px;top:16px;text-align:right;",
+    "top-left": "left:30px;top:16px;text-align:left;",
+}
+_PAGE_NUMBER_STYLE = {
+    "business-classic": ("#898989", 12),
+    "tech-minimal": ("rgba(0,0,0,0.8)", 12),
+    "industrial-tech": ("#898989", 14),
+    "elegant-narrative": ("#87867f", 14),
+}
+
+
+def _insert_visible_page_marker(
+    html_text: str,
+    marker_text: str,
+    policy: _PageNumberPolicy,
+    style_id: str,
+) -> str:
+    """在 ppt-slide 根容器末尾插入一个普通、可编辑的页码文本元素。"""
+    root_match = _PPT_SLIDE_DIV_RE.search(html_text)
+    if root_match is None:
+        logger.warning("[P8.1] 可见页码插入失败：未找到 ppt-slide 根容器")
+        return html_text
+
+    depth = 0
+    insertion_index: int | None = None
+    for tag_match in _DIV_TAG_RE.finditer(html_text, root_match.start()):
+        if tag_match.group(0).lower().startswith("</div"):
+            depth -= 1
+            if depth == 0:
+                insertion_index = tag_match.start()
+                break
+        else:
+            depth += 1
+    if insertion_index is None:
+        logger.warning("[P8.1] 可见页码插入失败：未找到 ppt-slide 闭合标签")
+        return html_text
+
+    position_css = _PAGE_NUMBER_POSITION_CSS[policy.position]
+    color, font_size = _PAGE_NUMBER_STYLE.get(style_id, ("#666666", 12))
+    marker = (
+        "\n<span data-skill-turbo-page-number=\"true\" "
+        f"data-position=\"{policy.position}\" "
+        'style="position:absolute;z-index:30;min-width:48px;'
+        f"{position_css}font-family:inherit;font-size:{font_size}px;"
+        f"line-height:1;font-weight:400;color:{color};white-space:nowrap;"
+        'background:transparent;border:0;padding:0;margin:0;">'
+        # marker_text 仅由固定格式文字和整数页码组成，不包含用户原始 HTML。
+        f"{marker_text}</span>\n"
+    )
+    return html_text[:insertion_index] + marker + html_text[insertion_index:]
+
+
+def _apply_visible_page_number_policy(
+    html_text: str,
+    *,
+    user_query: str,
+    page_number: int,
+    total_pages: int,
+    style_id: str,
+) -> str:
+    """默认移除运行页码；用户明确要求时确定性统一为一个可编辑页码。"""
+    policy = _resolve_page_number_policy(user_query)
+    normalized = _strip_visible_page_markers(html_text)
+    if not policy.enabled:
+        return normalized
+    marker_text = _format_visible_page_number(policy, page_number, total_pages)
+    normalized = _insert_visible_page_marker(
+        normalized,
+        marker_text,
+        policy,
+        style_id,
+    )
+    if 'data-skill-turbo-page-number="true"' in normalized:
+        logger.info(
+            "[P8.1] 已统一可见页码 page=%d total=%d position=%s format=%s",
+            page_number,
+            total_pages,
+            policy.position,
+            policy.format_kind,
+        )
+    return normalized
 
 
 def _truncate_to_single_slide(html: str) -> str:
@@ -1589,6 +1884,23 @@ def _extract_search_text(result: Any) -> str:
 _PAGE_HEADING_RE = re.compile(r"^###\s+P(\d+)\s*:", re.MULTILINE)
 
 
+def _strip_leading_non_section_lines(text: str) -> str:
+    """剥离首部非 ``### P`` 章节开头的行。
+
+    兼容 image_watermark 等扩展在文件首行注入的标记文本（如 "AI生成"），
+    避免严格的 ``startswith("### P")`` 校验误判有效 research 文件为无效。
+    """
+    lines = text.splitlines(keepends=True)
+    idx = 0
+    while idx < len(lines) and not lines[idx].lstrip().startswith("### P"):
+        idx += 1
+    if idx == 0:
+        return text
+    if idx >= len(lines):
+        return ""
+    return "".join(lines[idx:])
+
+
 def _split_md_pages(text: str) -> dict[int, str]:
     """按 `### P{N}:` 章节拆分 Markdown，返回 {页码: 该页片段}。"""
     matches = list(_PAGE_HEADING_RE.finditer(text))
@@ -1711,6 +2023,7 @@ def _build_page_prompt(
     original_html: str = "",
     image_map_page: str = "",
     user_query: str = "",
+    total_pages: int = 0,
 ) -> str:
     # 用户原始 query 段（用于指导内容方向/格式/风格，不改变本任务的页面范围）
     user_query_section = ""
@@ -1808,6 +2121,11 @@ def _build_page_prompt(
         )
 
     layout_template = _PAGE_LAYOUT_TEMPLATES.get(page_type, "")
+    page_number_rule = _build_visible_page_number_rule(
+        user_query,
+        page_number,
+        total_pages or page_number,
+    )
 
     density_checklist = _STRUCTURAL_DENSITY_CHECKLIST if is_structural else _DENSITY_CHECKLIST_DIGEST
     design_rules = _STRUCTURAL_DESIGN_RULES if is_structural else _DESIGN_RULES_DIGEST
@@ -1841,8 +2159,18 @@ def _build_page_prompt(
         "- 严禁任何解释、注释、Markdown 代码块包裹，只输出 HTML 原文\n"
         "- 页面尺寸严格 1280×720px\n"
         '- 必须包含 `<div class="ppt-slide">` 容器\n'
+        f"{page_number_rule}"
+        f"{_EDITABLE_LAYERING_RULES}"
         "- 禁止在思考过程中反复计算像素或纠结布局，参考下方布局示例并根据内容调整\n"
         "- 一次性输出完整 HTML，禁止输出'final code''truly final'等反复确认语句\n"
+        "\n"
+        "### 思考预算（强制约束）\n"
+        "- 布局规划**上限 300 字思考**：用 flex/grid 权重和比例描述布局意图即可，"
+        "禁止逐元素计算像素高度、padding、font-size 数值\n"
+        "- 禁止做「计算→验证→调整→重算」循环；若布局估算不收敛，直接采用布局示例中的默认比例\n"
+        "- 优先使用 `flex-1`/`flex-[N]`/`min-h-0` 自适应布局，让浏览器自动分配空间，而非手动算尺寸\n"
+        "- 内容预算（§4）一次过，禁止反复推演；若内容超量，直接提炼或删减辅助细节\n"
+        "- 思考阶段产出 ≤500 tokens 即可开始写 HTML；超过此量说明陷入了过度规划，应立即停止思考并输出代码\n"
         "\n"
         "## 1. 视觉风格规范（强制遵守）\n"
         f"{style_text}\n"
@@ -1851,6 +2179,7 @@ def _build_page_prompt(
         f"{_CDN_HEAD_SNIPPET}"
         "\n"
         f"{design_rules}"
+        f"{_AUDIENCE_VISIBLE_TEXT_RULES}"
         f"{designer_section}"
         f"{diversity_rule}"
         "\n"
@@ -1902,6 +2231,7 @@ class PageGenContext:
     image_map_page: str  # 本页图片素材描述（空串=无图）
     designer_md_text: str  # references/designer.md 原文（由 PrepareNode 通过 read_file 读取）
     user_query: str = ""  # 用户原始 query（由 collect_user_text 提取）
+    total_pages: int = 0
 
 
 class PrepareNode(PlanNode):
@@ -1978,6 +2308,9 @@ class PrepareNode(PlanNode):
         for p in all_pages:
             research_path = f"{output_dir}/research-P{p}.md"
             research_text_p = await self._read_file(research_path)
+            # 剥离首部非 ### P 行（兼容 image_watermark 等扩展注入的首行标记），再校验
+            if research_text_p:
+                research_text_p = _strip_leading_non_section_lines(research_text_p)
             # 校验内容是有效的 research 片段（以 ### P 开头），过滤 read_file 错误消息
             if research_text_p and research_text_p.lstrip().startswith("### P"):
                 research_pages[p] = research_text_p
@@ -2119,6 +2452,8 @@ class PageWorkerNode(PlanNode):
                 "style_text": style_text,
             }
 
+        total_pages = int(inputs.get("total_pages") or max(all_pages))
+
         tasks = [
             self._run_page_pipeline(
                 page_num=p,
@@ -2132,6 +2467,7 @@ class PageWorkerNode(PlanNode):
                 image_map=image_map,
                 designer_md_text=designer_md_text,
                 user_query=user_query,
+                total_pages=total_pages,
             )
             for p in all_pages
         ]
@@ -2181,6 +2517,7 @@ class PageWorkerNode(PlanNode):
         image_map: dict[str, Any],
         designer_md_text: str = "",
         user_query: str = "",
+        total_pages: int = 0,
     ) -> dict[str, Any]:
         """生成并校验单页；仅生成失败时按预算重试。"""
         path = f"{pages_dir}/page-{page_num}.pptx.html"
@@ -2208,6 +2545,7 @@ class PageWorkerNode(PlanNode):
             image_map_page=image_map_page,
             designer_md_text=designer_md_text,
             user_query=user_query,
+            total_pages=total_pages,
         )
 
         html = ""
@@ -2252,6 +2590,7 @@ class PageWorkerNode(PlanNode):
                     image_map_page=ctx.image_map_page,
                     designer_md_text=ctx.designer_md_text,
                     user_query=ctx.user_query,
+                    total_pages=ctx.total_pages,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_1_page_{ctx.page_num}",
@@ -2268,6 +2607,13 @@ class PageWorkerNode(PlanNode):
             return ""
         # 后置校验：替换「第X页」标题占位符为 outline 中的实际标题
         html = _replace_placeholder_headings(html, ctx.outline_page)
+        html = _apply_visible_page_number_policy(
+            html,
+            user_query=ctx.user_query,
+            page_number=ctx.page_num,
+            total_pages=ctx.total_pages,
+            style_id=ctx.style_id,
+        )
         html = _fix_echarts_svg_renderer(html)
         return html
 

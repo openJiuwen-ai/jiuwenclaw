@@ -57,6 +57,7 @@ def _configure_worker(
     llm_calls: list[str],
     tool_calls: list[str],
     concurrency: dict[str, int] | None = None,
+    written_contents: list[str] | None = None,
 ) -> ppg.PageWorkerNode:
     node = ppg.PageWorkerNode()
     queue = list(responses)
@@ -79,10 +80,12 @@ def _configure_worker(
             raise response
         yield response
 
-    async def _use_tool(tool_name: str, **_: Any) -> dict[str, Any]:
+    async def _use_tool(tool_name: str, **kwargs: Any) -> dict[str, Any]:
         tool_calls.append(tool_name)
         if tool_name != "write_file":
             raise AssertionError(f"unexpected tool call: {tool_name}")
+        if written_contents is not None:
+            written_contents.append(str(kwargs.get("content") or ""))
         return {"success": True}
 
     node.set_runtime_callbacks(
@@ -118,6 +121,235 @@ def test_page_worker_generates_each_page_once_without_post_generation_llm_or_sea
     assert result["missing_pages"] == []
     assert result["low_density_pages"] == []
     assert result["density_report"] == {}
+
+
+@pytest.mark.unit
+def test_page_prompt_forbids_visible_page_numbers_for_all_page_types() -> None:
+    for outline_page, research_page in [
+        (
+            "### P2: 内容页\n- **类型**: data\n- **研究需求**: ✅",
+            "### P2: 内容页\n#### PPT 内容建议\n正文素材",
+        ),
+        ("### P10: 结束页\n- **类型**: ending\n- **研究需求**: ❌", ""),
+    ]:
+        prompt = ppg._build_page_prompt(
+            2,
+            style_id="business-classic",
+            style_text="---\nfont-family: Arial\n---\n",
+            outline_page=outline_page,
+            research_page=research_page,
+            user_query="生成 8 页商务经典风格 PPT",
+        )
+
+        assert "可见运行页码禁令（所有页型）" in prompt
+        assert "用户要求“生成 N 页”只表示页数，不等于要求显示页码" in prompt
+        assert "agenda 正文中的章节目标页码" in prompt
+
+
+@pytest.mark.unit
+def test_page_number_policy_requires_explicit_user_intent() -> None:
+    assert not ppg._resolve_page_number_policy("生成 10 页 PPT").enabled
+    assert not ppg._resolve_page_number_policy("不要显示页码，生成 10 页 PPT").enabled
+
+    policy = ppg._resolve_page_number_policy("请在右下角添加页码")
+
+    assert policy.enabled
+    assert policy.position == "bottom-right"
+    assert ppg._format_visible_page_number(policy, 2, 10) == "2 / 10"
+
+
+@pytest.mark.unit
+def test_page_prompt_defers_explicit_page_number_to_deterministic_patch() -> None:
+    prompt = ppg._build_page_prompt(
+        2,
+        style_id="business-classic",
+        style_text="---\nfont-family: Arial\n---\n",
+        outline_page="### P2: 内容页\n- **类型**: data\n- **研究需求**: ✅",
+        research_page="### P2: 内容页\n#### PPT 内容建议\n正文素材",
+        user_query="页码生成在右下角",
+        total_pages=10,
+    )
+
+    assert "用户显式页码要求（优先于默认禁令）" in prompt
+    assert "文字逐字为 `2 / 10`" in prompt
+    assert "当前页面生成阶段不得自行创建页码" in prompt
+    assert "插入统一的可编辑文本页码" in prompt
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("query", "position", "marker"),
+    [
+        ("在左下角添加页码，仅显示当前页数字", "bottom-left", "7"),
+        ("在右上角显示页码，格式为 Page N", "top-right", "Page 7"),
+        ("在左上角生成页码，格式为第 N 页", "top-left", "第 7 页"),
+        ("右下角显示两位补零页码，格式为 P N", "bottom-right", "P07"),
+    ],
+)
+def test_explicit_page_number_position_and_format(
+    query: str,
+    position: str,
+    marker: str,
+) -> None:
+    html = ppg._apply_visible_page_number_policy(
+        _VALID_HTML,
+        user_query=query,
+        page_number=7,
+        total_pages=12,
+        style_id="business-classic",
+    )
+
+    assert html.count('data-skill-turbo-page-number="true"') == 1
+    assert f'data-position="{position}"' in html
+    assert f">{marker}</span>" in html
+
+
+@pytest.mark.unit
+def test_page_prompt_keeps_overlays_behind_editable_content_and_charts_vectorized() -> None:
+    prompt = ppg._build_page_prompt(
+        2,
+        style_id="business-classic",
+        style_text="---\nfont-family: Arial\n---\n",
+        outline_page="### P2: 内容页\n- **类型**: data\n- **研究需求**: ✅",
+        research_page="### P2: 内容页\n#### PPT 内容建议\n正文素材",
+    )
+
+    assert "背景图片 → 遮罩 → `relative z-10` 内容层" in prompt
+    assert "遮罩只能覆盖背景图片" in prompt
+    assert "禁止给语义内容的父容器设置 `opacity`" in prompt
+    assert "ECharts 必须使用 SVG renderer" in prompt
+    assert "echarts.graphic.LinearGradient/RadialGradient" in prompt
+    assert "会使图表在 PPTX 中转成位图" in prompt
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("outline_page", "research_page"),
+    [
+        (
+            "### P2: 内容页\n- **类型**: data\n- **研究需求**: ✅",
+            "### P2: 内容页\n#### PPT 内容建议\n正文素材",
+        ),
+        ("### P6: 第二章\n- **类型**: chapter\n- **研究需求**: ❌", ""),
+    ],
+)
+def test_page_prompt_enforces_page_chrome_source_contract_for_all_page_types(
+    outline_page: str,
+    research_page: str,
+) -> None:
+    prompt = ppg._build_page_prompt(
+        2,
+        style_id="custom",
+        style_text="---\nfont-family: Arial\n---\n",
+        outline_page=outline_page,
+        research_page=research_page,
+    )
+
+    assert "观众可见文字来源契约（所有页型，强制）" in prompt
+    assert "页眉、页脚、角标、徽章、状态条、导航标签和装饰性文字" in prompt
+    assert "内部核对结果或生成流程" in prompt
+    assert "编号必须来自章节顺序语义" in prompt
+    assert "非章节页不得自行创建章节导航信息" in prompt
+    assert "PART XX" not in prompt
+    assert "数据已核验" not in prompt
+    assert "CASE 02" not in prompt
+
+
+@pytest.mark.unit
+def test_page_prompt_preserves_chapter_label_supplied_by_outline() -> None:
+    outline_page = (
+        "### P6: PART 01 现状分析\n"
+        "- **类型**: chapter\n"
+        "- **研究需求**: ❌"
+    )
+
+    prompt = ppg._build_page_prompt(
+        6,
+        style_id="elegant-narrative",
+        style_text="---\nfont-family: Arial\n---\n",
+        outline_page=outline_page,
+        research_page="",
+    )
+
+    assert "PART 01 现状分析" in prompt
+    assert "编号必须来自章节顺序语义" in prompt
+
+
+@pytest.mark.unit
+def test_visible_page_marker_normalization_preserves_main_content_and_metadata() -> None:
+    html = """<!DOCTYPE html>
+<html><body><div class="ppt-slide">
+<header><h1>标题</h1><span>P02 / 08</span></header>
+<main><span>P3</span><p>产品 P3 型号</p></main>
+<footer><span>第 10 页 / 共 10 页</span><span>v1.0</span><span>2026Q1</span></footer>
+</div></body></html>"""
+
+    normalized = ppg._strip_visible_page_markers(html)
+
+    assert "P02 / 08" not in normalized
+    assert "第 10 页 / 共 10 页" not in normalized
+    assert "<span>P3</span>" in normalized
+    assert "产品 P3 型号" in normalized
+    assert "v1.0" in normalized
+    assert "2026Q1" in normalized
+
+
+@pytest.mark.unit
+def test_page_worker_removes_page_marker_without_extra_llm_call() -> None:
+    marked_html = _VALID_HTML.replace(
+        "<h1>历史文化介绍</h1>",
+        "<header><h1>历史文化介绍</h1><span>P01 / 10</span></header>",
+    )
+    llm_calls: list[str] = []
+    written_contents: list[str] = []
+    node = _configure_worker(
+        [marked_html],
+        llm_calls=llm_calls,
+        tool_calls=[],
+        written_contents=written_contents,
+    )
+
+    result = asyncio.run(node._execute(_worker_inputs()))
+
+    assert llm_calls == ["p8_1_page_1"]
+    assert result["missing_pages"] == []
+    assert len(written_contents) == 1
+    assert "P01 / 10" not in written_contents[0]
+
+
+@pytest.mark.unit
+def test_page_worker_inserts_consistent_page_numbers_without_extra_llm_calls() -> None:
+    llm_calls: list[str] = []
+    written_contents: list[str] = []
+    node = _configure_worker(
+        [_VALID_HTML, _VALID_HTML, _VALID_HTML],
+        llm_calls=llm_calls,
+        tool_calls=[],
+        written_contents=written_contents,
+    )
+
+    result = asyncio.run(
+        node._execute(
+            _worker_inputs(
+                page_count=3,
+                query="请在右下角添加页码",
+                total_pages=3,
+            )
+        )
+    )
+
+    assert sorted(llm_calls) == ["p8_1_page_1", "p8_1_page_2", "p8_1_page_3"]
+    assert result["missing_pages"] == []
+    assert len(written_contents) == 3
+    combined_html = "\n".join(written_contents)
+    assert all(
+        combined_html.count(f">{marker}</span>") == 1
+        for marker in ("1 / 3", "2 / 3", "3 / 3")
+    )
+    assert all(
+        content.count('data-skill-turbo-page-number="true"') == 1
+        for content in written_contents
+    )
 
 
 @pytest.mark.unit
