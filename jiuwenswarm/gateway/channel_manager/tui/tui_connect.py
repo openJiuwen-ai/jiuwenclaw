@@ -1275,10 +1275,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         try:
             try:
-                response = await _probe(1)
+                response = await _probe(3)
             except Exception as first_exc:  # noqa: BLE001
                 logger.info(
-                    "[cli config.validate_model] max_tokens=1 failed, retrying with 16: %s",
+                    "[cli config.validate_model] max_tokens=3 failed, retrying with 16: %s",
                     first_exc,
                 )
                 response = await _probe(16)
@@ -1299,8 +1299,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             content = response.get("content", "")
         else:
             content = str(response)
-
-        if not (isinstance(content, str) and content.strip()):
+        reasoning_content = getattr(response, "reasoning_content", None) if hasattr(response,
+                                                                                    "reasoning_content") else None
+        has_valid_response = (isinstance(content, str) and content) or (
+                isinstance(reasoning_content, str) and reasoning_content
+        )
+        if not has_valid_response:
             await channel.send_response(
                 ws,
                 req_id,
