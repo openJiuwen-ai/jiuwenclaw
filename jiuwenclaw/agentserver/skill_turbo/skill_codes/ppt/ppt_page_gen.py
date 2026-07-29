@@ -1589,6 +1589,23 @@ def _extract_search_text(result: Any) -> str:
 _PAGE_HEADING_RE = re.compile(r"^###\s+P(\d+)\s*:", re.MULTILINE)
 
 
+def _strip_leading_non_section_lines(text: str) -> str:
+    """剥离首部非 ``### P`` 章节开头的行。
+
+    兼容 image_watermark 等扩展在文件首行注入的标记文本（如 "AI生成"），
+    避免严格的 ``startswith("### P")`` 校验误判有效 research 文件为无效。
+    """
+    lines = text.splitlines(keepends=True)
+    idx = 0
+    while idx < len(lines) and not lines[idx].lstrip().startswith("### P"):
+        idx += 1
+    if idx == 0:
+        return text
+    if idx >= len(lines):
+        return ""
+    return "".join(lines[idx:])
+
+
 def _split_md_pages(text: str) -> dict[int, str]:
     """按 `### P{N}:` 章节拆分 Markdown，返回 {页码: 该页片段}。"""
     matches = list(_PAGE_HEADING_RE.finditer(text))
@@ -1978,6 +1995,9 @@ class PrepareNode(PlanNode):
         for p in all_pages:
             research_path = f"{output_dir}/research-P{p}.md"
             research_text_p = await self._read_file(research_path)
+            # 剥离首部非 ### P 行（兼容 image_watermark 等扩展注入的首行标记），再校验
+            if research_text_p:
+                research_text_p = _strip_leading_non_section_lines(research_text_p)
             # 校验内容是有效的 research 片段（以 ### P 开头），过滤 read_file 错误消息
             if research_text_p and research_text_p.lstrip().startswith("### P"):
                 research_pages[p] = research_text_p
