@@ -173,6 +173,7 @@ def test_search_tools_runs_dense_off_event_loop(monkeypatch):
     from types import SimpleNamespace
 
     rail = _make_rail(monkeypatch)
+    rail._min_sim = -1.0  # disable threshold; this test verifies to_thread, not min_sim
 
     class FakeModel:
         def __init__(self, dim=8):

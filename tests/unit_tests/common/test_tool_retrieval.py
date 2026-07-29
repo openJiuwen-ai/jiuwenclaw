@@ -346,6 +346,33 @@ def test_dense_search_lazy_embeds_uncached_tool():
 
 
 # ---------------------------------------------------------------------------
+# min_sim threshold (avoid misleading top-k when nothing matches)
+# ---------------------------------------------------------------------------
+
+
+def test_dense_search_min_sim_keeps_only_exact_name_match():
+    tools = _cron_tools()
+    cache = {}
+    res = dense_search("cron", tools, FakeModel(), cache, limit=3, detail_level=1, desc_cap=64, min_sim=0.99)
+    assert res, "expected at least the exact-name match"
+    assert all(r["name"] == "cron" for r in res), [r["name"] for r in res]
+
+
+def test_dense_search_min_sim_returns_empty_when_threshold_too_high():
+    tools = _cron_tools()
+    cache = {}
+    res = dense_search("cron", tools, FakeModel(), cache, limit=3, detail_level=1, desc_cap=64, min_sim=10.0)
+    assert res == [], res
+
+
+def test_dense_search_default_min_sim_no_filtering():
+    tools = _cron_tools()
+    cache = {}
+    res = dense_search("cron", tools, FakeModel(), cache, limit=3, detail_level=1, desc_cap=64)
+    assert len(res) >= 1
+
+
+# ---------------------------------------------------------------------------
 # precompute_embeddings + embed_single
 # ---------------------------------------------------------------------------
 

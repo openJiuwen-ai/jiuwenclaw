@@ -148,6 +148,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             config, "tool_retrieval_embedding_model", "BAAI/bge-small-zh-v1.5"
         )
         self._top_k_max = int(getattr(config, "tool_retrieval_top_k_max", 3))
+        self._min_sim = float(getattr(config, "tool_retrieval_min_sim", 0.35))
         self._embedding_model = None
         self._cached_tool_embeddings: Dict[str, Any] = {}
         self._cached_tool_sig: frozenset = frozenset()
@@ -475,6 +476,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             limit=limit,
             detail_level=detail_level,
             desc_cap=self._desc_cap,
+            min_sim=self._min_sim,
         )
 
     # ------------------------------------------------------------------

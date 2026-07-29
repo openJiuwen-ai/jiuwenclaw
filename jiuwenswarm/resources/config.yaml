@@ -422,7 +422,9 @@ debug_trace:
 react:
   agent_name: main_agent
   enable_task_loop: true
-  progressive_tool_enabled: false      # 按需检索开关（默认 false = opt-in）：true=启用（search 返回完整工具定义到 message，LLM 按名直调，不注入 tools[]，prefill 恒定利于 cache）；false=关闭，回到全量工具列表
+  progressive_tool_enabled: true       # 按需检索开关（默认 true = 默认开启）：true=启用（search 返回完整工具定义到 message，LLM 按名直调，不注入 tools[]，prefill 恒定利于 cache）；false=关闭，回到全量工具列表
+  tool_retrieval:
+    min_sim: 0.35                     # dense 检索最低相似度阈值（低于此值不返回，避免误导性 top-k；调高更严格、调低更宽松；0=不过滤）
   max_iterations: 100
   model_name: ${MODEL_NAME:-deepseek-chat}
   skill_mode: all

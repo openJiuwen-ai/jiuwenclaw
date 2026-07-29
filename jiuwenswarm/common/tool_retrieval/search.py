@@ -52,6 +52,7 @@ def dense_search(
     limit: int,
     detail_level: int,
     desc_cap: int = 256,
+    min_sim: float = -1.0,
 ) -> List[dict]:
     if model is None or not (tools or []):
         return []
@@ -97,7 +98,7 @@ def dense_search(
         sim += verb_intent_boost(ql, nl)
         scored.append((sim, tool))
     scored.sort(key=lambda item: (-item[0], getattr(item[1], "name", "")))
-    matched = [tool for _, tool in scored[:max(1, limit)]]
+    matched = [tool for sim, tool in scored if sim >= min_sim][:limit]
     return [build_tool_summary(tool, detail_level=detail_level) for tool in matched]
 
 
