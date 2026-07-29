@@ -657,13 +657,16 @@ async def rewind_session_context(
     cannot simply slice the in-memory buffer.  Instead we reload the truncated
     history.json, convert its records to openjiuwen messages, tear down the old
     context, and build a fresh one.
+
+    When DeepAgent has a live ``_interaction_session`` for this session_id, the
+    rebuild mutates that Session in place (commit, not post_run) so the next
+    chat round does not reload stale pre-rewind messages from memory.
     """
     from openjiuwen.core.foundation.llm.schema.message import (
         UserMessage,
         AssistantMessage,
         ToolMessage,
     )
-    from openjiuwen.core.single_agent import create_agent_session
 
     react_agent = deep_agent.react_agent
     if react_agent is None:
@@ -682,9 +685,22 @@ async def rewind_session_context(
         logger.warning("rewind_session_context: failed to read history for %s: %s", session_id, exc)
         return False
 
-    if not isinstance(history_records, list) or not history_records:
-        logger.info("rewind_session_context: empty history for %s", session_id)
-        return True
+    if not isinstance(history_records, list):
+        logger.warning("rewind_session_context: invalid history for %s", session_id)
+        return False
+
+    # Empty history (e.g. rewind removed every turn) still requires clearing the
+    # live context — otherwise the next chat.send keeps the rewound turns.
+    if not history_records:
+        logger.info("rewind_session_context: empty history for %s; clearing live context", session_id)
+        return await _apply_rewound_context(
+            deep_agent=deep_agent,
+            react_agent=react_agent,
+            session_id=session_id,
+            turn_index=turn_index,
+            context_messages=[],
+            skipped=0,
+        )
 
     # --- 2. Convert history.json records → openjiuwen BaseMessage list ---
     #
@@ -903,43 +919,56 @@ async def rewind_session_context(
             content="[Continue from where the conversation was rewound.]"
         ))
 
-    if not context_messages:
-        logger.info("rewind_session_context: no convertible messages in history for %s", session_id)
-        return True
+    return await _apply_rewound_context(
+        deep_agent=deep_agent,
+        react_agent=react_agent,
+        session_id=session_id,
+        turn_index=turn_index,
+        context_messages=context_messages,
+        skipped=skipped,
+    )
 
-    # --- 3. Tear down old context (discard compressed summaries & stale state) ---
-    context_engine = react_agent.context_engine
-    context = context_engine.get_context(session_id=session_id)
-    if context is not None:
-        logger.info(
-            "rewind_session_context: clearing old context for %s (%d messages in buffer)",
-            session_id, len(context.get_messages()),
-        )
-    await context_engine.clear_context(session_id=session_id)
 
-    # --- 4. Build fresh context from truncated history ---
-    try:
-        session = create_agent_session(session_id=session_id, card=deep_agent.card)
-        await session.pre_run(inputs=None)
-    except Exception as exc:
-        logger.warning("rewind_session_context: pre_run failed for %s: %s", session_id, exc)
-        return False
+def _resolve_live_agent_session(deep_agent: "DeepAgent", session_id: str) -> Any | None:
+    """Return DeepAgent's long-lived Session if it matches ``session_id``.
 
-    # Wipe stale context / deepagent state in the checkpointer so
-    # _load_state_from_session + the agent loop start from our rebuild.
+    Chat rounds reuse ``_interaction_session`` (pre_run once). Rewinding via a
+    fresh Session only updates checkpointer; the next turn still loads stale
+    in-memory context from the bound session.
+    """
+    for attr in ("_interaction_session", "_loop_session"):
+        session_obj = getattr(deep_agent, attr, None)
+        if session_obj is None:
+            continue
+        get_sid = getattr(session_obj, "get_session_id", None)
+        if not callable(get_sid):
+            continue
+        try:
+            if str(get_sid()) == str(session_id):
+                return session_obj
+        except Exception as exc:
+            # Skip this candidate and try the next attr / fall back to a temp
+            # Session; a broken get_session_id must not abort rewind.
+            logger.warning(
+                "rewind_session_context: get_session_id failed on %s for %s: %s",
+                attr, session_id, exc,
+            )
+            continue
+    return None
+
+
+async def _wipe_session_runtime_state(
+    *,
+    session: Any,
+    react_agent: Any,
+    session_id: str,
+) -> None:
+    """Clear context / deep-agent / HITL keys on a live or temp Session."""
     from openjiuwen.harness.schema.state import _SESSION_STATE_KEY
+
     try:
         session.update_state({"context": None})
         session.update_state({_SESSION_STATE_KEY: None})
-        # Clear persisted HITL tool-interrupt state.  When a turn is cancelled
-        # mid-tool (e.g. user ESC'd an ask_user prompt), the SDK persists the
-        # pending interrupt under INTERRUPTION_KEY via _hitl_handler.save().
-        # rewind truncates history.json and rebuilds context_engine, but if we
-        # leave INTERRUPTION_KEY in the checkpoint, the next chat.send loads it
-        # in react_agent.invoke() (hitl_state = self._hitl_handler.load(session))
-        # and treats the new user message as the resume answer for the OLD
-        # interrupted tool_call — replaying the cancelled tool and swallowing
-        # the new question.  Wipe it here so the rebuilt session starts clean.
         try:
             from openjiuwen.core.single_agent.interrupt.state import (
                 INTERRUPTION_KEY,
@@ -952,7 +981,6 @@ async def rewind_session_context(
                 "rewind_session_context: HITL interrupt wipe failed for %s: %s",
                 session_id, int_exc,
             )
-        # Best-effort in-memory clear via the handler too (defence-in-depth).
         try:
             hitl_handler = getattr(react_agent, "_hitl_handler", None)
             if hitl_handler is not None:
@@ -965,17 +993,16 @@ async def rewind_session_context(
     except Exception as exc:
         logger.warning("rewind_session_context: state wipe failed for %s: %s", session_id, exc)
 
-    try:
-        await context_engine.create_context(
-            session=session,
-            history_messages=context_messages,
-        )
-    except Exception as exc:
-        logger.warning("rewind_session_context: create_context failed for %s: %s", session_id, exc)
-        return False
 
-    # --- 5. Persist fresh context to checkpointer ---
-    persist_ok = False
+async def _persist_rewound_session(
+    *,
+    session: Any,
+    deep_agent: "DeepAgent",
+    context_engine: Any,
+    session_id: str,
+    is_live_session: bool,
+) -> bool:
+    """Save rebuilt context; commit live sessions without post_run side effects."""
     try:
         await context_engine.save_contexts(session)
         try:
@@ -985,18 +1012,89 @@ async def rewind_session_context(
                 "rewind_session_context: deep_agent.save_state failed for %s: %s",
                 session_id, save_exc,
             )
-        await session.post_run()
-        persist_ok = True
+        if is_live_session:
+            # post_run closes the interaction stream and marks the session done;
+            # chat must keep using the same Session object.
+            commit = getattr(session, "commit", None)
+            if callable(commit):
+                await commit()
+            else:
+                await session.post_run()
+        else:
+            await session.post_run()
+        return True
     except Exception as exc:
         logger.warning(
             "rewind_session_context: checkpointer persist failed for %s: %s",
             session_id, exc,
         )
+        return False
+
+
+async def _apply_rewound_context(
+    *,
+    deep_agent: "DeepAgent",
+    react_agent: Any,
+    session_id: str,
+    turn_index: int,
+    context_messages: list[Any],
+    skipped: int,
+) -> bool:
+    """Clear + rebuild context_engine and sync the Session the next turn will use."""
+    from openjiuwen.core.single_agent import create_agent_session
+
+    context_engine = react_agent.context_engine
+    context = context_engine.get_context(session_id=session_id)
+    if context is not None:
+        logger.info(
+            "rewind_session_context: clearing old context for %s (%d messages in buffer)",
+            session_id, len(context.get_messages()),
+        )
+    await context_engine.clear_context(session_id=session_id)
+
+    live_session = _resolve_live_agent_session(deep_agent, session_id)
+    is_live_session = live_session is not None
+    if is_live_session:
+        session = live_session
+        logger.info(
+            "rewind_session_context: reusing live interaction session for %s",
+            session_id,
+        )
+    else:
+        try:
+            session = create_agent_session(session_id=session_id, card=deep_agent.card)
+            await session.pre_run(inputs=None)
+        except Exception as exc:
+            logger.warning("rewind_session_context: pre_run failed for %s: %s", session_id, exc)
+            return False
+
+    await _wipe_session_runtime_state(
+        session=session,
+        react_agent=react_agent,
+        session_id=session_id,
+    )
+
+    try:
+        await context_engine.create_context(
+            session=session,
+            history_messages=context_messages,
+        )
+    except Exception as exc:
+        logger.warning("rewind_session_context: create_context failed for %s: %s", session_id, exc)
+        return False
+
+    persist_ok = await _persist_rewound_session(
+        session=session,
+        deep_agent=deep_agent,
+        context_engine=context_engine,
+        session_id=session_id,
+        is_live_session=is_live_session,
+    )
 
     logger.info(
         "rewind_session_context: session=%s turn=%d rebuilt context with %d messages "
-        "(skipped %d streaming/metadata records) persist=%s",
-        session_id, turn_index, len(context_messages), skipped, persist_ok,
+        "(skipped %d streaming/metadata records) persist=%s live_session=%s",
+        session_id, turn_index, len(context_messages), skipped, persist_ok, is_live_session,
     )
     return True
 

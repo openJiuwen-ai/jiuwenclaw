@@ -2886,14 +2886,57 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    def _resolve_rewind_agent(self, channel_id: str) -> tuple[Any, Any] | None:
-        """Return (deep_agent, react_agent) for the given channel, or None."""
+    def _resolve_rewind_agent(
+        self,
+        channel_id: str,
+        session_id: str | None = None,
+    ) -> tuple[Any, Any] | None:
+        """Return (deep_agent, react_agent) for rewind context rebuild.
+
+        Prefer the live **session-scoped** DeepAgent used by chat.send.
+        Root ``agent.get_instance()`` is a separate DeepAgent whose
+        context_engine / ``_interaction_session`` are not the ones the next
+        user turn will read — updating them leaves the model still seeing
+        rewound turns.
+        """
         agent = self._agent_manager.get_agent_nowait(
             channel_id=channel_id or "default"
         )
         if agent is None:
             return None
-        deep_agent = agent.get_instance()
+
+        deep_agent = None
+        sid = str(session_id or "").strip()
+        if sid:
+            adapter = self._resolve_adapter(agent)
+            if adapter is not None:
+                # Already session-scoped (rare): use it directly.
+                if getattr(adapter, "_is_session_scoped_adapter", False):
+                    deep_agent = getattr(adapter, "_instance", None)
+                else:
+                    get_cached = getattr(adapter, "_get_cached_session_adapter", None)
+                    if callable(get_cached):
+                        session_adapter = get_cached(sid)
+                        if session_adapter is not None:
+                            deep_agent = getattr(session_adapter, "_instance", None)
+                            if deep_agent is None:
+                                logger.warning(
+                                    "[AgentWS] rewind: cached session adapter has no "
+                                    "instance for session_id=%s",
+                                    sid,
+                                )
+
+        if deep_agent is None:
+            # Fallback: no live session adapter yet (e.g. rewind before any chat
+            # on this process). Checkpointer-only rebuild still helps cold start.
+            deep_agent = agent.get_instance()
+            if deep_agent is not None and sid:
+                logger.info(
+                    "[AgentWS] rewind: no session-scoped DeepAgent for %s; "
+                    "falling back to root instance",
+                    sid,
+                )
+
         if deep_agent is None:
             return None
         react_agent = deep_agent.react_agent
@@ -2986,8 +3029,19 @@ class AgentWebSocketServer:
             # converts ALL records to context messages, so it naturally produces the
             # correct result for both "from" and "up_to" directions.
             context_ok = False
-            pair = self._resolve_rewind_agent(request.channel_id or "default")
-            if pair is not None:
+            pair = self._resolve_rewind_agent(
+                request.channel_id or "default",
+                session_id=target_sid,
+            )
+            if pair is None:
+                logger.warning(
+                    "[AgentWS] session.rewind: no agent for context rebuild "
+                    "(session_id=%s channel=%s); history truncated but model "
+                    "context may still contain rewound turns",
+                    target_sid,
+                    request.channel_id,
+                )
+            else:
                 deep_agent, _react_agent = pair
                 try:
                     context_ok = await rewind_session_context(
@@ -2998,6 +3052,12 @@ class AgentWebSocketServer:
                 except Exception as exc:
                     logger.warning(
                         "[AgentWS] session.rewind context truncation failed: %s", exc,
+                    )
+                if not context_ok:
+                    logger.warning(
+                        "[AgentWS] session.rewind: history truncated but "
+                        "rewind_context=false (session_id=%s)",
+                        target_sid,
                     )
 
             payload = {**rewind_result, "rewind_context": context_ok}
@@ -3143,7 +3203,10 @@ class AgentWebSocketServer:
                 await send_wire_payload(ws, wire)
             return
 
-        pair = self._resolve_rewind_agent(request.channel_id or "default")
+        pair = self._resolve_rewind_agent(
+            request.channel_id or "default",
+            session_id=target_sid,
+        )
         if pair is None:
             wire = AgentWebSocketServer._send_error_response(
                 ws, request, send_lock, "no agent instance available",
