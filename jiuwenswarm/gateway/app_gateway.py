@@ -1558,15 +1558,16 @@ async def _run(
     message_handler._heartbeat_scheduler_service = heartbeat_scheduler_service
 
     full_cfg: dict[str, Any] = {}
-    heartbeat_cfg: dict | None = None
+    health_check_cfg: dict | None = None
     channels_cfg: dict | None = None
     try:
         full_cfg = get_config()
-        heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
+        # 旧探活配置已从 heartbeat 段迁移到 health_check 段(方案 §2.3)。
+        health_check_cfg = full_cfg.get("health_check") if isinstance(full_cfg, dict) else None
         channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
     except Exception as e:  # noqa: BLE001
-        logger.warning("[App] failed to read heartbeat config from config.yaml, using defaults: %s", e)
-        heartbeat_cfg = None
+        logger.warning("[App] failed to read health_check config from config.yaml, using defaults: %s", e)
+        health_check_cfg = None
         channels_cfg = None
 
     client.set_or_update_server_config(
@@ -1574,10 +1575,10 @@ async def _run(
         env={env_key: (os.getenv(env_key) or "") for env_key in _CONFIG_SET_ENV_MAP.values()},
     )
 
-    if isinstance(heartbeat_cfg, dict):
-        cfg_every = heartbeat_cfg.get("every")
-        cfg_target = heartbeat_cfg.get("target")
-        cfg_active_hours = heartbeat_cfg.get("active_hours")
+    if isinstance(health_check_cfg, dict):
+        cfg_every = health_check_cfg.get("every")
+        cfg_target = health_check_cfg.get("target")
+        cfg_active_hours = health_check_cfg.get("active_hours")
     else:
         cfg_every = None
         cfg_target = None

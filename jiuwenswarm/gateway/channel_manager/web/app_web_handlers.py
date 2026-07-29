@@ -47,7 +47,7 @@ from jiuwenswarm.common.config import (
     get_default_models,
     replace_teams_in_config,
     update_default_models_in_config,
-    update_heartbeat_in_config,
+    update_health_check_in_config,
     update_channel_in_config,
     replace_channel_subsection_with_cleanup,
     update_browser_in_config,
@@ -1497,7 +1497,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         env_updates 为本次变更的环境变量增量（仅包含更新项），
         config_payload 为当前最新配置快照；
         返回 True 表示已热更新未重启，False 表示已安排进程重启。
-    heartbeat_service: 可选，GatewayHeartbeatService 实例，用于处理 heartbeat.get_conf / heartbeat.set_conf。
+    heartbeat_service: 可选，GatewayHealthCheckService 实例，用于处理 health_check.get_conf / health_check.set_conf。
     """
     channel = bind.channel
     agent_client = bind.agent_client
@@ -4498,22 +4498,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.warning("[locale.set_conf] 写回 config.yaml 失败: %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _heartbeat_get_conf(ws, req_id, params, session_id):
-        """返回当前心跳配置（every / target / active_hours）。"""
+    async def _health_check_get_conf(ws, req_id, params, session_id):
+        """返回当前探活配置（every / target / active_hours）。"""
         hb = _resolve(heartbeat_service)
         if hb is None:
-            await channel.send_response(ws, req_id, ok=False, error="heartbeat service not available",
+            await channel.send_response(ws, req_id, ok=False, error="health_check service not available",
                                         code="SERVICE_UNAVAILABLE")
             return
         try:
-            payload = dict(hb.get_heartbeat_conf())
+            payload = dict(hb.get_health_check_conf())
             await channel.send_response(ws, req_id, ok=True, payload=payload)
         except Exception as e:
-            logger.exception("[heartbeat.get_conf] %s", e)
+            logger.exception("[health_check.get_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _heartbeat_set_conf(ws, req_id, params, session_id):
-        """更新心跳配置并重启心跳服务；params 可含 every、target、active_hours。"""
+    async def _health_check_set_conf(ws, req_id, params, session_id):
+        """更新探活配置并重启探活服务；params 可含 every、target、active_hours。"""
         hb = _resolve(heartbeat_service)
         if hb is None:
             await channel.send_response(ws, req_id, ok=False, error="heartbeat service not available",
@@ -4569,33 +4569,33 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                         )
                         return
                 except Exception as e:
-                    logger.debug("[heartbeat.set_conf] 飞书目标检测异常: %s", e)
+                    logger.debug("[health_check.set_conf] 飞书目标检测异常: %s", e)
                     await channel.send_response(
                         ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR",
                     )
                     return
 
             # 检查通过后再保存配置
-            await hb.set_heartbeat_conf(every=every, target=target, active_hours=active_hours)
-            payload = dict(hb.get_heartbeat_conf())
+            await hb.set_health_check_conf(every=every, target=target, active_hours=active_hours)
+            payload = dict(hb.get_health_check_conf())
             should_clear_agent_config_cache = False
             try:
-                update_heartbeat_in_config(payload)
+                update_health_check_in_config(payload)
                 should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
-                logger.warning("[heartbeat.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[health_check.set_conf] 写回 config.yaml 失败: %s", e)
             try:
                 await channel.send_response(ws, req_id, ok=True, payload=payload)
             finally:
                 if should_clear_agent_config_cache:
-                    _schedule_clear_agent_config_cache("heartbeat.set_conf")
+                    _schedule_clear_agent_config_cache("health_check.set_conf")
         except ValueError as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
         except Exception as e:
-            logger.exception("[heartbeat.set_conf] %s", e)
+            logger.exception("[health_check.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _heartbeat_get_path(ws, req_id, params, session_id):
+    async def _health_check_get_path(ws, req_id, params, session_id):
         """返回 HEARTBEAT.md 文件路径。"""
         from jiuwenswarm.common.utils import get_deepagent_heartbeat_path, get_agent_root_dir
 
@@ -5530,9 +5530,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.get_conf", _updater_get_conf)
     channel.register_method("updater.reset_source", _updater_reset_source)
     channel.register_method("updater.set_conf", _updater_set_conf)
-    channel.register_method("heartbeat.get_conf", _heartbeat_get_conf)
-    channel.register_method("heartbeat.set_conf", _heartbeat_set_conf)
-    channel.register_method("heartbeat.get_path", _heartbeat_get_path)
+    channel.register_method("health_check.get_conf", _health_check_get_conf)
+    channel.register_method("health_check.set_conf", _health_check_set_conf)
+    channel.register_method("health_check.get_path", _health_check_get_path)
     channel.register_method("channel.feishu.get_conf", _channel_feishu_get_conf)
     channel.register_method("channel.feishu.set_conf", _channel_feishu_set_conf)
     channel.register_method("channel.xiaoyi.get_conf", _channel_xiaoyi_get_conf)

@@ -352,19 +352,27 @@ _load_yaml_round_trip = load_yaml_round_trip
 _dump_yaml_round_trip = dump_yaml_round_trip
 
 
-def update_heartbeat_in_config(payload: dict[str, Any]) -> None:
-    """只更新 heartbeat 段并写回。"""
+def update_health_check_in_config(payload: dict[str, Any]) -> None:
+    """只更新 health_check 段(旧探活配置)并写回。
+
+    旧 ``update_heartbeat_in_config`` 的迁移目标(方案 §2.3):探活配置
+    every/target/active_hours 已从 heartbeat 段迁移到 health_check 段。
+    """
     data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "heartbeat" not in data:
-        data["heartbeat"] = {}
-    hb = data["heartbeat"]
+    if "health_check" not in data:
+        data["health_check"] = {}
+    hc = data["health_check"]
     if "every" in payload:
-        hb["every"] = payload["every"]
+        hc["every"] = payload["every"]
     if "target" in payload:
-        hb["target"] = payload["target"]
+        hc["target"] = payload["target"]
     if "active_hours" in payload:
-        hb["active_hours"] = payload["active_hours"]
+        hc["active_hours"] = payload["active_hours"]
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+# 兼容别名:旧调用方仍可 import update_heartbeat_in_config(指向 health_check 段)。
+update_heartbeat_in_config = update_health_check_in_config
 
 
 def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:

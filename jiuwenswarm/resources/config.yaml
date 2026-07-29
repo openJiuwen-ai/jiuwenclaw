@@ -589,12 +589,31 @@ gateway:
       connect_timeout_s: 30
       client_keys_dir: "/root/.ssh"
 
+# 新心跳任务(线程续跑)资源限制(方案 §11)。只服务 heartbeat job;
+# 旧探活配置见下方 health_check 段。
 heartbeat:
-  # 心跳间隔（秒），默认 3600
+  jobs:
+    # interval 模式最小间隔(秒)
+    min_interval_seconds: 60
+    # 单个 session 同时活跃心跳任务上限
+    max_active_jobs_per_session: 5
+    # 全局活跃心跳任务上限
+    max_active_jobs_global: 100
+    # 默认最大触发次数(null=不限,需 UI 确认)
+    default_max_runs: 12
+    # 默认重叠运行策略:skip | queue | replace
+    default_concurrency_policy: skip
+    # 默认会话删除后处理策略:disable | completed
+    default_session_deleted_policy: disable
+
+# 旧探活(HealthCheck/Probe):HEARTBEAT.md 驱动的全局周期探活,只做连通性检查。
+# 由 gateway/health_check/ 实现,与上方 heartbeat.jobs 严格区分。
+health_check:
+  # 探活间隔（秒），默认 3600
   every: 3600
-  # 心跳结果回传的 channel（如 "web"），
+  # 探活结果回传的 channel（如 "web"）
   target: web
-  # 心跳生效时间段（本地时间），start <= now < end 时心跳生效
+  # 探活生效时间段（本地时间），start <= now < end 时生效
   active_hours:
     start: 08:00
     end: 22:00

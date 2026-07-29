@@ -10,8 +10,10 @@
 结果通过 ``health_check.relay`` 事件回传到指定 channel(默认 web)。
 只做连通性检查,不再作为任务系统。
 
-迁移期:旧 ``gateway/heartbeat/heartbeat.py`` 保留为 thin shim 再导出本模块符号,
-保持既有 import 不崩;IM 渠道的 ``EventType.HEARTBEAT_RELAY`` 分支暂保留。
+迁移已完成:旧 ``gateway/heartbeat/heartbeat.py`` shim 已删除;IM 渠道 8 文件
++ web_connect 的 relay 分支已全量切换到 ``EventType.HEALTH_CHECK_RELAY``;
+探活配置已从 config.yaml 的 ``heartbeat`` 段迁移到 ``health_check`` 段。
+环境变量 ``HEARTBEAT_RELAY_CHANNEL_ID`` 等保留旧名(运维侧不断裂)。
 """
 
 from __future__ import annotations
@@ -242,8 +244,8 @@ class GatewayHealthCheckService(IHealthCheck):
                 )
 
             # 将响应内容作为 event 类型 Message 回传到配置的 channel(如 WebChannel)。
-            # 迁移期仍用 EventType.HEARTBEAT_RELAY(旧值)以保持 IM 渠道 relay 分支兼容;
-            # 后续全量切换到 EventType.HEALTH_CHECK_RELAY。
+            # 发送 EventType.HEALTH_CHECK_RELAY(新值);接收端(8 个 IM 渠道 + web_connect)
+            # 已在任务 2 全量切换到 HEALTH_CHECK_RELAY,端到端一致。
             if self._config.relay_channel_id and self._message_handler:
                 from jiuwenswarm.common.schema.message import Message, EventType
 

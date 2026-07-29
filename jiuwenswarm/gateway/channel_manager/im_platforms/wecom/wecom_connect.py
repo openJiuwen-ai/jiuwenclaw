@@ -1004,8 +1004,8 @@ class WecomChannel(BaseChannel):
         msg_id = str(msg.id or "").strip()
         is_system_msg = (
             msg_id.startswith("cron-push")
-            or msg_id.startswith("heartbeat-relay")
-            or str(getattr(msg, "session_id", "") or "").startswith(("__", "heartbeat_", "cron"))
+            or msg_id.startswith("healthcheck-relay")
+            or str(getattr(msg, "session_id", "") or "").startswith(("__", "healthcheck_", "cron"))
         )
         if is_system_msg:
             wecom_user_id = str(meta.get("wecom_user_id") or "").strip()
@@ -1020,8 +1020,8 @@ class WecomChannel(BaseChannel):
 
         sid = getattr(msg, "session_id", None) or msg.id
         sid_str = str(sid) if sid else ""
-        # 系统会话（心跳、cron 等）无有效 chatid，使用 config 中的 last_chat_id
-        system_session_prefixes = ("__", "heartbeat_", "cron")
+        # 系统会话（探活、cron 等）无有效 chatid，使用 config 中的 last_chat_id
+        system_session_prefixes = ("__", "healthcheck_", "cron")
         if sid_str and not any(sid_str.startswith(p) for p in system_session_prefixes):
             if not self._looks_like_msgid(sid_str):
                 logger.info("[WecomChannel] _extract_chatid: 返回session_id=%s", sid_str)
@@ -1150,7 +1150,7 @@ class WecomChannel(BaseChannel):
             return
 
         # 心跳/系统事件
-        if msg.event_type == EventType.HEARTBEAT_RELAY:
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             chatid = self._extract_chatid(msg)
             logger.info("[WecomChannel] 心跳/系统事件处理: chatid=%s, msg.id=%s", chatid, msg.id)
             if chatid:

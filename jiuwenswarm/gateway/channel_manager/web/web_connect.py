@@ -61,7 +61,7 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "chat.interrupt_result",
         "chat.evolution_status",
         "chat.error",
-        "heartbeat.relay",
+        "health_check.relay",
         "context.usage",
         "context.compression_state",
         "chat.ask_user_question",
@@ -697,17 +697,17 @@ class WebChannel(BaseWsChannel):
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
         )
-        # ── 心跳 relay：临时 session_id（heartbeat_{ts}_{suffix}）不匹配任何前端连接，
-        # 按常规 session_id 路由会被当作"无连接"丢弃。心跳状态是全局的（非会话级），
+        # ── health_check relay：临时 session_id（healthcheck_{ts}_{suffix}）不匹配任何前端连接，
+        # 按常规 session_id 路由会被当作"无连接"丢弃。探活状态是全局的（非会话级），
         # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
-        # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
-        if msg.event_type == EventType.HEARTBEAT_RELAY:
+        # 与 wechat 等 IM 渠道在 send() 中对 HEALTH_CHECK_RELAY 的专属分支对齐。
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
             logger.debug(
-                "[WebChannel] heartbeat.relay broadcast to %d client(s) id=%s",
+                "[WebChannel] health_check.relay broadcast to %d client(s) id=%s",
                 len(clients), getattr(msg, "id", ""),
             )
             return
