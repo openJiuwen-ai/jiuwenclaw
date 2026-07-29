@@ -60,7 +60,11 @@ def dense_search(
 
     ql = (query or "").strip().lower()
     ql_norm = "_".join(ql.split())
-    emb_results = list(model.embed([ql]))
+    try:
+        emb_results = list(model.embed([ql]))
+    except Exception as exc:
+        logger.warning("[tool_retrieval] query embed failed: %s", exc)
+        return []
     if not emb_results:
         return []
     qv = emb_results[0]

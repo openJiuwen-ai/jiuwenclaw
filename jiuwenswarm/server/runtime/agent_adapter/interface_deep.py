@@ -225,7 +225,6 @@ from jiuwenswarm.agents.harness.common.tools import (
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
-from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
@@ -3885,13 +3884,12 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     def _build_progressive_tool_rail(self) -> "JiuWenProgressiveToolRail | None":
-        """Build agent-core ProgressiveToolRail (search-based, with always-visible tools).
+        """Build JiuWenProgressiveToolRail (search-based, with always-visible tools).
 
         search_tools returns full tool definitions (incl. JSON Schema) in the
         result message. The LLM calls matched tools by name directly — they
         are resolved by ability_manager regardless of the request tools[] list,
         so inputs.tools (prefill) stays constant for prompt-cache stability.
-        load_tools is still available for explicit session-visible loading.
         """
         try:
             from types import SimpleNamespace

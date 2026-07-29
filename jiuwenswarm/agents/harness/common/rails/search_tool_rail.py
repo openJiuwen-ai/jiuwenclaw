@@ -207,7 +207,6 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
 
         # Remove the static "tools" section (nav replaces it).
         builder.remove_section("tools")
-        session = getattr(ctx, "session", None)
 
         # Debug: log prefill + active set before each LLM call.
         if session is not None:
