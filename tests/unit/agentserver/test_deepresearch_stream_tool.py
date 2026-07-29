@@ -25,10 +25,23 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
+from jiuwenclaw.agentserver.tools.deepresearch import todo_progress
 from jiuwenclaw.local_env_config import (
     bind_task_env_overlay,
     reset_task_env_overlay,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stream_search_config(monkeypatch):
+    original_export = dt.export_agent_environ
+
+    def export_with_search(service_id, agent_id):
+        env = original_export(service_id, agent_id)
+        env.setdefault("BOCHA_API_KEY", "test-bocha-key")
+        return env
+
+    monkeypatch.setattr(dt, "export_agent_environ", export_with_search)
 
 
 class _Proc:
@@ -110,6 +123,12 @@ class _StderrBackpressureProc(_Proc):
         async def gen():
             await self.stderr_drained.wait()
             yield json.dumps({
+                "agent": "sub_reporter",
+                "section_idx": "1",
+                "section_total": 1,
+                "event": "done",
+            }).encode()
+            yield json.dumps({
                 "__deepsearch_status__": "completed",
                 "conversation_id": "C1",
                 "final_result": {"response_content": "done"},
@@ -142,6 +161,12 @@ class _LargeStdoutLineProc(_Proc):
     def __init__(self, report_content):
         super().__init__([])
         self._stdout = asyncio.StreamReader()
+        self._stdout.feed_data((json.dumps({
+            "agent": "sub_reporter",
+            "section_idx": "1",
+            "section_total": 1,
+            "event": "done",
+        }) + "\n").encode())
         self._stdout.feed_data((json.dumps({
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
@@ -507,14 +532,22 @@ async def test_styled_report_llm_context_releases_after_repeated_entry_cancellat
     await asyncio.wait_for(reenter(), timeout=0.1)
 
 
-def _patch_env(tool_lines):
-    """统一 patch:Python/script 解析、route(空,触发 _send 早退)、subprocess、transport。"""
+def _patch_env(tool_lines, push=None):
+    """统一 patch:Python/script 解析、route、subprocess、transport。"""
+    route = (
+        {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
+        if push is not None
+        else {"request_id": "", "channel_id": "", "session_id": ""}
+    )
     return [
         patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"),
         patch.object(dt, "_resolve_run_script", return_value="/s"),
-        patch.object(dt, "_get_route", return_value={"request_id": "", "channel_id": "", "session_id": ""}),
+        patch.object(dt, "_get_route", return_value=route),
         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(tool_lines))),
-        patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport"),
+        patch(
+            "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+            return_value=push,
+        ),
     ]
 
 
@@ -560,7 +593,12 @@ async def test_tool_sends_ordered_stage_surfaces_and_retains_completed_snapshot(
     report_path = tmp_path / "r.md"
     report_path.write_text("done", encoding="utf-8")
     push = AsyncMock()
-    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+    with patch.object(
+             todo_progress,
+             "resolve_tenant_agent_workspace_dir",
+             return_value=tmp_path,
+         ), \
+         patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
          patch.object(dt, "_get_route", return_value={
              "request_id": "R1", "channel_id": "CH1", "session_id": "S1"
@@ -623,32 +661,35 @@ async def test_tool_sends_ordered_stage_surfaces_and_retains_completed_snapshot(
         "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
         "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n",
         "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
-        "[DeepResearch 阶段切换] 开始 Stage 4：报告整合\n",
-        "[DeepResearch 阶段切换] 开始 Stage 5：引用溯源与校验\n",
-        "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
-        "[DeepResearch 阶段完成] Stage 6：报告交付\n",
+        "[DeepResearch 阶段切换] 开始 Stage 4：报告交付\n",
+        "[DeepResearch 阶段完成] Stage 4：报告交付\n",
     ]
     assert [payload["content"] for payload in stage_deltas] == [
         "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
         "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n",
         "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
-        "[DeepResearch 阶段切换] 开始 Stage 4：报告整合\n",
-        "[DeepResearch 阶段切换] 开始 Stage 5：引用溯源与校验\n",
-        "[DeepResearch 阶段切换] 开始 Stage 6：报告交付\n",
-        "[DeepResearch 阶段完成] Stage 6：报告交付\n",
+        "[DeepResearch 阶段切换] 开始 Stage 4：报告交付\n",
+        "[DeepResearch 阶段完成] Stage 4：报告交付\n",
     ]
     assert [_active_stage(update) for update in task_updates] == [
-        1, 2, 3, 4, 5, 6, None,
+        1, 2, 3, 4, None,
     ]
     completed_update = task_updates[-1]
     assert [task["task_id"] for task in completed_update["tasks"]] == [
-        f"deepresearch_stage_{index}" for index in range(1, 7)
+        f"deepresearch_stage_{index}" for index in range(1, 5)
     ]
     assert all(task["status"] == "completed" for task in completed_update["tasks"])
     assert not any(
         payload.get("event_type") == "task.update" and not payload.get("tasks")
         for payload in payloads
     )
+    persisted_todos = json.loads(
+        (tmp_path / "todo" / "S1" / "todo.json").read_text(encoding="utf-8")
+    )
+    assert [item["id"] for item in persisted_todos] == [
+        f"deepresearch_stage_{index}" for index in range(1, 5)
+    ]
+    assert all(item["status"] == "completed" for item in persisted_todos)
     completed_update_index = payloads.index(completed_update)
     file_index = next(
         index for index, payload in enumerate(payloads)
@@ -657,14 +698,32 @@ async def test_tool_sends_ordered_stage_surfaces_and_retains_completed_snapshot(
     completion_reasoning_index = next(
         index for index, payload in enumerate(payloads)
         if payload.get("event_type") == "chat.reasoning"
-        and payload.get("content") == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+        and payload.get("content") == "[DeepResearch 阶段完成] Stage 4：报告交付\n"
     )
     completion_delta_index = next(
         index for index, payload in enumerate(payloads)
         if payload.get("event_type") == "chat.delta"
-        and payload.get("content") == "[DeepResearch 阶段完成] Stage 6：报告交付\n"
+        and payload.get("content") == "[DeepResearch 阶段完成] Stage 4：报告交付\n"
     )
     assert file_index < completed_update_index < completion_reasoning_index < completion_delta_index
+    nested_boundaries = [
+        (payload["event_type"], payload.get("stream_source_id"))
+        for payload in payloads
+        if payload.get("event_type") in {"task.start", "task.complete"}
+    ]
+    assert nested_boundaries == [
+        ("task.start", "deepresearch_section_1"),
+        ("task.complete", "deepresearch_section_1"),
+        ("task.start", "deepresearch_final_report"),
+        ("task.complete", "deepresearch_final_report"),
+    ]
+    aggregate_complete_index = next(
+        index for index, payload in enumerate(payloads)
+        if payload.get("event_type") == "task.complete"
+        and payload.get("stream_source_id") == "deepresearch_final_report"
+    )
+    stage_four_update_index = payloads.index(task_updates[-2])
+    assert aggregate_complete_index < stage_four_update_index < file_index
 
     for update in task_updates[:-1]:
         active_stage = _active_stage(update)
@@ -2380,6 +2439,12 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps({
+            "agent": "sub_reporter",
+            "section_idx": "1",
+            "section_total": 1,
+            "event": "done",
+        }),
+        json.dumps({
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
             "final_result": final_result,
@@ -2453,7 +2518,7 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
     }
     assert "C1.citations.json" not in json.dumps(file_payload)
     assert [_active_stage(update) for update in _task_updates(payloads)] == [
-        1, 2, 3, 4, 5, 6, None,
+        1, 2, 3, 4, None,
     ]
     assert json.loads(result) == {
         "status": "completed",
@@ -2469,6 +2534,12 @@ async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fa
 ):
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({
+            "agent": "sub_reporter",
+            "section_idx": "1",
+            "section_total": 1,
+            "event": "done",
+        }),
         json.dumps({
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
@@ -2503,7 +2574,7 @@ async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fa
     assert "report_content" not in outcome
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     assert [_active_stage(update) for update in _task_updates(payloads)] == [
-        1, 2, 3, 4, 5, 6,
+        1, 2, 3, 4,
     ]
 
 
@@ -2534,12 +2605,21 @@ async def test_tool_keeps_current_workflow_stage_in_progress_when_research_fails
              "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
              return_value=push,
          ):
-        await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
+        result = await dt.deepresearch_stream._func(
+            action="start",
+            query="X",
+            file_name="r",
+        )
 
+    outcome = json.loads(result)
+    assert outcome["status"] == "error"
+    assert outcome["error_code"] == "workflow_error"
+    assert outcome["error"] == "search failed"
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     assert [_active_stage(update) for update in _task_updates(payloads)] == [
         1, 2, 3,
     ]
+    assert all(payload.get("event_type") != "chat.error" for payload in payloads)
 
 
 @pytest.mark.asyncio
@@ -2644,7 +2724,8 @@ async def test_repeated_outline_interaction_after_auto_accept_returns_error():
         json.dumps({"__deepsearch_status__": "interrupted", "agent": "outline_interaction",
                     "conversation_id": "C1"}),
     ]
-    patches = _patch_env(lines)
+    push = AsyncMock()
+    patches = _patch_env(lines, push)
     for p in patches:
         p.start()
     try:
@@ -2656,6 +2737,8 @@ async def test_repeated_outline_interaction_after_auto_accept_returns_error():
     out = json.loads(result)
     assert out["status"] == "error"
     assert out["error_code"] == "outline_auto_resume_loop"
+    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
+    assert all(payload.get("event_type") != "chat.error" for payload in payloads)
 
 
 @pytest.mark.asyncio
@@ -2668,7 +2751,8 @@ async def test_outline_status_placeholder_does_not_escape_auto_resume_loop():
         json.dumps({"__deepsearch_status__": "interrupted", "agent": "outline_interaction",
                     "conversation_id": "C1", "content": "Round 1: waiting for user feedback."}),
     ]
-    patches = _patch_env(lines)
+    push = AsyncMock()
+    patches = _patch_env(lines, push)
     for p in patches:
         p.start()
     try:
@@ -2680,6 +2764,8 @@ async def test_outline_status_placeholder_does_not_escape_auto_resume_loop():
     out = json.loads(result)
     assert out["status"] == "error"
     assert out["error_code"] == "outline_auto_resume_loop"
+    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
+    assert all(payload.get("event_type") != "chat.error" for payload in payloads)
 
 
 @pytest.mark.asyncio
@@ -2702,6 +2788,12 @@ async def test_outline_interaction_is_resumed_inside_the_tool_without_returning_
     ]
     resume_lines = [
         json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
+        json.dumps({
+            "agent": "sub_reporter",
+            "section_idx": "1",
+            "section_total": 1,
+            "event": "done",
+        }),
         json.dumps({
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
@@ -2808,7 +2900,9 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume(tmp_path
             action="start", query="X", file_name="r",
         )
 
-    assert json.loads(completed)["status"] == "completed"
+    outcome = json.loads(completed)
+    assert outcome["status"] == "error"
+    assert outcome["error_code"] == "incomplete_section_progress"
     section_payloads = [
         call.args[0]["payload"]
         for call in push.send_push.await_args_list
@@ -2821,8 +2915,54 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume(tmp_path
         for payload in section_payloads
     )
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
-    assert [_active_stage(update) for update in _task_updates(payloads)] == [
-        1, 2, 3, 4, 5, 6, None,
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 2, 3]
+    assert not any(payload.get("event_type") == "chat.file" for payload in payloads)
+
+
+@pytest.mark.asyncio
+async def test_user_feedback_resume_can_complete_existing_final_report_node(tmp_path):
+    lines = [
+        json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
+        json.dumps({
+            "__deepsearch_status__": "completed",
+            "conversation_id": "C1",
+            "final_result": {"response_content": "done"},
+        }),
+    ]
+    report_path = tmp_path / "r.md"
+    report_path.write_text("done", encoding="utf-8")
+    push = AsyncMock()
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "R1", "channel_id": "CH1", "session_id": "S1"
+         }), \
+         patch.object(
+             dt,
+             "_write_report_artifacts_stream",
+             new=AsyncMock(return_value={"md": str(report_path)}),
+         ), \
+         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+             return_value=push,
+         ):
+        completed = await dt.deepresearch_stream._func(
+            action="resume",
+            conversation_id="C1",
+            node="user_feedback_processor",
+            feedback='{"feedback":"accepted"}',
+            file_name="r",
+        )
+
+    assert json.loads(completed)["status"] == "completed"
+    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
+    assert (
+        "task.complete",
+        "deepresearch_final_report",
+    ) in [
+        (payload.get("event_type"), payload.get("stream_source_id"))
+        for payload in payloads
     ]
 
 
@@ -2939,6 +3079,12 @@ async def test_start_returns_completed_outcome(tmp_path):
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps({"agent": "reporter", "content": "最终报告正文"}),
+        json.dumps({
+            "agent": "sub_reporter",
+            "section_idx": "1",
+            "section_total": 1,
+            "event": "done",
+        }),
         json.dumps({"__deepsearch_status__": "completed", "conversation_id": "C1",
                     "final_result": final_result}),
     ]
@@ -3263,6 +3409,36 @@ async def test_missing_run_script_returns_error():
     out = json.loads(result)
     assert out["status"] == "error"
     assert "run_deepsearch.py" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_missing_search_config_returns_error_without_spawning():
+    spawn = AsyncMock(return_value=_Proc([]))
+    child_env = {
+        "LLM_MODEL_NAME": "model",
+        "LLM_MODEL_TYPE": "openai",
+        "LLM_BASE_URL": "https://llm.example/v1",
+        "LLM_API_KEY": "llm-key",
+    }
+
+    with patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_build_deepresearch_child_env", return_value=child_env), \
+         patch("asyncio.create_subprocess_exec", new=spawn), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "R1", "channel_id": "CH1", "session_id": "S1",
+         }):
+        result = await dt.deepresearch_stream._func(
+            action="start",
+            query="X",
+            file_name="r",
+        )
+
+    out = json.loads(result)
+    assert out["status"] == "error"
+    assert out["error_code"] == "search_config_missing"
+    assert "Petal" in out["error"]
+    assert "Bocha" in out["error"]
+    spawn.assert_not_awaited()
 
 
 @pytest.mark.asyncio

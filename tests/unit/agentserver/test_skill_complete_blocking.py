@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -33,12 +33,14 @@ def _mk_tool_call(name, tool_id="test_id_123"):
     return tc
 
 
-def _mk_ctx_with_tool_call(tool_name, tool_id="test_id_123"):
+def _mk_ctx_with_tool_call(tool_name, tool_id="test_id_123", skill_name=""):
     tc = _mk_tool_call(tool_name, tool_id)
+    tool_args = {"skill_name": skill_name} if skill_name else {}
+    tc.arguments = tool_args
     inputs = ToolCallInputs(
         tool_call=tc,
         tool_name=tool_name,
-        tool_args={},
+        tool_args=tool_args,
         tool_result=None,
         tool_msg=None,
     )
@@ -175,6 +177,46 @@ class TestSkillCompleteBlocking:
 
         assert "_skip_tool" not in ctx.extra
         assert ctx.inputs.tool_result is None
+
+    @pytest.mark.asyncio
+    @staticmethod
+    async def test_skill_complete_does_not_emit_empty_task_update():
+        rail = TaskExecutionRail()
+        rail._todo_map = {}
+        rail._detect_and_emit_artifact_generated = AsyncMock()
+        rail._emit_task_update_event = AsyncMock()
+
+        await rail.after_tool_call(
+            _mk_ctx_with_tool_call("skill_complete", skill_name="deepresearch")
+        )
+
+        rail._emit_task_update_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @staticmethod
+    async def test_other_skill_complete_keeps_empty_task_update():
+        rail = TaskExecutionRail()
+        rail._todo_map = {}
+        rail._detect_and_emit_artifact_generated = AsyncMock()
+        rail._emit_task_update_event = AsyncMock()
+
+        await rail.after_tool_call(
+            _mk_ctx_with_tool_call("skill_complete", skill_name="another-skill")
+        )
+
+        rail._emit_task_update_event.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @staticmethod
+    async def test_skill_complete_keeps_nonempty_task_update():
+        rail = TaskExecutionRail()
+        rail._todo_map = {"task1": {"status": "completed"}}
+        rail._detect_and_emit_artifact_generated = AsyncMock()
+        rail._emit_task_update_event = AsyncMock()
+
+        await rail.after_tool_call(_mk_ctx_with_tool_call("skill_complete"))
+
+        rail._emit_task_update_event.assert_awaited_once()
 
     @pytest.mark.asyncio
     @staticmethod

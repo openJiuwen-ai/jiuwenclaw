@@ -36,6 +36,10 @@ from jiuwenclaw.agentserver.tools.deepresearch.tls import (
     DEEPRESEARCH_TLS_ENV_LOCK as _REPORT_STYLE_LLM_INIT_LOCK,
     scoped_deepresearch_tls_env,
 )
+from jiuwenclaw.agentserver.tools.deepresearch.todo_progress import (
+    deepresearch_todo_path,
+    persist_deepresearch_task_update,
+)
 from jiuwenclaw.local_env_config import export_agent_environ, read_env
 
 logger = logging.getLogger(__name__)
@@ -1469,6 +1473,19 @@ def _build_deepresearch_child_env(
     return env
 
 
+def _validate_deepresearch_search_env(env: dict[str, str]) -> str | None:
+    """Return a user-facing error when the child cannot perform web search."""
+    engine = env.get("WEB_SEARCH_ENGINE_NAME", "").strip().lower()
+    search_key = env.get("WEB_SEARCH_API_KEY", "").strip()
+    search_url = env.get("WEB_SEARCH_URL", "").strip()
+    if engine and search_key and (engine != "petal" or search_url):
+        return None
+    return (
+        "DeepResearch 搜索配置缺失：请配置完整的 Petal（URL 与凭据）"
+        "或 Bocha（API Key）搜索凭据。"
+    )
+
+
 async def _iter_ndjson_lines(stream, read_size: int = 64 * 1024):
     """Read newline-delimited subprocess output without StreamReader's line limit."""
     if stream is None:
@@ -1618,6 +1635,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
         advance_stage,
         build_interrupt_prompt,
         collected_questions,
+        complete_final_report_processing,
         is_outline_status_placeholder,
         route_chunk,
     )
@@ -1665,6 +1683,29 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     else:
         return f'{{"status":"error","error":"unknown action: {action}"}}'
 
+    try:
+        child_env = _build_deepresearch_child_env(
+            os.environ,
+            interactive_ask=interactive_ask,
+            service_id=str(route.get("service_id") or "default"),
+            agent_id=str(route.get("agent_id") or "default"),
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        return json.dumps(
+            {"status": "error", "error": f"child env build failed: {exc}"},
+            ensure_ascii=False,
+        )
+    search_config_error = _validate_deepresearch_search_env(child_env)
+    if search_config_error:
+        return json.dumps(
+            {
+                "status": "error",
+                "error_code": "search_config_missing",
+                "error": search_config_error,
+            },
+            ensure_ascii=False,
+        )
+
     push = WebSocketGatewayPushTransport()
     cached_titles = outline_title_cache.get(conversation_id, {}) if action == "resume" else {}
     existing_state = _deepresearch_router_state_ctx.get()
@@ -1673,17 +1714,42 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
         if action == "resume" and node == "feedback_handler"
         else 0
     )
+    resumes_final_report = (
+        action == "resume" and node == "user_feedback_processor"
+    )
     state = (
         existing_state
         if existing_state is not None
         else RouterState(
             section_titles=dict(cached_titles),
             current_stage=resume_stage,
+            final_report_started=resumes_final_report,
         )
     )
     outcome_cid = conversation_id
+    todo_path = None
+    if route.get("session_id"):
+        try:
+            todo_path = deepresearch_todo_path(
+                session_id=str(route["session_id"]),
+                service_id=str(route.get("service_id") or "default"),
+                agent_id=str(route.get("agent_id") or "default"),
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "[deepresearch_stream] resolve todo path failed: %s",
+                exc,
+            )
 
     async def _send(payload: dict) -> bool:
+        if todo_path is not None and payload.get("event_type") == "task.update":
+            try:
+                persist_deepresearch_task_update(payload, todo_path=todo_path)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "[deepresearch_stream] persist task.update failed: %s",
+                    exc,
+                )
         if not route.get("session_id") or not route.get("channel_id"):
             return False
         msg = {
@@ -1711,12 +1777,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=_build_deepresearch_child_env(
-                os.environ,
-                interactive_ask=interactive_ask,
-                service_id=str(route.get("service_id") or "default"),
-                agent_id=str(route.get("agent_id") or "default"),
-            ),
+            env=child_env,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return f'{{"status":"error","error":"spawn failed: {exc}"}}'
@@ -1756,7 +1817,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                 if action == "resume" and node == "outline_interaction":
                     initial_stage = 2
                 elif action == "resume" and node == "user_feedback_processor":
-                    initial_stage = 6
+                    initial_stage = 3
                 for stage_payload in advance_stage(state, initial_stage):
                     await _send(stage_payload)
                 await _send({"event_type": "chat.processing_status",
@@ -1814,14 +1875,35 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                 # breaking here makes finally terminate the resumable subprocess.
                 continue
             if status == "completed":
-                for stage_payload in advance_stage(state, 6):
-                    await _send(stage_payload)
                 final_result = chunk.get("final_result")
                 response_content = (
                     final_result.get("response_content", "")
                     if isinstance(final_result, dict)
                     else ""
                 )
+                if not response_content:
+                    outcome = {
+                        "status": "error",
+                        "conversation_id": chunk.get("conversation_id", outcome_cid),
+                        "error_code": "empty_report",
+                        "error": "completed marker missing final_result.response_content",
+                    }
+                    break
+                if not state.final_report_started:
+                    outcome = {
+                        "status": "error",
+                        "conversation_id": chunk.get("conversation_id", outcome_cid),
+                        "error_code": "incomplete_section_progress",
+                        "error": (
+                            "completed marker arrived before all expected chapter "
+                            "completion events"
+                        ),
+                    }
+                    break
+                for stage_payload in complete_final_report_processing(state):
+                    await _send(stage_payload)
+                for stage_payload in advance_stage(state, 4):
+                    await _send(stage_payload)
                 has_chat_route = bool(
                     route.get("session_id") and route.get("channel_id")
                 )
@@ -1858,14 +1940,6 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                     if bundle:
                         file_payload["metadata"] = {"artifactBundle": bundle}
                     report_delivered = await _send(file_payload)
-                elif not response_content:
-                    outcome = {
-                        "status": "error",
-                        "conversation_id": chunk.get("conversation_id", outcome_cid),
-                        "error_code": "empty_report",
-                        "error": "completed marker missing final_result.response_content",
-                    }
-                    break
                 else:
                     outcome = {
                         "status": "error",
@@ -1876,7 +1950,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                     break
 
                 if report_delivered:
-                    for stage_payload in advance_stage(state, 6, complete=True):
+                    for stage_payload in advance_stage(state, 4, complete=True):
                         await _send(stage_payload)
                     outcome = {
                         "status": "completed",
@@ -1935,6 +2009,8 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
         except OSError:
             pass
 
+    # Tool failures must reach the Main Agent as tool results. ``chat.error``
+    # terminates the parent request before the Agent can explain the failure.
     if outcome.get("status") in {"completed", "error", "cancelled"}:
         _clear_outline_title_cache(route, outcome.get("conversation_id", outcome_cid))
     if (
@@ -1942,12 +2018,15 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
         and outcome.get("node_id") == "outline_interaction"
     ):
         if action == "resume" and node == "outline_interaction":
+            loop_error = {
+                "error_code": "outline_auto_resume_loop",
+                "error": "outline_interaction repeated after automatic acceptance",
+            }
             return json.dumps(
                 {
                     "status": "error",
                     "conversation_id": outcome.get("conversation_id", outcome_cid),
-                    "error_code": "outline_auto_resume_loop",
-                    "error": "outline_interaction repeated after automatic acceptance",
+                    **loop_error,
                 },
                 ensure_ascii=False,
             )

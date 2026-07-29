@@ -1,4 +1,4 @@
-"""Single-call fast path for strict DeepResearch report rewrite requests."""
+"""Bounded-retry fast path for strict DeepResearch report rewrite requests."""
 
 from __future__ import annotations
 
@@ -14,6 +14,12 @@ _ENVELOPE_RE = re.compile(
     r"</deepresearch_rewrite_request>\s*\Z",
     re.DOTALL,
 )
+_JSON_FENCE_RE = re.compile(
+    r"\A\s*```(?:json)?[ \t]*\r?\n"
+    r"(?P<body>\{.*\})[ \t]*\r?\n```[ \t]*\s*\Z",
+    re.DOTALL | re.IGNORECASE,
+)
+_IGNORED_SLOT_OUTPUT_KEYS = {"format", "link_id"}
 _REQUEST_KEYS = {"report_path", "action", "selection", "instruction"}
 _ACTIONS = {"polish", "expand", "shorten"}
 _PROMPT_FIELDS = (
@@ -40,12 +46,21 @@ Rules:
 - Do not output Markdown, URLs, citation anchors, file paths, or source IDs.
 - Do not add numbers, times, people, organizations, places, examples, facts,
   constraints, or conclusions.
-- For polish, preserve meaning and information boundaries while performing a medium
-  structural rewrite of wording, syntax, ordering, and cohesion. When a slot has
-  enough syntactic structure, restructure at least one sentence or clause; do not
-  stop after replacing only one or two synonyms. Keep length about 85%-115% of the
-  original. Preserve facts, numbers, actors, times, scope, evidence, constraints,
-  judgment strength, causal direction, negation, and conclusion direction.
+- For polish, preserve meaning and information boundaries while performing a
+  controlled medium structural rewrite of wording, syntax, ordering, and cohesion.
+  When a slot has enough syntactic structure, restructure at least one sentence or
+  clause; do not stop after replacing only one or two synonyms, but keep the
+  remaining wording as stable as possible. Aim for roughly 20%-40% visible
+  character-level change when semantically safe. This is only a soft target.
+  Never change wording solely to hit this range; falling below or above it is not a
+  failure. For a short single-sentence slot, prefer localized clause restructuring
+  and avoid moving or inverting the whole sentence. Keep length about 90%-110% of
+  the original. Preserve facts, numbers,
+  actors, times, scope, evidence, constraints, judgment strength, causal direction,
+  negation, and conclusion direction. Preserve modal, quantifier, and frequency
+  markers verbatim when they carry judgment strength, including can, may, often,
+  should, and must (可以、可能、往往、不宜、必须); do not substitute an expression
+  with a different strength.
   For short, terminological, or otherwise unsafe-to-restructure slots, prioritize
   naturalness and semantic safety.
 - For expand, elaborate only existing concepts, causes, premises, scope, and effects;
@@ -55,6 +70,20 @@ Rules:
   fixed compression ratio when the original is already concise.
 - Follow instruction when it does not conflict with these rules.
 """
+_RETRY_SYSTEM_SUFFIX = (
+    "\n\nStrict retry: the previous response was structurally invalid. "
+    "Return only the required JSON object. Do not use Markdown fences and do "
+    "not copy input metadata fields."
+)
+_USAGE_SUM_KEYS = {
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_tokens",
+    "input_cost",
+    "output_cost",
+    "total_cost",
+}
 _SUCCESS_MESSAGE = (
     "本轮改写已完成。若报告已是最终版本，请回复‘生成 HTML’；"
     "如需继续改写，可直接选择下一处内容。"
@@ -68,6 +97,14 @@ class RewriteFastPathError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class ModelOutputError(ValueError):
+    """Internal model-output rejection with a safe diagnostic reason."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -98,6 +135,8 @@ class RewriteFastPathResult:
     commit_ms: float
     total_ms: float
     model_calls: int
+    model_output_adjustments: tuple[str, ...] = ()
+    model_output_error_reason: str | None = None
     commit_result: dict[str, Any] | None = None
 
 
@@ -155,6 +194,8 @@ def _result(
     model_ms: float = 0.0,
     commit_ms: float = 0.0,
     model_calls: int = 0,
+    model_output_adjustments: tuple[str, ...] = (),
+    model_output_error_reason: str | None = None,
     commit_result: dict[str, Any] | None = None,
 ) -> RewriteFastPathResult:
     return RewriteFastPathResult(
@@ -169,6 +210,8 @@ def _result(
         commit_ms=commit_ms,
         total_ms=_milliseconds(started_at),
         model_calls=model_calls,
+        model_output_adjustments=model_output_adjustments,
+        model_output_error_reason=model_output_error_reason,
         commit_result=commit_result,
     )
 
@@ -182,19 +225,92 @@ def _decode_tool_result(raw: object) -> dict[str, Any]:
     return payload
 
 
-def _decode_model_result(content: object) -> dict[str, Any]:
+def _project_model_units(raw_units: object) -> list[dict[str, Any]]:
+    if not isinstance(raw_units, list) or not raw_units:
+        raise ValueError("prepared units are unavailable")
+    projected = []
+    for unit in raw_units:
+        if not isinstance(unit, dict) or not isinstance(unit.get("unit_id"), str):
+            raise ValueError("prepared units are invalid")
+        raw_slots = unit.get("slots")
+        if not isinstance(raw_slots, list) or not raw_slots:
+            raise ValueError("prepared units are invalid")
+        slots = []
+        for slot in raw_slots:
+            if (
+                not isinstance(slot, dict)
+                or not isinstance(slot.get("slot_id"), str)
+                or not isinstance(slot.get("text"), str)
+            ):
+                raise ValueError("prepared units are invalid")
+            slots.append({"slot_id": slot["slot_id"], "text": slot["text"]})
+        projected.append({"unit_id": unit["unit_id"], "slots": slots})
+    return projected
+
+
+def _decode_model_result(
+    content: object,
+    expected_units: list[dict[str, Any]],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
     if not isinstance(content, str) or not content.strip():
-        raise ValueError("model content is unavailable")
-    payload = json.loads(content)
+        raise ModelOutputError("content_unavailable")
+    adjustments = []
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as bare_error:
+        fence = _JSON_FENCE_RE.fullmatch(content)
+        if fence is None:
+            raise ModelOutputError("json_invalid") from bare_error
+        try:
+            payload = json.loads(fence.group("body"))
+        except json.JSONDecodeError as fence_error:
+            raise ModelOutputError("json_invalid") from fence_error
+        adjustments.append("json_fence")
     if (
         not isinstance(payload, dict)
         or set(payload) != {"units", "facts_added"}
         or payload.get("facts_added") is not False
     ):
-        raise ValueError("model output has an invalid shape")
-    if not isinstance(payload.get("units"), list) or not payload["units"]:
-        raise ValueError("model output has an invalid shape")
-    return payload
+        raise ModelOutputError("top_level_shape")
+    units = payload.get("units")
+    if not isinstance(units, list) or len(units) != len(expected_units):
+        raise ModelOutputError("unit_shape")
+    canonical_units = []
+    for unit, expected_unit in zip(units, expected_units):
+        if (
+            not isinstance(unit, dict)
+            or set(unit) != {"unit_id", "slots"}
+            or unit.get("unit_id") != expected_unit["unit_id"]
+        ):
+            raise ModelOutputError("unit_shape")
+        slots = unit.get("slots")
+        expected_slots = expected_unit["slots"]
+        if not isinstance(slots, list) or len(slots) != len(expected_slots):
+            raise ModelOutputError("slot_shape")
+        canonical_slots = []
+        for slot, expected_slot in zip(slots, expected_slots):
+            if not isinstance(slot, dict):
+                raise ModelOutputError("slot_shape")
+            keys = set(slot)
+            if (
+                not {"slot_id", "text"} <= keys
+                or not keys <= {"slot_id", "text"} | _IGNORED_SLOT_OUTPUT_KEYS
+                or slot.get("slot_id") != expected_slot["slot_id"]
+                or not isinstance(slot.get("text"), str)
+            ):
+                raise ModelOutputError("slot_shape")
+            if keys & _IGNORED_SLOT_OUTPUT_KEYS:
+                adjustments.append("slot_metadata")
+            canonical_slots.append(
+                {"slot_id": slot["slot_id"], "text": slot["text"]}
+            )
+        canonical_units.append(
+            {"unit_id": unit["unit_id"], "slots": canonical_slots}
+        )
+    return (
+        {"units": canonical_units, "facts_added": False},
+        tuple(dict.fromkeys(adjustments)),
+    )
 
 
 def _normalize_usage_metadata(raw: object) -> dict[str, Any] | None:
@@ -211,6 +327,21 @@ def _normalize_usage_metadata(raw: object) -> dict[str, Any] | None:
         if isinstance(payload, dict):
             return payload
     return None
+
+
+def _merge_usage_metadata(
+    total: dict[str, Any] | None,
+    current: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if current is None:
+        return total
+    merged = dict(total or {})
+    for key, value in current.items():
+        if key in _USAGE_SUM_KEYS and isinstance(value, (int, float)):
+            merged[key] = merged.get(key, 0) + value
+        elif key not in merged:
+            merged[key] = value
+    return merged
 
 
 def _safe_error_fields(
@@ -231,7 +362,7 @@ async def run_rewrite_fast_path(
     query: object,
     *,
     prepare_invoke: Callable[..., Awaitable[object]],
-    model_invoke: Callable[[list[dict[str, str]]], Awaitable[object]],
+    model_invoke: Callable[..., Awaitable[object]],
     commit_invoke: Callable[..., Awaitable[object]],
 ) -> RewriteFastPathResult | None:
     """Run a recognized rewrite request without entering the Agent loop."""
@@ -294,7 +425,19 @@ async def run_rewrite_fast_path(
             message="rewrite preparation failed",
             prepare_ms=prepare_ms,
         )
+    try:
+        projected_units = _project_model_units(prepared.get("units"))
+    except ValueError:
+        return _result(
+            started_at=started_at,
+            status="error",
+            action=request.action,
+            error_code="INTERNAL_ERROR",
+            message="rewrite preparation failed",
+            prepare_ms=prepare_ms,
+        )
     prompt_payload = {field: prepared.get(field) for field in _PROMPT_FIELDS}
+    prompt_payload["units"] = projected_units
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {
@@ -304,26 +447,53 @@ async def run_rewrite_fast_path(
     ]
 
     model_started = time.perf_counter()
-    try:
-        response = await model_invoke(messages)
-    except Exception:  # pylint: disable=broad-exception-caught
-        return _result(
-            started_at=started_at,
-            status="error",
-            action=request.action,
-            error_code="MODEL_CALL_FAILED",
-            message="rewrite model call failed",
-            prepare_ms=prepare_ms,
-            model_ms=_milliseconds(model_started),
-            model_calls=1,
+    model_kwargs = {"temperature": 0.2} if request.action == "polish" else {}
+    usage_metadata = None
+    model_calls = 0
+    structured_result = None
+    model_output_adjustments = ()
+    model_output_error_reason = None
+    for attempt in range(2):
+        attempt_messages = messages
+        if attempt:
+            attempt_messages = [
+                {
+                    "role": "system",
+                    "content": _SYSTEM_PROMPT + _RETRY_SYSTEM_SUFFIX,
+                },
+                messages[1],
+            ]
+        try:
+            model_calls += 1
+            response = await model_invoke(attempt_messages, **model_kwargs)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return _result(
+                started_at=started_at,
+                status="error",
+                action=request.action,
+                error_code="MODEL_CALL_FAILED",
+                message="rewrite model call failed",
+                usage_metadata=usage_metadata,
+                prepare_ms=prepare_ms,
+                model_ms=_milliseconds(model_started),
+                model_calls=model_calls,
+            )
+        usage_metadata = _merge_usage_metadata(
+            usage_metadata,
+            _normalize_usage_metadata(getattr(response, "usage_metadata", None)),
         )
+        try:
+            structured_result, model_output_adjustments = _decode_model_result(
+                getattr(response, "content", None),
+                projected_units,
+            )
+        except ModelOutputError as exc:
+            model_output_error_reason = exc.reason
+            continue
+        model_output_error_reason = None
+        break
     model_ms = _milliseconds(model_started)
-    usage_metadata = _normalize_usage_metadata(
-        getattr(response, "usage_metadata", None)
-    )
-    try:
-        structured_result = _decode_model_result(getattr(response, "content", None))
-    except (TypeError, ValueError):
+    if structured_result is None:
         return _result(
             started_at=started_at,
             status="error",
@@ -333,7 +503,8 @@ async def run_rewrite_fast_path(
             usage_metadata=usage_metadata,
             prepare_ms=prepare_ms,
             model_ms=model_ms,
-            model_calls=1,
+            model_calls=model_calls,
+            model_output_error_reason=model_output_error_reason,
         )
 
     commit_started = time.perf_counter()
@@ -355,7 +526,8 @@ async def run_rewrite_fast_path(
             prepare_ms=prepare_ms,
             model_ms=model_ms,
             commit_ms=_milliseconds(commit_started),
-            model_calls=1,
+            model_calls=model_calls,
+            model_output_adjustments=model_output_adjustments,
         )
     commit_ms = _milliseconds(commit_started)
     if committed.get("status") != "completed":
@@ -374,7 +546,8 @@ async def run_rewrite_fast_path(
             prepare_ms=prepare_ms,
             model_ms=model_ms,
             commit_ms=commit_ms,
-            model_calls=1,
+            model_calls=model_calls,
+            model_output_adjustments=model_output_adjustments,
         )
     if committed.get("report_delivered") is False:
         delivery_error_code = committed.get("delivery_error_code")
@@ -392,7 +565,8 @@ async def run_rewrite_fast_path(
             prepare_ms=prepare_ms,
             model_ms=model_ms,
             commit_ms=commit_ms,
-            model_calls=1,
+            model_calls=model_calls,
+            model_output_adjustments=model_output_adjustments,
             commit_result=committed,
         )
     return _result(
@@ -405,6 +579,7 @@ async def run_rewrite_fast_path(
         prepare_ms=prepare_ms,
         model_ms=model_ms,
         commit_ms=commit_ms,
-        model_calls=1,
+        model_calls=model_calls,
+        model_output_adjustments=model_output_adjustments,
         commit_result=committed,
     )
