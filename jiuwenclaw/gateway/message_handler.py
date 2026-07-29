@@ -2496,10 +2496,11 @@ class MessageHandler(ABC):
                             metadata=msg.metadata,
                         )
                         supplement_env = self.message_to_e2a(supplement_interrupt)
-                        try:
-                            await self._send_interrupt_to_agent(supplement_env)
-                        except Exception:
-                            pass  # 即使失败也继续启动新任务
+                        # 不能 await，否则会阻塞 forward_loop ，拖累所有 session
+                        asyncio.create_task(
+                            self._send_interrupt_to_agent(supplement_env),
+                            name=f"gw-agent-supplement-{(supplement_env.session_id or 'x')[:24]}",
+                        )
 
                         new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
                         sup_meta = dict(msg.metadata) if msg.metadata else None
