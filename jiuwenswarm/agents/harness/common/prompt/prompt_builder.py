@@ -269,6 +269,17 @@ JiuwenSwarm 使用独立的内部数据目录保存启动配置、Agent 身份�
 2. browser_agent 返回文件下载 URL 后，**你（主 agent）自己**用 bash `wget` 把文件下载到 `{workspace_dir}` 下；
 3. 下载完成后用 `send_file_to_user` 把本地文件的绝对路径发给用户。
 即：browser_agent 只负责「找 URL」，下载由你用 bash 完成。派给 browser_agent 的任务描述里绝不要出现「下载文件」字样，应写成「返回下载 URL」。
+
+## 技能工具适配（exec 不存在，改用 bash/code）
+
+部分技能是从其他平台（如 OpenClaw）移植而来，其文档或脚本里可能引用 `exec` 工具及其专有参数（如 `yieldMs`、"command still running"、`background` 等）。
+
+**当前 agent 没有 `exec` 工具**，可用的命令执行工具是 `bash` 与 `code`。技能中出现 `exec` 时按以下处理：
+
+- **禁止调用名为 `exec` 的工具**——它不存在，调用会失败或参数被忽略。
+- **改用 `bash`**（短命令、轮询、读写文件）或 **`code`**（需代码执行环境时）完成对应动作。
+- **参数与调用逻辑不能照搬 exec**：`bash` 的 `timeout` 是"子进程最多跑 N 秒、到点强杀"，与 exec 的 `yieldMs`（归还控制权、进程继续后台运行）**语义相反**；exec 的 yield/后台/session 机制在 bash 中不存在。请依据 `bash`/`code` 的真实参数语义重新设计调用——长任务用 `nohup ... &` 放后台后立即返回，轮询用短命令读状态文件，切勿用 `timeout` 前台直接跑长任务。
+- 始终以当前环境的真实工具能力为准，不要假设技能里 exec 所描述的机制存在。
 """
     else:
         content = (
@@ -418,6 +429,17 @@ When the user asks to download, save, or export a file on a web page (e.g. a sam
 2. After browser_agent returns the file download URL, **you (the main agent)** download the file yourself with bash `curl` or `wget` into `{workspace_dir}`;
 3. Once downloaded, use `send_file_to_user` to send the local file absolute path to the user.
 In short: browser_agent only "finds the URL"; the download is done by you with bash. Never put "download the file" in the task description for browser_agent — write "return the download URL" instead.
+
+## Skill Tool Adaptation (exec does not exist — use bash/code)
+
+Some skills are ported from other platforms (e.g. OpenClaw); their docs or scripts may reference an `exec` tool and its proprietary parameters (`yieldMs`, "command still running", `background`, etc.).
+
+**This agent has NO `exec` tool**. The available command-execution tools are `bash` and `code`. When a skill mentions `exec`:
+
+- **Do NOT call a tool named `exec`** — it does not exist; the call will fail or its parameters will be ignored.
+- **Use `bash`** (short commands, polling, file read/write) or **`code`** (when a code-execution environment is needed) instead.
+- **Do not copy exec's parameters or invocation logic wholesale**: `bash`'s `timeout` means "the subprocess is killed after at most N seconds", which is the **opposite** of exec's `yieldMs` (returns control while the process keeps running in the background); exec's yield/background/session mechanisms do not exist in bash. Redesign the call based on the real semantics of `bash`/`code` — put long tasks in the background with `nohup ... &` and return immediately, poll with short commands that read status files, and never run a long task in the foreground with `timeout`.
+- Always trust the real tool capabilities of the current environment; do not assume the mechanisms described for `exec` in the skill exist.
 """
         )
     return PromptSection(
