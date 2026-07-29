@@ -37,6 +37,11 @@ from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
+try:
+    from jiuwenclaw.utils import build_default_headers
+except ImportError:  # pragma: no cover - browser runtime can still run without repo helpers
+    build_default_headers = None
+
 
 
 class ReActAgentConfig(BaseModel):
@@ -235,12 +240,14 @@ class ReActAgentConfig(BaseModel):
         self.api_key = api_key
         self.api_base = api_base
         self.model_name = model_name
+        custom_headers = build_default_headers("") if build_default_headers else None
 
         self.model_client_config = ModelClientConfig(
             client_provider=provider,
             api_key=api_key,
             api_base=api_base,
-            verify_ssl=verify_ssl
+            verify_ssl=verify_ssl,
+            custom_headers=custom_headers,
         )
         self.model_config_obj = ModelRequestConfig(
             model_name=model_name
@@ -375,6 +382,11 @@ class ReActAgent(BaseAgent):
     ) -> AssistantMessage:
         """Call LLM with messages and optional tools
 
+        When the model client config's custom headers include
+        ``Accept: text/event-stream`` (set by build_default_headers
+        in sandbox mode), use ``llm.stream()`` to match the SSE
+        response format.  Otherwise fall back to ``llm.invoke()``.
+
         Args:
             messages: Message list (BaseMessage or dict)
             tools: Optional tool definitions (List[ToolInfo])
@@ -383,10 +395,38 @@ class ReActAgent(BaseAgent):
             AssistantMessage from LLM
         """
         llm = self._get_llm()
-        return await llm.invoke(
-            model=self._config.model_name,
-            messages=messages,
-            tools=tools
+
+        custom_headers = getattr(
+            self._config.model_client_config, "custom_headers", None
+        ) or {}
+        accept = custom_headers.get("Accept", "") or custom_headers.get("accept", "")
+        if "text/event-stream" not in accept:
+            return await llm.invoke(
+                model=self._config.model_name,
+                messages=messages,
+                tools=tools
+            )
+
+        # Streaming path: accumulate chunks to match Accept: text/event-stream
+        accumulated_chunk = None
+        async for chunk in llm.stream(
+                model=self._config.model_name,
+                messages=messages,
+                tools=tools
+        ):
+            if accumulated_chunk is None:
+                accumulated_chunk = chunk
+            else:
+                accumulated_chunk = accumulated_chunk + chunk
+
+        if accumulated_chunk is None:
+            return AssistantMessage(content="", tool_calls=[])
+
+        return AssistantMessage(
+            content=accumulated_chunk.content or "",
+            tool_calls=accumulated_chunk.tool_calls or [],
+            usage_metadata=accumulated_chunk.usage_metadata,
+            reasoning_content=accumulated_chunk.reasoning_content,
         )
 
     async def _init_context(

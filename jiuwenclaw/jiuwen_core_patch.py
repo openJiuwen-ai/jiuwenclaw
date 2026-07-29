@@ -352,11 +352,11 @@ class RetryMixin:
                 return  # 流式成功完成
             except Exception as e:
                 last_error = e
-                if not self._is_retryable_error(e, cfg):
-                    reason = self._classify_error(e, cfg)
-                    details = self._extract_error_details(e)
-                    llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
-                    raise
+                # if not self._is_retryable_error(e, cfg):
+                #     reason = self._classify_error(e, cfg)
+                #     details = self._extract_error_details(e)
+                #     llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
+                #     raise
                 llm_logger.info(f"LLM stream 开始重试, details: {e}")
                 reason = self._classify_error(e, cfg)
                 details = self._extract_error_details(e)
@@ -856,6 +856,9 @@ def _patch_railed_model_call_session() -> None:
     """Monkey-patch ReActAgent._railed_model_call to set _retry_session ContextVar
     around llm.invoke/stream calls so RetryMixin._notify_retry_start can reach the frontend."""
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
+
+    if not hasattr(ReActAgent, "_railed_model_call"):
+        return
 
     _orig_railed_model_call = ReActAgent._railed_model_call  # pylint: disable=protected-access
 

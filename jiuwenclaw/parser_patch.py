@@ -37,11 +37,11 @@ def _build_tool_calls(msg: dict) -> list[ChatCompletionMessageFunctionToolCall] 
         return None
     return [
         ChatCompletionMessageFunctionToolCall(
-            id=tc["id"],
+            id=tc.get("id", ""),
             type="function",
             function=Function(
-                name=tc["function"]["name"],
-                arguments=tc["function"]["arguments"]
+                name=tc.get("function", {}).get("name", ""),
+                arguments=tc.get("function", {}).get("arguments", "")
             )
         )
         for tc in msg["tool_calls"]
