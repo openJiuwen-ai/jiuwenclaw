@@ -281,11 +281,12 @@ def test_runtime_prompt_rail_resolves_via_registry() -> None:
 
 @pytest.mark.asyncio
 async def test_team_skill_storage_policy_rail_resolves_and_injects_paths(tmp_path: Path) -> None:
-    """The team skill storage policy should inject concrete team/member paths.
+    """The team skill storage policy should inject concrete team-level paths.
 
-    Team-level paths stay in the system prompt (identical for every member, so
-    the team shares one cacheable prefix); the per-member workspace path is
-    delivered as a prompt attachment instead.
+    Only team-level paths belong here: they are identical for every member, so
+    the team shares one cacheable prefix. The member's own workspace is
+    per-member and openjiuwen's team rail tells the member about it as part of
+    its identity, so this rail must not carry it in any lane.
     """
     register_swarm_providers()
     global_skills_dir = str(tmp_path / "agent" / "workspace" / "skills")
@@ -323,57 +324,9 @@ async def test_team_skill_storage_policy_rail_resolves_and_injects_paths(tmp_pat
     assert team_ws_root in content
     assert team_skills_dir in content
     assert "skill-creator" not in content
-    # The per-member path is the only value that differs between members, so it
-    # must not land in the shared system-prompt prefix.
+    # The per-member path is not this rail's business any more.
     assert member_workspace_root not in content
-
-    items = await manager.list_by_filter(
-        session_id="sess-1",
-        section=rail.MEMBER_WORKSPACE_SECTION_NAME,
-    )
-    assert len(items) == 1
-    assert member_workspace_root in items[0].content
-    # The attachment renders in the member's language, not both at once.
-    assert "成员工作区" in items[0].content
-    assert "Member workspace" not in items[0].content
-
-
-@pytest.mark.asyncio
-async def test_team_skill_storage_policy_rail_renders_english_attachment(tmp_path: Path) -> None:
-    """An English member gets the member workspace attachment in English."""
-    register_swarm_providers()
-    global_skills_dir = str(tmp_path / "agent" / "workspace" / "skills")
-    member_workspace_root = str(
-        tmp_path / ".agent_teams" / "unit" / "workspaces" / "member_workspace"
-    )
-    fake_ctx = SwarmBuildContext(
-        language="en",
-        global_skills_dir=global_skills_dir,
-        workspace=types.SimpleNamespace(root_path=member_workspace_root),
-    )
-
-    rail = RailSpec(type=registry.TEAM_SKILL_STORAGE_POLICY).build(
-        language="en",
-        context=fake_ctx,
-    )
-    manager = PromptAttachmentManager()
-    rail.init(
-        types.SimpleNamespace(
-            system_prompt_builder=SystemPromptBuilder(language="en"),
-            prompt_attachment_manager=manager,
-        )
-    )
-
-    session = types.SimpleNamespace(get_session_id=lambda: "sess-en")
-    await rail.before_model_call(AgentCallbackContext(agent=None, inputs=None, session=session))
-
-    items = await manager.list_by_filter(
-        session_id="sess-en",
-        section=rail.MEMBER_WORKSPACE_SECTION_NAME,
-    )
-    assert len(items) == 1
-    assert "Member workspace" in items[0].content
-    assert "成员工作区" not in items[0].content
+    assert await manager.list_by_filter(session_id="sess-1") == []
 
 
 @pytest.mark.asyncio
