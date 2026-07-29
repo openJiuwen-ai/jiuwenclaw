@@ -13,7 +13,8 @@
     "ok": "确定",
     "and": "和",
     "modify": "修改",
-    "delete": "删除"
+    "delete": "删除",
+    "clear": "清除"
   },
   "a2ui": {
     "generating": "A2UI 界面生成中...",

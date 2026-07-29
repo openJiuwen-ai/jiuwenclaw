@@ -18,6 +18,7 @@
     "test:stream-delta-batcher": "tsc src/services/streamDeltaBatcher.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/stream-delta-batcher --skipLibCheck --noEmitOnError && node --test tests/streamDeltaBatcher.test.mjs",
     "test:file-download-dedup": "tsc src/utils/fileDownloadDedup.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/file-download-dedup --skipLibCheck --noEmitOnError && node --test tests/fileDownloadDedup.test.mjs",
     "test:chat-store-streaming": "esbuild src/stores/chatStore.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/chat-store-streaming/chatStore.mjs --define:import.meta.env.DEV=false && node --test tests/chatStoreStreaming.test.mjs",
+    "test:clawhub-token-action": "tsc src/features/SourceManagerModal/clawhubTokenAction.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/clawhub-token-action --skipLibCheck --noEmitOnError && node --test tests/clawhubTokenAction.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
