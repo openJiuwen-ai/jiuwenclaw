@@ -522,10 +522,36 @@ class CronSchedulerService:
         if at_ts <= self._now_fn() + 1.0:
             self._reload_event.set()
 
+    _MISSED_TRIGGER_WINDOW_SECONDS = 10.0
+
     def _compute_next_run(self, job: CronJob, *, now_ts: float) -> tuple[datetime, datetime, str]:
         tz = ZoneInfo(job.timezone)
         base = datetime.fromtimestamp(now_ts, tz=tz)
-        push_dt = _cron_next_push_dt(job.cron_expr, base)
+        try:
+            push_dt = _cron_next_push_dt(job.cron_expr, base)
+        except Exception as original_exc:
+            if not self._is_croniter_no_next_date(original_exc):
+                raise original_exc
+            from croniter import croniter
+            field_count = len(job.cron_expr.strip().split())
+            second_at_beginning = field_count == 7
+            it = croniter(job.cron_expr, base, second_at_beginning=second_at_beginning)
+            prev_dt = it.get_prev(datetime)
+            if prev_dt is not None and isinstance(prev_dt, datetime):
+                if prev_dt.tzinfo is None:
+                    prev_dt = prev_dt.replace(tzinfo=tz)
+                elapsed = (base.timestamp() - prev_dt.timestamp())
+                if elapsed <= self._MISSED_TRIGGER_WINDOW_SECONDS:
+                    logger.info(
+                        "[Cron] one-shot job=%s missed trigger by %.1fs (within %ss window), "
+                        "scheduling immediate execution instead of marking expired",
+                        job.id, elapsed, self._MISSED_TRIGGER_WINDOW_SECONDS,
+                    )
+                    push_dt = prev_dt
+                else:
+                    raise original_exc
+            else:
+                raise original_exc
         # proactive.tick 无视 wake_offset——到点就执行，不提前 wake。
         # 否则 wake_dt = push_dt - offset 可能在过去，导致 reschedule 后立刻
         # 触发 → 每 6 秒循环（实测 14:26-14:28 反复 triggering 同一 run_id）。
@@ -647,6 +673,15 @@ class CronSchedulerService:
             # （实测：19:56 tick 完，20:00 整点不触发，因为没 reload）。
             try:
                 push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
+                if push_dt.timestamp() <= self._now_fn():
+                    logger.info(
+                        "[Cron] one-shot job=%s push_dt is in the past (%s), "
+                        "marking expired instead of rescheduling",
+                        job.id, push_dt.isoformat(),
+                    )
+                    job.expired = True
+                    await self._store.update_job(job.id, {"expired": True})
+                    return
                 self._schedule_event(wake_dt, "wake", job.id, next_run_id)
                 self._schedule_event(push_dt, "push", job.id, next_run_id)
             except Exception as exc:  # 兜底：reschedule 失败不阻断本次 tick 结果（下个 reload 会重排）
@@ -744,6 +779,16 @@ class CronSchedulerService:
                 return
             try:
                 push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
+                if push_dt.timestamp() <= self._now_fn():
+                    logger.info(
+                        "[Cron] one-shot job=%s push_dt is in the past (%s), "
+                        "marking expired instead of rescheduling",
+                        job.id, push_dt.isoformat(),
+                    )
+                    job.enabled = False
+                    job.expired = True
+                    await self._store.update_job(job.id, {"enabled": False, "expired": True})
+                    return
                 self._schedule_event(wake_dt, "wake", job.id, next_run_id)
                 self._schedule_event(push_dt, "push", job.id, next_run_id)
             except Exception as exc:  # noqa: BLE001
@@ -832,6 +877,7 @@ class CronSchedulerService:
                     "run_id": run_id,
                     "push_at": state.push_at_iso,
                     "wake_at": state.wake_at_iso,
+                    "current_time": datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone)).isoformat(),
                 }
                 params: dict[str, Any] = {
                     "content": job.description,
