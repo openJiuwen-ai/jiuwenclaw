@@ -14,6 +14,7 @@ contact sheet 缩略图看不见 0.1 英寸级的重叠和错位。
 
 import argparse
 import json
+import logging
 import re
 import sys
 import zipfile
@@ -31,9 +32,21 @@ NS = {
 }
 
 
+# Program output (report bodies, --json payloads) goes to stdout, diagnostics
+# to stderr. Both travel through logging; this logger owns stdout, keeps a bare
+# "%(message)s" format so the text is unchanged, and does not propagate so the
+# stderr root handler never sees it.
+STDOUT_LOGGER = logging.getLogger("qa_geometry.stdout")
+STDOUT_LOGGER.propagate = False
+STDOUT_LOGGER.setLevel(logging.INFO)
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.setFormatter(logging.Formatter("%(message)s"))
+STDOUT_LOGGER.addHandler(_stdout_handler)
+
+
 def emit(line: str) -> None:
-    """报告正文写 stdout —— 这是工具的输出，不是日志。"""
-    sys.stdout.write(f"{line}\n")
+    """报告正文是工具输出，走 stdout logger，不与 stderr 诊断混在一起。"""
+    STDOUT_LOGGER.info(line)
 
 
 @dataclass(frozen=True)

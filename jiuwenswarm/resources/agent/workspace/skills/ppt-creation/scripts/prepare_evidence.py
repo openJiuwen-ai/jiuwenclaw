@@ -25,8 +25,20 @@ from pathlib import Path
 LOGGER = logging.getLogger("prepare_evidence")
 
 
+# Program output (report bodies, --json payloads) goes to stdout, diagnostics
+# to stderr. Both travel through logging; this logger owns stdout, keeps a bare
+# "%(message)s" format so the text is unchanged, and does not propagate so the
+# stderr root handler never sees it.
+STDOUT_LOGGER = logging.getLogger("prepare_evidence.stdout")
+STDOUT_LOGGER.propagate = False
+STDOUT_LOGGER.setLevel(logging.INFO)
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.setFormatter(logging.Formatter("%(message)s"))
+STDOUT_LOGGER.addHandler(_stdout_handler)
+
+
 def emit(line: str) -> None:
-    sys.stdout.write(f"{line}\n")
+    STDOUT_LOGGER.info(line)
 
 
 FILE_COPY_ROUTES = {

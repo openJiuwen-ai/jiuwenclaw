@@ -64,9 +64,21 @@ LOGGER = logging.getLogger("extract_arxiv_visuals")
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(message)s")
 
 
+# Program output (report bodies, --json payloads) goes to stdout, diagnostics
+# to stderr. Both travel through logging; this logger owns stdout, keeps a bare
+# "%(message)s" format so the text is unchanged, and does not propagate so the
+# stderr root handler never sees it.
+STDOUT_LOGGER = logging.getLogger("extract_arxiv_visuals.stdout")
+STDOUT_LOGGER.propagate = False
+STDOUT_LOGGER.setLevel(logging.INFO)
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.setFormatter(logging.Formatter("%(message)s"))
+STDOUT_LOGGER.addHandler(_stdout_handler)
+
+
 def emit(line: str) -> None:
-    """Final summary is program output on stdout, not a diagnostic."""
-    sys.stdout.write(f"{line}\n")
+    """Final summary is program output, not a diagnostic."""
+    STDOUT_LOGGER.info(line)
 
 
 def eprint(*args: object) -> None:
