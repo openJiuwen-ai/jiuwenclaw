@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import html as html_lib
 import json
 import logging
 import re
@@ -704,6 +703,21 @@ _VISIBLE_TEXT_LEAF_RE = re.compile(
     re.IGNORECASE,
 )
 _MAIN_BLOCK_RE = re.compile(r"<main\b[^>]*>.*?</main\s*>", re.IGNORECASE | re.DOTALL)
+_PAGE_MARKER_SPACE_ENTITY_RE = re.compile(
+    r"&(?:nbsp|#0*(?:32|160)|#x0*(?:20|a0));",
+    re.IGNORECASE,
+)
+_PAGE_MARKER_SLASH_ENTITY_RE = re.compile(
+    r"&(?:sol|#0*47|#x0*2f);",
+    re.IGNORECASE,
+)
+
+
+def _normalize_page_marker_text(text: str) -> str:
+    """仅还原页码识别所需的空白与斜杠实体，不依赖白名单外模块。"""
+    normalized = _PAGE_MARKER_SPACE_ENTITY_RE.sub(" ", text)
+    normalized = _PAGE_MARKER_SLASH_ENTITY_RE.sub("/", normalized)
+    return normalized.replace("\xa0", " ").strip()
 
 
 def _strip_visible_page_markers(html_text: str) -> str:
@@ -721,7 +735,7 @@ def _strip_visible_page_markers(html_text: str) -> str:
         # agenda 章节目标页码和可能的业务型号位于 main，不能按运行页码误删。
         if any(start <= match.start() < end for start, end in main_ranges):
             return match.group(0)
-        marker = html_lib.unescape(match.group("text")).replace("\xa0", " ").strip()
+        marker = _normalize_page_marker_text(match.group("text"))
         if not _VISIBLE_PAGE_MARKER_RE.fullmatch(marker):
             return match.group(0)
         removed_markers.append(marker)
@@ -788,7 +802,8 @@ def _insert_visible_page_marker(
         f"{position_css}font-family:inherit;font-size:{font_size}px;"
         f"line-height:1;font-weight:400;color:{color};white-space:nowrap;"
         'background:transparent;border:0;padding:0;margin:0;">'
-        f"{html_lib.escape(marker_text)}</span>\n"
+        # marker_text 仅由固定格式文字和整数页码组成，不包含用户原始 HTML。
+        f"{marker_text}</span>\n"
     )
     return html_text[:insertion_index] + marker + html_text[insertion_index:]
 
@@ -2148,6 +2163,14 @@ def _build_page_prompt(
         f"{_EDITABLE_LAYERING_RULES}"
         "- 禁止在思考过程中反复计算像素或纠结布局，参考下方布局示例并根据内容调整\n"
         "- 一次性输出完整 HTML，禁止输出'final code''truly final'等反复确认语句\n"
+        "\n"
+        "### 思考预算（强制约束）\n"
+        "- 布局规划**上限 300 字思考**：用 flex/grid 权重和比例描述布局意图即可，"
+        "禁止逐元素计算像素高度、padding、font-size 数值\n"
+        "- 禁止做「计算→验证→调整→重算」循环；若布局估算不收敛，直接采用布局示例中的默认比例\n"
+        "- 优先使用 `flex-1`/`flex-[N]`/`min-h-0` 自适应布局，让浏览器自动分配空间，而非手动算尺寸\n"
+        "- 内容预算（§4）一次过，禁止反复推演；若内容超量，直接提炼或删减辅助细节\n"
+        "- 思考阶段产出 ≤500 tokens 即可开始写 HTML；超过此量说明陷入了过度规划，应立即停止思考并输出代码\n"
         "\n"
         "## 1. 视觉风格规范（强制遵守）\n"
         f"{style_text}\n"
