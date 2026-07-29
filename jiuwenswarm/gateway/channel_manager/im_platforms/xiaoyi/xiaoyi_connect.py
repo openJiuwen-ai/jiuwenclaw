@@ -592,13 +592,32 @@ class XiaoyiChannel(BaseChannel):
         team_role = str(payload.get("role") or "").strip().lower()
         metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
         mode = str(metadata.get("mode") or "").strip().lower()
+        reset_team_session = bool(metadata.get("reset_team_session"))
         session_id, task_id = self._extract_platform_receive_info(msg)
-        is_team_event = (
+        is_team_mode = mode in {"team", "team.plan", "code.team"}
+        is_team_event = not reset_team_session and (
             event_name.startswith("team.")
-            or mode in {"team", "team.plan", "code.team"}
+            or is_team_mode
         )
+        latest_task_id = self._latest_platform_tasks.get(session_id)
+        if (
+            is_team_event
+            and session_id not in self._team_sessions
+            and (not latest_task_id or task_id != latest_task_id)
+        ):
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_STALE_TEAM_EVENT_SKIPPED "
+                "message_id=%s session_id=%s source_task_id=%s "
+                "latest_task_id=%s event_type=%s",
+                msg.id,
+                session_id,
+                task_id,
+                latest_task_id,
+                event_name,
+            )
+            return
         if is_team_event:
-            task_id = self._latest_platform_tasks.get(session_id, task_id)
+            task_id = latest_task_id or task_id
         team_task_key = (session_id, task_id)
 
         # Team control/state events are not user-visible.  They identify a
@@ -607,6 +626,11 @@ class XiaoyiChannel(BaseChannel):
         if is_team_event and session_id:
             self._team_sessions.add(session_id)
             self._team_tasks.add(team_task_key)
+        elif mode or reset_team_session:
+            # An explicit non-Team mode overrides stale session-level Team
+            # state. Clear every task marker for the platform session so an
+            # older Team round cannot contaminate the new non-Team task.
+            self._clear_team_session(session_id)
         is_team_session = team_task_key in self._team_tasks
 
         # keepalive 是 jiuwenswarm 流空窗期(如 team 长任务后台执行工具)每 10s
@@ -1878,23 +1902,6 @@ class XiaoyiChannel(BaseChannel):
         user_message = message.get("params", {}).get("message", {})
         parts = user_message.get("parts", [])
 
-        # A Team runtime spans multiple platform tasks. Retire only the
-        # previous delivery task; keep the session-level Team runtime alive.
-        previous_task_id = self._latest_platform_tasks.get(session_id)
-        if (
-            session_id in self._team_sessions
-            and previous_task_id
-            and previous_task_id != task_id
-        ):
-            await self._retire_superseded_team_task(session_id, previous_task_id)
-
-        # Mark session as active
-        self._mark_session_active(session_id, task_id)
-        self._remember_active_platform_task(session_id, task_id)
-        if session_id in self._team_sessions:
-            self._team_tasks.add((session_id, task_id))
-        self._session_task_map[task_id] = session_id
-
         # ==================== PROCESS PARTS (TEXT & FILES) ====================
         text = ""
         push_id = ""  # V2: 从 data part 的 systemVariables 提取，webhook 推送寻址 token
@@ -2060,6 +2067,22 @@ class XiaoyiChannel(BaseChannel):
             )
             return
         # ────────────────────────────────────────────────────────────────
+
+        # Only real user requests become active platform tasks. Empty
+        # message/stream event frames must not leave behind phantom tasks.
+        previous_task_id = self._latest_platform_tasks.get(session_id)
+        if (
+            session_id in self._team_sessions
+            and previous_task_id
+            and previous_task_id != task_id
+        ):
+            await self._retire_superseded_team_task(session_id, previous_task_id)
+
+        self._mark_session_active(session_id, task_id)
+        self._remember_active_platform_task(session_id, task_id)
+        if session_id in self._team_sessions:
+            self._team_tasks.add((session_id, task_id))
+        self._session_task_map[task_id] = session_id
 
         # Add media payload to metadata
         params = {"query": text, "task_id": task_id}
