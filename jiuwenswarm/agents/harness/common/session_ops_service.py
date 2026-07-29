@@ -644,6 +644,89 @@ def restore_session_files(
     }
 
 
+def redo_session_files(
+    *,
+    session_id: str,
+    turn_index: int,
+    project_dir: str | None = None,
+    extra_history_roots: list[str] | None = None,
+) -> dict[str, Any]:
+    """重新应用指定 turn 被 discard(soft) 撤销的文件修改.
+
+    与 ``restore_session_files`` 对称:后者写回 old_content(撤销),
+    本方法写回 new_content(重新应用)。
+
+    注意:当 ``get_files_to_redo`` 返回空(例如 file_ops 缺失/损坏/没被打
+    ``discarded_out`` 标记)时,本方法返回 ``redone_files=[] deleted_files=[]
+    errors=[]``。这种"空成功"不应被当作真正的成功——调用方(如 redo handler)
+    应自行判断空结果并返回 ``REDO_HISTORY_MISSING``,避免误清 discarded 状态。
+
+    Args:
+        session_id: 会话 ID
+        turn_index: 目标重新应用轮次(1-based)
+        project_dir: 项目目录路径(可选)
+    """
+    from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+    diff_service = get_diff_service()
+    files_to_redo = diff_service.get_files_to_redo(
+        session_id,
+        turn_index,
+        project_dir=project_dir,
+        extra_history_roots=extra_history_roots,
+    )
+
+    if not files_to_redo:
+        return {
+            "session_id": session_id,
+            "turn_index": turn_index,
+            "redone_files": [],
+            "deleted_files": [],
+            "errors": [],
+        }
+
+    redone: list[str] = []
+    deleted: list[str] = []
+    errors: list[dict[str, str]] = []
+
+    for file_path, info in files_to_redo.items():
+        path = Path(file_path)
+        try:
+            if info["action"] == "write":
+                # 写回 agent 修改后的内容(new_content)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    info["content"], encoding="utf-8", newline=""
+                )
+                redone.append(file_path)
+            elif info["action"] == "delete":
+                # 文件被 agent 删除,redo 时重新删除。
+                # 文件不存在属于"目标状态已满足"(redo 后状态 == discard 前状态),
+                # 仍记为已处理,避免 handler 把这种正常情况误判成 REDO_HISTORY_MISSING。
+                if path.exists():
+                    path.unlink()
+                deleted.append(file_path)
+        except Exception as exc:
+            errors.append({"file": file_path, "error": str(exc)})
+            logger.warning(
+                "redo_session_files: failed to redo %s: %s",
+                file_path, exc,
+            )
+
+    logger.info(
+        "redo_session_files: session=%s turn=%s redone=%d deleted=%d errors=%d",
+        session_id, turn_index, len(redone), len(deleted), len(errors),
+    )
+
+    return {
+        "session_id": session_id,
+        "turn_index": turn_index,
+        "redone_files": redone,
+        "deleted_files": deleted,
+        "errors": errors,
+    }
+
+
 async def rewind_session_context(
     *,
     deep_agent: "DeepAgent",
