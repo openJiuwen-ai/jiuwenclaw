@@ -6,39 +6,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { webRequest } from "../../services/webClient";
 import type { WebError } from "../../types/websocket";
+import { getSkillAvatar } from "../../utils/skillAvatar";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
+
+export { getSkillAvatar } from "../../utils/skillAvatar";
 
 const SKILLNET_UPSTREAM_REPO_URL = "https://github.com/zjunlp/SkillNet";
 /** 同时进行的 SkillNet 安装任务上限（与后端 asyncio 能力匹配，避免前端狂点拖垮） */
 const SKILLNET_MAX_CONCURRENT_INSTALLS = 5;
 /** SkillNet「评估」入口：暂时隐藏；后端 `skills.skillnet.evaluate` 仍可用，改回 true 即恢复按钮 */
 const SKILLNET_EVALUATE_BUTTON_ENABLED = false;
-
-const avatarColors = [
-  "bg-red-500",
-  "bg-orange-500",
-  "bg-amber-500",
-  "bg-yellow-500",
-  "bg-lime-500",
-  "bg-green-500",
-  "bg-emerald-500",
-  "bg-teal-500",
-  "bg-cyan-500",
-  "bg-sky-500",
-  "bg-blue-500",
-  "bg-indigo-500",
-  "bg-violet-500",
-  "bg-purple-500",
-  "bg-fuchsia-500",
-  "bg-pink-500",
-  "bg-rose-500",
-];
-
-export const getSkillAvatar = (name: string) => {
-  const firstChar = name.charAt(0).toUpperCase();
-  const colorIndex = name.charCodeAt(0) % avatarColors.length;
-  return { firstChar, color: avatarColors[colorIndex] };
-};
 
 /** 评估结果展示顺序（与 skillnet-ai 五维一致） */
 const EVAL_DIMENSION_KEYS = [

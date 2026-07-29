@@ -1451,7 +1451,11 @@
         "success": "Available ({{count}})",
         "error": "Unavailable",
         "skipped": "Not configured"
-      }
+      },
+      "sourceFilterHelp": "SkillNet and ClawHub are shown by default. Click a source chip to filter results; keep at least one source selected.",
+      "sourceFilterToggle": "Click to filter this source",
+      "sourceFilterKeepOne": "Keep at least one source selected",
+      "noFilteredResults": "No results for the current source filter. Select another source."
     },
     "actions": {
       "install": "Install",
@@ -1474,6 +1478,9 @@
       "local": "Local",
       "project": "Project",
       "builtin": "Built-in",
+      "clawhub": "ClawHub",
+      "skillnet": "SkillNet",
+      "teamskillshub": "TeamSkillsHub",
       "unknown": "Unknown"
     },
     "sourceLabel": "Source",

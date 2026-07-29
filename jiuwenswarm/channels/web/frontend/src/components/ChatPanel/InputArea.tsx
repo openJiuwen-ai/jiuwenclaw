@@ -16,6 +16,7 @@ import { PermissionWarningDialog } from './PermissionWarningDialog';
 import { ModelProviderIcon } from '../ModelProviderIcon';
 import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
+import { getSkillAvatar } from '../../utils/skillAvatar';
 import {
   isLikelyAbsolutePath,
   isProjectDirectoryPickerSupported,
@@ -31,6 +32,8 @@ import { generateUuidV4 } from '../../utils/uuid';
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
   name: string;
+  /** 展示名（保留安装来源的原始大小写，如 ClawHub 的 Weather）；缺省回退到 name */
+  display_name?: string;
   description: string;
   source: string;
   is_builtin?: boolean;
@@ -2422,32 +2425,6 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
   const [searchQuery, setSearchQuery] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const avatarColors = [
-    'bg-red-500',
-    'bg-orange-500',
-    'bg-amber-500',
-    'bg-yellow-500',
-    'bg-lime-500',
-    'bg-green-500',
-    'bg-emerald-500',
-    'bg-teal-500',
-    'bg-cyan-500',
-    'bg-sky-500',
-    'bg-blue-500',
-    'bg-indigo-500',
-    'bg-violet-500',
-    'bg-purple-500',
-    'bg-fuchsia-500',
-    'bg-pink-500',
-    'bg-rose-500',
-  ];
-
-  const getSkillAvatar = (name: string) => {
-    const firstChar = name.charAt(0).toUpperCase();
-    const colorIndex = name.charCodeAt(0) % avatarColors.length;
-    return { firstChar, color: avatarColors[colorIndex] };
-  };
-
   const installedSkillMap = useMemo(() => {
     const map = new Map<string, InputAreaInstalledPlugin>();
     plugins.forEach((plugin) => {
@@ -2477,8 +2454,9 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
     if (!q) return installedSkills;
     return installedSkills.filter((s) => {
       const name = s.name.toLowerCase();
+      const displayName = (s.display_name || '').toLowerCase();
       const desc = (s.description || '').toLowerCase();
-      return name.includes(q) || desc.includes(q);
+      return name.includes(q) || displayName.includes(q) || desc.includes(q);
     });
   }, [installedSkills, searchQuery]);
 
@@ -2621,7 +2599,7 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
                         {avatar.firstChar}
                       </div>
                       <div className="chat-skill-select__item-main">
-                        <div className="chat-skill-select__item-name">{skill.name}</div>
+                        <div className="chat-skill-select__item-name">{skill.display_name || skill.name}</div>
                         <div className="chat-skill-select__item-desc">
                           {skill.description || t('skills.noDescription')}
                         </div>

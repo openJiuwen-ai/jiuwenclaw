@@ -516,6 +516,7 @@ class SkillManager:
                 meta["content"] = meta.pop("body", "")
                 meta["file_path"] = meta.pop("path", "")
                 meta["source"] = self._resolve_skill_source(meta.get("name", ""))
+                meta["display_name"] = self._resolve_skill_display_name(meta.get("name", ""))
                 meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
                 builtin_dir = get_builtin_skills_dir()
                 if builtin_dir.exists():
@@ -935,14 +936,16 @@ class SkillManager:
             description = str(item.get("summary") or "").strip()
             identifier = str(item.get("slug") or "").strip()
             version = str(item.get("version") or "").strip()
-            author = ""
+            owner_handle = str(item.get("owner_handle") or "").strip()
+            # ClawHub download needs ownerHandle when the same slug has multiple publishers.
+            author = owner_handle
             native_score = item.get("score")
             category = ""
             updated_at = item.get("updated_at") or 0
         else:
             raise ValueError(f"unsupported online search source: {source}")
 
-        return {
+        normalized: dict[str, Any] = {
             "source": source,
             "name": name,
             "description": description,
@@ -962,6 +965,11 @@ class SkillManager:
                 }
             ],
         }
+        if source == "clawhub":
+            normalized["owner_handle"] = owner_handle
+            if owner_handle:
+                normalized["matched_sources"][0]["owner_handle"] = owner_handle
+        return normalized
 
     @classmethod
     def _aggregate_online_search_results(
@@ -978,10 +986,13 @@ class SkillManager:
                 item = cls._normalize_online_search_item(source, raw_item, rank)
                 if not item["identifier"] and not item["name"]:
                     continue
-                identity = cls._normalize_online_search_identifier(
-                    source,
-                    item["identifier"] or item["name"],
-                )
+                identity_value = item["identifier"] or item["name"]
+                if source == "clawhub":
+                    owner_handle = str(item.get("owner_handle") or "").strip()
+                    if owner_handle and identity_value:
+                        # Keep ambiguous slugs from different publishers as distinct results.
+                        identity_value = f"{owner_handle}/{identity_value}"
+                identity = cls._normalize_online_search_identifier(source, identity_value)
                 existing = merged.get(identity)
                 if existing is None:
                     merged[identity] = item
@@ -1375,6 +1386,7 @@ class SkillManager:
         params:
             slug: skill slug (必需)
             owner_handle: 发布者标识 (可选，slug 有多个发布者时必需)
+            display_name: 目录展示名 (可选；用于保留 ClawHub 大小写，避免安装后 Weather→weather)
             version: 版本号 (可选，默认 latest)
             tag: 标签 (可选，如 latest)
             force: 强制覆盖 (可选，默认 False)
@@ -1397,6 +1409,7 @@ class SkillManager:
             }
 
         owner_handle = str(params.get("owner_handle") or "").strip()
+        display_name = str(params.get("display_name") or "").strip()
         version = params.get("version")
         tag = params.get("tag")
         force = bool(params.get("force", False))
@@ -1480,14 +1493,27 @@ class SkillManager:
                         mirror_root.mkdir(parents=True, exist_ok=True)
                         shutil.copytree(skill_dir, mirror_dest)
 
-                    # 记录安装信息
-                    parsed_name = meta.get("name", "")
-                    skill_name = parsed_name if (parsed_name and parsed_name != (md.stem if md else "")) else slug
+                    # skill_name 必须与磁盘扫描出的规范名（_resolve_skill_name）保持一致，
+                    # 否则会被 _register_unmanaged_local_skills 当作"未登记的本地技能"
+                    # 重复注册一条 source=local 的幽灵记录（表现为大小写不一致 + 重复条目）。
+                    # 展示层面的大小写差异（如 Weather vs weather）改为通过 display_name 单独承载。
+                    parsed_name = str(meta.get("name") or "").strip()
+                    stem = md.stem if md else ""
+                    if parsed_name and parsed_name != stem:
+                        skill_name = parsed_name
+                    else:
+                        skill_name = slug
+                    resolved_display_name = display_name if display_name else skill_name
 
                     self._add_local_skill(
                         {
                             "name": skill_name,
-                            "origin": f"clawhub:{slug}",
+                            "display_name": resolved_display_name,
+                            "origin": (
+                                f"clawhub:{owner_handle}/{slug}"
+                                if owner_handle
+                                else f"clawhub:{slug}"
+                            ),
                             "source": "clawhub",
                             "installed_at": datetime.now(timezone.utc).isoformat(),
                         }
@@ -1495,6 +1521,7 @@ class SkillManager:
                     self._add_installed_plugin(
                         {
                             "name": skill_name,
+                            "display_name": resolved_display_name,
                             "marketplace": "clawhub",
                             "version": meta.get("version", ""),
                             "commit": "",
@@ -1506,7 +1533,11 @@ class SkillManager:
                     _safe_rmtree(skill_dir)
                     return {
                         "success": True,
-                        "skill": {"name": skill_name, "source": "clawhub"},
+                        "skill": {
+                            "name": skill_name,
+                            "display_name": resolved_display_name,
+                            "source": "clawhub",
+                        },
                     }
 
         except httpx.HTTPStatusError as exc:
@@ -2758,9 +2789,14 @@ class SkillManager:
                         origin = ls.get("origin")
                         if isinstance(origin, str) and origin.strip():
                             meta["origin"] = origin.strip()
+                        display_name = ls.get("display_name")
+                        if isinstance(display_name, str) and display_name.strip():
+                            meta["display_name"] = display_name.strip()
                     break
 
             meta["source"] = source
+            if not str(meta.get("display_name") or "").strip():
+                meta["display_name"] = meta.get("name", "")
             meta["installed"] = True
             meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
             # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
@@ -2842,6 +2878,24 @@ class SkillManager:
                 return "local"
 
         return "project"
+
+    def _resolve_skill_display_name(self, skill_name: str) -> str:
+        """解析 skill 展示名（优先 local_skills/installed_plugins 记录的 display_name）."""
+        if not skill_name:
+            return skill_name
+        for local_skill in self._state.get("local_skills", []):
+            if local_skill.get("name") == skill_name:
+                display_name = str(local_skill.get("display_name") or "").strip()
+                if display_name:
+                    return display_name
+                break
+        for plugin in self._get_installed_plugins():
+            if plugin.get("name") == skill_name:
+                display_name = str(plugin.get("display_name") or "").strip()
+                if display_name:
+                    return display_name
+                break
+        return skill_name
 
     def _resolve_local_skill_dir(self, skill_name: str) -> Path | None:
         """根据 skill name 定位本地技能目录（仅 agent/skills 下）."""
