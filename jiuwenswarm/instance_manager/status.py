@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -338,8 +339,15 @@ def load_all_instance_configs(
 def stop_process_by_pid(pid: int, timeout: float = 10.0) -> bool:
     """Stop a process by its PID directly.
 
+    On Unix, if the PID is a process group leader (pid == pgid, which
+    happens when the instance was started via ``setsid``), the entire
+    process group is killed so that child processes (agent_server,
+    gateway, web, frontend) are terminated together. Otherwise, only
+    the single PID is signaled to avoid killing unrelated processes
+    in the same group (e.g. the parent shell).
+
     Args:
-        pid: Process ID to stop
+        pid: Process ID to stop (parent process)
         timeout: Seconds to wait for graceful shutdown
 
     Returns:
@@ -369,12 +377,38 @@ def stop_process_by_pid(pid: int, timeout: float = 10.0) -> bool:
         except Exception as exc:
             logger.warning("taskkill failed for PID %d: %s", pid, exc)
     else:
-        # Unix: SIGTERM then SIGKILL
+        # Unix: only kill the whole process group if this PID is its
+        # leader (pid == pgid). This is the case when the instance was
+        # started via `setsid`. If the PID is just a regular member of
+        # some other group (e.g. started in a shell without setsid),
+        # killpg would kill the shell too — so fall back to single kill.
+        use_group_kill = False
         try:
-            os.kill(pid, 15)  # SIGTERM
-            time.sleep(2)
-            if is_process_alive(pid):
-                os.kill(pid, 9)  # SIGKILL
+            pgid = os.getpgid(pid)
+            use_group_kill = (pgid == pid)
+        except (ProcessLookupError, PermissionError):
+            use_group_kill = False
+
+        try:
+            if use_group_kill:
+                logger.info("PID %d is process group leader, killing group %d", pid, pgid)
+                os.killpg(pgid, signal.SIGTERM)
+                time.sleep(3)
+                # Unconditionally send SIGKILL to the entire group.
+                # Checking only the group leader (pid) is insufficient:
+                # the leader dies immediately on SIGTERM, but child
+                # processes (e.g. app_agentserver with active WebSocket
+                # connections) may still be in graceful shutdown and
+                # survive as orphans (reparented to init), leaking memory.
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # Group already gone
+            else:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(2)
+                if is_process_alive(pid):
+                    os.kill(pid, signal.SIGKILL)
         except OSError as exc:
             logger.warning("kill failed for PID %d: %s", pid, exc)
 
@@ -391,6 +425,12 @@ def stop_process_by_pid(pid: int, timeout: float = 10.0) -> bool:
 
 def stop_instance_process(config: InstanceConfig, timeout: float = 10.0) -> bool:
     """Stop a running instance process.
+
+    On Unix, kills the entire process group rooted at the PID recorded
+    in the PID file (the parent ``jiuwenswarm-start`` process), so that
+    child processes (agent_server, gateway, web, frontend) are terminated
+    together. This prevents orphaned children from keeping the ports
+    bound after the parent is killed.
 
     Args:
         config: InstanceConfig for the instance
@@ -435,12 +475,42 @@ def stop_instance_process(config: InstanceConfig, timeout: float = 10.0) -> bool
         except Exception as exc:
             logger.warning("taskkill failed for PID %d: %s", pid, exc)
     else:
-        # Unix: SIGTERM then SIGKILL
+        # Unix: only kill the whole process group if this PID is its
+        # leader (pid == pgid). This is the case when the instance was
+        # started via `setsid`. If the PID is just a regular member of
+        # some other group (e.g. started in a shell without setsid),
+        # killpg would kill the shell too — so fall back to single kill.
+        use_group_kill = False
         try:
-            os.kill(pid, 15)  # SIGTERM
-            time.sleep(2)
-            if is_process_alive(pid):
-                os.kill(pid, 9)  # SIGKILL
+            pgid = os.getpgid(pid)
+            use_group_kill = (pgid == pid)
+        except (ProcessLookupError, PermissionError):
+            use_group_kill = False
+
+        try:
+            if use_group_kill:
+                logger.info(
+                    "PID %d is process group leader, killing group %d for instance '%s'",
+                    pid, pgid, config.name,
+                )
+                os.killpg(pgid, signal.SIGTERM)
+                time.sleep(3)
+                # Unconditionally send SIGKILL to the entire group.
+                # The group leader (pid) may die immediately on SIGTERM
+                # while child processes (e.g. app_agentserver with active
+                # WebSocket connections) are still in graceful shutdown.
+                # Checking only is_process_alive(pid) would skip SIGKILL,
+                # leaving children orphaned (reparented to init) and
+                # leaking memory indefinitely.
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # Group already gone
+            else:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(2)
+                if is_process_alive(pid):
+                    os.kill(pid, signal.SIGKILL)
         except OSError as exc:
             logger.warning("kill failed for PID %d: %s", pid, exc)
 
