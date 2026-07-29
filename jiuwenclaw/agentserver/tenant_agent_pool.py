@@ -875,6 +875,80 @@ class TenantAgentPool:
                 "agents": results,
             }
 
+    # Web control-plane evolution RPCs that still construct a full agent (LLM client).
+    # Disk-only methods (archives/rollback) skip create_instance and do not need this.
+    _LLM_CONTROL_EVOLUTION_METHODS: frozenset[str] = frozenset(
+        {
+            "skills.evolution.rebuild",
+            "skills.evolution.status",
+            "skills.evolution.get",
+            "skills.evolution.save",
+        }
+    )
+    _PREFERRED_CONTROL_AGENT_IDS: tuple[str, ...] = ("office", "jiuwenclaw", "assistant")
+
+    @staticmethod
+    def _tip_has_api_base(service_id: str, agent_id: str) -> bool:
+        tip = effective_tip(service_id, agent_id) or {}
+        return bool(str(tip.get("API_BASE") or "").strip())
+
+    @classmethod
+    def resolve_control_rpc_tenant(
+        cls,
+        request: AgentRequest,
+        agent_id: str,
+        service_id: str,
+    ) -> tuple[str, str]:
+        """Remap web evolution RPCs off default tip when it lacks API_BASE.
+
+        ``skills.evolution.rebuild`` (and sibling control RPCs) historically arrive on
+        ``channel=web`` without ``agent_id``. That resolves to ``default/default``, whose
+        tip often has ``MODEL_NAME`` but omits ``API_BASE`` (credentials live on catalog
+        agents such as ``office``). Remount to a credentialed catalog tenant.
+        """
+        if agent_id != "default" or service_id != "default":
+            return agent_id, service_id
+        if getattr(request, "channel_id", None) != "web":
+            return agent_id, service_id
+        req_method = getattr(request, "req_method", None)
+        method = getattr(req_method, "value", req_method)
+        if not isinstance(method, str) or method not in cls._LLM_CONTROL_EVOLUTION_METHODS:
+            return agent_id, service_id
+        if cls._tip_has_api_base(service_id, agent_id):
+            return agent_id, service_id
+
+        tip = effective_tip(service_id, agent_id) or {}
+        desired_model = str(tip.get("MODEL_NAME") or "").strip()
+        registry = TenantCatalogRegistry.get_instance()
+        catalog_ids = list(registry.list_ids(service_id=service_id))
+
+        candidates: list[str] = []
+        for preferred in cls._PREFERRED_CONTROL_AGENT_IDS:
+            if preferred in catalog_ids and preferred not in candidates:
+                candidates.append(preferred)
+        if desired_model:
+            for cid in catalog_ids:
+                if cid in candidates:
+                    continue
+                other = effective_tip(service_id, cid) or {}
+                if str(other.get("MODEL_NAME") or "").strip() == desired_model:
+                    candidates.append(cid)
+        for cid in catalog_ids:
+            if cid not in candidates:
+                candidates.append(cid)
+
+        for cid in candidates:
+            if cls._tip_has_api_base(service_id, cid):
+                logger.info(
+                    "[TenantAgentPool] remapped control RPC tenant default/default -> %s/%s "
+                    "(method=%s reason=missing_API_BASE)",
+                    service_id,
+                    cid,
+                    method,
+                )
+                return cid, service_id
+        return agent_id, service_id
+
     @staticmethod
     def require_officeclaw_agent(request: AgentRequest) -> AgentResponse | None:
         """Allow legacy default/default; require catalog membership for named tenants."""
@@ -945,6 +1019,7 @@ class TenantAgentPool:
         if guard is not None:
             return guard
         agent_id, service_id = self.extract_ids(request)
+        agent_id, service_id = self.resolve_control_rpc_tenant(request, agent_id, service_id)
         cache_key = self._build_cache_key(agent_id, service_id)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
         try:
@@ -970,6 +1045,7 @@ class TenantAgentPool:
             )
             return
         agent_id, service_id = self.extract_ids(request)
+        agent_id, service_id = self.resolve_control_rpc_tenant(request, agent_id, service_id)
         cache_key = self._build_cache_key(agent_id, service_id)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
         try:
