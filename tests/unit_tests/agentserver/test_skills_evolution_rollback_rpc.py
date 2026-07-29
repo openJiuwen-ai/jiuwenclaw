@@ -5,6 +5,7 @@
 # pylint: disable=protected-access
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -162,29 +163,32 @@ def test_do_evolve_rollback_restores_skill_without_rail(monkeypatch, tmp_path: P
         "version": "SKILL.v1.0.0.md",
     }
     assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# archived body\n"
-    assert '"version": "1.0.0"' in (skill_dir / "evolutions.json").read_text(encoding="utf-8") or (
-        '"version":"1.0.0"' in (skill_dir / "evolutions.json").read_text(encoding="utf-8")
-    )
+    evo_text = (skill_dir / "evolutions.json").read_text(encoding="utf-8")
+    evo_data = json.loads(evo_text)
+    # Live evolutions.json must be cleared; no SKILL.md version -> default v1.0.0.
+    assert evo_data.get("entries") == []
+    assert not evo_data.get("records")
+    assert evo_data.get("version") == "v1.0.0"
     assert not (archive_dir / "SKILL.v1.0.0.md").exists()
     assert adapter._skill_evolution_rail is None
     assert adapter._model is None
 
 
 @pytest.mark.unit
-def test_rollback_skill_via_store_continues_when_evo_restore_fails(monkeypatch):
-    """Body rollback must succeed even if paired evolution-log restore fails."""
+def test_rollback_skill_via_store_continues_when_evo_clear_fails(monkeypatch):
+    """Body rollback must succeed even if clearing the live evolution log fails."""
     adapter = _make_adapter()
     body_archive = SimpleNamespace(name="SKILL.v1.0.0.md")
-    evo_archive = SimpleNamespace(name="evolutions.v1.0.0.json")
     store = MagicMock()
     store.get_skill_archive_dir.return_value = Path("/tmp/skill/archive")
     store.normalize_body_archive_name.return_value = "SKILL.v1.0.0.md"
     store.get_skill_archive_file.return_value = body_archive
-    store.resolve_paired_evolution_archive.return_value = evo_archive
     store.read_archive_text = AsyncMock(return_value="# archived body\n")
     store.archive_current_state = AsyncMock()
     store.write_skill_content = AsyncMock()
-    store.restore_evolution_log_from_archive = AsyncMock(return_value=False)
+    store._extract_version_from_skill_md = MagicMock(return_value=None)
+    store.clear_evolutions = AsyncMock(return_value=False)
+    store.restore_evolution_log_from_archive = AsyncMock()
     store.delete_archive_version = AsyncMock(return_value=True)
 
     ok, evo_ok = asyncio.run(
@@ -193,14 +197,44 @@ def test_rollback_skill_via_store_continues_when_evo_restore_fails(monkeypatch):
     assert ok is True
     assert evo_ok is False
     store.write_skill_content.assert_awaited_once_with("daily-weather", "# archived body\n")
-    store.restore_evolution_log_from_archive.assert_awaited_once()
+    store.clear_evolutions.assert_awaited_once_with(
+        "daily-weather", retain_version="v1.0.0",
+    )
+    store.restore_evolution_log_from_archive.assert_not_awaited()
     store.delete_archive_version.assert_awaited_once_with(
         "daily-weather", "SKILL.v1.0.0.md"
     )
 
 
 @pytest.mark.unit
-def test_do_evolve_rollback_surfaces_evo_restore_warning(monkeypatch):
+def test_rollback_skill_via_store_retains_frontmatter_version(monkeypatch):
+    """When restored SKILL.md has a version, clear_evolutions keeps that version."""
+    adapter = _make_adapter()
+    body_archive = SimpleNamespace(name="SKILL.v1.2.0.md")
+    body = "---\nname: daily-weather\nversion: v1.2.0\n---\n# archived body\n"
+    store = MagicMock()
+    store.get_skill_archive_dir.return_value = Path("/tmp/skill/archive")
+    store.normalize_body_archive_name.return_value = "SKILL.v1.2.0.md"
+    store.get_skill_archive_file.return_value = body_archive
+    store.read_archive_text = AsyncMock(return_value=body)
+    store.archive_current_state = AsyncMock()
+    store.write_skill_content = AsyncMock()
+    store._extract_version_from_skill_md = MagicMock(return_value="v1.2.0")
+    store.clear_evolutions = AsyncMock(return_value=None)
+    store.delete_archive_version = AsyncMock(return_value=True)
+
+    ok, evo_ok = asyncio.run(
+        adapter._rollback_skill_via_store(store, "daily-weather", "SKILL.v1.2.0.md")
+    )
+    assert ok is True
+    assert evo_ok is True
+    store.clear_evolutions.assert_awaited_once_with(
+        "daily-weather", retain_version="v1.2.0",
+    )
+
+
+@pytest.mark.unit
+def test_do_evolve_rollback_surfaces_evo_clear_warning(monkeypatch):
     adapter = _make_adapter()
     store = MagicMock()
     store.skill_exists.return_value = True
@@ -222,6 +256,7 @@ def test_do_evolve_rollback_surfaces_evo_restore_warning(monkeypatch):
     assert result["ok"] is True
     assert result["rolled_back"] is True
     assert "evolution log" in result["warning"]
+    assert "清空失败" in result["warning"]
 
     rpc = asyncio.run(
         adapter.handle_skills_evolution_rollback(
@@ -230,6 +265,7 @@ def test_do_evolve_rollback_surfaces_evo_restore_warning(monkeypatch):
     )
     assert rpc["rolled_back"] is True
     assert "evolution log" in rpc["warning"]
+    assert "清空失败" in rpc["warning"]
 
 
 @pytest.mark.unit
