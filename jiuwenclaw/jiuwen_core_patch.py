@@ -343,7 +343,6 @@ class RetryMixin:
         "model config error",
         "model invoke parameter error",
         "model client_config is invalid",
-        "async invoke error"
     )
 
     def _resolve_stream_timeout(self, timeout: Optional[float]) -> float:
