@@ -663,7 +663,11 @@ class TenantAgentPool:
         *,
         channel_id: str = "officeclaw",
     ) -> dict[str, Any]:
-        """Eager/light warmup: create ``__warmup__`` session then tear it down."""
+        """Optional smoke create/destroy for a tenant (not used by sync_agents_configs).
+
+        Full DeepAgent cold-start per catalog agent was too slow for sync; chat creates
+        the real session on demand. Kept for manual/debug callers.
+        """
         warmup_session = "__warmup__"
         try:
             agent_manager = await self._ensure_agent_manager(agent_id, service_id)
@@ -797,7 +801,9 @@ class TenantAgentPool:
                 try:
                     # Apply side effects first; commit catalog only on full success so a
                     # failed attempt keeps the previous content_hash and identical retries
-                    # re-run replace_active_env / apply_sync_config / warmup.
+                    # re-run replace_active_env / apply_sync_config.
+                    # Skip DeepAgent __warmup__ create/destroy: it dominated sync latency
+                    # (~2.5s × N agents) and did not reuse into real chat sessions.
                     replace_active_env(
                         materialized_env,
                         service_id=service_id,
@@ -822,10 +828,7 @@ class TenantAgentPool:
                     if reload_result.failed:
                         agent_ok = False
                         agent_error = "reload failed for one or more sessions"
-                    warmup_payload = await self.warmup_tenant(agent_id, service_id)
-                    if not warmup_payload.get("ok"):
-                        agent_ok = False
-                        agent_error = warmup_payload.get("error") or "warmup failed"
+                    warmup_payload = {"ok": True, "error": None, "skipped": True}
                     if agent_ok:
                         registry.upsert(spec)
                 except Exception as exc:

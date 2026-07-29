@@ -429,7 +429,8 @@ async def test_sync_first_adds_agents_registry_contains(mock_warmup):
 
     registry = TenantCatalogRegistry.get_instance()
     assert registry.contains("default", "office")
-    mock_warmup.assert_awaited()
+    mock_warmup.assert_not_awaited()
+    assert result["agents"][0]["warmup"]["skipped"] is True
 
 
 @pytest.mark.asyncio
@@ -439,11 +440,11 @@ async def test_sync_same_revision_fast_path_unchanged(mock_warmup):
 
     first = await pool.sync_agents_configs(payload)
     assert first["agents"][0]["action"] in {"added", "updated"}
-    warmup_calls_after_first = mock_warmup.await_count
+    mock_warmup.assert_not_awaited()
 
     second = await pool.sync_agents_configs(payload)
     assert second["agents"][0]["action"] == "unchanged"
-    assert mock_warmup.await_count == warmup_calls_after_first
+    mock_warmup.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -560,28 +561,55 @@ async def test_sync_preempt_clears_staged_rebuilds_pending(mock_warmup):
 
 @pytest.mark.asyncio
 async def test_sync_half_failure_does_not_elevate_revision(mock_warmup):
+    """Soft apply failure must not elevate revision / commit catalog (retryable)."""
     pool = TenantAgentPool.get_instance()
-    mock_warmup.return_value = {"ok": False, "error": "warmup boom"}
+    payload = _sync_payload(revision="fail-rev")
+    reload_result = MagicMock()
+    reload_result.applied = 0
+    reload_result.deferred = 0
+    reload_result.failed = [{"session": "x", "error": "boom"}]
+    mock_manager = MagicMock()
+    mock_manager.apply_sync_config = AsyncMock(return_value=reload_result)
 
-    result = await pool.sync_agents_configs(_sync_payload(revision="fail-rev"))
+    with patch.object(
+        TenantAgentPool,
+        "_ensure_agent_manager",
+        new=AsyncMock(return_value=mock_manager),
+    ):
+        result = await pool.sync_agents_configs(payload)
+
     assert result["agents"][0]["ok"] is False
     assert pool._last_sync_revision.get("default") is None
-    # Catalog must not commit on soft failure; otherwise identical retries short-circuit.
     assert TenantCatalogRegistry.get_instance().contains("default", "office") is False
 
-    mock_warmup.return_value = {"ok": True, "error": None}
-    second = await pool.sync_agents_configs(_sync_payload(revision="fail-rev", agents=[
-        {
-            "agent_id": "office",
-            "config": {},
-            "env": _full_env(MODEL_NAME="retry-after-fail"),
-            "runtime": {},
-        }
-    ]))
-    # First attempt never committed, so retry is still an add (or update if seeded).
+    reload_ok = MagicMock()
+    reload_ok.applied = 1
+    reload_ok.deferred = 0
+    reload_ok.failed = []
+    mock_manager.apply_sync_config = AsyncMock(return_value=reload_ok)
+    with patch.object(
+        TenantAgentPool,
+        "_ensure_agent_manager",
+        new=AsyncMock(return_value=mock_manager),
+    ):
+        second = await pool.sync_agents_configs(
+            _sync_payload(
+                revision="fail-rev",
+                agents=[
+                    {
+                        "agent_id": "office",
+                        "config": {},
+                        "env": _full_env(MODEL_NAME="retry-after-fail"),
+                        "runtime": {},
+                    }
+                ],
+            )
+        )
+
     assert second["agents"][0]["action"] in {"added", "updated"}
     assert second["agents"][0]["ok"] is True
     assert pool._last_sync_revision.get("default") == "fail-rev"
+    mock_warmup.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -620,10 +648,11 @@ async def test_sync_replace_active_env_failure_allows_identical_retry(mock_warmu
 
 
 @pytest.mark.asyncio
-async def test_sync_warmup_failure_identical_payload_retries_apply(mock_warmup):
+async def test_sync_skips_deep_agent_warmup(mock_warmup):
+    """Catalog sync must not cold-create/destroy DeepAgent (__warmup__)."""
     pool = TenantAgentPool.get_instance()
     payload = _sync_payload(
-        revision="warmup-fail-rev",
+        revision="warmup-skip-rev",
         agents=[
             {
                 "agent_id": "office",
@@ -635,21 +664,12 @@ async def test_sync_warmup_failure_identical_payload_retries_apply(mock_warmup):
     )
     registry = TenantCatalogRegistry.get_instance()
 
-    mock_warmup.return_value = {"ok": False, "error": "warmup boom"}
-    first = await pool.sync_agents_configs(payload)
-    assert first["agents"][0]["ok"] is False
-    assert registry.contains("default", "office") is False
-    # Env may already be tip-updated; catalog hash must still allow retry.
-    assert get_active_env(service_id="default", agent_id="office").get("API_KEY") == "k1"
-
-    mock_warmup.return_value = {"ok": True, "error": None}
-    second = await pool.sync_agents_configs(payload)
-    assert second["agents"][0]["ok"] is True
-    assert second["agents"][0]["action"] == "added"
+    result = await pool.sync_agents_configs(payload)
+    assert result["agents"][0]["ok"] is True
+    assert result["agents"][0]["action"] == "added"
+    assert result["agents"][0]["warmup"] == {"ok": True, "error": None, "skipped": True}
     assert registry.contains("default", "office") is True
-    assert registry.get("default", "office").content_hash is not None
-    mock_warmup.assert_awaited()
-    assert mock_warmup.await_count >= 2
+    mock_warmup.assert_not_awaited()
 
 
 @pytest.mark.asyncio
