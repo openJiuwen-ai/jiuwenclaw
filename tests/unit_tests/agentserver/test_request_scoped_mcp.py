@@ -16,7 +16,12 @@ from jiuwenclaw.agentserver.tool_manager import (
     ToolManager,
     _make_stdio_params_getter,
     _REQUEST_STDIO_PARAMS,
+    _validate_cat_cafe_request_scoped_stdio,
     _validate_request_scoped_remote_mcp,
+)
+from jiuwenclaw.agentserver.tools.mcp_toolkits import (
+    _normalize_stdio_command_kind,
+    create_mcp_tool,
 )
 
 
@@ -427,3 +432,176 @@ class TestValidateRequestScopedRemoteMcp:
             _validate_request_scoped_remote_mcp("t", {"url": "http://10.0.0.1/sse"})
         with pytest.raises(ValueError, match="SSRF"):
             _validate_request_scoped_remote_mcp("t", {"url": "http://192.168.1.1/mcp"})
+
+
+class TestNormalizeStdioCommandKind:
+    def test_node_bare(self):
+        assert _normalize_stdio_command_kind("node") == "node"
+
+    def test_node_exe(self):
+        assert _normalize_stdio_command_kind("node.exe") == "node"
+
+    def test_node_absolute_path(self):
+        assert _normalize_stdio_command_kind("/usr/local/bin/node") == "node"
+        assert _normalize_stdio_command_kind(r"C:\Program Files\nodejs\node.exe") == "node"
+
+    def test_python_variants(self):
+        for cmd in ("python", "python3", "python.exe", "python3.11"):
+            assert _normalize_stdio_command_kind(cmd) == "python", cmd
+
+    def test_npx_bare(self):
+        assert _normalize_stdio_command_kind("npx") == "npx"
+
+    def test_npx_exe(self):
+        assert _normalize_stdio_command_kind("npx.exe") == "npx"
+
+    def test_npx_absolute_path(self):
+        assert _normalize_stdio_command_kind("/usr/local/bin/npx") == "npx"
+        assert _normalize_stdio_command_kind(r"C:\Users\me\AppData\Roaming\npm\npx.cmd") == "npx"
+
+    def test_uvx_bare(self):
+        assert _normalize_stdio_command_kind("uvx") == "uvx"
+
+    def test_uvx_exe(self):
+        assert _normalize_stdio_command_kind("uvx.exe") == "uvx"
+
+    def test_uvx_absolute_path(self):
+        assert _normalize_stdio_command_kind("/home/u/.local/bin/uvx") == "uvx"
+
+    def test_empty_raises(self):
+        with pytest.raises(ValueError, match="缺少 'command'"):
+            _normalize_stdio_command_kind("")
+
+    def test_empty_after_strip_raises(self):
+        with pytest.raises(ValueError, match="缺少 'command'"):
+            _normalize_stdio_command_kind("   ")
+
+    def test_unsupported_raises(self):
+        for cmd in ("bash", "sh", "ruby", "cmd", "powershell", "deno"):
+            with pytest.raises(ValueError, match="不支持的 command 类型"):
+                _normalize_stdio_command_kind(cmd)
+
+
+class TestCreateMcpToolStdio:
+    def _make_stdio_config(self, command: str, args: list, name: str = "t", **extra):
+        cfg = {"name": name, "command": command, "args": args}
+        cfg.update(extra)
+        return json.dumps(cfg)
+
+    def test_npx_config(self):
+        cfg_str = self._make_stdio_config(
+            "npx", ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+        )
+        mcp_cfg = create_mcp_tool(cfg_str)
+        assert mcp_cfg.client_type == "stdio"
+        assert mcp_cfg.params["command"] == "npx"
+        assert mcp_cfg.params["args"] == ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+    def test_uvx_config(self):
+        cfg_str = self._make_stdio_config("uvx", ["mcp-server-fetch"])
+        mcp_cfg = create_mcp_tool(cfg_str)
+        assert mcp_cfg.client_type == "stdio"
+        assert mcp_cfg.params["command"] == "uvx"
+        assert mcp_cfg.params["args"] == ["mcp-server-fetch"]
+
+    def test_npx_with_env_and_cwd(self):
+        cfg_str = self._make_stdio_config(
+            "npx", ["-y", "@scope/pkg"],
+            env={"API_KEY": "secret"},
+            cwd="/some/dir",
+        )
+        mcp_cfg = create_mcp_tool(cfg_str)
+        assert mcp_cfg.params["env"] == {"API_KEY": "secret"}
+        assert mcp_cfg.params["cwd"] == "/some/dir"
+
+    def test_npx_absolute_path(self):
+        cfg_str = self._make_stdio_config(
+            "/usr/local/bin/npx", ["-y", "pkg"]
+        )
+        mcp_cfg = create_mcp_tool(cfg_str)
+        assert mcp_cfg.params["command"] == "/usr/local/bin/npx"
+
+    def test_uvx_absolute_path(self):
+        cfg_str = self._make_stdio_config(
+            r"C:\Users\me\.local\bin\uvx.exe", ["pkg"]
+        )
+        mcp_cfg = create_mcp_tool(cfg_str)
+        assert mcp_cfg.params["command"] == r"C:\Users\me\.local\bin\uvx.exe"
+
+    def test_unsupported_command_raises(self):
+        cfg_str = self._make_stdio_config("bash", ["--version"])
+        with pytest.raises(ValueError, match="不支持的 command 类型"):
+            create_mcp_tool(cfg_str)
+
+    def test_npx_dangerous_eval_arg_blocked(self):
+        cfg_str = self._make_stdio_config("npx", ["-e", "code"])
+        with pytest.raises(ValueError, match="危险标志"):
+            create_mcp_tool(cfg_str)
+
+    def test_uvx_dangerous_command_arg_blocked(self):
+        cfg_str = self._make_stdio_config("uvx", ["-c", "print(1)"])
+        with pytest.raises(ValueError, match="危险标志"):
+            create_mcp_tool(cfg_str)
+
+
+class TestValidateCatCafeRequestScopedStdio:
+    def test_npx_skips_path_check(self):
+        _validate_cat_cafe_request_scoped_stdio({
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/etc", "/tmp"],
+        })
+
+    def test_uvx_skips_path_check(self):
+        _validate_cat_cafe_request_scoped_stdio({
+            "command": "uvx",
+            "args": ["mcp-server-fetch", "/var/data"],
+        })
+
+    def test_npx_untrusted_cwd_allowed(self):
+        _validate_cat_cafe_request_scoped_stdio({
+            "command": "npx",
+            "args": ["-y", "pkg"],
+            "cwd": "/untrusted/random/dir",
+        })
+
+    def test_npx_dangerous_command_arg_still_blocked(self):
+        with pytest.raises(ValueError, match="python -c"):
+            _validate_cat_cafe_request_scoped_stdio({
+                "command": "npx",
+                "args": ["-c", "code"],
+            })
+
+    def test_uvx_dangerous_command_arg_still_blocked(self):
+        with pytest.raises(ValueError, match="python -c"):
+            _validate_cat_cafe_request_scoped_stdio({
+                "command": "uvx",
+                "args": ["--command", "code"],
+            })
+
+    def test_node_path_check_still_active(self):
+        with pytest.raises(ValueError, match="受信根"):
+            _validate_cat_cafe_request_scoped_stdio({
+                "command": "node",
+                "args": ["/untrusted/script.js"],
+            })
+
+    def test_python_path_check_still_active(self):
+        with pytest.raises(ValueError, match="受信根"):
+            _validate_cat_cafe_request_scoped_stdio({
+                "command": "python",
+                "args": ["/untrusted/script.py"],
+            })
+
+    def test_node_eval_still_blocked(self):
+        with pytest.raises(ValueError, match="node -e"):
+            _validate_cat_cafe_request_scoped_stdio({
+                "command": "node",
+                "args": ["-e", "console.log(1)"],
+            })
+
+    def test_args_not_list_raises(self):
+        with pytest.raises(ValueError, match="args 须为列表"):
+            _validate_cat_cafe_request_scoped_stdio({
+                "command": "npx",
+                "args": "not-a-list",
+            })
