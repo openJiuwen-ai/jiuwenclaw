@@ -180,6 +180,32 @@ UDS-related env vars:
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | Host directory bind-mounted by `run_docker.sh` to expose the socket. |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | Container-side mount point; must match the directory in `JIUWENBOX_LISTEN`'s socket path. |
 
+### API authentication (opt-in)
+
+When `JIUWENBOX_API_TOKEN` is set, every HTTP endpoint (including `/health`, `/api/v1/*`, and `/mcp`) requires:
+
+```http
+Authorization: Bearer <token>
+```
+
+Missing or invalid tokens return `401` with `{"error":"unauthorized"}`.
+
+```bash
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN jiuwenbox-server
+
+export JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN
+jiuwenbox health
+
+curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/health
+```
+
+| Variable / flag | Notes |
+| --- | --- |
+| `JIUWENBOX_API_TOKEN` | Shared by server and CLI; unset = auth disabled |
+| `jiuwenbox-server --api-token` | Launch flag; overrides env |
+| `jiuwenbox --api-token` | CLI flag; overrides env |
+
 ### Persisting the audit log (`--save-logs DIR`)
 
 **By default jiuwenbox writes no log files at all.** Audit events
@@ -889,6 +915,7 @@ Global flags:
 | Flag | Default | Env var | Description |
 | --- | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:8321` | `JIUWENBOX_URL` | Server endpoint. Accepts `http://host:port` or `unix:///abs/socket/path` |
+| `--api-token` | _unset_ | `JIUWENBOX_API_TOKEN` | Bearer token; required when the server has auth enabled |
 | `--timeout` | `30` | `JIUWENBOX_TIMEOUT` | HTTP timeout seconds |
 | `--verbose / -v` | off | – | Debug logging on stderr |
 | `--no-color` | off | `NO_COLOR` | Disable ANSI colors on stderr |

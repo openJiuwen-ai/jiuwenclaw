@@ -8,6 +8,8 @@ from typing import Any, Callable
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +113,7 @@ class DiscordChannel(BaseChannel):
                 logger.warning("DiscordChannel stop failed: %s", e)
         logger.info("DiscordChannel stopped")
 
-    async def send(self, msg: Message) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         if self._client is None or self._client.is_closed():
             return
 

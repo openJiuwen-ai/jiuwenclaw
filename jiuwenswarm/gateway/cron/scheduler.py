@@ -23,6 +23,8 @@ from jiuwenswarm.gateway.cron.store import CronJobStore
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE
+from jiuwenswarm.server.runtime.session.session_history import append_history_record
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +122,8 @@ def _extract_text_from_stream_payload(payload: dict | None) -> str | None:
             return content
     if event_type == "chat.error":
         error = payload.get("error")
-        if error is not None:
-            return f"[cron] 任务执行失败: {error}"
+        if isinstance(error, str) and error.strip():
+            return error
     workflow_text = _extract_workflow_result_text(payload)
     if workflow_text:
         return workflow_text
@@ -180,6 +182,11 @@ def _resolve_cron_team_timeout_result(
 def _extract_text_from_agent_payload(payload: dict | None) -> str:
     if not isinstance(payload, dict):
         return ""
+    # AgentServer unary error responses use ok=False, payload={"error": "..."}
+    # Pass through raw error text, same as normal chat behavior
+    error = payload.get("error")
+    if isinstance(error, str) and error.strip():
+        return error
     # Common: {"content": {"output": "...", "result_type": "answer"}}
     content = payload.get("content")
     if isinstance(content, dict):
@@ -202,13 +209,9 @@ def _extract_text_from_agent_payload(payload: dict | None) -> str:
 
 
 def _format_cron_broadcast_text(*, job_name: str, text: str, is_placeholder: bool) -> str:
-    body = str(text or "").strip()
-    if not body:
-        return body
-    if is_placeholder or body.startswith("[cron]"):
-        return body
-    name = str(job_name or "").strip() or "cron"
-    return f"{name} result:\n\n{body}"
+    # Result body, in-progress placeholders, and [cron] status text are all
+    # delivered as-is — no job-name prefix is prepended.
+    return str(text or "").strip()
 
 
 def _cron_next_push_dt(cron_expr: str, base_dt: datetime) -> datetime:
@@ -230,7 +233,7 @@ def _cron_next_push_dt(cron_expr: str, base_dt: datetime) -> datetime:
     return nxt
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=True)
 class _Event:
     at_ts: float
     seq: int
@@ -380,7 +383,10 @@ class CronSchedulerService:
             if ev.kind == "push_update" and ev.job_id in new_job_ids
         ]
         self._events.clear()
-        self._seq = 0
+        # 不重置 _seq：保留的 push_update 事件携带原始 seq 值，
+        # 若重置为 0，新调度事件的 seq 会从 1 开始递增，与保留事件的 seq 碰撞。
+        # 当 at_ts 也相同时，heapq 元组比较回退到 _Event 比较（即使 _Event
+        # 已加 order=True，仍应避免 seq 碰撞以保证排序语义正确）。
         for item in pending_push_updates:
             heapq.heappush(self._events, item)
 
@@ -414,33 +420,67 @@ class CronSchedulerService:
 
         now = self._now_fn()
         for job in jobs:
-            if not job.enabled:
-                continue
             try:
                 push_dt, wake_dt, run_id = self._compute_next_run(job, now_ts=now)
             except Exception as exc:  # noqa: BLE001
                 if self._is_croniter_no_next_date(exc):
-                    # 已过期的 one-shot：标记 expired 并停用，避免 UI 仍显示 enabled。
-                    try:
-                        job.enabled = False
-                        job.expired = True
-                        await self._store.update_job(job.id, {"enabled": False, "expired": True})
-                    except Exception as update_exc:  # noqa: BLE001
-                        logger.warning(
-                            "[Cron] mark expired failed job=%s: %s",
-                            job.id,
-                            update_exc,
-                        )
+                    # 已过期的 one-shot：标记 expired 并停用，避免 UI 仍显示"运行中/已暂停"。
+                    # 这里故意不提前 continue 掉 disabled 的任务——一个单次任务如果在到期前
+                    # 被手动暂停，同样需要能被检测到"已经没有下一次执行时间"从而转入过期态，
+                    # 否则会永远卡在"已暂停"（见 2026-07-16 bugfix）。
+                    # proactive job 的 enabled 由 ConfigPanel 开关管，scheduler 不碰。
+                    # 幂等保护：已经是 expired+disabled 状态的任务不再重复写回——
+                    # store.update_job 每次都会刷 updated_at 和 cron_jobs.json 的 mtime，
+                    # 若对已过期任务每次 reload 都写一次，会形成"mtime 变 → _check_store_changed
+                    # 触发 reload → 又写一次 → mtime 又变"的循环（每 5 秒一轮），导致过期任务的
+                    # updated_at 一直是最新的、永远排在任务列表最前面（PR #3756 review 期间
+                    # 发现的 Bug7 回归）
+                    is_proactive = getattr(job, "mode", "") == "proactive.tick"
+                    already_expired = bool(getattr(job, "expired", False))
+                    already_disabled = is_proactive or not bool(getattr(job, "enabled", True))
+                    if not (already_expired and already_disabled):
+                        try:
+                            patch = {"expired": True}
+                            if not is_proactive:
+                                patch["enabled"] = False
+                                job.enabled = False
+                            job.expired = True
+                            await self._store.update_job(job.id, patch)
+                        except Exception as update_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[Cron] mark expired failed job=%s: %s",
+                                job.id,
+                                update_exc,
+                            )
                 else:
                     logger.warning("[Cron] compute next run failed job=%s: %s", job.id, exc)
                 continue
-            self._schedule_event(wake_dt, "wake", job.id, run_id)
+            if not job.enabled:
+                continue
+            # 幂等保护：reload 清空事件队列后重新排入，但同一 run_id
+            # 可能已执行中或已完成（wake_offset 过大时 wake_dt 在过去，
+            # 每次 reload 都会立刻触发）。跳过已活跃 run 的 wake 事件，
+            # 但 push 事件仍需排入——_on_push 内部有 pushed_final 兜底。
+            existing = self._runs.get(run_id)
+            already_active = (
+                existing is not None
+                and existing.status in ("running", "succeeded", "failed")
+            ) or (
+                run_id in self._run_tasks
+                and not self._run_tasks[run_id].done()
+            )
+            if not already_active:
+                self._schedule_event(wake_dt, "wake", job.id, run_id)
             self._schedule_event(push_dt, "push", job.id, run_id)
 
         self._sync_store_mtime()
         self._reload_event.set()
 
     async def trigger_run_now(self, job_id: str) -> str:
+        info = await self.trigger_run_now_info(job_id)
+        return str(info["run_id"])
+
+    async def trigger_run_now_info(self, job_id: str) -> dict[str, str]:
         job_id = str(job_id or "").strip()
         job = self._jobs.get(job_id) or await self._store.get_job(job_id)
         if job is None:
@@ -449,10 +489,35 @@ class CronSchedulerService:
         push_dt = now
         wake_dt = now
         run_id = f"{job.id}:{int(push_dt.timestamp())}"
+        channel_id, exec_session_id = self._make_execution_context(job)
+        self._runs[run_id] = CronRunState(
+            run_id=run_id,
+            job_id=job.id,
+            wake_at_iso=wake_dt.isoformat(),
+            push_at_iso=push_dt.isoformat(),
+            job_name=job.name,
+            targets=job.targets,
+            session_id=job.session_id,
+            chat_type=job.chat_type,
+            timezone=job.timezone,
+            exec_channel_id=channel_id,
+            exec_session_id=exec_session_id,
+        )
         self._schedule_event(wake_dt, "wake", job.id, run_id)
         self._schedule_event(push_dt, "push", job.id, run_id)
         self._reload_event.set()
-        return run_id
+        return {"run_id": run_id, "session_id": exec_session_id}
+
+    def _make_execution_context(self, job: CronJob) -> tuple[str, str]:
+        ts = format(int(time.time() * 1000), "x")
+        mode = str(job.mode or CRON_JOB_DEFAULT_MODE).strip() or CRON_JOB_DEFAULT_MODE
+        if is_team_cron_mode(mode):
+            return _resolve_cron_execution_context(
+                job,
+                ts=ts,
+                message_handler=self._message_handler,
+            )
+        return "__cron__", f"cron_{ts}_{job.id}"
 
     def _schedule_event(self, at_dt: datetime, kind: str, job_id: str, run_id: str) -> None:
         at_ts = float(at_dt.timestamp())
@@ -467,7 +532,14 @@ class CronSchedulerService:
         tz = ZoneInfo(job.timezone)
         base = datetime.fromtimestamp(now_ts, tz=tz)
         push_dt = _cron_next_push_dt(job.cron_expr, base)
-        wake_dt = push_dt - timedelta(seconds=max(0, int(job.wake_offset_seconds or 0)))
+        # proactive.tick 无视 wake_offset——到点就执行，不提前 wake。
+        # 否则 wake_dt = push_dt - offset 可能在过去，导致 reschedule 后立刻
+        # 触发 → 每 6 秒循环（实测 14:26-14:28 反复 triggering 同一 run_id）。
+        if getattr(job, "mode", "") == "proactive.tick":
+            offset = 0
+        else:
+            offset = max(0, int(job.wake_offset_seconds or 0))
+        wake_dt = push_dt - timedelta(seconds=offset)
         run_id = f"{job.id}:{int(push_dt.timestamp())}"
         return push_dt, wake_dt, run_id
 
@@ -524,6 +596,81 @@ class CronSchedulerService:
 
     async def _handle_event(self, ev: _Event) -> None:
         job = self._jobs.get(ev.job_id)
+
+        # Handle proactive.tick mode: send WebSocket request to AgentServer
+        if job is not None and job.mode == "proactive.tick" and ev.kind == "wake":
+            logger.info("[Cron] triggering proactive.tick for job=%s run_id=%s", job.id, ev.run_id)
+            try:
+                # Create run state for tracking
+                tz = ZoneInfo(job.timezone)
+                push_ts = int(ev.run_id.split(":")[-1])
+                push_dt = datetime.fromtimestamp(push_ts, tz=tz)
+                wake_dt = push_dt - timedelta(seconds=max(0, int(job.wake_offset_seconds or 0)))
+                state = CronRunState(
+                    run_id=ev.run_id,
+                    job_id=job.id,
+                    wake_at_iso=wake_dt.isoformat(),
+                    push_at_iso=push_dt.isoformat(),
+                    job_name=job.name,
+                    targets=job.targets,
+                    session_id=job.session_id,
+                    chat_type=job.chat_type,
+                    timezone=job.timezone,
+                )
+                self._runs[ev.run_id] = state
+                state.status = "running"
+                state.started_at = self._now_fn()
+
+                # Send proactive.tick request to AgentServer via WebSocket
+                envelope = e2a_from_agent_fields(
+                    request_id=f"proactive-tick-{ev.run_id}",
+                    channel_id="__cron__",
+                    session_id=f"cron_{job.id}",
+                    req_method=ReqMethod.PROACTIVE_TICK,
+                    params={"target_channel": job.targets or None},
+                    is_stream=False,
+                    timestamp=self._now_fn(),
+                    metadata={"cron": {"job_id": job.id, "run_id": ev.run_id}},
+                )
+                resp = await self._agent_client.send_request(envelope)
+
+                state.finished_at = self._now_fn()
+                if resp.ok:
+                    success = resp.payload.get("success", False) if resp.payload else False
+                    state.status = "succeeded" if success else "skipped"
+                    # success 现在表示"是否真的推送了推荐"(cooldown/无新内容/配额已满均为 False)。
+                    # 文案与实际一致：不再出现"已发送"但实际没内容的情况。
+                    state.result_text = "推荐已发送" if success else "本次无需推荐（冷却中或无新内容）"
+                    logger.info("[Cron] proactive.tick completed job=%s success=%s", job.id, success)
+                else:
+                    state.status = "failed"
+                    state.error = resp.payload.get("error", "unknown") if resp.payload else "unknown"
+                    logger.warning("[Cron] proactive.tick failed job=%s: %s", job.id, state.error)
+            except Exception as exc:
+                logger.warning("[Cron] proactive.tick failed job=%s: %s", job.id, exc, exc_info=True)
+            # proactive.tick 走专属分支提前 return，跳过下方 643 通用 reschedule。
+            # 必须显式排下一次 wake，否则只在 reload 时才排，期间漏跑
+            # （实测：19:56 tick 完，20:00 整点不触发，因为没 reload）。
+            try:
+                push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
+                self._schedule_event(wake_dt, "wake", job.id, next_run_id)
+                self._schedule_event(push_dt, "push", job.id, next_run_id)
+            except Exception as exc:  # 兜底：reschedule 失败不阻断本次 tick 结果（下个 reload 会重排）
+                if self._is_croniter_no_next_date(exc):
+                    try:
+                        is_proactive = getattr(job, "mode", "") == "proactive.tick"
+                        patch = {"expired": True}
+                        if not is_proactive:
+                            patch["enabled"] = False
+                            job.enabled = False
+                        job.expired = True
+                        await self._store.update_job(job.id, patch)
+                    except Exception as update_exc:  # 兜底：标记过期失败仅告警，不影响主流程
+                        logger.warning("[Cron] mark expired after proactive.tick failed job=%s: %s", job.id, update_exc)
+                else:
+                    logger.warning("[Cron] reschedule after proactive.tick failed job=%s: %s", job.id, exc)
+            return
+
         if job is None and ev.kind != "push_update":
             return
         # For wake/push/push_update events: if the job no longer exists in the
@@ -584,11 +731,22 @@ class CronSchedulerService:
                 # 不删除，改为标记过期（与自然过期的一次性任务行为一致）
                 logger.info("[Cron] delete_after_run job=%s, marking expired after push", job.id)
                 try:
-                    await self._store.update_job(job.id, {"enabled": False, "expired": True})
-                    job.enabled = False
+                    is_proactive = getattr(job, "mode", "") == "proactive.tick"
+                    patch = {"expired": True}
+                    if not is_proactive:
+                        patch["enabled"] = False
+                        job.enabled = False
                     job.expired = True
+                    await self._store.update_job(job.id, patch)
                 except Exception as update_exc:
                     logger.warning("[Cron] mark expired after push failed job=%s: %s", job.id, update_exc)
+                return
+            # proactive.tick 的 wake 分支（525）已处理执行 + reschedule，push 事件
+            # 在此仅 _on_push（已 return，不做推送）。若 push 也 reschedule，会和
+            # wake 的 reschedule 重复排 wake 事件，形成 push→reschedule→wake→
+            # reschedule→push 循环（实测每 6 秒反复 triggering 同一 run_id）。
+            # proactive.tick 跳过 push 的 reschedule，由 wake 分支统一管调度。
+            if getattr(job, "mode", "") == "proactive.tick":
                 return
             try:
                 push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
@@ -636,24 +794,48 @@ class CronSchedulerService:
             )
             self._runs[run_id] = state
 
+        # 幂等保护：reload 可能对同一 run_id 重复排入 wake 事件。
+        # 如果该 run 已完成（succeeded/failed）或已有结果文本，不再重复执行 agent。
+        if state.status in ("succeeded", "failed"):
+            logger.info(
+                "[Cron] _on_wake skipped: already %s run_id=%s job=%s",
+                state.status, run_id, job.id,
+            )
+            return
+        if state.result_text and state.pushed_final:
+            logger.info(
+                "[Cron] _on_wake skipped: result already pushed run_id=%s job=%s",
+                run_id, job.id,
+            )
+            return
         if run_id in self._run_tasks and not self._run_tasks[run_id].done():
             return
 
         async def _run_agent() -> None:
             state.status = "running"
             state.started_at = self._now_fn()
+            ok = False
+            mode = CRON_JOB_DEFAULT_MODE
+            channel_id = ""
+            exec_session_id = ""
             try:
-                ts = format(int(time.time() * 1000), "x")
                 mode = str(job.mode or CRON_JOB_DEFAULT_MODE).strip() or CRON_JOB_DEFAULT_MODE
-                if is_team_cron_mode(mode):
-                    channel_id, exec_session_id = _resolve_cron_execution_context(
-                        job,
-                        ts=ts,
-                        message_handler=self._message_handler,
-                    )
+                if state.exec_channel_id and state.exec_session_id:
+                    channel_id = state.exec_channel_id
+                    exec_session_id = state.exec_session_id
                 else:
-                    channel_id = "__cron__"
-                    exec_session_id = f"cron_{ts}_{job.id}"
+                    channel_id, exec_session_id = self._make_execution_context(job)
+                    state.exec_channel_id = channel_id
+                    state.exec_session_id = exec_session_id
+                # 解析 project_dir 供 AgentServer 写入会话归属（与 project_id 联动）
+                try:
+                    from jiuwenswarm.server.runtime.session import project_store as _ps
+                    exec_project_dir = _ps.get_project_dir_by_id(job.project_id)
+                except Exception as pdir_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
+                    )
+                    exec_project_dir = ""
                 cron_meta = {
                     "job_id": job.id,
                     "job_name": job.name,
@@ -661,17 +843,24 @@ class CronSchedulerService:
                     "push_at": state.push_at_iso,
                     "wake_at": state.wake_at_iso,
                 }
+                params: dict[str, Any] = {
+                    "content": job.description,
+                    "query": job.description,
+                    "mode": mode,
+                    "cron": cron_meta,
+                    "cron_id": job.id,
+                    "project_id": job.project_id or "",
+                    "project_dir": exec_project_dir,
+                    "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
+                }
+                if job.model_name:
+                    params["model_name"] = job.model_name
                 envelope = e2a_from_agent_fields(
                     request_id=f"cron-{run_id}",
                     channel_id=channel_id,
                     session_id=exec_session_id,
                     req_method=ReqMethod.CHAT_SEND,
-                    params={
-                        "content": job.description,
-                        "query": job.description,
-                        "mode": mode,
-                        "cron": cron_meta,
-                    },
+                    params=params,
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
                     metadata={"cron": {"job_id": job.id, "run_id": run_id}},
@@ -691,8 +880,7 @@ class CronSchedulerService:
                         envelope=envelope,
                         timeout_seconds=timeout_seconds,
                     )
-                if not text:
-                    text = "[cron] 任务完成，但未返回可展示文本"
+                await self._mark_last_session_ready(job, exec_session_id)
                 state.result_text = text
                 state.status = "succeeded" if ok else "failed"
             except asyncio.CancelledError:
@@ -716,6 +904,17 @@ class CronSchedulerService:
                 # a job the user has removed.
                 if not state.result_text and state.error and not is_cancelled_ghost:
                     state.result_text = f"[cron] 任务执行失败: {state.error}"
+                if state.result_text and not ok and not is_cancelled_ghost:
+                    append_history_record(
+                        session_id=exec_session_id,
+                        request_id=getattr(envelope, "request_id", ""),
+                        channel_id=job.targets or channel_id,
+                        role="assistant",
+                        event_type="chat.final",
+                        content=state.result_text,
+                        timestamp=self._now_fn(),
+                        mode=mode,
+                    )
                 if not state.pushed_final and state.result_text and not is_cancelled_ghost:
                     logger.info(
                         "[Cron] scheduling push_update after agent finished "
@@ -734,6 +933,16 @@ class CronSchedulerService:
 
         task = asyncio.create_task(_run_agent(), name=f"cron-run-{job.id}")
         self._run_tasks[run_id] = task
+
+    async def _mark_last_session_ready(self, job: CronJob, exec_session_id: str) -> None:
+        """Record the execution session after the agent request has accepted it."""
+        try:
+            await self._store.update_job(job.id, {"last_session_id": exec_session_id})
+            job.last_session_id = exec_session_id
+        except Exception as lsid_exc:  # noqa: BLE001
+            logger.warning(
+                "[Cron] update last_session_id failed job=%s: %s", job.id, lsid_exc,
+            )
 
     async def _cancel_cron_team_agent_session(
         self,
@@ -927,6 +1136,12 @@ class CronSchedulerService:
             raise
 
     async def _on_push(self, job: CronJob, run_id: str) -> None:
+        # proactive.tick 的结果在 wake 分支已同步产出：有推荐时由
+        # trigger_main_agent → send_push 直接推送内容；无推荐时静默。
+        # push 事件不再推 result_text 或"正在执行中"占位，避免 wake 的
+        # tick_now 还在跑（LLM 耗时）时误推占位消息。
+        if getattr(job, "mode", None) == "proactive.tick":
+            return
         state = self._runs.get(run_id)
         if state is None:
             tz = ZoneInfo(job.timezone)
@@ -1006,6 +1221,8 @@ class CronSchedulerService:
                 "run_id": state.run_id,
                 "push_at": state.push_at_iso,
                 "wake_at": state.wake_at_iso,
+                "exec_channel_id": state.exec_channel_id,
+                "exec_session_id": state.exec_session_id,
                 "is_placeholder": bool(is_placeholder),
                 "status": state.status,
             },
@@ -1016,11 +1233,14 @@ class CronSchedulerService:
 
         # 企业飞书：优先用作业里绑定的 SessionMap session_id（feishu::chat_id::bot_id::...），
         # 避免多群共用 bot 时误用 config 中的 last_*（最近一条消息的会话）。
-        # Web/TUI：不绑定 session_id，否则新会话或重启后 session_id 与旧不同，消息会被前端过滤。
+        # TUI：不绑定 session_id，否则 TUI 重启后新 session_id 与旧不同，消息会被前端过滤。
+        # Web：不绑定 session_id——WebChannel.send 对带 payload.cron 的推送会广播给所有 web 客户端，
+        # 绑定旧 session_id 反而会让前端 shouldHandleSessionEvent 因 session 不匹配而丢弃。
+        # 关闭 tab/换设备后旧会话再无连接，置空 session_id 让消息进当前活跃会话流。
         metadata: dict | None = None
         msg_session_id: str | None = None
         routing_sid = str(getattr(job, "session_id", None) or "").strip()
-        if routing_sid and channel_id not in ("web", "tui"):
+        if routing_sid and channel_id != "tui" and channel_id != "web":
             msg_session_id = routing_sid
         if channel_id.startswith("feishu_enterprise:") and routing_sid and "::" in routing_sid:
             parts = routing_sid.split("::")
@@ -1045,14 +1265,38 @@ class CronSchedulerService:
                 cfg = get_config_raw() or {}
                 channels_cfg = cfg.get("channels") or {}
                 ch_cfg = channels_cfg.get(channel_id) or {}
-                if channel_id == "feishu":
-                    last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
-                    last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
-                    if last_chat_id or last_open_id:
-                        metadata = {
-                            "feishu_chat_id": last_chat_id,
-                            "feishu_open_id": last_open_id,
-                        }
+                if channel_id == "feishu" or channel_id.startswith("feishu:"):
+                    # V2 多应用：从 apps 列表取对应 app 的 last_*（而非平铺字段）
+                    target_app_id = str(getattr(job, "app_id", None) or "").strip()
+                    if not target_app_id:
+                        if channel_id.startswith("feishu:") and not channel_id.startswith("feishu_enterprise:"):
+                            target_app_id = channel_id.split(":", 1)[1].strip()
+                    apps = ch_cfg.get("apps") or []
+                    if isinstance(apps, list):
+                        for app in apps:
+                            if not isinstance(app, dict):
+                                continue
+                            if target_app_id and app.get("app_id") != target_app_id:
+                                continue
+                            if not target_app_id and not app.get("is_default", False):
+                                continue
+                            last_chat_id = str(app.get("last_chat_id") or "").strip()
+                            last_open_id = str(app.get("last_open_id") or "").strip()
+                            if last_chat_id or last_open_id:
+                                metadata = {
+                                    "feishu_chat_id": last_chat_id,
+                                    "feishu_open_id": last_open_id,
+                                }
+                            break
+                    # 兜底：如果 apps 列表为空或无匹配，回退到旧平铺字段
+                    if metadata is None:
+                        last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
+                        last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
+                        if last_chat_id or last_open_id:
+                            metadata = {
+                                "feishu_chat_id": last_chat_id,
+                                "feishu_open_id": last_open_id,
+                            }
                 elif channel_id.startswith("feishu_enterprise:"):
                     app_id = channel_id.split(":", 1)[1].strip()
                     enterprise_cfg = channels_cfg.get("feishu_enterprise") or {}
@@ -1185,6 +1429,7 @@ class CronSchedulerService:
                     job.chat_type, channel_id, job.id,
                 )
 
+        _msg_app_id = str(getattr(job, "app_id", None) or "").strip() or None
         msg = Message(
             id=f"cron-push-{state.run_id}-{channel_id}",
             type="event",
@@ -1197,5 +1442,6 @@ class CronSchedulerService:
             event_type=EventType.CHAT_FINAL,
             metadata=metadata,
             group_digital_avatar=_group_digital_avatar,
+            app_id=_msg_app_id,
         )
         await self._message_handler.publish_robot_messages(msg)

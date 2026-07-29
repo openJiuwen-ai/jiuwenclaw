@@ -393,8 +393,8 @@ class TeamSkillEvolutionInput(ConstructionInput):
         default_factory=dict,
         description="Serializable evolution model config (LLM built at build time).",
     )
-    auto_scan: bool = param_field(
-        default=False, description="Evolution auto-scan flag."
+    review_trigger: bool = param_field(
+        default=False, description="Evolution review trigger flag."
     )
     auto_save: bool = param_field(
         default=False, description="Evolution auto-save approval flag."
@@ -469,10 +469,9 @@ def build_team_skill_evolution_rail(
             trajectory_source=bound_registry,
             trajectory_sink=bound_registry,
             member_role=inp.role,
-            auto_scan=False,
+            signal_trigger=False,
             auto_save=inp.auto_save,
-            fuzzy_review=False,
-            completion_followup_enabled=inp.auto_scan,
+            review_trigger=inp.review_trigger,
             team_id=inp.team_id,
             disabled_skills=load_execution_disabled_skills(),
         )
@@ -487,11 +486,11 @@ def build_team_skill_evolution_rail(
         )
         logger.info(
             "[swarm.team_skill_evolution] built: skills_dir=%s, model=%s, "
-            "auto_scan=%s, completion_followup_enabled=%s",
+            "signal_trigger=%s, review_trigger=%s",
             inp.team_skills_dir,
             actual_model_name,
             False,
-            inp.auto_scan,
+            inp.review_trigger,
         )
         return _build_evolution_approval_stack(
             rail,
@@ -598,8 +597,8 @@ class MemberSkillEvolutionInput(ConstructionInput):
         default_factory=dict,
         description="Serializable evolution model config (LLM built at build time).",
     )
-    auto_scan: bool = param_field(
-        default=False, description="Evolution auto-scan flag."
+    signal_trigger: bool = param_field(
+        default=False, description="Evolution signal trigger flag."
     )
     team_skills_dir: str | None = context_field(
         attr="team_skills_dir", description="Team shared skills directory."
@@ -662,9 +661,8 @@ def build_member_skill_evolution_rail(
             model=actual_model_name,
             review_runtime=review_runtime,
             language=inp.language,
-            auto_scan=inp.auto_scan,
+            signal_trigger=inp.signal_trigger,
             auto_save=True,
-            fuzzy_review=False,
             disabled_skills=load_execution_disabled_skills(),
         )
         has_team_trajectory_sink = inp.trajectory_registry is not None and bool(inp.team_id)
@@ -676,10 +674,10 @@ def build_member_skill_evolution_rail(
             )
         rail.bind_swarm_context(channel=inp.channel, session_id=inp.session_id)
         logger.info(
-            "[swarm.member_skill_evolution] built: model=%s, auto_scan=%s, "
+            "[swarm.member_skill_evolution] built: model=%s, signal_trigger=%s, "
             "team_trajectory_sink=%s",
             actual_model_name,
-            inp.auto_scan,
+            inp.signal_trigger,
             has_team_trajectory_sink,
         )
         return _build_evolution_approval_stack(

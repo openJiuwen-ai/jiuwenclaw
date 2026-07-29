@@ -270,34 +270,3 @@ class GitCollector:
                 })
 
         return result
-
-
-def main():
-    """测试入口"""
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python git_collector.py <repo_path> [date]")
-        sys.exit(1)
-
-    repo_path = sys.argv[1]
-    date = sys.argv[2] if len(sys.argv) > 2 else None
-
-    collector = GitCollector(repo_path)
-    stats = collector.get_commits(date)
-
-    print(f"Git 统计 ({date or '今天'}):")
-    print(f"  提交次数: {stats.total_commits}")
-    print(f"  修改文件: {stats.total_files_changed}")
-    print(f"  新增行数: {stats.total_insertions}")
-    print(f"  删除行数: {stats.total_deletions}")
-    print(f"  净增行数: {stats.net_lines}")
-
-    if stats.commits:
-        print("\n提交记录:")
-        for commit in stats.commits:
-            print(f"  [{commit.hash}] {commit.message} ({commit.author})")
-
-
-if __name__ == "__main__":
-    main()

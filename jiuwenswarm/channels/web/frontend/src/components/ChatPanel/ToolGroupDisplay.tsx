@@ -1,28 +1,20 @@
-/**
- * ToolGroupDisplay 组件
- *
- * 以轻量折叠列表展示工具调用状态，行内可展开查看参数和结果。
- */
-
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { ToolExecution } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { SkillTreePath } from './SkillTreePath';
+import { BeamSearchTree } from './BeamSearchTree';
+import { classifyToolCall, describeToolCall, type ToolCategory } from './toolCategory';
 
 interface ToolGroupDisplayProps {
   executions: ToolExecution[];
+  notices?: string[];
   showAvatar?: boolean;
   teamLayout?: boolean;
   collapseSkillTreeWhenContentStarts?: boolean;
   viewedSkillIds?: string[];
-}
-
-interface ToolDetailModalProps {
-  execution: ToolExecution;
-  onClose: () => void;
 }
 
 type ToolStatusTone = 'success' | 'warning' | 'error' | 'pending';
@@ -48,9 +40,9 @@ function ToolStatusIcon({
           <circle cx="10" cy="13.65" r="0.75" fill="currentColor" stroke="none" />
         </svg>
       ) : (
-        <svg className="tool-status-icon__spinner" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <circle cx="10" cy="10" r="6.8" opacity="0.22" />
-          <path strokeLinecap="round" d="M10 3.2A6.8 6.8 0 0 1 16.8 10" />
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <circle cx="10" cy="10" r="6.8" opacity="0.4" />
+          <circle cx="10" cy="10" r="2.1" fill="currentColor" stroke="none" />
         </svg>
       )}
     </span>
@@ -61,29 +53,16 @@ function isToolResultSuccessful(result?: ToolExecution['result']) {
   return Boolean(result?.success && !result.result.includes('success=False'));
 }
 
-function isExecutionSuccessful(execution: ToolExecution) {
-  return execution.status === 'completed' && isToolResultSuccessful(execution.result);
-}
-
-function getExecutionTone(execution: ToolExecution): ToolStatusTone {
-  if (isExecutionSuccessful(execution)) {
-    return 'success';
-  }
-  if (execution.status === 'timeout') {
-    return 'warning';
-  }
-  if (execution.status === 'error' || execution.result) {
-    return 'error';
-  }
-  return 'pending';
-}
-
-function getExecutionLabel(execution: ToolExecution, sessionCompletedLabel: string) {
+function getExecutionLabel(
+  execution: ToolExecution,
+  sessionCompletedLabel: string,
+  t: (key: string) => string
+) {
   if (execution.toolCall.name === 'session') {
     return execution.toolCall.formatted_args || sessionCompletedLabel;
   }
 
-  return execution.toolCall.name;
+  return describeToolCall(execution.toolCall, t);
 }
 
 function isSkillToolName(name: string): boolean {
@@ -147,297 +126,183 @@ export function collectViewedSkillIds(executions: ToolExecution[]): string[] {
   return Array.from(out);
 }
 
-function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
+/** 行内下拉展开的工具详情：展示参数与结果（替代原弹窗）。 */
+function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
   const { t } = useTranslation();
   const { toolCall, result, status } = execution;
   const isTimeout = status === 'timeout';
-  const modalTone = getExecutionTone(execution);
   const resultSuccess = isToolResultSuccessful(result);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        onClose();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  const hasArguments = Object.keys(toolCall.arguments).length > 0;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-
-      <div
-        className="relative w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl animate-rise"
-        style={{
-          backgroundColor: 'var(--card)',
-          boxShadow: 'var(--shadow-xl)',
-        }}
-      >
-        <div
-          className="px-6 py-4 flex items-center justify-between"
-          style={{
-            backgroundColor: 'var(--panel-strong)',
-            borderBottom: '1px solid var(--border)',
-          }}
-        >
-          <div className="flex items-center gap-4">
-            <ToolStatusIcon tone={modalTone} className="tool-status-icon--lg" />
-
-            <div>
-              <h2
-                className="text-lg font-semibold font-mono"
-                style={{ color: 'var(--text-strong)' }}
-              >
-                {toolCall.name}
-              </h2>
-              {toolCall.formatted_args && (
-                <p
-                  className="text-sm font-mono mt-1"
-                  style={{ color: 'var(--muted)' }}
-                >
-                  {toolCall.formatted_args}
-                </p>
-              )}
-            </div>
+    <div className="tool-tree-item__detail">
+      {hasArguments && (
+        <div className="tool-tree-item__detail-block">
+          <div className="tool-tree-item__detail-label">
+            {t('chatUi.toolResult.arguments')}
           </div>
-
-          <button
-            onClick={onClose}
-            className="p-2 rounded-lg transition-colors"
-            style={{ color: 'var(--muted)' }}
-            onMouseEnter={(event) => {
-              event.currentTarget.style.backgroundColor = 'var(--bg-hover)';
-              event.currentTarget.style.color = 'var(--text)';
-            }}
-            onMouseLeave={(event) => {
-              event.currentTarget.style.backgroundColor = 'transparent';
-              event.currentTarget.style.color = 'var(--muted)';
-            }}
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <pre className="tool-tree-item__detail-pre">
+            {formatToolArguments(toolCall.arguments)}
+          </pre>
         </div>
+      )}
 
-        <div
-          className="px-6 py-5 overflow-y-auto"
-          style={{ maxHeight: '60vh' }}
-        >
-          {Object.keys(toolCall.arguments).length > 0 && (
-            <div className="mb-6">
-              <div
-                className="flex items-center gap-2 mb-3"
-                style={{ color: 'var(--text-strong)' }}
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                </svg>
-                <span className="text-sm font-semibold">{t('chatUi.toolResult.arguments')}</span>
-              </div>
-              <pre
-                className="p-4 rounded-lg overflow-auto whitespace-pre-wrap break-all"
-                style={{
-                  fontFamily: 'var(--mono)',
-                  fontSize: 'var(--font-size-sm)',
-                  lineHeight: '1.5',
-                  backgroundColor: 'var(--bg-elevated)',
-                  border: '1px solid var(--border)',
-                  color: 'var(--text)',
-                  wordBreak: 'break-word',
-                }}
-              >
-                {formatToolArguments(toolCall.arguments)}
-              </pre>
-            </div>
-          )}
-
-          {result && (
-            <div>
-              <div
-                className="flex items-center gap-2 mb-3"
-                style={{
-                  color: resultSuccess
-                    ? 'var(--ok)'
-                    : 'var(--danger)',
-                }}
-              >
-                <ToolStatusIcon tone={resultSuccess ? 'success' : 'error'} />
-                <span className="text-sm font-semibold">
-                  {t('chatUi.toolResult.result')}
-                  {!resultSuccess && (
-                    <span
-                      className="ml-2 px-2 py-0.5 rounded text-xs font-medium"
-                      style={{
-                        backgroundColor: 'var(--danger-subtle)',
-                        color: 'var(--danger)',
-                      }}
-                    >
-                      {t('chatUi.toolResult.failed')}
-                    </span>
-                  )}
-                </span>
-              </div>
-              {result.skillTree && (
-                <SkillTreePath tree={result.skillTree} stepIntervalMs={0} />
+      {result && (
+        <div className="tool-tree-item__detail-block">
+          <div className="tool-tree-item__detail-label">
+            {t('chatUi.toolResult.result')}
+            {!resultSuccess && (
+              <span className="tool-tree-item__detail-badge">
+                {t('chatUi.toolResult.failed')}
+              </span>
+            )}
+          </div>
+          {result.skillTree && <SkillTreePath tree={result.skillTree} stepIntervalMs={0} />}
+          {(!result.skillTree || result.result) && (
+            <pre
+              className={clsx(
+                'tool-tree-item__detail-pre',
+                result.skillTree && 'mt-2'
               )}
-              {(!result.skillTree || result.result) && (
-                <pre
-                  className={clsx(
-                    'p-4 rounded-lg overflow-auto whitespace-pre-wrap break-all',
-                    result.skillTree && 'mt-4'
-                  )}
-                  style={{
-                    fontFamily: 'var(--mono)',
-                    fontSize: 'var(--font-size-sm)',
-                    lineHeight: '1.5',
-                    backgroundColor: 'var(--bg-elevated)',
-                    border: '1px solid var(--border)',
-                    color: resultSuccess
-                      ? 'var(--text)'
-                      : 'var(--danger)',
-                    wordBreak: 'break-word',
-                  }}
-                >
-                  {formatToolResult(result.result)}
-                </pre>
-              )}
-            </div>
-          )}
-
-          {!result && isTimeout && (
-            <div
-              className="flex items-center gap-3 p-4 rounded-lg"
-              style={{
-                backgroundColor: 'var(--warn-subtle)',
-                border: '1px solid var(--warn)',
-                color: 'var(--warn)',
-              }}
             >
-              <ToolStatusIcon tone="warning" />
-              <span className="font-medium">{t('chatUi.toolResult.timeout')}</span>
-            </div>
-          )}
-
-          {!result && !isTimeout && (
-            <div
-              className="flex items-center gap-3 p-4 rounded-lg"
-              style={{
-                backgroundColor: 'var(--accent-subtle)',
-                border: '1px solid var(--accent)',
-                color: 'var(--accent)',
-              }}
-            >
-              <ToolStatusIcon tone="pending" />
-              <span className="font-medium">{t('chatUi.toolResult.running')}</span>
-            </div>
+              {formatToolResult(result.result)}
+            </pre>
           )}
         </div>
-      </div>
+      )}
+
+      {!result && isTimeout && (
+        <div className="tool-tree-item__detail-status is-warning">
+          <ToolStatusIcon tone="warning" />
+          <span>{t('chatUi.toolResult.timeout')}</span>
+        </div>
+      )}
+
+      {!result && !isTimeout && (
+        <div className="tool-tree-item__detail-status is-pending">
+          <ToolStatusIcon tone="pending" />
+          <span>{t('chatUi.toolResult.running')}</span>
+        </div>
+      )}
     </div>
   );
 }
 
-function ToolExecutionRow({ execution }: { execution: ToolExecution }) {
-  const { t } = useTranslation();
-  const [showModal, setShowModal] = useState(false);
-  const { toolCall, status } = execution;
-  const rowTone = getExecutionTone(execution);
+/**
+ * 是否按「执行中」展示。已完成/失败/超时，或已有结果，一律不当作执行中，
+ * 避免 tool_update / 思考整理后重渲染把旧工具误显示成执行中。
+ */
+function isDisplayRunning(execution: ToolExecution): boolean {
+  if (
+    execution.status === 'completed' ||
+    execution.status === 'error' ||
+    execution.status === 'timeout'
+  ) {
+    return false;
+  }
+  if (execution.result) {
+    return false;
+  }
+  return execution.status === 'pending';
+}
 
+interface GroupHeaderLine {
+  key: string;
+  category: ToolCategory;
+  text: string;
+  running: boolean;
+  executions: ToolExecution[];
+}
+
+/**
+ * 每条工具单独一行展示可读动作名（优先后端 display_name），
+ * 如「抓取 workbuddy.ai」「写入 DESIGN.md」；不再按分类收成「已完成 N 次…」。
+ */
+function buildGroupLines(
+  executions: ToolExecution[],
+  t: (key: string, options?: Record<string, unknown>) => string
+): GroupHeaderLine[] {
+  const sessionCompletedLabel = t('chatUi.toolGroup.sessionCompleted');
+  return executions.map((execution) => {
+    const category = classifyToolCall(execution.toolCall.name);
+    const running = isDisplayRunning(execution);
+    const label = getExecutionLabel(execution, sessionCompletedLabel, t);
+    return {
+      key: execution.toolCallId,
+      category,
+      running,
+      executions: [execution],
+      text: running
+        ? t('chatUi.toolGroup.running', { label })
+        : t('chatUi.toolGroup.completed', { label }),
+    };
+  });
+}
+
+/** 五类任务各自的图标（file/search/code/system/other）。 */
+function CategoryIcon({ category }: { category: ToolCategory }) {
   return (
-    <>
-      <div
-        className="tool-tree-item"
-        data-testid={`tool-execution-${toolCall.id}`}
-        data-tool-name={toolCall.name}
-        data-tool-status={status}
-      >
-        <button
-          type="button"
-          className="tool-tree-item__button"
-          onClick={() => setShowModal(true)}
-        >
-          <ToolStatusIcon tone={rowTone} className="tool-tree-item__status" />
-
-          <span className="tool-tree-item__main">
-            <span className="tool-tree-item__name">
-              {getExecutionLabel(execution, t('chatUi.toolGroup.sessionCompleted'))}
-            </span>
-          </span>
-        </button>
-      </div>
-
-      {showModal && (
-        <ToolDetailModal execution={execution} onClose={() => setShowModal(false)} />
+    <span className="tool-tree__cat-icon" aria-hidden="true">
+      {category === 'file' ? (
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M5.5 3.5h5L15 8v8a.9.9 0 0 1-.9.9H5.5a.9.9 0 0 1-.9-.9V4.4a.9.9 0 0 1 .9-.9z" />
+          <path d="M10.3 3.5V8H15" />
+        </svg>
+      ) : category === 'search' ? (
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="9" cy="9" r="4.3" />
+          <path d="m12.3 12.3 3.4 3.4" />
+        </svg>
+      ) : category === 'code' ? (
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="m7.4 6.5-3.4 3.5 3.4 3.5" />
+          <path d="m12.6 6.5 3.4 3.5-3.4 3.5" />
+        </svg>
+      ) : category === 'system' ? (
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3.5" y="4.5" width="13" height="11" rx="1.6" />
+          <path d="m6.5 8.6 2.3 1.9-2.3 1.9" />
+          <path d="M10.8 12.7h3" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M13.4 4.6a2.7 2.7 0 0 0-3.3 3.4l-5 5a1.3 1.3 0 1 0 1.9 1.9l5-5a2.7 2.7 0 0 0 3.4-3.3l-2 2-1.9-.1-.1-1.9 2-2z" />
+        </svg>
       )}
-    </>
+    </span>
   );
 }
 
+export { formatDurationPrecise, useNow } from './chatTimelineClock';
+
 export function ToolGroupDisplay({
   executions,
+  notices = [],
   showAvatar = true,
   teamLayout = false,
   collapseSkillTreeWhenContentStarts = false,
   viewedSkillIds: turnViewedSkillIds = [],
 }: ToolGroupDisplayProps) {
   const { t } = useTranslation();
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [groupOpen, setGroupOpen] = useState(true);
-  const [userScrolled, setUserScrolled] = useState(false);
+  const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
+  const toggleLine = useCallback((key: string) => {
+    setOpenKeys((current) => ({ ...current, [key]: !current[key] }));
+  }, []);
   const visibleExecutions = teamLayout
     ? executions.filter((execution) => !execution.toolCall.memberName)
     : executions;
-  const totalPairs = visibleExecutions.length;
-  const hasPending = visibleExecutions.some((execution) => execution.status === 'pending');
 
-  useEffect(() => {
-    if (hasPending) {
-      setGroupOpen(true);
-    }
-  }, [hasPending, visibleExecutions.length]);
-
-  const handleScroll = useCallback(() => {
-    const element = scrollRef.current;
-    if (!element) {
-      return;
-    }
-    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
-    setUserScrolled(!atBottom);
-  }, []);
-
-  const scrollInner = useCallback((smooth = true) => {
-    const element = scrollRef.current;
-    if (!element) {
-      return;
-    }
-    element.scrollTo({
-      top: element.scrollHeight,
-      behavior: smooth ? 'smooth' : 'instant',
-    });
-  }, []);
-
-  useEffect(() => {
-    if (groupOpen && !userScrolled) {
-      scrollInner(false);
-    }
-  }, [visibleExecutions.length, groupOpen, userScrolled, scrollInner]);
-
-  const scrollToBottom = useCallback(() => {
-    setUserScrolled(false);
-    scrollInner(true);
-  }, [scrollInner]);
-
-  const headerLabel = t('chatUi.toolGroup.executed', { totalPairs });
+  const headerLines = buildGroupLines(visibleExecutions, t);
   const skillTreeExecutions = visibleExecutions.filter(
     (execution) => execution.result?.skillTree
   );
   const skillTrees = skillTreeExecutions
     .map((execution) => execution.result?.skillTree)
     .filter((tree): tree is NonNullable<typeof tree> => Boolean(tree));
+  const beamSearch = [...visibleExecutions]
+    .reverse()
+    .find((execution) => execution.result?.beamSearch)
+    ?.result?.beamSearch;
   const viewedSkillIds = Array.from(new Set([
     ...turnViewedSkillIds,
     ...collectViewedSkillIds(executions),
@@ -449,57 +314,77 @@ export function ToolGroupDisplay({
   return (
     <div
       className={clsx(
-        'tool-group-frame animate-rise',
+        'tool-group-frame',
         teamLayout && 'tool-group-frame--team'
       )}
       data-testid="tool-group"
     >
-      <div className="pt-0.5">
+      <div className="pt-0.5 tool-group-frame__avatar">
         {showAvatar ? (
           <TeamMemberAvatar member="team_leader" />
         ) : null}
       </div>
       <div className="min-w-0">
         <div className="tool-tree">
-          <button
-            type="button"
-            className="tool-tree__header"
-            onClick={() => setGroupOpen((current) => !current)}
-            aria-expanded={groupOpen}
-          >
-            <span className="tool-tree__header-text">
-              <span className="tool-tree__header-title-row">
-                <span className="tool-tree__header-title">{headerLabel}</span>
-                <span className={clsx('tool-tree__chevron', groupOpen && 'is-open')} aria-hidden="true">
-                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="m6.5 8 3.5 4 3.5-4" />
-                  </svg>
-                </span>
-              </span>
-            </span>
-          </button>
-
-          {groupOpen && (
-            <>
-              <div ref={scrollRef} className="tool-tree__list" onScroll={handleScroll}>
-                {visibleExecutions.map((execution) => (
-                  <ToolExecutionRow key={execution.toolCallId} execution={execution} />
-                ))}
-              </div>
-
-              {userScrolled && (
-                <button type="button" className="tool-tree__latest" onClick={scrollToBottom}>
-                  {t('chatUi.toolGroup.latest')}
-                </button>
-              )}
-            </>
+          {notices.length > 0 && (
+            <div className="tool-tree__notices">
+              {notices.map((notice) => (
+                <div key={notice} className="tool-tree__notice">
+                  {notice}
+                </div>
+              ))}
+            </div>
           )}
+          {headerLines.map((line) => {
+            const open = Boolean(openKeys[line.key]);
+            return (
+              <div key={line.key} className="tool-tree__section">
+                <button
+                  type="button"
+                  className="tool-tree__header"
+                  onClick={() => toggleLine(line.key)}
+                  aria-expanded={open}
+                >
+                  <span className="tool-tree__header-line">
+                    <CategoryIcon category={line.category} />
+                    <span className={clsx('tool-tree__header-line-text', line.running && 'is-running')}>
+                      {line.text}
+                    </span>
+                    <span
+                      className={clsx('tool-tree-item__disclosure', open && 'is-open')}
+                      aria-hidden="true"
+                    >
+                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="m8 6 4 4-4 4" />
+                      </svg>
+                    </span>
+                  </span>
+                </button>
+
+                <div className={clsx('tool-tree-item__collapse', open && 'is-open')}>
+                  <div className="tool-tree-item__collapse-inner">
+                    {line.executions[0] ? (
+                      <div className="tool-tree-item__detail-wrap">
+                        <ToolExecutionDetails execution={line.executions[0]} />
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         {skillTrees.length > 0 && (
           <SkillTreePath
             trees={skillTrees}
             viewedSkillIds={viewedSkillIds}
+            autoCollapse={collapseSkillTreeWhenContentStarts}
+          />
+        )}
+        {beamSearch && (
+          <BeamSearchTree
+            progress={beamSearch}
             autoCollapse={collapseSkillTreeWhenContentStarts}
           />
         )}

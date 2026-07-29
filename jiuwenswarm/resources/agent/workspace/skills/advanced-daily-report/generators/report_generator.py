@@ -11,6 +11,7 @@
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -96,7 +97,7 @@ class ReportGenerator:
             try:
                 self.ai_analyzer = AIAnalyzer()
             except Exception as e:
-                print(f"[ReportGenerator] AI 分析器初始化失败: {e}")
+                logging.info(f"[ReportGenerator] AI 分析器初始化失败: {e}")
                 return None
 
         try:
@@ -106,7 +107,7 @@ class ReportGenerator:
             # 运行完整分析
             return asyncio.run(self.ai_analyzer.analyze_full(data.to_dict(), pattern_data))
         except Exception as e:
-            print(f"[ReportGenerator] AI 分析失败: {e}")
+            logging.info(f"[ReportGenerator] AI 分析失败: {e}")
             return None
 
     def generate_weekly(self, end_date: Optional[str] = None) -> str:
@@ -485,7 +486,7 @@ def main():
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python report_generator.py <workspace_dir> [git_repo]")
+        logging.info("Usage: python report_generator.py <workspace_dir> [git_repo]")
         sys.exit(1)
 
     workspace_dir = sys.argv[1]
@@ -496,9 +497,9 @@ def main():
     generator = ReportGenerator(aggregator)
 
     # 生成日报
-    print("=== 日报 ===\n")
+    logging.info("=== 日报 ===\n")
     daily_report = generator.generate_daily()
-    print(daily_report)
+    logging.info(daily_report)
 
 
 if __name__ == "__main__":

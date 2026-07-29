@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .cluster import ClusteredQuery
-from .models import DistilledPattern, TraceRecord
+from .models import DistilledPattern
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class TraceDistiller:
 
     def __init__(
             self,
-            llm_client: Any | None,
+            llm_client: Any,
             llm_model: str,
             *,
             skills_info: list[dict[str, str]] | None = None,
@@ -76,10 +76,9 @@ class TraceDistiller:
             max_success_examples: int = 20,
     ) -> None:
         self._llm_model = llm_model
-        if llm_client is not None and llm_model:
-            self._llm = llm_client
-        else:
-            self._llm = None
+        if not llm_client or not llm_model:
+            raise ValueError("TraceDistiller requires both llm_client and llm_model.")
+        self._llm = llm_client
         self._max_workers = max_workers
         self._max_examples = max_success_examples
 
@@ -111,103 +110,58 @@ class TraceDistiller:
                         idx, clusters[idx].cluster_id, exc,
                         type(exc).__name__, exc,
                     )
+                    raise RuntimeError(
+                        f"TraceDistiller: distillation failed for cluster {idx} "
+                        f"(id={clusters[idx].cluster_id}): {exc}"
+                    ) from exc
 
         return [r for r in results if r is not None]
 
     def _distill_one(self, cluster: ClusteredQuery) -> DistilledPattern | None:
-        metrics = self._compute_metrics(cluster.success_traces, cluster.failure_traces)
+        success_traces = cluster.success_traces
+        effective_skills = list(success_traces[0].skills) if success_traces else []
 
-        success_queries = [t.query for t in cluster.success_traces]
-        used_skill_names = {
-            s for combo in metrics["effective_skills"] for s in combo
-        }
+        success_queries = [t.query for t in success_traces]
+        used_skill_names = set(effective_skills)
 
         prompt = self._build_prompt(cluster, success_queries, used_skill_names)
 
-        pattern_description = ""
-        if self._llm and self._llm_model:
-            try:
-                response = self._llm.chat.completions.create(
-                    model=self._llm_model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are an expert at generalizing query patterns. "
-                                "Output only valid JSON."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=256,
-                    stream=False,
-                )
-                content = response.choices[0].message.content
-                if content:
-                    pattern_description = self._parse_response(content, cluster.cluster_id)
-            except Exception as exc:
-                LOGGER.debug(
-                    "TraceDistiller: LLM call failed for cluster %d: %s",
-                    cluster.cluster_id, exc,
-                )
-        else:
-            # No LLM available — use centroid query as the pattern
-            pattern_description = cluster.centroid_query
-            LOGGER.info(
-                "TraceDistiller: no LLM client, using centroid query as pattern for cluster %d",
-                cluster.cluster_id,
+        try:
+            response = self._llm.chat.completions.create(
+                model=self._llm_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert at generalizing query patterns. "
+                            "Output only valid JSON."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=256,
+                stream=False,
+                extra_body={"enable_thinking": False, "thinking": {"type": "disabled"}},
             )
+            content = response.choices[0].message.content
+            if not content:
+                raise RuntimeError(
+                    f"LLM returned empty content for cluster {cluster.cluster_id}"
+                )
+            pattern_description = self._parse_response(content, cluster.cluster_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"LLM call failed for cluster {cluster.cluster_id}: {exc}"
+            ) from exc
 
         if not pattern_description:
             return None
 
         return DistilledPattern(
             cluster_id=cluster.cluster_id,
+            effective_skills=effective_skills,
             pattern_description=pattern_description,
-            **metrics,
         )
-
-    @staticmethod
-    def _compute_metrics(
-            success_traces: list[TraceRecord],
-            failure_traces: list[TraceRecord],
-    ) -> dict[str, Any]:
-        effective_skills_map: dict[tuple[str, ...], int] = {}
-        for t in success_traces:
-            key = tuple(sorted(t.skills))
-            effective_skills_map[key] = effective_skills_map.get(key, 0) + 1
-        effective_skills = [
-            list(k)
-            for k, _ in sorted(effective_skills_map.items(), key=lambda x: -x[1])
-        ]
-
-        ineffective_skills: list[dict[str, str | list[str]]] = []
-        seen: set[tuple[str, ...]] = set()
-        for t in failure_traces:
-            key = tuple(sorted(t.skills))
-            if key not in seen:
-                seen.add(key)
-                ineffective_skills.append(
-                    {
-                        "skills": list(key),
-                        "reason": t.error_type or "unknown",
-                    }
-                )
-
-        avg_success = 0.0
-        avg_failure = 0.0
-
-        total = len(success_traces) + len(failure_traces)
-        success_rate = len(success_traces) / total if total > 0 else 0.0
-
-        return {
-            "effective_skills": effective_skills,
-            "ineffective_skills": ineffective_skills,
-            "avg_token_cost_success": avg_success,
-            "avg_token_cost_failure": avg_failure,
-            "success_rate": success_rate,
-            "raw_trace_count": total,
-        }
 
     def _build_prompt(
             self,

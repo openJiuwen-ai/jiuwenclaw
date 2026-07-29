@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,9 @@ class FakeWebSocket:
 
 
 class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
+    async def handle_browser_runtime_restart_for_test(self, ws, request, send_lock):
+        await self._handle_browser_runtime_restart(ws, request, send_lock)
+
     async def handle_command_add_dir_for_test(self, ws, request, send_lock):
         await self._handle_command_add_dir(ws, request, send_lock)
 
@@ -40,6 +44,9 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
 
     async def handle_command_session_for_test(self, ws, request, send_lock):
         await self._handle_command_session(ws, request, send_lock)
+
+    async def handle_permissions_config_for_test(self, ws, request, send_lock):
+        await self._handle_permissions_config(ws, request, send_lock)
 
     def get_agent_manager_for_test(self):
         return self._agent_manager
@@ -73,6 +80,63 @@ def patch_wire_encoder(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_browser_runtime_restart_resets_active_agent_runtimes(
+    server,
+    fake_ws,
+    monkeypatch,
+):
+    from openjiuwen.harness.tools import browser_move
+
+    async def fake_reset_active_browser_runtimes():
+        return 2
+
+    monkeypatch.setattr(
+        browser_move,
+        "reset_active_browser_runtimes",
+        fake_reset_active_browser_runtimes,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        browser_move,
+        "restart_local_browser_runtime_server",
+        lambda: {"status": "restarted"},
+    )
+    request = AgentRequest(
+        request_id="req-browser-restart",
+        channel_id="web",
+        req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+    )
+
+    await server.handle_browser_runtime_restart_for_test(
+        fake_ws,
+        request,
+        asyncio.Lock(),
+    )
+
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-browser-restart",
+            "payload": {
+                "result": {"status": "restarted"},
+                "reset_runtimes": 2,
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_browser_runtime_restart_supports_sdk_without_runtime_reset():
+    reset_runtimes = (
+        await agent_ws_server_module._reset_active_browser_runtimes_if_available(
+            SimpleNamespace()
+        )
+    )
+
+    assert reset_runtimes == 0
+
+
+@pytest.mark.asyncio
 async def test_handle_command_add_dir_returns_path_and_remember(
     server, fake_ws, monkeypatch
 ):
@@ -100,6 +164,57 @@ async def test_handle_command_add_dir_returns_path_and_remember(
     assert fake_ws.sent == [
         {
             "response_id": "req-add-dir",
+            "payload": {
+                "path": "/tmp/demo",
+                "remember": True,
+                "persist": persist_stub,
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_command_add_dir_does_not_wait_for_agent_reload(
+    server, fake_ws, monkeypatch
+):
+    persist_stub = {
+        "ok": True,
+        "normalized": "/tmp/demo",
+    }
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "persist_cli_trusted_directory",
+        lambda _raw: persist_stub,
+    )
+    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
+    reload_started = asyncio.Event()
+
+    async def _blocking_reload(_config, _env):
+        reload_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        server.get_agent_manager(),
+        "reload_agents_config",
+        _blocking_reload,
+    )
+    request = AgentRequest(
+        request_id="req-add-dir-no-reload-wait",
+        channel_id="tui",
+        req_method=ReqMethod.COMMAND_ADD_DIR,
+        params={"path": "/tmp/demo", "remember": True},
+    )
+
+    await asyncio.wait_for(
+        server.handle_command_add_dir_for_test(fake_ws, request, asyncio.Lock()),
+        timeout=0.5,
+    )
+
+    assert not reload_started.is_set()
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-add-dir-no-reload-wait",
             "payload": {
                 "path": "/tmp/demo",
                 "remember": True,
@@ -241,6 +356,63 @@ async def test_handle_command_diff_returns_summary_payload(server, fake_ws):
 
 
 @pytest.mark.asyncio
+async def test_handle_command_diff_includes_session_extra_history_roots(
+    server, fake_ws, monkeypatch
+):
+    captured = {}
+
+    class FakeDiffService:
+        def get_turn_diffs(self, session_id, project_dir, **kwargs):
+            captured["turns"] = {
+                "session_id": session_id,
+                "project_dir": project_dir,
+                "kwargs": kwargs,
+            }
+            return []
+
+        def get_git_diff(self, project_dir):
+            captured["git_diff_project_dir"] = project_dir
+            return None
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.utils.diff_service.get_diff_service",
+        lambda: FakeDiffService(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.git_diff_status.get_session_extra_history_roots",
+        lambda session_id: [f"/history/{session_id}/worktrees"],
+    )
+    request = AgentRequest(
+        request_id="req-diff-extra-roots",
+        channel_id="tui",
+        session_id="sess-1",
+        req_method=ReqMethod.COMMAND_DIFF,
+        params={"project_dir": "/repo"},
+    )
+
+    await server.handle_command_diff_for_test(fake_ws, request, asyncio.Lock())
+
+    assert captured["turns"] == {
+        "session_id": "sess-1",
+        "project_dir": "/repo",
+        "kwargs": {
+            "extra_history_roots": ["/history/sess-1/worktrees"],
+        },
+    }
+    assert captured["git_diff_project_dir"] == "/repo"
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-diff-extra-roots",
+            "payload": {
+                "type": "list",
+                "turns": [],
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handle_command_simplify_returns_prompt(server, fake_ws):
     """ /simplify 无 target 时返回包含三阶段审查结构的 prompt。"""
     request = AgentRequest(
@@ -270,6 +442,9 @@ async def test_handle_command_simplify_returns_prompt(server, fake_ws):
     assert "perform all three reviews yourself directly" in prompt
     # No Additional Focus section when no target is given
     assert "Additional Focus" not in prompt
+    # Security is explicitly out of scope — must point to /security-review
+    assert "security" in prompt.lower()
+    assert "/security-review" in prompt
 
 
 @pytest.mark.asyncio
@@ -631,3 +806,55 @@ async def test_handle_command_session_returns_remote_handoff(server, fake_ws):
             "ok": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_permissions_config_does_not_block_on_slow_reload(server, fake_ws, monkeypatch):
+    """权限 RPC 必须 fire-and-forget 重载: 即使 reload 很慢, RPC 也应立即回包,
+    不再 await reload(否则会触发 AgentServer request timed out)。"""
+    import time as _time
+
+    # dispatch 直接返回 ok, 不真写盘
+    from jiuwenswarm.agents.harness.common.rails.permissions import permissions_config_rpc as _rpc_mod
+
+    class _Resp:
+        ok = True
+        payload = {"ok": True}
+
+    monkeypatch.setattr(_rpc_mod, "dispatch_permissions_config_request", lambda _req: _Resp())
+    # dispatch 在 _handle_permissions_config 内部是延迟 import 取的符号, 需同时 patch 该符号
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc.dispatch_permissions_config_request",
+        lambda _req: _Resp(),
+        raising=True,
+    )
+    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
+
+    reload_calls = {"n": 0}
+
+    async def _slow_reload(_config, _env):
+        reload_calls["n"] += 1
+        await asyncio.sleep(0.2)  # 模拟慢 reload
+
+    monkeypatch.setattr(server.get_agent_manager(), "reload_agents_config", _slow_reload)
+
+    request = AgentRequest(
+        request_id="req-perm-update",
+        channel_id="tui",
+        session_id="sess_demo",
+        req_method=ReqMethod.PERMISSIONS_TOOLS_UPDATE,
+        params={"tool": "bash", "level": "deny"},
+    )
+
+    t0 = _time.monotonic()
+    await server.handle_permissions_config_for_test(fake_ws, request, asyncio.Lock())
+    elapsed = _time.monotonic() - t0
+
+    # RPC 立即回包: 远小于 reload 的 0.2s
+    assert fake_ws.sent and fake_ws.sent[0]["ok"] is True
+    assert fake_ws.sent[0]["response_id"] == "req-perm-update"
+    assert elapsed < 0.2, f"RPC 被 reload 阻塞了 {elapsed:.3f}s, 期望 fire-and-forget"
+
+    # reload 在后台被调度: 等它跑完确认调用过一次
+    await asyncio.sleep(0.3)
+    assert reload_calls["n"] == 1, f"期望 reload 被调用 1 次, 实际 {reload_calls['n']}"

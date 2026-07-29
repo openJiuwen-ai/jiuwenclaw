@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from shared.tags import normalize_tags
+
 from .base import BaseScanner, ScannedItem, console
 from .common import clean_first_paragraph, parse_frontmatter
 
@@ -33,6 +35,7 @@ class SkillScanner(BaseScanner):
                 "stars": item.get("stars", 0),
                 "is_official": item.get("is_official", False),
                 "author": item.get("author", ""),
+                "tags": normalize_tags(item.get("tags")),
             }
 
     @classmethod
@@ -77,4 +80,8 @@ class SkillScanner(BaseScanner):
             stars=int(meta.get("stars") or 0),
             is_official=bool(meta.get("is_official")),
             author=str(meta.get("author") or ""),
+            tags=normalize_tags(
+                frontmatter.get("tags"),
+                meta.get("tags"),
+            ),
         )

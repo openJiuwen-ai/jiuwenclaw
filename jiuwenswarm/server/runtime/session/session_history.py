@@ -21,6 +21,44 @@ _WORKER_LOCK = threading.Lock()
 _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
+_HEARTBEAT_OK = "HEARTBEAT_OK"
+
+
+def _is_ephemeral_heartbeat_session(session_id: str) -> bool:
+    """Heartbeat sessions are one-shot and should not pollute history.json(l)."""
+    return (session_id or "").startswith("heartbeat")
+
+
+def _has_persistable_assistant_payload(
+    *,
+    content_text: str,
+    event_type: str | None,
+    extra: dict[str, Any] | None,
+) -> bool:
+    """Return False for blank assistant shells that would show as empty history rows."""
+    content = (content_text or "").strip()
+    if content.upper() == _HEARTBEAT_OK:
+        return False
+
+    et = str(event_type or "").strip()
+    payload = extra if isinstance(extra, dict) else {}
+    if content:
+        return True
+    if str(payload.get("reasoning_content") or "").strip():
+        return True
+    if et == "chat.file" and payload.get("files"):
+        return True
+    if et == "chat.tool_call" and (payload.get("tool_call") or payload.get("tool_calls")):
+        return True
+    if payload.get("error") or payload.get("files"):
+        return True
+    if payload.get("tool_call") or payload.get("tool_calls"):
+        return True
+    # Empty chat.final / chat.* status shells and other blank assistants: skip.
+    if et.startswith("chat.") or et in {"", "chat.final"}:
+        return False
+    # team.* / context.* monitor events may carry structured extras without content.
+    return bool(payload)
 
 
 def _serialize_value_with_flag(obj: Any) -> tuple[Any, bool]:
@@ -68,12 +106,12 @@ def _session_dir(session_id: str, *, create: bool = True) -> Path:
     return session_dir
 
 
-def _history_file(session_id: str) -> Path:
-    return _session_dir(session_id) / _LEGACY_HISTORY_FILENAME
+def _history_file(session_id: str, *, create: bool = True) -> Path:
+    return _session_dir(session_id, create=create) / _LEGACY_HISTORY_FILENAME
 
 
-def _history_jsonl_file(session_id: str) -> Path:
-    return _session_dir(session_id) / _JSONL_HISTORY_FILENAME
+def _history_jsonl_file(session_id: str, *, create: bool = True) -> Path:
+    return _session_dir(session_id, create=create) / _JSONL_HISTORY_FILENAME
 
 
 def use_legacy_history_json() -> bool:
@@ -91,18 +129,18 @@ def get_write_history_path(session_id: str) -> Path:
 def get_read_history_path(session_id: str) -> Path:
     """Return the preferred history source, falling back to legacy json."""
     if use_legacy_history_json():
-        legacy_path = _history_file(session_id)
+        legacy_path = _history_file(session_id, create=False)
         if legacy_path.exists():
             return legacy_path
-        jsonl_path = _history_jsonl_file(session_id)
+        jsonl_path = _history_jsonl_file(session_id, create=False)
         if jsonl_path.exists():
             return jsonl_path
         return legacy_path
 
-    jsonl_path = _history_jsonl_file(session_id)
+    jsonl_path = _history_jsonl_file(session_id, create=False)
     if jsonl_path.exists():
         return jsonl_path
-    legacy_path = _history_file(session_id)
+    legacy_path = _history_file(session_id, create=False)
     if legacy_path.exists():
         return legacy_path
     return jsonl_path
@@ -294,6 +332,64 @@ def _read_history_by_path(path: Path) -> list[dict[str, Any]]:
     return _read_history(path)
 
 
+def _is_member_relevant(item: dict[str, Any], member_name: str) -> bool:
+    """判断一条 team 历史记录是否与指定 member 相关（用于飞书 /join 历史推送）。
+
+    与实时 fan_out 投递语义一致：每个 member 只看到"涉及自己的对话"：
+    - team.message.p2p 且 to_member 或 from_member == member_name →
+      发给/由该成员发出的私聊（与 fan_out
+      [godview, mention(to_member), private(from_member)] 对齐：收件人和
+      发送方都能看到 P2P 卡片）
+    - team.message.broadcast → @all 广播，所有人都能看到
+    - chat.* teammate 流式输出 且 member_name == 该成员 →
+      该成员扮演的 agent 的输出（与 fan_out [godview, private(member)] 对齐）
+
+    不含 team.member/team.task 上下文事件（不会发给飞书，避免刷屏）。
+    """
+    et = item.get("event_type")
+    if not isinstance(et, str):
+        return False
+
+    if et == "team.message":
+        inner = item.get("event", {}) if isinstance(item.get("event"), dict) else {}
+        msg_type = inner.get("type", "") or item.get("type", "")
+        if msg_type == "team.message.broadcast":
+            return True
+        if msg_type == "team.message.p2p":
+            to_m = item.get("to_member", "") or inner.get("to_member", "")
+            from_m = item.get("from_member", "") or inner.get("from_member", "")
+            return member_name in {to_m, from_m}
+        return False
+
+    # chat.* teammate outputs: 已在 _is_team_relevant 中按 role/mode 过滤。
+    # 实时投递只发给该 member 的 private 席位，历史同样只对该 member 可见。
+    if et in {"chat.final", "chat.tool_call", "chat.tool_result", "chat.file", "chat.tracer_agent"}:
+        src_member = str(item.get("member_name", "") or "").strip()
+        return bool(src_member) and src_member == member_name
+
+    # 注意：team.member / team.task / team.event 不包含，
+    # 这些是上下文事件，飞书端不需要看到，避免刷屏。
+    return False
+
+
+def read_member_history_records(session_id: str, member_name: str) -> list[dict[str, Any]]:
+    """读取 team 历史记录，仅返回与指定 member 相关的记录。
+
+    与实时 fan_out 投递语义一致：
+    - 发给/由该 member 发出的 p2p 消息
+    - @all 广播消息
+    - 该 member 扮演的 teammate 的流式输出
+
+    不含 team.member/team.task 上下文事件，也不含其他 member 的输出。
+    无 member_name 时回退到 read_team_history_records（供 web 前端面板恢复用）。
+    """
+    if not member_name or not isinstance(member_name, str):
+        return read_team_history_records(session_id)
+    all_team_records = read_team_history_records(session_id)
+    mn = member_name.strip()
+    return [item for item in all_team_records if _is_member_relevant(item, mn)]
+
+
 def read_session_history_records(session_id: str) -> list[dict[str, Any]]:
     """读取指定会话的历史记录，返回所有记录。
 
@@ -370,10 +466,24 @@ def append_history_record(
 ) -> None:
     """向指定 session 的当前激活历史文件异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
+    if _is_ephemeral_heartbeat_session(sid):
+        logger.debug("skip heartbeat session history: session_id=%s event_type=%s", sid, event_type)
+        return
     rid = str(request_id or "").strip()
     cid = str(channel_id or "").strip()
     role_norm = "assistant" if role == "assistant" else "user"
     content_text = content if isinstance(content, str) else str(content)
+    if role_norm == "assistant" and not _has_persistable_assistant_payload(
+        content_text=content_text,
+        event_type=event_type,
+        extra=extra,
+    ):
+        logger.debug(
+            "skip empty assistant history: session_id=%s event_type=%s",
+            sid,
+            event_type or "",
+        )
+        return
 
     item: dict[str, Any] = {
         "id": f"{rid}:{role_norm}",
@@ -422,6 +532,9 @@ def append_history_record(
             # 传入渠道元数据,首次写入时持久化
             channel_metadata=channel_metadata,
             mode=mode,
+            # 用户消息时刷新 last_user_message_at(用消息时间戳,比请求到达时刻更精确;
+            # 与 AgentServer 的 _sync_chat_request_metadata 互补,覆盖所有记录用户消息的路径)
+            last_user_message_at=float(timestamp) if role_norm == "user" else None,
         )
         if role_norm == "user":
             set_session_delivery_context(

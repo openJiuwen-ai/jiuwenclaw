@@ -278,21 +278,21 @@ jiuwenswarm chat "Hello, introduce yourself"
 
 ### Modes (`--mode`)
 
-Supported mode values match those in [Modes](Modes.md):
+Supported mode values match those in [Modes](Modes.md) and TUI `/mode` command:
 
 | Mode | Alias | Description |
 |---|---|---|
-| `code.normal` | `code`, `normal` | Default, code normal mode |
+| `code.normal` | `code` | Default, code normal mode |
 | `code.plan` | — | Code planning mode |
 | `code.team` | — | Code team mode |
 | `agent.plan` | `agent` | Agent planning mode |
-| `agent.fast` | `fast` | Agent fast mode |
-| `team` | `team.normal` | Team mode |
+| `agent.fast` | — | Agent fast mode |
+| `team` | — | Team mode |
 
 ```bash
 # Using aliases
-jiuwenswarm chat --mode fast "quick answer"
 jiuwenswarm chat --mode agent "help me plan"
+jiuwenswarm chat --mode code "help me analyze the code"
 
 # Using canonical values
 jiuwenswarm chat --mode code.plan "design a user system"

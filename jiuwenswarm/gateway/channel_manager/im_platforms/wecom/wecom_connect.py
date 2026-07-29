@@ -22,6 +22,8 @@ from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadat
 from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.message import MessageStore
 from jiuwenswarm.common.schema.message import Message, ReqMethod, EventType
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -1115,8 +1117,17 @@ class WecomChannel(BaseChannel):
         meta = getattr(msg, "metadata", None) or {}
         return (meta.get("wecom_req_id") or "").strip() or None
 
-    async def send(self, msg: Message) -> None:
-        """通过企业微信发送消息。支持流式（reply_stream）与非流式（send_message）。"""
+    async def send(
+        self,
+        msg: Message,
+        *,
+        routing_target: RoutingTarget | None = None,
+    ) -> None:
+        """通过企业微信发送消息。支持流式（reply_stream）与非流式（send_message）。
+
+        V2: resolved/delivery 为 team 模式分发元数据，企微通道当前通过
+        msg.metadata 获取投递信息，暂不直接消费。
+        """
         if not self._ws_client or not getattr(self._ws_client, "is_connected", False):
             logger.warning("WecomChannel 未连接，跳过发送")
             return
@@ -1172,13 +1183,19 @@ class WecomChannel(BaseChannel):
                     return
                 content = self._extract_content_from_payload(msg)
                 if content is not None:
-                    entry["accumulated"] = (entry.get("accumulated") or "") + content
+                    is_final = msg.event_type == EventType.CHAT_FINAL
+                    if is_final and content.strip():
+                        entry["accumulated"] = content
+                    else:
+                        entry["accumulated"] = (entry.get("accumulated") or "") + content
                     # 移除 <think>...</think> 块，不将 Agent 思考过程展示给用户
                     to_send = self._strip_think_tags(entry["accumulated"]).strip()
                     if not to_send or self._is_thinking_only_content(to_send):
                         if msg.event_type == EventType.CHAT_FINAL:
                             self._pending_streams.pop(req_id, None)
                             self._stream_completed_requests.add(req_id)
+                        return
+                    if not is_final and to_send == entry.get("last_sent"):
                         return
                     
                     # 群聊场景：出站管线已在 publish_robot_messages 时设置 reply_scope
@@ -1208,13 +1225,13 @@ class WecomChannel(BaseChannel):
                     
                     # 非群聊场景或无目标用户，正常流式发送
                     try:
-                        is_final = msg.event_type == EventType.CHAT_FINAL
                         await self._ws_client.reply_stream(
                             entry["frame"],
                             entry["stream_id"],
                             to_send,
                             finish=is_final,
                         )
+                        entry["last_sent"] = to_send
                         logger.debug(
                             "WecomChannel 流式发送: req_id=%s finish=%s len=%d",
                             req_id,

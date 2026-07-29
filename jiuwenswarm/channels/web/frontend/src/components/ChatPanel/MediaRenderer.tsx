@@ -19,9 +19,11 @@ export function MediaRenderer({ items }: MediaRendererProps) {
 }
 
 function MediaItemView({ item }: { item: MediaItem }) {
-  const src = item.base64Data
-    ? `data:${item.mimeType};base64,${item.base64Data}`
-    : item.url;
+  const mimeType = item.mimeType || item.mime_type || 'application/octet-stream';
+  const base64Data = item.base64Data || item.base64_data;
+  const src = base64Data
+    ? `data:${mimeType};base64,${base64Data}`
+    : item.url || (item.path ? `/file-api/raw-file?path=${encodeURIComponent(item.path)}` : undefined);
 
   if (!src) {
     return null;
@@ -39,13 +41,13 @@ function MediaItemView({ item }: { item: MediaItem }) {
     case 'audio':
       return (
         <audio controls className="w-full">
-          <source src={src} type={item.mimeType} />
+          <source src={src} type={mimeType} />
         </audio>
       );
     case 'video':
       return (
         <video controls className="max-w-full rounded-lg border border-border">
-          <source src={src} type={item.mimeType} />
+          <source src={src} type={mimeType} />
         </video>
       );
     case 'document':

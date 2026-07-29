@@ -11,9 +11,12 @@ import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
 import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
+import { OnlineSkillSearchPanel } from "../../features/OnlineSkillSearchPanel";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
+import { getSkillAvatar } from "../../utils/skillAvatar";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
+import { MarkdownRenderer } from "../MarkdownRenderer";
 import { Switch } from "../Switch";
 
 /** 刷新会 git pull marketplace，略放宽；普通进页单次 RPC 一般很快。 */
@@ -23,24 +26,10 @@ const SKILL_RETRIEVAL_RUNNING_POLL_MS = 10_000;
 const SKILL_RETRIEVAL_IDLE_POLL_MS = 5 * 60_000;
 const GRAPH_READING_MIN_VISIBLE_MS = 500;
 
-/** 在线技能源存储 key */
-const ONLINE_SOURCE_STORAGE_KEY = "jiuwen:online_source";
-
-/** 获取保存的在线源 */
-function getSavedOnlineSource(): "skillnet" | "clawhub" {
-  try {
-    const saved = localStorage.getItem(ONLINE_SOURCE_STORAGE_KEY);
-    if (saved === "skillnet" || saved === "clawhub") {
-      return saved;
-    }
-  } catch {
-    /* ignore */
-  }
-  return "skillnet";
-}
-
 type SkillItem = {
   name: string;
+  /** 展示名（保留安装来源的原始大小写，如 ClawHub 的 Weather）；缺省回退到 name */
+  display_name?: string;
   description: string;
   source: string;
   version: string;
@@ -131,6 +120,7 @@ type SkillIndexNode = {
   dont_select_when?: string;
   source_description?: string;
   worker_id?: string;
+  skill_name?: string;
   category?: string;
   keywords?: string[];
   examples?: string[];
@@ -152,6 +142,9 @@ function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSou
   if (source === "local") return t('skills.source.local');
   if (source === "project") return t('skills.source.project');
   if (source === "builtin") return t('skills.source.builtin');
+  if (source === "clawhub") return t('skills.source.clawhub');
+  if (source === "skillnet") return t('skills.source.skillnet');
+  if (source === "teamskillshub") return t('skills.source.teamskillshub');
   return source || t('skills.source.unknown');
 }
 
@@ -213,6 +206,32 @@ function buildSkillIndexTree(nodes: SkillIndexNode[]): SkillIndexTreeNode[] {
 
 function getSkillIndexNodeLabel(node: SkillIndexNode): string {
   return String(node.label || node.worker_id || node.cid || "").trim() || "node";
+}
+
+function getSkillIndexSkillName(node: SkillIndexNode): string {
+  return String(node.skill_name || node.worker_id || node.label || "").trim();
+}
+
+function getSkillIndexNodeClassName(disabledLeaf: boolean, selected: boolean): string {
+  if (disabledLeaf) {
+    return selected
+      ? "border-zinc-400/40 bg-zinc-500/10 text-text-muted"
+      : "border-transparent text-text-muted opacity-75 hover:bg-secondary/50";
+  }
+  if (selected) {
+    return "border-accent/40 bg-accent/10 text-accent";
+  }
+  return "border-transparent text-text hover:bg-secondary/60";
+}
+
+function getSkillIndexNodeBadgeClassName(disabledLeaf: boolean, isLeaf: boolean): string {
+  if (disabledLeaf) {
+    return "border-zinc-400/25 bg-zinc-500/10 text-text-muted";
+  }
+  if (isLeaf) {
+    return "border-emerald-500/25 bg-emerald-500/10 text-emerald-600";
+  }
+  return "border-sky-500/25 bg-sky-500/10 text-sky-600";
 }
 
 function findSkillIndexNode(nodes: SkillIndexNode[], cid: string | null): SkillIndexNode | null {
@@ -386,7 +405,7 @@ function SkillIndexBuildProgressPanel({
 
       <div className="mt-4 h-2 overflow-hidden rounded-full bg-secondary">
         <div
-          className={`h-full rounded-full transition-all ${isError ? "bg-red-500" : "bg-emerald-500"}`}
+          className={`h-full rounded-full  ${isError ? "bg-red-500" : "bg-emerald-500"}`}
           style={{ width: `${progress}%` }}
         />
       </div>
@@ -447,6 +466,8 @@ function SkillIndexTreeView({
   emptyText,
   branchLabel,
   skillLabel,
+  disabledSkillNames,
+  disabledSkillLabel,
 }: {
   roots: SkillIndexTreeNode[];
   selectedCid: string | null;
@@ -454,6 +475,8 @@ function SkillIndexTreeView({
   emptyText: string;
   branchLabel: string;
   skillLabel: string;
+  disabledSkillNames: Set<string>;
+  disabledSkillLabel: string;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -476,16 +499,15 @@ function SkillIndexTreeView({
     const isExpanded = expanded[node.cid] ?? false;
     const selected = selectedCid === node.cid;
     const isLeaf = node.type === "leaf";
+    const disabledLeaf = isLeaf && disabledSkillNames.has(getSkillIndexSkillName(node));
     return (
       <div key={node.cid}>
         <div
           role="treeitem"
           aria-selected={selected}
           aria-expanded={hasChildren ? isExpanded : undefined}
-          className={`flex items-center gap-1 rounded-md border text-xs transition-colors ${
-            selected
-              ? "border-accent/40 bg-accent/10 text-accent"
-              : "border-transparent text-text hover:bg-secondary/60"
+          className={`flex items-center gap-1 rounded-md border text-xs  ${
+            getSkillIndexNodeClassName(disabledLeaf, selected)
           }`}
           style={{ paddingLeft: `${8 + depth * 14}px` }}
         >
@@ -503,7 +525,7 @@ function SkillIndexTreeView({
           >
             {hasChildren ? (
               <ChevronRight
-                className={`h-3 w-3 transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                className={`h-3 w-3  ${isExpanded ? "rotate-90" : ""}`}
                 strokeWidth={2}
               />
             ) : (
@@ -513,19 +535,24 @@ function SkillIndexTreeView({
           <button
             type="button"
             onClick={() => onSelect(node.cid)}
-            className="min-w-0 flex-1 h-7 flex items-center gap-2 text-left"
+            className="min-w-0 flex-1 min-h-7 py-1 flex items-center gap-2 text-left"
             title={getSkillIndexNodeLabel(node)}
           >
             <span
               className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none ${
-                isLeaf
-                  ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-600"
-                  : "border-sky-500/25 bg-sky-500/10 text-sky-600"
+                getSkillIndexNodeBadgeClassName(disabledLeaf, isLeaf)
               }`}
             >
               {isLeaf ? skillLabel : branchLabel}
             </span>
-            <span className="truncate">{getSkillIndexNodeLabel(node)}</span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate">{getSkillIndexNodeLabel(node)}</span>
+              {disabledLeaf ? (
+                <span className="block truncate text-[10px] leading-4 text-text-muted">
+                  {disabledSkillLabel}
+                </span>
+              ) : null}
+            </span>
           </button>
         </div>
         {hasChildren && isExpanded ? (
@@ -549,7 +576,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
-  const [onlineSource, setOnlineSource] = useState<"skillnet" | "clawhub">(getSavedOnlineSource);
   const [searchTrigger, setSearchTrigger] = useState(0);
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [plugins, setPlugins] = useState<InstalledPluginItem[]>([]);
@@ -578,6 +604,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [retrievalTreeNodes, setRetrievalTreeNodes] = useState<SkillIndexNode[]>([]);
   const [retrievalTreeCounts, setRetrievalTreeCounts] = useState({ branches: 0, skills: 0 });
   const [selectedTreeNodeCid, setSelectedTreeNodeCid] = useState<string | null>(null);
+  const [retrievalShowExistingIndexFailureNotice, setRetrievalShowExistingIndexFailureNotice] = useState(false);
   const [retrievalLoading, setRetrievalLoading] = useState<"idle" | "status" | "tree" | "build" | "cancel">("idle");
 
   useEffect(() => {
@@ -707,6 +734,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     return result.filter((skill) => {
       const haystack = [
         skill.name,
+        skill.display_name,
         skill.description,
         skill.author,
         coerceStringList(skill.tags).join(" "),
@@ -738,7 +766,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [filteredSkills, activeTab, installedSkillMap]);
 
   const builtinSkills = useMemo(() => {
-    let filtered = skills.filter((skill) => skill.is_builtin === true);
+    let filtered = skills.filter((skill) => skill.is_builtin === true || skill.is_builtin_source === true);
     if (search.trim()) {
       const searchLower = search.toLowerCase();
       filtered = filtered.filter(
@@ -770,10 +798,10 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         plugins?: InstalledPluginItem[];
       }>(
         "skills.list",
-        withSession({
+        {
           with_installed: true,
           ...(refreshMarketplaces ? { refresh_marketplaces: true } : {}),
-        }),
+        },
         {
           timeoutMs: refreshMarketplaces
             ? SKILLS_FETCH_TIMEOUT_REFRESH_MS
@@ -893,10 +921,17 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [fetchRetrievalStatus]);
 
   useEffect(() => {
-    if (activeTab !== "index") return;
+    if (retrievalStatus?.build_status === "running") {
+      setRetrievalShowExistingIndexFailureNotice(false);
+    }
+  }, [retrievalStatus?.build_status]);
+
+  useEffect(() => {
+    if (!isActive || activeTab !== "index") return;
+    setRetrievalShowExistingIndexFailureNotice(true);
     void fetchRetrievalStatus();
     void fetchRetrievalTree();
-  }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree]);
+  }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree, isActive]);
 
   useEffect(() => {
     const disabled = retrievalStatus?.enabled === false;
@@ -956,6 +991,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   ]);
 
   const handleBuildRetrievalIndex = useCallback(async (force = false) => {
+    setRetrievalShowExistingIndexFailureNotice(false);
     setRetrievalLoading("build");
     try {
       await webRequest<{ success: boolean; result?: string }>(
@@ -975,12 +1011,24 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const handleCancelRetrievalBuild = useCallback(async () => {
     setRetrievalLoading("cancel");
     try {
-      await webRequest<{ success: boolean; result?: string }>(
+      const result = await webRequest<{ success: boolean; result?: string; build_status?: string }>(
         "skills.retrieval.index_cancel",
         withSession(),
         { timeoutMs: 30_000 }
       );
-      await fetchRetrievalStatus();
+      if (result.success) {
+        setRetrievalStatus((current) => current
+          ? {
+              ...current,
+              build_status: "cancelled",
+              build_stage: "cancelled",
+              build_message: result.result || current.build_message,
+              build_progress: 1,
+            }
+          : current);
+      } else {
+        await fetchRetrievalStatus();
+      }
     } catch (error) {
       console.error(error);
     } finally {
@@ -1166,32 +1214,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     [fetchSkills, handleBackToList, t, withSession]
   );
 
-  const avatarColors = [
-    "bg-red-500",
-    "bg-orange-500",
-    "bg-amber-500",
-    "bg-yellow-500",
-    "bg-lime-500",
-    "bg-green-500",
-    "bg-emerald-500",
-    "bg-teal-500",
-    "bg-cyan-500",
-    "bg-sky-500",
-    "bg-blue-500",
-    "bg-indigo-500",
-    "bg-violet-500",
-    "bg-purple-500",
-    "bg-fuchsia-500",
-    "bg-pink-500",
-    "bg-rose-500",
-  ];
-
-  const getSkillAvatar = (name: string) => {
-    const firstChar = name.charAt(0).toUpperCase();
-    const colorIndex = name.charCodeAt(0) % avatarColors.length;
-    return { firstChar, color: avatarColors[colorIndex] };
-  };
-
   const renderActionButton = (skill: SkillItem) => {
     const plugin = installedSkillMap.get(skill.name);
 
@@ -1223,11 +1245,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
             event.stopPropagation();
             handleUninstall(skill.name);
           }}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary transition-colors"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary "
           disabled={isLoading}
-          style={{ color: '#191919' }}
+          style={{ color: 'var(--color-text-primary)' }}
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: '#191919' }}>
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: 'var(--color-text-primary)' }}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
           </svg>
           {t('skills.actions.uninstall')}
@@ -1245,11 +1267,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
             event.stopPropagation();
             handleUninstall(pluginName);
           }}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary transition-colors"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary "
           disabled={isLoading}
-          style={{ color: '#191919' }}
+          style={{ color: 'var(--color-text-primary)' }}
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: '#191919' }}>
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: 'var(--color-text-primary)' }}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
           </svg>
           {t('skills.actions.uninstall')}
@@ -1285,11 +1307,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
             event.stopPropagation();
             handleUninstall(skill.name);
           }}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary transition-colors"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary "
           disabled={isLoading}
-          style={{ color: '#191919' }}
+          style={{ color: 'var(--color-text-primary)' }}
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: '#191919' }}>
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: 'var(--color-text-primary)' }}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
           </svg>
           {t('skills.actions.uninstall')}
@@ -1387,8 +1409,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
           event.stopPropagation();
           handleOpenEvolution(skill.name);
         }}
-        className="px-4 py-2 rounded-2xl transition-colors whitespace-nowrap hover:opacity-80"
-        style={{ color: "#0067d1", fontSize: "12px" }}
+        className="px-4 py-2 rounded-2xl  whitespace-nowrap hover:opacity-80"
+        style={{ color: 'var(--color-text-link)', fontSize: '12px' }}
       >
         {t('skills.actions.viewEvolution')}
       </button>
@@ -1400,16 +1422,39 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     () => buildSkillIndexTree(retrievalTreeNodes),
     [retrievalTreeNodes]
   );
+  const disabledSkillNames = useMemo(
+    () => new Set(skills.filter((skill) => skill.enabled === false).map((skill) => skill.name)),
+    [skills]
+  );
   const selectedTreeNode = useMemo(
     () => findSkillIndexNode(retrievalTreeNodes, selectedTreeNodeCid),
     [retrievalTreeNodes, selectedTreeNodeCid]
+  );
+  const retrievalUsingExistingAfterFailure = Boolean(
+    retrievalStatus
+      && retrievalShowExistingIndexFailureNotice
+      && retrievalStatus.enabled !== false
+      && retrievalStatus.build_status === "failed"
+      && retrievalStatus.index_exists
+      && retrievalStatus.fresh
+  );
+  const retrievalUsingExistingAfterCancellation = Boolean(
+    retrievalStatus
+      && retrievalStatus.enabled !== false
+      && retrievalStatus.build_status === "cancelled"
+      && retrievalStatus.index_exists
+      && retrievalStatus.fresh
+  );
+  const retrievalUsingExistingAfterInterruptedBuild = (
+    retrievalUsingExistingAfterFailure
+    || retrievalUsingExistingAfterCancellation
   );
   const retrievalStatusText = retrievalStatus
     ? retrievalStatus.enabled === false
       ? t('skills.retrieval.disabled')
       : retrievalStatus.build_status === "running"
       ? t('skills.retrieval.building')
-      : retrievalStatus.build_status === "failed"
+      : retrievalStatus.build_status === "failed" && !retrievalUsingExistingAfterFailure
       ? t('skills.retrieval.buildFailed')
       : retrievalStatus.build_status === "cancelled"
       ? t('skills.retrieval.cancelled')
@@ -1419,6 +1464,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         : t('skills.retrieval.stale')
       : t('skills.retrieval.missing')
     : t('common.loading');
+  const retrievalLastBuildMessage = retrievalUsingExistingAfterFailure
+    ? t('skills.retrieval.lastBuildFailedUsingExisting')
+    : retrievalUsingExistingAfterCancellation
+    ? t('skills.retrieval.lastBuildCancelledUsingExisting')
+    : "";
   const retrievalBuildRunning = retrievalStatus?.build_status === "running";
   const retrievalBuildProgress = Math.round(Math.max(0, Math.min(1, retrievalStatus?.build_progress ?? 0)) * 100);
   const retrievalBuildLogs = Array.isArray(retrievalStatus?.build_logs)
@@ -1427,6 +1477,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const retrievalHasBuildInfo = Boolean(
     retrievalStatus
       && retrievalStatus.enabled !== false
+      && !retrievalUsingExistingAfterInterruptedBuild
       && (
         retrievalBuildRunning
         || ["success", "failed", "cancelled"].includes(String(retrievalStatus.build_status || ""))
@@ -1436,9 +1487,9 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   return (
     <>
       {message && messageType === "success" && (
-        <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-black shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "#d5f2dc", width: "564px", height: "40px" }}>
-          <span className="w-4 h-4 rounded-full bg-[#1a991d] flex items-center justify-center flex-shrink-0">
-            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
+          <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
+            <svg className="w-3 h-3 text-text-inverse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
             </svg>
           </span>
@@ -1446,7 +1497,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
           <button
             type="button"
             onClick={() => setMessage(null)}
-            className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-white/30 rounded-full transition-colors"
+            className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-card/30 rounded-full "
           >
             <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -1468,7 +1519,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
           <div className="flex items-center">
             <button
               onClick={() => setSourceModalOpen(true)}
-              className="flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 transition-colors"
+              className="flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 "
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
@@ -1492,7 +1543,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   setSearchTrigger((prev) => prev + 1);
                 }
               }}
-              className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted transition-colors ${
+              className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted  ${
                 activeTab === "graph" && graphReading
                   ? "cursor-not-allowed opacity-70"
                   : "hover:text-text hover:bg-secondary/50"
@@ -1506,7 +1557,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
             </button>
             <button
               onClick={handleImportLocal}
-              className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm transition-colors ${
+              className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm  ${
                 actionTarget === "import_local"
                   ? "text-text-muted cursor-not-allowed"
                   : "text-text-muted hover:text-text hover:bg-secondary/50"
@@ -1526,7 +1577,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
           <div className="flex items-center gap-2">
             <button
               onClick={() => setActiveTab("my")}
-              className={`px-4 text-sm font-medium transition-colors ${
+              className={`px-4 text-sm font-medium  ${
                 activeTab === "my"
                   ? "rounded-[8px] bg-secondary h-8 text-text"
                   : "text-text-muted hover:text-text"
@@ -1536,7 +1587,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
             </button>
             <button
               onClick={() => setActiveTab("marketplace")}
-              className={`px-4 text-sm font-medium transition-colors ${
+              className={`px-4 text-sm font-medium  ${
                 activeTab === "marketplace"
                   ? "rounded-[8px] bg-secondary h-8 text-text"
                   : "text-text-muted hover:text-text"
@@ -1546,7 +1597,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
             </button>
             <button
               onClick={() => setActiveTab("graph")}
-              className={`px-4 text-sm font-medium transition-colors ${
+              className={`px-4 text-sm font-medium  ${
                 activeTab === "graph"
                   ? "rounded-[8px] bg-secondary h-8 text-text"
                   : "text-text-muted hover:text-text"
@@ -1556,7 +1607,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
             </button>
             <button
               onClick={() => setActiveTab("index")}
-              className={`px-4 text-sm font-medium transition-colors ${
+              className={`px-4 text-sm font-medium  ${
                 activeTab === "index"
                   ? "rounded-[8px] bg-secondary h-8 text-text"
                   : "text-text-muted hover:text-text"
@@ -1569,7 +1620,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
             <div className="flex items-center gap-1 border border-border rounded-lg p-1">
               <button
                 onClick={() => setViewMode("list")}
-                className={`p-1.5 rounded-md transition-colors ${
+                className={`p-1.5 rounded-md  ${
                   viewMode === "list"
                     ? "bg-secondary text-text"
                     : "text-text-muted hover:text-text"
@@ -1582,7 +1633,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
               </button>
               <button
                 onClick={() => setViewMode("grid")}
-                className={`p-1.5 rounded-md transition-colors ${
+                className={`p-1.5 rounded-md  ${
                   viewMode === "grid"
                     ? "bg-secondary text-text"
                     : "text-text-muted hover:text-text"
@@ -1616,11 +1667,16 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                         })}`
                       : ""}
                   </div>
+                  {retrievalLastBuildMessage ? (
+                    <div className="mt-1 text-xs text-amber-600">
+                      {retrievalLastBuildMessage}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => void handleBuildRetrievalIndex(false)}
-                    className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
+                    className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                     disabled={retrievalLoading === "build" || retrievalBuildRunning || retrievalStatus?.enabled === false}
                   >
                     {retrievalLoading === "build"
@@ -1630,7 +1686,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {retrievalStatus?.index_exists ? (
                     <button
                       onClick={() => void handleBuildRetrievalIndex(true)}
-                      className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
+                      className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                       disabled={retrievalLoading === "build" || retrievalBuildRunning || retrievalStatus?.enabled === false}
                     >
                       {retrievalLoading === "build"
@@ -1641,7 +1697,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {retrievalBuildRunning ? (
                     <button
                       onClick={handleCancelRetrievalBuild}
-                      className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
+                      className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                       disabled={retrievalLoading === "cancel"}
                     >
                       {retrievalLoading === "cancel"
@@ -1651,10 +1707,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   ) : null}
                   <button
                     onClick={() => {
+                      setRetrievalShowExistingIndexFailureNotice(true);
                       void fetchRetrievalStatus();
                       void fetchRetrievalTree();
                     }}
-                    className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary transition-colors disabled:opacity-60"
+                    className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                     disabled={retrievalLoading === "tree" || retrievalLoading === "status"}
                   >
                     {retrievalLoading === "tree" || retrievalLoading === "status"
@@ -1672,8 +1729,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 />
               ) : null}
             </div>
-            <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
-              <div className="rounded-lg border border-border bg-panel p-4 min-h-0 flex flex-col">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
+              <div className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
                 <div className="mb-3 flex items-center justify-between gap-2">
                   <div>
                     <div className="text-sm font-medium text-text-strong">
@@ -1700,15 +1757,21 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       emptyText={t('skills.retrieval.noTree')}
                       branchLabel={t('skills.retrieval.nodeTypes.branch')}
                       skillLabel={t('skills.retrieval.nodeTypes.skill')}
+                      disabledSkillNames={disabledSkillNames}
+                      disabledSkillLabel={t('skills.retrieval.disabledSkill')}
                     />
                   ) : (
-                    <div className="whitespace-pre-wrap text-xs text-text-muted">
-                      {retrievalTree || (retrievalLoading === "tree" ? t('common.loading') : t('skills.retrieval.noTree'))}
-                    </div>
+                    <MarkdownRenderer
+                      content={
+                        retrievalTree
+                        || (retrievalLoading === "tree" ? t('common.loading') : t('skills.retrieval.noTree'))
+                      }
+                      className="chat-markdown text-xs text-text-muted"
+                    />
                   )}
                 </div>
               </div>
-              <div className="rounded-lg border border-border bg-panel p-4 min-h-0 flex flex-col">
+              <div className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
                 <div className="text-sm font-medium text-text-strong mb-3">
                   {t('skills.retrieval.nodeDetails')}
                 </div>
@@ -1825,7 +1888,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                     setDebouncedSearch(search);
                     setSearchTrigger((prev) => prev + 1);
                   }}
-                  className={`px-4 text-sm font-medium transition-colors ${
+                  className={`px-4 text-sm font-medium  ${
                     marketplaceSubTab === "builtin"
                       ? "rounded-[8px] bg-secondary h-8 text-text"
                       : "text-text-muted hover:text-text"
@@ -1839,7 +1902,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   setDebouncedSearch(search);
                   setSearchTrigger((prev) => prev + 1);
                 }}
-                className={`px-4 text-sm font-medium transition-colors ${
+                className={`px-4 text-sm font-medium  ${
                   marketplaceSubTab === "swarmskills"
                     ? "rounded-[8px] bg-secondary h-8 text-text"
                     : "text-text-muted hover:text-text"
@@ -1853,7 +1916,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   setDebouncedSearch(search);
                   setSearchTrigger((prev) => prev + 1);
                 }}
-                className={`px-4 text-sm font-medium transition-colors ${
+                className={`px-4 text-sm font-medium  ${
                   marketplaceSubTab === "online"
                     ? "rounded-[8px] bg-secondary h-8 text-text"
                     : "text-text-muted hover:text-text"
@@ -1872,9 +1935,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       ? t("skills.searchPlaceholder")
                       : marketplaceSubTab === "swarmskills"
                       ? t("skills.swarmskills.searchPlaceholder")
-                      : onlineSource === "skillnet"
-                      ? t("skills.skillNet.searchPlaceholder")
-                      : t("skills.clawhub.searchPlaceholder")
+                      : t("skills.onlineSearch.searchPlaceholder")
                   }
                   className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
                 />
@@ -1896,6 +1957,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {listState === "success" && builtinSkills.length > 0 && (
                     builtinSkills.map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
+                      const displayName = skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
                       const isToggling = actionTarget === `toggle:${skill.name}`;
                       const isInstalled = installedSkillMap.has(skill.name) || skill.source === "local";
@@ -1904,18 +1966,18 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                         <div
                           key={skill.name}
                           onClick={() => handleOpenSkill(skill.name)}
-                          className={`text-left border border-border bg-panel hover:bg-card transition-colors cursor-pointer ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
+                          className={`text-left border border-border bg-panel hover:bg-card  cursor-pointer ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
                           style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
                         >
                           {viewMode === "list" ? (
                             <div className="flex items-center justify-between gap-4">
                               <div className="flex items-center gap-3 min-w-0 flex-1">
-                                <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold`}>
+                                <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
                                   {avatar.firstChar}
                                 </div>
                                 <div className="min-w-0">
                                   <div className="text-base font-semibold text-text-strong">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                     {skill.description || t('skills.noDescription')}
@@ -1929,7 +1991,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                       event.stopPropagation();
                                       handleInstall(skill.name);
                                     }}
-                                    className="min-w-[76px] h-[28px] px-3 text-sm rounded-full border border-black bg-white text-black hover:bg-gray-100 transition-colors whitespace-nowrap"
+                                    className="min-w-[76px] h-[28px] px-3 text-sm rounded-full border border-black bg-card text-text hover:bg-gray-100  whitespace-nowrap"
                                     disabled={isInstalling}
                                   >
                                     {isInstalling ? t('skills.actions.installing') : t('skills.actions.install')}
@@ -1946,12 +2008,12 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                           ) : (
                             <>
                               <div className="flex items-start gap-3 flex-shrink-0">
-                                <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold text-sm`}>
+                                <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
                                   {avatar.firstChar}
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <div className="text-sm font-semibold text-text-strong truncate">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                     {skill.description || t('skills.noDescription')}
@@ -1997,35 +2059,14 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 </div>
               )}
 
-              {marketplaceSubTab === "online" && onlineSource === "skillnet" && (
-                <div className="h-full" key={`skillnet-${searchTrigger}`}>
-                  <SkillNetSearchModal
-                    open={true}
-                    embedded={true}
+              {marketplaceSubTab === "online" && (
+                <div className="h-full" key={`online-${searchTrigger}`}>
+                  <OnlineSkillSearchPanel
                     sessionId={sessionId}
                     externalSearchQuery={debouncedSearch}
                     installedSkillNames={installedSkillNames}
                     installedSkillOrigins={installedSkillOrigins}
                     viewMode={viewMode}
-                    onClose={() => {}}
-                    onInstalled={(_skillName: string) => {
-                      void fetchSkills();
-                    }}
-                  />
-                </div>
-              )}
-
-              {marketplaceSubTab === "online" && onlineSource === "clawhub" && (
-                <div className="h-full" key={`clawhub-${searchTrigger}`}>
-                  <ClawHubSearchModal
-                    open={true}
-                    embedded={true}
-                    sessionId={sessionId}
-                    externalSearchQuery={debouncedSearch}
-                    installedSkillNames={installedSkillNames}
-                    installedSkillOrigins={installedSkillOrigins}
-                    viewMode={viewMode}
-                    onClose={() => {}}
                     onInstalled={(_skillName: string) => {
                       void fetchSkills();
                     }}
@@ -2055,18 +2096,18 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                     <div className="flex items-start gap-3">
                       <button
                         onClick={handleBackToList}
-                        className="flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-text-muted hover:text-text hover:bg-secondary/50 transition-colors"
+                        className="flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-text-muted hover:text-text hover:bg-secondary/50 "
                       >
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
                         </svg>
                       </button>
-                      <div className={`w-10 h-10 rounded-lg ${getSkillAvatar(selectedSkill.name).color} flex items-center justify-center flex-shrink-0 text-white font-semibold`}>
+                      <div className={`w-10 h-10 rounded-lg ${getSkillAvatar(selectedSkill.name).color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
                         {getSkillAvatar(selectedSkill.name).firstChar}
                       </div>
                       <div>
                         <div className="text-lg font-semibold text-text-strong">
-                          {selectedSkill.name}
+                          {selectedSkill.display_name || selectedSkill.name}
                         </div>
                         <div className="text-sm text-text-muted mt-1">
                           {selectedSkill.description || t('skills.noDescription')}
@@ -2088,7 +2129,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                     <div className="flex flex-col items-end gap-2">
                       <div className="flex items-center gap-4">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm whitespace-nowrap" style={{ color: '#191919' }}>{selectedSkill.enabled === false ? t('skills.mySkillsTabs.disabled') : t('skills.mySkillsTabs.enabled')}</span>
+                          <span className="text-sm whitespace-nowrap" style={{ color: 'var(--color-text-primary)' }}>{selectedSkill.enabled === false ? t('skills.mySkillsTabs.disabled') : t('skills.mySkillsTabs.enabled')}</span>
                           <Switch
                             checked={selectedSkill.enabled !== false}
                             onChange={() => toggleSkillDisabled(selectedSkill.name)}
@@ -2137,7 +2178,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => setMySkillsSubTab("all")}
-                      className={`px-4 text-sm font-medium transition-colors ${
+                      className={`px-4 text-sm font-medium  ${
                         mySkillsSubTab === "all"
                           ? "rounded-[8px] bg-secondary h-8 text-text"
                           : "text-text-muted hover:text-text"
@@ -2147,7 +2188,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                     </button>
                     <button
                       onClick={() => setMySkillsSubTab("enabled")}
-                      className={`px-4 text-sm font-medium transition-colors ${
+                      className={`px-4 text-sm font-medium  ${
                         mySkillsSubTab === "enabled"
                           ? "rounded-[8px] bg-secondary h-8 text-text"
                           : "text-text-muted hover:text-text"
@@ -2157,7 +2198,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                     </button>
                     <button
                       onClick={() => setMySkillsSubTab("disabled")}
-                      className={`px-4 text-sm font-medium transition-colors ${
+                      className={`px-4 text-sm font-medium  ${
                         mySkillsSubTab === "disabled"
                           ? "rounded-[8px] bg-secondary h-8 text-text"
                           : "text-text-muted hover:text-text"
@@ -2198,24 +2239,25 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {listState === "success" &&
                     getMySkillsFiltered().map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
+                      const displayName = skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
                       const isToggling = actionTarget === `toggle:${skill.name}`;
                       return (
                         <div
                           key={skill.name}
                           onClick={() => handleOpenSkill(skill.name)}
-                          className={`text-left border border-border bg-panel hover:bg-card transition-colors cursor-pointer ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
+                          className={`text-left border border-border bg-panel hover:bg-card  cursor-pointer ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
                           style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
                         >
                           {viewMode === "list" ? (
                             <div className="flex items-center justify-between gap-4">
                               <div className="flex items-center gap-3 min-w-0 flex-1">
-                                <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold`}>
+                                <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
                                   {avatar.firstChar}
                                 </div>
                                 <div className="min-w-0">
                                   <div className="text-base font-semibold text-text-strong">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                     {skill.description || t('skills.noDescription')}
@@ -2244,12 +2286,12 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                           ) : (
                             <>
                               <div className="flex items-start gap-3 flex-shrink-0">
-                                <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold text-sm`}>
+                                <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
                                   {avatar.firstChar}
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <div className="text-sm font-semibold text-text-strong truncate">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                     {skill.description || t('skills.noDescription')}
@@ -2291,15 +2333,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         open={sourceModalOpen}
         sessionId={sessionId}
         onClose={() => setSourceModalOpen(false)}
-        currentSource={onlineSource}
-        onSourceChange={(source) => {
-          setOnlineSource(source);
-          try {
-            localStorage.setItem(ONLINE_SOURCE_STORAGE_KEY, source);
-          } catch {
-            /* ignore */
-          }
-        }}
         onNavigateToConfig={() => {
           setSourceModalOpen(false);
           onNavigateToConfig?.();

@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Make repo-local modules importable when running from repo root or src/.
 _HERE = Path(__file__).resolve().parent
@@ -21,10 +24,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 try:
     from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 
-    load_dotenv()
-except Exception:
-    pass
+if load_dotenv is not None:
+    try:
+        load_dotenv()
+    except Exception as e:
+        logger.warning("Failed to load .env via python-dotenv: %s", e)
 
 from .openjiuwen_monkeypatch import apply_openjiuwen_monkeypatch
 

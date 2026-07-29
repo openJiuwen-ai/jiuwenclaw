@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
-import type { Message } from '../../types';
+import type { Message, TeamMemberContextCompressionState } from '../../types';
 import type {
   TeamMemberExecutionEvent,
   TeamTask as SessionTeamTask,
@@ -10,12 +10,12 @@ import { MarkdownMessageBody } from '../ChatPanel/MessageItem';
 import { parseTeamEventMessage, type ParsedTeamEvent } from '../ChatPanel/teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { isTeamLeaderMember, isUserMember } from '../../utils/teamMemberAvatar';
+import teamIcon from '../../assets/team.svg';
 import { MemberListItem } from './MemberListItem';
 import {
   buildProcessItems,
   buildTaskMap,
   Chevron,
-  ExpandIcon,
   formatTime,
   getMemberDisplayName,
   getTaskStatusLabel,
@@ -28,7 +28,7 @@ import {
   type TeamDetailTab,
   type TeamMember,
 } from './shared';
-import { Users, Wrench, MessageSquare } from 'lucide-react';
+import { AlertTriangle, CircleAlert, LoaderCircle, MessageSquare, Wrench, X } from 'lucide-react';
 
 type TeamMembersPanelProps = {
   variant: 'compact' | 'expanded';
@@ -198,11 +198,11 @@ export function TeamMembersPanel({
   onSelectMember,
   onMemberClick,
   onDetailTabChange,
-  onExpand,
 }: TeamMembersPanelProps) {
   const { t } = useTranslation();
-  const { messages } = useChatStore();
-  const { teamLeaderMemberIds } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  const teamLeaderMemberIds = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamLeaderMemberIds ?? []);
   const groupMessages = useMemo(
     () => buildGroupMessageItems(historyMessages, messages),
     [historyMessages, messages],
@@ -227,19 +227,12 @@ export function TeamMembersPanel({
 
   if (variant === 'compact') {
     return (
-      <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card min-h-0">
-        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3 border-b border-border">
+      <div className="flex flex-1 flex-col overflow-hidden rounded-b-lg bg-card min-h-0 px-3">
+        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3 border-border">
           <div className="flex items-center gap-2">
-            <Users size={16} className="text-text-muted" />
-            <span className="text-sm font-medium text-text">{t('team.membersTab')}</span>
+            <img src={teamIcon} alt="" className="h-4 w-4 text-text-muted" />
+            <span className="text-sm font-medium text-text">{t('team.members')} ({visibleMembers.length})</span>
           </div>
-          <button
-            onClick={onExpand}
-            className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
-            title={t('team.expand')}
-          >
-            <ExpandIcon />
-          </button>
         </div>
         <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
           {visibleMembers.length === 0 ? (
@@ -259,7 +252,7 @@ export function TeamMembersPanel({
   }
 
   return (
-    <div className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden border border-border rounded-lg mt-0 mx-6 mb-6 ">
+    <div className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
       {activeDetailTab === 'members' && (
         <aside className="w-[260px] shrink-0 overflow-y-auto border-r border-border bg-card">
           <div className="px-3 pt-4">
@@ -316,14 +309,14 @@ function DetailTabSwitch({
     <div className="grid grid-cols-2 rounded-md bg-secondary p-1 text-sm">
       <button
         type="button"
-        className={`h-8 rounded text-center transition-colors ${activeTab === 'members' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
+        className={`h-8 rounded text-center  ${activeTab === 'members' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
         onClick={() => onChange?.('members')}
       >
         {t('team.detailTabs.members')}
       </button>
       <button
         type="button"
-        className={`h-8 rounded text-center transition-colors ${activeTab === 'group' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
+        className={`h-8 rounded text-center  ${activeTab === 'group' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
         onClick={() => onChange?.('group')}
       >
         {t('team.detailTabs.group')}
@@ -415,7 +408,7 @@ function GroupAvatarStack({ memberIds }: { memberIds: string[] }) {
         <TeamMemberAvatar key={memberId} member={memberId} className="!h-7 !w-7 ring-2 ring-card" />
       ))}
       {hiddenCount > 0 && (
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#edf1ff] text-xs font-medium text-accent ring-2 ring-card">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--color-team-overflow-surface)] text-xs font-medium text-accent ring-2 ring-card">
           +{hiddenCount}
         </span>
       )}
@@ -467,9 +460,13 @@ function MemberTaskDetail({
   const { t } = useTranslation();
   const [taskListExpanded, setTaskListExpanded] = useState(false);
   const [expandedProcessIds, setExpandedProcessIds] = useState<Set<string>>(new Set());
-  const { todos } = useTodoStore();
-  const { teamTaskEvents, teamMemberExecutionEvents } = useSessionStore();
-  const { messages } = useChatStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
+  const teamMemberExecutionEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMemberExecutionEvents ?? []);
+  const teamMemberContextCompression = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMemberContextCompression ?? {});
+  const clearTeamMemberContextCompressionStatus = useSessionStore((s) => s.clearTeamMemberContextCompressionStatus);
+  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
   const processMessages = useMemo(
     () => mergeUniqueMessages([...historyMessages, ...messages]),
     [historyMessages, messages]
@@ -495,6 +492,7 @@ function MemberTaskDetail({
   );
   const completedCount = memberTasks.filter((task) => task.status === 'completed').length;
   const displayName = getMemberDisplayName(member);
+  const contextCompressionState = teamMemberContextCompression[member.member_id];
 
   useEffect(() => {
     setTaskListExpanded(false);
@@ -511,7 +509,7 @@ function MemberTaskDetail({
   };
 
   return (
-    <section className="flex min-w-[400px] flex-1 flex-col bg-card">
+    <section className="flex min-w-[320px] flex-1 flex-col bg-card">
       <div className="flex shrink-0 items-center bg-card px-7 pt-3 h-[34px]">
         <div className="text-sm font-semibold text-text">
           {t('team.memberTasksTitle', { member: displayName })}
@@ -528,6 +526,14 @@ function MemberTaskDetail({
       </div>
 
       <div className="shrink-0 border-t border-border bg-card">
+        <TeamMemberContextCompressionBar
+          state={contextCompressionState}
+          onClose={() => {
+            if (activeSessionId) {
+              clearTeamMemberContextCompressionStatus(activeSessionId, member.member_id);
+            }
+          }}
+        />
         <TaskListBar
           tasks={memberTasks}
           expanded={taskListExpanded}
@@ -552,10 +558,10 @@ function MemberTaskDetail({
                         {getTaskStatusLabel(task.status)}
                         {task.id ? ` · ${task.id}` : ''}
                       </div>
-                      <div className="mt-2 rounded bg-[#F8FAFC] px-3 py-2 text-[11px] leading-5 text-[#5D6675]">
+                      <div className="mt-2 rounded bg-[var(--color-team-detail-surface)] px-3 py-2 text-[11px] leading-5 text-[var(--color-team-detail-text)]">
                         {buildTaskRawEntries(task).map(([label, value]) => (
                           <div key={label} className="grid grid-cols-[88px_minmax(0,1fr)] gap-2">
-                            <span className="text-[#9AA3AF]">{label}</span>
+                            <span className="text-[var(--color-team-detail-label)]">{label}</span>
                             <span className="whitespace-pre-wrap break-words">{value}</span>
                           </div>
                         ))}
@@ -572,6 +578,88 @@ function MemberTaskDetail({
   );
 }
 
+function TeamMemberContextCompressionBar({
+  state,
+  onClose,
+}: {
+  state?: TeamMemberContextCompressionState;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const runtime = state?.runtime;
+  const summary = state?.summary;
+  const summaryItems = (summary?.summaries ?? []).filter(Boolean);
+  const showSummaryDetails = summaryItems.length > 0;
+
+  if (!runtime?.summary && !showSummaryDetails) {
+    return null;
+  }
+
+  const status = runtime?.status;
+  const isRunning = status === 'running';
+  const isFailed = status === 'failed';
+  let statusTitle = t('team.contextCompression.completed', { count: summary?.count || 1 });
+  if (isRunning) {
+    statusTitle = t('team.contextCompression.running');
+  } else if (isFailed) {
+    statusTitle = t('team.contextCompression.failed');
+  }
+  const detailsTitle = showSummaryDetails
+    ? summaryItems.map((item, index) => `${index + 1}. ${item}`).join('\n')
+    : undefined;
+
+  const isComplete = !isRunning && !isFailed;
+  let stateClass = 'is-complete';
+  if (isFailed) {
+    stateClass = 'is-failed';
+  } else if (isRunning) {
+    stateClass = 'is-running';
+  }
+  const statusIcon = isFailed ? <AlertTriangle size={14} /> : <CircleAlert size={14} />;
+  const statusIconTitle = showSummaryDetails && !isRunning ? detailsTitle : undefined;
+  const activityClassName = isRunning
+    ? 'team-event-group-summary__activity context-compression-running-text'
+    : 'team-event-group-summary__activity';
+
+  return (
+    <div className="team-event-group team-event-group--context-compression w-[auto]">
+      <div className={`team-event-group-summary team-event-group-summary--context-compression ${stateClass}`}>
+        <span className="team-event-group-summary__main">
+          <span
+            className="team-event-group-summary__icon team-event-group-summary__icon--status"
+            title={statusIconTitle}
+            aria-hidden="true"
+          >
+            {statusIcon}
+          </span>
+          <span className="team-event-group-summary__title">{statusTitle}</span>
+          {isRunning && (
+            <span className="team-event-group-summary__icon team-event-group-summary__icon--status" aria-hidden="true">
+              <LoaderCircle size={14} className="animate-spin" />
+            </span>
+          )}
+        </span>
+        {runtime?.summary && !isComplete && (
+          <span className={activityClassName}>
+            {runtime.summary}
+          </span>
+        )}
+        {!isRunning && (
+          <button
+            type="button"
+            className="team-event-group-summary__icon team-event-group-summary__icon--close"
+            onClick={onClose}
+            title={t('team.contextCompression.close')}
+            aria-label={t('team.contextCompression.close')}
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function FinalSummaryList({ events }: { events: TeamMemberExecutionEvent[] }) {
   const { t } = useTranslation();
 
@@ -580,7 +668,7 @@ function FinalSummaryList({ events }: { events: TeamMemberExecutionEvent[] }) {
   }
 
   return (
-    <div className="mx-auto mt-5 max-w-[720px] border-t border-[#E2E5EA] pt-4">
+    <div className="mx-auto mt-5 max-w-[720px] border-t border-[var(--color-team-detail-divider)] pt-4">
       <h3 className="text-sm font-semibold text-text">{t('team.process.execution.final')}</h3>
       <div className="mt-4 space-y-6">
         {events.map((event) => (
@@ -607,7 +695,7 @@ function ProcessListCard({
   const { t } = useTranslation();
 
   return (
-    <div className="mx-auto max-w-[720px] overflow-hidden rounded-lg border border-border bg-card">
+    <div className="mx-auto max-w-[720px] overflow-hidden rounded-md border border-border bg-card">
       {items.length === 0 ? (
         <div className="px-5 py-12 text-center text-sm text-text-muted">
           {t('team.noProcessData')}
@@ -701,7 +789,7 @@ function TaskListBar({
     <button
       type="button"
       onClick={onToggle}
-      className="flex w-full h-[54px] items-center justify-between px-5 text-left transition-colors hover:bg-secondary"
+      className="flex w-full h-[54px] items-center justify-between px-5 text-left  hover:bg-secondary"
     >
       <div className="flex min-w-0 items-center gap-2">
         <span className="text-sm font-medium text-text">{t('team.memberTasks')}</span>

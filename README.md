@@ -51,7 +51,7 @@
 | --- | --- |
 | Multi-Agent Collaboration | Complex tasks are no longer a single Agent's battlefield: Leader automatically decomposes tasks, assembles teams, and multiple Agents specialize and negotiate dynamically |
 | Distributed Agent Swarm | Break through single-machine compute limits: Leader/Teammate deploy across processes and machines, coordinating at scale |
-| Swarmflow | Orchestrate workflows with natural language: Leader automatically decomposes into multi-stage workflows, with Agents seamlessly handing off between stages |
+| Swarmflow | Orchestrate workflows with natural language: Leader automatically decomposes into multi-stage workflows, with Agents seamlessly handing off between stages. Human-in-the-loop support allows you to answer questions mid-workflow via `/swarmflow on` and the TUI P key interface |
 | Skill Self-Evolution | Capabilities grow stronger with use, not rigid over time: automatically detects error signals and user dissatisfaction, then optimizes Skill definitions |
 | Skill Hub Sharing | Capability assets are built once and reused everywhere: Skills can be searched, installed, combined, and remixed across developers |
 | Auto Harness | Evaluation-driven, end-to-end automated Harness optimization: not training model weights, but letting the Harness learn and optimize automatically in practice |
@@ -179,7 +179,7 @@ For common usage instructions and feature documentation, see: [Documentation](do
 
 | Feature | Status | ETA | Value |
 | --- |-----| --- | --- |
-| Swarmflow Stateful Operators | In Development | 2026-07 | Workflow nodes support human intervention and state memory — Humans can participate as stateful operators, approving, correcting, or taking over subsequent steps based on intermediate results |
+| Swarmflow Stateful Operators | Shipped | 2026-07 | Workflow nodes support human intervention and state memory — Humans can participate as stateful operators, approving, correcting, or taking over subsequent steps based on intermediate results |
 | Team Mode Same-Session Feishu Integration | In Development | 2026-07 | Feishu users join as Human Agents in the same session, collaborating with AI Agent teams — human-AI mixed squads for more precise decisions |
 
 ## FAQ

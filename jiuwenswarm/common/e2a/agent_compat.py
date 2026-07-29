@@ -61,4 +61,6 @@ def e2a_to_agent_request(env: E2AEnvelope) -> AgentRequest:
         is_stream=bool(env.is_stream),
         timestamp=_e2a_timestamp_to_float(env.timestamp),
         metadata=metadata,
+        # V2: 透传 agent_ref 到 AgentServer，供响应侧 chunk/response 回带（设计 §6.3）。
+        agent_ref=env.agent_ref,
     )

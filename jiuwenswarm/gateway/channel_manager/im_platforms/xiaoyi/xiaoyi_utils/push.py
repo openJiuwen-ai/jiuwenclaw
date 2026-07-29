@@ -122,7 +122,8 @@ class XiaoYiPushService:
                         logger.info("[PUSH] Push notification sent successfully")
                         return True
                     else:
-                        logger.error(f"[PUSH] Failed: HTTP {response.status}")
+                        body = await response.text()
+                        logger.error(f"[PUSH] Failed: HTTP {response.status}, response: {body}")
                         return False
 
         except aiohttp.ClientError as e:

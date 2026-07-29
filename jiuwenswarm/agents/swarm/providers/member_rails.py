@@ -38,6 +38,9 @@ from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import (
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
+from jiuwenswarm.agents.harness.common.rails.symphony import (
+    SymphonyOrchestrationRail,
+)
 from jiuwenswarm.agents.harness.team.rails.team_skill_storage_policy_rail import (
     TeamSkillStoragePolicyRail,
 )
@@ -61,6 +64,7 @@ TEAM_WORKSPACE_REPORT_PATH = "swarm.team_workspace_report_path"
 CONTEXT_PROCESSOR = "swarm.context_processor"
 PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
+SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
 
 
@@ -106,6 +110,22 @@ def _build_skill_retrieval_prompt_rail(
     )
 
 
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=SYMPHONY_ORCHESTRATION_PROMPT,
+    description="Leader-only prompt guidance for Symphony orchestration.",
+)
+def _build_symphony_orchestration_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> SymphonyOrchestrationRail | None:
+    """Build the Symphony orchestration prompt rail for the team leader."""
+    _ = params
+    if getattr(context, "role", "") != "leader":
+        return None
+    return SymphonyOrchestrationRail()
+
+
 class RuntimePromptInput(ConstructionInput):
     """Construction inputs for the member runtime prompt rail."""
 
@@ -122,6 +142,10 @@ class RuntimePromptInput(ConstructionInput):
     project_dir: str | None = context_field(
         attr="project_dir",
         description="Resolved user project directory (seeds the TUI cwd policy).",
+    )
+    member_workspace_root: str | None = context_field(
+        resolver=_workspace_root,
+        description="Current member workspace root (cwd fallback without a project).",
     )
 
 
@@ -146,18 +170,32 @@ def _build_runtime_prompt_rail(
     """
     inp = RuntimePromptInput.resolve(params, context)
     rail = RuntimePromptRail(language=inp.language, channel=inp.channel)
-    # Seed cwd/project_dir so the TUI branch injects the "current project
-    # directory" policy and the model answers with the project dir instead of
-    # calling `pwd` (which would surface the per-member workspace path).
-    # Mirrors the code-team rail (code_rails.build_code_runtime_prompt).
-    if inp.project_dir:
-        rail.set_runtime_paths(cwd=inp.project_dir, project_dir=inp.project_dir)
+    # Team members use their own RuntimePromptRail instance. Bind it to the
+    # originating request so runtime state is read from the active session
+    # instead of the process-wide ``default`` state file.
+    rail.set_mode(context.mode)
+    rail.set_session_id(context.session_id)
+    # Report the member's real working directory. cwd and workspace are
+    # separate layers (see openjiuwen.core.sys_operation.cwd): with a project
+    # the member runs in the project dir, without one it runs in its own
+    # workspace. Reporting anything else makes the model resolve relative
+    # paths against a directory the tools never use.
+    rail.set_runtime_paths(
+        cwd=inp.project_dir or inp.member_workspace_root,
+        project_dir=inp.project_dir,
+        workspace_dir=inp.member_workspace_root,
+    )
     return rail
 
 
 class TeamSkillStoragePolicyInput(ConstructionInput):
     """Construction inputs for the team skill storage policy rail."""
 
+    language: str = context_field(
+        attr="language",
+        default="cn",
+        description="Resolved member language code.",
+    )
     global_skills_dir: str | None = context_field(
         attr="global_skills_dir",
         description="Global shared skills source directory.",
@@ -205,6 +243,7 @@ def _build_team_skill_storage_policy_rail(
         team_workspace_root=inp.team_ws_root,
         team_skills_dir=inp.team_skills_dir,
         member_workspace_root=inp.member_workspace_root,
+        language=inp.language,
     )
 
 
@@ -399,6 +438,7 @@ __all__ = [
     "CONTEXT_PROCESSOR",
     "PLUGIN_RAILS",
     "SKILL_RETRIEVAL_PROMPT",
+    "SYMPHONY_ORCHESTRATION_PROMPT",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
 ]

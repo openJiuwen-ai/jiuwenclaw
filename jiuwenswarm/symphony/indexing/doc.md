@@ -12,6 +12,11 @@ Given skill/plugin material directories or pre-scanned JSONL, it builds the tree
 - `catalog.jsonl`
 - `manifest.json`
 
+Each candidate can carry normalized tags. Directory builds read `tags` from
+`SKILL.md` frontmatter, while pre-scanned JSONL builds read `tags` from
+`contentExtendParam`. Tags are written to each `catalog.jsonl` row, while
+`manifest.json.tag_counts` summarizes the available filter values.
+
 ## Main Components
 
 ### `indexing/tree/`

@@ -20,7 +20,12 @@ export function createClearCommand(): SlashCommand {
 
       const nextId = generateSessionId();
       try {
-        await ctx.request("session.create", { session_id: nextId });
+        await ctx.request("session.create", {
+          session_id: nextId,
+          previous_session_id: ctx.sessionId,
+          previous_mode: ctx.mode,
+          mode: ctx.mode,
+        });
       } catch {
         // Some backends may create the session lazily on first message.
       }

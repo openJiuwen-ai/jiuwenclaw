@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="default" data-color-mode="light">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/logo.svg" />
@@ -12,14 +12,5 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <script>
-      // Theme initialization - default to light
-      (function() {
-        const theme = localStorage.getItem('theme') || 'light';
-        if (theme === 'light') {
-          document.documentElement.setAttribute('data-theme', 'light');
-        }
-      })();
-    </script>
   </body>
 </html>

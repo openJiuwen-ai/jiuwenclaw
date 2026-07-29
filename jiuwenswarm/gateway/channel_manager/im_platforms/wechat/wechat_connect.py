@@ -17,6 +17,8 @@ from aiohttp.client_exceptions import ContentTypeError
 from pydantic import BaseModel, Field
 
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 
 logger = logging.getLogger(__name__)
@@ -467,7 +469,7 @@ class WechatChannel(BaseChannel):
             raise RuntimeError("WechatChannel HTTP client is not initialized")
         return http
 
-    async def send(self, msg: Message) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         """delta 聚合；enable_streaming 时与原先一致：工具调用/结果会即时下发并在边界冲刷 delta；关闭时仅 chat.final / interrupt 等完结事件合并下发（对齐飞书非流式）。"""
         if not self._http or not self.config.bot_token:
             logger.warning("WechatChannel 未就绪，跳过发送")
@@ -841,7 +843,19 @@ class WechatChannel(BaseChannel):
         payload = getattr(msg, "payload", None) or {}
         if not isinstance(payload, dict):
             return False
-        return payload.get("is_complete") is True
+        if payload.get("is_complete") is not True:
+            return False
+        # 仅当是「纯哨兵」帧才视作流结束标记：AgentServer 流式终帧 payload 正是
+        # ``{"is_complete": True}``（见 interface.py:2129），正文已由前置 chat.delta 下发。
+        # 但 /skills list 等非流式通知经 _send_channel_notice 也会带 is_complete=True，
+        # 且其正文在 payload.content 里——若不在此排除，整段技能列表会被当哨兵丢弃。
+        if payload.get("content") not in (None, ""):
+            return False
+        if payload.get("error") not in (None, ""):
+            return False
+        if payload.get("event_type"):
+            return False
+        return set(payload.keys()) <= {"is_complete"}
 
     @staticmethod
     def _is_stream_accept_ack_only(msg: Message) -> bool:

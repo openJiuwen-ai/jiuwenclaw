@@ -22,6 +22,8 @@ htmlcov/
 **/node_modules/
 dist/
 build/
+# 构建时下载的 Node 运行时缓存（build-macos.sh / build-exe.ps1 用），不入库
+vendor/node/
 coverage/
 jiuwenswarm/channels/web/frontend/logs/
 jiuwenswarm/channels/web/frontend/cd
@@ -38,6 +40,14 @@ pnpm-debug.log*
 .env
 .env_personal
 !.env.example
+
+# Apple code signing & notarization secrets — NEVER commit (contains private keys!)
+*.p12
+*.cer
+*.mobileprovision
+AuthKey_*.p8
+DeveloperID_backup.p12
+developerID_application.cer
 
 # IDE / Editor
 .vscode/
@@ -61,6 +71,11 @@ docs/ai/
 # logs
 logs/
 
+# Browser automation runtime artifacts
+.browser/
+.browser-profiles/
+.playwright-mcp/
+
 # workspace
 workspace/session
 workspace/agent/memory/*.db
@@ -79,3 +94,6 @@ packages/jiuwenswarm-tui/jiuwenswarm_tui/resources/tui-bin/
 
 .crossnote/
 .trae/
+
+# Build-time Node runtime cache used by packaging scripts.
+vendor/node/

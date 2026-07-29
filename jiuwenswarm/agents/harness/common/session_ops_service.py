@@ -144,6 +144,9 @@ def fork_session(
         "message_count": source_meta.get("message_count", 0),
         "mode": source_mode,
         "forked_from": source_session_id,
+        # 复制源会话的项目归属字段，确保分叉会话继承原项目归属
+        "project_id": source_meta.get("project_id", ""),
+        "project_dir": source_meta.get("project_dir", ""),
     }
     # 复制源会话的 channel_metadata，确保分叉会话在 /resume 按项目目录过滤时可见
     source_channel_meta = source_meta.get("channel_metadata")
@@ -202,6 +205,17 @@ def rewind_session(
     # 在截断 history 之前，记录目标 turn 的时间戳（用于后续清理 file_ops）
     cut_timestamp = history[cut_index].get("timestamp")
 
+    # 同样必须在下面 update_session_metadata 之前解析项目目录：metadata.json 是
+    # 非原子的原地覆写且走后台线程，之后再让 truncate_file_ops 自己去推断，会撞上
+    # 半截文件 → JSONDecodeError → 静默返回 None → 扫不到 file_ops → 清理无声失效。
+    project_dir: str | None = None
+    try:
+        from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+        project_dir = get_diff_service().resolve_project_dir(session_id)
+    except Exception as exc:
+        logger.warning("rewind_session: failed to resolve project_dir: %s", exc)
+
     result = truncate_history_records(session_id=session_id, cut_index=cut_index)
 
     from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
@@ -213,11 +227,16 @@ def rewind_session(
 
     # 清理 session-specific file_ops 日志，使 turn diff 显示与截断后的 history 一致
     # 必须在 truncate_history_records 之后调用，但传入截断前获取的时间戳
+    #
+    # soft=True: 本函数只回退对话、不动工作区文件。硬删除快照会让这些文件永久
+    # 失去回滚能力（后续 /rewind 选 code 找不到它们，却仍报告成功）。
     if cut_timestamp is not None:
         try:
             from jiuwenswarm.server.utils.diff_service import get_diff_service
 
-            get_diff_service().truncate_file_ops_by_timestamp(session_id, cut_timestamp)
+            get_diff_service().truncate_file_ops_by_timestamp(
+                session_id, cut_timestamp, project_dir=project_dir, soft=True,
+            )
         except Exception as exc:
             logger.warning("rewind_session: failed to truncate file_ops: %s", exc)
 
@@ -281,15 +300,27 @@ def compact_partial_session(
     if direction == "from":
         cut_timestamp = history[target_user_index].get("timestamp")
         summarized_count = len(history) - target_user_index
+        # 在 update_session_metadata 之前解析（同 rewind_session，避免元数据写入竞态）
+        compact_project_dir: str | None = None
+        try:
+            from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+            compact_project_dir = get_diff_service().resolve_project_dir(session_id)
+        except Exception as exc:
+            logger.warning("compact_partial_session: failed to resolve project_dir: %s", exc)
 
         result = truncate_history_records(session_id=session_id, cut_index=target_user_index)
         remaining = result["remaining_records"]
         removed = result["removed_records"]
 
+        # soft=True: 摘要化同样只改对话、不动工作区文件（同 rewind_session）
         if cut_timestamp is not None:
             try:
                 from jiuwenswarm.server.utils.diff_service import get_diff_service
-                get_diff_service().truncate_file_ops_by_timestamp(session_id, cut_timestamp)
+                get_diff_service().truncate_file_ops_by_timestamp(
+                    session_id, cut_timestamp,
+                    project_dir=compact_project_dir, soft=True,
+                )
             except Exception as exc:
                 logger.warning("compact_partial_session: failed to truncate file_ops: %s", exc)
 
@@ -486,15 +517,67 @@ def list_session_turns(
     return {"turns": turns, "total": user_count}
 
 
+def get_last_turn_info(
+    *,
+    session_id: str,
+) -> dict[str, Any]:
+    """返回最后一轮 user message 的 turn_index 和 timestamp.
+
+    用于"撤销本轮代码修改"(``project.git.discard_turn_changes``)功能:
+    该接口需要最后一轮的 turn_index(传给 ``restore_session_files``)和
+    timestamp(传给 ``truncate_file_ops_by_timestamp``)。
+
+    与 ``list_session_turns`` 不同,本函数不过滤不可选的 user message,
+    返回的是最后一条 user message 的信息(包括系统注入的消息)。
+
+    Returns:
+        ``{"turn_index": int, "timestamp": float}``;
+        无 history 或无 user message 时返回 ``{"turn_index": 0, "timestamp": 0.0}``。
+    """
+    if not history_exists(session_id):
+        return {"turn_index": 0, "timestamp": 0.0}
+
+    try:
+        history = load_history_records(session_id)
+    except Exception as exc:
+        logger.warning("get_last_turn_info: failed to read history: %s", exc)
+        return {"turn_index": 0, "timestamp": 0.0}
+
+    if not isinstance(history, list):
+        return {"turn_index": 0, "timestamp": 0.0}
+
+    user_count = 0
+    last_timestamp: float = 0.0
+    for record in history:
+        if record.get("role") != "user":
+            continue
+        user_count += 1
+        ts = record.get("timestamp", 0)
+        if isinstance(ts, (int, float)):
+            last_timestamp = float(ts)
+
+    return {"turn_index": user_count, "timestamp": last_timestamp}
+
+
 def restore_session_files(
     *,
     session_id: str,
     turn_index: int,
+    project_dir: str | None = None,
+    extra_history_roots: list[str] | None = None,
 ) -> dict[str, Any]:
     """恢复指定 turn 之后所有被修改的文件到目标 turn 开始前的状态.
 
     基于 DiffService.get_files_to_restore() 确定需要恢复的文件，
     然后将每个文件写回其 old_content（或删除 agent 新建的文件）。
+
+    Args:
+        session_id: 会话 ID
+        turn_index: 目标回退轮次(1-based)
+        project_dir: 项目目录路径。显式传入可避免底层从 metadata 推断,
+            覆盖 ``channel_metadata.cwd`` 缺失的场景(如 Web/code 模式新会话)。
+            为 ``None`` 时底层从 session metadata 推断(读取顺序见
+            ``DiffService._get_project_dir_from_metadata``)。
 
     局限性（底层暂不支持，后续迭代）：
     - bash 命令修改的文件不在 file_ops 日志中，无法恢复
@@ -505,7 +588,12 @@ def restore_session_files(
     from jiuwenswarm.server.utils.diff_service import get_diff_service
 
     diff_service = get_diff_service()
-    files_to_restore = diff_service.get_files_to_restore(session_id, turn_index)
+    files_to_restore = diff_service.get_files_to_restore(
+        session_id,
+        turn_index,
+        project_dir=project_dir,
+        extra_history_roots=extra_history_roots,
+    )
 
     if not files_to_restore:
         return {
@@ -526,7 +614,9 @@ def restore_session_files(
             if info["action"] == "write":
                 # 文件在目标 turn 前已有内容，写回 old_content
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(info["restore_content"], encoding="utf-8")
+                path.write_text(
+                    info["restore_content"], encoding="utf-8", newline=""
+                )
                 restored.append(file_path)
             elif info["action"] == "delete":
                 # 文件由 agent 在目标 turn 后创建，删除
@@ -841,6 +931,37 @@ async def rewind_session_context(
     try:
         session.update_state({"context": None})
         session.update_state({_SESSION_STATE_KEY: None})
+        # Clear persisted HITL tool-interrupt state.  When a turn is cancelled
+        # mid-tool (e.g. user ESC'd an ask_user prompt), the SDK persists the
+        # pending interrupt under INTERRUPTION_KEY via _hitl_handler.save().
+        # rewind truncates history.json and rebuilds context_engine, but if we
+        # leave INTERRUPTION_KEY in the checkpoint, the next chat.send loads it
+        # in react_agent.invoke() (hitl_state = self._hitl_handler.load(session))
+        # and treats the new user message as the resume answer for the OLD
+        # interrupted tool_call — replaying the cancelled tool and swallowing
+        # the new question.  Wipe it here so the rebuilt session starts clean.
+        try:
+            from openjiuwen.core.single_agent.interrupt.state import (
+                INTERRUPTION_KEY,
+                INTERRUPT_AUTO_CONFIRM_KEY,
+            )
+            session.update_state({INTERRUPTION_KEY: None})
+            session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: None})
+        except Exception as int_exc:
+            logger.warning(
+                "rewind_session_context: HITL interrupt wipe failed for %s: %s",
+                session_id, int_exc,
+            )
+        # Best-effort in-memory clear via the handler too (defence-in-depth).
+        try:
+            hitl_handler = getattr(react_agent, "_hitl_handler", None)
+            if hitl_handler is not None:
+                hitl_handler.clear(session)
+        except Exception as int_exc:
+            logger.warning(
+                "rewind_session_context: in-memory HITL clear failed for %s: %s",
+                session_id, int_exc,
+            )
     except Exception as exc:
         logger.warning("rewind_session_context: state wipe failed for %s: %s", session_id, exc)
 

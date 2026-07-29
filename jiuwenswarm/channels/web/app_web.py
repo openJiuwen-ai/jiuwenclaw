@@ -8,6 +8,7 @@ Supports ``--dotenv <path>`` for multi-instance isolation.
 from __future__ import annotations
 
 import argparse
+import errno
 import http.client
 import json
 import logging
@@ -31,8 +32,11 @@ parse_dotenv_early("jiuwenswarm-web")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
+from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
+    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, \
+    wait_for_tcp_port, SensitiveDataFilter
 from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
 
 configure_agent_teams_home()
@@ -417,7 +421,18 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 ctx = ssl.create_default_context() if get_ssl_verify() else get_insecure_ssl_context()
                 upstream = ctx.wrap_socket(upstream, server_hostname=upstream_host)
         except OSError as exc:
-            self.log_error("proxy ws connect failed: %s", exc)
+            self.log_error(
+                "proxy ws connect failed: %s",
+                format_ws_diagnostics(
+                    {
+                        "client": self.client_address,
+                        "upstream_host": upstream_host,
+                        "upstream_port": upstream_port,
+                        "scheme": parsed.scheme,
+                    },
+                    describe_ws_exception(exc),
+                ),
+            )
             self.send_error(502, "proxy ws connect failed")
             return
 
@@ -446,13 +461,35 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 if len(response_head) > self._WS_HANDSHAKE_MAX_SIZE:
                     break
             if not response_head:
+                self.log_error(
+                    "proxy ws handshake failed: %s",
+                    format_ws_diagnostics(
+                        {
+                            "client": self.client_address,
+                            "upstream_host": upstream_host,
+                            "upstream_port": upstream_port,
+                            "reason": "empty response",
+                        }
+                    ),
+                )
                 self.send_error(502, "proxy ws handshake failed: empty response")
                 return
 
             self.connection.sendall(response_head)
 
             if b" 101 " not in response_head.split(b"\r\n", 1)[0]:
-                self.logger.info("[ws][handshake] upstream returned non-101, tunnel closed")
+                status_line = response_head.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+                self.logger.info(
+                    "[ws][handshake] upstream returned non-101, tunnel closed: %s",
+                    format_ws_diagnostics(
+                        {
+                            "client": self.client_address,
+                            "upstream_host": upstream_host,
+                            "upstream_port": upstream_port,
+                            "status": status_line,
+                        }
+                    ),
+                )
                 return
 
             self.logger.info(
@@ -467,26 +504,104 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             while True:
                 readable, _, errored = select.select(sockets, [], sockets, self._WS_SELECT_TIMEOUT)
                 if errored:
+                    self.log_error(
+                        "proxy ws socket error, closing tunnel: %s",
+                        format_ws_diagnostics(
+                            {
+                                "client": self.client_address,
+                                "upstream_host": upstream_host,
+                                "upstream_port": upstream_port,
+                                "errored": [
+                                    "client" if sock is self.connection else "upstream"
+                                    for sock in errored
+                                ],
+                            }
+                        ),
+                    )
                     break
                 if not readable:
                     continue
                 for sock in readable:
+                    direction = "frontend->backend" if sock is self.connection else "backend->frontend"
                     try:
                         data = sock.recv(self._WS_RECV_BUFFER)
-                    except OSError:
+                    except OSError as recv_exc:
+                        self.log_error(
+                            "proxy ws recv failed, closing tunnel: %s",
+                            format_ws_diagnostics(
+                                {
+                                    "client": self.client_address,
+                                    "upstream_host": upstream_host,
+                                    "upstream_port": upstream_port,
+                                    "direction": direction,
+                                },
+                                describe_ws_exception(recv_exc),
+                            ),
+                        )
                         data = b""
                     if not data:
+                        self.logger.info(
+                            "[ws][tunnel] peer closed: %s",
+                            format_ws_diagnostics(
+                                {
+                                    "client": self.client_address,
+                                    "upstream_host": upstream_host,
+                                    "upstream_port": upstream_port,
+                                    "direction": direction,
+                                }
+                            ),
+                        )
                         return
+                    target = upstream if sock is self.connection else self.connection
                     if sock is self.connection:
                         for text_message in client_parser.feed(data):
                             self._log_ws_business_message("frontend->backend", text_message)
-                        upstream.sendall(data)
                     else:
                         for text_message in server_parser.feed(data):
                             self._log_ws_business_message("backend->frontend", text_message)
-                        self.connection.sendall(data)
+                    # 非阻塞 socket 写入：循环增量 send，缓冲区满时等待可写后继续，
+                    # 跨平台覆盖 Windows WSAEWOULDBLOCK (10035) 与 POSIX EAGAIN/EWOULDBLOCK。
+                    pending = data
+                    while pending:
+                        try:
+                            sent = target.send(pending)
+                        except OSError as e:
+                            would_block = (
+                                getattr(e, "winerror", None) == 10035
+                                or e.errno in (errno.EAGAIN, errno.EWOULDBLOCK)
+                            )
+                            if not would_block:
+                                raise
+                            _, writable, _ = select.select([], [target], [], 1.0)
+                            if not writable:
+                                # 长时间不可写，对端疑似卡死，关闭隧道避免空转
+                                self.log_error(
+                                    "proxy ws write stalled, closing tunnel: %s",
+                                    format_ws_diagnostics(
+                                        {
+                                            "client": self.client_address,
+                                            "upstream_host": upstream_host,
+                                            "upstream_port": upstream_port,
+                                            "direction": direction,
+                                            "pending_bytes": len(pending),
+                                        }
+                                    ),
+                                )
+                                return
+                            continue
+                        pending = pending[sent:]
         except Exception as exc:  # noqa: BLE001
-            self.log_error("proxy ws error: %s", exc)
+            self.log_error(
+                "proxy ws error: %s",
+                format_ws_diagnostics(
+                    {
+                        "client": self.client_address,
+                        "upstream_host": upstream_host,
+                        "upstream_port": upstream_port,
+                    },
+                    describe_ws_exception(exc),
+                ),
+            )
             try:
                 self.send_error(502, "proxy ws error")
             except Exception:  # noqa: BLE001
@@ -685,6 +800,34 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     }
                 )
             self._write_json(200, {"files": files})
+            return
+
+        if path == "/file-api/raw-file":
+            file_arg = query.get("path", "")
+            if not file_arg:
+                self._write_json(400, {"error": "missing_file_path"})
+                return
+            full_path = (self.project_root / file_arg).resolve()
+            if not self._is_path_under_allowed_root(full_path):
+                self._write_json(403, {"error": "forbidden_path"})
+                return
+            if not full_path.is_file():
+                self._write_json(404, {"error": "file_not_found"})
+                return
+
+            mime_type, _ = mimetypes.guess_type(full_path.name)
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type or "application/octet-stream")
+            self.send_header("Content-Length", str(full_path.stat().st_size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                with full_path.open("rb") as file_obj:
+                    while True:
+                        chunk = file_obj.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
             return
 
         if path == "/file-api/file-content":
@@ -992,8 +1135,15 @@ def _setup_logger(logs_root: Path, log_level: str) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    # ws-dev.log 会原样记录前端↔后端业务报文（含 config.validate 等 method 的
+    # model_params，其中带 api_key/api_base 等敏感字段），必须挂脱敏 filter，
+    # 否则 api_key 明文落盘。propagate 到根 logger 的 handler 虽已脱敏，
+    # 但本 handler 自身需独立挂载，才能保证 ws-dev.log 也脱敏。
+    privacy_filter = SensitiveDataFilter()
+
     file_handler = logging.FileHandler(logs_root / "ws-dev.log", mode="w", encoding="utf-8")
     file_handler.setFormatter(formatter)
+    file_handler.addFilter(privacy_filter)
     lg.addHandler(file_handler)
     return lg
 
@@ -1077,6 +1227,8 @@ def main() -> None:
         help="Load environment from .env file (processed at startup, not used here).",
     )
     args = parser.parse_args()
+
+    install_async_dump_handler("web")
 
     dist_dir = Path(args.dist).expanduser().resolve()
     if not dist_dir.exists():

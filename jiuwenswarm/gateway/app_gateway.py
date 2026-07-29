@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Standalone Gateway entrypoint (split deployment).
 
 This process starts:
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -26,18 +27,20 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
-from websockets.exceptions import ConnectionClosedError
 from openjiuwen.core.common.logging import LogManager
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
-from jiuwenswarm.dotenv_early import parse_dotenv_early
+from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 
 parse_dotenv_early("jiuwenswarm-gateway")
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge
+from jiuwenswarm.gateway.routing.agent_request_timeout import coerce_client_timeout_ms
+from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     get_cron_jobs_path,
     get_env_file,
@@ -46,6 +49,8 @@ from jiuwenswarm.common.utils import (
     prepare_workspace,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -67,7 +72,7 @@ else:
     for _lg in LogManager.get_all_loggers().values():
         _lg.set_level(logging.CRITICAL)
 
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 try:
     from jiuwenswarm.common.config import invalidate_config_cache
 
@@ -95,7 +100,6 @@ def _build_event_frame(msg) -> dict[str, Any]:
 
 
 def _normalize_gateway_message(msg):
-    from jiuwenswarm.common.schema.message import Message, ReqMethod
 
     req_method = getattr(msg, "req_method", None) or ReqMethod.CHAT_SEND
     params = dict(msg.params or {})
@@ -125,14 +129,77 @@ def _normalize_gateway_message(msg):
         stream_seq=msg.stream_seq,
         stream_id=msg.stream_id,
         metadata=msg.metadata,
+        user_id=getattr(msg, "user_id", None),
     )
 
 
-def _normalize_and_forward_message(msg, channel_manager) -> bool:
+async def _normalize_and_forward_message(msg, channel_manager) -> bool:
     normalized = _normalize_gateway_message(msg)
-    channel_manager.deliver_to_message_handler(normalized)
+    # ACP/直连转发路径(session.create 等)也需注入 work_mode 归一化,
+    # 与 _norm_and_forward(Web/TUI 主路径)保持一致。否则直连 AgentServer 的
+    # 调用方传真实 project_id + 合法但不匹配的 work_mode 时,AgentServer 侧
+    # _work_mode_explicit marker 缺失,不会返回设计要求的 BAD_REQUEST。
+    method_val = getattr(getattr(msg, "req_method", None), "value", None) or ""
+    if method_val == "session.create":
+        _inject_session_work_mode(normalized)
+    await channel_manager.deliver_to_message_handler(normalized)
     logger.info("[App] Gateway inbound -> MessageHandler: id=%s channel_id=%s", msg.id, msg.channel_id)
     return False
+
+
+def _inject_session_work_mode(msg: Message) -> None:
+    """为 ``session.create`` 请求注入 work_mode 归一化(主路径兜底)。
+
+    与 fallback ``_session_create`` 共用同一 helper
+    ``resolve_session_work_mode_params``,保持主路径/fallback 一致。
+
+    成功时写回归一化后的 ``project_id`` / ``project_dir`` / ``work_mode`` 到
+    ``msg.params``;失败时(非法 work_mode)不写回,保留原始 params 由后续
+    AgentServer 或 fallback ``_session_create`` 返回 BAD_REQUEST。
+
+    本函数做参数归一化 + **TUI project_dir 预解析**(设计文档 §5.3.5):
+    - TUI 通道下,若 project_id 为默认项目且 project_dir 非空绝对路径,
+      按 work_mode="code" 查找/创建 code 项目,将真实 project_id 写回 params。
+    - 非 TUI 通道仅做纯参数归一化,最终 work_mode 以 Project 记录为准的
+      校验由 ``_session_create`` / AgentServer 侧完成。
+
+    显式性判定(``has_explicit_work_mode``)由 ``resolve_session_work_mode_params``
+    随 binding 返回。但 gateway → AgentServer 是跨进程通信,binding 结果不能
+    直接传递。因此 gateway 将 ``has_explicit_work_mode`` 注入 params 的
+    ``_work_mode_explicit`` 字段作为传输标记,AgentServer 消费后立即 pop。
+    AgentServer 直连调用方(非 gateway 路径)不携带此标记,此时 AgentServer
+    通过重新调用 ``resolve_session_work_mode_params`` 获取 binding 中的
+    ``has_explicit_work_mode``(直连场景 params 为原始值,计算结果正确)。
+    """
+    params = getattr(msg, "params", None)
+    if not isinstance(params, dict):
+        return
+    channel_id = getattr(msg, "channel_id", None)
+    try:
+        from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
+        binding = resolve_session_work_mode_params(params, channel_id=channel_id)
+    except Exception:  # noqa: BLE001
+        # 归一化异常时不写回,保留原始 params 由后续处理
+        return
+    if binding.error:
+        return
+
+    resolved_project_id = binding.project_id
+    resolved_project_dir = binding.project_dir
+    resolved_work_mode = binding.work_mode
+
+    # 注意:TUI 通道的 session.create 不走 forward 路径(不在 CLI_FORWARD_REQ_METHODS),
+    # TUI 预解析在 tui_connect.py 的 _session_create 中通过 find_or_create_code_project_for_tui_params 完成。
+    # 此处仅处理 WEB/ACP 通道的 work_mode 绑定注入。
+
+    params["project_id"] = resolved_project_id
+    params["project_dir"] = resolved_project_dir
+    params["work_mode"] = resolved_work_mode
+    # _work_mode_explicit: 跨进程传输"请求是否显式传了 work_mode"标志。
+    # AgentServer 消费后立即 pop,不持久化、不序列化到日志。
+    # 该标志区分"用户显式传 work_mode"(需做 Project 一致性校验)与
+    # "gateway 注入通道默认 work_mode"(跳过一致性校验,以 Project 记录为准)。
+    params["_work_mode_explicit"] = binding.has_explicit_work_mode
 
 
 class _InboundGatewayServer:
@@ -186,7 +253,43 @@ async def _connect_with_retry(
         max_retries: int = 20,
         interval: float = 3.0,
 ) -> None:
+    """连接 AgentServer, 失败重试.
+
+    相比固定 3s 间隔: 先做轻量 TCP 端口探测, 端口通了再 ws 握手, 避免 AgentServer
+    尚未 listen 时反复走完整 WS 握手; 重试间隔改为指数退避 (0.2s 起, 翻倍至上限
+    ``interval``), 让 AgentServer 一旦 listen 即在亚秒级连上, 而非硬等下一个 3s 节拍.
+    """
+    import socket as _socket
+    from urllib.parse import urlparse as _urlparse
+
+    parsed = _urlparse(uri)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+
+    def _tcp_ready(timeout: float = 0.5) -> bool:
+        try:
+            with _socket.create_connection(("127.0.0.1", port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    backoff = 0.2
     for attempt in range(1, max_retries + 1):
+        # 先 TCP 探测: 端口未通则不浪费一次 WS 握手, 直接进入退避等待.
+        if not _tcp_ready():
+            if attempt >= max_retries:
+                logger.error(
+                    "[App] connect AgentServer failed after %d tries: port %s not listening  uri=%s",
+                    attempt, port, uri,
+                )
+                raise ConnectionRefusedError(f"AgentServer port {port} not listening")
+            logger.info(
+                "[App] AgentServer port %s not listening yet (%d/%d), retry in %.2fs...",
+                port, attempt, max_retries, backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, interval)
+            continue
         try:
             await client.connect(uri)
             logger.info("[App] connected to AgentServer: %s", uri)
@@ -201,13 +304,82 @@ async def _connect_with_retry(
                 )
                 raise
             logger.warning(
-                "[App] connect AgentServer failed (%d/%d): %s  retry in %s s...",
+                "[App] connect AgentServer failed (%d/%d): %s  retry in %.2fs...",
                 attempt,
                 max_retries,
                 exc,
-                interval,
+                backoff,
             )
-            await asyncio.sleep(interval)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, interval)
+
+
+def _exec_gateway_restart() -> None:
+    logger.info("[App] .env updated, restarting Gateway...")
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+@dataclass
+class GatewayRestartRequest:
+    requested: bool = False
+    ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+def _schedule_gateway_restart(
+        restart_request: GatewayRestartRequest | None = None,
+        *,
+        delay: float = 2.0,
+) -> None:
+    if restart_request is not None:
+        restart_request.requested = True
+
+    def _request_restart() -> None:
+        if restart_request is not None:
+            restart_request.ready_event.set()
+            return
+        _exec_gateway_restart()
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_later(delay, _request_restart)
+    except RuntimeError:
+        _request_restart()
+
+
+async def _wait_for_gateway_tasks_or_restart(
+        tasks_to_wait: list[asyncio.Task],
+        restart_request: GatewayRestartRequest,
+) -> bool:
+    restart_task = asyncio.create_task(restart_request.ready_event.wait(), name="gateway-restart")
+    service_tasks = set(tasks_to_wait)
+    wait_tasks = set(service_tasks)
+    wait_tasks.add(restart_task)
+    try:
+        while wait_tasks:
+            done, _ = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+            if restart_task in done:
+                return restart_request.requested or restart_request.ready_event.is_set()
+            for task in done:
+                wait_tasks.discard(task)
+                service_tasks.discard(task)
+                if task.cancelled():
+                    raise asyncio.CancelledError
+                exc = task.exception()
+                if exc is not None:
+                    if restart_request.requested:
+                        logger.warning("[App] service task failed while Gateway restart is pending: %s", exc)
+                        return True
+                    raise exc
+            if not service_tasks:
+                return restart_request.requested or restart_request.ready_event.is_set()
+        return restart_request.requested or restart_request.ready_event.is_set()
+    finally:
+        if not restart_task.done():
+            restart_task.cancel()
+            try:
+                await restart_task
+            except asyncio.CancelledError:
+                pass
 
 
 @dataclass
@@ -223,6 +395,13 @@ class RouteConfig:
     outbound_interceptor: Callable[..., Awaitable[bool]] | None = None
     cleanup_handler: Callable[..., Any] | None = None
     disconnect_handler: Callable[..., Any] | None = None
+    session_bind_handler: Callable[..., Any] | None = None
+    # V2: 委托 ws 注册的外部 Channel（如 tui 的 TuiChannel）。
+    # GatewayServer 仍作 ws 宿主 + 入站帧解析，但把 ws + RoutingKey 委托注册进该
+    # Channel 的五维索引（_clients_by_key / _ws_by_id），出站由 ChannelManager 派发
+    # 到该 Channel.send（按 delivery.ws_id 物理寻址）。None 表示该 route 无需委托
+    # （如 acp 自带 _session_to_client 反查，web 有独立 WebChannel 不经此路径）。
+    ws_channel: Any = None
 
 
 @dataclass
@@ -243,6 +422,15 @@ class GatewayServerConfig:
             self.routes[path] = RouteConfig(path=path, channel_id=channel_id)
 
 
+@dataclass(frozen=True)
+class _LocalHandlerContext:
+    ws: Any
+    req_id: str
+    params: dict[str, Any]
+    session_id: str
+    user_id: str | None
+
+
 class GatewayServer:
     """通用多路路由 WebSocket Gateway Server。
 
@@ -257,8 +445,13 @@ class GatewayServer:
         self._running = False
         self._on_message_cb = None
         self._clients: set[Any] = set()
-        self._request_to_client: dict[tuple[str, str], Any] = {}
-        self._session_to_client: dict[tuple[str, str], Any] = {}
+        # V2: key 升级为 (channel_id, session_id, agent_ref_str|None)，
+        # 兼容旧 2-tuple key（agent_ref 为 None 时回退）。
+        self._request_to_client: dict[tuple, Any] = {}
+        self._session_to_client: dict[tuple, Any] = {}
+        # ACP 延迟绑定：session 在握手期先挂起，等首个 agent 请求 promote。
+        self._pending_session_clients: dict[tuple[str, str], Any] = {}
+        self.message_handler_ref = None
         self._acp_bridge = AcpGatewayBridge(
             self._dispatch_on_message,
             bind_session_client=self._bind_acp_session_client,
@@ -268,18 +461,145 @@ class GatewayServer:
         self._install_default_route_hooks()
 
     @staticmethod
-    def _client_route_key(channel_id: str | None, scoped_id: str | None) -> tuple[str, str] | None:
+    def _extract_ws_user_id(ws: Any) -> str | None:
+        """从 WebSocket 握手 HTTP Header 读取 X-User-Id（大小写不敏感）。"""
+        headers = (
+            getattr(getattr(ws, "request", None), "headers", None)
+            or getattr(ws, "request_headers", None)
+        )
+        raw = get_header_value(headers, "X-User-Id")
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        return text or None
+
+    @staticmethod
+    def _connection_user_id(ws: Any) -> str | None:
+        """返回连接建立时缓存的 user_id（来自握手 Header）。"""
+        uid = getattr(ws, "_gateway_user_id", None)
+        if uid is None:
+            return None
+        text = str(uid).strip()
+        return text or None
+
+    @staticmethod
+    def _connection_agent_type(ws: Any) -> str:
+        """返回当前 WS 连接绑定的 agent_type（缺省 jiuwenswarm）。"""
+        raw = getattr(ws, "_gateway_agent_type", None)
+        text = str(raw or "jiuwenswarm").strip().lower()
+        return text or "jiuwenswarm"
+
+    @staticmethod
+    def _invoke_local_handler(
+        handler: Callable[..., Awaitable[None]],
+        ctx: _LocalHandlerContext,
+    ) -> Awaitable[None]:
+        kwargs: dict[str, Any] = {}
+        if "user_id" in inspect.signature(handler).parameters:
+            kwargs["user_id"] = ctx.user_id
+        return handler(ctx.ws, ctx.req_id, ctx.params, ctx.session_id, **kwargs)
+
+    @staticmethod
+    def _client_route_key(
+        channel_id: str | None,
+        scoped_id: str | None,
+        agent_ref: Any = None,
+    ) -> tuple | None:
+        """构造客户端路由键。
+
+        V2: 可选 agent_ref 作为第三维，支撑同 session 多 agent_ref 共存（场景 2）。
+        传入 agent_ref 时返回 (channel_id, scoped_id, agent_ref_str) 三元组；
+        不传时返回 (channel_id, scoped_id) 二元组，兼容旧路径。
+        """
         channel = str(channel_id or "").strip()
         scope = str(scoped_id or "").strip()
         if not channel or not scope:
             return None
-        return channel, scope
+        if agent_ref is not None:
+            ar_str = ""
+            if hasattr(agent_ref, "mode") and hasattr(agent_ref, "id"):
+                ar_str = f"{agent_ref.mode}:{agent_ref.id}"
+            elif isinstance(agent_ref, dict):
+                ar_str = f"{agent_ref.get('mode', '')}:{agent_ref.get('id', '')}"
+            elif isinstance(agent_ref, str) and agent_ref.strip():
+                ar_str = agent_ref.strip()
+            if ar_str:
+                return (channel, scope, ar_str)
+        return (channel, scope)
 
     def _find_channel_clients(self, channel_id: str) -> list[Any]:
         return [
             client_ws for key, client_ws in self._session_to_client.items()
             if isinstance(key, tuple) and key[0] == channel_id and not getattr(client_ws, "closed", False)
         ]
+
+    def _lookup_client(
+        self,
+        table: dict[tuple, Any],
+        channel_id: str | None,
+        scope: str | None,
+        agent_ref: Any = None,
+    ) -> Any | None:
+        """按 (channel, scope, agent_ref?) 查找客户端 ws，2↔3 元组双向兜底。
+
+        - 优先精确匹配（agent_ref 非空时 3 元组，否则 2 元组）。
+        - 3 元组 MISS → 降级 2 元组（响应侧丢 agent_ref 时仍能命中）。
+        - 2 元组 MISS → 升级扫描所有以 (channel, scope) 开头的 3 元组
+          （注册侧有 agent_ref、查找侧丢 agent_ref 时仍能命中）。
+        - 裸 scope 字符串兜底。
+        防御性双向兜底，避免链路某环节丢 agent_ref 导致响应 dropped（设计 §6.3）。
+        """
+        key = self._client_route_key(channel_id, scope, agent_ref)
+        if key is None:
+            return None
+        ws = table.get(key)
+        if ws is not None:
+            return ws
+        # 3 → 2 降级
+        if len(key) >= 3:
+            ws = table.get((key[0], key[1]))
+            if ws is not None:
+                return ws
+        # 2 → 3 升级扫描
+        if len(key) == 2:
+            for k, v in table.items():
+                # (channel, scope, agent_ref) 三元组，前两段与 (channel, scope) 匹配
+                if isinstance(k, tuple) and len(k) == 3 and k[:2] == key:
+                    return v
+        # 裸 scope 兜底
+        return table.get(scope)
+
+    def is_session_bound_to_client(self, channel_id: str, session_id: str, ws: Any) -> bool:
+        session_key = self._client_route_key(channel_id, session_id)
+        if session_key is None:
+            return False
+        return self._session_to_client.get(session_key) is ws
+
+    def get_active_session_ids(
+        self,
+        channel_id: str,
+        exclude_ws: Any = None,
+    ) -> set[str]:
+        """返回在指定 channel 下、仍处于活跃连接绑定的 session_id 集合。
+
+        用于 session.list 标记 active_in_window，供前端在 /resume 前拦截冲突会话。
+        排除 exclude_ws（通常是发起 session.list 请求的连接本身），并跳过已关闭的 ws，
+        与实时防线（forward 阶段 SESSION_IN_USE 检查）口径保持一致。
+        """
+        active: set[str] = set()
+        for key, client_ws in self._session_to_client.items():
+            if not isinstance(key, tuple) or len(key) < 2:
+                continue
+            if key[0] != channel_id:
+                continue
+            if client_ws is exclude_ws:
+                continue
+            if bool(getattr(client_ws, "closed", False)):
+                continue
+            session_id = key[1]
+            if isinstance(session_id, str) and session_id:
+                active.add(session_id)
+        return active
 
     @staticmethod
     def _extract_routing_session_id(msg, *, include_top_level: bool = True) -> str | None:
@@ -300,6 +620,33 @@ class GatewayServer:
                 return str(sid).strip()
         return None
 
+    @staticmethod
+    def _ws_is_open(ws: Any) -> bool:
+        return ws is not None and not bool(getattr(ws, "closed", False))
+
+    async def _send_frame_to_ws(
+        self,
+        ws: Any,
+        frame: dict[str, Any],
+        *,
+        channel_id: str | None,
+        request_id: str | None,
+        session_id: str | None,
+    ) -> bool:
+        if not self._ws_is_open(ws):
+            return False
+        try:
+            await ws.send(json.dumps(frame, ensure_ascii=False))
+            return True
+        except ConnectionClosed:
+            logger.info(
+                "[GatewayServer] WebSocket closed while sending: channel_id=%s session_id=%s id=%s",
+                channel_id,
+                session_id,
+                request_id,
+            )
+            return False
+
     def on_message(self, callback) -> None:
         self._on_message_cb = callback
 
@@ -311,10 +658,79 @@ class GatewayServer:
             result = await result
         return bool(result)
 
-    def _bind_acp_session_client(self, session_id: str, ws: Any) -> None:
-        session_key = self._client_route_key("acp", session_id)
+    def _bind_acp_session_client(self, session_id: str, ws: Any, agent_ref: Any = None) -> None:
+        session_key = self._client_route_key("acp", session_id, agent_ref)
         if session_key is not None:
             self._session_to_client[session_key] = ws
+
+    async def _bind_route_session_client(
+        self,
+        route: RouteConfig,
+        session_id: str,
+        ws: Any,
+    ) -> bool:
+        session_key = self._client_route_key(route.channel_id, session_id)
+        if session_key is None:
+            return False
+        existing_ws = self._session_to_client.get(session_key)
+        if (
+            existing_ws is not None
+            and existing_ws is not ws
+            and not bool(getattr(existing_ws, "closed", False))
+        ):
+            if self._ws_is_open(ws):
+                self._pending_session_clients[session_key] = ws
+            return False
+        self._session_to_client[session_key] = ws
+        if self._pending_session_clients.get(session_key) is ws:
+            self._pending_session_clients.pop(session_key, None)
+        if existing_ws is ws or route.session_bind_handler is None:
+            return True
+        try:
+            result = route.session_bind_handler(route.channel_id, session_id)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.warning(
+                "GatewayServer session bind handler failed: channel_id=%s session_id=%s",
+                route.channel_id,
+                session_id,
+                exc_info=True,
+            )
+        return True
+
+    async def _promote_pending_session_client(
+        self,
+        route: RouteConfig,
+        session_key: tuple[str, str],
+    ) -> None:
+        pending_ws = self._pending_session_clients.pop(session_key, None)
+        if not self._ws_is_open(pending_ws):
+            return
+        existing_ws = self._session_to_client.get(session_key)
+        if (
+            existing_ws is not None
+            and existing_ws is not pending_ws
+            and self._ws_is_open(existing_ws)
+        ):
+            return
+        self._session_to_client[session_key] = pending_ws
+        if route.session_bind_handler is None:
+            return
+        try:
+            result = route.session_bind_handler(route.channel_id, session_key[1])
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.warning(
+                "GatewayServer pending session bind handler failed: channel_id=%s session_id=%s",
+                route.channel_id,
+                session_key[1],
+                exc_info=True,
+            )
+
+    def _get_message_handler(self):
+        return self.message_handler_ref
 
     def _install_default_route_hooks(self) -> None:
         for route in self.config.routes.values():
@@ -428,28 +844,63 @@ class GatewayServer:
         self._clients.clear()
         self._request_to_client.clear()
         self._session_to_client.clear()
+        self._pending_session_clients.clear()
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
         logger.info("[App] Gateway server stopped")
 
-    async def send(self, msg) -> None:
-        ws = None
-        request_key = self._client_route_key(getattr(msg, "channel_id", None), getattr(msg, "id", None))
-        if request_key is not None:
-            ws = self._request_to_client.get(request_key)
-            if ws is None:
-                ws = self._request_to_client.get(request_key[1])
+    async def send(self, msg, *, routing_target: "RoutingTarget | None" = None) -> None:
+        # V2: 提取 agent_ref，优先 3 元组查找，2↔3 双向兜底（_lookup_client）。
+        _agent_ref = getattr(msg, "agent_ref", None) or None
+        _send_cid = getattr(msg, "channel_id", None)
+        _send_sid = getattr(msg, "session_id", None)
+        _send_id = getattr(msg, "id", None)
+        ws: Any = None
+        # 三级级联 fallback 查找投递目标 ws：任一级命中可用（非 None 且未关闭）ws 即短路，
+        # 不再执行后续更低优先级的查找。三级依次为：
+        #   1) routing_target（team fan_out 投递，经 dispatch_to_session 调用）
+        #   2) request_id 精确回响应（常规 res/event 回到发起请求的 ws）
+        #   3) session_id 兜底（同 session 任意活跃 ws，或无 session_id 时广播）
+
+        # ── 第 1 级：fan_out 投递（team 模式经 dispatch_to_session 调用）──
+        # GatewayServer 不像 BaseWsChannel 维护 ws_id 物理索引，这里按
+        # routing_target.routing_keys 的 session_id 维度查 _session_to_client，
+        # 命中任一仍活跃的 ws 即投递。保证 TUI/ACP 误入 team 路径时 GodView/
+        # mention fan_out 不会因签名不符而静默丢弃。
+        if routing_target is not None:
+            _rt_keys = getattr(routing_target, "routing_keys", None) or []
+            for _rk in _rt_keys:
+                _rk_sid = getattr(_rk, "session_id", None)
+                if not _rk_sid:
+                    continue
+                _cand = self._lookup_client(
+                    self._session_to_client,
+                    getattr(_rk, "channel_id", None) or _send_cid,
+                    _rk_sid,
+                    getattr(_rk, "agent_ref", None),
+                )
+                if _cand is not None and not bool(getattr(_cand, "closed", False)):
+                    ws = _cand
+                    break
+        # ── 第 2 级：request_id 精确回响应（回到发起该请求的 ws）──
         if ws is None:
-            session_key = self._client_route_key(
-                getattr(msg, "channel_id", None),
-                getattr(msg, "session_id", None),
+            ws = self._lookup_client(
+                self._request_to_client,
+                _send_cid,
+                _send_id,
+                _agent_ref,
             )
-            if session_key is not None:
-                ws = self._session_to_client.get(session_key)
-                if ws is None:
-                    ws = self._session_to_client.get(session_key[1])
+        # ── 第 3 级：session_id 兜底（同 session 任意活跃 ws）──
+        # 前级返回 None 或已关闭的 ws 时，仍尝试按 session 路由。
+        if ws is None or bool(getattr(ws, "closed", False)):
+            ws = self._lookup_client(
+                self._session_to_client,
+                _send_cid,
+                _send_sid,
+                _agent_ref,
+            )
         if ws is None or bool(getattr(ws, "closed", False)):
             if ws is None:
                 channel_id = getattr(msg, "channel_id", None)
@@ -491,11 +942,19 @@ class GatewayServer:
                                 return_exceptions=True,
                             )
                             return
+                # delivery target 没注册上：附 sess_table_keys 便于反查为何反查不到 ws
                 logger.warning(
-                    "[GatewayServer] message dropped: no WebSocket client found for channel_id=%s session_id=%s id=%s",
+                    "[GatewayServer] message dropped: no WebSocket client found for"
+                    " channel_id=%s session_id=%s id=%s sess_table_keys=%s",
                     getattr(msg, "channel_id", None),
                     getattr(msg, "session_id", None),
                     getattr(msg, "id", None),
+                    [str(k) for k in self._session_to_client.keys()],
+                )
+            else:
+                logger.warning(
+                    "[GatewayServer] ws already closed, drop: channel_id=%s id=%s session_id=%s ws=%s",
+                    _send_cid, _send_id, _send_sid, hex(id(ws)),
                 )
             return
 
@@ -531,6 +990,11 @@ class GatewayServer:
             }
             if not msg.ok:
                 frame["error"] = str(payload.get("error") or "request failed")
+                # 提升 payload.code 为顶层 code(与本地 handler 的 send_response
+                # 错误帧结构一致,设计文档 §1.3 前端按顶层 code 分流)
+                code_val = payload.get("code")
+                if isinstance(code_val, str) and code_val.strip():
+                    frame["code"] = code_val.strip()
             await ws.send(json.dumps(frame, ensure_ascii=False))
             return
 
@@ -558,6 +1022,18 @@ class GatewayServer:
             return
 
         self._clients.add(ws)
+
+        ws_user_id = self._extract_ws_user_id(ws)
+        setattr(ws, "_gateway_user_id", ws_user_id)
+        setattr(ws, "_gateway_agent_type", "jiuwenswarm")
+        uid_marker = "" if ws_user_id else " uid_empty=yes"
+        logger.info(
+            "[Gateway] WS handshake X-User-Id: user_id=%r%s channel=%s path=%s",
+            ws_user_id,
+            uid_marker,
+            route.channel_id,
+            matched_path,
+        )
 
         # connection.ack
         try:
@@ -597,6 +1073,22 @@ class GatewayServer:
             ]
             for session_key in stale_session_keys:
                 self._session_to_client.pop(session_key, None)
+            stale_pending_session_keys = [
+                key for key, client in self._pending_session_clients.items() if client is ws
+            ]
+            for session_key in stale_pending_session_keys:
+                self._pending_session_clients.pop(session_key, None)
+            # V2: 委托 ws_channel（tui 的 TuiChannel）摘除死 ws + 清 per-ws writer。
+            # 放在 _session_to_client 清理之后、disconnect_handler 之前；ws_channel
+            # 反查不依赖 _session_to_client，顺序无强约束，但先摘可避免后续投递命中死 ws。
+            if route.ws_channel is not None:
+                try:
+                    await route.ws_channel.unregister_ws(ws)
+                except Exception:
+                    logger.warning(
+                        "GatewayServer delegate unregister_ws to ws_channel failed: path=%s",
+                        request_path, exc_info=True,
+                    )
             if route.disconnect_handler is not None:
                 try:
                     # Pass stale_request_keys so the handler can recover session_ids
@@ -622,9 +1114,10 @@ class GatewayServer:
                         request_path,
                         exc_info=True,
                     )
+            for session_key in stale_session_keys:
+                await self._promote_pending_session_client(route, session_key)
 
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
-        from jiuwenswarm.common.schema.message import Message, Mode, ReqMethod
 
         try:
             data = json.loads(raw)
@@ -681,7 +1174,11 @@ class GatewayServer:
             )
             return
 
-        session_id = str(params.get("session_id") or "").strip() or req_id
+        explicit_session_id = bool(str(params.get("session_id") or "").strip())
+        session_id = (str(params.get("session_id") or "").strip()) or req_id
+        session_key = self._client_route_key(route.channel_id, session_id) if explicit_session_id else None
+
+        req_user_id = self._connection_user_id(ws)
 
         # 1. forward 优先：方法在 forward_methods 中则转发到 MessageHandler
         if method in route.forward_methods:
@@ -700,23 +1197,100 @@ class GatewayServer:
                 )
                 return
 
-            request_key = self._client_route_key(route.channel_id, req_id)
+            # V2: 提取 agent_ref 用于路由键（支撑场景 2 同 session 切 mode 不串窗）。
+            # 客户端未发送 agent_ref 时不合成——保持 2 元组注册，与响应查找侧
+            # （AgentServer 普通模式不回带 agent_ref → msg.agent_ref=None → 2 元组）
+            # 对称，避免 3/2 元组不匹配导致响应消息被丢弃（设计 §1.1 非 team 零改动）。
+            _agent_ref = params.get("agent_ref")
+
+            request_key = self._client_route_key(route.channel_id, req_id, _agent_ref)
+            # 升级 session_key 为 3 元组（含 agent_ref），与 _session_to_client 键一致。
+            session_key = (
+                self._client_route_key(route.channel_id, session_id, _agent_ref)
+                if explicit_session_id else None
+            )
+            # 检测 session 是否已在其他窗口打开：若已绑定到另一个仍活跃的连接，
+            # 拒绝当前请求，避免多窗口 session 冲突（事件路由串台、binding 被覆盖）。
+            # 前端 session.list 的 active_in_window 标记是"事后快照"，此处是实时防线。
+            if session_key is not None:
+                existing_ws = self._session_to_client.get(session_key)
+                if (
+                    existing_ws is not None
+                    and existing_ws is not ws
+                    and not bool(getattr(existing_ws, "closed", False))
+                ):
+                    logger.warning(
+                        "GatewayServer reject %s: session %s already active in another %s connection",
+                        method, session_id, route.channel_id,
+                    )
+                    await self.send_response(
+                        ws, req_id, ok=False,
+                        error=f"Session {session_id} is already active in another window. Close that window first.",
+                        code="SESSION_IN_USE",
+                    )
+                    return
             if request_key is not None:
                 self._request_to_client[request_key] = ws
-            session_key = self._client_route_key(route.channel_id, session_id)
             if session_key is not None:
-                self._session_to_client[session_key] = ws
+                await self._bind_route_session_client(route, session_id, ws)
 
-            default_mode = Mode.CODE_NORMAL if route.channel_id == "tui" else Mode.AGENT_PLAN
+            default_mode = Mode.CODE_NORMAL if route.channel_id == "tui" else Mode.AGENT
             mode = Mode.from_raw(params.get("mode"), default=default_mode)
 
             # 确保 mode 被设置到 params 中，以便后续转发到 AgentServer
             params = dict(params)
             params.setdefault("mode", mode.value)
 
+            # 连接级 agent_type 为 SSOT，注入后续转发请求
+            # （3rdagent.switch 由 TUI local_handler 写回 ws._gateway_agent_type）
+            params["agent_type"] = self._connection_agent_type(ws)
+
+            # V2: agent_ref 全链路透传（阶段2）。
+            # tui 客户端从不发 agent_ref（_agent_ref 恒 None）→ 按 mode/agent_id 合成 AgentRef，
+            # 用于：(1) 委托 _register 的 RoutingKey.agent_ref；(2) msg.agent_ref 经 E2A 透传到
+            # AgentServer，chunk 回带同 agent_ref；(3) _maybe_register_godview 用 msg.agent_ref 构造
+            # GodView RoutingKey.agent_ref（与入站注册同源，routing_keys 兜底能命中）。
+            # acp 等非 ws_channel route 不合成（保留原 _agent_ref，走各自路径）。
+            from jiuwenswarm.gateway.routing.keys import AgentRef as _AgentRef
+
+            _resolved_agent_ref = _agent_ref
+            if route.ws_channel is not None and not isinstance(_resolved_agent_ref, _AgentRef):
+                _agent_id_raw = str(params.get("agent_id") or "default").strip() or "default"
+                _resolved_agent_ref = _AgentRef(mode=mode.value, id=_agent_id_raw)
+
+            # V2: 委托 ws 注册进 route.ws_channel（tui 的 TuiChannel）的五维索引。
+            # GatewayServer 仍保留 _session_to_client/_request_to_client 用于入站响应反查
+            # （send_response / local handler 回包），但出站 chunk 的精确路由改由
+            # TuiChannel 的 _ws_by_id（物理寻址）/ _clients_by_key（五维逻辑）承担。
+            # 同步把 ws_id 注入 metadata，供 _maybe_register_godview 构造带真 ws_id 的
+            # TuiDeliveryTarget（修掉原 tui _kind="group" + ws_id 恒空导致投递不到）。
+            _ws_id_for_metadata = ""
+            if route.ws_channel is not None:
+                from jiuwenswarm.gateway.routing.keys import RoutingKey
+
+                # user_id 取 "tui"：与 _maybe_register_godview 的 _user 兜底（... or _ch）
+                # 同源，保证 GodView 订阅的 RoutingKey.user_id 与此处入站注册一致。
+                _tui_rk = RoutingKey(
+                    user_id="tui",
+                    channel_id=route.channel_id,
+                    app_id="default",
+                    agent_ref=_resolved_agent_ref,
+                    session_id=session_id,
+                )
+                try:
+                    await route.ws_channel.register_ws(ws, _tui_rk)
+                    _ws_id_for_metadata = getattr(ws, "_jiuwen_ws_id", "") or ""
+                except Exception:
+                    logger.warning(
+                        "GatewayServer delegate _register to ws_channel failed: channel_id=%s session_id=%s",
+                        route.channel_id, session_id, exc_info=True,
+                    )
+
             # 从 params 中提取 cwd/project_dir，注入到 metadata 中
             # cwd 供 message_handler 解析 @file 引用；project_dir 供 session.list 按项目过滤
             metadata = {"method": method}
+            if _ws_id_for_metadata:
+                metadata["ws_id"] = _ws_id_for_metadata
             cwd = params.get("cwd")
             if cwd and isinstance(cwd, str) and cwd.strip():
                 metadata["cwd"] = cwd.strip()
@@ -728,6 +1302,9 @@ class GatewayServer:
                 from jiuwenswarm.common.utils import resolve_git_branch
 
                 metadata["git_branch"] = resolve_git_branch(project_dir.strip())
+            client_timeout_ms = coerce_client_timeout_ms(data.get("timeout_ms"))
+            if route.channel_id == "tui" and client_timeout_ms is not None:
+                metadata["client_timeout_ms"] = client_timeout_ms
 
             is_stream = bool(data.get("is_stream", False))
 
@@ -743,6 +1320,12 @@ class GatewayServer:
                 mode=mode,
                 metadata=metadata,
                 is_stream=is_stream,
+                # V2: 透传 agent_ref 到请求 Message，经 E2A 线协议传到 AgentServer，
+                # 响应侧 chunk/response 回带，gateway 查找侧 3 元组匹配（设计 §6.3）。
+                # 阶段2：tui ws_channel route 用合成的 _resolved_agent_ref（与 _register /
+                # GodView 同源）；非 ws_channel route 保留原 _agent_ref。
+                agent_ref=_resolved_agent_ref,
+                user_id=req_user_id,
             )
 
             if self._on_message_cb is not None:
@@ -763,8 +1346,19 @@ class GatewayServer:
         # 2. 本地 handler：发 ack 或纯本地处理
         local_handler = route.local_handlers.get(method)
         if local_handler is not None:
+            if session_key is not None:
+                await self._bind_route_session_client(route, session_id, ws)
             try:
-                await local_handler(ws, req_id, params, session_id)
+                await self._invoke_local_handler(
+                    local_handler,
+                    _LocalHandlerContext(
+                        ws=ws,
+                        req_id=req_id,
+                        params=params,
+                        session_id=session_id,
+                        user_id=req_user_id,
+                    ),
+                )
             except Exception as e:
                 ws_closed = bool(getattr(ws, "closed", False))
                 if ws_closed:
@@ -821,6 +1415,8 @@ def _build_route_config_map(bindings: list[GatewayRouteBinding]) -> dict[str, Ro
             outbound_interceptor=binding.outbound_interceptor,
             cleanup_handler=binding.cleanup_handler,
             disconnect_handler=binding.disconnect_handler,
+            session_bind_handler=binding.session_bind_handler,
+            ws_channel=binding.ws_channel,
         )
         for binding in bindings
     }
@@ -847,7 +1443,10 @@ async def _run(
         TelegramChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.discord.discord_connect import DiscordChannel, \
         DiscordChannelConfig
+    from jiuwenswarm.gateway.channel_manager.im_platforms.slack.slack_connect import SlackChannel, \
+        SlackChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
+    from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
     from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
@@ -861,30 +1460,24 @@ async def _run(
         _CONFIG_SET_ENV_MAP,
         _FORWARD_NO_LOCAL_HANDLER_METHODS,
         _FORWARD_REQ_METHODS,
+        _normalize_feishu_conf,
+        _normalize_xiaoyi_conf,
         _register_web_handlers,
     )
     from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
+        CLI_FORWARD_NO_LOCAL_HANDLER_METHODS,
+        CLI_FORWARD_REQ_METHODS,
         CliRouteBindParams,
         build_cli_route_binding,
     )
+    from jiuwenswarm.gateway.channel_manager.tui.tui_channel import TuiChannel, TuiChannelConfig
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
-    from jiuwenswarm.common.schema.message import Message
     from jiuwenswarm.common.updater import UpdaterService
     from openjiuwen.core.runner import Runner
 
-    def _do_restart() -> None:
-        logger.info("[App] .env updated, restarting Gateway...")
-        os.execv(sys.executable, [sys.executable, *sys.argv])
-
-    def _schedule_restart() -> None:
-        try:
-            loop = asyncio.get_running_loop()
-            loop.call_later(2.0, _do_restart)
-        except RuntimeError:
-            _do_restart()
-
     logger.info("[App] Gateway starting, connecting AgentServer: %s", agent_server_url)
+    restart_request = GatewayRestartRequest()
 
     callback_framework = Runner.callback_framework
     extension_registry = ExtensionRegistry.create_instance(
@@ -899,13 +1492,22 @@ async def _run(
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
 
-    # 从扩展注册表获取 AgentServerClient
+    # 从扩展注册表获取 AgentServerClient（WebSocket 或 Yuanrong 等扩展实现）
     agent_server_ext = extension_registry.get_agent_server_client_extension()
     if agent_server_ext is not None:
         logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
         client = agent_server_ext.get_client()
     else:
         client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
+
+    from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
+
+    third_agent_ext = extension_registry.get_third_agent_extension()
+    if third_agent_ext is not None:
+        logger.info("[App] using extension ThirdAgent: %s", third_agent_ext.metadata.name)
+        third_agent = third_agent_ext.get_third_agent()
+    else:
+        third_agent = get_unsupported_third_agent()
 
     # 如果是 WebSocket 客户端，需要连接；如果是 YuanrongFrontendAgentClient，无需连接
     if isinstance(client, WebSocketAgentServerClient):
@@ -991,6 +1593,8 @@ async def _run(
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
+    # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
+    message_handler.set_channel_manager(channel_manager)
     updater_service = UpdaterService()
 
     async def _on_config_saved(
@@ -998,6 +1602,7 @@ async def _run(
             *,
             env_updates: dict[str, str] | None = None,
             config_payload: dict[str, Any] | None = None,
+            reload_options: dict[str, Any] | None = None,
     ) -> bool:
         browser_runtime_keys = {
             "MODEL_PROVIDER",
@@ -1023,9 +1628,6 @@ async def _run(
                 env=dict(env_updates or {}),
             )
 
-            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-            from jiuwenswarm.common.schema.message import ReqMethod
-
             reload_env = e2a_from_agent_fields(
                 request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
                 channel_id="",
@@ -1035,6 +1637,7 @@ async def _run(
                     "config": dict(config_payload or {}),
                     # env: incremental environment updates; missing keys mean unchanged.
                     "env": dict(env_updates or {}),
+                    **dict(reload_options or {}),
                 },
             )
             reload_resp = await client.send_request(reload_env)
@@ -1059,15 +1662,38 @@ async def _run(
                     req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
                 )
                 await client.send_request(restart_env)
+
+            # 主动推荐：enabled 变更时同步 proactive.tick job（创建/删除）
+            proactive_keys = {
+                "proactive_recommendation_enabled",
+            }
+            if updated_env_keys and (proactive_keys & set(updated_env_keys)):
+                try:
+                    from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
+                    await sync_proactive_tick_job(cron_controller, config_payload)
+                except Exception as e:  # noqa: BLE001  # 兜底：proactive 同步失败不阻断配置保存
+                    logger.warning("[App] proactive.tick sync on config save failed: %s", e)
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
-            _schedule_restart()
+            _schedule_gateway_restart(restart_request)
             return False
 
     web_channel = None
+    tui_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
+
+    # 注入 Git diff 监控注册表(设计文档阶段10):
+    # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询
+    # 2. 通过 ``set_channel`` 让 registry 拿到 send_event 的发送句柄
+    from jiuwenswarm.server.runtime.session.git_diff_watcher import (
+        get_git_diff_watcher_registry,
+    )
+    _git_watcher_registry = get_git_diff_watcher_registry()
+    web_channel.git_watcher_registry = _git_watcher_registry
+    _git_watcher_registry.set_channel(web_channel)
+
     _register_web_handlers(
         WebHandlersBindParams(
             channel=web_channel,
@@ -1086,12 +1712,20 @@ async def _run(
             no_local_methods: set[str] | frozenset[str],
             source_label: str,
     ):
-        def _norm_and_forward(msg: Message) -> bool:
+        async def _norm_and_forward(msg: Message) -> bool:
             method_val = getattr(getattr(msg, "req_method", None), "value", None) or ""
             if method_val not in forward_methods:
                 return False
             normalized = _normalize_gateway_message(msg)
-            channel_manager.deliver_to_message_handler(normalized)
+            # session.create 主路径注入 work_mode 归一化(与 fallback _session_create
+            # 共用同一 helper resolve_session_work_mode_params,保持主路径/fallback 一致):
+            # 成功时写回归一化后的 project_id/project_dir/work_mode 到 params,
+            # 转发到 AgentServer 后由其 session.create 处理逻辑使用;
+            # 失败时(非法 work_mode)不写回,保留原始 params 由 AgentServer 或
+            # fallback _session_create 返回 BAD_REQUEST。
+            if method_val == "session.create":
+                _inject_session_work_mode(normalized)
+            await channel_manager.deliver_to_message_handler(normalized)
             logger.info("[App] %s 入站 -> MessageHandler: id=%s channel_id=%s", source_label, msg.id, msg.channel_id)
             if method_val in no_local_methods:
                 return True
@@ -1105,6 +1739,19 @@ async def _run(
         "Web",
     )
     channel_manager.register_channel_with_inbound(web_channel, web_norm_and_forward)
+
+    # ── V2: TUI 独立 Channel（出站契约 + 五维索引）──
+    # GatewayServer 仍是 /tui ws 宿主 + 入站帧解析 + local handler 派发（install 仍挂
+    # gateway_server）；TuiChannel 只接管出站 send 与 ws 五维索引，被 GatewayServer
+    # 在 forward 分支委托 register_ws/unregister_ws。移除原 register_external_channel("tui",
+    # gateway_server)，tui 出站不再走 GatewayServer.send（其 routing_target 反查缺五维索引）。
+    tui_channel = TuiChannel(TuiChannelConfig(enabled=True), _DummyBus())
+    tui_norm_and_forward = _make_norm_and_forward(
+        CLI_FORWARD_REQ_METHODS,
+        CLI_FORWARD_NO_LOCAL_HANDLER_METHODS,
+        "TUI",
+    )
+    channel_manager.register_channel_with_inbound(tui_channel, tui_norm_and_forward)
 
     acp_inbound_server = _InboundGatewayServer(
         lambda msg: _normalize_and_forward_message(msg, channel_manager)
@@ -1123,10 +1770,12 @@ async def _run(
             CliRouteBindParams(
                 agent_client=client,
                 message_handler=message_handler,
+                third_agent=third_agent,
                 on_config_saved=_on_config_saved,
                 path="/tui",
                 channel_id="tui",
                 cron_controller=cron_controller,
+                ws_channel=tui_channel,
             )
         ),
     ]
@@ -1138,9 +1787,15 @@ async def _run(
         routes=_build_route_config_map(route_bindings),
     )
     gateway_server = GatewayServer(gateway_server_config, _DummyBus())
+    gateway_server.message_handler_ref = message_handler
     for binding in route_bindings:
         route_config = gateway_server_config.routes[binding.path]
-        channel_manager.register_external_channel(route_config.channel_id, gateway_server)
+        # tui 出站已由 TuiChannel 接管（register_channel_with_inbound），
+        # 不再把 gateway_server 注册为 tui channel；acp 等仍走 gateway_server。
+        # 但 install（register_cli_handlers 注册 local handler 如 _chat_send）
+        # 仍须执行——local handler 依赖 gateway_server 上的 session/request 索引。
+        if route_config.channel_id != "tui":
+            channel_manager.register_external_channel(route_config.channel_id, gateway_server)
         if binding.install is not None:
             binding.install(gateway_server)
     gateway_server.on_message(acp_inbound_server.handle_message)
@@ -1178,6 +1833,8 @@ async def _run(
                 os.getenv("A2A_SERVER_APP_VERSION", "0.1.0")
             ).strip()
                         or "0.1.0",
+            expose_reasoning=str(os.getenv("A2A_SERVER_EXPOSE_REASONING", "true")).strip().lower()
+                             not in {"0", "false", "no", "off"},
         ),
         _DummyBus(),
     )
@@ -1212,12 +1869,16 @@ async def _run(
     telegram_task = None
     discord_channel = None
     discord_task = None
+    slack_channel = None
+    slack_task = None
     whatsapp_channel = None
     whatsapp_task = None
     wecom_channel = None
     wecom_task = None
     wechat_channel = None
     wechat_task = None
+    ssh_channel = None
+    ssh_task = None
 
     _last_channels_conf: dict = {}
 
@@ -1287,11 +1948,23 @@ async def _run(
         nonlocal feishu_channel, feishu_task, xiaoyi_channel, xiaoyi_task
         nonlocal dingtalk_channel, dingtalk_task, telegram_channel, telegram_task
         nonlocal discord_channel, discord_task
+        nonlocal slack_channel, slack_task
         nonlocal whatsapp_channel, whatsapp_task
         nonlocal wecom_channel, wecom_task
         nonlocal wechat_channel, wechat_task
+        nonlocal ssh_channel, ssh_task
         nonlocal _last_channels_conf
         nonlocal feishu_enterprise_channels, feishu_enterprise_tasks
+
+        # === 新增：入口归一化（必须在 _should_restart_channel 之前） ===
+        if isinstance(conf, dict):
+            feishu_raw = conf.get("feishu")
+            if isinstance(feishu_raw, dict):
+                conf["feishu"] = _normalize_feishu_conf(feishu_raw)
+            xiaoyi_raw = conf.get("xiaoyi")
+            if isinstance(xiaoyi_raw, dict):
+                conf["xiaoyi"] = _normalize_xiaoyi_conf(xiaoyi_raw)
+        # ==========================================================
 
         restart_pending = channel_manager.pop_channel_restart_pending()
         changed_channels: list[str] = []
@@ -1303,8 +1976,10 @@ async def _run(
             "telegram",
             "whatsapp",
             "discord",
+            "slack",
             "wecom",
             "wechat",
+            "ssh",
         ]:
             if _should_restart_channel(channel_name, _last_channels_conf, conf) or channel_name in restart_pending:
                 if channel_name in restart_pending and not _should_restart_channel(
@@ -1318,33 +1993,54 @@ async def _run(
         _last_channels_conf = dict(conf or {})
 
         if "feishu" in changed_channels:
-            feishu_conf = conf.get("feishu") if isinstance(conf, dict) else None
-            await _stop_channel(feishu_channel, feishu_task, "feishu")
+            feishu_conf = conf.get("feishu") if isinstance(conf, dict) else {}
+
+            # ---- 停止旧 apps 实例（从 channel_manager 查找） ----
+            # 先 pop 再停止，避免 _stop_channel 内部 unregister_channel(channel_id)
+            # 批量删除后后续 key 访问抛 KeyError
+            for ch in channel_manager.pop_channels_by_id("feishu"):
+                await _stop_channel(ch, getattr(ch, "start_task", None), f"feishu_app[{ch.app_id}]")
+            # 统一注销 adapter（所有 feishu app 共享 "feishu" 标识）
+            im_inbound.unregister_adapter("feishu")
+            im_outbound.unregister_adapter("feishu")
+
+            # 单变量置空（不再使用，但保持 nonlocal 兼容）
             feishu_channel, feishu_task = None, None
 
-            if isinstance(feishu_conf, dict):
-                enabled, reason = _is_channel_enabled(feishu_conf, ["app_id", "app_secret"])
-                if not enabled:
-                    logger.info("[App] channels.feishu.%s, FeishuChannel disabled", reason)
-                else:
+            apps = feishu_conf.get("apps") or []
+            if not apps:
+                logger.info("[App] channels.feishu.apps empty, FeishuChannel disabled")
+            else:
+                for app in apps:
+                    if not app.get("enabled", True):
+                        continue
+                    enabled, reason = _is_channel_enabled(app, ["app_id", "app_secret"])
+                    if not enabled:
+                        logger.info("[App] channels.feishu.apps[].%s, skipping", reason)
+                        continue
+
+                    app_id = str(app.get("app_id") or "").strip()
+                    channel_id = "feishu"
+
                     feishu_config = FeishuConfig(
                         enabled=True,
-                        app_id=str(feishu_conf.get("app_id") or "").strip(),
-                        app_secret=str(feishu_conf.get("app_secret") or "").strip(),
-                        encrypt_key=str(feishu_conf.get("encrypt_key") or "").strip(),
-                        verification_token=str(feishu_conf.get("verification_token") or "").strip(),
-                        allow_from=feishu_conf.get("allow_from") or [],
-                        enable_streaming=bool(feishu_conf.get("enable_streaming", True)),
-                        chat_id=str(feishu_conf.get("chat_id") or "").strip(),
-                        last_chat_id=str(feishu_conf.get("last_chat_id") or "").strip(),
-                        last_open_id=str(feishu_conf.get("last_open_id") or "").strip(),
-                        group_digital_avatar=bool(feishu_conf.get("group_digital_avatar", False)),
-                        my_user_id=str(feishu_conf.get("my_user_id") or feishu_conf.get("my_open_id") or "").strip(),
-                        bot_name=str(feishu_conf.get("bot_name") or "").strip(),
-                        enable_memory=bool(feishu_conf.get("enable_memory", False)),
-                        message_merge_window_ms=int(feishu_conf.get("message_merge_window_ms", 15000)),
+                        app_id=app_id,
+                        app_secret=str(app.get("app_secret") or "").strip(),
+                        encrypt_key=str(app.get("encrypt_key") or "").strip(),
+                        verification_token=str(app.get("verification_token") or "").strip(),
+                        allow_from=app.get("allow_from") or [],
+                        enable_streaming=bool(app.get("enable_streaming", True)),
+                        chat_id=str(app.get("chat_id") or "").strip(),
+                        channel_id=channel_id,
+                        last_chat_id=str(app.get("last_chat_id") or "").strip(),
+                        last_open_id=str(app.get("last_open_id") or "").strip(),
+                        group_digital_avatar=bool(app.get("group_digital_avatar", False)),
+                        my_user_id=str(app.get("my_user_id") or app.get("my_open_id") or "").strip(),
+                        bot_name=str(app.get("bot_name") or "").strip(),
+                        enable_memory=bool(app.get("enable_memory", False)),
+                        message_merge_window_ms=int(app.get("message_merge_window_ms", 15000)),
                     )
-                    # 数字分身：创建 adapter 并注册到 pipeline
+                    # 数字分身 adapter（共享 "feishu" key）
                     feishu_adapter = None
                     if feishu_config.group_digital_avatar:
                         from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_im_adapter import \
@@ -1353,14 +2049,14 @@ async def _run(
                             my_open_id=feishu_config.my_user_id,
                             bot_name=feishu_config.bot_name,
                         )
-                        im_inbound.register_adapter("feishu", feishu_adapter)
-                        im_outbound.register_adapter("feishu", feishu_adapter)
-                    feishu_channel = FeishuChannel(feishu_config, _DummyBus(), im_platform_adapter=feishu_adapter)
-                    channel_manager.register_channel(feishu_channel)
-                    feishu_task = asyncio.create_task(feishu_channel.start(), name="feishu")
-                    logger.info("[App] FeishuChannel registered from config.yaml.channels.feishu")
-            else:
-                logger.info("[App] channels.feishu missing or invalid, FeishuChannel disabled")
+                        im_inbound.register_adapter(channel_id, feishu_adapter)
+                        im_outbound.register_adapter(channel_id, feishu_adapter)
+
+                    channel = FeishuChannel(feishu_config, _DummyBus(), im_platform_adapter=feishu_adapter)
+                    channel_manager.register_channel(channel)
+                    task = asyncio.create_task(channel.start(), name=f"feishu-{app_id}")
+                    channel.start_task = task  # 挂到 channel 对象上，不另存 dict
+                    logger.info("[App] FeishuChannel(app=%s) registered from channels.feishu.apps", app_id)
 
         if "feishu_enterprise" in changed_channels:
             for bot_key, task in list(feishu_enterprise_tasks.items()):
@@ -1443,52 +2139,62 @@ async def _run(
                     )
 
         if "xiaoyi" in changed_channels:
-            xiaoyi_conf = conf.get("xiaoyi") if isinstance(conf, dict) else None
-            await _stop_channel(xiaoyi_channel, xiaoyi_task, "xiaoyi")
+            xiaoyi_conf = conf.get("xiaoyi") if isinstance(conf, dict) else {}
+
+            # ---- 停止旧 apps 实例（从 channel_manager 查找） ----
+            # 先 pop 再停止，避免 _stop_channel 内部 unregister_channel(channel_id)
+            # 批量删除后后续 key 访问抛 KeyError
+            for ch in channel_manager.pop_channels_by_id("xiaoyi"):
+                await _stop_channel(ch, getattr(ch, "start_task", None), f"xiaoyi_app[{ch.app_id}]")
+
+            # 单变量置空（不再使用，但保持 nonlocal 兼容）
             xiaoyi_channel, xiaoyi_task = None, None
 
-            if isinstance(xiaoyi_conf, dict):
-                enabled, reason = _is_channel_enabled(xiaoyi_conf, ["ak", "sk", "agent_id"])
-                if not enabled:
-                    logger.info("[App] channels.xiaoyi.%s, XiaoyiChannel disabled", reason)
-                else:
-                    if xiaoyi_conf.get("mode") == "xiaoyi_claw":
-                        xiaoyi_config = XiaoyiChannelConfig(
-                            enabled=True,
-                            mode=str(xiaoyi_conf.get("mode") or "xiaoyi_claw").strip(),
-                            api_id=str(xiaoyi_conf.get("api_id") or "").strip(),
-                            push_id=str(xiaoyi_conf.get("push_id") or "").strip(),
-                            push_url=str(xiaoyi_conf.get("push_url") or "").strip(),
-                            agent_id=str(xiaoyi_conf.get("agent_id") or "").strip(),
-                            uid=str(xiaoyi_conf.get("uid") or "").strip(),
-                            api_key=str(xiaoyi_conf.get("api_key") or "").strip(),
-                            file_upload_url=str(xiaoyi_conf.get("file_upload_url") or "").strip(),
-                            ws_url1=str(xiaoyi_conf.get("ws_url1")).strip(),
-                            ws_url2=str(xiaoyi_conf.get("ws_url2")).strip(),
-                            enable_streaming=bool(xiaoyi_conf.get("enable_streaming", True)),
-                        )
-                    else:
-                        xiaoyi_config = XiaoyiChannelConfig(
-                            enabled=True,
-                            mode=str(xiaoyi_conf.get("mode") or "xiaoyi_channel").strip(),
-                            ak=str(xiaoyi_conf.get("ak") or "").strip(),
-                            sk=str(xiaoyi_conf.get("sk") or "").strip(),
-                            api_id=str(xiaoyi_conf.get("api_id") or "").strip(),
-                            push_id=str(xiaoyi_conf.get("push_id") or "").strip(),
-                            push_url=str(xiaoyi_conf.get("push_url") or "").strip(),
-                            agent_id=str(xiaoyi_conf.get("agent_id") or "").strip(),
-                            ws_url1=str(xiaoyi_conf.get("ws_url1") or "").strip()
-                                    or "wss://hag.cloud.huawei.com/openclaw/v1/ws/link",
-                            ws_url2=str(xiaoyi_conf.get("ws_url2") or "").strip()
-                                    or "wss://116.63.174.231/openclaw/v1/ws/link",
-                            enable_streaming=bool(xiaoyi_conf.get("enable_streaming", True)),
-                        )
-                    xiaoyi_channel = XiaoyiChannel(xiaoyi_config, _DummyBus())
-                    channel_manager.register_channel(xiaoyi_channel)
-                    xiaoyi_task = asyncio.create_task(xiaoyi_channel.start(), name="xiaoyi")
-                    logger.info("[App] XiaoyiChannel registered from config.yaml.channels.xiaoyi")
+            apps = xiaoyi_conf.get("apps") or []
+            if not apps:
+                logger.info("[App] channels.xiaoyi.apps empty, XiaoyiChannel disabled")
             else:
-                logger.info("[App] channels.xiaoyi missing or invalid, XiaoyiChannel disabled")
+                for app in apps:
+                    if not app.get("enabled", True):
+                        continue
+                    enabled, reason = _is_channel_enabled(app, ["ak", "sk", "agent_id"])
+                    if not enabled:
+                        logger.info("[App] channels.xiaoyi.apps[].%s, skipping", reason)
+                        continue
+
+                    api_id = str(app.get("api_id") or "").strip()
+                    is_default = app.get("is_default", False) or len(apps) == 1
+                    if not api_id and not is_default:
+                        logger.warning(
+                            "[App] channels.xiaoyi.apps[].api_id required for non-default, skipping"
+                        )
+                        continue
+
+                    channel_id = "xiaoyi"
+                    config = XiaoyiChannelConfig(
+                        enabled=True,
+                        channel_id=channel_id,
+                        mode=str(app.get("mode") or "xiaoyi_channel").strip(),
+                        ak=str(app.get("ak") or "").strip(),
+                        sk=str(app.get("sk") or "").strip(),
+                        agent_id=str(app.get("agent_id") or "").strip(),
+                        api_id=api_id,
+                        enable_streaming=bool(app.get("enable_streaming", True)),
+                        # 以下字段 _normalize_xiaoyi_conf 会自动填充缺省值，
+                        # 此处显式读取以兼容直接使用 apps 格式的场景
+                        ws_url1=str(app.get("ws_url1") or "").strip(),
+                        ws_url2=str(app.get("ws_url2") or "").strip(),
+                        uid=str(app.get("uid") or "").strip(),
+                        api_key=str(app.get("api_key") or "").strip(),
+                        push_id=str(app.get("push_id") or "").strip(),
+                        push_url=str(app.get("push_url") or "").strip(),
+                        file_upload_url=str(app.get("file_upload_url") or "").strip(),
+                    )
+                    channel = XiaoyiChannel(config, _DummyBus())
+                    channel_manager.register_channel(channel)
+                    task = asyncio.create_task(channel.start(), name=f"xiaoyi-{api_id or 'default'}")
+                    channel.start_task = task  # 挂到 channel 对象上，不另存 dict
+                    logger.info("[App] XiaoyiChannel(api_id=%s) from channels.xiaoyi.apps", api_id or "default")
 
         if "dingtalk" in changed_channels:
             dingtalk_conf = conf.get("dingtalk") if isinstance(conf, dict) else None
@@ -1562,6 +2268,38 @@ async def _run(
                     logger.info("[App] DiscordChannel registered from config.yaml.channels.discord")
             else:
                 logger.info("[App] channels.discord missing or invalid, DiscordChannel disabled")
+
+        if "slack" in changed_channels:
+            slack_conf = conf.get("slack") if isinstance(conf, dict) else None
+            await _stop_channel(slack_channel, slack_task, "slack")
+            slack_channel, slack_task = None, None
+
+            if isinstance(slack_conf, dict):
+                enabled, reason = _is_channel_enabled(slack_conf, ["bot_token", "app_token"])
+                if not enabled:
+                    logger.info("[App] channels.slack.%s, SlackChannel disabled", reason)
+                else:
+                    reply_in_thread_raw = slack_conf.get("reply_in_thread", True)
+                    reply_in_thread = (
+                        str(reply_in_thread_raw).strip().lower() in ("true", "1", "yes", "on")
+                        if isinstance(reply_in_thread_raw, str)
+                        else bool(reply_in_thread_raw)
+                    )
+                    slack_config = SlackChannelConfig(
+                        enabled=True,
+                        bot_token=str(slack_conf.get("bot_token") or "").strip(),
+                        app_token=str(slack_conf.get("app_token") or "").strip(),
+                        allow_from=slack_conf.get("allow_from") or [],
+                        allowed_channel_ids=slack_conf.get("allowed_channel_ids") or [],
+                        default_channel_id=str(slack_conf.get("default_channel_id") or "").strip(),
+                        reply_in_thread=reply_in_thread,
+                    )
+                    slack_channel = SlackChannel(slack_config, _DummyBus())
+                    channel_manager.register_channel(slack_channel)
+                    slack_task = asyncio.create_task(slack_channel.start(), name="slack")
+                    logger.info("[App] SlackChannel registered from config.yaml.channels.slack")
+            else:
+                logger.info("[App] channels.slack missing or invalid, SlackChannel disabled")
 
         if "whatsapp" in changed_channels:
             whatsapp_conf = conf.get("whatsapp") if isinstance(conf, dict) else None
@@ -1685,11 +2423,74 @@ async def _run(
             else:
                 logger.info("[App] channels.wechat missing or invalid, WechatChannel disabled")
 
+        if "ssh" in changed_channels:
+            ssh_conf = conf.get("ssh") if isinstance(conf, dict) else None
+            await _stop_channel(ssh_channel, ssh_task, "ssh")
+            ssh_channel, ssh_task = None, None
+
+            if isinstance(ssh_conf, dict):
+                # 南向经 agent client（如 agentos_router -> yuanrong）动态解析。
+                enabled, reason = _is_channel_enabled(ssh_conf, ["listen_port"])
+                full_cfg = get_config()
+                gateway_cfg = full_cfg.get("gateway") if isinstance(full_cfg, dict) else {}
+                agent_client_cfg = (
+                    gateway_cfg.get("agent_client") if isinstance(gateway_cfg, dict) else {}
+                )
+                client_type = (
+                    str(agent_client_cfg.get("type") or "websocket").strip().lower()
+                    if isinstance(agent_client_cfg, dict)
+                    else "websocket"
+                )
+                if not enabled:
+                    logger.info("[App] channels.ssh.%s, SshChannel disabled", reason)
+                elif client_type != "agentos_router":
+                    logger.warning(
+                        "[App] channels.ssh.enabled=true but gateway.agent_client.type=%s "
+                        "(require agentos_router); SshChannel will not start",
+                        client_type,
+                    )
+                else:
+                    ssh_config = SshChannelConfig.from_dict({**ssh_conf, "enabled": True})
+                    ssh_channel = SshChannel(ssh_config, _DummyBus())
+                    channel_manager.register_channel(ssh_channel)
+                    ssh_task = asyncio.create_task(ssh_channel.start(), name="ssh")
+
+                    def _on_ssh_task_done(task: asyncio.Task) -> None:
+                        try:
+                            task.result()
+                        except asyncio.CancelledError:
+                            return
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error(
+                                "[App] SSH channel failed to start: %s. "
+                                "If SSH is enabled, install optional dependency with "
+                                "`uv sync --extra ssh` or `pip install \"jiuwenswarm[ssh]\"`.",
+                                exc,
+                            )
+
+                    ssh_task.add_done_callback(_on_ssh_task_done)
+                    logger.info(
+                        "[App] SshChannel registered from config.yaml.channels.ssh "
+                        "(listen %s:%s -> MessageHandler; southbound via agent client)",
+                        ssh_config.listen_host,
+                        ssh_config.listen_port,
+                    )
+            else:
+                logger.info("[App] channels.ssh missing or invalid, SshChannel disabled")
+
     channel_manager.set_config_callback(_apply_channel_config)
     await channel_manager.set_config(initial_channels_conf)
 
     await channel_manager.start_dispatch()
+    # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
+    # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
     await cron_scheduler.start()
+    # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
+    try:
+        from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
+        await sync_proactive_tick_job(cron_controller, get_config())
+    except Exception as e:  # noqa: BLE001  # 兜底：启动时 proactive job 注册失败不阻断 Gateway 启动
+        logger.warning("[App] proactive.tick auto-register failed (non-fatal): %s", e)
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     await gateway_server.start()
     gateway_server_task = asyncio.create_task(
@@ -1710,10 +2511,14 @@ async def _run(
             agent_server_url,
         )
 
+    restart_requested = False
     try:
         tasks_to_wait = [task for task in (gateway_server_task, web_task) if task is not None]
         if tasks_to_wait:
-            await asyncio.gather(*tasks_to_wait)
+            restart_requested = await _wait_for_gateway_tasks_or_restart(
+                tasks_to_wait,
+                restart_request,
+            )
     except KeyboardInterrupt:
         logger.info("received Ctrl+C, shutting down...")
     except asyncio.CancelledError:
@@ -1735,6 +2540,8 @@ async def _run(
                 pass
         await gateway_server.stop()
         await acp_inbound_server.stop()
+        if tui_channel is not None:
+            await tui_channel.stop()
         if web_task is not None:
             web_task.cancel()
             try:
@@ -1767,6 +2574,18 @@ async def _run(
             except asyncio.CancelledError:
                 pass
             await xiaoyi_channel.stop()
+        # ---- 从 channel_manager 清理所有动态注册的 channel 实例 ----
+        for _cid in ("feishu", "xiaoyi"):
+            for ch in channel_manager.pop_channels_by_id(_cid):
+                task = getattr(ch, "start_task", None)
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                await ch.stop()
+        # -----------------------------------
         if dingtalk_channel is not None and dingtalk_task is not None:
             dingtalk_task.cancel()
             try:
@@ -1788,6 +2607,13 @@ async def _run(
             except asyncio.CancelledError:
                 pass
             await discord_channel.stop()
+        if slack_channel is not None and slack_task is not None:
+            slack_task.cancel()
+            try:
+                await slack_task
+            except asyncio.CancelledError:
+                pass
+            await slack_channel.stop()
         if whatsapp_channel is not None and whatsapp_task is not None:
             whatsapp_task.cancel()
             try:
@@ -1809,6 +2635,13 @@ async def _run(
             except asyncio.CancelledError:
                 pass
             await wechat_channel.stop()
+        if ssh_channel is not None and ssh_task is not None:
+            ssh_task.cancel()
+            try:
+                await ssh_task
+            except asyncio.CancelledError:
+                pass
+            await ssh_channel.stop()
 
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
@@ -1823,6 +2656,9 @@ async def _run(
             pass
 
         logger.info("[App] Gateway stopped")
+
+    if restart_requested:
+        _exec_gateway_restart()
 
 
 def main() -> None:
@@ -1891,6 +2727,7 @@ def main() -> None:
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
     web_path = args.web_path or os.getenv("WEB_PATH", "/ws")
 
+    install_async_dump_handler("gateway")
     asyncio.run(
         _run(
             agent_server_url=agent_server_url,

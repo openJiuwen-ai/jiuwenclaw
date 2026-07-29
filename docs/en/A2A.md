@@ -60,6 +60,7 @@ uv sync --extra a2a
 | `A2A_SERVER_APP_NAME` | `JiuwenSwarm Gateway A2A Server` | Agent Card `name` |
 | `A2A_SERVER_APP_DESCRIPTION` | `A2A ingress for JiuwenSwarm Gateway` | Agent Card `description` |
 | `A2A_SERVER_APP_VERSION` | `0.1.0` | Agent Card `version` |
+| `A2A_SERVER_EXPOSE_REASONING` | `true` (enabled by default) | when enabled, reasoning (thinking) content is emitted as working-state `TaskStatusUpdateEvent` (see §6.2); set to `false`/`0`/`no`/`off` to drop it |
 
 AgentServer connectivity still follows existing gateway config (for example `AGENT_SERVER_URL`) and is independent from the A2A listening endpoint.
 
@@ -116,8 +117,11 @@ Inbound A2A `message.parts` are mapped into internal `Message.params.query` and 
 
 | Internal | A2A |
 |------|-----|
-| `payload.content`, tool-related events, etc. | `Part(text=...)`, etc. |
+| `payload.content`, tool-related events, etc. | `Part(text=...)`, etc., written into the `response` artifact |
 | `payload.files[]` | `Part` url / data / raw fields |
+| reasoning content (`chat.reasoning`, or `chat.delta` with `source_chunk_type == "llm_reasoning"`) | see below |
+
+**Separating reasoning from the answer**: reasoning content never enters the `response` artifact. By default (`A2A_SERVER_EXPOSE_REASONING` enabled) it is emitted as working-state `TaskStatusUpdateEvent`s whose `status.message.parts[].metadata` carries `{"jiuwen_thought": true}` (mirroring Google ADK's `adk_thought` convention), so callers can structurally render or ignore it. Set to `false`/`0`/`no`/`off` to drop it.
 
 ---
 

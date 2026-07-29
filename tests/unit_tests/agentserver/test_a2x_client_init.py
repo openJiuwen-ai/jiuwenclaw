@@ -129,6 +129,17 @@ class _NotOwnedOnceAsyncA2XRegistryClient(_FakeAsyncA2XRegistryClient):
         return await super().replace_agent_card(dataset, service_id, agent_card, release_lease)
 
 
+class _RegisterFailingAsyncA2XRegistryClient(_FakeAsyncA2XRegistryClient):
+    async def register_blank_agent(
+        self,
+        dataset: str,
+        endpoint: str,
+        service_id: str | None = None,
+        persistent: bool = True,
+    ):
+        raise RuntimeError("register failed")
+
+
 def _make_config(role: str, *, dataset: str = "", endpoint: str = "") -> dict:
     return {
         "react": {
@@ -391,6 +402,70 @@ async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch:
     assert "runtime_cwd" not in kwargs
     assert "project_root" not in kwargs
     assert kwargs["enable_read_image_multimodal"] is True
+
+
+@pytest.mark.asyncio
+async def test_reload_reuses_existing_a2x_client_when_config_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeAsyncA2XRegistryClient.instances.clear()
+    fake_module = ModuleType("jiuwenswarm.agents.harness.team.a2x.client")
+    fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
+
+    config_base = _make_config(
+        "teammate",
+        dataset="team_pool",
+        endpoint="tcp://127.0.0.1:28610",
+    )
+    adapter = JiuWenSwarmDeepAdapter()
+    existing = _FakeAsyncA2XRegistryClient(
+        base_url="http://127.0.0.1:8000",
+        timeout=30.0,
+        api_key=None,
+        ownership_file=False,
+    )
+    adapter._a2x_client = existing
+    adapter._a2x_config = adapter._get_a2x_config(config_base)
+
+    monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
+
+    await adapter._try_init_a2x_client(config_base, reload=True)
+
+    assert _FakeAsyncA2XRegistryClient.instances == [existing]
+    assert existing.closed is False
+    assert adapter._a2x_client is existing
+
+
+@pytest.mark.asyncio
+async def test_reload_keeps_existing_a2x_client_when_unchanged_registration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _RegisterFailingAsyncA2XRegistryClient.instances.clear()
+    fake_module = ModuleType("jiuwenswarm.agents.harness.team.a2x.client")
+    fake_module.AsyncA2XRegistryClient = _RegisterFailingAsyncA2XRegistryClient
+
+    config_base = _make_config(
+        "teammate",
+        dataset="team_pool",
+        endpoint="tcp://127.0.0.1:28610",
+    )
+    adapter = JiuWenSwarmDeepAdapter()
+    existing = _RegisterFailingAsyncA2XRegistryClient(
+        base_url="http://127.0.0.1:8000",
+        timeout=30.0,
+        api_key=None,
+        ownership_file=False,
+    )
+    adapter._a2x_client = existing
+    adapter._a2x_config = adapter._get_a2x_config(config_base)
+
+    monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
+
+    await adapter._try_init_a2x_client(config_base, reload=True)
+
+    assert _RegisterFailingAsyncA2XRegistryClient.instances == [existing]
+    assert existing.closed is False
+    assert adapter._a2x_client is existing
 
 
 def test_make_deep_agent_config_keeps_read_image_multimodal_without_vision_model(

@@ -14,6 +14,8 @@ from jiuwenswarm.common.config import (
     get_config_raw,
     get_evolution_auto_save_enabled,
     get_evolution_auto_scan_enabled,
+    get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
     get_skill_create_enabled,
     get_config,
     invalidate_config_cache,
@@ -22,6 +24,8 @@ from jiuwenswarm.common.config import (
     resolve_env_vars,
     set_config,
     update_skill_retrieval_in_config,
+    update_setup_guide_enabled_in_config,
+    update_xiaoyi_runtime_in_config,
 )
 
 
@@ -120,6 +124,18 @@ class TestResolveEnvVars:
 class TestConfigFunctions:
     """Test config module functions."""
 
+    @staticmethod
+    def test_update_setup_guide_enabled_in_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_setup_guide_enabled_in_config(False)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["setup_guide"] == {"enabled": False}
+
     @pytest.mark.parametrize(
         ("config", "expected"),
         [
@@ -194,6 +210,58 @@ class TestConfigFunctions:
             monkeypatch.setenv("EVOLUTION_AUTO_SCAN", env_value)
 
         assert get_evolution_auto_scan_enabled(config) is expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "fallback", "expected"),
+        [
+            (None, {"react": {"evolution": {"signal_trigger": True}}}, False, True),
+            (None, {"evolution": {"signal_trigger": False}}, True, False),
+            (None, {"evolution": {"signal_trigger": None}}, True, True),
+            (None, {"evolution": {"auto_scan": True}}, False, False),
+            ("false", {"react": {"evolution": {"signal_trigger": True}}}, True, False),
+            ("true", {"react": {"evolution": {"signal_trigger": False}}}, False, True),
+        ],
+    )
+    def test_evolution_signal_trigger_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        fallback,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+        else:
+            monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", env_value)
+
+        assert get_evolution_signal_trigger_enabled(config, fallback=fallback) is expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "fallback", "expected"),
+        [
+            (None, {"react": {"evolution": {"review_trigger": True}}}, False, True),
+            (None, {"evolution": {"review_trigger": False}}, True, False),
+            (None, {"evolution": {"review_trigger": None}}, True, True),
+            (None, {"evolution": {"auto_scan": True}}, False, False),
+            ("false", {"react": {"evolution": {"review_trigger": True}}}, True, False),
+            ("true", {"react": {"evolution": {"review_trigger": False}}}, False, True),
+        ],
+    )
+    def test_evolution_review_trigger_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        fallback,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+        else:
+            monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", env_value)
+
+        assert get_evolution_review_trigger_enabled(config, fallback=fallback) is expected
 
     @pytest.mark.parametrize(
         ("env_value", "config", "expected"),
@@ -368,6 +436,48 @@ symphony:
         assert migrated["symphony"]["fingerprint"]["extraction"]["workers"] == 3
         assert migrated["symphony"]["fingerprint"]["extraction"]["batch_size"] == 1
         assert migrated["symphony"]["fingerprint"]["normalization"]["workers"] == 1
+
+    @staticmethod
+    def test_migrate_config_preserves_legacy_evolution_settings(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+        template_path = tmp_path / "template.yaml"
+        user_config_path = tmp_path / "config.yaml"
+        template_path.write_text(
+            """
+react:
+  evolution:
+    auto_scan: false
+    signal_trigger:
+    review_trigger:
+    auto_save: false
+""",
+            encoding="utf-8",
+        )
+        user_config_path.write_text(
+            """
+react:
+  evolution:
+    auto_scan: true
+    auto_save: true
+""",
+            encoding="utf-8",
+        )
+
+        assert migrate_config_from_template(template_path, user_config_path) is True
+
+        migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
+        assert migrated["react"]["evolution"] == {
+            "auto_scan": True,
+            "signal_trigger": None,
+            "review_trigger": None,
+            "auto_save": True,
+        }
+        assert get_evolution_auto_scan_enabled(migrated) is True
+        assert get_evolution_auto_save_enabled(migrated) is True
 
     @staticmethod
     def test_update_skill_retrieval_preserves_existing_hidden_config(
@@ -769,3 +879,112 @@ modes:
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert "team" not in raw["modes"]
+
+
+class TestUpdateXiaoyiRuntimeInConfig:
+    """push_id 需同时写入顶层与 apps[]，供 cron 与频道重启共用。"""
+
+    @staticmethod
+    def test_writes_top_level_and_matching_app_push_id(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  xiaoyi:
+    apps:
+      - name: 默认应用
+        is_default: true
+        api_id: webhook_api_1
+        agent_id: agent_abc
+        push_id: ""
+      - name: 其他
+        api_id: webhook_api_2
+        agent_id: agent_other
+        push_id: ""
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_xiaoyi_runtime_in_config(
+            {
+                "last_session_id": "sess-1",
+                "last_task_id": "task-1",
+                "last_message_id": "msg-1",
+                "push_id": "push-token-xyz",
+            },
+            api_id="webhook_api_1",
+            agent_id="agent_abc",
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        xy = raw["channels"]["xiaoyi"]
+        assert xy["push_id"] == "push-token-xyz"
+        assert xy["last_session_id"] == "sess-1"
+        assert xy["apps"][0]["push_id"] == "push-token-xyz"
+        assert xy["apps"][1]["push_id"] == ""
+
+    @staticmethod
+    def test_without_push_id_does_not_touch_apps(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  xiaoyi:
+    apps:
+      - name: 默认应用
+        is_default: true
+        api_id: webhook_api_1
+        push_id: keep-me
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_xiaoyi_runtime_in_config(
+            {"last_session_id": "sess-2"},
+            api_id="webhook_api_1",
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        xy = raw["channels"]["xiaoyi"]
+        assert xy["last_session_id"] == "sess-2"
+        assert "push_id" not in xy
+        assert xy["apps"][0]["push_id"] == "keep-me"
+
+    @staticmethod
+    def test_push_id_dumped_without_quotes_even_if_old_app_value_quoted(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        # apps 旧值为单引号空串时，覆盖后顶层与 apps 均应无引号
+        temp_config_file.write_text(
+            """
+channels:
+  xiaoyi:
+    apps:
+      - name: 默认应用
+        is_default: true
+        api_id: webhook_api_1
+        agent_id: agent_abc
+        push_id: ''
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        token = "88062548d4436ba6b6bfb573c641ad5d2a3f10a649dae5f52ad6f31f851cad64"
+        update_xiaoyi_runtime_in_config(
+            {"push_id": token},
+            api_id="webhook_api_1",
+            agent_id="agent_abc",
+        )
+
+        text = temp_config_file.read_text(encoding="utf-8")
+        assert f"push_id: {token}" in text
+        assert f"push_id: '{token}'" not in text
+        assert f'push_id: "{token}"' not in text

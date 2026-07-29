@@ -212,9 +212,12 @@ async def run(args):
 # - Use top-level explicit `from swarmflow import ...` imports for the operators
 #   this script actually uses. Do not use import *, delayed imports, aliases, or
 #   dynamic import/importlib/getattr(sys.modules[...]) lookup. Do not import or
-#   call workflow(...): sub-workflow composition is not part of this template's
-#   supported surface. The supported operators are agent, budget, compact,
-#   flatten_filter, log, map_parallel, parallel, phase, pipeline, and pmap.
+#   call workflow(...): nested workflow composition remains outside this
+#   template's supported surface. The supported operators are agent,
+#   agent_session, budget, compact, flatten_filter, human, human_session, log,
+#   map_parallel, parallel, phase, pipeline, and pmap. AgentSession and
+#   HumanSession are type-only imports; import them only for annotations and
+#   never construct them directly.
 # - Do not define variables, functions, parameters, or classes named like
 #   SwarmFlow operators. They shadow the imported runtime primitives.
 # - Use JSON Schema literals for structured agent outputs. Keep schema but
@@ -226,6 +229,22 @@ async def run(args):
 #   with extract_json(..., fallback={...}). agent() may return None (schema
 #   validation failed) or a raw string (no schema match); extract_json handles
 #   both gracefully.
+# - Use human(...) for one-shot human input. Await it outside parallel thunks,
+#   never pass notify=..., and handle None just as deliberately as an agent
+#   failure. Use a schema when the human answer must be structured.
+# - Use human_session(...) or agent_session(...) only when the same participant
+#   needs multiple turns with persistent context. The factories are synchronous:
+#   assign their return value without await. Await every session.send(...) and
+#   session.aclose() call, keep sends on one session sequential, and close the
+#   session in a finally block. send(notify=True) is one-way and returns None;
+#   never combine notify=True with schema=....
+# - An agent_session consumes one spawn slot when first opened and its turns use
+#   the agent concurrency permit. A human_session consumes neither while waiting
+#   for a person. Account for the former in budgets, and handle None returned by
+#   either session instead of assuming every turn succeeds.
+# - Give human and session interactions stable literal labels. An active phase()
+#   call overrides a session's default phase, so one session may intentionally
+#   continue across multiple workflow phases.
 # - After extract_json(...), verify semantic key fields before treating a
 #   result as successful. Missing or empty key fields should trigger fallback,
 #   retry, or degraded handling.

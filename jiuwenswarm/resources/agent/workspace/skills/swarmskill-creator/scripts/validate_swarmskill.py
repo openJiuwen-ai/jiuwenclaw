@@ -31,8 +31,9 @@ What this script catches (deterministic):
     - Every roles[].skills / roles[].tools in SKILL.md appears in dependencies.yaml
     - scripts/workflow.py, when present, satisfies the executable SwarmFlow
       safety envelope: standalone shape, literal META, inline prompts, safe
-      imports, phase/agent consistency, permissive schemas, and blocked runtime
-      patterns. The full authoring constraint list lives in
+      imports, phase/agent consistency, human/session call discipline,
+      permissive schemas, and blocked runtime patterns. The full authoring
+      constraint list lives in
       templates/scripts/workflow.py.template.
 
 What this script does NOT catch (judgment calls — see reference/compliance-checklist.md):
@@ -482,9 +483,12 @@ def validate_dependencies_yaml(path: Path, report: Report) -> dict[str, list[str
 
 SUPPORTED_SWARMFLOW_OPERATORS = {
     "agent",
+    "agent_session",
     "budget",
     "compact",
     "flatten_filter",
+    "human",
+    "human_session",
     "log",
     "map_parallel",
     "parallel",
@@ -493,6 +497,7 @@ SUPPORTED_SWARMFLOW_OPERATORS = {
     "pmap",
 }
 
+SUPPORTED_SWARMFLOW_TYPES = {"AgentSession", "HumanSession"}
 PROTECTED_SWARMFLOW_NAMES = SUPPORTED_SWARMFLOW_OPERATORS
 NON_DETERMINISTIC_IMPORTS = {"random", "time", "datetime"}
 FILESYSTEM_CALLS = {"open"}
@@ -836,6 +841,58 @@ def _is_module_level_mutable_assignment(node: ast.Assign | ast.AnnAssign) -> boo
     return is_mutable_literal or is_set_call
 
 
+def _session_variable_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        if _call_name(value) not in {"agent_session", "human_session"}:
+            continue
+        targets = [node.target] if isinstance(node, ast.AnnAssign) else list(node.targets)
+        names.update(target.id for target in targets if isinstance(target, ast.Name))
+    return names
+
+
+def _session_method_name(node: ast.Call, session_names: set[str]) -> str | None:
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if not isinstance(func.value, ast.Name):
+        return None
+    if func.value.id not in session_names:
+        return None
+    if func.attr not in {"send", "aclose"}:
+        return None
+    return func.attr
+
+
+def _keyword(node: ast.Call, name: str) -> ast.keyword | None:
+    return next((keyword for keyword in node.keywords if keyword.arg == name), None)
+
+
+def _is_literal_true(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _is_literal_none(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _has_notify_schema_conflict(node: ast.Call) -> bool:
+    notify_kw = _keyword(node, "notify")
+    if notify_kw is None or not _is_literal_true(notify_kw.value):
+        return False
+
+    schema_kw = _keyword(node, "schema")
+    if schema_kw is None:
+        return False
+
+    return not _is_literal_none(schema_kw.value)
+
+
 def _is_asyncio_orchestration_alias_call(node: ast.Call, asyncio_modules: set[str]) -> bool:
     if not isinstance(node.func, ast.Attribute):
         return False
@@ -850,6 +907,8 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     asyncio_modules, asyncio_functions = _asyncio_orchestration_aliases(tree)
+    session_names = _session_variable_names(tree)
+    imported_swarmflow_types = _swarmflow_imported_names(tree) & SUPPORTED_SWARMFLOW_TYPES
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -897,6 +956,21 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                     errors.append(f"line {line}: agent prompt must not be an empty string")
                 if not _is_directly_awaited(node) and not _is_inside_parallel_lambda(node):
                     errors.append(f"line {line}: agent() must be awaited or returned from a parallel thunk")
+            elif call_name == "human":
+                if node.args and _string_literal(node.args[0]) == "":
+                    errors.append(f"line {line}: human prompt must not be an empty string")
+                if _keyword(node, "notify") is not None:
+                    errors.append(f"line {line}: human() does not accept notify; use human_session().send()")
+                if not _is_directly_awaited(node) and not _is_inside_parallel_lambda(node):
+                    errors.append(f"line {line}: human() must be awaited or returned from a parallel thunk")
+            elif call_name in {"agent_session", "human_session"}:
+                if _is_directly_awaited(node):
+                    errors.append(f"line {line}: {call_name}() is synchronous and must not be awaited")
+            elif call_name in imported_swarmflow_types:
+                errors.append(
+                    f"line {line}: do not construct {call_name} directly; "
+                    "use agent_session() or human_session()"
+                )
             elif call_name in {"map_parallel", "pmap"}:
                 warnings.append(
                     f"line {line}: dynamic fan-out should declare an item cap and log skipped work "
@@ -916,6 +990,17 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                 warnings.append(f"line {line}: avoid direct filesystem access in workflow.py")
             elif call_name in {"time.time", "datetime.now", "datetime.utcnow"}:
                 warnings.append(f"line {line}: current time access is non-deterministic; pass values via args")
+
+            method_name = _session_method_name(node, session_names)
+            if method_name is not None:
+                if not _is_directly_awaited(node):
+                    errors.append(
+                        f"line {line}: session.{method_name}() must be awaited"
+                    )
+                if method_name == "send" and _has_notify_schema_conflict(node):
+                    errors.append(
+                        f"line {line}: session.send(notify=True) must not also pass schema"
+                    )
 
             if isinstance(node.func, ast.Attribute) and node.func.attr in PATH_IO_METHODS:
                 warnings.append(
@@ -955,7 +1040,10 @@ def _swarmflow_import_issues(tree: ast.Module) -> list[str]:
             if alias.name == "*":
                 issues.append(f"line {line}: import * from swarmflow is not allowed")
                 continue
-            if alias.name not in SUPPORTED_SWARMFLOW_OPERATORS:
+            if (
+                alias.name not in SUPPORTED_SWARMFLOW_OPERATORS
+                and alias.name not in SUPPORTED_SWARMFLOW_TYPES
+            ):
                 issues.append(f"line {line}: unsupported swarmflow operator {alias.name!r}")
             if alias.asname:
                 issues.append(f"line {line}: import swarmflow.{alias.name} without aliasing it")

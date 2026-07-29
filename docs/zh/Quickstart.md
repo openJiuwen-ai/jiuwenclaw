@@ -58,6 +58,38 @@ jiuwenswarm-start
 
 当看到类似上述提示时，表示服务已启动，在浏览器中访问 `http://localhost:5173` 即可使用。
 
+### 端口冲突自动处理
+
+JiuWenSwarm 默认使用一组固定端口（`18092 / 19000 / 19001 / 5173`）。若启动时检测到某端口已被占用（例如上一次未完全停止、或被其他应用占用），系统会**自动向上扫描相邻索引寻找可用的端口组**并使用，而不会直接退出：
+
+```
+[start_services] ⚠️  Original ports conflict. Falling back to alternative port group (index 1):
+[start_services] Using ports:
+  agent_server: 19092
+  web: 20000
+  gateway: 20001
+  frontend: 6173
+[start_services] TUI/CLI connect with:
+  jiuwenswarm-tui --url ws://127.0.0.1:20001/tui
+  jiuwenswarm chat   (auto-reads GATEWAY_PORT)
+```
+
+选中的新端口会被**持久化**，下次启动和 TUI/CLI 都会自动读到，无需手动记忆。若整段扫描范围内仍无可用端口组，会打印占用排查命令并退出。
+
+如需**强制使用特定端口**，有两种方式：
+
+1. **停掉占用进程**：`jiuwenswarm-start --stop default`（Linux/Mac 可 `lsof -i :19001`，Windows 可 `netstat -ano | findstr :19001` 后 `taskkill /PID <pid> /F`）。
+2. **用环境变量覆盖 base 端口**（适合 Docker / 容器化部署）：
+
+   ```bash
+   # 覆盖 base 端口（index 0 的起始端口，命名实例在其上 +index×1000）
+   export JIUWENSWARM_GATEWAY_PORT=29001
+   export JIUWENSWARM_AGENT_SERVER_PORT=28092
+   export JIUWENSWARM_FRONTEND_PORT=15173
+   export JIUWENSWARM_WEB_PORT=29000
+   jiuwenswarm-start
+   ```
+
 ### 终端 CLI
 
 也可以直接在终端中与 JiuwenSwarm 对话：
@@ -68,13 +100,33 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 详情见 [命令行指令 / 终端 CLI](命令行指令.md#终端-clijiuwenswarm-chat)。
 
+### 远程访问（可选）
+
+如需远程访问，执行以下命令：
+
+```bash
+# 启动 Web 服务
+jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
+
+# 启动后端服务
+jiuwenswarm-app
+```
+
 **配置目录自动创建**：
 首次启动服务后，系统会自动创建配置目录：
 - **Windows**：`C:\Users\<你的用户名>\.jiuwenswarm`
 - **Linux/Mac**：`~/.jiuwenswarm/`
 
 配置文件、记忆文件等数据将存储在该目录下。
-​适合基于JiuwenSwarm进行二次开发适配的用户。
+
+以下安装方式适合基于JiuwenSwarm进行二次开发适配的用户。
+
+首先克隆仓库并进入项目目录：
+
+```bash
+git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+cd jiuwenswarm
+```
 
 ### `uv`方式安装
 - 使用`uv`新建虚拟环境
@@ -94,9 +146,9 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 - 安装前端依赖
 
-  进入前端目录 jiuwenswarm/channels/web/frontend 安装依赖：
+  进入前端目录 `channels/web/frontend` 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -106,14 +158,19 @@ jiuwenswarm chat "你好，介绍一下你自己"
   - 静态运行前端服务（适合生产环境部署）
     ```bash
     npm run build
-    cd ../../
+    # 复制构建产物到用户工作区
+    # Windows:
+    xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
+    # macOS/Linux:
+    cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start
     ```
 
   - 动态运行前端服务（适合开发调试）
     ```bash
-    cd ../../
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start dev
     ```
@@ -127,6 +184,10 @@ jiuwenswarm chat "你好，介绍一下你自己"
   conda create -n JiuwenSwarm python=3.11
   # 或 conda create -n JiuwenSwarm python=3.12
   # 或 conda create -n JiuwenSwarm python=3.13
+  ```
+- 激活 conda 虚拟环境
+  ```bash
+  conda activate JiuwenSwarm
   ```
 - 安装python依赖
 
@@ -142,9 +203,9 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 - 安装前端依赖
 
-  进入前端目录 jiuwenswarm/channels/web/frontend 安装依赖：
+  进入前端目录 `channels/web/frontend` 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -154,14 +215,19 @@ jiuwenswarm chat "你好，介绍一下你自己"
   - 静态运行前端服务（适合生产环境部署）
     ```bash
     npm run build
-    cd ../../
+    # 复制构建产物到用户工作区
+    # Windows:
+    xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
+    # macOS/Linux:
+    cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
+    cd ../../../
     jiuwenswarm-init
     jiuwenswarm-start
     ```
 
   - 动态运行前端服务（适合开发调试）
     ```bash
-    cd ../../
+    cd ../../../
     # 直接启动（不使用 uv run）
     jiuwenswarm-init
     jiuwenswarm-start dev
@@ -173,7 +239,7 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 ## 快速上手
 
-#### 1️⃣ 对话模式
+### 1️⃣ 对话模式
 
 | 方式 | 说明                                        |
 |------|-------------------------------------------|
@@ -181,19 +247,9 @@ jiuwenswarm chat "你好，介绍一下你自己"
 | **小艺频道** | 华为手机用户可直接唤醒小艺，与JiuwenSwarm对话               |
 | **飞书频道** | 完成渠道配置后，在飞书中与JiuwenSwarm畅聊                 |
 
-#### 2️⃣ 配置模型
+### 2️⃣ 配置模型
 
-### 远程访问（可选）
-
-如需远程访问，执行以下命令：
-
-```bash
-# 启动 Web 服务
-jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
-
-# 启动后端服务
-jiuwenswarm-app
-```
+详见下方 [配置模型](#配置模型) 章节。
 
 ## 配置模型
 

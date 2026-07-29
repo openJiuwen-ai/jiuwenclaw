@@ -172,15 +172,28 @@ class HumanRenderer:
         final_text = payload.get("content", "")
         if not isinstance(final_text, str) or not final_text:
             return
+        if not self._streamed_text:
+            self._content_writer(final_text)
+            self._streamed_text = final_text
+            return
+        # chooseFinalAssistantContent logic (same as TUI frontend):
+        # 1) Same or extends streamed → print suffix only
+        # 2) Final is subset of streamed → already displayed, keep streamed
+        # 3) Completely different → keep the longer one internally;
+        #    don't reprint from scratch (terminal can't undo streamed text)
         if final_text == self._streamed_text:
             return
         if final_text.startswith(self._streamed_text):
             suffix = final_text[len(self._streamed_text):]
             self._content_writer(suffix)
             self._streamed_text = final_text
+        elif final_text in self._streamed_text:
+            # Final is a subset of what was already streamed
+            pass
         else:
-            self._content_writer(final_text)
-            self._streamed_text = final_text
+            # Different format — keep the longer version as canonical
+            if len(final_text) >= len(self._streamed_text):
+                self._streamed_text = final_text
 
     def handle_error(self, payload: dict[str, Any]) -> None:
         self.clear_loading()

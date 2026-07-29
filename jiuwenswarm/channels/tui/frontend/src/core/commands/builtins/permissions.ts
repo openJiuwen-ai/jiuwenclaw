@@ -5,6 +5,19 @@ const VALID_LEVELS = new Set(["allow", "ask", "deny"]);
 
 const RULE_MATCH_RE = /^(\S+?)\((.+)\)$/;
 
+// 无空格长 token（如复杂正则 pattern）按固定宽度硬切分，避免 wrapPlainText 整体截断。
+const PATTERN_WRAP_WIDTH = 76;
+const PATTERN_CONT_INDENT = "    ";
+
+function wrapLongToken(text: string, width: number, indent: string): string[] {
+  if (!text) return [];
+  const lines: string[] = [];
+  for (let i = 0; i < text.length; i += width) {
+    lines.push(indent + text.slice(i, i + width));
+  }
+  return lines;
+}
+
 // ---------------------------------------------------------------------------
 // Type helpers
 // ---------------------------------------------------------------------------
@@ -75,15 +88,28 @@ function groupAll(
       ? (r as any).tools.join(", ")
       : String((r as any).tools ?? "");
     const pattern = String((r as any).pattern ?? "");
-    const action = String((r as any).action ?? "").toLowerCase();
+    let action = String((r as any).action ?? "").toLowerCase();
+    // 当 action 未显式配置时，根据 severity 推断（与后端 permission_mode=normal 一致）
+    if (!action || !["allow", "ask", "deny"].includes(action)) {
+      const severity = String((r as any).severity ?? "").toUpperCase();
+      if (severity === "LOW" || severity === "MEDIUM") {
+        action = "allow";
+      } else if (severity === "HIGH" || severity === "CRITICAL") {
+        action = "ask";
+      } else {
+        action = "ask"; // 默认 fallback
+      }
+    }
     const group = action === "allow" ? result.allow : action === "deny" ? result.deny : result.ask;
+    // 缩短 label 中的 pattern 显示，避免过长被截断
+    const shortPattern = pattern.length > 30 ? pattern.slice(0, 27) + "..." : pattern;
     group.rules.push({
       kind: "rule",
       key: rid,
       tools: toolsRawStr,
       pattern,
       action,
-      label: shortenToolList(toolsRawStr) + `(${pattern})`,
+      label: shortenToolList(toolsRawStr) + `(${shortPattern})`,
       description: `pattern: ${pattern}`,
     });
   }
@@ -323,6 +349,30 @@ async function manageRule(
   ctx: CommandCtx,
   entry: RuleEntry,
 ): Promise<"reload" | "exit" | null> {
+  // 规则详情拼进 question（问询标题），固定渲染在选项列表上方，不随焦点跳动；
+  // 且仍属问询 UI 的一部分，选返回/Esc 后随之消失，不再 addItem 进聊天流残留。
+  // pattern 多为无空格长串，wrapPlainText 会整体截断，这里先按可用宽度切分多行。
+  const PATTERN_PREFIX = "  Pattern: ";
+  const chunks = wrapLongToken(
+    entry.pattern,
+    PATTERN_WRAP_WIDTH - PATTERN_PREFIX.length,
+    PATTERN_CONT_INDENT,
+  );
+  const questionLines: string[] = [
+    `当前: ${entry.action}`,
+    `  工具: ${entry.tools}`,
+  ];
+  if (chunks.length === 0) {
+    questionLines.push(PATTERN_PREFIX);
+  } else {
+    questionLines.push(PATTERN_PREFIX + chunks[0].slice(PATTERN_CONT_INDENT.length));
+    for (let i = 1; i < chunks.length; i++) {
+      questionLines.push(chunks[i]);
+    }
+  }
+  questionLines.push("请选择操作:");
+  const question = questionLines.join("\n");
+
   const options = [
     { label: "移到 ALLOW", description: "自动允许匹配此 pattern 的请求" },
     { label: "移到 ASK", description: "匹配时需要确认" },
@@ -331,7 +381,7 @@ async function manageRule(
     { label: "返回", description: "返回列表" },
   ];
 
-  const selected = await pickOne(ctx, `规则: ${entry.key}`, `tools: ${entry.tools}\npattern: ${entry.pattern}\n当前: ${entry.action}`, options, "perm_rule_action");
+  const selected = await pickOne(ctx, `规则: ${entry.key}`, question, options, "perm_rule_action");
   if (!selected || selected === "返回") return null;
 
   if (selected.startsWith("移到 ")) {

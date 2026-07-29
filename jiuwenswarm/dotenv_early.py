@@ -26,8 +26,27 @@ IMPORTANT: This ensures module-level code uses correct workspace path.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
+
+# gRPC C-core hygiene — must be set BEFORE grpc initializes (it is imported
+# lazily by the OTLP/otel exporter and chromadb). This module is the first
+# jiuwenswarm import in every entrypoint, so setting it here guarantees grpc
+# reads it at init.
+#
+# When the agent server forks for tool subprocesses (e.g. the bash tool running
+# ``curl | python3``), grpc's pthread_atfork child handler floods the child's
+# stderr with INFO lines like::
+#
+#   I.... ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(26, ...)
+#
+# which the tool captures via 2>&1 and mixes into its result. The forked child
+# immediately exec()s away and never touches the inherited grpc channel, so
+# disabling fork support removes the handler (and the noise) safely; VERBOSITY
+# is lowered as defense in depth against other INFO-level C-core chatter.
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 
 # Early logger for startup diagnostics (outputs to stderr)
 _early_logger = logging.getLogger("jiuwenswarm.early")
@@ -44,6 +63,63 @@ def _early_warning(component_name: str, message: str) -> None:
 def _early_error(component_name: str, message: str) -> None:
     """Log early error message to stderr."""
     _early_logger.error("[%s] %s", component_name, message)
+
+
+# Port / bind keys injected for the current launch session (desktop or
+# jiuwenswarm-start). When a session flag is set, load_dotenv(override=True)
+# must not clobber them with stale values from ~/.jiuwenswarm/config/.env
+# (e.g. a prior CLI port-fallback residue such as GATEWAY_PORT=20001).
+DESKTOP_PRESERVED_ENV_KEYS = (
+    "WEB_HOST",
+    "WEB_PORT",
+    "GATEWAY_PORT",
+    "AGENT_SERVER_PORT",
+    "AGENT_PORT",
+    "FRONTEND_PORT",
+)
+
+# Flag set by jiuwenswarm-start when it injects the resolved port group into
+# child env. Mirrors JIUWENSWARM_DESKTOP=1 for the CLI launcher path (issue #2749).
+CLI_PORTS_ENV_FLAG = "JIUWENSWARM_CLI_PORTS"
+
+
+def _should_preserve_session_ports() -> bool:
+    """True when this process was launched with an explicit session port remap."""
+    return (
+        os.environ.get("JIUWENSWARM_DESKTOP") == "1"
+        or os.environ.get(CLI_PORTS_ENV_FLAG) == "1"
+    )
+
+
+def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True) -> bool:
+    """load_dotenv wrapper that keeps session-injected port env vars.
+
+    Plain processes behave exactly like ``load_dotenv``. Under
+    ``JIUWENSWARM_DESKTOP=1`` or ``JIUWENSWARM_CLI_PORTS=1``, any of
+    ``DESKTOP_PRESERVED_ENV_KEYS`` already present in ``os.environ`` are
+    restored after loading so the launcher's resolved port group survives
+    ``override=True`` (avoids banner vs Gateway bind mismatch, issue #2749).
+
+    Also drops ``AGENT_SERVER_URL`` in those modes: Gateway prefers that URL
+    over ``AGENT_SERVER_PORT``, so a stale value from .env/shell would bypass
+    the remapped agent port. Without the URL, Gateway builds
+    ``ws://{host}:{AGENT_SERVER_PORT}`` from the injected port.
+    """
+    from dotenv import load_dotenv
+
+    preserve = _should_preserve_session_ports()
+    saved = (
+        {k: os.environ[k] for k in DESKTOP_PRESERVED_ENV_KEYS if k in os.environ}
+        if preserve
+        else {}
+    )
+    loaded = load_dotenv(dotenv_path=dotenv_path, override=override)
+    if saved:
+        os.environ.update(saved)
+    if preserve:
+        # Prefer remapped AGENT_SERVER_PORT over any URL from .env/parent env.
+        os.environ.pop("AGENT_SERVER_URL", None)
+    return loaded
 
 
 def parse_dotenv_early(component_name: str = "jiuwenswarm") -> Path | None:
@@ -91,8 +167,7 @@ def parse_dotenv_early(component_name: str = "jiuwenswarm") -> Path | None:
         # --dotenv takes priority
         dotenv_file = Path(dotenv_path).expanduser().resolve()
         if dotenv_file.exists():
-            from dotenv import load_dotenv
-            load_dotenv(dotenv_file, override=True)
+            load_dotenv_runtime(dotenv_file, override=True)
             result = dotenv_file
         else:
             _early_warning(component_name, f"--dotenv file not found: {dotenv_file}")
@@ -121,7 +196,6 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
     Returns:
         Path to loaded .env if successful, None otherwise
     """
-    import os
 
     # Basic instance name validation (just check it's not empty/reserved)
     if not name or name.lower() in ("default", "config", "tmp"):
@@ -170,8 +244,7 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
     # Load bootstrap .env
     bootstrap_env = workspace / ".env"
     if bootstrap_env.exists():
-        from dotenv import load_dotenv
-        load_dotenv(bootstrap_env, override=True)
+        load_dotenv_runtime(bootstrap_env, override=True)
         return bootstrap_env
     else:
         # Bootstrap .env doesn't exist - need to create it
@@ -179,8 +252,7 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
         from jiuwenswarm.instance_manager.bootstrap import _create_basic_bootstrap_env
         _create_basic_bootstrap_env(name, workspace, component_name)
         if bootstrap_env.exists():
-            from dotenv import load_dotenv
-            load_dotenv(bootstrap_env, override=True)
+            load_dotenv_runtime(bootstrap_env, override=True)
             return bootstrap_env
         return None
 
@@ -233,7 +305,10 @@ def load_instance_bootstrap_by_name(name: str) -> Path | None:
 
 
 __all__ = [
+    "CLI_PORTS_ENV_FLAG",
+    "DESKTOP_PRESERVED_ENV_KEYS",
     "parse_dotenv_early",
+    "load_dotenv_runtime",
     "get_parsed_dotenv",
     "set_component_name",
     "load_instance_bootstrap_by_name",

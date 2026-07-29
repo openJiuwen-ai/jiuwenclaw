@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -27,7 +28,7 @@ TUI_TARGETS = {
 
 
 def run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
-    print(f"[build] ({cwd.relative_to(ROOT) if cwd != ROOT else '.'}) {' '.join(cmd)}")
+    logging.info(f"[build] ({cwd.relative_to(ROOT) if cwd != ROOT else '.'}) {' '.join(cmd)}")
     subprocess.run(cmd, cwd=cwd, check=True, env=env)
 
 
@@ -82,13 +83,21 @@ def build_tui_binary(target: str, clean: bool) -> None:
     run(cmd, ROOT)
 
 
+class MissingJsDependenciesError(RuntimeError):
+    """Raised when TUI frontend node_modules is missing and auto-install is disabled."""
+
+
+class InvalidTargetError(ValueError):
+    """Raised when --target contains unknown TUI build target(s)."""
+
+
 def ensure_js_dependencies(install: bool) -> None:
     node_modules = TUI_ROOT / "node_modules"
     if node_modules.exists():
         return
 
     if not install:
-        raise SystemExit(
+        raise MissingJsDependenciesError(
             "\n".join(
                 [
                     "missing JavaScript dependencies for jiuwenswarm/channels/tui/frontend",
@@ -120,7 +129,7 @@ def resolve_requested_targets(raw: str) -> list[str]:
     unknown = [value for value in values if value not in TUI_TARGETS]
     if unknown:
         valid = ", ".join(["current", "all", *TUI_TARGETS.keys()])
-        raise SystemExit(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
+        raise InvalidTargetError(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
     return values
 
 
@@ -204,17 +213,19 @@ def main() -> None:
     if not args.skip_jiuwenbox:
         build_jiuwenbox_wheel()
 
-    print("\n[build] done")
+    logging.info("\n[build] done")
     if not args.skip_root:
-        print(f"[build] main wheel: {SIDE_CAR_DIST}")
+        logging.info(f"[build] main wheel: {SIDE_CAR_DIST}")
     if not args.skip_sidecar:
-        print(f"[build] tui wheel(s): {SIDE_CAR_DIST}")
+        logging.info(f"[build] tui wheel(s): {SIDE_CAR_DIST}")
     if not args.skip_jiuwenbox:
-        print(f"[build] jiuwenbox wheel: {JIUWENBOX_DIST}")
+        logging.info(f"[build] jiuwenbox wheel: {JIUWENBOX_DIST}")
 
 
 if __name__ == "__main__":
     try:
         main()
+    except (MissingJsDependenciesError, InvalidTargetError) as exc:
+        raise SystemExit(str(exc)) from exc
     except subprocess.CalledProcessError as exc:
         raise SystemExit(exc.returncode) from exc

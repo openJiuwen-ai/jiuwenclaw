@@ -223,7 +223,7 @@ Agent Team 模式下同样支持技能（Skills）的使用和开发。团队中
 2. **共享工具资源**：团队共享技能可以让所有成员使用同一套工具，避免重复开发
 3. **协作效率提升**：技能可以让 Agent 更高效地完成分配的任务
 
-> 有关 Team Skills 的详细使用和开发教程，请参阅 [Team Skill 开发指南](TeamSkill.md)。
+> 有关 Team Skills 的详细使用和开发教程，请参阅 [Team Skill 开发指南](TeamSkills.md)。
 
 ### 2.5 Team Memory
 

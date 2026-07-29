@@ -10,6 +10,7 @@ AI 智能分析器
 
 import asyncio
 import json
+import logging
 import os
 from collections import Counter
 from dataclasses import dataclass, field
@@ -133,7 +134,7 @@ class AIAnalyzer:
                                 config["api_base"] = client_config.get("api_base", config["api_base"])
                                 config["api_key"] = client_config.get("api_key", config["api_key"])
             except Exception:
-                print(f"[AIAnalyzer] 加载配置文件失败")
+                logging.info(f"[AIAnalyzer] 加载配置文件失败")
 
         return config
 
@@ -186,7 +187,6 @@ class AIAnalyzer:
             response = await model.invoke(messages=messages)
             return response.content if hasattr(response, "content") else str(response)
         except Exception:
-            print(f"[AIAnalyzer] LLM 调用失败")
             return ""
 
     def generate_summary_sync(self, data: dict) -> str:

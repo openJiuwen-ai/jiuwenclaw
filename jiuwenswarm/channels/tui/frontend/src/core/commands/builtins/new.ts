@@ -16,7 +16,12 @@ export function createNewCommand(): SlashCommand {
         return;
       }
       const nextId = args.trim() || generateSessionId();
-      await ctx.request("session.create", { session_id: nextId });
+      await ctx.request("session.create", {
+        session_id: nextId,
+        previous_session_id: ctx.sessionId,
+        previous_mode: ctx.mode,
+        mode: ctx.mode,
+      });
       ctx.updateSession(nextId);
       ctx.clearEntries();
       ctx.addItem(makeItem(nextId, "info", `Switched to session ${nextId}`, "i"));

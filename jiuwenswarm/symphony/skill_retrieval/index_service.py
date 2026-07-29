@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import tempfile
 import threading
 import time
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
@@ -12,13 +13,13 @@ from typing import Any
 
 import yaml
 
+from .catalog import CATALOG_FILENAME, load_catalog_by_worker
 from .config import SkillRetrievalSettings, load_settings
 from .dispatch_imports import dispatch_import_path
 from .inventory import SkillInventory, scan_skill_inventory
 from .markdown import render_build_failure, render_build_success, render_disabled
 
 TREE_INDEX_FILENAME = "tree_index.yaml"
-CATALOG_FILENAME = "catalog.jsonl"
 MANIFEST_FILENAME = "manifest.json"
 STATE_FILENAME = "state.json"
 LOGGER = logging.getLogger(__name__)
@@ -293,10 +294,14 @@ class SkillIndexService:
             if _is_stale_index(settings, inventory, expected):
                 _cleanup_index(settings)
             error = _normalize_build_error(exc)
+            failed_state = _build_state_from_state(_read_state(settings))
+            failed_stage = failed_state.get("stage") or "failed"
+            if failed_stage not in {"llm_check", "build", "publish"}:
+                failed_stage = "failed"
             _write_build_state(
                 settings,
                 status="failed",
-                stage="failed",
+                stage=failed_stage,
                 message="Skill index build failed.",
                 error=error,
                 progress=1.0,
@@ -409,7 +414,7 @@ class SkillIndexService:
     def tree(self, *, language: str = "cn") -> dict[str, Any]:
         settings = load_settings()
         if not settings.enabled:
-            return {"success": False, "result": render_disabled()}
+            return {"success": False, "result": render_disabled(language)}
 
         index_dir = _index_dir(settings)
         inventory = scan_skill_inventory(self._manager)
@@ -444,7 +449,8 @@ class SkillIndexService:
 
         branch_count = sum(1 for node in nodes if isinstance(node, dict) and node.get("type") == "branch")
         leaf_count = sum(1 for node in nodes if isinstance(node, dict) and node.get("type") == "leaf")
-        tree_nodes = _tree_node_payload(nodes)
+        catalog_by_worker = load_catalog_by_worker(index_dir)
+        tree_nodes = _tree_node_payload(nodes, catalog_by_worker=catalog_by_worker)
         return {
             "success": True,
             "result": (
@@ -546,35 +552,65 @@ class SkillIndexService:
     @staticmethod
     def _check_build_llm_access(settings: SkillRetrievalSettings) -> None:
         try:
-            from openai import OpenAI
-        except ModuleNotFoundError as exc:
-            raise RuntimeError("The openai package is required to build the skill index.") from exc
-
-        client = OpenAI(
-            api_key=settings.llm.api_key,
-            base_url=settings.llm.base_url or None,
-        )
-        try:
-            client.chat.completions.create(
-                model=settings.llm.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": "Reply with OK. This is a connectivity check before building a local skill index.",
-                    }
-                ],
-                max_tokens=8,
-                timeout=settings.build.request_timeout_seconds,
-                stream=False,
-                extra_body={
-                    "thinking": {"type": "disabled"},
-                    "chat_template_kwargs": {"enable_thinking": False},
-                    "temperature": 0.0,
-                    "top_p": 1.0,
-                },
-            )
+            SkillIndexService._check_build_llm_access_with_tree_runtime(settings)
         except Exception as exc:
             raise RuntimeError(f"Skill index build model is not reachable or rejected the request: {exc}") from exc
+
+    @staticmethod
+    def _check_build_llm_access_with_tree_runtime(settings: SkillRetrievalSettings) -> None:
+        with dispatch_import_path():
+            from indexing.tree import DynamicTreeConfig, TreeBuildConfig, TreeManagerConfig
+            from indexing.tree.builder import TreeBuilder
+            from indexing.tree.llm_runtime import TreeLLMRuntime
+            from indexing.tree.schema import normalize_root_categories
+            from indexing.workflows.artifacts import resolve_build_config
+
+            config = SkillIndexService._make_build_config(settings)
+            resolved = resolve_build_config(config=config)
+            taxonomy = resolved.taxonomy_config
+            execution = resolved.execution_config
+            root_categories = normalize_root_categories(taxonomy.root_categories)
+            with tempfile.TemporaryDirectory(prefix="skill-index-llm-check-") as tmpdir:
+                tmp_path = Path(tmpdir)
+                builder = TreeBuilder(
+                    skills_dir=tmp_path,
+                    output_path=tmp_path / "tree_index.yaml",
+                    config=DynamicTreeConfig(
+                        branching_factor=taxonomy.branching_factor,
+                        max_depth=taxonomy.max_depth,
+                        root_categories=root_categories,
+                    ),
+                    manager_config=TreeManagerConfig(
+                        branching_factor=taxonomy.branching_factor,
+                        max_depth=taxonomy.max_depth,
+                        root_categories=root_categories,
+                        build=TreeBuildConfig(
+                            max_workers=1,
+                            num_retries=execution.max_retries,
+                            timeout=execution.request_timeout_seconds,
+                            classify_batch_cap=execution.classification_batch_limit,
+                            postprocess_enabled=taxonomy.postprocess_enabled,
+                            postprocess_max_passes=taxonomy.postprocess_max_passes,
+                            postprocess_min_skills=taxonomy.postprocess_min_skills,
+                            equiv_grouping_enabled=taxonomy.equivalence_enabled,
+                            discovery_seed=execution.discovery_seed,
+                        ),
+                    ),
+                    client=resolved.llm_config.client,
+                    model=resolved.llm_config.model,
+                    api_key=resolved.llm_config.api_key,
+                    base_url=resolved.llm_config.base_url,
+                    llm_seed=resolved.llm_config.seed,
+                    max_workers=1,
+                    item_type="skill",
+                )
+                with _suppress_dispatch_console():
+                    result = TreeLLMRuntime(builder).call_llm_json(
+                        'Return exactly this JSON object and no extra text: {"ok": true}',
+                        max_retries=1,
+                    )
+            if result.get("ok") is not True:
+                raise RuntimeError(f"unexpected connectivity check response: {result!r}")
 
     @staticmethod
     def _recover_index(
@@ -1131,7 +1167,7 @@ def _render_tree_outline(nodes: list[Any], *, max_nodes: int = 400) -> str:
     return "\n".join(lines) if lines else "(empty tree)"
 
 
-def _tree_node_payload(nodes: list[Any]) -> list[dict[str, Any]]:
+def _tree_node_payload(nodes: list[Any], *, catalog_by_worker: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     known_cids: set[str] = set()
     for raw in nodes:
@@ -1152,6 +1188,8 @@ def _tree_node_payload(nodes: list[Any]) -> list[dict[str, Any]]:
             parent_cid = ""
         node_type = str(raw.get("type") or "").strip() or "branch"
         worker_id = str(raw.get("worker_id") or "").strip()
+        catalog = catalog_by_worker.get(worker_id, {})
+        skill_name = str(catalog.get("name") or "").strip() if node_type == "leaf" else ""
         fallback_label = worker_id if node_type == "leaf" and worker_id else cid.rsplit(".", 1)[-1]
         out.append(
             {
@@ -1164,6 +1202,7 @@ def _tree_node_payload(nodes: list[Any]) -> list[dict[str, Any]]:
                 "dont_select_when": str(raw.get("dont_select_when") or "").strip(),
                 "source_description": str(raw.get("source_description") or "").strip(),
                 "worker_id": worker_id,
+                "skill_name": skill_name,
                 "category": str(raw.get("category") or "").strip(),
                 "keywords": _string_list(raw.get("keywords")),
                 "examples": _string_list(raw.get("examples")),

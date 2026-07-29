@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
+from .catalog import CATALOG_FILENAME, load_catalog_by_worker
 from .config import load_settings
 from .dispatch_imports import dispatch_import_path
-from .index_service import CATALOG_FILENAME, _index_dir
+from .index_service import _index_dir
 from .markdown import render_disabled, render_retrieve_failure, render_retrieve_success
 from .skill_tree import build_skill_tree_payload
 
@@ -53,7 +53,7 @@ class SkillRetrieveService:
             }
 
         index_dir = _index_dir(settings)
-        catalog_by_worker = _load_catalog(index_dir)
+        catalog_by_worker = load_catalog_by_worker(index_dir)
         try:
             result = self._run_dispatch_retrieve(settings=settings, index_dir=index_dir, query=normalized_query)
         except Exception as exc:
@@ -132,31 +132,6 @@ def run_structured_skill_retrieve(*, settings: Any, index_dir: Path, query: str)
             )
         finally:
             retriever.close()
-
-
-def _load_catalog(index_dir: Path) -> dict[str, dict[str, Any]]:
-    out: dict[str, dict[str, Any]] = {}
-    path = index_dir / CATALOG_FILENAME
-    if not path.is_file():
-        return out
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        item = _load_catalog_line(line)
-        if item is None:
-            continue
-        worker_id = str(item.get("worker_id") or "").strip()
-        if worker_id:
-            out[worker_id] = item
-    return out
-
-
-def _load_catalog_line(line: str) -> dict[str, Any] | None:
-    try:
-        item = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    return item if isinstance(item, dict) else None
 
 
 def _settings_summary(settings: Any) -> str:

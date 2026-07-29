@@ -87,6 +87,13 @@ def code_runtime_language(ctx: SwarmBuildContext) -> str:
     return "en"
 
 
+def structured_ask_user_language(ctx: SwarmBuildContext) -> str:
+    """Resolve the StructuredAskUserRail language for team/code profiles."""
+    if ctx.role == "leader" and ctx.mode in {"team", "team.plan"}:
+        return resolve_language((ctx.config or {}).get("preferred_language", "zh"))
+    return code_runtime_language(ctx)
+
+
 def _project_dir(ctx: SwarmBuildContext) -> str:
     """Resolve the code project directory from the build context."""
     workspace_root = (
@@ -138,6 +145,10 @@ def build_code_runtime_prompt(params: dict[str, Any], ctx: SwarmBuildContext) ->
     try:
         inp = CodeRuntimePromptInput.resolve(params, ctx)
         rail = RuntimePromptRail(language=inp.language, channel=inp.channel)
+        # Code-team members need the same per-request runtime binding as the
+        # regular team profile; otherwise mode falls back to "unknown".
+        rail.set_mode(ctx.mode)
+        rail.set_session_id(ctx.session_id)
         rail.set_runtime_paths(cwd=inp.project_dir, project_dir=inp.project_dir)
         return rail
     except Exception as exc:
@@ -383,9 +394,9 @@ class StructuredAskUserInput(ConstructionInput):
     """Construction inputs for the structured ask-user rail."""
 
     language: str = context_field(
-        resolver=code_runtime_language,
+        resolver=structured_ask_user_language,
         default="en",
-        description="Code runtime language.",
+        description="Structured ask-user language.",
     )
 
 
@@ -544,4 +555,5 @@ __all__ = [
     "CODE_SKILL_USE",
     "CODING_MEMORY_EXTRAS_KEY",
     "code_runtime_language",
+    "structured_ask_user_language",
 ]

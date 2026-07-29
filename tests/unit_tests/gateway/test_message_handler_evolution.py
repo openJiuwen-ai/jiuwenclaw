@@ -141,11 +141,13 @@ class _TestMessageHandler(MessageHandler):
         old_sid: str | None,
         *,
         publish_interrupt_result: bool = True,
+        agent_notify: str = "await",
     ) -> None:
         await self._cancel_agent_work_for_session(
             msg,
             old_sid,
             publish_interrupt_result=publish_interrupt_result,
+            agent_notify=agent_notify,  # type: ignore[arg-type]
         )
 
     def build_queued_chat_send_message(
@@ -366,6 +368,87 @@ def _control_message() -> Message:
     )
 
 
+@pytest.mark.parametrize("path", ["stream", "server_push"])
+@pytest.mark.asyncio
+async def test_regular_stream_chunks_do_not_read_evolution_auto_save_config(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    calls = 0
+
+    def count_auto_save_reads() -> bool:
+        nonlocal calls
+        calls += 1
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.message_handler.message_handler.get_evolution_auto_save_enabled",
+        count_auto_save_reads,
+    )
+    handler = _TestMessageHandler.create()
+
+    payload = {"event_type": "chat.delta", "content": "chunk"}
+    if path == "stream":
+        published = await handler.publish_stream_chunk(
+            SimpleNamespace(
+                channel_id="web",
+                request_id="stream-1",
+                payload=payload,
+                is_complete=False,
+            ),
+            session_id="sess-1",
+        )
+        assert published is True
+    else:
+        await handler.handle_agent_server_push(
+            {
+                "request_id": "stream-1",
+                "channel_id": "web",
+                "session_id": "sess-1",
+                "is_complete": False,
+                "payload": payload,
+                "metadata": {},
+            }
+        )
+
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_interrupt_evolution_approval_does_not_read_auto_save_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def count_auto_save_reads() -> bool:
+        nonlocal calls
+        calls += 1
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.message_handler.message_handler.get_evolution_auto_save_enabled",
+        count_auto_save_reads,
+    )
+    handler = _TestMessageHandler.create()
+    chunk = _evolution_question_chunk("call_123", include_approval_context=True)
+    chunk.payload["evolution_meta"] = _interrupt_approval_meta()
+
+    should_publish = await handler.publish_stream_chunk(
+        chunk,
+        session_id="sess-1",
+        request_metadata={"k": "v"},
+    )
+
+    assert calls == 0
+    assert should_publish is True
+    assert handler.pending_evolution_approval("sess-1") == "call_123"
+    assert handler.user_message_queue_empty() is True
+    out = await handler.consume_robot_messages(timeout=0)
+    assert out is not None
+    assert out.payload["request_id"] == "call_123"
+    assert out.metadata == {"k": "v"}
+
+
 def test_processing_status_is_only_emitted_for_chat_streams() -> None:
     handler = _TestMessageHandler.create()
 
@@ -375,6 +458,92 @@ def test_processing_status_is_only_emitted_for_chat_streams() -> None:
     assert handler.should_emit_processing_status_for_stream(
         _message(ReqMethod.HISTORY_GET)
     ) is False
+
+
+
+@pytest.mark.asyncio
+async def test_permission_resume_stream_keeps_processing_while_goal_stream_active() -> None:
+    """command.goal (emit=False) still blocks processing_status=false on permission ack."""
+    handler = _TestMessageHandler.create()
+    _FakeAgentClient.stream_payloads = [
+        {"event_type": "runtime.accepted", "request_id": "perm-1"},
+    ]
+    # Seed an in-flight Goal stream on the same session (emit=False).
+    getattr(handler, "_stream_emits_processing_status")["goal-1"] = False
+    getattr(handler, "_stream_methods")["goal-1"] = ReqMethod.COMMAND_GOAL.value
+    getattr(handler, "_stream_sessions")["goal-1"] = "sess-goal"
+    getattr(handler, "_stream_modes")["goal-1"] = "agent"
+    getattr(handler, "_stream_channels")["goal-1"] = "web"
+
+    await handler.process_stream(
+        SimpleNamespace(
+            request_id="perm-1",
+            channel="web",
+            method=ReqMethod.CHAT_SEND.value,
+            params={
+                "source": "permission_interrupt",
+                "request_id": "call_perm_1",
+                "answers": [{"selected_options": ["allow_once"]}],
+            },
+        ),
+        "sess-goal",
+        None,
+        emit_processing_status=True,
+    )
+
+    payloads = await _drain_robot_payloads_for_permission_resume(handler)
+    assert not any(
+        p.get("event_type") == "chat.processing_status"
+        and p.get("is_processing") is False
+        for p in payloads
+    )
+    # Goal tracking must still be present after the short resume stream exits.
+    assert "goal-1" in getattr(handler, "_stream_sessions")
+
+
+@pytest.mark.asyncio
+async def test_chat_send_clears_processing_while_history_get_stream_active() -> None:
+    """history.get must not block processing_status=false (unlike command.goal)."""
+    handler = _TestMessageHandler.create()
+    _FakeAgentClient.stream_payloads = [
+        {"event_type": "chat.final", "content": "done"},
+    ]
+    getattr(handler, "_stream_emits_processing_status")["hist-1"] = False
+    getattr(handler, "_stream_methods")["hist-1"] = ReqMethod.HISTORY_GET.value
+    getattr(handler, "_stream_sessions")["hist-1"] = "sess-chat"
+    getattr(handler, "_stream_modes")["hist-1"] = "agent"
+    getattr(handler, "_stream_channels")["hist-1"] = "web"
+
+    await handler.process_stream(
+        SimpleNamespace(
+            request_id="chat-1",
+            channel="web",
+            method=ReqMethod.CHAT_SEND.value,
+            params={"query": "hello"},
+        ),
+        "sess-chat",
+        None,
+        emit_processing_status=True,
+    )
+
+    payloads = await _drain_robot_payloads_for_permission_resume(handler)
+    assert any(
+        p.get("event_type") == "chat.processing_status"
+        and p.get("is_processing") is False
+        for p in payloads
+    )
+    assert "hist-1" in getattr(handler, "_stream_sessions")
+
+
+async def _drain_robot_payloads_for_permission_resume(handler: _TestMessageHandler) -> list[dict]:
+    payloads: list[dict] = []
+    while True:
+        out = await handler.consume_robot_messages(timeout=0)
+        if out is None:
+            break
+        if isinstance(out.payload, dict):
+            payloads.append(out.payload)
+    return payloads
 
 
 def test_queued_supplement_message_instructs_todo_continuation():
@@ -771,3 +940,106 @@ async def test_default_cancel_publishes_interrupt_result() -> None:
     out = await handler.consume_robot_messages(timeout=0)
     assert out is not None
     assert out.payload == _FakeAgentClient.response_payload
+
+
+@pytest.mark.asyncio
+async def test_fire_and_forget_cancel_publishes_interrupt_result() -> None:
+    handler = _TestMessageHandler.create()
+
+    await handler.cancel_agent_work_for_session(
+        _control_message(),
+        "sess-1",
+        agent_notify="fire_and_forget",
+    )
+
+    out = await handler.consume_robot_messages(timeout=0)
+    assert out is not None
+    assert out.payload == {
+        "event_type": "chat.interrupt_result",
+        "intent": "cancel",
+        "success": True,
+        "message": "任务已取消",
+    }
+    await asyncio.sleep(0)
+    assert len(_FakeAgentClient.sent_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_fire_and_forget_cancel_forwards_cancelled_tools() -> None:
+    """Background interrupt must still push chat.tool_result for cancelled tools."""
+    handler = _TestMessageHandler.create()
+    old_payload = dict(_FakeAgentClient.response_payload)
+    _FakeAgentClient.response_payload = {
+        "event_type": "chat.interrupt_result",
+        "intent": "cancel",
+        "success": True,
+        "message": "任务已取消",
+        "cancelled_tools": [
+            {
+                "tool_name": "task_tool",
+                "tool_call_id": "call_spin",
+                "result": "[Interrupted] Tool execution cancelled by user.",
+                "status": "error",
+            }
+        ],
+    }
+    try:
+        await handler.cancel_agent_work_for_session(
+            _control_message(),
+            "sess-1",
+            agent_notify="fire_and_forget",
+        )
+
+        interrupt_out = await handler.consume_robot_messages(timeout=0)
+        assert interrupt_out is not None
+        assert interrupt_out.payload["event_type"] == "chat.interrupt_result"
+
+        # Wait for fire-and-forget task to publish tool_result
+        tool_out = None
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while asyncio.get_running_loop().time() < deadline:
+            tool_out = await handler.consume_robot_messages(timeout=0.05)
+            if tool_out is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        assert tool_out is not None
+        assert tool_out.event_type.value == "chat.tool_result"
+        assert tool_out.payload["tool_result"]["tool_call_id"] == "call_spin"
+        assert "[Interrupted]" in tool_out.payload["tool_result"]["result"]
+    finally:
+        _FakeAgentClient.response_payload = old_payload
+
+
+@pytest.mark.asyncio
+async def test_forward_loop_cancel_intent_uses_fire_and_forget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CHAT_CANCEL intent=cancel 必须 fire_and_forget，避免堵 _forward_loop。"""
+    handler = _TestMessageHandler.create()
+    notify_modes: list[str] = []
+
+    async def _spy_cancel(msg, old_sid, **kwargs):
+        notify_modes.append(str(kwargs.get("agent_notify", "await")))
+
+    monkeypatch.setattr(handler, "_cancel_agent_work_for_session", _spy_cancel)
+    await handler.start_forwarding()
+    try:
+        cancel_msg = Message(
+            id="cancel-fire-and-forget",
+            type="req",
+            channel_id="web",
+            session_id="sess-1",
+            params={"intent": "cancel", "session_id": "sess-1"},
+            timestamp=0.0,
+            ok=True,
+            req_method=ReqMethod.CHAT_CANCEL,
+            is_stream=False,
+        )
+        await handler.publish_user_messages(cancel_msg)
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while not notify_modes and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert notify_modes == ["fire_and_forget"]
+    finally:
+        await handler.stop_forwarding()
