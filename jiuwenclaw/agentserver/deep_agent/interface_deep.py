@@ -6285,9 +6285,14 @@ class JiuWenClawDeepAdapter:
         SemVer string (``1.0.0``). When omitted, the newest body archive by mtime
         is used.
 
-        Returns ``(success, evo_restored)``. ``evo_restored`` is meaningful only
-        when ``success`` is True; False means body was rolled back but the paired
-        evolution log could not be restored.
+        After restoring the skill body, always clears live ``evolutions.json``
+        (empty evolution log), retaining the restored SKILL.md frontmatter
+        version or defaulting to ``v1.0.0``. Archive files under ``archive/``
+        are unchanged except the consumed body archive version.
+
+        Returns ``(success, evo_cleared)``. ``evo_cleared`` is meaningful only
+        when ``success`` is True; False means body was rolled back but the live
+        evolution log could not be cleared.
         """
         archive = store.get_skill_archive_dir(skill_name)
         if archive is None:
@@ -6321,8 +6326,6 @@ class JiuWenClawDeepAdapter:
                 return False, True
             body_archive = body_files[0]
 
-        evo_archive = store.resolve_paired_evolution_archive(skill_name, body_archive.name)
-
         old_body = await store.read_archive_text(skill_name, body_archive.name)
         if not old_body:
             logger.warning(
@@ -6335,22 +6338,36 @@ class JiuWenClawDeepAdapter:
         await store.archive_current_state(skill_name)
         await store.write_skill_content(skill_name, old_body)
 
-        # Body write is the primary commit. Evolution-log restore is best-effort:
-        # failure must not report overall rollback failure after body already changed.
-        evo_restored = True
-        if evo_archive is not None:
-            restored = await store.restore_evolution_log_from_archive(
-                skill_name, evo_archive.name,
+        # Retain version from the restored SKILL.md frontmatter; default to
+        # v1.0.0 when absent so we never keep the pre-rollback live log version.
+        retain_version = "v1.0.0"
+        extract_version = getattr(store, "_extract_version_from_skill_md", None)
+        if callable(extract_version):
+            parsed_version = extract_version(old_body)
+            if parsed_version:
+                retain_version = parsed_version
+
+        # Body write is the primary commit. Clearing the live evolution log is
+        # best-effort: failure must not report overall rollback failure after
+        # body already changed.
+        evo_cleared = True
+        try:
+            cleared = await store.clear_evolutions(
+                skill_name, retain_version=retain_version,
             )
-            if not restored:
-                evo_restored = False
+            if cleared is False:
+                evo_cleared = False
                 logger.warning(
-                    "[JiuWenClaw] body rolled back but evolution log restore failed for %s: %s",
+                    "[JiuWenClaw] body rolled back but failed to clear evolution log for %s",
                     skill_name,
-                    evo_archive.name,
                 )
-        else:
-            await store.clear_evolutions(skill_name)
+        except Exception as exc:
+            evo_cleared = False
+            logger.warning(
+                "[JiuWenClaw] body rolled back but failed to clear evolution log for %s: %s",
+                skill_name,
+                exc,
+            )
 
         deleted = await store.delete_archive_version(skill_name, body_archive.name)
         if not deleted:
@@ -6360,7 +6377,7 @@ class JiuWenClawDeepAdapter:
                 body_archive.name,
             )
 
-        if evo_restored:
+        if evo_cleared:
             logger.info(
                 "[JiuWenClaw] disk rollback completed for %s -> %s",
                 skill_name,
@@ -6369,11 +6386,11 @@ class JiuWenClawDeepAdapter:
         else:
             logger.warning(
                 "[JiuWenClaw] disk rollback completed for %s -> %s "
-                "(skill body restored; evolution log may be inconsistent)",
+                "(skill body restored; evolution log was not cleared)",
                 skill_name,
                 body_archive.name,
             )
-        return True, evo_restored
+        return True, evo_cleared
 
     async def _do_evolve_rollback(
         self, skill_name: str, version: str | None,
@@ -6464,8 +6481,8 @@ class JiuWenClawDeepAdapter:
                 result["skill_path"] = skill_path
             if not evo_ok:
                 result["warning"] = (
-                    "Skill body 已回滚，但 evolution log 恢复失败，"
-                    "演进历史可能不一致。请检查该 Skill 的 archive 与 evolutions.json。"
+                    "Skill body 已回滚，但 evolution log 清空失败，"
+                    "请检查该 Skill 的 evolutions.json。"
                 )
             return result
         return {"ok": False, "error": f"Skill '{skill_name}' 回滚失败，请检查归档版本是否有效。"}
