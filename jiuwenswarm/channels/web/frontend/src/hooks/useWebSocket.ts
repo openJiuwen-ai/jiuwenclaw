@@ -57,6 +57,8 @@ import {
   unescapeLiteralNewlines,
   interpretChatFinalAction,
   shouldCollapseTurnFinal,
+  parseTimestampToMs,
+  timestampMsToIso,
 } from '../utils';
 import {
   findOverlappingFileExecutionEvent,
@@ -629,17 +631,11 @@ const EVENT_DEDUP_WINDOW_MS = 1500;
 const CONTEXT_COMPRESSION_START_DELAY_MS = 300;
 
 function normalizeEventTimestampIso(value: unknown): string {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    const millis = value > 1_000_000_000_000 ? value : value * 1000;
-    const date = new Date(millis);
-    if (!Number.isNaN(date.getTime())) {
-      return date.toISOString();
-    }
-  }
-  if (typeof value === 'string') {
-    const parsed = Date.parse(value);
-    if (!Number.isNaN(parsed)) {
-      return new Date(parsed).toISOString();
+  const ms = parseTimestampToMs(value);
+  if (Number.isFinite(ms)) {
+    const iso = timestampMsToIso(ms);
+    if (iso) {
+      return iso;
     }
   }
   return new Date().toISOString();
@@ -659,17 +655,8 @@ function getTeamPayloadMemberName(payload: Record<string, unknown>): string | un
 }
 
 function eventTimestampMs(payload: Record<string, unknown>): number {
-  const value = payload.timestamp;
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value > 1_000_000_000_000 ? value : value * 1000;
-  }
-  if (typeof value === 'string') {
-    const parsed = Date.parse(value);
-    if (!Number.isNaN(parsed)) {
-      return parsed;
-    }
-  }
-  return Date.now();
+  const parsed = parseTimestampToMs(payload.timestamp);
+  return Number.isFinite(parsed) ? parsed : Date.now();
 }
 
 function stableEventId(...parts: unknown[]): string {

@@ -499,6 +499,7 @@ function AppContent() {
   const addMessage = useChatStore((s) => s.addMessage);
   const addToolCall = useChatStore((s) => s.addToolCall);
   const addToolResult = useChatStore((s) => s.addToolResult);
+  const settleHistoricalToolExecutions = useChatStore((s) => s.settleHistoricalToolExecutions);
   const prependMessages = useChatStore((s) => s.prependMessages);
   const isProcessing = useChatStore((s) => s.runtimes[sessionId]?.isProcessing ?? false);
   const isPaused = useChatStore((s) => s.runtimes[sessionId]?.isPaused ?? false);
@@ -654,6 +655,7 @@ function AppContent() {
         );
       }
     }
+    settleHistoricalToolExecutions(sid);
 
     const harnessStore = useHarnessStore.getState();
     const harnessRuntime = harnessStore.getRuntime(sid);
@@ -703,7 +705,7 @@ function AppContent() {
       }));
       store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
     }
-  }, [addToolCall, addToolResult, prependMessages]);
+  }, [addToolCall, addToolResult, prependMessages, settleHistoricalToolExecutions]);
 
   const fetchHistoryPageResult = useCallback(async (
     sid: string,
@@ -1398,6 +1400,7 @@ function AppContent() {
             );
           }
         }
+        settleHistoricalToolExecutions(sessionId);
       },
       onHarnessReplay: (items: HistoryHarnessReplayItem[]) => {
         const harnessStore = useHarnessStore.getState();
@@ -1488,6 +1491,7 @@ function AppContent() {
     addMessage,
     addToolCall,
     addToolResult,
+    settleHistoricalToolExecutions,
     clearMessages,
     clearSubtasks,
     disposeInFlightHistoryHandles,

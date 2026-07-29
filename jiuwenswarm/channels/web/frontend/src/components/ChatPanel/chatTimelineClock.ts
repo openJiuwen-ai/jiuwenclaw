@@ -9,9 +9,14 @@ export function formatDurationPrecise(ms: number): string {
   if (totalSeconds < 60) {
     return `${totalSeconds.toFixed(2)}s`;
   }
-  const minutes = Math.floor(totalSeconds / 60);
+  const totalMinutes = Math.floor(totalSeconds / 60);
   const seconds = Math.floor(totalSeconds % 60);
-  return `${minutes}m${seconds.toString().padStart(2, '0')}s`;
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m${seconds.toString().padStart(2, '0')}s`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h${minutes.toString().padStart(2, '0')}m`;
 }
 
 /** active 时 250ms 刷新；关闭时停走，避免无谓重渲染。 */

@@ -29,6 +29,7 @@ import {
   shouldDropToolResult,
 } from './toolResultLifecycle';
 import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
+import { parseTimestampToMs } from '../utils/timestamp';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
 const EVOLUTION_STATUS_END_VISIBLE_MS = 3_000;
@@ -239,6 +240,8 @@ interface ChatState {
   updateToolProgress: (sessionId: string, toolCallId: string, progress: Partial<ToolResult>) => void;
   addToolResult: (sessionId: string, toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: (sessionId: string) => void;
+  /** 历史回放常只有 tool_call、无 tool_result：把仍 pending 的工具按 startedAt 结算，避免超时巡检用 now 污染耗时 */
+  settleHistoricalToolExecutions: (sessionId: string) => void;
   updateSubtask: (sessionId: string, payload: SubtaskUpdatePayload) => void;
   clearSubtasks: (sessionId: string) => void;
   clearMessages: (sessionId: string) => void;
@@ -479,10 +482,14 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         const text = item.text?.trim();
         if (!text || seen.has(text)) return;
         seen.add(text);
-        const parsed = Date.parse(item.at);
+        const parsed = parseTimestampToMs(item.at);
         // 历史里思考与同一步 final/tool_call 共用落盘时间；减 1ms 仅补齐缺失的独立时间戳，
         // 使时间线能分出「先思考、后动作」，不做跨步骤重排。
-        const startedAt = Number.isFinite(parsed) ? parsed - 1 : index;
+        // 解析失败时跳过该段，勿用 index 当 epoch（会让 startMs≈0，耗时爆炸）
+        if (!Number.isFinite(parsed)) {
+          return;
+        }
+        const startedAt = parsed - 1;
         segments.push({
           id: `hist-rsn-${sessionId}-${index}-${createReasoningSegmentId()}`,
           text,
@@ -1164,11 +1171,47 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           continue;
         }
         changed = true;
+        // timedOutAt = 巡检发现时刻；updatedAt 保持事件时间（startedAt/原值），避免把「已完成」耗时撑到 now。
         nextExecutions.set(toolCallId, {
           ...execution,
           status: 'timeout',
           timedOutAt: new Date(now).toISOString(),
-          updatedAt: new Date(now).toISOString(),
+        });
+      }
+      if (!changed) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, toolExecutions: nextExecutions },
+        },
+      };
+    });
+  },
+
+  settleHistoricalToolExecutions: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || runtime.isProcessing) return state;
+      let changed = false;
+      const nextExecutions = new Map(runtime.toolExecutions);
+      for (const [toolCallId, execution] of nextExecutions) {
+        if (execution.status !== 'pending' && execution.status !== 'timeout') {
+          continue;
+        }
+        // 无真实 result：按调用时刻结算，不引入 Date.now()
+        changed = true;
+        nextExecutions.set(toolCallId, {
+          ...execution,
+          status: 'completed',
+          updatedAt: execution.startedAt,
+          result:
+            execution.result ??
+            ({
+              toolName: execution.toolCall.name,
+              result: '',
+              success: true,
+              toolCallId,
+            } as ToolResult),
         });
       }
       if (!changed) return state;
