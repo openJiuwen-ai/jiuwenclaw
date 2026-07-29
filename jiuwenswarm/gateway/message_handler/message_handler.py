@@ -458,6 +458,9 @@ class MessageHandler(ABC):
         channel_id: str,
         session_id: str | None,
         text_or_payload: str | dict[str, Any],
+        *,
+        mode: str | None = None,
+        reset_team_session: bool = False,
     ) -> None:
         """向指定 channel 发送一条系统提示消息.
 
@@ -472,6 +475,12 @@ class MessageHandler(ABC):
         else:
             payload = {"content": text_or_payload, "is_complete": True}
 
+        metadata = dict(user_infos.get("meta_data") or {})
+        if mode:
+            metadata["mode"] = mode
+        if reset_team_session:
+            metadata["reset_team_session"] = True
+
         msg = Message(
             id=user_infos['id'],
             type="event",
@@ -482,7 +491,7 @@ class MessageHandler(ABC):
             ok=True,
             payload=payload,
             event_type=EventType.CHAT_FINAL,
-            metadata=user_infos['meta_data']
+            metadata=metadata,
         )
         await self.publish_robot_messages(msg)
 
@@ -1008,6 +1017,7 @@ class MessageHandler(ABC):
             params.channel_id,
             params.reply_session_id,
             f"[收到 CLI 指令], session_id 已变更为 {params.new_sid}",
+            reset_team_session=True,
         )
 
     async def _mode_change_cancel_and_notice(
@@ -1026,6 +1036,8 @@ class MessageHandler(ABC):
             params.channel_id,
             params.reply_session_id,
             self._build_mode_change_notice_text(params.new_mode_label),
+            mode=params.new_mode_label,
+            reset_team_session=True,
         )
 
     @staticmethod
@@ -1169,6 +1181,7 @@ class MessageHandler(ABC):
                         ch,
                         msg.session_id,
                         self._build_mode_change_notice_text(new_label),
+                        mode=new_label,
                     )
                 )
             return True
@@ -1235,6 +1248,7 @@ class MessageHandler(ABC):
                         ch,
                         msg.session_id,
                         self._build_mode_change_notice_text(new_label),
+                        mode=new_label,
                     )
                 )
             return True
@@ -2606,6 +2620,7 @@ class MessageHandler(ABC):
                 msg.session_id,
                 msg.channel_id,
                 is_processing=False,
+                metadata=msg.metadata,
             )
             return
 
@@ -2638,6 +2653,7 @@ class MessageHandler(ABC):
             msg.session_id,
             msg.channel_id,
             is_processing=False,
+            metadata=msg.metadata,
         )
 
     @staticmethod
@@ -3224,7 +3240,11 @@ class MessageHandler(ABC):
                         emit_processing_status = self._should_emit_processing_status_for_stream(msg)
                         if emit_processing_status:
                             await self._send_processing_status(
-                                stream_rid, msg.session_id, msg.channel_id, is_processing=True,
+                                stream_rid,
+                                msg.session_id,
+                                msg.channel_id,
+                                is_processing=True,
+                                metadata=msg.metadata,
                             )
                         task = asyncio.create_task(
                             self.process_stream(
@@ -3420,7 +3440,11 @@ class MessageHandler(ABC):
                 )
                 if not session_has_active_tasks:
                     await self._send_processing_status(
-                        rid, session_id, channel_id, is_processing=False,
+                        rid,
+                        session_id,
+                        channel_id,
+                        is_processing=False,
+                        metadata=request_metadata,
                     )
                     logger.info(
                         "[MessageHandler] 该 session 流式任务已完成，已发送 is_processing=false: session_id=%s",
@@ -3537,7 +3561,13 @@ class MessageHandler(ABC):
         )
 
     async def _send_processing_status(
-        self, request_id: str, session_id: str | None, channel_id: str, *, is_processing: bool,
+        self,
+        request_id: str,
+        session_id: str | None,
+        channel_id: str,
+        *,
+        is_processing: bool,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """发送 chat.processing_status 事件到客户端."""
         from jiuwenswarm.common.schema.message import Message, EventType
@@ -3557,7 +3587,7 @@ class MessageHandler(ABC):
                 "is_complete": not is_processing
             },
             event_type=EventType.CHAT_PROCESSING_STATUS,
-            metadata=None,
+            metadata=dict(metadata) if isinstance(metadata, dict) else None,
         )
         await self.publish_robot_messages(status_msg)
         logger.info(
