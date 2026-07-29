@@ -3490,6 +3490,7 @@ class MessageHandler(ABC):
                             )
                         supplement_params = {
                             "intent": "supplement",
+                            "new_input": new_input.strip(),
                             "session_id": agent_msg.session_id,
                             **runtime_params,
                         }
