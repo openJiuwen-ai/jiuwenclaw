@@ -336,8 +336,21 @@ def _set_prompt_capture_context(
     mode: str,
     inputs: dict[str, Any],
 ) -> None:
-    """Set prompt capture context from the current request."""
-    pass
+    """Set prompt capture context from the current request.
+
+    Prompt capture is not yet implemented; this is a placeholder so the
+    request paths in _invoke_agent / _invoke_agent_stream stay wired. If
+    JIUWENSWARM_PROMPT_CAPTURE is set we warn once so users are not silently
+    misled (the docs previously implied a capture file would be written).
+    """
+    if os.environ.get("JIUWENSWARM_PROMPT_CAPTURE") and not getattr(
+        _set_prompt_capture_context, "_warned", False
+    ):
+        logger.warning(
+            "[prompt_capture] JIUWENSWARM_PROMPT_CAPTURE is set, but prompt "
+            "capture is not yet implemented — no capture file will be written."
+        )
+        _set_prompt_capture_context._warned = True
 
 
 logger = logging.getLogger(__name__)
@@ -3871,7 +3884,7 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
             return None
 
-    def _build_progressive_tool_rail(self) -> ProgressiveToolRail | None:
+    def _build_progressive_tool_rail(self) -> "JiuWenProgressiveToolRail | None":
         """Build agent-core ProgressiveToolRail (search-based, with always-visible tools).
 
         search_tools returns full tool definitions (incl. JSON Schema) in the

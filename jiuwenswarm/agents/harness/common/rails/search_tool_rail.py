@@ -169,7 +169,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self._init_visible_tools(
             session, default_visible_tools=list(self.default_visible_tools)
         )
-        self._build_executable_corpus(ctx)
+        await asyncio.to_thread(self._build_executable_corpus, ctx)
         await asyncio.to_thread(self._precompute_tool_embeddings)
 
     async def before_model_call(self, ctx):
