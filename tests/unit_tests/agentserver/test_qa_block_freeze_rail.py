@@ -6,13 +6,19 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import pathlib
+import tempfile
 import unittest
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.core.context_engine.qa_block.freezer import FreezeCommitResult
+from openjiuwen.core.context_engine.qa_block.history_buffer import HistoryQABuffer
+from openjiuwen.core.context_engine.qa_block.messages import load_qa_l0
+from openjiuwen.core.context_engine.qa_block.registry import load_registry
 from openjiuwen.core.context_engine.qa_block.schema import QABlockEntry, QABlockRegistry
+from openjiuwen.core.context_engine.qa_block.store import QABlockStore
+from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
@@ -259,6 +265,113 @@ class TestQABlockFreezeRailInteractiveResume(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(registry.current_qa_id)
         context_engine.save_contexts.assert_not_awaited()
+        self.assertEqual(self.freeze_mock.await_args.kwargs["persist_mode"], "sync")
+
+    async def test_interrupt_freeze_forwards_async_persist_mode(self) -> None:
+        context_engine = MagicMock()
+        context_engine.get_context.return_value = MagicMock(context_id=lambda: "ctx-1")
+        context_engine.get_history_qa_buffer.return_value = []
+        context_engine.save_contexts = AsyncMock()
+        session = SimpleNamespace(get_session_id=lambda: "session-1")
+
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "post_agent_execute_for_session", new_callable=AsyncMock):
+            await self.rail.freeze_current_qa_sync(
+                "session-1",
+                agent=SimpleNamespace(),
+                session=session,
+                persist_mode="async",
+            )
+
+        self.assertEqual(self.freeze_mock.await_args.kwargs["persist_mode"], "async")
+
+    async def test_async_interrupt_freeze_eventually_persists_readable_l0(self) -> None:
+        rail = JiuClawQABlockFreezeRail()
+        persist_started = asyncio.Event()
+        allow_persist = asyncio.Event()
+
+        async def generate_l1(
+            _user_query: str,
+            _final_answer: str,
+            *,
+            allow_llm: bool,
+            **_kwargs: Any,
+        ) -> tuple[str, str]:
+            if allow_llm:
+                persist_started.set()
+                await allow_persist.wait()
+            return "summary", "inline"
+
+        rail._freezer._summarizer.generate_l1 = generate_l1
+        rail._maybe_await_overview_before_freeze = AsyncMock()
+
+        state: dict[str, Any] = {}
+        session = SimpleNamespace(
+            get_session_id=lambda: "session-1",
+            get_state=lambda key, default=None: state.get(key, default),
+            update_state=lambda updates: state.update(updates),
+        )
+        messages = [
+            UserMessage(content="请总结当前任务"),
+            AssistantMessage(content="当前任务已完成一部分"),
+        ]
+        context = MagicMock()
+        context.context_id.return_value = "ctx-1"
+        context.get_messages.return_value = messages
+        context.token_counter = None
+        history = HistoryQABuffer(max_blocks=3)
+        context_engine = MagicMock()
+        context_engine.get_context.return_value = context
+        context_engine.get_history_qa_buffer.return_value = history
+        context_engine.save_contexts = AsyncMock()
+
+        with tempfile.TemporaryDirectory() as workspace_root:
+            rail.workspace = SimpleNamespace(root_path=workspace_root)
+            with patch.object(
+                _module, "resolve_context_engine", return_value=context_engine
+            ), patch.object(
+                _module, "resolve_summarizer_model", return_value=None
+            ), patch.object(
+                _module, "clear_assembly_committed_qa_id"
+            ), patch.object(
+                _module, "post_agent_execute_for_session", new_callable=AsyncMock
+            ):
+                await rail.freeze_current_qa_sync(
+                    "session-1",
+                    agent=SimpleNamespace(),
+                    session=session,
+                    persist_mode="async",
+                )
+
+                await asyncio.wait_for(persist_started.wait(), timeout=1.0)
+                registry = load_registry(session)
+                self.assertEqual(len(registry.blocks), 1)
+                entry = next(iter(registry.blocks.values()))
+                self.assertEqual(entry.l0_persist_status, "pending")
+
+                allow_persist.set()
+
+                async def wait_until_persisted() -> None:
+                    while load_registry(session, force_reload=True).blocks[
+                        entry.qa_id
+                    ].l0_persist_status != "done":
+                        await asyncio.sleep(0)
+
+                await asyncio.wait_for(wait_until_persisted(), timeout=1.0)
+                store = QABlockStore(workspace_root, "session-1")
+                loaded = await load_qa_l0(
+                    entry.qa_id,
+                    HistoryQABuffer(max_blocks=3),
+                    store,
+                )
+
+        self.assertEqual(
+            [message.content for message in loaded],
+            [message.content for message in messages],
+        )
 
 
 class TestQABlockFreezeRailFirstAskPlainQuery(unittest.IsolatedAsyncioTestCase):

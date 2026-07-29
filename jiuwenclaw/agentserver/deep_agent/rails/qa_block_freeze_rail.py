@@ -219,8 +219,13 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         session: Any = None,
         status: Literal["completed", "interrupted"] = "interrupted",
         persist_context: bool = True,
+        persist_mode: Literal["async", "sync"] = "sync",
     ) -> None:
         """Emergency freeze before plan cancel checkpoint.
+
+        Async persistence requires the caller to keep ``session`` alive until
+        the background freeze task finishes. Callers that own a temporary
+        session must use the default sync mode before closing it.
 
         ``persist_context=False`` skips ``save_contexts`` so callers (orphan salvage)
         can restore temporarily stripped current-round user messages before persisting.
@@ -261,7 +266,7 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             history,
             store,
             status=status,
-            persist_mode="sync",
+            persist_mode=persist_mode,
             summarizer_model=summarizer_model,
             post_commit=lambda commit, s=actual_session, c=context: self._on_freeze_commit(s, c, commit),
         )
@@ -273,12 +278,13 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             else:
                 await self._persist_freeze_checkpoint(actual_session, session_id=session_id)
             logger.info(
-                "[QABlockFreezeRail] cancel sync freeze done session_id=%s qa_id=%s status=%s "
-                "persist_context=%s",
+                "[QABlockFreezeRail] cancel freeze done session_id=%s qa_id=%s status=%s "
+                "persist_context=%s persist_mode=%s",
                 session_id,
                 entry.qa_id,
                 status,
                 persist_context,
+                persist_mode,
             )
         else:
             await self._clear_empty_current_qa_after_failed_freeze(
