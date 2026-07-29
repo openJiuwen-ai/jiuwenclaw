@@ -47,10 +47,10 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
     resolve_agent_request_timeout_seconds,
     send_agent_request_with_timeout,
 )
+from jiuwenswarm.gateway.auth.common import _handle_connect
 
 from jiuwenswarm.gateway.app_gateway import get_auth_handler
 from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext
-from jiuwenswarm.gateway.channel_manager.common import extract_token, extract_headers, get_remote_addr
 
 logger = logging.getLogger(__name__)
 
@@ -191,27 +191,6 @@ def _update_auto_harness_gitcode_access_token(value: str) -> None:
         config["gitcode"] = {}
     config["gitcode"]["access_token"] = value
     _save_auto_harness_config(config)
-
-
-#3rd agent
-async def _handle_connect(self, ws, path):
-    try:
-        context = AuthContext(
-            channel_type="tui",
-            credentials={"token": extract_token(ws)},
-            headers=extract_headers(ws),
-            remote_addr=get_remote_addr(ws)
-        )
-        authenticator = get_auth_handler()
-        result = await authenticator.authenticate(context)
-
-        if not result.success:
-            await ws.close()
-            return
-    except Exception:
-        # 认证过程中任何异常，安全关闭连接
-        await ws.close()
-        raise
 
 
 # ── 需要转发到 Agent 的方法集合 ──────────────────────────────
@@ -3224,6 +3203,9 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
             return
         mh.cancel_scheduled_disconnect_cancel(channel_id, session_id)
 
+    async def _tui_connect_hook(ws, path):
+        return await _handle_connect(ws, path)
+
     return GatewayRouteBinding(
         path=bind.path,
         channel_id=bind.channel_id,
@@ -3233,4 +3215,5 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         disconnect_handler=_tui_disconnect,
         session_bind_handler=_tui_session_bound,
         ws_channel=bind.ws_channel,
+        connect_hook=_tui_connect_hook,  # 新增
     )

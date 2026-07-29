@@ -30,7 +30,7 @@ async def test_handle_connect_success():
     with (
         patch(f"{_MOCK_MODULE}.extract_token", return_value="valid-token"),
         patch(f"{_MOCK_MODULE}.extract_headers", return_value={"Authorization": "Bearer valid-token"}),
-        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value="127.0.0.1:9000"),
+        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value="client-addr"),
         patch(f"{_MOCK_MODULE}.get_auth_handler", return_value=mock_authenticator),
     ):
         await _handle_connect(None, ws, "/tui")
@@ -42,7 +42,7 @@ async def test_handle_connect_success():
     assert ctx.channel_type == "tui"
     assert ctx.credentials == {"token": "valid-token"}
     assert ctx.headers == {"Authorization": "Bearer valid-token"}
-    assert ctx.remote_addr == "127.0.0.1:9000"
+    assert ctx.remote_addr == "client-addr"
 
 
 @pytest.mark.asyncio
@@ -56,7 +56,7 @@ async def test_handle_connect_auth_failure_closes_ws():
     with (
         patch(f"{_MOCK_MODULE}.extract_token", return_value="bad-token"),
         patch(f"{_MOCK_MODULE}.extract_headers", return_value={}),
-        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value="10.0.0.1:1234"),
+        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value="client-addr"),
         patch(f"{_MOCK_MODULE}.get_auth_handler", return_value=mock_authenticator),
     ):
         await _handle_connect(None, ws, "/tui")
@@ -98,7 +98,7 @@ async def test_handle_connect_builds_auth_context_correctly():
     with (
         patch(f"{_MOCK_MODULE}.extract_token", return_value="ctx-token"),
         patch(f"{_MOCK_MODULE}.extract_headers", return_value={"X-Token": "ctx-token", "X-Custom": "value"}),
-        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value="192.168.1.1:8080"),
+        patch(f"{_MOCK_MODULE}.get_remote_addr", return_value="client-addr"),
         patch(f"{_MOCK_MODULE}.get_auth_handler", return_value=mock_authenticator),
     ):
         await _handle_connect(None, ws, "/tui")
@@ -107,4 +107,4 @@ async def test_handle_connect_builds_auth_context_correctly():
     assert captured_context.channel_type == "tui"
     assert captured_context.credentials == {"token": "ctx-token"}
     assert captured_context.headers == {"X-Token": "ctx-token", "X-Custom": "value"}
-    assert captured_context.remote_addr == "192.168.1.1:8080"
+    assert captured_context.remote_addr == "client-addr"

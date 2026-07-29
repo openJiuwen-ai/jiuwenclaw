@@ -21,10 +21,12 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
+from sqlalchemy import false
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
+from jiuwenswarm.gateway.auth.common import _handle_connect
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -44,7 +46,6 @@ from jiuwenswarm.common.ws_diagnostics import (
 
 from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext
 from jiuwenswarm.gateway.app_gateway import get_auth_handler
-from jiuwenswarm.gateway.channel_manager.common import extract_token, extract_headers, get_remote_addr
 
 logger = logging.getLogger(__name__)
 
@@ -940,7 +941,7 @@ class WebChannel(BaseWsChannel):
                         describe_ws_exception(e),
                     ),
                 )
-        auth_result = await self._handle_connect(ws, path)
+        auth_result = await _handle_connect(ws, path)
         if not auth_result:
             return
 
@@ -1074,33 +1075,6 @@ class WebChannel(BaseWsChannel):
                 "[WebChannel] /ws/git 连接清理完成: remote=%s",
                 remote,
             )
-
-    ## ── 3rd agent ──
-    async def _handle_connect(self, ws: Any, path) -> bool:
-        try:
-            context = AuthContext(
-                channel_type = "web",
-                credentials = {"token": extract_token(ws)},
-                headers = extract_headers(ws),
-                remote_addr = get_remote_addr(ws),
-            )
-
-            authenticator = get_auth_handler()
-            result = await authenticator.authenticate(context)
-
-            if not result.success:
-                await ws.close()
-                return False
-
-            # 认证成功，将用户信息存储到 ws 对象上，供后续使用
-            ws.user_id = result.user_id
-            for key, value in (result.extensions or {}).items():
-                setattr(ws, f"auth_{key}", value)
-            return True
-
-        except Exception:
-            await ws.close()
-            return False
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
         try:

@@ -3,6 +3,9 @@
 from urllib.parse import urlparse, parse_qs
 from typing import Any
 
+from jiuwenswarm.gateway.app_gateway import get_auth_handler
+from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext
+
 
 def extract_token(ws: Any) -> str | None:
     """从 WebSocket 连接中提取 JWT token
@@ -53,3 +56,30 @@ def get_remote_addr(ws: Any) -> str:
             return f"{remote[0]}:{remote[1]}"
         return str(remote)
     return ""
+
+
+async def _handle_connect(ws, path):
+    try:
+        context = AuthContext(
+            channel_type="web",
+            credentials={"token": extract_token(ws)},
+            headers=extract_headers(ws),
+            remote_addr=get_remote_addr(ws),
+        )
+
+        authenticator = get_auth_handler()
+        result = await  authenticator.authenticate(context)
+
+        if not result.success:
+            ws.close()
+            return False
+
+        # 认证成功，将用户信息存储到 ws 对象上，供后续使用
+        ws.user_id = result.user_id
+        for key, value in (result.extensions or {}).items():
+            setattr(ws, f"auth_{key}", value)
+        return True
+
+    except Exception:
+        ws.close()
+        return False

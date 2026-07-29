@@ -13,7 +13,7 @@ from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenti
 from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
 
 from jiuwenswarm.gateway.auth.passthrough_authenticator import PassthroughAuthenticator
-from jiuwenswarm.extensions.auth.agentos_authenticator import AgentOSAuthenticator
+from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
 
 
 class ExtensionRegistry:

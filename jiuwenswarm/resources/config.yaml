@@ -965,7 +965,6 @@ auth:
   type: passthrough # passthrough | agentos
   agentos:
     auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
-    gateway_secret_key: ${GATEWAY_SECRET_KEY:-}
 
 
 # ============================================================

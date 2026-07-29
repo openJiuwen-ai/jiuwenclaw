@@ -72,4 +72,28 @@ async def register_extensions(registry):
     extension = AgentOSRouter(load_router_config(config))
     registry.register_agent_server_client(extension)
     registry.register_third_agent(extension)
+
+    from jiuwenswarm.common.config import resolve_env_vars
+    from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
+
+    auth_config = config.get("auth") if isinstance(config, dict) else {}
+    if not isinstance(auth_config, dict):
+        auth_config = {}
+    auth_config = resolve_env_vars(auth_config) or {}
+    auth_type = str(auth_config.get("type") or "passthrough").strip().lower()
+
+    if auth_type == "agentos":
+        agentos_auth_config = auth_config.get("agentos")
+        if not isinstance(agentos_auth_config, dict):
+            agentos_auth_config = {}
+        agentos_auth_config = resolve_env_vars(agentos_auth_config) or {}
+
+        auth_service_url = str(agentos_auth_config.get("auth_service_url") or "").strip()
+        if not auth_service_url:
+            raise ValueError(
+                "auth.agentos.auth_service_url is required when auth.type=agentos"
+            )
+
+        registry.register_authenticator(auth_service_url)
+
     return [extension]

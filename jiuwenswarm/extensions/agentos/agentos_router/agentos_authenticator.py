@@ -1,38 +1,14 @@
-from datetime import timedelta
-
-from jose import jwt, JWTError
 import httpx
 
 from jiuwenswarm.gateway.auth.credential_authenticator import (
     CredentialAuthenticator,
     AuthContext,
     AuthResult,
-    KeyPair,
-    SSHCertificate,
 )
 
 
 class AuthServiceClient:
     pass
-
-
-class CredentialManager:
-    @classmethod
-    def generate_api_key(cls):
-        pass
-
-    @classmethod
-    def generate_user_keypair(cls):
-        pass
-
-    @classmethod
-    def generate_ssh_certificate(cls, public_key, user_id, validity):
-        pass
-
-    @classmethod
-    def compute_api_key_hmac(cls, api_key, secret_key):
-        pass
-
 
 class AgentOSAuthenticator(CredentialAuthenticator):
 
@@ -64,21 +40,6 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]  # 覆盖 token 参数
 
-        # 本地验证（零 IO）
-        if self._gateway_secret_key:
-            token_data = self._verify_access_token_local(token)
-            if token_data is None:
-                return AuthResult(success=False, user_id="", error="Token 无效或已过期")
-            return AuthResult(
-                success=True,
-                user_id=token_data["user_id"],
-                extensions={
-                    "username": token_data["username"],
-                    "role": token_data["role"],
-                    "auth_method": "token",
-                }
-            )
-
         # HTTP 验证：合并自定义 header
         headers = {
             "Content-Type": "application/json",
@@ -94,61 +55,8 @@ class AgentOSAuthenticator(CredentialAuthenticator):
                 timeout=self._timeout,
             )
 
-        except httpx.ConnectError:
-            return AuthResult(
-                success=False, user_id="",
-                error="无法连接到认证服务",
-                extensions={"error_code": "CONNECTION_ERROR"},
-            )
-        except httpx.TimeoutException:
-            return AuthResult(
-                success=False, user_id="",
-                error="认证服务请求超时",
-                extensions={"error_code": "TIMEOUT"},
-            )
-        except httpx.RequestError as e:
-            return AuthResult(
-                success=False, user_id="",
-                error=f"认证服务不可达: {e}",
-                extensions={"error_code": "REQUEST_ERROR"},
-            )
-
-        # 处理 HTTP 状态码
-        if resp.status_code == 401:
-            return AuthResult(
-                success=False,
-                user_id="",
-                error="Token 已过期，请重新登录",
-                extensions={"error_code": "TOKEN_EXPIRED"},
-            )
-        elif resp.status_code == 403:
-            return AuthResult(
-                success=False,
-                user_id="",
-                error="无权限访问该资源",
-                extensions={"error_code": "FORBIDDEN"},
-            )
-        elif resp.status_code == 429:
-            return AuthResult(
-                success=False,
-                user_id="",
-                error="请求过于频繁，请稍后重试",
-                extensions={"error_code": "RATE_LIMITED"},
-            )
-        elif resp.status_code >= 500:
-            return AuthResult(
-                success=False,
-                user_id="",
-                error="认证服务内部错误，请稍后重试",
-                extensions={"error_code": "SERVER_ERROR"},
-            )
-        elif resp.status_code != 200:
-            return AuthResult(
-                success=False,
-                user_id="",
-                error=f"认证服务返回异常状态码: {resp.status_code}",
-                extensions={"error_code": "UNKNOWN_HTTP_ERROR"},
-            )
+        except Exception as e:
+            return AuthResult(success=False, user_id="", error=str(e))
 
         # 解析业务响应
         try:
@@ -162,48 +70,26 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             )
 
         data = body.get("data", {})
-        if not data.get("valid"):
+        if data.get("valid"):
             return AuthResult(
-                success=False,
-                user_id="",
-                error="Token 无效或已过期",
-                extensions={"error_code": "TOKEN_INVALID"},
+                success=True,
+                user_id=data.get("user_id", ""),
+                extensions={
+                    "username": data.get("username"),
+                    "role": data.get("role"),
+                    "auth_method": "token",
+                },
             )
 
         return AuthResult(
-            success=True,
-            user_id=data["user_id"],
-            extensions={
-                "username": data.get("username"),
-                "role": data.get("role"),
-                "auth_method": "token",
-            },
+            success=False,
+            user_id="",
+            error=data.get("error", "Token 无效或已过期"),
         )
 
-    def _verify_access_token_local(self, token: str) -> dict | None:
-        """本地解码并验证 JWT access_token（零 IO）。"""
-        try:
-            payload = jwt.decode(
-                token,
-                self._gateway_secret_key,
-                algorithms=[self._gateway_algorithm],
-                options={"require_exp": True},
-            )
-        except JWTError:
-            return None
-        if payload.get("type") != "access":
-            return None
-        return {
-            "user_id": payload["sub"],
-            "username": payload["username"],
-            "role": payload["role"],
-        }
 
     def _lookup_agent_by_api_key_hash(self, api_key_hash) -> str | None:
         """通过 API Key 的 HMAC 哈希值查找 agent_id
-
-            根据设计文档 4.5.4.2 节：
-            数据库中只存储 HMAC 值，不存储明文 API Key。
             """
         # 接入数据库存储 api_key_hash -> agent_id 映射
         # 当前简化实现：从 self._api_key_map 中查找
@@ -292,19 +178,6 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             return self._authenticate_public_key(credentials["public_key"])
 
         return AuthResult(success=False, error="No valid credentials")
-
-    # 凭证管理实现 --- 当前暂时不支持，抛出异常
-    def generate_api_key(self) -> str:
-        return CredentialManager.generate_api_key()
-
-    def generate_user_keypair(self) -> KeyPair:
-        return CredentialManager.generate_user_keypair()
-
-    def generate_ssh_certificate(self, public_key: str, user_id: str, validity: timedelta) -> SSHCertificate:
-        return CredentialManager.generate_ssh_certificate(public_key, user_id, validity)
-
-    def compute_api_key_hmac(self, api_key: str, secret_key: str) -> str:
-        return CredentialManager.compute_api_key_hmac(api_key, secret_key)
 
 
 

@@ -1012,6 +1012,19 @@ class GatewayServer:
             matched_path,
         )
 
+        setattr(ws, "_gateway_agent_type", "jiuwenswarm")
+        # ── 新增：认证 ──
+        if route.connect_hook is not None:
+            try:
+                auth_result = await route.connect_hook(ws, raw_path)
+                if not auth_result:
+                    self._clients.discard(ws)
+                    return
+            except Exception:
+                self._clients.discard(ws)
+                await ws.close()
+                return  #TODO 咨询
+
         # connection.ack
         try:
             await ws.send(json.dumps({

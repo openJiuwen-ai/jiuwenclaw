@@ -7,7 +7,6 @@ from jiuwenswarm.gateway.auth.credential_authenticator import (
     KeyPair,
     SSHCertificate,
     CredentialAuthenticator,
-    CredentialManager,
     UnsupportedOperationError,
 )
 
@@ -106,30 +105,6 @@ class TestCredentialAuthenticator:
                 return "hmac-value"
         auth = FullAuthenticator()
         assert isinstance(auth, CredentialAuthenticator)
-
-
-class TestCredentialManager:
-
-    def test_cannot_instantiate_abstract(self):
-        with pytest.raises(TypeError):
-            CredentialManager()
-
-    def test_concrete_subclass_can_instantiate(self):
-        class FullManager(CredentialManager):
-            def generate_api_key(self):
-                return "ak-test-key"
-            def generate_user_keypair(self):
-                return KeyPair(public_key="ssh-rsa AAA...", private_key="key")
-            def generate_ssh_certificate(self, public_key, user_id, validity):
-                return SSHCertificate(
-                    public_key=public_key,
-                    certificate="cert",
-                    expires_at=datetime(2026, 12, 31, 23, 59, 59),
-                )
-            def compute_api_key_hmac(self, api_key, secret_key):
-                return "hmac-value"
-        mgr = FullManager()
-        assert isinstance(mgr, CredentialManager)
 
 
 class TestUnsupportedOperationError:

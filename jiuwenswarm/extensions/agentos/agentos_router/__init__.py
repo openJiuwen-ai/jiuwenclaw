@@ -8,7 +8,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     SUPPORTED_AGENT_TYPES,
     normalize_agent_key_fields,
 )
-from jiuwenswarm.extensions.agentos.agentos_router.extension import AgentOSRouter
+from jiuwenswarm.extensions.agentos.agentos_router.extension import AgentOSRouter, register_extensions
 from jiuwenswarm.extensions.agentos.agentos_router.models import (
     AgentInfo,
     AgentStatus,
@@ -59,4 +59,5 @@ __all__ = [
     "instance_service_id",
     "normalize_agent_key_fields",
     "resolve_instance_kind",
+    "register_extensions"
 ]
