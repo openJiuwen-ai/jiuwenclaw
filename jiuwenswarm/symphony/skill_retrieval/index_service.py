@@ -39,13 +39,17 @@ class _TreeCacheEntry:
 _tree_cache: _TreeCacheEntry | None = None
 
 
-def _is_tree_cache_hit(tree_path: Path, stat: Any) -> bool:
+def _is_tree_cache_hit(
+    cache: _TreeCacheEntry | None,
+    tree_path: Path,
+    stat: Any,
+) -> bool:
     """检查 tree 缓存是否命中."""
     return (
-        _tree_cache is not None
-        and _tree_cache.path == str(tree_path)
-        and _tree_cache.mtime_ns == stat.st_mtime_ns
-        and _tree_cache.size == stat.st_size
+        cache is not None
+        and cache.path == str(tree_path)
+        and cache.mtime_ns == stat.st_mtime_ns
+        and cache.size == stat.st_size
     )
 
 
@@ -55,8 +59,9 @@ def _get_cached_tree(tree_path: Path) -> _TreeCacheEntry | None:
     except OSError:
         _clear_tree_cache()
         return None
-    if _is_tree_cache_hit(tree_path, stat):
-        return _tree_cache
+    cache = _tree_cache
+    if _is_tree_cache_hit(cache, tree_path, stat):
+        return cache
     _clear_tree_cache()
     return None
 

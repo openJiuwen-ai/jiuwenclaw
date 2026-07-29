@@ -5,6 +5,7 @@ import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from jiuwenswarm.symphony.skill_retrieval import index_service as index_service_module
 from jiuwenswarm.symphony.skill_retrieval.build_coordinator import (
@@ -793,6 +794,38 @@ def test_tree_cache_invalidates_on_file_change(monkeypatch, tmp_path: Path) -> N
     result2 = SkillIndexService(manager).tree()
     assert result2["success"] is True
     assert result2["nodes"][0]["cid"] == "second", "文件变化后应重新解析新内容"
+
+
+def test_get_cached_tree_uses_one_cache_snapshot(monkeypatch, tmp_path: Path) -> None:
+    tree_path = tmp_path / "tree_index.yaml"
+    tree_path.write_text("nodes: []\n", encoding="utf-8")
+    stat = tree_path.stat()
+    entry = index_service_module._TreeCacheEntry(
+        path=str(tree_path),
+        payload={"nodes": []},
+        tree_nodes=[],
+        branch_count=0,
+        leaf_count=0,
+        mtime_ns=stat.st_mtime_ns,
+        size=stat.st_size,
+    )
+    index_service_module._set_cached_tree(tree_path, entry)
+    real_is_tree_cache_hit = index_service_module._is_tree_cache_hit
+
+    def clear_global_before_check(cache, path, current_stat):
+        _clear_tree_cache()
+        return real_is_tree_cache_hit(cache, path, current_stat)
+
+    monkeypatch.setattr(
+        index_service_module,
+        "_is_tree_cache_hit",
+        clear_global_before_check,
+    )
+
+    try:
+        assert index_service_module._get_cached_tree(tree_path) is entry
+    finally:
+        _clear_tree_cache()
 
 
 def test_tree_no_cache_on_yaml_parse_error(monkeypatch, tmp_path: Path) -> None:
