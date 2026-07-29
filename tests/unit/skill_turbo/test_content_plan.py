@@ -20,7 +20,8 @@ _P41_RESPONSE_RICH = '{"material_richness":"rich","focus_areas":"AI 市场规模
 _P41_RESPONSE_EMPTY = '{"material_richness":"empty","focus_areas":"基于主题做行业概览"}'
 
 _P42A_RESPONSE = (
-    '{"queries":['
+    '{"entity":"AI Agent",'
+    '"queries":['
     '{"dimension":"领域现状","query":"2025 AI agent market overview"},'
     '{"dimension":"关键维度","query":"enterprise AI agent platforms comparison"},'
     '{"dimension":"最新动态","query":"AI coding agent trends 2026"},'
