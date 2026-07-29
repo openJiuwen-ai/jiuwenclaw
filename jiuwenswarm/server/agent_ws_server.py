@@ -559,6 +559,9 @@ def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
     if mode_text in ("plan", "fast"):
         return "agent", None, "agent"
 
+    if mode_text == "agent.team":
+        return "team", None, "agent.team"
+
     parts = mode_text.split(".")
     mode = parts[0] or "agent"
     if mode == "agent":
@@ -581,6 +584,45 @@ def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
         sub_mode = default_sub_modes.get(mode, "normal")
     canonical_mode = f"{mode}.{sub_mode}" if sub_mode else mode
     return mode, sub_mode, canonical_mode
+
+
+def validate_target_agent_routing(params: dict[str, Any]) -> None:
+    """Validate Relay's mutually exclusive single-mention routing fields."""
+    target_agent = params.get("target_agent")
+    if target_agent is None:
+        return
+    if not isinstance(target_agent, str) or not target_agent.strip():
+        raise ValueError("target_agent must be a non-empty string")
+
+    raw_mode = getattr(params.get("mode"), "value", params.get("mode"))
+    normalized_mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else ""
+    if normalized_mode != "agent.plan":
+        raise ValueError("TARGET_AGENT_MODE_INVALID: target_agent requires agent.plan")
+
+    if str(params.get("team_name") or "").strip():
+        raise ValueError(
+            "TARGET_AGENT_ROUTE_CONFLICT: target_agent and team_name cannot be used together"
+        )
+
+    if params.get("hint_members"):
+        raise ValueError(
+            "TARGET_AGENT_ROUTE_CONFLICT: target_agent and hint_members cannot be used together"
+        )
+
+
+def validate_team_runtime_identity_params(params: dict[str, Any]) -> None:
+    """Reject legacy runtime identity fields on Team requests."""
+    if not is_team_params(params):
+        return
+    forbidden = [
+        field_name
+        for field_name in ("identify", "soul", "system_prompt")
+        if params.get(field_name) is not None
+    ]
+    if forbidden:
+        raise ValueError(
+            "TEAM_RUNTIME_IDENTITY_NOT_ALLOWED: " + ", ".join(forbidden)
+        )
 
 
 def _apply_resolved_mode_to_request(request: AgentRequest) -> tuple[str, str | None]:
@@ -1391,7 +1433,10 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.TEAM_BINDING_GENERATE:
                 await self._handle_team_binding_generate(ws, request, send_lock)
                 return
-            if request.req_method == ReqMethod.TEAM_SESSION_BIND:
+            if request.req_method in {
+                ReqMethod.TEAM_SESSION_BIND,
+                ReqMethod.TEAM_SWITCH,
+            }:
                 await self._handle_team_session_bind(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.TEAM_DELETE:
@@ -1550,6 +1595,9 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.AGENTS_LIST:
                 await self._handle_agents_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.SYNC_AGENTS_CONFIGS:
+                await self._handle_agents_sync_configs(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.AGENTS_GET:
                 await self._handle_agents_get(ws, request, send_lock)
@@ -2045,6 +2093,8 @@ class AgentWebSocketServer:
         # 注意：用与下游一致的严格判断——纯空白串 "   " 不算显式携带（bool("   ") 为 True
         # 会误判，导致空白 mode 走默认推断 agent.plan 并写盘腐蚀已锁定 mode）。
         params = request.params if isinstance(request.params, dict) else {}
+        validate_target_agent_routing(params)
+        validate_team_runtime_identity_params(params)
         _raw_mode = params.get("mode")
         explicit_mode_provided = isinstance(_raw_mode, str) and bool(_raw_mode.strip())
         mode, sub_mode = _apply_resolved_mode_to_request(request)
@@ -2842,6 +2892,8 @@ class AgentWebSocketServer:
         session_id = str(request.session_id or params.get("session_id") or "").strip()
         if not session_id:
             return None
+        requested_team_name = str(params.get("team_name") or "").strip()
+        requested_template_id = str(params.get("team_template_id") or "").strip()
 
         from jiuwenswarm.server.runtime.session.session_metadata import (
             get_session_metadata,
@@ -2861,11 +2913,15 @@ class AgentWebSocketServer:
 
         existing_team_name = str(metadata.get("team_name") or "").strip()
         if existing_team_name:
-            params.setdefault("team_name", existing_team_name)
             template_id = str(metadata.get("team_template_id") or "").strip()
-            if template_id:
-                params.setdefault("team_template_id", template_id)
-            return existing_team_name
+            if not requested_team_name or requested_team_name in {
+                existing_team_name,
+                template_id,
+            }:
+                params["team_name"] = existing_team_name
+                if template_id:
+                    params["team_template_id"] = template_id
+                return existing_team_name
 
         query = _request_query_text(request)
         if not query:
@@ -2874,22 +2930,86 @@ class AgentWebSocketServer:
         async with self._session_team_binding_lock(session_id):
             metadata = get_session_metadata(session_id, cache_bust=True)
             existing_team_name = str(metadata.get("team_name") or "").strip()
+            existing_template_id = str(metadata.get("team_template_id") or "").strip()
             if existing_team_name:
-                params.setdefault("team_name", existing_team_name)
-                template_id = str(metadata.get("team_template_id") or "").strip()
-                if template_id:
-                    params.setdefault("team_template_id", template_id)
-                return existing_team_name
+                if not requested_team_name or requested_team_name in {
+                    existing_team_name,
+                    existing_template_id,
+                }:
+                    params["team_name"] = existing_team_name
+                    if existing_template_id:
+                        params["team_template_id"] = existing_template_id
+                    return existing_team_name
 
             from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
             from jiuwenswarm.server.runtime.team_entity_store import get_team_entity_store
 
-            binding, _template = await self._create_generated_team_binding(
-                description=query,
-                config_base=get_config(),
-            )
             binding_store = get_team_binding_store()
+            config_base = get_config()
+            binding_created = False
+            if requested_team_name:
+                effective_template_id = requested_template_id or requested_team_name
+                from jiuwenswarm.agents.harness.team import list_team_template_summaries
+
+                configured_template_ids = {
+                    str(item.get("template_id") or "").strip()
+                    for item in list_team_template_summaries(config_base)
+                }
+                if effective_template_id not in configured_template_ids:
+                    raise ValueError(f"TEAM_NAME_UNKNOWN: {effective_template_id}")
+                binding = binding_store.get(requested_team_name)
+                if binding is not None:
+                    if binding.template_id != effective_template_id:
+                        raise ValueError(
+                            "TEAM_NAME_UNKNOWN: "
+                            f"{requested_team_name} is not template {effective_template_id}"
+                        )
+                else:
+                    binding = self._create_team_binding_from_template(
+                        team_name=requested_team_name,
+                        template_id=effective_template_id,
+                        config_base=config_base,
+                    )
+                    binding_created = True
+            else:
+                from jiuwenswarm.agents.harness.team import list_team_template_summaries
+
+                configured_templates = list_team_template_summaries(config_base)
+                if len(configured_templates) > 1:
+                    raise ValueError("TEAM_NAME_REQUIRED: multiple teams are configured")
+                binding, _template = await self._create_generated_team_binding(
+                    description=query,
+                    config_base=config_base,
+                )
+                binding_created = True
             entity_store = get_team_entity_store()
+
+            if existing_team_name and binding.team_name != existing_team_name:
+                from jiuwenswarm.agents.harness.team import get_team_manager
+
+                team_manager = get_team_manager(request.channel_id)
+                active_server_tasks = [
+                    task
+                    for task in self._session_stream_tasks.get(session_id, {})
+                    if not task.done() and task is not asyncio.current_task()
+                ]
+                if (
+                    active_server_tasks
+                    or team_manager.has_stream_task(session_id)
+                    or team_manager.has_waiters(session_id)
+                ):
+                    if binding_created:
+                        binding_store.delete(binding.team_name)
+                        entity_store.delete_team_directory(binding.team_name)
+                    raise ValueError(
+                        "TEAM_SWITCH_BUSY: session has an active team request"
+                    )
+                await team_manager.stop_session_runtime(
+                    session_id,
+                    reason="team-switch",
+                )
+                team_manager.clear_session_initialized(session_id)
+
             try:
                 binding = binding_store.bind_session(
                     team_name=binding.team_name,
@@ -2907,14 +3027,26 @@ class AgentWebSocketServer:
                 )
             except Exception:
                 cleanup_errors: list[str] = []
-                cleanup_steps = (
+                cleanup_steps = [
                     lambda: binding_store.unbind_session(
                         team_name=binding.team_name,
                         session_id=session_id,
-                    ),
-                    lambda: binding_store.delete(binding.team_name),
-                    lambda: entity_store.delete_team_directory(binding.team_name),
-                )
+                    )
+                ]
+                if existing_team_name:
+                    cleanup_steps.append(
+                        lambda: binding_store.bind_session(
+                            team_name=existing_team_name,
+                            session_id=session_id,
+                        )
+                    )
+                if binding_created:
+                    cleanup_steps.extend(
+                        (
+                            lambda: binding_store.delete(binding.team_name),
+                            lambda: entity_store.delete_team_directory(binding.team_name),
+                        )
+                    )
                 for cleanup_step in cleanup_steps:
                     try:
                         cleanup_step()
@@ -2936,7 +3068,7 @@ class AgentWebSocketServer:
             request.metadata["team_name"] = binding.team_name
             request.metadata["team_template_id"] = binding.template_id
             logger.info(
-                "[AgentWebSocketServer] auto-created and bound team before chat: "
+                "[AgentWebSocketServer] selected and bound team before chat: "
                 "session_id=%s team_name=%s template_id=%s",
                 session_id,
                 binding.team_name,
@@ -2947,7 +3079,7 @@ class AgentWebSocketServer:
     @staticmethod
     def _is_team_metadata_mode(metadata: dict[str, Any]) -> bool:
         mode = str(metadata.get("mode") or "").strip().lower()
-        return mode in {"team", "team.plan", "code.team"}
+        return mode in {"team", "agent.team", "team.plan", "code.team"}
 
     @staticmethod
     def _active_team_session_map() -> dict[str, str]:
@@ -3173,7 +3305,10 @@ class AgentWebSocketServer:
             await send_wire_payload(ws, wire)
 
     async def _handle_team_session_bind(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            update_session_metadata,
+        )
         from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStoreError, get_team_binding_store
         from jiuwenswarm.server.runtime.team_entity_store import (
             TeamEntityStoreError,
@@ -3188,15 +3323,64 @@ class AgentWebSocketServer:
         try:
             if not session_id:
                 raise TeamBindingStoreError("session_id is required", code="BAD_REQUEST")
+            if not team_name:
+                raise TeamBindingStoreError("team_name is required", code="BAD_REQUEST")
             if not (get_agent_sessions_dir() / session_id).is_dir():
                 raise TeamBindingStoreError("session not found", code="NOT_FOUND")
             binding_store = get_team_binding_store()
+            binding_created = False
             existing_binding = binding_store.get(team_name)
             if existing_binding is None:
-                raise TeamBindingStoreError("team binding not found", code="NOT_FOUND")
+                from jiuwenswarm.agents.harness.team import list_team_template_summaries
+
+                configured_template_ids = {
+                    str(item.get("template_id") or "").strip()
+                    for item in list_team_template_summaries(get_config())
+                }
+                if team_name not in configured_template_ids:
+                    raise TeamBindingStoreError(
+                        f"TEAM_NAME_UNKNOWN: {team_name}",
+                        code="TEAM_NAME_UNKNOWN",
+                    )
+                existing_binding = self._create_team_binding_from_template(
+                    team_name=team_name,
+                    template_id=team_name,
+                    config_base=get_config(),
+                )
+                binding_created = True
             entity = ensure_team_entity_for_binding(existing_binding, config_base=get_config())
             if entity is None:
                 raise TeamBindingStoreError("team entity config missing", code="NOT_FOUND")
+
+            metadata = get_session_metadata(session_id, cache_bust=True)
+            previous_team_name = str(metadata.get("team_name") or "").strip()
+            if previous_team_name and previous_team_name != team_name:
+                from jiuwenswarm.agents.harness.team import get_team_manager
+
+                team_manager = get_team_manager(request.channel_id)
+                active_server_tasks = [
+                    task
+                    for task in self._session_stream_tasks.get(session_id, {})
+                    if not task.done() and task is not asyncio.current_task()
+                ]
+                if (
+                    active_server_tasks
+                    or team_manager.has_stream_task(session_id)
+                    or team_manager.has_waiters(session_id)
+                ):
+                    if binding_created:
+                        binding_store.delete(team_name)
+                        get_team_entity_store().delete_team_directory(team_name)
+                    raise TeamBindingStoreError(
+                        "session has an active team request",
+                        code="TEAM_SWITCH_BUSY",
+                    )
+                await team_manager.stop_session_runtime(
+                    session_id,
+                    reason="team-switch",
+                )
+                team_manager.clear_session_initialized(session_id)
+
             binding = binding_store.bind_session(
                 team_name=team_name,
                 session_id=session_id,
@@ -6499,6 +6683,127 @@ class AgentWebSocketServer:
                 channel_id=request.channel_id,
                 ok=False,
                 payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_agents_sync_configs(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        from jiuwenswarm.common.config import replace_teams_in_config
+        from jiuwenswarm.server.runtime.agent_config_service import (
+            BUILTIN_AGENTS,
+            AgentConfigService,
+            build_team_member_agent_params,
+        )
+
+        try:
+            params = request.params if isinstance(request.params, dict) else {}
+            if "teams" not in params:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={
+                        "revision": params.get("revision"),
+                        "teams_applied": False,
+                    },
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await send_wire_payload(ws, wire)
+                return
+
+            teams_payload = params["teams"]
+            if not isinstance(teams_payload, dict):
+                raise ValueError("teams must be an object")
+
+            agent_params = build_team_member_agent_params(teams_payload)
+            builtin_names = {agent.name for agent in BUILTIN_AGENTS}
+            conflicting_builtin = next(
+                (item.name for item in agent_params if item.name in builtin_names),
+                None,
+            )
+            if conflicting_builtin:
+                raise ValueError(f"不能覆盖内置 agent: {conflicting_builtin}")
+
+            replace_teams_in_config(teams_payload)
+
+            agent_service = AgentConfigService()
+            materialized_agents = [
+                agent_service.create_agent(agent_params_item)
+                for agent_params_item in agent_params
+            ]
+            for agent in materialized_agents:
+                upsert_subagent_in_config(agent.name, enabled=True)
+
+            config_base = get_config()
+            from jiuwenswarm.agents.harness.team import get_team_template_snapshot
+            from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
+            from jiuwenswarm.server.runtime.team_entity_store import get_team_entity_store
+
+            entity_store = get_team_entity_store()
+            configured_team_names = {
+                str(item.get("team_name") or "").strip()
+                for item in teams_payload.get("team", [])
+                if isinstance(item, dict) and str(item.get("team_name") or "").strip()
+            }
+            for binding in get_team_binding_store().list():
+                if binding.template_id not in configured_team_names:
+                    continue
+                entity_store.write(
+                    team_name=binding.team_name,
+                    template_id=binding.template_id,
+                    template_snapshot=get_team_template_snapshot(
+                        config_base,
+                        template_id=binding.template_id,
+                    ),
+                    created_at=binding.created_at,
+                )
+
+            await self._agent_manager.reload_agents_config(
+                config_base,
+                None,
+                reload_scopes={"agent", "team"},
+            )
+
+            team_names = [
+                str(item.get("team_name") or "").strip()
+                for item in teams_payload.get("team", [])
+                if isinstance(item, dict)
+            ]
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "revision": params.get("revision"),
+                    "team_names": team_names,
+                    "agent_names": [agent.name for agent in materialized_agents],
+                    "teams_applied": True,
+                    "applies_to": "next_session",
+                },
+            )
+        except ValueError as e:
+            logger.warning("[AgentWebSocketServer] invalid teams config: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e), "code": "TEAM_CONFIG_INVALID"},
+            )
+        except Exception as e:
+            logger.exception("[AgentWebSocketServer] sync_agents_configs failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e), "code": "TEAM_CONFIG_SYNC_FAILED"},
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
