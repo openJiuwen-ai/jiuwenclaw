@@ -188,16 +188,19 @@ C:\Users\<username>\.jiuwenswarm\
 │       ├── SOUL_EN.md               # Values and persona (English)
 │       ├── HEARTBEAT_ZH.md          # Heartbeat tasks (Chinese)
 │       ├── HEARTBEAT_EN.md          # Heartbeat tasks (English)
-│       ├── USER.md                  # User-related information
+│       ├── USER.md                  # User profile and preferences
 │       ├── memory/                  # Agent memory store
 │       └── skills/                  # Skills
 │
+├── todo/                            # Todo items storage
 ├── gateway/                         # Gateway data
 ├── logs/                            # Log files
 ├── memory/                          # Global memory store
 ├── received_files/                  # Incoming external files
 └── web/                             # Web channel assets
 ```
+
+> **Note:** Session history is stored in an internal database, not as file directories. You can view and manage session history through the Web UI.
 
 **Key files:**
 
@@ -209,8 +212,10 @@ C:\Users\<username>\.jiuwenswarm\
 | `agent/workspace/IDENTITY_ZH.md` | Identity (Chinese) | Customizable | Affects how the agent sees its role |
 | `agent/workspace/SOUL_ZH.md` | Values and persona (Chinese) | Customizable | Affects tone and style |
 | `agent/workspace/HEARTBEAT_ZH.md` | Heartbeat tasks (Chinese) | Adjustable | Affects scheduled / proactive behavior |
+| `agent/workspace/USER.md` | User profile and preferences | Auto-managed by system | Affects personalization; update via agent conversation |
 | `agent/workspace/skills/` | Skills | Add skills | Extends capabilities |
-| `agent/workspace/memory/` | Memory store | Do not edit by hand | Risk of corrupting memory data |
+| `agent/workspace/memory/` | Memory store (user profile, episodic, semantic) | Do not edit by hand | Risk of corrupting memory data |
+| `todo/` | Todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
 | `logs/` | Logs | View only | Used for troubleshooting |
 
 **Example (Windows):**
@@ -218,6 +223,7 @@ C:\Users\<username>\.jiuwenswarm\
 ```text
 C:\Users\Administrator\.jiuwenswarm\
 ├── config\config.yaml
+├── todo\
 ├── agent\workspace\
 │   ├── AGENT_ZH.md
 │   ├── AGENT_EN.md
