@@ -841,8 +841,70 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         return None
 
 
+async def _build_mysql_async_engine():
+    """构建 checkpoint MySQL AsyncEngine。
+
+    连接参数从 ``GATEWAY_DB_*`` 环境变量读取，与 Gateway 共用同一 MySQL 实例。
+    未配置 ``GATEWAY_DB_HOST`` 时返回 None，checkpoint 回退到 SQLite。
+    如果目标库不存在，会自动创建。
+    """
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        return None
+    db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
+    if not db_host:
+        return None
+    try:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        db_port = os.getenv("GATEWAY_DB_PORT", "3306").strip()
+        db_user = os.getenv("GATEWAY_DB_USER", "root").strip()
+        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
+        db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
+        # 先连接不指定库，自动建库
+        server_url = (
+            f"mysql+aiomysql://{db_user}:{db_password}"
+            f"@{db_host}:{db_port}?charset=utf8mb4"
+        )
+        temp_engine = create_async_engine(server_url, echo=False)
+        async with temp_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
+                    f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                )
+            )
+        await temp_engine.dispose()
+
+        # 再连接目标库
+        db_url = (
+            f"mysql+aiomysql://{db_user}:{db_password}"
+            f"@{db_host}:{db_port}/{db_name}?charset=utf8mb4"
+        )
+        engine = create_async_engine(
+            db_url,
+            pool_size=5,
+            max_overflow=10,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+        )
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] checkpoint MySQL engine created: %s:%s/%s",
+            db_host,
+            db_port,
+            db_name,
+        )
+        return engine
+    except Exception as exc:
+        logger.error(
+            "[JiuWenSwarmDeepAdapter] failed to create checkpoint MySQL engine: %s",
+            exc,
+        )
+        return None
+
+
 async def ensure_persistent_checkpointer() -> None:
-    """Ensure the process-wide default checkpointer uses sqlite persistence."""
+    """Ensure the process-wide default checkpointer uses sqlite (or MySQL) persistence."""
     global _PERSISTENT_CHECKPOINTER_READY
 
     if _PERSISTENT_CHECKPOINTER_READY:
@@ -869,11 +931,24 @@ async def ensure_persistent_checkpointer() -> None:
         try:
             PersistenceCheckpointerProvider()
             checkpoint_path = get_checkpoint_dir()
+            conf: dict[str, Any] = {
+                "db_type": "sqlite",
+                "db_path": f"{checkpoint_path}/checkpoint",
+            }
+
+            # 企业版：CHECKPOINT_DB_TYPE=true 时改用 MySQL（复用 GATEWAY_DB_*）
+            checkpoint_db_type = os.getenv("CHECKPOINT_DB_TYPE", "").strip().lower()
+            if (
+                os.getenv("AGENT_RUNTIME", "").strip()
+                and checkpoint_db_type == "true"
+            ):
+                mysql_engine = await _build_mysql_async_engine()
+                if mysql_engine is not None:
+                    conf["db_client"] = mysql_engine
+                    logger.info("[JiuWenSwarmDeepAdapter] use mysql db_client for checkpointer")
+
             checkpointer = await CheckpointerFactory.create(
-                CheckpointerConfig(
-                    type="persistence",
-                    conf={"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"},
-                ),
+                CheckpointerConfig(type="persistence", conf=conf),
             )
             CheckpointerFactory.set_default_checkpointer(checkpointer)
             _PERSISTENT_CHECKPOINTER_READY = True
