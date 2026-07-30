@@ -456,7 +456,8 @@ class ExperienceBaseBuilder:
         sample_n = max(0, self._query_examples_count)
         new_items: list[ExperienceItem] = []
         for pat in merged_patterns:
-            examples = [t.query for t in cluster_by_id.get(pat.cluster_id, None).success_traces] if cluster_by_id.get(pat.cluster_id) else []
+            examples = [t.query for t in cluster_by_id.get(pat.cluster_id, None).success_traces] \
+                if cluster_by_id.get(pat.cluster_id) else []
             if self._kb.exist(pat.effective_skills):
                 # Same-skill items already exist — skip if any is similar enough
                 hits = self._kb.search_by_embedding(pat.pattern_description, threshold=self._pattern_merge_threshold)
