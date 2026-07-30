@@ -86,7 +86,10 @@ class _EvolutionRailReloadHarness(JiuWenClawDeepAdapter):
             self, config: dict[str, Any], config_base: dict[str, Any] | None = None
     ) -> list[Any]:
         """Expose the protected rail assembly entrypoint."""
-        return await self._get_current_agent_rails(config, config_base)
+        rails, _progressive_rail_to_unregister = await self._get_current_agent_rails(
+            config, config_base
+        )
+        return rails
 
 
 @pytest.fixture

@@ -461,7 +461,7 @@ class _DeepAdapterReloadHarness:
                     self._apply_model_to_react_agent = MagicMock()
                     self._refresh_fork_agent_executor_model = MagicMock()
                     self._make_deep_agent_config = MagicMock(return_value=MagicMock())
-                    self._get_current_agent_rails = AsyncMock(return_value=[])
+                    self._get_current_agent_rails = AsyncMock(return_value=([], None))
                     self.load_user_rails = AsyncMock()
                     self._handle_memory_rail_by_config = AsyncMock()
                     self._handle_external_memory_rail_by_config = AsyncMock()
@@ -1074,7 +1074,7 @@ async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.Mo
     )
 
     async def _empty_rails(self, c, cb):
-        return []
+        return [], None
     monkeypatch.setattr(mod.JiuWenClawDeepAdapter, "_get_current_agent_rails", _empty_rails)
 
     async def _noop(*a, **kw):
@@ -1546,6 +1546,80 @@ async def test_force_apply_clears_stale_pending_reload():
 
     assert result.applied is True
     assert adapter.get_pending_reload() is None
+
+
+@pytest.mark.asyncio
+async def test_reload_unregisters_progressive_rail_only_after_configure():
+    adapter = _DeepAdapterReloadHarness.build(working=False)
+    adapter.configure_for_force_apply_test()
+    old_rail = MagicMock(name="old-progressive-tool-rail")
+    adapter._progressive_tool_rail = old_rail
+    adapter._get_current_agent_rails.return_value = ([], old_rail)
+    events = []
+    adapter._instance.configure.side_effect = lambda _config: events.append("configure")
+
+    async def _unregister(rail):
+        assert rail is old_rail
+        events.append("unregister")
+
+    adapter._instance.unregister_rail = AsyncMock(side_effect=_unregister)
+
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        return_value={"react": {"agent_name": "a"}},
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
+        return_value="mfp",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_engine",
+        return_value="builtin",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_task_memory_service",
+    ):
+        result = await adapter.reload_agent_config(
+            config_base={"models": {"default": {}}},
+            _force_apply=True,
+        )
+
+    assert result.applied is True
+    assert events == ["configure", "unregister"]
+    assert adapter._progressive_tool_rail is None
+
+
+@pytest.mark.asyncio
+async def test_reload_keeps_progressive_rail_when_configure_fails():
+    adapter = _DeepAdapterReloadHarness.build(working=False)
+    adapter.configure_for_force_apply_test()
+    old_rail = MagicMock(name="old-progressive-tool-rail")
+    adapter._progressive_tool_rail = old_rail
+    adapter._get_current_agent_rails.return_value = ([], old_rail)
+    adapter._instance.unregister_rail = AsyncMock()
+    adapter._instance.configure.side_effect = RuntimeError("configure failed")
+
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        return_value={"react": {"agent_name": "a"}},
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
+        return_value="mfp",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_engine",
+        return_value="builtin",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_task_memory_service",
+    ):
+        with pytest.raises(RuntimeError, match="configure failed"):
+            await adapter.reload_agent_config(
+                config_base={"models": {"default": {}}},
+                _force_apply=True,
+            )
+
+    adapter._instance.unregister_rail.assert_not_awaited()
+    assert adapter._progressive_tool_rail is old_rail
 
 
 @pytest.mark.asyncio

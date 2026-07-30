@@ -3473,8 +3473,8 @@ class JiuWenClawDeepAdapter:
         self,
         config: dict[str, Any],
         config_base: dict[str, Any] | None = None,
-    ) -> list[Any]:
-        """Return rail instances that need to be re-initialized on hot reload.
+    ) -> tuple[list[Any], Any | None]:
+        """Return rail replacements and a progressive rail to retire after configure.
 
         Only rails that require a **new object** enter ``rails_list``. Rails updated
         in-place (PermissionRail, DisabledToolsRail) must not pass the same instance,
@@ -3552,16 +3552,14 @@ class JiuWenClawDeepAdapter:
         permission_rail_newly_created = self._permission_rail is None
         self._update_permission_rail(config_base)
 
-        # ProgressiveToolRail 可通过热重载启停；更新时传新对象，关闭时传旧对象仅用于卸载。
+        # ProgressiveToolRail can be enabled or disabled through hot reload.
         old_progressive_tool_rail = self._progressive_tool_rail
         progressive_tool_rail = self._build_progressive_tool_rail(config)
-        progressive_tool_rail_unload_only = (
-            progressive_tool_rail is None and old_progressive_tool_rail is not None
-        )
+        progressive_tool_rail_to_unregister = None
         if progressive_tool_rail is not None:
             self._progressive_tool_rail = progressive_tool_rail
-        elif progressive_tool_rail_unload_only:
-            self._progressive_tool_rail = None
+        elif old_progressive_tool_rail is not None:
+            progressive_tool_rail_to_unregister = old_progressive_tool_rail
 
         # Update disabled_tools_rail config in-place (no re-init needed)
         disabled_tools_rail_newly_created = False
@@ -3601,11 +3599,6 @@ class JiuWenClawDeepAdapter:
 
         if progressive_tool_rail is not None:
             rails_list.append(progressive_tool_rail)
-        elif progressive_tool_rail_unload_only and old_progressive_tool_rail is not None:
-            rails_list.append(old_progressive_tool_rail)
-        # core会先卸载与rails_list同类的已注册rail，再加载rails_list中的rail。
-        # 但需要注意，这里不能传一个与已注册的rail相同的对象。否则core只会进行卸载，不会进行加载。
-        # 如果你要更新rail，就传一个新的对象；如果不要更新，就不传；如果需要仅卸载，就传原来的rail对象。
         if disabled_tools_rail_newly_created and self._disabled_tools_rail is not None:
             rails_list.append(self._disabled_tools_rail)
         # SkillCredentialInjectionRail: only add when newly created (in-place update otherwise)
@@ -3626,7 +3619,7 @@ class JiuWenClawDeepAdapter:
             any(type(r).__name__ == "RuntimePromptRail" for r in rails_list),
         )
 
-        return rails_list
+        return rails_list, progressive_tool_rail_to_unregister
 
     async def _get_tool_cards(self, agent_card_id: str, *, mode: str = "agent.plan"):
         """Get tool cards with session-qualified resource_mgr registration."""
@@ -4453,7 +4446,9 @@ class JiuWenClawDeepAdapter:
                     self._registered_skill_dirs,
                 )
 
-            rails_list = await self._get_current_agent_rails(config, config_base)
+            rails_list, progressive_tool_rail_to_unregister = (
+                await self._get_current_agent_rails(config, config_base)
+            )
 
             # 加载用户自定义的 Rail 扩展
             await self.load_user_rails()
@@ -4484,6 +4479,14 @@ class JiuWenClawDeepAdapter:
             )
 
             self._instance.configure(deep_cfg)
+            if progressive_tool_rail_to_unregister is not None:
+                await self._instance.unregister_rail(progressive_tool_rail_to_unregister)
+                if self._progressive_tool_rail is progressive_tool_rail_to_unregister:
+                    self._progressive_tool_rail = None
+                logger.info(
+                    "[JiuWenClawDeepAdapter] ProgressiveToolRail unregistered on reload "
+                    "(tool_lazy_load disabled)"
+                )
             # configure() rebuilds ability_manager from tool_cards; multimodal tools
             # registered before configure are dropped — re-sync after configure.
             self._sync_multimodal_tools_for_runtime()
