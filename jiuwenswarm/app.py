@@ -13,8 +13,12 @@ import sys
 import time
 import os
 
-from jiuwenswarm.dotenv_early import parse_dotenv_early, get_parsed_dotenv, load_dotenv_runtime
-parse_dotenv_early("jiuwenswarm-app")
+try:
+    from jiuwenswarm.dotenv_early import parse_dotenv_early, get_parsed_dotenv, load_dotenv_runtime
+    parse_dotenv_early("jiuwenswarm-app")
+except KeyboardInterrupt:
+    sys.stderr.write("Interrupted during startup. Exiting.\n")
+    sys.exit(130)
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler

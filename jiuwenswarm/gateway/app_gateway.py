@@ -31,9 +31,12 @@ from openjiuwen.core.common.logging import LogManager
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
-from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
-
-parse_dotenv_early("jiuwenswarm-gateway")
+try:
+    from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
+    parse_dotenv_early("jiuwenswarm-gateway")
+except KeyboardInterrupt:
+    sys.stderr.write("Interrupted during startup. Exiting.\n")
+    sys.exit(130)
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge

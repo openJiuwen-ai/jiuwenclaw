@@ -23,8 +23,12 @@ import sys
 from openjiuwen.core.common.logging import LogManager
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
-from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
-parse_dotenv_early("jiuwenswarm-agentserver")
+try:
+    from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
+    parse_dotenv_early("jiuwenswarm-agentserver")
+except KeyboardInterrupt:
+    sys.stderr.write("Interrupted during startup. Exiting.\n")
+    sys.exit(130)
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
@@ -285,5 +289,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 

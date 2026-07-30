@@ -24,8 +24,12 @@ import time
 from pathlib import Path
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
-from jiuwenswarm.dotenv_early import parse_dotenv_early
-parse_dotenv_early("jiuwenswarm-start")
+try:
+    from jiuwenswarm.dotenv_early import parse_dotenv_early
+    parse_dotenv_early("jiuwenswarm-start")
+except KeyboardInterrupt:
+    sys.stderr.write("Interrupted during startup. Exiting.\n")
+    sys.exit(130)
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.utils import get_env_file, get_root_dir, get_user_workspace_dir, is_package_installation

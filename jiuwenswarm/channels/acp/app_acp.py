@@ -14,8 +14,12 @@ import sys
 import uuid
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
-from jiuwenswarm.dotenv_early import parse_dotenv_early, get_parsed_dotenv
-parse_dotenv_early("jiuwenswarm-tui")
+try:
+    from jiuwenswarm.dotenv_early import parse_dotenv_early, get_parsed_dotenv
+    parse_dotenv_early("jiuwenswarm-tui")
+except KeyboardInterrupt:
+    sys.stderr.write("Interrupted during startup. Exiting.\n")
+    sys.exit(130)
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.e2a.adapters import (
