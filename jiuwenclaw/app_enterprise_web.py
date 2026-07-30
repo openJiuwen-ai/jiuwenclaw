@@ -24,6 +24,7 @@ from jiuwenclaw.webserver.app import create_enterprise_broker_app, create_enterp
 from jiuwenclaw.webserver.common import WebRuntime, default_dist_dir, normalize_ws_target, setup_logger
 # re-export：保持 `from jiuwenclaw.app_enterprise_web import EnterpriseWebWsServer, CHAT_ACCEPT_METHODS`
 from jiuwenclaw.webserver.enterprise_broker import CHAT_ACCEPT_METHODS, EnterpriseWebWsServer
+from jiuwenclaw.webserver.history import ChatHistoryStore, make_history_callback
 
 __all__ = ["CHAT_ACCEPT_METHODS", "EnterpriseWebWsServer", "main"]
 
@@ -104,6 +105,13 @@ def main() -> None:
         ws_target=ws_target_base, ws_disable_compress=args.ws_disable_compress,
         dist_dir=dist_dir, workspace_root=workspace_root, logs_root=logs_root, logger=log,
     )
+
+    # 会话历史采集：broker on_frame → make_history_callback → ChatHistoryStore（aiosqlite）。
+    history_db = rt.workspace_root / "web_history.db"
+    history_store = ChatHistoryStore(history_db)
+    rt.history_store = history_store
+    broker.on_frame = make_history_callback(history_store)
+    log.info("[jiuwenclaw-enterprise-web] history db: %s", history_db)
 
     broker_cfg = uvicorn.Config(
         create_enterprise_broker_app(broker, rt),
