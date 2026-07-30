@@ -6,25 +6,29 @@ from jiuwenswarm.gateway.auth.credential_authenticator import (
     AuthResult,
 )
 
-
-class AuthServiceClient:
-    pass
-
 class AgentOSAuthenticator(CredentialAuthenticator):
+    """通过 agent-os IAM ``POST /api/v1/auth/verify`` 校验 token。
+     	     门禁只依据响应中的 ``valid``（身份是否合法），不消费 ``authorized``
+     	     （资源级授权留给后续能力）。
 
+     	     成功时 ``AuthResult`` 字段约定（供后续会话路由 / 注册中心 / 实例创建贯通）：
+     	     - ``user_id``: IAM 返回的用户 ID（权威身份）
+     	     - ``extensions.username``: 用户名（可选）
+     	     - ``extensions.role``: 角色（可选）
+     	     - ``extensions.auth_method``: 固定为 ``"token"``
+    """
     def __init__(self, auth_service_url: str,  # agent-os 后端地址，例如 "http://localhost:8000"
                  timeout: float = 10.0, ):  # HTTP 请求超时秒数，默认 10
         self._auth_service_url = auth_service_url.rstrip("/")
         self._timeout = timeout
         self._auth_client = httpx.AsyncClient(timeout=timeout)
 
-    async def _authenticate_token(self, token: str, extra_headers: dict | None = None) -> AuthResult:
+    async def aclose(self) -> None:
+        await self._auth_client.aclose()
 
-        """验证 JWT access_token。
-        支持从 extra_headers 中提取 Authorization header 覆盖 token 参数。
- 	    如果配置了 gateway_secret_key，优先本地解码（零 IO）；
- 	    否则调用 agent-os 的 /api/v1/auth/verify 接口验证。
-        """
+    async def _authenticate_token(self, token: str,
+                                  extra_headers: dict | None = None
+                                  ) -> AuthResult:
 
         # 如果 extra_headers 中有 Authorization header，优先从中提取 token
         if extra_headers:
@@ -32,40 +36,47 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]  # 覆盖 token 参数
 
+        token = (token or "").strip()
+        if not token:
+            return AuthResult(
+                success=False,
+                user_id="",
+                error="缺少 token",
+                extensions={"error_code": "MISSING_TOKEN"},
+            )
+        # resource_id/action_id 为 IAM 契约必填字段；本阶段仅做身份门禁，填占位值并忽略 authorized
+
         # HTTP 验证：合并自定义 header
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}"
+            "Authorization": f"Bearer {token}",
         }
         if extra_headers:
             headers.update(extra_headers)
         try:
             resp = await self._auth_client.post(
                 f"{self._auth_service_url}/api/v1/auth/verify",
-                json={"token": token, "resource_id": "", "action_id": ""},
+                json={"token": token, "resource_id": "apps", "action_id": "read"},
                 headers=headers,
                 timeout=self._timeout,
             )
 
-        except Exception as e:
+        except httpx.RequestError as e:
             return AuthResult(success=False, user_id="", error=str(e))
 
         # 解析业务响应
         try:
             body = resp.json()
         except ValueError:
-            return AuthResult(
-                success=False,
-                user_id="",
-                error="认证服务返回了非法的响应格式",
-                extensions={"error_code": "INVALID_RESPONSE"},
-            )
+            return AuthResult(extensions={"error_code": "INVALID_RESPONSE"})
 
-        data = body.get("data", {})
+        data = body.get("data", {}) if isinstance(body, dict) else {}
+
+        # 仅校验身份合法性（valid）；authorized 不参与门禁决策
         if data.get("valid"):
             return AuthResult(
                 success=True,
-                user_id=data.get("user_id", ""),
+                user_id=str(data.get("user_id") or ""),
                 extensions={
                     "username": data.get("username"),
                     "role": data.get("role"),
@@ -76,25 +87,27 @@ class AgentOSAuthenticator(CredentialAuthenticator):
         return AuthResult(
             success=False,
             user_id="",
-            error=data.get("error", "Token 无效或已过期"),
+            error=str(data.get("error") or "Token 无效或已过期"),
         )
 
     async def authenticate(self, context: AuthContext) -> AuthResult:
-        """根据 context.credentials 中的凭证类型选择认证方式。
-
-        支持以下凭证类型（按优先级）：
-          - token: Bearer JWT access_token
-        """
-
         """支持Token、API-KEY、SSH证书等多种认证方式"""
         credentials = context.credentials or {}
         extra_headers = getattr(context, 'headers', None) or {}  # 从 context 取自定义 header
 
         # 1. Token认证（Web/TUI Channel）
         if "token" in credentials:
-            return await self._authenticate_token(credentials["token"], extra_headers)
+            return await self._authenticate_token(
+                str(credentials.get("token") or ""),
+                extra_headers,
+            )
 
-        return AuthResult(success=False, error="No valid credentials")
+        return AuthResult(
+            success=False,
+            user_id="",
+            error="No valid credentials",
+            extensions={"error_code": "UNSUPPORTED_CREDENTIAL"},
+        )
 
 
 

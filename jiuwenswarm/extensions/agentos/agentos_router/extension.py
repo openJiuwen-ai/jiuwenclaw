@@ -76,24 +76,36 @@ async def register_extensions(registry):
     from jiuwenswarm.common.config import resolve_env_vars
     from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
 
+    # 默认 passthrough（Registry 初始值）；仅 agentos 生效且 auth.type=agentos 时注入远程鉴权
     auth_config = config.get("auth") if isinstance(config, dict) else {}
     if not isinstance(auth_config, dict):
         auth_config = {}
     auth_config = resolve_env_vars(auth_config) or {}
     auth_type = str(auth_config.get("type") or "passthrough").strip().lower()
 
-    if auth_type == "agentos":
-        agentos_auth_config = auth_config.get("agentos")
-        if not isinstance(agentos_auth_config, dict):
-            agentos_auth_config = {}
-        agentos_auth_config = resolve_env_vars(agentos_auth_config) or {}
+    if auth_type != "agentos":
+        return [extension]
 
-        auth_service_url = str(agentos_auth_config.get("auth_service_url") or "").strip()
-        if not auth_service_url:
-            raise ValueError(
-                "auth.agentos.auth_service_url is required when auth.type=agentos"
-            )
+    agentos_auth_config = auth_config.get("agentos")
+    if not isinstance(agentos_auth_config, dict):
+        agentos_auth_config = {}
+    agentos_auth_config = resolve_env_vars(agentos_auth_config) or {}
 
-        registry.register_authenticator(auth_service_url)
+    auth_service_url = str(agentos_auth_config.get("auth_service_url") or "").strip()
+    if not auth_service_url:
+        raise ValueError("auth.agentos.auth_service_url is required when auth.type=agentos")
+
+    timeout_raw = agentos_auth_config.get("timeout", 10.0)
+    try:
+        timeout = float(timeout_raw)
+    except (TypeError, ValueError):
+        timeout = 10.0
+    authenticator = AgentOSAuthenticator(
+        auth_service_url=auth_service_url,
+        timeout=timeout,
+    )
+
+    registry.register_authenticator(authenticator)
+    extension._authenticator = authenticator
 
     return [extension]
