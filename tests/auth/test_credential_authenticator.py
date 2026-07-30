@@ -1,13 +1,10 @@
 """测试 credential_authenticator.py 的数据模型和抽象基类"""
 import pytest
-from datetime import timedelta, datetime
+
 from jiuwenswarm.gateway.auth.credential_authenticator import (
     AuthContext,
     AuthResult,
-    KeyPair,
-    SSHCertificate,
     CredentialAuthenticator,
-    UnsupportedOperationError,
 )
 
 
@@ -32,6 +29,18 @@ class TestAuthContext:
         assert context.headers == {}
         assert context.remote_addr == ""
 
+    def test_mutable_defaults_are_independent(self):
+        """验证 dataclass field(default_factory=dict) 每个实例独立"""
+        ctx1 = AuthContext()
+        ctx2 = AuthContext()
+        ctx1.credentials["key"] = "value"
+        assert "key" not in ctx2.credentials
+
+    def test_channel_type_enum_values(self):
+        for ct in ("web", "tui", "ssh", ""):
+            ctx = AuthContext(channel_type=ct)
+            assert ctx.channel_type == ct
+
 
 class TestAuthResult:
 
@@ -44,11 +53,14 @@ class TestAuthResult:
         assert result.success is True
         assert result.user_id == "user-123"
         assert result.error == ""
+        assert result.extensions == {"role": "admin"}
 
     def test_failure_result(self):
         result = AuthResult(success=False, error="Token 无效")
         assert result.success is False
         assert result.error == "Token 无效"
+        assert result.user_id == ""
+        assert result.extensions == {}
 
     def test_default_values(self):
         result = AuthResult(success=True)
@@ -56,65 +68,92 @@ class TestAuthResult:
         assert result.error == ""
         assert result.extensions == {}
 
+    def test_extensions_mutable_default_independence(self):
+        r1 = AuthResult(success=True)
+        r2 = AuthResult(success=True)
+        r1.extensions["key"] = "val"
+        assert "key" not in r2.extensions
 
-class TestKeyPair:
+    def test_success_without_user_id(self):
+        """success=True 但未提供 user_id 的场景"""
+        result = AuthResult(success=True)
+        assert result.success is True
+        assert result.user_id == ""
 
-    def test_create_keypair(self):
-        kp = KeyPair(
-            public_key="ssh-rsa AAAAB3...",
-            private_key="-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...",
+    def test_failure_with_extensions(self):
+        """失败时仍可携带扩展信息"""
+        result = AuthResult(
+            success=False,
+            error="rate limit",
+            extensions={"retry_after": 30},
         )
-        assert kp.public_key.startswith("ssh-rsa")
-        assert "BEGIN RSA PRIVATE KEY" in kp.private_key
-
-
-class TestSSHCertificate:
-
-    def test_create_certificate(self):
-        expires = datetime(2026, 12, 31, 23, 59, 59)
-        cert = SSHCertificate(
-            public_key="ssh-rsa AAA...",
-            certificate="ssh-rsa-cert-v01@openssh.com AAA...",
-            expires_at=expires,
-        )
-        assert cert.public_key.startswith("ssh-rsa")
-        assert cert.expires_at == expires
+        assert result.success is False
+        assert result.extensions["retry_after"] == 30
 
 
 class TestCredentialAuthenticator:
 
     def test_cannot_instantiate_abstract(self):
         with pytest.raises(TypeError):
-            CredentialAuthenticator()
+            CredentialAuthenticator()  # type: ignore[abstract]
 
     def test_concrete_subclass_can_instantiate(self):
-        class FullAuthenticator(CredentialAuthenticator):
+        class SimpleAuthenticator(CredentialAuthenticator):
             async def authenticate(self, context):
                 return AuthResult(success=True, user_id="test")
-            def generate_api_key(self):
-                return "ak-test-key"
-            def generate_user_keypair(self):
-                return KeyPair(public_key="ssh-rsa AAA...", private_key="key")
-            def generate_ssh_certificate(self, public_key, user_id, validity):
-                return SSHCertificate(
-                    public_key=public_key,
-                    certificate="cert",
-                    expires_at=datetime(2026, 12, 31, 23, 59, 59),
-                )
-            def compute_api_key_hmac(self, api_key, secret_key):
-                return "hmac-value"
-        auth = FullAuthenticator()
+
+        auth = SimpleAuthenticator()
         assert isinstance(auth, CredentialAuthenticator)
 
+    @pytest.mark.asyncio
+    async def test_authenticate_returns_auth_result(self):
+        class TestAuth(CredentialAuthenticator):
+            async def authenticate(self, context):
+                return AuthResult(
+                    success=True,
+                    user_id="user-abc",
+                    extensions={"method": "test"},
+                )
 
-class TestUnsupportedOperationError:
+        auth = TestAuth()
+        ctx = AuthContext(
+            channel_type="web",
+            credentials={"token": "xxx"},
+        )
+        result = await auth.authenticate(ctx)
+        assert isinstance(result, AuthResult)
+        assert result.success is True
+        assert result.user_id == "user-abc"
+        assert result.extensions["method"] == "test"
 
-    def test_exception_can_be_raised(self):
-        with pytest.raises(UnsupportedOperationError):
-            raise UnsupportedOperationError("not supported")
+    @pytest.mark.asyncio
+    async def test_authenticate_failure_path(self):
+        class FailingAuth(CredentialAuthenticator):
+            async def authenticate(self, context):
+                return AuthResult(success=False, error="invalid token")
 
-    def test_exception_message(self):
-        try:
-            raise UnsupportedOperationError("custom message")
-        except UnsupportedOperationError as e:
-            assert str(e) == "custom message"
+        auth = FailingAuth()
+        ctx = AuthContext(credentials={"token": "bad"})
+        result = await auth.authenticate(ctx)
+        assert result.success is False
+        assert result.error == "invalid token"
+
+    @pytest.mark.asyncio
+    async def test_authenticate_receives_context_correctly(self):
+        class EchoAuth(CredentialAuthenticator):
+            async def authenticate(self, context):
+                return AuthResult(
+                    success=True,
+                    user_id=context.credentials.get("token", "none"),
+                    extensions={"channel": context.channel_type},
+                )
+
+        auth = EchoAuth()
+        ctx = AuthContext(
+            channel_type="ssh",
+            credentials={"token": "ssh-user"},
+            remote_addr="10.0.0.1",
+        )
+        result = await auth.authenticate(ctx)
+        assert result.user_id == "ssh-user"
+        assert result.extensions["channel"] == "ssh"

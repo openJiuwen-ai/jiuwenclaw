@@ -30,7 +30,7 @@ class AgentOSAuthenticator(CredentialAuthenticator):
                                   extra_headers: dict | None = None
                                   ) -> AuthResult:
 
-        # 如果 extra_headers 中有 Authorization header，优先从中提取 token
+        # 1. 如果 extra_headers 中有 Authorization header，优先从中提取 token, 如果token为空直接返回失败
         if extra_headers:
             auth_header = extra_headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
@@ -46,7 +46,7 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             )
         # resource_id/action_id 为 IAM 契约必填字段；本阶段仅做身份门禁，填占位值并忽略 authorized
 
-        # HTTP 验证：合并自定义 header
+        # 2. 构建 HTTP 验证：合并自定义 header，只验证身份是否合法，不验证资源权限
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
@@ -61,18 +61,18 @@ class AgentOSAuthenticator(CredentialAuthenticator):
                 timeout=self._timeout,
             )
 
+        # 3. 异常处理
         except httpx.RequestError as e:
             return AuthResult(success=False, user_id="", error=str(e))
 
-        # 解析业务响应
+        # 4. 解析业务响应
         try:
             body = resp.json()
         except ValueError:
             return AuthResult(extensions={"error_code": "INVALID_RESPONSE"})
-
         data = body.get("data", {}) if isinstance(body, dict) else {}
 
-        # 仅校验身份合法性（valid）；authorized 不参与门禁决策
+        # 5. 仅校验身份合法性（valid）；authorized 不参与门禁决策
         if data.get("valid"):
             return AuthResult(
                 success=True,
@@ -86,7 +86,6 @@ class AgentOSAuthenticator(CredentialAuthenticator):
 
         return AuthResult(
             success=False,
-            user_id="",
             error=str(data.get("error") or "Token 无效或已过期"),
         )
 

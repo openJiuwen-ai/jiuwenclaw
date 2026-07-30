@@ -17,7 +17,6 @@ ExtensionRegistry.create_instance(
 
 from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
 from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext, AuthResult
-from jiuwenswarm.gateway.channel_manager.common import extract_token, extract_headers, get_remote_addr
 
 
 # ── Fixture ──────────────────────────────────────────
