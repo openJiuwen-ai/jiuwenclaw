@@ -827,6 +827,8 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
     // 内层 CombinedAutocompleteProvider 硬编码"行首 /"，
     // 行内 /skill 不会进它的命令补全分支，故外层自备 skill 列表在行内自行补全。
     private readonly skillCommands: readonly InstalledSkillEntry[] = [],
+    /** 补全把整行变成 /<名字> 时回调，供上层区分「补全带来的提交」与「用户回车」。 */
+    private readonly onSlashNameCompleted?: (name: string) => void,
   ) {}
 
   /** 光标前最后一个 token（以空白切分）。 */
@@ -993,6 +995,11 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
       const newLines = [...result.lines];
       newLines[result.cursorLine] = line + " ";
       return { lines: newLines, cursorLine: result.cursorLine, cursorCol: result.cursorCol + 1 };
+    }
+
+    if (isCommandNameCompletion && this.onSlashNameCompleted) {
+      const completed = (result.lines[result.cursorLine] ?? "").trim().match(/^\/(\S+)$/);
+      if (completed?.[1]) this.onSlashNameCompleted(completed[1]);
     }
 
     return result;
@@ -1718,6 +1725,8 @@ export class AppScreen implements Component, Focusable {
   private mouseTrackingEnabled = false;
   /** Previous session title for terminal window title sync. */
   private previousSessionTitle: string = "";
+  /** 刚由补全填入的 /<名字>，用于识别补全回车连带的那次提交。 */
+  private slashNameCompletion: { name: string; at: number } | null = null;
 
   constructor(
     private readonly tui: TUI,
@@ -3397,6 +3406,28 @@ export class AppScreen implements Component, Focusable {
           ? this.commands.getInstalledSkills().find((s) => s.name === firstToken)
           : undefined;
         if (installedSkill) {
+          // 只有 /<skill> 而没有内容时没什么可发的。pi-tui 在补全弹窗上按回车会
+          // 「应用补全」并顺势提交（见其 editor 的 tui.select.confirm 分支），这一下
+          // 只是补全，所以把补全结果放回输入框等用户补内容；用户自己再回车才提示为空。
+          if (text === `/${installedSkill.name}`) {
+            const justCompleted =
+              this.slashNameCompletion?.name === installedSkill.name &&
+              Date.now() - this.slashNameCompletion.at < 1000;
+            this.slashNameCompletion = null;
+            if (justCompleted) {
+              this.editor.setText(`${text} `);
+              this.tui.requestRender();
+              return;
+            }
+            this.editor.addToHistory(text);
+            this.editor.setText("");
+            this.state.addItem(addCommandEcho(snapshot.sessionId, text));
+            this.state.addItem(
+              addError(snapshot.sessionId, `${text} 后面需要跟内容，例如 ${text} 帮我做…`),
+            );
+            return;
+          }
+          this.slashNameCompletion = null;
           this.beginPendingSubmittedInput(text, snapshot);
           const extractedSkills = this.extractSkillsFromContent(content);
           const requestId = this.state.sendMessage(
@@ -8753,6 +8784,9 @@ export class AppScreen implements Component, Focusable {
         return this.ensureMvController().getMemoryCompletions(sub);
       },
       skills, // ← 传给外层，用于行内 skill 补全
+      (name: string) => {
+        this.slashNameCompletion = { name, at: Date.now() };
+      },
     );
   }
 
