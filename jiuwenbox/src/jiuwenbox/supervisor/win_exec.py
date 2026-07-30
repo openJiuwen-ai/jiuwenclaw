@@ -27,6 +27,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import sys
 from ctypes import wintypes
 
@@ -412,6 +413,23 @@ def two_hop_spawn(
     pi = PROCESS_INFORMATION()
 
     # LOGON_WITH_PROFILE = 0x1, LOGON_NETCREDENTIALS_ONLY = 0x2
+    #
+    # 为什么必须保留 LOGON_WITH_PROFILE (而非去掉它避免建 C:\Users\jbx-sandbox):
+    # CreateProcessWithLogonW 的 dwLogonFlags 不能为 0 (传 0 直接 WinError 87),
+    # 只有两个合法取值:
+    #   LOGON_WITH_PROFILE     — 以 jbx-sandbox 身份登录 + 加载 profile (建目录).
+    #   LOGON_NETCREDENTIALS_ONLY — 不加载 profile 不建目录, 但进程用调用方
+    #                              (box-server) 凭据跑, 破坏 jbx-sandbox 隔离前提.
+    # runner 必须以 jbx-sandbox 身份跑 (合成 SID ACL / logon session SID 都依赖
+    # 此身份), 故只能选 LOGON_WITH_PROFILE. profile 加载是其代价.
+    #
+    # 本项目对 profile 目录的态度: "接口保留, 运行期不再主动触发额外 profile 创建".
+    #   - 主源 (本处): 登录链路必需, profile 首次登录后复用, 保留不动.
+    #   - 副源 (win_setup._verify_or_reset_sandbox_user_password): 原用
+    #     LogonUserW(INTERACTIVE) 每次校验密码也会加载 profile, 已改为 NETWORK
+    #     不加载 profile, 消除高频副源.
+    #   - 清理接口 (_purge_stale_profile_dirs / DeleteProfileW): 保留, uninstall
+    #     及 reinstall 时清理 jbx-sandbox* 残留目录, 不在运行期调用.
     LOGON_WITH_PROFILE = 0x00000001
     # CREATE_SUSPENDED: runner 主线程挂起, 调用方 assign Job 后再 ResumeThread,
     # 避免 Job 逃逸窗口 (设计 6.8 SUSPEND→Assign→Resume).
@@ -710,6 +728,7 @@ def _create_process_as_user(
     workdir: str | None,
     stdin_fd: int,
     stdout_fd: int,
+    workspace: str | None = None,
 ) -> "tuple[int, int]":
     """CreateProcessAsUserW 以受限 token 启动子命令.
 
@@ -737,10 +756,30 @@ def _create_process_as_user(
     # 已补过一次, 但经 daemon IPC JSON 序列化 + 调用方 env 可能只含 PATH 片段,
     # 在此第二跳再补一次确保不缺. 用 setdefault 不覆盖已有值, 与 _create_windows
     # 给 runner 的 env 一致 (process.py §2962).
-    for _var in ("SystemRoot", "windir", "TEMP", "TMP", "PATHEXT", "COMSPEC"):
+    for _var in ("SystemRoot", "windir", "PATHEXT", "COMSPEC"):
         _val = os.environ.get(_var)
         if _val:
             env.setdefault(_var, _val)
+    # 沙箱可写临时区: 受限 token 写不了宿主 %TEMP% (C:\Users\liubuyu\AppData\
+    # Local\Temp), Playwright mkdtemp 会 EPERM. 把 TEMP/TMP 指向 sandbox
+    # workspace 下 .tmp (box-server 是 owner, 合成 SID ACL 允许受限 token 写).
+    # 其余 profile 路径 (LOCALAPPDATA/APPDATA/USERPROFILE/HOME) 不覆盖 —
+    # 让它们保持 jbx-sandbox 的默认值, Playwright 浏览器装在默认位置
+    # (%LOCALAPPDATA%\ms-playwright), 由 install/apply_sandbox_acl 对该路径授权,
+    # 不桥接、不重定向到共享目录.
+    if workspace:
+        _child_tmp = os.path.join(workspace, ".tmp")
+        try:
+            os.makedirs(_child_tmp, exist_ok=True)
+        except OSError:
+            pass
+        env["TEMP"] = _child_tmp
+        env["TMP"] = _child_tmp
+    else:
+        for _var in ("TEMP", "TMP"):
+            _val = os.environ.get(_var)
+            if _val:
+                env.setdefault(_var, _val)
     # 自动注入代理 env (文档 §6.6): 即使调用方没传, 也让遵守代理协议的程序
     # (pip/git/curl/node 等) 走 win_proxy, WFP 兜底拦截不走代理的出网.
     proxy_url = f"http://127.0.0.1:{_proxy_port_start}"
@@ -751,6 +790,15 @@ def _create_process_as_user(
     env.setdefault("ALL_PROXY", proxy_url)
     # NO_PROXY 放行 loopback 自身 (代理 → 代理 不该再走代理).
     env.setdefault("NO_PROXY", "127.0.0.1,localhost,::1")
+    _push_log(
+        "INFO",
+        f"child proxy injected: HTTPS_PROXY={env.get('HTTPS_PROXY')} "
+        f"NO_PROXY={env.get('NO_PROXY')} "
+        f"LOCALAPPDATA={env.get('LOCALAPPDATA')} "
+        f"PLAYWRIGHT_BROWSERS_PATH={env.get('PLAYWRIGHT_BROWSERS_PATH')} "
+        f"USERPROFILE={env.get('USERPROFILE')} HOME={env.get('HOME')} "
+        f"TEMP={env.get('TEMP')}",
+    )
     parts = [f"{k}={v}" for k, v in env.items()]
     block = "\0".join(parts) + "\0\0"
     env_block_buf = ctypes.create_unicode_buffer(block)
@@ -983,6 +1031,49 @@ def _send_error_response(stream, detail: str) -> None:
     _send_response(stream, {"ok": False, "error": "io_error", "detail": detail})
 
 
+# 匹配双引号包围的片段 (不含内部双引号). 用于规整 bash -lc script 中双引号内的
+# Windows 路径反斜杠, 把 \ 替换为 / (bash 双引号内会吞掉非特殊反斜杠, 详见
+# _handle_exec_request 注释). 单引号/双引号外内容不动, 避免误伤 shell 元字符.
+_DQ_SEGMENT_RE = re.compile(r'"[^"]*"')
+
+
+def _normalize_bash_script_backslashes(command: list) -> list | None:
+    """对 ["bash"|"sh", "-lc"|"-c", script, ...] 的 script 做反斜杠规整.
+
+    返回新 command list; 不命中模式返回 None (调用方保持原样).
+    """
+    if len(command) < 3:
+        return None
+    exe = str(command[0])
+    flag = str(command[1])
+    exe_base = os.path.basename(exe).lower()
+    if exe_base not in ("bash", "bash.exe", "sh", "sh.exe"):
+        return None
+    if flag not in ("-lc", "-c"):
+        return None
+    script = str(command[2])
+    if "\\" not in script:
+        return None
+
+    def _norm_dq(m: "re.Match[str]") -> str:
+        seg = m.group(0)
+        # seg 形如 "...", 把内部的反斜杠换成正斜杠 (Windows/node 能正确解析).
+        inner = seg[1:-1].replace("\\", "/")
+        return f'"{inner}"'
+
+    new_script = _DQ_SEGMENT_RE.sub(_norm_dq, script)
+    if new_script == script:
+        return None
+    new_command = list(command)
+    new_command[2] = new_script
+    _push_log(
+        "DEBUG",
+        f"bash script backslash normalized (flag={flag}): "
+        f"before={script[:120]!r} after={new_script[:120]!r}",
+    )
+    return new_command
+
+
 def _handle_exec_request(stream, header, restricted_token, workspace, stdin_bytes) -> None:
     """处理 exec 请求: 以受限 token 起子命令, 回传 stdout/stderr/exit.
 
@@ -1001,6 +1092,18 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
     if _c0 in ("python3", "python3.13", "python3.12", "python3.11") or _c0.startswith("python3."):
         if "\\" not in _c0 and "/" not in _c0:
             command[0] = "python"
+    # Windows bash 反斜杠规整: caller (openjiuwen) 把命令包成 ["bash","-lc",script],
+    # script 形如 node "D:\...\cli.js" check-env. _create_process_as_user 把 argv 重新
+    # 拼成 Windows cmdline 时, script 因含空格被双引号包裹; bash 解析双引号内非特殊
+    # 字符前的反斜杠会直接吞掉 (bash 双引号内仅保留 $ ` \" \newline 的反斜杠), 导致
+    # Windows 路径 D:\Workspace\...\cli.js 变成 D:Workspace...cli.js → MODULE_NOT_FOUND.
+    # 日志证明: 改用正斜杠 D:/.../cli.js 后该问题消失. 这里在交给 bash 前, 把 script
+    # 中双引号段内的反斜杠规整为正斜杠 (只动双引号内, 不碰单引号/双引号外, 避免误伤
+    # shell 元字符). 只对 ["bash"|"sh", "-lc"|"-c", script, ...] 模式生效, 不影响
+    # python -c / node -e 等非 bash 命令.
+    _norm_command = _normalize_bash_script_backslashes(command)
+    if _norm_command is not None:
+        command = _norm_command
     # 建立 pipe 收集子进程 stdout/stderr.
     kernel32 = _get_kernel32()
     sa = SECURITY_ATTRIBUTES()
@@ -1032,6 +1135,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                 _self_token, list(command), env, workdir,
                 stdin_fd=int(child_in_read.value),
                 stdout_fd=int(child_out_write.value),
+                workspace=workspace,
             )
         finally:
             _get_kernel32().CloseHandle(wintypes.HANDLE(_self_token))
@@ -1056,11 +1160,22 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         # box-server 端 exec 超时 (timed out). 先 wait 让内核回收 child 持有的
         # 所有 handle (含 stdout 写端), 再 drain stdout 能拿到 EOF.
         # 用带超时的循环 wait 而非 INFINITE: 防 child stdout 写满 pipe (64KB) 后
-        # 阻塞在 write 等 runner 读 → 互相死锁. 120s 足够覆盖正常命令; 超时强杀.
+        # 阻塞在 write 等 runner 读 → 互相死锁. child 超时预算取调用方传的 timeout
+        # (box-server payload["timeout"], 单位秒, 如 playwright install 的 600s),
+        # 缺省 120s. 旧版硬编码 120000ms 不读 caller timeout → bash 工具传 600s
+        # 也被 120s 强杀, 导致长命令被误杀.
         INFINITE = 0xFFFFFFFF
         WAIT_TIMEOUT_MS = 500
         deadline_waited_ms = 0
-        WAIT_BUDGET_MS = 120000
+        _caller_timeout_s = header.get("timeout")
+        try:
+            _caller_timeout_s = int(_caller_timeout_s) if _caller_timeout_s is not None else 120
+        except (TypeError, ValueError):
+            _caller_timeout_s = 120
+        if _caller_timeout_s <= 0:
+            _caller_timeout_s = 120
+        WAIT_BUDGET_MS = _caller_timeout_s * 1000
+        _child_killed = False  # child 是否被超时强杀 (强杀后 stdout pipe 可能不 EOF)
         while True:
             result = kernel32.WaitForSingleObject(
                 wintypes.HANDLE(proc_handle), WAIT_TIMEOUT_MS,
@@ -1072,6 +1187,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                 # child 长时间不退出 (可能 stdout 写满死锁, 或 child 卡住),
                 # 强杀避免 runner 永久挂起. 后续 exec 还能继续 (单连接不杀 runner).
                 kernel32.TerminateProcess(wintypes.HANDLE(proc_handle), 1)
+                _child_killed = True
                 _push_log("WARNING",
                           f"exec child 超时未退出 ({WAIT_BUDGET_MS}ms) 强杀, "
                           f"cmd={command[:3] if command else []!r}")
@@ -1083,15 +1199,61 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             int(child_out_read.value), os.O_RDONLY | os.O_BINARY,
         )
         out_buf = bytearray()
-        with os.fdopen(read_fd, "rb") as fh:
+        # 强杀后的 stdout 读取必须带超时, 不能阻塞等 EOF: TerminateProcess 只杀
+        # 直接 child (bash), 但 child 起的孙进程 (node/npm/下载子进程) 继承了
+        # stdout pipe 写端仍持有 → pipe 不 EOF → fh.read 永久阻塞 → runner accept
+        # 循环卡死 → 后续所有 exec IPC 全 timeout (实测: npx playwright install
+        # 超时强杀后, 整个 sandbox 后续 bash 全 timed out + WinError 10053).
+        # 正常退出 (child 自己关闭写端) 则 pipe 会 EOF, 用阻塞读完整输出.
+        # 强杀后用 PeekNamedPipe 轮询 + 总期限读, 超时即放弃残缺 stdout 跳出, 不卡 runner.
+        # (Windows select 只支持 socket, pipe 用 win32pipe.PeekNamedPipe 探测可读字节数.)
+        if _child_killed:
+            import time as _time
+            import win32pipe  # type: ignore[import-not-found]
+            _drain_deadline = _time.monotonic() + 5.0
+            _read_handle = int(child_out_read.value)
             while True:
-                chunk = fh.read(65536)
-                if not chunk:
+                if _time.monotonic() >= _drain_deadline:
+                    _push_log("DEBUG",
+                              f"exec stdout 读超时跳过 (child 强杀后 pipe 不 EOF), "
+                              f"cmd={command[:3] if command else []!r}")
                     break
-                out_buf.extend(chunk)
-                if len(out_buf) > MAX_STDOUT_BYTES:
-                    out_buf = out_buf[:MAX_STDOUT_BYTES]
+                try:
+                    _avail, _ = win32pipe.PeekNamedPipe(_read_handle, 0)
+                except Exception:
+                    # pipe 已无效 (handle 关闭等): 视为 EOF.
                     break
+                if _avail > 0:
+                    try:
+                        chunk = os.read(read_fd, min(_avail, 65536))
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    out_buf.extend(chunk)
+                    if len(out_buf) > MAX_STDOUT_BYTES:
+                        out_buf = out_buf[:MAX_STDOUT_BYTES]
+                        break
+                else:
+                    # 暂无数据, 短睡再轮询 (PeekNamedPipe 无数据时也可能因写端全关
+                    # 而后续返回 EOF, 但孙进程仍持写端时永远不 EOF — 靠 deadline 兜底).
+                    _time.sleep(0.1)
+            # 强杀分支用的是裸 os.read(fd), fdopen 分支会自动关 fd; 这里显式关
+            # 避免 osfhandle→fd 映射泄漏 (底层 handle 由 finally CloseHandle 关).
+            try:
+                os.close(read_fd)
+            except OSError:
+                pass
+        else:
+            with os.fdopen(read_fd, "rb") as fh:
+                while True:
+                    chunk = fh.read(65536)
+                    if not chunk:
+                        break
+                    out_buf.extend(chunk)
+                    if len(out_buf) > MAX_STDOUT_BYTES:
+                        out_buf = out_buf[:MAX_STDOUT_BYTES]
+                        break
         exit_code = wintypes.DWORD()
         kernel32.GetExitCodeProcess(
             wintypes.HANDLE(proc_handle), ctypes.byref(exit_code),
@@ -1109,8 +1271,24 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         # "空 stderr exit=1" 类问题的关键, 把 command 摘要 + exit + 输出前缀
         # 经日志长连发回 box-server 由主进程打印. 输出截断防撑爆日志帧.
         cmd_summary = " ".join(str(c) for c in (header.get("command") or []))[:200]
-        out_preview = out_text[:512]
+        # 失败时若含 EPERM, 取更长 preview (含完整错误路径, 之前 512 截断 EPERM 路径).
+        if ec != 0 and "EPERM" in out_text:
+            out_preview = out_text[:4000]
+        else:
+            out_preview = out_text[:512]
         if ec != 0:
+            # 失败时把完整 stdout 落盘到 workspace (.exec_failed.log), 供宿主机直接读.
+            # 日志长连会截断 preview, 落盘拿完整 EPERM 路径等错误信息.
+            if workspace:
+                try:
+                    _failed_log = os.path.join(str(workspace), ".exec_failed.log")
+                    with open(_failed_log, "w", encoding="utf-8", errors="replace") as _fh:
+                        _fh.write(f"cmd: {cmd_summary}\nexit: {ec}\n")
+                        _fh.write(f"stdout_len: {len(out_text)}\n")
+                        _fh.write("---- stdout ----\n")
+                        _fh.write(out_text)
+                except OSError:
+                    pass
             _push_log("WARNING",
                       f"exec 失败 exit={ec} cmd={cmd_summary!r} "
                       f"stdout_len={len(out_text)} stdout_preview={out_preview!r}")

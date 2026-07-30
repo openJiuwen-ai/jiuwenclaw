@@ -22,6 +22,11 @@ from typing import Literal
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.supervisor import win_constants as const
+from jiuwenbox.server.workspace import (
+    JIUWENBOX_HOME,
+    JIUWENCLAW_DATA_DIR_PATH,
+    OFFICE_CLAW_DATA_ROOT,
+)
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -380,6 +385,83 @@ def apply_sandbox_acl(
                 recursive=recursive,
             )
         applied.append(expanded)
+
+    # 数据根 traverse (非递归 Allow Read): 沙箱 child 访问 workspace /
+    # isolation_venv / 业务产物 时, 路径上每一级父目录需 traverse+读属性权限.
+    # 实测 npx/npm 解析时逐级 lstat 数据子树祖先, 每一级 ACL 残缺都会 EPERM:
+    #   .office-claw           (OFFICE_CLAW_DATA_ROOT)   → 已解决
+    #   .jiuwenclaw             (JIUWENCLAW_DATA_DIR_PATH) → 残缺, 仍 EPERM
+    #   jiuwenbox               (JIUWENBOX_HOME)           → 残缺, lstat EPERM
+    # 这三个目录的 ACL 都经历过沙箱 revoke 或创建时未给 jbx-sandbox/合成 SID,
+    # 受限 token lstat 即 WinError 5, 导致 playwright install 失败.
+    #
+    # 对这三个数据子树目录施加非递归 (只目录本身, 不继承子对象) Allow Read:
+    # 让受限 token 能 lstat/traverse 整条链, 但不递归读其他沙箱 workspace 内容
+    # (避免跨沙箱泄露). 真实 SID (runner 第一跳) 同步授一份.
+    #
+    # 路径取值均来自 box 已知常量/env (workspace.py 解析, 与 relay-claw 同算法),
+    # 不在此拼祖先路径. 非递归 ACE **不**加入 applied 清单: revoke_sandbox_acl
+    # 对清单 rglob 递归扫, 放进去会扫整树误删其他沙箱 ACE (合成 SID 固定共用).
+    # traverse read 残留无害且 grant 幂等, 下次建沙箱重新施加.
+    _traverse_roots: list[Path] = []
+    for _root in (OFFICE_CLAW_DATA_ROOT, JIUWENCLAW_DATA_DIR_PATH, JIUWENBOX_HOME):
+        if _root and _root not in _traverse_roots and os.path.isdir(str(_root)):
+            _traverse_roots.append(_root)
+    for _root in _traverse_roots:
+        grant_ace(
+            str(_root), sid,
+            rights=const.FILE_GENERIC_READ,
+            mode="ALLOW",
+            recursive=False,
+        )
+        if sandbox_user_sid:
+            grant_ace(
+                str(_root), sandbox_user_sid,
+                rights=const.FILE_GENERIC_READ,
+                mode="ALLOW",
+                recursive=False,
+            )
+    if _traverse_roots:
+        logger.info(
+            "施加数据根 traverse: roots=%s (非递归, 不进 revoke 清单)",
+            [str(r) for r in _traverse_roots],
+        )
+
+    # 对 ~/.office-claw 整个数据根递归补授 Read+Write ACL (一劳永逸, 与
+    # install 阶段同路径同语义): install force=False 幂等跳过时, 这里每次建
+    # 沙箱补授, 让受限 token 能读写整个数据根 (workspace / isolation_venv /
+    # .ms-playwright / 业务产物). 用 Path.home()/.office-claw (与 relay-claw
+    # 同算法), 不依赖 JIUWENCLAW_DATA_DIR env (避免 install 子进程 env 缺失算错).
+    # 递归 grant, 合成 SID 固定 → 幂等, 不进 applied 清单 (避免 revoke 跨沙箱
+    # 误删). 真实 SID 同步授一份. 单用户本地部署, 跨沙箱读 workspace 可接受.
+    import pathlib as _pl
+    _office_claw_root = str(_pl.Path.home() / ".office-claw")
+    if os.path.isdir(_office_claw_root):
+        grant_ace(
+            _office_claw_root, sid,
+            rights=const.ALLOW_WRITE_RIGHTS,
+            mode="ALLOW", recursive=True,
+        )
+        grant_ace(
+            _office_claw_root, sid,
+            rights=const.FILE_GENERIC_READ,
+            mode="ALLOW", recursive=True,
+        )
+        if sandbox_user_sid:
+            grant_ace(
+                _office_claw_root, sandbox_user_sid,
+                rights=const.ALLOW_WRITE_RIGHTS,
+                mode="ALLOW", recursive=True,
+            )
+            grant_ace(
+                _office_claw_root, sandbox_user_sid,
+                rights=const.FILE_GENERIC_READ,
+                mode="ALLOW", recursive=True,
+            )
+        logger.info(
+            "施加数据根递归 Read+Write ACL: root=%s (不进 revoke 清单)",
+            _office_claw_root,
+        )
 
     logger.info(
         "施加沙箱 ACL 完成: workspace=%s allow_write=%d deny_write=%d "

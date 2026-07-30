@@ -24,6 +24,7 @@ import os
 import secrets
 import sys
 import threading
+from pathlib import Path
 from ctypes import wintypes
 
 from jiuwenbox.logging_config import configure_logging
@@ -494,6 +495,11 @@ def _delete_profile_by_sid(sid_str: str) -> bool:
     需 admin. lpProfilePath 传 None 让 API 自己从 ProfileList 解析路径.
     返回 True=已删或本就无 profile; False=删除失败 (常见: profile 正被
     占用, 此情形下注册表项仍会被清理, 目录待下次重启后可手动删).
+
+    本接口保留, 仅在 uninstall / reinstall 流程调用 (见 uninstall / install 回滚),
+    不在沙箱运行期调用: 运行期 profile 由 win_exec.two_hop_spawn 的
+    CreateProcessWithLogonW(LOGON_WITH_PROFILE) 首次登录创建, 首次后复用,
+    运行期无需再删. 保留它是为了卸载干净 + reinstall 清理历史残留目录.
     """
     if not sid_str:
         return False
@@ -526,6 +532,10 @@ def _purge_stale_profile_dirs() -> None:
     其余 (而非整体中止). WinX 本身留作 reparse point 由 DeleteProfileW / 系统
     处理, 不阻断 profile 目录整体清理 (实测: 加 onerror 后 WinX 单文件失败但
     其余全删干净, 目录树最终 rmdir 成功).
+
+    本接口保留, 仅在 uninstall / install 回滚流程调用, 不在沙箱运行期调用
+    (运行期 profile 复用单一目录, 无残留堆积). 保留它专为 reinstall 清理历史
+    残留 + uninstall 卸载干净, 见 _delete_profile_by_sid 注释.
     """
     import shutil
 
@@ -958,6 +968,34 @@ def install(
             ]
         else:
             paths_to_preinstall = []
+        # 对 ~/.office-claw 整个数据根递归授 Read+Write ACL (一劳永逸):
+        # 沙箱 workspace / isolation_venv / 浏览器目录 (.ms-playwright) / 业务产物
+        # 都在 ~/.office-claw 子树下, 受限 token (jbx-sandbox) 需读写这些路径.
+        # 之前分目录授权 (ms-playwright / 数据根 traverse) 因 install 子进程 env
+        # 缺 JIUWENCLAW_DATA_DIR 导致 workspace.py 算错路径 (算成 ~/.jiuwenclaw 而非
+        # ~/.office-claw/.jiuwenclaw), 授到错误路径 → 运行时 EPERM. 直接对
+        # ~/.office-claw 整树递归 grant (Read+Write+Execute+Delete), 不依赖任何
+        # env/常量解析, 用 Path.home()/.office-claw (与 relay-claw 同算法).
+        # 注意: ~/.office-claw 含所有沙箱 workspace, 递归授权会让各沙箱能互相读
+        # workspace 内容 — 但本产品是单用户本地部署, 跨沙箱隔离非安全目标,
+        # 数据根本就是当前用户的, 一劳永逸授权可接受.
+        try:
+            from jiuwenbox.supervisor import win_acl as _wa, win_constants as _wc
+            _office_claw_root = str(Path.home() / ".office-claw")
+            os.makedirs(_office_claw_root, exist_ok=True)
+            # 递归 grant Read (含 Execute).
+            _wa.grant_ace(
+                _office_claw_root, sid,
+                rights=_wc.FILE_GENERIC_READ, mode="ALLOW", recursive=True,
+            )
+            # 递归 grant Write+Execute+Delete.
+            _wa.grant_ace(
+                _office_claw_root, sid,
+                rights=_wc.ALLOW_WRITE_RIGHTS, mode="ALLOW", recursive=True,
+            )
+            logger.info("预装数据根递归 Read+Write ACL: %s", _office_claw_root)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("预装数据根 ACL 失败 (非致命): %s", exc)
         preinstall_thread = _preinstall_read_acl_async(paths_to_preinstall, sid)
         preinstall_thread.join(timeout=PREINSTALL_JOIN_TIMEOUT_SECONDS)
         if preinstall_thread.is_alive():
@@ -1119,13 +1157,34 @@ def _verify_or_reset_sandbox_user_password() -> None:
         return
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     token = ctypes.c_void_p()
-    LOGON32_LOGON_INTERACTIVE = 2
     LOGON32_PROVIDER_DEFAULT = 0
+    # 登录类型优先用 LOGON32_LOGON_NETWORK (3) 而非 INTERACTIVE (2):
+    # 本函数仅为校验 jbx-sandbox 密码与注册表一致, 不需要加载用户 profile.
+    # INTERACTIVE 会在首次登录时物理创建 C:\Users\jbx-sandbox 目录 + 挂载
+    # NTUSER.DAT, 这会让用户摸不着头脑 (莫名其妙多出来一堆用户目录).
+    # NETWORK 是轻量登录: 只校验凭据, 不加载 profile 不建目录.
+    # 兜底: 若本地安全策略拒绝 network logon (如 "拒绝从网络访问这台计算机"
+    # 策略命中 jbx-sandbox), 回退 INTERACTIVE 保校验功能 (仅此异常路径才可能
+    # 建 profile, 正常路径不再触发). 详见 win_exec.two_hop_spawn 注释.
+    LOGON32_LOGON_NETWORK = 3
+    LOGON32_LOGON_INTERACTIVE = 2
     ok = advapi32.LogonUserW(
         const.SANDBOX_USER_NAME, None, password,
-        LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
+        LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT,
         ctypes.byref(token),
     )
+    if not ok:
+        network_err = ctypes.get_last_error()
+        # network logon 被策略拒 (常见 WinError 1327/1385/1326): 回退交互式.
+        logger.debug(
+            "jbx-sandbox network logon 失败 (WinError %d), 回退 interactive 校验密码",
+            network_err,
+        )
+        ok = advapi32.LogonUserW(
+            const.SANDBOX_USER_NAME, None, password,
+            LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
+            ctypes.byref(token),
+        )
     if ok:
         try:
             ctypes.WinDLL("kernel32").CloseHandle(token)

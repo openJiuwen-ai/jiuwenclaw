@@ -97,7 +97,15 @@ windows:
     # owner=Administrators 且不在系统目录下, 默认 ACL 不放行 Users → 需预装;
     # 目录小递归快). 由 collect_preinstall_paths 自动合并 read_acl_preinstall +
     # tool_paths, 故这里留空即可.
-    read_acl_preinstall: []
+    #
+    # 系统浏览器目录 (Qoom Chrome 等): 沙箱内 playwright convert 需浏览器,
+    # 宿主机若装了系统 Chrome 可复用 (skill 用 executablePath/channel 指向它).
+    # Program Files 默认 ACL 虽给 Users 组 ReadAndExecute, 但受限 token 实测
+    # 仍可能读不到某些子项, 预装一份 Allow Read ACE 保险. 路径按实际安装位置
+    # 调整; 该目录默认 ACL 已给 Users 组, 预装是 idempotent 保险, 不预装也多
+    # 半能读 (Users 组继承).
+    read_acl_preinstall:
+      - "C:\\Program Files (x86)\\Qoom\\Chrome"
     # 沙箱可写路径 (合成 SID 授 Allow Write+Execute+Delete). 第一个路径作为
     # 沙箱 workspace 根.
     allow_write:
@@ -132,9 +140,17 @@ windows:
     egress:
       default: deny
       # 域名白名单 (沙箱可访问的外部域名, 解析后比对 IP).
+      # Playwright Chromium 下载: pptx-craft/.npmrc 配 playwright_download_host
+      # =https://npmmirror.com/mirrors/playwright, 实际经 npmmirror.com →
+      # registry.npmmirror.com (binary.html) → cdn.npmmirror.com (二进制文件).
+      # 故放行 npmmirror 全域 (*.npmmirror.com 含子域 + 主域).
+      # npm 包源: registry.npmmirror.com (pptx-craft .npmrc registry).
+      # python 包源: pypi.org / files.pythonhosted.org (pip install).
       allowed_domains:
         - "pypi.org"
         - "files.pythonhosted.org"
+        - "*.npmmirror.com"
+        - "npmmirror.com"
       blocked_domains:
         - "ip.me"
       allowed_ips:

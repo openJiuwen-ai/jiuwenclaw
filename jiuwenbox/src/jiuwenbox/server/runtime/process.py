@@ -2958,15 +2958,35 @@ class ProcessRuntime(RuntimeAdapter):
             existing_path = env.get("PATH", os.environ.get("PATH", ""))
             extra = os.pathsep.join(win_tool_dirs)
             env["PATH"] = f"{extra}{os.pathsep}{existing_path}" if existing_path else extra
-            # SystemRoot/TEMP 也带上 (CreateProcessAsUserW 子进程基本依赖).
+            # SystemRoot 也带上 (CreateProcessAsUserW 子进程基本依赖).
             env.setdefault("SystemRoot", os.environ.get("SystemRoot", ""))
-            env.setdefault("TEMP", os.environ.get("TEMP", ""))
-            env.setdefault("TMP", os.environ.get("TMP", ""))
             logger.info(
                 "[SandboxWin] %s windows toolpaths injected: dirs=%s bash_path=%s "
                 "PATH_prefix=%s (read ACL 由 install 预装, 运行时仅拼 PATH)",
                 sandbox_id, win_tool_dirs, _bash_path or "<未配置>", extra,
             )
+        # 沙箱可写临时区注入: 受限 token 写不了宿主 %TEMP%
+        # (C:\Users\...\AppData\Local\Temp), 导致 Playwright mkdtemp EPERM.
+        # TEMP/TMP 指向 sandbox workspace 下 .tmp (box-server 是 owner, 合成 SID
+        # ACL 允许受限 token 写 → 解决 EPERM). 放在 win_tool_dirs 块外确保生效.
+        # 不设 PLAYWRIGHT_BROWSERS_PATH — 让 Playwright 装在默认位置
+        # (%LOCALAPPDATA%\ms-playwright, jbx-sandbox profile 下), 由 install/
+        # apply_sandbox_acl 对该路径授权, 不桥接、不重定向.
+        env = dict(env) if env else {}
+        win_tmp_dir = os.path.join(workspace, ".tmp")
+        try:
+            os.makedirs(win_tmp_dir, exist_ok=True)
+        except OSError as _e:
+            logger.warning(
+                "[SandboxWin] %s 创建沙箱临时目录失败 %s: %s",
+                sandbox_id, win_tmp_dir, _e,
+            )
+        env.setdefault("TEMP", win_tmp_dir)
+        env.setdefault("TMP", win_tmp_dir)
+        logger.info(
+            "[SandboxWin] %s sandbox-writable temp injected: TEMP=%s",
+            sandbox_id, win_tmp_dir,
+        )
         # jbx-sandbox 真实 SID: 第一跳 runner 进程用它且 token 未受限,
         # 合成 SID 的 ACE 对它不生效, apply_sandbox_acl 会对 allow_read 路径
         # 给真实 SID 也 grant Allow Read, 否则 runner 读不了 venv python.
@@ -3204,6 +3224,7 @@ class ProcessRuntime(RuntimeAdapter):
             payload["timeout"] = request.timeout
         response = await self._win_runner_roundtrip(
             sandbox_id, runner, REQUEST_TYPE_EXEC, payload, request.stdin_data,
+            read_timeout=float(request.timeout) if request.timeout is not None else None,
         )
         if response is None:
             return ExecResult(
@@ -3326,6 +3347,7 @@ class ProcessRuntime(RuntimeAdapter):
         request_type: str, payload: dict[str, Any],
         body_bytes: bytes | None,
         want_body: bool,
+        read_timeout: float | None = None,
     ) -> "tuple[dict[str, Any] | None, bytes]":
         """同步执行一次 runner TCP roundtrip (在 executor 线程调用).
 
@@ -3342,9 +3364,17 @@ class ProcessRuntime(RuntimeAdapter):
             # 起子命令 (bash/node) 执行可能跑几十秒, 旧版整个 roundtrip 都用 2s
             # → node 慢一点就 socket.timeout → box-server 关连接 → runner 发响应
             # 抛 ConnectionAbortedError → 旧版 runner 直接退出 → 后续全 409.
-            # exec roundtrip 读响应放宽到 120s (对齐 Linux exec 默认无短超时).
+            #
+            # exec 读响应超时必须 **长于** runner 端 WAIT_BUDGET_MS (120s): runner
+            # 超时强杀 child 后还要读 stdout + 发响应, 这几步耗时会让总响应晚于
+            # 120s 到达. 若 box-server 也设 120s, 会先于 runner 关连接 → runner
+            # _send_response 抛 WinError 10053 (连接中止) → 日志噪音 + 该次结果丢失.
+            # 故默认 130s (runner 120s + 10s 余量); 调用方传了更长 timeout 则用之并加余量.
             if request_type == REQUEST_TYPE_EXEC:
-                sock.settimeout(120.0)
+                _exec_read_timeout = 130.0
+                if read_timeout is not None:
+                    _exec_read_timeout = max(_exec_read_timeout, float(read_timeout) + 10.0)
+                sock.settimeout(_exec_read_timeout)
             header_blob = encode_request(request_type=request_type, payload=payload)
             send_frame(sock, header_blob)
             if body_bytes:
@@ -3367,6 +3397,7 @@ class ProcessRuntime(RuntimeAdapter):
         request_type: str,
         payload: dict[str, Any],
         body_bytes: bytes | None,
+        read_timeout: float | None = None,
     ) -> dict[str, Any] | None:
         """发送请求帧 + (可选) body 帧, 读回单个响应帧 (JSON).
 
@@ -3379,9 +3410,11 @@ class ProcessRuntime(RuntimeAdapter):
             try:
                 response, _ = await loop.run_in_executor(
                     None,
-                    self._win_roundtrip_blocking,
-                    runner["control_port"],
-                    request_type, payload, body_bytes, False,
+                    lambda: self._win_roundtrip_blocking(
+                        runner["control_port"],
+                        request_type, payload, body_bytes, False,
+                        read_timeout=read_timeout,
+                    ),
                 )
                 return response
             except (OSError, ConnectionError, ValueError) as exc:

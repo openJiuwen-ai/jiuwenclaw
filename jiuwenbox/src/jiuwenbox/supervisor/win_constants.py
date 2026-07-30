@@ -204,11 +204,16 @@ INHERITED_ACE = 0x10
 # ACE 继承标志 (AceFlags), 用于容器/子对象继承.
 CONTAINER_INHERIT_ACE = 0x2
 OBJECT_INHERIT_ACE = 0x1
-SUB_CONTAINERS_AND_OBJECTS_INHERIT = 0x7
+# SUB_CONTAINERS_AND_OBJECTS_INHERIT: 容器+对象都继承. 注意: 这是 CONTAINER_INHERIT
+# | OBJECT_INHERIT 的组合常量 (=0x3), 不是单独的 0x7. 旧版误写成 0x7 (含
+# NO_PROPAGATE_INHERIT_ACE=0x4), 导致 recursive grant 的 ACE 只继承到直接子项、
+# 不向下传播到孙目录 (实测: workspace\.tmp\playwright-download-* 子目录没继承
+# 合成 SID/jbx-sandbox ACE → child 在子目录里写文件 EPERM).
+SUB_CONTAINERS_AND_OBJECTS_INHERIT = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
 INHERIT_ONLY_ACE = 0x8
 NO_PROPAGATE_INHERIT_ACE = 0x4
 
-# 递归施加 ACE 时使用的继承标志 (目录 + 所有子对象).
+# 递归施加 ACE 时使用的继承标志 (目录 + 所有子对象, 向下传播到整棵子树).
 RECURSIVE_ACE_FLAGS = (
     CONTAINER_INHERIT_ACE
     | OBJECT_INHERIT_ACE
