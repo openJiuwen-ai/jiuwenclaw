@@ -43,6 +43,14 @@ _err_handler.setFormatter(logging.Formatter("%(message)s"))
 LOGGER.addHandler(_err_handler)
 
 
+class FillCoverError(RuntimeError):
+    """Fatal condition raised by the helpers; main() turns it into SystemExit.
+
+    Raising SystemExit outside the process entry point is disallowed, and it
+    also makes these functions unusable as a library.
+    """
+
+
 def emit(line):
     """Program output on stdout."""
     _OUT.info(line)
@@ -105,7 +113,7 @@ def set_title(sp, title):
         sp, count=1, flags=re.S,
     )
     if n == 0:
-        raise SystemExit("fill_cover: could not locate the title paragraph in the ctrTitle placeholder")
+        raise FillCoverError("fill_cover: could not locate the title paragraph in the ctrTitle placeholder")
     return new_sp
 
 
@@ -113,7 +121,7 @@ def set_meta(sp, values):
     """Append each value after the label text of the Nth paragraph."""
     paras = list(re.finditer(r"<a:p>.*?</a:p>", sp, re.S))
     if len(paras) < len(values):
-        raise SystemExit(
+        raise FillCoverError(
             f"fill_cover: cover meta placeholder has {len(paras)} lines but {len(values)} values were given"
         )
     # Patch back-to-front so earlier spans stay valid.
@@ -129,12 +137,12 @@ def set_meta(sp, values):
             flags=re.S,
         )
         if n == 0:
-            raise SystemExit("fill_cover: cover meta line has no text run to append to")
+            raise FillCoverError("fill_cover: cover meta line has no text run to append to")
         sp = sp[: para.start()] + new_body + sp[para.end():]
     return sp
 
 
-def main():
+def _run():
     ap = ArgumentParser(description=__doc__)
     ap.add_argument("--target", required=True, help="unpacked PPTX directory")
     ap.add_argument("--title", help="cover main title (accent color, single line)")
@@ -142,15 +150,15 @@ def main():
     args = ap.parse_args()
 
     if not args.title and not args.meta:
-        raise SystemExit("fill_cover: nothing to do — pass --title and/or --meta")
+        raise FillCoverError("fill_cover: nothing to do — pass --title and/or --meta")
 
     slides_dir = Path(args.target) / "ppt" / "slides"
     covers = [p for p in sorted(slides_dir.glob("slide*.xml")) if 'type="ctrTitle"' in read(p)]
     if not covers:
-        raise SystemExit(f"fill_cover: no slide with a ctrTitle placeholder found in {slides_dir}")
+        raise FillCoverError(f"fill_cover: no slide with a ctrTitle placeholder found in {slides_dir}")
     if len(covers) > 1:
         names = ", ".join(p.name for p in covers)
-        raise SystemExit(f"fill_cover: expected exactly one cover slide, found {len(covers)} ({names})")
+        raise FillCoverError(f"fill_cover: expected exactly one cover slide, found {len(covers)} ({names})")
 
     path = covers[0]
     xml = read(path)
@@ -165,12 +173,21 @@ def main():
         # template types it "subTitle", and attribute order differs too.
         span = find_sp(xml, r'<p:ph[^>]*\bidx="1"')
         if span is None:
-            raise SystemExit("fill_cover: cover has no 部门/作者/日期 placeholder")
+            raise FillCoverError("fill_cover: cover has no 部门/作者/日期 placeholder")
         values = [v.strip() for v in args.meta.split("|")]
         xml = xml[: span[0]] + set_meta(xml[span[0]:span[1]], values) + xml[span[1]:]
 
     write(path, xml)
     emit(f"fill_cover: {path.name} updated")
+
+
+
+def main():
+    """Process entry point: turn a fatal helper error into a clean exit."""
+    try:
+        return _run()
+    except FillCoverError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

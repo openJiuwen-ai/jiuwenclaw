@@ -157,9 +157,11 @@ XLSX_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def next_embedding_num(embed_dir):
-    nums = [int(m.group(1))
-            for f in Path(embed_dir).glob("mergedBook*.xlsx")
-            if (m := re.search(r"mergedBook(\d+)", f.stem))]
+    nums = []
+    for f in Path(embed_dir).glob("mergedBook*.xlsx"):
+        match = re.search(r"mergedBook(\d+)", f.stem)
+        if match:
+            nums.append(int(match.group(1)))
     return max(nums, default=0) + 1
 
 
@@ -431,9 +433,9 @@ def _drop_notes(m):
 
 def main():
     ap = ArgumentParser()
-    ap.add_argument("--target",  required=True)
-    ap.add_argument("--source",  required=True)
-    ap.add_argument("--order",   required=True)
+    ap.add_argument("--target", required=True)
+    ap.add_argument("--source", required=True)
+    ap.add_argument("--order", required=True)
     ap.add_argument(
         "--source-layout-mode",
         choices=("template", "source"),
@@ -449,7 +451,7 @@ def main():
 
     target = Path(args.target)
     source = Path(args.source)
-    order  = [x.strip() for x in args.order.split(",")]
+    order = [x.strip() for x in args.order.split(",")]
 
     template_layout_path = target / "ppt" / "slideLayouts" / args.template_layout
     if args.source_layout_mode == "template" and not template_layout_path.exists():
@@ -544,10 +546,12 @@ def main():
     for item in order:
         idx = int(item[1:]) - 1
         if item.startswith("t"):
-            if idx < len(t_slides): final.append(t_slides[idx])
+            if idx < len(t_slides):
+                final.append(t_slides[idx])
         elif item.startswith("s"):
             src = s_slides[idx] if idx < len(s_slides) else None
-            if src and src in s_name_map: final.append(s_name_map[src])
+            if src and src in s_name_map:
+                final.append(s_name_map[src])
     emit(f"\nFinal order: {final}")
 
     # --- Update presentation.xml.rels ---

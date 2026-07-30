@@ -41,6 +41,14 @@ _err_handler.setFormatter(logging.Formatter("%(message)s"))
 LOGGER.addHandler(_err_handler)
 
 
+class FinalizeError(RuntimeError):
+    """Fatal condition raised by the helpers; main() turns it into SystemExit.
+
+    Raising SystemExit outside the process entry point is disallowed, and it
+    also makes these functions unusable as a library.
+    """
+
+
 def emit(line):
     """Program output on stdout."""
     _OUT.info(line)
@@ -52,7 +60,10 @@ SKILL_ROOT = SCRIPTS.parent
 def run(argv, step):
     proc = subprocess.run([sys.executable, *argv])
     if proc.returncode != 0:
-        raise SystemExit(f"finalize_deck: {step} failed (exit {proc.returncode}); rerun with --keep-workdir to inspect")
+        raise FinalizeError(
+            f"finalize_deck: {step} failed (exit {proc.returncode}); "
+            f"rerun with --keep-workdir to inspect"
+        )
 
 
 def count_slides(unpacked):
@@ -86,7 +97,7 @@ def cover_title_filled(pptx_path):
     return True  # no template cover in this deck (e.g. --order without t1)
 
 
-def main():
+def _run():
     ap = ArgumentParser(description=__doc__)
     ap.add_argument("content", help="generated content .pptx (PptxGenJS output)")
     ap.add_argument("out", help="final .pptx to write")
@@ -108,12 +119,12 @@ def main():
     out = Path(args.out)
     for p, what in ((content, "content pptx"), (template, "template pptx")):
         if not p.is_file():
-            raise SystemExit(f"finalize_deck: {what} not found: {p}")
+            raise FinalizeError(f"finalize_deck: {what} not found: {p}")
     # Same workspace rule as the validators: task artifacts must not live in
     # the shared skill directory (the template itself is skill material).
     for p in (content.resolve(), out.resolve()):
         if p.is_relative_to(SKILL_ROOT):
-            raise SystemExit(
+            raise FinalizeError(
                 f"finalize_deck: task file {p} is inside the skill directory ({SKILL_ROOT}); "
                 "move the whole workspace outside skills/ppt-creation (e.g. <workspace>/projects/<task>/)"
             )
@@ -127,7 +138,7 @@ def main():
 
         n = count_slides(sdir)
         if n == 0:
-            raise SystemExit(f"finalize_deck: no slides found in {content}")
+            raise FinalizeError(f"finalize_deck: no slides found in {content}")
         order = ",".join(
             tok if tok != "s*" else ",".join(f"s{i}" for i in range(1, n + 1))
             for tok in (t.strip() for t in args.order.split(","))
@@ -162,7 +173,7 @@ def main():
     inherits_template = args.source_layout_mode == "template"
     lost_structure = masters < tpl_masters or layouts < tpl_layouts
     if inherits_template and lost_structure:
-        raise SystemExit(
+        raise FinalizeError(
             f"finalize_deck: FAILED master-inheritance check — template carries "
             f"{tpl_masters} masters / {tpl_layouts} layouts but the output has "
             f"{masters} / {layouts}; the merge dropped template structure"
@@ -170,11 +181,20 @@ def main():
     # cover-title hard gate: the template's ctrTitle ships empty and renders as
     # blank space, so an unfilled cover looks finished but has no title.
     if not cover_title_filled(out):
-        raise SystemExit(
+        raise FinalizeError(
             "finalize_deck: FAILED cover-title check — the template cover's title placeholder is empty; "
             "rerun with --cover-title \"...\" (see base/quality-gates.md)"
         )
     emit("finalize_deck: OK")
+
+
+
+def main():
+    """Process entry point: turn a fatal helper error into a clean exit."""
+    try:
+        return _run()
+    except FinalizeError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

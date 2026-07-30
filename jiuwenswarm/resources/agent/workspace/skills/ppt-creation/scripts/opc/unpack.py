@@ -42,6 +42,14 @@ _err_handler.setFormatter(logging.Formatter("%(message)s"))
 LOGGER.addHandler(_err_handler)
 
 
+class UnpackError(RuntimeError):
+    """Fatal condition raised by the helpers; main() turns it into SystemExit.
+
+    Raising SystemExit outside the process entry point is disallowed, and it
+    also makes these functions unusable as a library.
+    """
+
+
 def emit(line):
     """Program output on stdout."""
     _OUT.info(line)
@@ -65,9 +73,9 @@ def pretty_print(path: Path) -> bool:
 def unpack(archive: Path, target: Path) -> int:
     """Extract `archive` into `target` and pretty-print its XML parts."""
     if archive.suffix.lower() not in SUPPORTED:
-        raise SystemExit(f"unpack: {archive} must be one of {sorted(SUPPORTED)}")
+        raise UnpackError(f"unpack: {archive} must be one of {sorted(SUPPORTED)}")
     if not archive.is_file():
-        raise SystemExit(f"unpack: {archive} does not exist")
+        raise UnpackError(f"unpack: {archive} does not exist")
 
     target.mkdir(parents=True, exist_ok=True)
     try:
@@ -76,10 +84,10 @@ def unpack(archive: Path, target: Path) -> int:
             for name in zf.namelist():
                 resolved = (target / name).resolve()
                 if not str(resolved).startswith(str(target.resolve())):
-                    raise SystemExit(f"unpack: refusing unsafe path in archive: {name}")
+                    raise UnpackError(f"unpack: refusing unsafe path in archive: {name}")
             zf.extractall(target)
-    except zipfile.BadZipFile:
-        raise SystemExit(f"unpack: {archive} is not a valid OOXML package")
+    except zipfile.BadZipFile as exc:
+        raise UnpackError(f"unpack: {archive} is not a valid OOXML package") from exc
 
     formatted = 0
     for pattern in XML_PATTERNS:
@@ -89,7 +97,7 @@ def unpack(archive: Path, target: Path) -> int:
     return formatted
 
 
-def main():
+def _run():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("archive", help="OOXML file to unpack")
     ap.add_argument("target", help="directory to unpack into")
@@ -97,6 +105,15 @@ def main():
 
     count = unpack(Path(args.archive), Path(args.target))
     emit(f"Unpacked {args.archive} ({count} XML files)")
+
+
+
+def main():
+    """Process entry point: turn a fatal helper error into a clean exit."""
+    try:
+        return _run()
+    except UnpackError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

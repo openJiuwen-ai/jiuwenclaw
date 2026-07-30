@@ -189,8 +189,8 @@ def validate(unpacked: Path, baseline: Path | None = None) -> list[str]:
                 zf.extractall(base_dir)
         except (zipfile.BadZipFile, OSError):
             return errors      # unreadable baseline: report everything
-        known = {_fingerprint(e) for e in
-                 validate_schemas(base_dir) + validate_structure(base_dir)}
+        baseline_errors = validate_schemas(base_dir) + validate_structure(base_dir)
+        known = {_fingerprint(e) for e in baseline_errors}
 
     return [e for e in errors if _fingerprint(e) not in known]
 

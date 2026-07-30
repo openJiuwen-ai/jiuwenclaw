@@ -37,6 +37,14 @@ _err_handler.setFormatter(logging.Formatter("%(message)s"))
 LOGGER.addHandler(_err_handler)
 
 
+class ThumbnailError(RuntimeError):
+    """Fatal condition raised by the helpers; main() turns it into SystemExit.
+
+    Raising SystemExit outside the process entry point is disallowed, and it
+    also makes these functions unusable as a library.
+    """
+
+
 def emit(line):
     """Program output on stdout."""
     _OUT.info(line)
@@ -52,7 +60,7 @@ def find_soffice() -> str:
                       "/Applications/LibreOffice.app/Contents/MacOS/soffice"):
         if shutil.which(candidate) or Path(candidate).is_file():
             return candidate
-    raise SystemExit("thumbnail: LibreOffice not found (install it, or `brew install --cask libreoffice`)")
+    raise ThumbnailError("thumbnail: LibreOffice not found (install it, or `brew install --cask libreoffice`)")
 
 
 def render_pages(deck: Path, workdir: Path) -> list[Image.Image]:
@@ -62,12 +70,12 @@ def render_pages(deck: Path, workdir: Path) -> list[Image.Image]:
                    check=True, capture_output=True, timeout=300)
     pdf = workdir / f"{deck.stem}.pdf"
     if not pdf.is_file():
-        raise SystemExit(f"thumbnail: LibreOffice produced no PDF for {deck}")
+        raise ThumbnailError(f"thumbnail: LibreOffice produced no PDF for {deck}")
 
     try:
         import fitz
-    except ImportError:
-        raise SystemExit("thumbnail: PyMuPDF is required (pip install pymupdf)")
+    except ImportError as exc:
+        raise ThumbnailError("thumbnail: PyMuPDF is required (pip install pymupdf)") from exc
 
     pages = []
     with fitz.open(pdf) as doc:
@@ -95,7 +103,7 @@ def build_sheet(pages: list[Image.Image], labels: list[str], cols: int) -> Image
     return sheet
 
 
-def main():
+def _run():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("deck", help="input .pptx")
     ap.add_argument("prefix", nargs="?", default="thumbnails",
@@ -105,7 +113,7 @@ def main():
 
     deck = Path(args.deck)
     if not deck.is_file():
-        raise SystemExit(f"thumbnail: {deck} not found")
+        raise ThumbnailError(f"thumbnail: {deck} not found")
 
     with tempfile.TemporaryDirectory() as tmp:
         pages = render_pages(deck, Path(tmp))
@@ -121,6 +129,15 @@ def main():
         written.append(str(out))
 
     emit(f"Wrote {', '.join(written)} ({len(pages)} slides)")
+
+
+
+def main():
+    """Process entry point: turn a fatal helper error into a clean exit."""
+    try:
+        return _run()
+    except ThumbnailError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

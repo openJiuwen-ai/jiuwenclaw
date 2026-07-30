@@ -23,7 +23,9 @@ import zipfile
 from pathlib import Path
 from xml.dom import minidom
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Append rather than insert(0, ...): prepending shadows same-named stdlib or
+# site-packages modules for the whole process.
+sys.path.append(str(Path(__file__).resolve().parent))
 from repair import repair_all          # noqa: E402
 from validate import validate          # noqa: E402
 
@@ -43,6 +45,14 @@ LOGGER.setLevel(logging.INFO)
 _err_handler = logging.StreamHandler(sys.stderr)
 _err_handler.setFormatter(logging.Formatter("%(message)s"))
 LOGGER.addHandler(_err_handler)
+
+
+class PackError(RuntimeError):
+    """Fatal condition raised by the helpers; main() turns it into SystemExit.
+
+    Raising SystemExit outside the process entry point is disallowed, and it
+    also makes these functions unusable as a library.
+    """
 
 
 def emit(line):
@@ -77,9 +87,9 @@ def condense(path: Path) -> None:
 def pack(unpacked: Path, output: Path, do_repair: bool = True,
          do_validate: bool = True, original: Path | None = None) -> None:
     if not unpacked.is_dir():
-        raise SystemExit(f"pack: {unpacked} is not a directory")
+        raise PackError(f"pack: {unpacked} is not a directory")
     if output.suffix.lower() not in SUPPORTED:
-        raise SystemExit(f"pack: {output} must be one of {sorted(SUPPORTED)}")
+        raise PackError(f"pack: {output} must be one of {sorted(SUPPORTED)}")
 
     if do_repair:
         totals = repair_all(unpacked)
@@ -96,7 +106,7 @@ def pack(unpacked: Path, output: Path, do_repair: bool = True,
                 LOGGER.error(f"  {err}")
             if len(errors) > 20:
                 LOGGER.error(f"  ... and {len(errors) - 20} more")
-            raise SystemExit(f"pack: refusing to write {output}")
+            raise PackError(f"pack: refusing to write {output}")
         emit("All validations PASSED!")
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -118,7 +128,7 @@ def pack(unpacked: Path, output: Path, do_repair: bool = True,
     emit(f"Successfully packed {unpacked} to {output}")
 
 
-def main():
+def _run():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("unpacked", help="unpacked OOXML directory")
     ap.add_argument("output", help="output .pptx/.docx/.xlsx")
@@ -131,6 +141,15 @@ def main():
     pack(Path(args.unpacked), Path(args.output),
          do_repair=not args.no_repair, do_validate=not args.no_validate,
          original=Path(args.original) if args.original else None)
+
+
+
+def main():
+    """Process entry point: turn a fatal helper error into a clean exit."""
+    try:
+        return _run()
+    except PackError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

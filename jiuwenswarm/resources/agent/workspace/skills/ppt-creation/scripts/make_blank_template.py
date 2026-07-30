@@ -101,8 +101,9 @@ def build_cover(pres):
     # The alignment is load-bearing, not cosmetic: the Title Slide layout
     # centers its placeholders, so an unset paragraph puts the filled-in title
     # in the middle of the slide while the accent rule below stays hard left.
+    # Setting .alignment creates the <a:pPr> on its own -- verified to emit the
+    # same XML as reaching into the private element to pre-create it.
     para = title.text_frame.paragraphs[0]
-    para._p.get_or_add_pPr()
     para.alignment = PP_ALIGN.LEFT
     para.font.name = CJK_FONT
     para.font.size = Pt(29)

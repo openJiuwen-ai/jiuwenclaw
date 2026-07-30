@@ -47,7 +47,11 @@ _ATTR = {k: re.compile(rf'\b{k}="([^"]*)"') for k in ("Id", "Type", "Target", "T
 
 
 def _attrs(tag: str) -> dict:
-    return {k: (m.group(1) if (m := rx.search(tag)) else None) for k, rx in _ATTR.items()}
+    out = {}
+    for key, rx in _ATTR.items():
+        match = rx.search(tag)
+        out[key] = match.group(1) if match else None
+    return out
 
 
 def rels_path_for(part: Path, root: Path) -> Path:

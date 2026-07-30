@@ -35,6 +35,14 @@ _err_handler.setFormatter(logging.Formatter("%(message)s"))
 LOGGER.addHandler(_err_handler)
 
 
+class AddSlideError(RuntimeError):
+    """Fatal condition raised by the helpers; main() turns it into SystemExit.
+
+    Raising SystemExit outside the process entry point is disallowed, and it
+    also makes these functions unusable as a library.
+    """
+
+
 def emit(line):
     """Program output on stdout."""
     _OUT.info(line)
@@ -74,8 +82,11 @@ xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
 
 
 def next_free(slides_dir: Path) -> int:
-    used = [int(m.group(1)) for f in slides_dir.glob("slide*.xml")
-            if (m := re.match(r"slide(\d+)\.xml$", f.name))]
+    used = []
+    for f in slides_dir.glob("slide*.xml"):
+        match = re.match(r"slide(\d+)\.xml$", f.name)
+        if match:
+            used.append(int(match.group(1)))
     return max(used) + 1 if used else 1
 
 
@@ -97,7 +108,7 @@ def add_slide(root: Path, source: str) -> str:
     if source.startswith("slideLayout"):
         layout = layouts / source
         if not layout.is_file():
-            raise SystemExit(f"add_slide: no such layout: {layout}")
+            raise AddSlideError(f"add_slide: no such layout: {layout}")
         new_part.write_text(EMPTY_SLIDE, encoding="utf-8")
         rels = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
                 f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -107,7 +118,7 @@ def add_slide(root: Path, source: str) -> str:
     else:
         src_part = slides / source
         if not src_part.is_file():
-            raise SystemExit(f"add_slide: no such slide: {src_part}")
+            raise AddSlideError(f"add_slide: no such slide: {src_part}")
         shutil.copy2(src_part, new_part)
         src_rels = slides / "_rels" / f"{source}.rels"
         if src_rels.is_file():
@@ -153,13 +164,22 @@ def _register_in_presentation(root: Path, slide_name: str) -> str:
     return rel_id
 
 
-def main():
+def _run():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("unpacked", help="unpacked PPTX directory")
     ap.add_argument("source", help="slideN.xml to duplicate, or slideLayoutN.xml to start from")
     args = ap.parse_args()
 
     emit(add_slide(Path(args.unpacked), args.source))
+
+
+
+def main():
+    """Process entry point: turn a fatal helper error into a clean exit."""
+    try:
+        return _run()
+    except AddSlideError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":
