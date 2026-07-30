@@ -39,8 +39,18 @@ _spec.loader.exec_module(_module)
 JiuClawQABlockFreezeRail = _module.JiuClawQABlockFreezeRail
 
 
-def _make_commit(*, qa_id: str = "qa_001") -> FreezeCommitResult:
+def _make_commit(
+    *,
+    qa_id: str = "qa_001",
+    had_full_compact_in_qa: bool = False,
+    l0_content_mode: str = "delta",
+    recovery_required: bool = False,
+) -> FreezeCommitResult:
     entry = QABlockEntry(qa_id=qa_id, qa_index=1, status="completed")
+    # setattr keeps tests runnable against older openjiuwen lacking newer fields.
+    setattr(entry, "had_full_compact_in_qa", had_full_compact_in_qa)
+    setattr(entry, "l0_content_mode", l0_content_mode)
+    setattr(entry, "recovery_required", recovery_required)
     return FreezeCommitResult(entry=entry, native_messages=[SimpleNamespace(content="msg")])
 
 
@@ -166,6 +176,41 @@ class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
             context=context,
             qa_id="qa_003",
             native_messages=commit.native_messages,
+            force_produce=False,
+            l0_content_mode=getattr(commit.entry, "l0_content_mode", None),
+            had_full_compact_in_qa=getattr(commit.entry, "had_full_compact_in_qa", None),
+        )
+
+    async def _assert_force_produce_true(self, commit: FreezeCommitResult) -> None:
+        context = MagicMock()
+        session = SimpleNamespace()
+        schedule_attr = "_schedule_freeze_artifact_produce_async"
+        with patch.object(self.rail, schedule_attr, autospec=True) as mock_async:
+            _on_freeze_commit(self.rail, session, context, commit)
+            await asyncio.sleep(0)
+        mock_async.assert_awaited_once_with(
+            _session=session,
+            context=context,
+            qa_id=commit.entry.qa_id,
+            native_messages=commit.native_messages,
+            force_produce=True,
+            l0_content_mode=getattr(commit.entry, "l0_content_mode", None),
+            had_full_compact_in_qa=getattr(commit.entry, "had_full_compact_in_qa", None),
+        )
+
+    async def test_on_freeze_commit_force_produce_when_had_full_compact(self) -> None:
+        await self._assert_force_produce_true(
+            _make_commit(qa_id="qa_fc", had_full_compact_in_qa=True)
+        )
+
+    async def test_on_freeze_commit_force_produce_when_compact_summary_tail(self) -> None:
+        await self._assert_force_produce_true(
+            _make_commit(qa_id="qa_tail", l0_content_mode="compact_summary_tail")
+        )
+
+    async def test_on_freeze_commit_force_produce_when_recovery_required(self) -> None:
+        await self._assert_force_produce_true(
+            _make_commit(qa_id="qa_rec", recovery_required=True)
         )
 
     def test_on_freeze_commit_without_running_loop_is_noop(self) -> None:
