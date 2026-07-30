@@ -859,7 +859,7 @@ class JiuWenSwarmDeepAdapter:
         self._session_instance_config: dict[str, Any] | None = None
         self._session_instance_mode: str = "agent"
         self._session_instance_sub_mode: str | None = None
-        self._target_agent_instances: dict[str, DeepAgent] = {}
+        self._target_agent_instances: dict[tuple[str, str], DeepAgent] = {}
         self._xiaoyi_phone_tools_registered: bool = False
         self._paid_search_registered: bool = False
         self._paid_search_tool: WebPaidSearchTool | None = None
@@ -1767,7 +1767,8 @@ class JiuWenSwarmDeepAdapter:
     ) -> DeepAgent:
         """Resolve one Relay single-mention target to its configured DeepAgent."""
         target = str(target_agent or "").strip()
-        cached = self._target_agent_instances.get(target)
+        cache_key = (session_id, target)
+        cached = self._target_agent_instances.get(cache_key)
         if cached is not None:
             return cached
 
@@ -1785,8 +1786,24 @@ class JiuWenSwarmDeepAdapter:
             )
         except Exception as exc:
             raise ValueError(f"TARGET_AGENT_NOT_AVAILABLE: {target}") from exc
-        self._target_agent_instances[target] = target_instance
+        self._target_agent_instances[cache_key] = target_instance
         return target_instance
+
+    @staticmethod
+    async def _close_target_agent_stream(
+        interaction_stream: Any,
+        target_agent_instance: DeepAgent,
+        *,
+        abort_active_round: bool,
+    ) -> None:
+        """Close a target-agent stream and abort its active round when required."""
+        try:
+            if abort_active_round:
+                await target_agent_instance.cancel_round(
+                    reason="target-agent-stream-aborted",
+                )
+        finally:
+            await interaction_stream.aclose()
 
     def _build_configured_subagents(
         self,
@@ -7637,8 +7654,12 @@ class JiuWenSwarmDeepAdapter:
                 reset_current_multimodal_image_files(image_files_token)
             if interaction_stream is not None:
                 try:
-                    if target_agent_streaming:
-                        await interaction_stream.aclose()
+                    if target_agent_streaming and target_agent_instance is not None:
+                        await self._close_target_agent_stream(
+                            interaction_stream,
+                            target_agent_instance,
+                            abort_active_round=interaction_stream_abort,
+                        )
                     else:
                         await interaction_stream.close(
                             abort_active_round=interaction_stream_abort,
@@ -8605,8 +8626,12 @@ class JiuWenSwarmDeepAdapter:
                 reset_current_multimodal_image_files(image_files_token)
             if interaction_stream is not None:
                 try:
-                    if target_agent_streaming:
-                        await interaction_stream.aclose()
+                    if target_agent_streaming and target_agent_instance is not None:
+                        await self._close_target_agent_stream(
+                            interaction_stream,
+                            target_agent_instance,
+                            abort_active_round=interaction_stream_abort,
+                        )
                     else:
                         await interaction_stream.close(
                             abort_active_round=interaction_stream_abort,

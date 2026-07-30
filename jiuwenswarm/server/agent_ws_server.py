@@ -12,6 +12,7 @@ import math
 import os
 import shutil
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 from weakref import WeakValueDictionary
@@ -625,6 +626,25 @@ def validate_team_runtime_identity_params(params: dict[str, Any]) -> None:
         )
 
 
+def _read_file_snapshot(path: Path) -> bytes | None:
+    """Return a file's bytes, or ``None`` when it does not exist."""
+    return path.read_bytes() if path.is_file() else None
+
+
+def _restore_file_snapshot(path: Path, snapshot: bytes | None) -> None:
+    """Restore one file snapshot with an atomic replacement when possible."""
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.rollback.tmp")
+    try:
+        tmp_path.write_bytes(snapshot)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def _apply_resolved_mode_to_request(request: AgentRequest) -> tuple[str, str | None]:
     mode, sub_mode, canonical_mode = resolve_agent_request_mode(
         request.params.get("mode", "agent")
@@ -853,6 +873,7 @@ class AgentWebSocketServer:
         # for interrupt/connection cleanup only; it never decides interaction
         # output ownership.
         self._session_stream_tasks: dict[str, dict[asyncio.Task, asyncio.Event]] = {}
+        self._agents_sync_config_lock = asyncio.Lock()
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
         self._scheduler_agent: Any = None
@@ -3320,6 +3341,16 @@ class AgentWebSocketServer:
         session_id = str(params.get("session_id") or request.session_id or "").strip()
         team_name = str(params.get("team_name") or "").strip()
         _, _, canonical_mode = resolve_agent_request_mode(params.get("mode", "team"))
+        binding_store = None
+        entity_store = None
+        binding_created = False
+        binding_attempted = False
+        mutation_started = False
+        previous_team_name = ""
+        metadata_path: Path | None = None
+        metadata_snapshot: bytes | None = None
+        entity_path: Path | None = None
+        entity_snapshot: bytes | None = None
         try:
             if not session_id:
                 raise TeamBindingStoreError("session_id is required", code="BAD_REQUEST")
@@ -3327,8 +3358,15 @@ class AgentWebSocketServer:
                 raise TeamBindingStoreError("team_name is required", code="BAD_REQUEST")
             if not (get_agent_sessions_dir() / session_id).is_dir():
                 raise TeamBindingStoreError("session not found", code="NOT_FOUND")
+            metadata_path = get_agent_sessions_dir() / session_id / "metadata.json"
+            metadata_snapshot = _read_file_snapshot(metadata_path)
+            metadata = get_session_metadata(session_id, cache_bust=True)
+            previous_team_name = str(metadata.get("team_name") or "").strip()
+
             binding_store = get_team_binding_store()
-            binding_created = False
+            entity_store = get_team_entity_store()
+            entity_path = entity_store.entity_path(team_name)
+            entity_snapshot = _read_file_snapshot(entity_path)
             existing_binding = binding_store.get(team_name)
             if existing_binding is None:
                 from jiuwenswarm.agents.harness.team import list_team_template_summaries
@@ -3348,12 +3386,11 @@ class AgentWebSocketServer:
                     config_base=get_config(),
                 )
                 binding_created = True
+                mutation_started = True
             entity = ensure_team_entity_for_binding(existing_binding, config_base=get_config())
             if entity is None:
                 raise TeamBindingStoreError("team entity config missing", code="NOT_FOUND")
 
-            metadata = get_session_metadata(session_id, cache_bust=True)
-            previous_team_name = str(metadata.get("team_name") or "").strip()
             if previous_team_name and previous_team_name != team_name:
                 from jiuwenswarm.agents.harness.team import get_team_manager
 
@@ -3368,9 +3405,6 @@ class AgentWebSocketServer:
                     or team_manager.has_stream_task(session_id)
                     or team_manager.has_waiters(session_id)
                 ):
-                    if binding_created:
-                        binding_store.delete(team_name)
-                        get_team_entity_store().delete_team_directory(team_name)
                     raise TeamBindingStoreError(
                         "session has an active team request",
                         code="TEAM_SWITCH_BUSY",
@@ -3380,7 +3414,10 @@ class AgentWebSocketServer:
                     reason="team-switch",
                 )
                 team_manager.clear_session_initialized(session_id)
+                mutation_started = True
 
+            binding_attempted = True
+            mutation_started = True
             binding = binding_store.bind_session(
                 team_name=team_name,
                 session_id=session_id,
@@ -3407,12 +3444,70 @@ class AgentWebSocketServer:
                 },
                 metadata=request.metadata,
             )
-        except (TeamBindingStoreError, TeamEntityStoreError) as exc:
+        except Exception as exc:
+            cleanup_errors: list[str] = []
+            if mutation_started and binding_store is not None:
+                if binding_attempted:
+                    try:
+                        binding_store.unbind_session(
+                            team_name=team_name,
+                            session_id=session_id,
+                        )
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        cleanup_errors.append(f"unbind target: {cleanup_exc}")
+                if previous_team_name:
+                    try:
+                        binding_store.bind_session(
+                            team_name=previous_team_name,
+                            session_id=session_id,
+                        )
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        cleanup_errors.append(f"restore previous binding: {cleanup_exc}")
+                if binding_created:
+                    try:
+                        binding_store.delete(team_name)
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        cleanup_errors.append(f"delete new binding: {cleanup_exc}")
+
+                if entity_store is not None and entity_path is not None:
+                    try:
+                        if binding_created and entity_snapshot is None:
+                            entity_store.delete_team_directory(team_name)
+                        else:
+                            _restore_file_snapshot(entity_path, entity_snapshot)
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        cleanup_errors.append(f"restore team entity: {cleanup_exc}")
+
+                if metadata_path is not None:
+                    try:
+                        _restore_file_snapshot(metadata_path, metadata_snapshot)
+                        remove_session_metadata_cache(session_id)
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        cleanup_errors.append(f"restore session metadata: {cleanup_exc}")
+
+            if cleanup_errors:
+                logger.error(
+                    "[AgentWebSocketServer] team session bind rollback incomplete: "
+                    "session_id=%s team_name=%s errors=%s",
+                    session_id,
+                    team_name,
+                    cleanup_errors,
+                )
+            if not isinstance(exc, (TeamBindingStoreError, TeamEntityStoreError)):
+                logger.exception(
+                    "[AgentWebSocketServer] team session bind failed: "
+                    "session_id=%s team_name=%s",
+                    session_id,
+                    team_name,
+                )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc), "code": getattr(exc, "code", "BAD_REQUEST")},
+                payload={
+                    "error": str(exc),
+                    "code": getattr(exc, "code", "TEAM_SWITCH_FAILED"),
+                },
                 metadata=request.metadata,
             )
 
@@ -6689,19 +6784,114 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def _handle_agents_sync_configs(
+    async def _apply_synced_team_config(
         self,
-        ws: Any,
-        request: AgentRequest,
-        send_lock: asyncio.Lock,
-    ) -> None:
+        teams_payload: dict[str, Any],
+    ) -> tuple[list[str], list[str]]:
+        """Persist Relay Team/Agent config as one compensating transaction."""
+        from jiuwenswarm.agents.harness.team import get_team_template_snapshot
         from jiuwenswarm.common.config import replace_teams_in_config
         from jiuwenswarm.server.runtime.agent_config_service import (
             BUILTIN_AGENTS,
             AgentConfigService,
             build_team_member_agent_params,
         )
+        from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
+        from jiuwenswarm.server.runtime.team_entity_store import get_team_entity_store
 
+        agent_params = build_team_member_agent_params(teams_payload)
+        builtin_names = {agent.name for agent in BUILTIN_AGENTS}
+        conflicting_builtin = next(
+            (item.name for item in agent_params if item.name in builtin_names),
+            None,
+        )
+        if conflicting_builtin:
+            raise ValueError(f"不能覆盖内置 agent: {conflicting_builtin}")
+
+        agent_service = AgentConfigService()
+        team_names = [
+            str(item.get("team_name") or "").strip()
+            for item in teams_payload.get("team", [])
+            if isinstance(item, dict)
+        ]
+        configured_team_names = {name for name in team_names if name}
+
+        async with self._agents_sync_config_lock:
+            config_path = Path(get_config_file())
+            file_snapshots: dict[Path, bytes | None] = {
+                config_path: _read_file_snapshot(config_path),
+            }
+            for item in agent_params:
+                path = agent_service.get_agent_file_path(item.name, item.location)
+                file_snapshots[path] = _read_file_snapshot(path)
+
+            binding_store = get_team_binding_store()
+            entity_store = get_team_entity_store()
+            bindings = binding_store.list()
+            for binding in bindings:
+                entity_path = entity_store.entity_path(binding.team_name)
+                file_snapshots[entity_path] = _read_file_snapshot(entity_path)
+
+            try:
+                replace_teams_in_config(teams_payload)
+
+                materialized_agents = [
+                    agent_service.create_agent(item)
+                    for item in agent_params
+                ]
+                for agent in materialized_agents:
+                    upsert_subagent_in_config(agent.name, enabled=True)
+
+                config_base = get_config()
+                for binding in bindings:
+                    if binding.template_id not in configured_team_names:
+                        continue
+                    entity_store.write(
+                        team_name=binding.team_name,
+                        template_id=binding.template_id,
+                        template_snapshot=get_team_template_snapshot(
+                            config_base,
+                            template_id=binding.template_id,
+                        ),
+                        created_at=binding.created_at,
+                    )
+
+                await self._agent_manager.reload_agents_config(
+                    config_base,
+                    None,
+                    reload_scopes={"agent", "team"},
+                )
+            except Exception:
+                for path, snapshot in file_snapshots.items():
+                    try:
+                        _restore_file_snapshot(path, snapshot)
+                    except Exception as rollback_exc:  # noqa: BLE001
+                        logger.exception(
+                            "[AgentWebSocketServer] teams sync rollback failed: path=%s error=%s",
+                            path,
+                            rollback_exc,
+                        )
+                try:
+                    await self._agent_manager.reload_agents_config(
+                        get_config(),
+                        None,
+                        reload_scopes={"agent", "team"},
+                    )
+                except Exception as reload_exc:  # noqa: BLE001
+                    logger.exception(
+                        "[AgentWebSocketServer] teams sync rollback reload failed: %s",
+                        reload_exc,
+                    )
+                raise
+
+        return team_names, [agent.name for agent in materialized_agents]
+
+    async def _handle_agents_sync_configs(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
         try:
             params = request.params if isinstance(request.params, dict) else {}
             if "teams" not in params:
@@ -6723,60 +6913,9 @@ class AgentWebSocketServer:
             if not isinstance(teams_payload, dict):
                 raise ValueError("teams must be an object")
 
-            agent_params = build_team_member_agent_params(teams_payload)
-            builtin_names = {agent.name for agent in BUILTIN_AGENTS}
-            conflicting_builtin = next(
-                (item.name for item in agent_params if item.name in builtin_names),
-                None,
+            team_names, agent_names = await self._apply_synced_team_config(
+                teams_payload,
             )
-            if conflicting_builtin:
-                raise ValueError(f"不能覆盖内置 agent: {conflicting_builtin}")
-
-            replace_teams_in_config(teams_payload)
-
-            agent_service = AgentConfigService()
-            materialized_agents = [
-                agent_service.create_agent(agent_params_item)
-                for agent_params_item in agent_params
-            ]
-            for agent in materialized_agents:
-                upsert_subagent_in_config(agent.name, enabled=True)
-
-            config_base = get_config()
-            from jiuwenswarm.agents.harness.team import get_team_template_snapshot
-            from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
-            from jiuwenswarm.server.runtime.team_entity_store import get_team_entity_store
-
-            entity_store = get_team_entity_store()
-            configured_team_names = {
-                str(item.get("team_name") or "").strip()
-                for item in teams_payload.get("team", [])
-                if isinstance(item, dict) and str(item.get("team_name") or "").strip()
-            }
-            for binding in get_team_binding_store().list():
-                if binding.template_id not in configured_team_names:
-                    continue
-                entity_store.write(
-                    team_name=binding.team_name,
-                    template_id=binding.template_id,
-                    template_snapshot=get_team_template_snapshot(
-                        config_base,
-                        template_id=binding.template_id,
-                    ),
-                    created_at=binding.created_at,
-                )
-
-            await self._agent_manager.reload_agents_config(
-                config_base,
-                None,
-                reload_scopes={"agent", "team"},
-            )
-
-            team_names = [
-                str(item.get("team_name") or "").strip()
-                for item in teams_payload.get("team", [])
-                if isinstance(item, dict)
-            ]
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -6784,7 +6923,7 @@ class AgentWebSocketServer:
                 payload={
                     "revision": params.get("revision"),
                     "team_names": team_names,
-                    "agent_names": [agent.name for agent in materialized_agents],
+                    "agent_names": agent_names,
                     "teams_applied": True,
                     "applies_to": "next_session",
                 },

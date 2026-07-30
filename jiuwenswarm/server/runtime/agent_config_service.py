@@ -265,6 +265,11 @@ class AgentConfigService:
                 return a
         return None
 
+    def get_agent_file_path(self, name: str, location: AgentSource = "user") -> Path:
+        """Return the persisted markdown path for a custom Agent definition."""
+        normalized_name = validate_agent_name(name)
+        return self._resolve_location_dir(location) / f"{normalized_name}.md"
+
     def create_agent(self, params: CreateAgentParams) -> AgentDefinition:
         """创建新的自定义 agent，写入 markdown 文件。
 
@@ -277,9 +282,8 @@ class AgentConfigService:
         if existing is not None and existing.source == "builtin":
             raise ValueError(f"不能覆盖内置 agent: {params.name}")
 
-        target_dir = self._resolve_location_dir(params.location)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        file_path = target_dir / f"{params.name}.md"
+        file_path = self.get_agent_file_path(params.name, params.location)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
 
         content = _format_agent_file(params)
         file_path.write_text(content, encoding="utf-8")
