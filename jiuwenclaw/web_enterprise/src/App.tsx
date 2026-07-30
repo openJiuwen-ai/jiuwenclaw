@@ -303,7 +303,9 @@ function AppContent() {
     addToolResult,
     prependMessages,
     isProcessing,
+    hasActiveRequest,
     setProcessing,
+    setHasActiveRequest,
     setThinking,
     setPaused,
   } = useChatStore();
@@ -311,9 +313,10 @@ function AppContent() {
 
   useEffect(() => {
     setProcessing(false);
+    setHasActiveRequest(false);
     setThinking(false);
     setPaused(false);
-  }, [setPaused, setProcessing, setThinking]);
+  }, [setHasActiveRequest, setPaused, setProcessing, setThinking]);
 
   useEffect(() => {
     if (!isProcessing) return;
@@ -584,6 +587,7 @@ function AppContent() {
     setHistoryPagerMeta(null);
     setHistoryLoadingMore(false);
     setProcessing(false);
+    setHasActiveRequest(false);
     setThinking(false);
     setPaused(false);
 
@@ -826,6 +830,7 @@ function AppContent() {
     setHistoryPagerMeta(null);
     setHistoryLoadingMore(false);
     setProcessing(false);
+    setHasActiveRequest(false);
     setThinking(false);
     setPaused(false);
     clearMessages();
@@ -887,6 +892,7 @@ function AppContent() {
       setHistoryPagerMeta(null);
       setHistoryLoadingMore(false);
       setProcessing(false);
+      setHasActiveRequest(false);
       setThinking(false);
       setPaused(false);
       clearMessages();
@@ -1170,6 +1176,7 @@ function AppContent() {
                     onInterrupt={handleInterrupt}
                     onSwitchMode={handleSwitchMode}
                     isProcessing={isProcessing}
+                    hasActiveRequest={hasActiveRequest}
                     onNewSession={handleNewSession}
                     onUserAnswer={handleUserAnswer}
                     historyPager={

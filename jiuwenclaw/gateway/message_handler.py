@@ -2496,12 +2496,6 @@ class MessageHandler(ABC):
                             metadata=msg.metadata,
                         )
                         supplement_env = self.message_to_e2a(supplement_interrupt)
-                        # 不能 await，否则会阻塞 forward_loop ，拖累所有 session
-                        asyncio.create_task(
-                            self._send_interrupt_to_agent(supplement_env),
-                            name=f"gw-agent-supplement-{(supplement_env.session_id or 'x')[:24]}",
-                        )
-
                         new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
                         sup_meta = dict(msg.metadata) if msg.metadata else None
                         supplement_query = new_input.strip() if isinstance(new_input, str) else ""
@@ -2535,11 +2529,28 @@ class MessageHandler(ABC):
                             bot_id=msg.bot_id,
                             metadata=sup_meta,
                         )
-                        self._user_messages.put_nowait(new_msg)
-                        logger.info(
-                            "[MessageHandler] supplement: 旧任务已取消，新任务已入队: id=%s session_id=%s",
-                            new_msg.id, msg.session_id,
+
+                        # 先等 supplement 中断在 AgentServer 处理完成（取消旧任务），再入队新流式 chat.send，
+                        # 否则新流可能先于中断进入 session 队列，被中断的 cancel_session_task 误杀
+                        def _enqueue_supplement_after_interrupt(_t, _new_msg=new_msg, _sid=msg.session_id):
+                            try:
+                                _t.result()
+                            except Exception as e:
+                                logger.warning(
+                                    "[MessageHandler] supplement 中断处理失败,仍入队新流: error=%s",
+                                    e,
+                                )
+                            self._user_messages.put_nowait(_new_msg)
+                            logger.info(
+                                "[MessageHandler] supplement: 中断已处理，新任务已入队: id=%s session_id=%s",
+                                _new_msg.id, _sid,
+                            )
+                        # 不能 await，否则会阻塞 forward_loop ，拖累所有 session
+                        _supp_task = asyncio.create_task(
+                            self._send_interrupt_to_agent(supplement_env),
+                            name=f"gw-agent-supplement-{(supplement_env.session_id or 'x')[:24]}",
                         )
+                        _supp_task.add_done_callback(_enqueue_supplement_after_interrupt)
 
                     elif intent == "cancel":
                         self._cancel_agent_work_for_session(msg, msg.session_id)
