@@ -62,6 +62,8 @@ def _build_web_search_description() -> str:
             f"search_source 可选，指定付费源名称（如 {providers}），"
             "配合 search_mode=paid 使用时优先使用指定源，不可用时返回明确错误。"
             "max_results 可选，限制单个 query 的最大返回条数。"
+            "若用户指定使用某搜索引擎（如 bing、duckduckgo），请在 query 开头包含该引擎名称（如 'bing 今天的天气'），"
+            "以便系统识别并在引擎不可用时向用户说明。"
         )
     else:
         return (
@@ -71,6 +73,8 @@ def _build_web_search_description() -> str:
             f"search_source 可选，指定付费源名称（如 {providers}），"
             "配合 search_mode=paid 使用时优先使用指定源，不可用时返回明确错误。"
             "max_results 可选，限制单个 query 的最大返回条数。"
+            "若用户指定使用某搜索引擎（如 bing、duckduckgo），请在 query 开头包含该引擎名称（如 'bing 今天的天气'），"
+            "以便系统识别并在引擎不可用时向用户说明。"
         )
 
 

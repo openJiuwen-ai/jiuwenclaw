@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from jiuwenclaw.agentserver.tools.web_search.constants import KNOWN_PAID_PROVIDERS
 from jiuwenclaw.agentserver.tools.web_search.providers import (
@@ -40,6 +41,54 @@ _SEARCH_MODE_ALIASES: dict[str, str] = {
 }
 
 _SUPPORTED_SEARCH_MODES = frozenset({"default", "paid", "free"})
+
+_ENGINE_ALIAS_MAP: dict[str, str] = {
+    "duckduckgo": "duckduckgo", "ddg": "duckduckgo", "鸭子": "duckduckgo",
+    "谷歌": "google", "google": "google",
+    "必应": "bing", "bing": "bing",
+    "百度": "baidu", "baidu": "baidu",
+    "花瓣": "petal", "petal": "petal",
+    "博查": "bocha", "bocha": "bocha",
+    "360": "360", "好搜": "360", "so": "360",
+    "搜狗": "sogou", "sogou": "sogou",
+    "头条": "toutiao", "今日头条": "toutiao",
+}
+
+_PROVIDER_TO_ENGINE: dict[str, str] = {
+    "petal": "petal",
+    "bocha": "bocha",
+    "tavily": "tavily",
+    "perplexity": "perplexity",
+    "serper": "serper",
+    "jina": "jina",
+    "duckduckgo": "duckduckgo",
+    "duckduckgo-jina": "duckduckgo",
+    "bing": "bing",
+}
+
+
+def _detect_requested_engine(query: str) -> str | None:
+    query_lower = query.lower()
+    for alias, engine in _ENGINE_ALIAS_MAP.items():
+        if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", query_lower):
+            return engine
+    return None
+
+
+def _generate_engine_mismatch_warning(
+    query: str,
+    actual_provider: str,
+) -> str | None:
+    requested_engine = _detect_requested_engine(query)
+    if not requested_engine:
+        return None
+    actual_engine = _PROVIDER_TO_ENGINE.get(actual_provider, actual_provider)
+    if requested_engine == actual_engine:
+        return None
+    return (
+        f"⚠️ 用户请求使用 {requested_engine} 搜索，但该引擎不可用，"
+        f"已自动切换至 {actual_provider}。"
+    )
 
 
 def _parse_search_source(value: str | None) -> str | None:
@@ -175,6 +224,7 @@ async def run_web_search(
             records=free_run.records,
             answer=free_run.answer,
             providers_tried=tried,
+            warning=_generate_engine_mismatch_warning(query, free_run.provider),
         )
 
     if mode == "paid":
@@ -208,6 +258,7 @@ async def run_web_search(
                 records=paid_run.records,
                 answer=paid_run.answer,
                 providers_tried=tried,
+                warning=_generate_engine_mismatch_warning(query, paid_run.provider),
             )
         _log_failed(
             query=query,
@@ -235,6 +286,7 @@ async def run_web_search(
             records=paid_run.records,
             answer=paid_run.answer,
             providers_tried=tried,
+            warning=_generate_engine_mismatch_warning(query, paid_run.provider),
         )
 
     earlier: list[WebSearchRecord] = []
@@ -283,4 +335,5 @@ async def run_web_search(
         answer=free_run.answer,
         supplementary_records=earlier,
         providers_tried=tried,
+        warning=_generate_engine_mismatch_warning(query, free_run.provider),
     )
