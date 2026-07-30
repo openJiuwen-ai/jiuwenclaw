@@ -126,6 +126,7 @@ interface InputAreaProps {
 const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_COUNT = 20;
+const ATTACHMENT_ALERT_DURATION_MS = 3000;
 
 type AttachmentStatus = 'uploading' | 'ready' | 'error';
 
@@ -218,6 +219,11 @@ function getImageValidationError(file: File): string | null {
   return null;
 }
 
+function clearAttachmentAlertTimers(timers: Map<string, number>): void {
+  timers.forEach((timeoutId) => window.clearTimeout(timeoutId));
+  timers.clear();
+}
+
 function readImageFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
   if (getImageValidationError(file)) {
     return Promise.resolve(null);
@@ -257,6 +263,7 @@ export function InputArea({
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
   const [attachmentAlerts, setAttachmentAlerts] = useState<AttachmentAlert[]>([]);
+  const attachmentAlertTimersRef = useRef<Map<string, number>>(new Map());
   const [attachmentMenuId, setAttachmentMenuId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [workMenuOpen, setWorkMenuOpen] = useState<'project' | null>(null);
@@ -491,15 +498,39 @@ export function InputArea({
       if (attachmentMenuTimerRef.current) {
         clearTimeout(attachmentMenuTimerRef.current);
       }
+      clearAttachmentAlertTimers(attachmentAlertTimersRef.current);
     };
   }, []);
 
   const pushAttachmentAlert = useCallback((message: string) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setAttachmentAlerts((prev) => [...prev, { id, message }].slice(-3));
+    const timers = attachmentAlertTimersRef.current;
+    while (timers.size >= 3) {
+      const oldestId = timers.keys().next().value;
+      if (oldestId === undefined) break;
+      const oldestTimeoutId = timers.get(oldestId);
+      if (oldestTimeoutId !== undefined) {
+        window.clearTimeout(oldestTimeoutId);
+      }
+      timers.delete(oldestId);
+    }
+    const timeoutId = window.setTimeout(() => {
+      timers.delete(id);
+      setAttachmentAlerts((prev) => prev.filter((item) => item.id !== id));
+    }, ATTACHMENT_ALERT_DURATION_MS);
+    timers.set(id, timeoutId);
+    setAttachmentAlerts((prev) => [
+      ...prev.filter((item) => timers.has(item.id)),
+      { id, message },
+    ].slice(-3));
   }, []);
 
   const dismissAttachmentAlert = useCallback((id: string) => {
+    const timeoutId = attachmentAlertTimersRef.current.get(id);
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+      attachmentAlertTimersRef.current.delete(id);
+    }
     setAttachmentAlerts((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
@@ -518,6 +549,7 @@ export function InputArea({
     setAttachments([]);
     setAttachmentAlerts([]);
     setAttachmentMenuId(null);
+    clearAttachmentAlertTimers(attachmentAlertTimersRef.current);
   }, []);
 
   const stopAttachmentMenuTimer = useCallback(() => {
@@ -1383,28 +1415,29 @@ export function InputArea({
 
   const currentMode = AGENT_MODE_OPTIONS.find((item) => item.value === mode) ?? AGENT_MODE_OPTIONS[0];
   const evolutionLabel = getEvolutionPillLabel(mode, evolutionStatus, t);
+  const attachmentAlertPortalTarget = inputRef.current?.closest<HTMLElement>('.chat-panel-shell');
 
   return (
     <>
+      {attachmentAlerts.length > 0 && attachmentAlertPortalTarget && createPortal(
+        <div className="chat-input-local-alerts" role="status" aria-live="polite">
+          {attachmentAlerts.map((alert) => (
+            <div className="chat-input-local-alert" key={alert.id}>
+              <CircleX size={16} strokeWidth={2.2} aria-hidden="true" />
+              <span>{alert.message}</span>
+              <button
+                type="button"
+                onClick={() => dismissAttachmentAlert(alert.id)}
+                aria-label={t('common.close')}
+              >
+                <X size={15} strokeWidth={2} aria-hidden="true" />
+              </button>
+            </div>
+          ))}
+        </div>,
+        attachmentAlertPortalTarget,
+      )}
       <div className="chat-input-frame">
-        {attachmentAlerts.length > 0 && (
-          <div className="chat-input-local-alerts" role="status" aria-live="polite">
-            {attachmentAlerts.map((alert) => (
-              <div className="chat-input-local-alert" key={alert.id}>
-                <CircleX size={16} strokeWidth={2.2} />
-                <span>{alert.message}</span>
-                <button
-                  type="button"
-                  onClick={() => dismissAttachmentAlert(alert.id)}
-                  aria-label="关闭提示"
-                >
-                  <X size={15} strokeWidth={2} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
         <div
           className={cx(
             'chat-input-container',
