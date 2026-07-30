@@ -2141,3 +2141,36 @@ def test_remove_team_mode_session_dirs_at_startup_keeps_stable_team_sessions(
     assert (sessions_dir / "stable_code").exists()
     assert not (sessions_dir / "temp_team").exists()
     assert (sessions_dir / "agent_temp").exists()
+
+
+# ===========================================================================
+# issue #2539: P0+ 原子写入验证
+# ===========================================================================
+class TestAtomicWrite:
+    """原子写入后 metadata.json 是合法 JSON。"""
+
+    @staticmethod
+    def test_atomic_write_leaves_valid_json(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            _write_metadata_sync,
+            _read_metadata,
+        )
+
+        _write_metadata_sync("sess_atomic", {
+            "session_id": "sess_atomic",
+            "mode": "team",
+            "team_name": "test_team",
+        })
+
+        # 文件应是合法 JSON
+        meta_path = sessions_dir / "sess_atomic" / "metadata.json"
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert data["mode"] == "team"
+        assert data["team_name"] == "test_team"
+
+        # 临时文件不应残留
+        assert not (sessions_dir / "sess_atomic" / "metadata.json.tmp").exists()
+
+        # 通过 _read_metadata 也能正常读取
+        result = _read_metadata("sess_atomic", cache_bust=True)
+        assert result["mode"] == "team"

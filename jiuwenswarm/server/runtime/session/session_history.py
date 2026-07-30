@@ -575,7 +575,9 @@ def append_history_record(
             user_content=content_text if role_norm == "user" else None,
             # 传入渠道元数据,首次写入时持久化
             channel_metadata=channel_metadata,
-            mode=mode,
+            # 不传 mode：mode 的更新由 sync_session_request_metadata（路径 A）负责，
+            # append_history_record 拿到的 mode 可能已被 _apply_resolved_mode_to_request
+            # 变异为默认值（如 "agent"），传入会腐蚀已锁定的会话 mode（如 team）。
             # 用户消息时刷新 last_user_message_at(用消息时间戳,比请求到达时刻更精确;
             # 与 AgentServer 的 _sync_chat_request_metadata 互补,覆盖所有记录用户消息的路径)
             last_user_message_at=float(timestamp) if role_norm == "user" else None,
