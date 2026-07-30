@@ -160,6 +160,9 @@ class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
             context=context,
             qa_id="qa_003",
             native_messages=commit.native_messages,
+            force_produce=False,
+            l0_content_mode=getattr(commit.entry, "l0_content_mode", None),
+            had_full_compact_in_qa=getattr(commit.entry, "had_full_compact_in_qa", None),
         )
 
     def test_on_freeze_commit_without_running_loop_is_noop(self) -> None:
