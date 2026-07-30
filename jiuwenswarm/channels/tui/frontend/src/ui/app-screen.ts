@@ -1477,7 +1477,7 @@ function formatConfigValue(schema: ConfigItemSchema, val: string): string {
   }
   if (schema.sensitive) {
     if (!val) return "(空)";
-    return val.length > 8 ? `${val.slice(0, 4)}****${val.slice(-4)}` : "***";
+    return "******";
   }
   return val || "(空)";
 }
@@ -7701,7 +7701,7 @@ export class AppScreen implements Component, Focusable {
     currentValues: Record<string, string>,
   ): Promise<void> {
     const isReset = this.configEditorState?.mode === "reset";
-    const valueDisplay = schema.sensitive ? "***" : value;
+    const valueDisplay = schema.sensitive ? "******" : value;
     const statusLabel = isReset ? "已重置" : "已应用";
     const restartLabel = isReset ? "已重置(需重启)" : "需重启";
 
@@ -8041,7 +8041,7 @@ export class AppScreen implements Component, Focusable {
           schema.type === "toggle"
             ? val === "true" ? "Enabled" : "Disabled"
             : schema.sensitive
-              ? val.length > 8 ? `${val.slice(0, 4)}****${val.slice(-4)}` : "***"
+              ? val ? "******" : "(empty)"
               : val || "(empty)";
         items.push({
           value: schema.key,
