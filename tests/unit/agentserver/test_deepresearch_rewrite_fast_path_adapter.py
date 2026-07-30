@@ -634,7 +634,10 @@ async def test_html_followup_missing_target_returns_terminal_safe_error():
     assert result == RewriteHtmlFollowupResult(
         status="error",
         error_code="TARGET_UNAVAILABLE",
-        message="未找到可生成 HTML 的已完成改写版本。",
+        message=(
+            "未找到可生成 HTML 的已完成改写版本。"
+            "建议先继续改写并生成新的 Markdown 版本，再生成 HTML。"
+        ),
     )
     html_tool.assert_not_awaited()
 
@@ -651,7 +654,10 @@ async def test_html_followup_missing_target_returns_terminal_safe_error():
         RewriteHtmlFollowupResult(
             status="error",
             error_code="TARGET_UNAVAILABLE",
-            message="未找到可生成 HTML 的已完成改写版本。",
+            message=(
+                "未找到可生成 HTML 的已完成改写版本。"
+                "建议先继续改写并生成新的 Markdown 版本，再生成 HTML。"
+            ),
         ),
     ],
 )
@@ -714,7 +720,10 @@ async def test_process_stream_skips_runner_for_html_followup(
             RewriteHtmlFollowupResult(
                 status="error",
                 error_code="TARGET_UNAVAILABLE",
-                message="未找到可生成 HTML 的已完成改写版本。",
+                message=(
+                    "未找到可生成 HTML 的已完成改写版本。"
+                    "建议先继续改写并生成新的 Markdown 版本，再生成 HTML。"
+                ),
             ),
             False,
         ),

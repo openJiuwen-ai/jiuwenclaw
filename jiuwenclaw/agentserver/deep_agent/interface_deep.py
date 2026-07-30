@@ -7904,7 +7904,10 @@ class JiuWenClawDeepAdapter:
             return RewriteHtmlFollowupResult(
                 status="error",
                 error_code="TARGET_UNAVAILABLE",
-                message="未找到可生成 HTML 的已完成改写版本。",
+                message=(
+                    "未找到可生成 HTML 的已完成改写版本。"
+                    "建议先继续改写并生成新的 Markdown 版本，再生成 HTML。"
+                ),
             )
 
         from jiuwenclaw.agentserver.tools.deepresearch import rewrite_tools
