@@ -18,7 +18,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentDeleted,
     AgentManager,
     AgentRuntime,
-    THIRD_PARTY_AGENT_TYPES,
+    is_third_party_agent_type,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     DEFAULT_AGENT_WORKSPACE_ROOT,
@@ -573,7 +573,7 @@ class AgentOSRouterClient(AgentServerClient):
         return reaped
 
     async def _create_agent(self, agent_info: AgentInfo) -> AgentInfo:
-        if agent_info.agent_type not in THIRD_PARTY_AGENT_TYPES:
+        if not is_third_party_agent_type(agent_info.agent_type):
             raise UnsupportedAgentType(
                 f"sandbox create is only supported for third-party "
                 f"agent_type, got: {agent_info.agent_type}"

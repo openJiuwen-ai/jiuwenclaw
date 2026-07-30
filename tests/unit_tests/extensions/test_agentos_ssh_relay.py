@@ -346,39 +346,8 @@ async def test_ssh_relay_follows_user_current_agent_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ssh_relay_without_switch_uses_claude_command_prefix() -> None:
-    """未 switch：``ssh ... "claude ..."`` 按指令前缀拉起 claude。"""
-    yuanrong = FakeYuanRongClient()
-    stub_relay = StubSshRelay()
-    agent_manager = AgentManager()
-    client = AgentOSRouterClient(
-        yuanrong,
-        FakeRegistryClient(),
-        agent_manager,
-        ssh_relay=stub_relay,
-    )
-    assert client.get_current_agent_type("alice") == "jiuwenswarm"
-    session = _relay_session("ssh_alice_claude_cmd")
-    try:
-        await client.send_request(
-            _ssh_envelope(session, agent_type=None, command="claude -p hi")
-        )
-        await asyncio.wait_for(session.done.wait(), timeout=5)
-
-        assert yuanrong.create_calls == 1
-        assert stub_relay.ran == [("ssh_alice_claude_cmd", "sbx-1", "alice")]
-        assert stub_relay.failed == []
-        agents = await agent_manager.list_user_agents("alice")
-        assert [a.info.agent_type for a in agents] == ["claude"]
-        assert client.get_current_agent_type("alice") == "jiuwenswarm"
-        assert session.exit_code == 0
-    finally:
-        await client.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_ssh_relay_without_switch_uses_opencode_command_prefix() -> None:
-    """未 switch：``ssh ... "opencode ..."`` 按指令前缀拉起 opencode。"""
+    """未 switch：``ssh ... "opencode ..."`` 按指令首词拉起 opencode。"""
     yuanrong = FakeYuanRongClient()
     stub_relay = StubSshRelay()
     agent_manager = AgentManager()
@@ -391,7 +360,7 @@ async def test_ssh_relay_without_switch_uses_opencode_command_prefix() -> None:
     session = _relay_session("ssh_alice_opencode_cmd")
     try:
         await client.send_request(
-            _ssh_envelope(session, agent_type=None, command="opencode")
+            _ssh_envelope(session, agent_type=None, command="opencode -p hi")
         )
         await asyncio.wait_for(session.done.wait(), timeout=5)
 

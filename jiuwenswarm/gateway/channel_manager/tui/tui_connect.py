@@ -1384,8 +1384,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             s["session_id"] = session_id
             normalized_sessions.append(s)
         all_sessions = normalized_sessions
-        # 按项目目录过滤 + 排除当前会话（对齐 Claude Code /resume 行为）
-        # all_projects=True 时跳过项目过滤，列出所有项目的会话（对齐 CC 的 Ctrl+A）
+        # 按项目目录过滤 + 排除当前会话（对齐 /resume 行为）
+        # all_projects=True 时跳过项目过滤，列出所有项目的会话（Ctrl+A）
         show_all_projects = (
             bool(params.get("all_projects"))
             if isinstance(params, dict) else False

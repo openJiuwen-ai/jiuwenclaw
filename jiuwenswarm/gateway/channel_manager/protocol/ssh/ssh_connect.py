@@ -31,7 +31,7 @@ class SshRelaySession:
     process: Any
     done: asyncio.Event = field(default_factory=asyncio.Event)
     exit_code: int = 0
-    # Optional northbound remote command (``ssh user@host "claude ..."``).
+    # Optional northbound remote command (``ssh user@host "<agent> ..."``).
     # Used for AgentOS agent_type selection and southbound exec forwarding.
     command: str | None = None
     # Background southbound relay task (set by AgentOS Router); cancelled on
