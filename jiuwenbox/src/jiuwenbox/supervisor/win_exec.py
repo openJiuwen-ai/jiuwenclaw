@@ -790,6 +790,35 @@ def _create_process_as_user(
     env.setdefault("ALL_PROXY", proxy_url)
     # NO_PROXY 放行 loopback 自身 (代理 → 代理 不该再走代理).
     env.setdefault("NO_PROXY", "127.0.0.1,localhost,::1")
+    # 调用方声明注入 (通用约定键, 不识任何工具语义): 调用方把"子进程需要的额
+    # 外 env"以 JSON 编码进约定键 JIUWENBOX_INJECT_ENV 传入, 沙箱在此解析后
+    # setdefault 注入子进程, 再删掉该约定键本身 (不泄漏给子进程).
+    # 设计意图: 沙箱只提供"注入这坨 env"的通用机制, 不认识 npm/playwright/任何
+    # 工具. 工具语义 (如 .npmrc 的自定义键 → npm_config_* 的映射) 由调用方负责
+    # 解析后塞进此键. 来新工具 (xxx_config_yyy) 只改调用方, 沙箱零改动.
+    # 容错: 解析失败只 warning 不阻断 (约定键非法不应让子进程起不来).
+    _inject_raw = env.pop("JIUWENBOX_INJECT_ENV", None)
+    if _inject_raw:
+        try:
+            import json as _json
+            _injected = _json.loads(_inject_raw)
+            if not isinstance(_injected, dict):
+                raise ValueError(f"expected JSON object, got {type(_injected).__name__}")
+        except (ValueError, TypeError) as _e:
+            _injected = None
+            _push_log(
+                "WARNING",
+                f"JIUWENBOX_INJECT_ENV 解析失败, 已忽略: {_e} raw_len={len(_inject_raw)}",
+            )
+        if _injected:
+            _injected_keys = []
+            for _k, _v in _injected.items():
+                env.setdefault(str(_k), str(_v))
+                _injected_keys.append(str(_k))
+            _push_log(
+                "INFO",
+                f"injected env from JIUWENBOX_INJECT_ENV: keys={_injected_keys}",
+            )
     _push_log(
         "INFO",
         f"child proxy injected: HTTPS_PROXY={env.get('HTTPS_PROXY')} "
