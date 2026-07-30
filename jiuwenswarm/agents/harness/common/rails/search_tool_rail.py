@@ -460,8 +460,39 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         query = (query or "").strip()
         if not query:
             return []
-        if self._embedding_model is None or not self._cached_tool_embeddings:
+        if self._embedding_model is None:
             return []
+        if not self._cached_tool_embeddings:
+            await asyncio.to_thread(self._precompute_tool_embeddings)
+
+        results = await asyncio.to_thread(self._dense_search, query, limit, detail_level)
+
+        query_lower = query.lower()
+        result_names = {str(r.get("name", "")).lower() for r in results}
+        looks_like_tool_name = "_" in query_lower and query_lower.replace("_", "").isalnum()
+
+        if not results or (looks_like_tool_name and query_lower not in result_names):
+            retried = await self._force_refresh_and_retry(query, limit, detail_level)
+            if retried:
+                results = retried
+
+        return results
+
+    async def _force_refresh_and_retry(self, query, limit, detail_level):
+        agent = self._runtime_agent or self._deep_agent
+        if agent is None:
+            return []
+        live_infos = await self._list_tool_infos(agent)
+        if len(live_infos) == len(self._cached_all_tool_infos):
+            return []
+        logger.info(
+            "[JiuWenRail] force-refresh: corpus stale (%d -> %d tools), rebuilding + retrying",
+            len(self._cached_all_tool_infos), len(live_infos),
+        )
+        self._cached_all_tool_infos = live_infos
+        self._search_corpus = list(live_infos)
+        self._cached_tool_sig = frozenset()
+        await asyncio.to_thread(self._precompute_tool_embeddings)
         return await asyncio.to_thread(self._dense_search, query, limit, detail_level)
 
     def _dense_search(self, query, limit, detail_level):
