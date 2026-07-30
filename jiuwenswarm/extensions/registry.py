@@ -13,7 +13,6 @@ from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenti
 from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
 
 from jiuwenswarm.gateway.auth.passthrough_authenticator import PassthroughAuthenticator
-from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
 
 
 class ExtensionRegistry:
@@ -29,7 +28,7 @@ class ExtensionRegistry:
         self._crypto_tool: CryptoUtility | None = None
         self._third_agent: ThirdAgentExtension | None = None
         self._rpc_handlers: dict[str, Callable] = {}
-        # 默认 passthrough；AgentOS 等实现由 extensions/auth 扩展按配置动态注册
+        # 默认 passthrough；AgentOS 等实现由 agentos_router load_all_extensions  扩展按配置动态注册
         self._authenticator: CredentialAuthenticator = PassthroughAuthenticator()
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
@@ -50,7 +49,7 @@ class ExtensionRegistry:
         if cls._instance is not None:
             raise RuntimeError("ExtensionRegistry 已初始化，请勿重复调用 create_instance()")
 
-        # 不在此处实例化具体认证器；由 extensions/auth 在 load_all_extensions 时按配置注册
+        # 不在此处实例化具体认证器；由 agentos_router 在 load_all_extensions 时按配置注册
         cls._instance = cls(
             callback_framework=callback_framework,
             config=config,

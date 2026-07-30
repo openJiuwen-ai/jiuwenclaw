@@ -85,20 +85,12 @@ logger = logging.getLogger("jiuwenswarm.gateway")
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
 
 
-#3rd
-def _init_auth_handler():
-    registry = ExtensionRegistry.get_instance()
-    return registry.get_authenticator()
-
-# 全局认证器实例
-_auth_handler: CredentialAuthenticator | None = None
-
+def _init_auth_handler() -> CredentialAuthenticator:
+    return ExtensionRegistry.get_instance().get_authenticator()
 
 def get_auth_handler() -> CredentialAuthenticator:
-    global _auth_handler
-    if _auth_handler is None:
-        _auth_handler = _init_auth_handler()
-    return _auth_handler
+    """始终从 ExtensionRegistry 读取，避免扩展注册前被错误缓存。"""
+    return _init_auth_handler()
 
 
 def _build_event_frame(msg) -> dict[str, Any]:
@@ -1012,18 +1004,28 @@ class GatewayServer:
             matched_path,
         )
 
-        setattr(ws, "_gateway_agent_type", "jiuwenswarm")
         # ── 新增：认证 ──
         if route.connect_hook is not None:
             try:
-                auth_result = await route.connect_hook(ws, raw_path)
-                if not auth_result:
+                auth_ok = await route.connect_hook(ws, raw_path)
+                if not auth_ok:
                     self._clients.discard(ws)
+                    await ws.close(code=1008, reason="unauthorized")
                     return
             except Exception:
+                logger.warning(
+                    "[Gateway] connect_hook auth failed: channel=%s path=%s",
+                    route.channel_id,
+                    matched_path,
+                    exc_info=True,
+                )
                 self._clients.discard(ws)
-                await ws.close()
-                return  #TODO 咨询
+                await ws.close(code=1008, reason="unauthorized")
+                return
+            # 鉴权成功时优先使用 AuthResult.user_id
+            auth_uid = getattr(ws, "user_id", None)
+            if auth_uid:
+                setattr(ws, "_gateway_user_id", str(auth_uid).strip() or ws_user_id)
 
         # connection.ack
         try:
