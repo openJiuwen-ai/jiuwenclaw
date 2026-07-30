@@ -214,6 +214,10 @@ class JiuwenBoxRunner:
         # 下次 ``ensure_running`` 若发现期望值与之不一致, 必须停掉旧实例重启,
         # 避免老进程继续用旧 policy (例如 default-policy.yaml) 服务新 sandbox。
         self._spawned_policy_path: Optional[Path] = None
+        # 记录上次 spawn 时 policy 文件的内容指纹 (sha256). 网络配置变更会改写运行时
+        # policy 副本 (path 不变但内容变), 仅比 path 无法检测到 → 必须比内容指纹才会
+        # 触发 stop+spawn 重启 box-server (重跑 lifespan 重建 EgressFilter).
+        self._spawned_policy_fingerprint: Optional[str] = None
 
     @classmethod
     def instance(cls) -> "JiuwenBoxRunner":
@@ -271,6 +275,22 @@ class JiuwenBoxRunner:
         if not self._owns_process:
             return None
         return (self._host, self._port)
+
+    @staticmethod
+    def _policy_fingerprint(policy_path: Optional[Path]) -> Optional[str]:
+        """计算 policy 文件内容指纹 (sha256). 不存在返回 None.
+
+        用于检测运行时 policy 副本 path 不变但内容变 (例如网络配置改写副本),
+        触发 stop+spawn 重启 box-server. runner 自包含 (只依赖 stdlib), 不耦合
+        ``sandbox_policy_render``.
+        """
+        if policy_path is None or not policy_path.is_file():
+            return None
+        try:
+            import hashlib
+            return hashlib.sha256(policy_path.read_bytes()).hexdigest()
+        except OSError:
+            return None
 
     async def health_check(self, host: str | None = None, port: int | None = None) -> bool:
         target_host = host or self._host
@@ -356,7 +376,9 @@ class JiuwenBoxRunner:
             #
             # 决策矩阵:
             # - 我们拥有的进程仍然 alive 且 host/port/policy_path 全部匹配 → 复用;
+            # - policy_path 不变但内容指纹变 (运行时副本被用户改了网络配置) → 也算 mismatch, 重 spawn;
             # - 否则: 停掉旧进程 (如有), 在新的 host:port 上 spawn 全新实例。
+            new_fp = self._policy_fingerprint(policy_path)
             owned_match = (
                 self._process is not None
                 and self._process.returncode is None
@@ -364,6 +386,7 @@ class JiuwenBoxRunner:
                 and self._host == host
                 and self._port == port
                 and self._spawned_policy_path == policy_path
+                and self._spawned_policy_fingerprint == new_fp
             )
             if owned_match:
                 if await self.health_check(host, port):
@@ -455,6 +478,7 @@ class JiuwenBoxRunner:
                 )
                 self._owns_process = True
                 self._spawned_policy_path = policy_path
+                self._spawned_policy_fingerprint = new_fp
                 # 同步退出兜底: 即便没走 stop() 也尽可能 terminate 子进程
                 self._register_atexit_once()
                 # 后台持续 drain stdout/stderr, 防止管道堆积阻塞子进程; 同时
@@ -471,6 +495,7 @@ class JiuwenBoxRunner:
                 self._process = None
                 self._owns_process = False
                 self._spawned_policy_path = None
+                self._spawned_policy_fingerprint = None
                 return False
 
             ok = await self._wait_until_ready(host, port, timeout=timeout)
@@ -629,10 +654,12 @@ class JiuwenBoxRunner:
         if proc is None or proc.returncode is not None:
             self._process = None
             self._spawned_policy_path = None
+            self._spawned_policy_fingerprint = None
             return
         if not self._owns_process:
             self._process = None
             self._spawned_policy_path = None
+            self._spawned_policy_fingerprint = None
             return
         logger.info("[JiuwenBoxRunner] stopping subprocess pid=%s", proc.pid)
         try:
@@ -640,6 +667,7 @@ class JiuwenBoxRunner:
         except ProcessLookupError:
             self._process = None
             self._spawned_policy_path = None
+            self._spawned_policy_fingerprint = None
             return
         # uvicorn 收到 SIGTERM 后会跑 FastAPI lifespan shutdown, 期间会调
         # ``SandboxManager.shutdown_all_sandboxes`` 给每个活的 sandbox 做
@@ -665,3 +693,4 @@ class JiuwenBoxRunner:
         self._process = None
         self._owns_process = False
         self._spawned_policy_path = None
+        self._spawned_policy_fingerprint = None

@@ -65,6 +65,7 @@ from jiuwenclaw.schema.hooks_context import (
 from jiuwenclaw.agentserver.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenclaw.e2a.acp.protocol import build_acp_session_new_result
 from jiuwenclaw.agentserver.permissions.config_rpc import get_permissions_config_req_methods
+from jiuwenclaw.agentserver.sandbox_config_rpc import get_sandbox_config_req_methods
 from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
 from jiuwenclaw.agentserver.file_transfer_manager import get_file_transfer_manager
 from jiuwenclaw.security.ws_origin import (
@@ -355,6 +356,29 @@ class AgentWebSocketServer:
                     effective_policy_file, policy_path,
                 )
                 return
+
+            # Windows: 把用户配置 (文件白/黑名单, 网络域名) 渲染进运行时 policy 副本,
+            # 用副本替代打包基底作为 box-server 的 root policy (用户配置追加在基底后面,
+            # 不改源模板). 副本 = 基底 windows-policy.yaml + user_overrides 合并.
+            # Linux 不走 windows-policy, 保持原 policy_path (default-policy.yaml 等).
+            if sys.platform == "win32":
+                try:
+                    from jiuwenclaw.agentserver.sandbox_policy_render import (
+                        render_runtime_policy,
+                    )
+                    runtime_policy = render_runtime_policy()
+                    if runtime_policy is not None and runtime_policy.is_file():
+                        policy_path = runtime_policy
+                        logger.info(
+                            "[AgentWebSocketServer][sandbox] using runtime policy copy: %s",
+                            policy_path,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentWebSocketServer][sandbox] render_runtime_policy failed, "
+                        "fall back to base policy: %s",
+                        exc,
+                    )
 
             host, preferred_port = self._parse_sandbox_host_port(url)
             port = self._allocate_internal_jiuwenbox_port(host, preferred_port)
@@ -807,6 +831,11 @@ class AgentWebSocketServer:
                            extra={'user_visible': 'progress'})
                 await self._handle_permissions_config(ws, request, send_lock)
                 return
+            if request.req_method in get_sandbox_config_req_methods():
+                logger.info(f"[AgentWebSocketServer] 处理 sandbox.config: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
+                await self._handle_sandbox_config(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.HISTORY_GET:
                 logger.info(f"[AgentWebSocketServer] 处理 history.get: request_id={request.request_id}",
                            extra={'user_visible': 'progress'})
@@ -1251,6 +1280,15 @@ class AgentWebSocketServer:
             request,
             get_runtime_tools_catalog=catalog_fn,
         )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_sandbox_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """处理 sandbox.* 配置 E2A 请求 (officeAce 经 WS 控制沙箱开关/启动方式/文件/网络)."""
+        from jiuwenclaw.agentserver.sandbox_config_rpc import dispatch_sandbox_config_request
+
+        resp = dispatch_sandbox_config_request(request)
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))

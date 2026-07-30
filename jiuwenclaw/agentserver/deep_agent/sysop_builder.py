@@ -307,10 +307,19 @@ def create_sandbox_sysop_card(
         )
 
     try:
-        policy, upload_list = build_filesystem_policy(
-            files_runtime,
-            shared_dir=shared_dir,
-        )
+        # Windows: 文件/网络配置由 agent-server 渲染进运行时 policy 副本 (root policy),
+        # box-server 在沙箱创建时经 _resolve_effective_policy (policy_data=None → deep-copy
+        # root) 自动继承, 无需 per-sandbox policy patch. 这里不传 policy (走 None → root 继承).
+        # Linux: 走 build_filesystem_policy 组 bind_mounts (R5: Linux 路径不动).
+        import sys as _sys
+        if _sys.platform == "win32":
+            policy: dict[str, Any] = {}
+            upload_list: list[dict[str, str]] = []
+        else:
+            policy, upload_list = build_filesystem_policy(
+                files_runtime,
+                shared_dir=shared_dir,
+            )
         extra_params: dict[str, Any] = {
             "policy": policy,
             "policy_mode": "append",

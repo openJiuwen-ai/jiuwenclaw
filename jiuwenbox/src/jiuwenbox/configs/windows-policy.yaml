@@ -138,7 +138,13 @@ windows:
     # disabled: 不安装 WFP filter, 沙箱可直接访问外网 (第一阶段降级).
     mode: wfp_loopback_proxy
     egress:
-      default: deny
+      # 当前为默认允许 (default: allow): Windows 沙箱尚在适配期, 业务 skill
+      # (pptx-craft 等) 产物 HTML 引用的 CDN 域名 (cdn.digitalhumanai.top /
+      # cdnjs / jsdelivr / unpkg / fonts.google 等) 未穷举进白名单, default:deny
+      # 会导致 convert 阶段 localize 资源时拉不到 CDN 而卡死超时. 先放开保证
+      # 功能可用, 待 skill 侧把 CDN 资源打包/镜像固化后, 再收紧为 default:deny
+      # + 完整白名单 (下方 allowed_domains 保留作为收紧时的清单参考).
+      default: allow
       # 域名白名单 (沙箱可访问的外部域名, 解析后比对 IP).
       # Playwright Chromium 下载: pptx-craft/.npmrc 配 playwright_download_host
       # =https://npmmirror.com/mirrors/playwright, 实际经 npmmirror.com →
