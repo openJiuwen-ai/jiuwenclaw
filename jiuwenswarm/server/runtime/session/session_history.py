@@ -50,6 +50,8 @@ def _has_persistable_assistant_payload(
         return True
     if et == "chat.tool_call" and (payload.get("tool_call") or payload.get("tool_calls")):
         return True
+    if et == "chat.tool_result" and (payload.get("tool_result") or payload.get("tool_call_id")):
+        return True
     if payload.get("error") or payload.get("files"):
         return True
     if payload.get("tool_call") or payload.get("tool_calls"):
