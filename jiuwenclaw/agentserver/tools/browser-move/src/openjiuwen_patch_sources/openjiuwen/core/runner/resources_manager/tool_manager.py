@@ -153,19 +153,18 @@ class ToolMgr:
     @staticmethod
     def _create_client(config: McpServerConfig) -> McpClient:
         if config.client_type == "sse":
-            return SseClient(config.server_path, config.server_name,
-                             config.auth_headers, config.auth_query_params)
-        elif config.client_type in {"streamable-http", "streamable_http", "http"}:
-            return StreamableHttpClient(
+            return SseClient(
                 config.server_path,
                 config.server_name,
                 config.auth_headers,
                 config.auth_query_params,
             )
+        elif config.client_type in {"streamable-http", "streamable_http", "http"}:
+            return StreamableHttpClient(config)
         elif config.client_type == "stdio":
-            return StdioClient(config.server_path, config.server_name, config.params)
+            return StdioClient(config)
         elif config.client_type == "playwright":
-            return PlaywrightClient(config.server_path, config.server_name)
+            return PlaywrightClient(config)
         elif config.client_type == "openapi":
             from openjiuwen.core.foundation.tool.mcp.client import OpenApiClient
             return OpenApiClient(config.server_path, config.server_name)

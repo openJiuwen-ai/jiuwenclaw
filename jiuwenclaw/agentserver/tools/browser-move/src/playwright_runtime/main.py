@@ -18,7 +18,12 @@ _SRC_ROOT = _HERE.parent
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
+from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from playwright_runtime import REPO_ROOT  # noqa: F401
+
+# Apply the same OpenAI client compatibility patch used by the main services
+# so browser runtime can parse non-standard string responses as well.
+apply_openai_model_client_patch()
 
 # Inject browser-move client subclasses before openjiuwen's ToolMgr is used,
 # so that our retry/timeout/reconnect logic is active without modifying openjiuwen.
@@ -33,6 +38,7 @@ from openjiuwen.core.runner import Runner
 from playwright_runtime.config import (
     BrowserRunGuardrails,
     build_playwright_mcp_config,
+    resolve_model_name,
     resolve_model_settings,
 )
 from playwright_runtime.runtime import BrowserAgentRuntime
@@ -44,7 +50,7 @@ GUARDRAIL_RETRY_ONCE = True
 
 async def main() -> None:
     provider, api_key, api_base = resolve_model_settings()
-    model_name = (os.getenv("MODEL_NAME") or "anthropic/claude-sonnet-4").strip()
+    model_name = resolve_model_name()
     if not api_key:
         raise RuntimeError("Missing API key. Set API_KEY (or OPENROUTER_API_KEY / OPENAI_API_KEY / DASHSCOPE_API_KEY).")
 
