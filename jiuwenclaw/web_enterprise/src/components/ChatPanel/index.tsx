@@ -27,6 +27,7 @@ interface ChatPanelProps {
   onInterrupt: (newInput?: string, files?: ChatSendFile[]) => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
+  hasActiveRequest: boolean;
   onNewSession: () => Promise<void>;
   onUserAnswer: (requestId: string, answers: UserAnswer[]) => void;
   /** 自会话管理恢复历史后出现；支持分页加载更早消息 */
@@ -68,6 +69,7 @@ export function ChatPanel({
   onInterrupt,
   onSwitchMode,
   isProcessing,
+  hasActiveRequest,
   onNewSession,
   onUserAnswer,
   historyPager = null,
@@ -214,6 +216,7 @@ export function ChatPanel({
           onInterrupt={onInterrupt}
           onSwitchMode={onSwitchMode}
           isProcessing={isProcessing}
+          hasActiveRequest={hasActiveRequest}
           onNewSession={onNewSession}
         />
       </div>

@@ -14,6 +14,7 @@ interface InputAreaProps {
   onInterrupt: (newInput?: string, files?: ChatSendFile[]) => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
+  hasActiveRequest: boolean;
   onNewSession: () => Promise<void>;
 }
 
@@ -22,6 +23,7 @@ export function InputArea({
   onInterrupt,
   onSwitchMode,
   isProcessing,
+  hasActiveRequest,
   onNewSession,
 }: InputAreaProps) {
   const [pendingVoiceText, setPendingVoiceText] = useState('');
@@ -37,7 +39,7 @@ export function InputArea({
   const { t } = useTranslation();
   const { isPaused, taskQueue, addToTaskQueue, removeFromTaskQueue, inputValue, setInputValue, messages } = useChatStore();
   const { mode } = useSessionStore();
-  const isInterruptible = isProcessing || isPaused;
+  const isInterruptible = isProcessing || isPaused || hasActiveRequest;
   const isAgentMode = mode === 'agent.fast';
   const isTeamMode = mode === 'team';
   const hasHistoryMessages = messages.length > 0;
