@@ -146,8 +146,6 @@ class CodingMemoryRail(_BaseCodingMemoryRail):
         super().uninit(agent)
 
 
-__all__ = ["CodingMemoryRail"]
-
 # ---------------------------------------------------------------------------
 # Static plan mode system prompt note (KV-cache-friendly: same content every turn)
 # Injected into system prompt so the model knows it's in plan mode BEFORE its
