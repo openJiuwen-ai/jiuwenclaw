@@ -308,7 +308,7 @@ The screenshots below are ordered roughly as the conversation unfolds.
 
 You can control sessions and switch modes through CLI commands during conversation:
 
-- For mode introduction and switching commands, see: [Mode System](ModeSystem.md)
+- For mode introduction and switching commands, see: [Mode System](Modes.md)
 - For common CLI commands and usage, see: [Slash Commands](SlashCommands.md)
 
 ---
