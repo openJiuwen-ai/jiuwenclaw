@@ -88,6 +88,10 @@ class TestEvents:
         ) is True
 
     @staticmethod
+    def test_is_terminal_chat_final_error_payload():
+        assert is_terminal_event("chat.final", {"error": "boom"}) is True
+
+    @staticmethod
     def test_is_terminal_chat_error():
         assert is_terminal_event("chat.error", {}) is True
 
