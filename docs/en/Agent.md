@@ -69,8 +69,8 @@ An agent has seven main areas. You can focus on the ones you care about.
 | **Tools** | Files, web, code, shell, media | Usually no edits | What operations are possible |
 | **Skills** | Professional modules (Git, PPT, etc.) | Load as needed | Extra capabilities |
 | **Memory** | Preferences, history, decisions | Mostly automatic | Continuity and personalization |
-| **Todo** | Task tracking | Day to day | Execution efficiency |
 | **Config** | Models, channels, permissions | Advanced users | Model, security, channel behavior |
+| **Multi-Agent Collaboration** | Supports team-based workflows for parallel operation | Enable as needed | Task decomposition and efficiency |
 
 **Details:**
 
