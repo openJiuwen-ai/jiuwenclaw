@@ -5,7 +5,7 @@
 校验 GENERATE 产出的 SKILL.md 是否符合 Skill 规范：
 - YAML frontmatter 存在且合法（name, description 必填）
 - name 是 kebab-case，≤30 字符
-- description ≤1024 字符
+- description ≤1024 加权字符且 ≤300 token（中文计2/0.6，英文计1/0.3）
 - 只包含允许的 frontmatter key
 
 校验失败 → 回退 GENERATE 重新生成。
@@ -22,7 +22,6 @@ from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import (
     ALLOWED_FRONTMATTER_KEYS,
     MAX_GENERATE_RETRIES,
-    SKILL_DESC_MAX_LEN,
     SKILL_NAME_MAX_LEN,
     SkillDevEventType,
     SkillDevStage,
@@ -31,6 +30,12 @@ from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResul
 from jiuwenclaw.agentserver.skilldev.utils.skill_description_fix import (
     normalize_skill_description,
     parse_frontmatter,
+)
+from jiuwenclaw.agentserver.skilldev.utils.skill_md_validation import (
+    DESCRIPTION_MAX_TOKENS,
+    DESCRIPTION_MAX_WEIGHTED,
+    description_weighted_len,
+    estimate_skill_tokens,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,8 +144,18 @@ def validate_skill_md(skill_md_path: Path) -> tuple[bool, str]:
     desc = normalize_skill_description(frontmatter["description"])
     if not desc:
         return False, "description 不能为空"
-    if len(desc) > SKILL_DESC_MAX_LEN:
-        return False, f"description 过长（{len(desc)} 字符，最大 {SKILL_DESC_MAX_LEN}）"
+    weighted_len = description_weighted_len(desc)
+    if weighted_len > DESCRIPTION_MAX_WEIGHTED:
+        return False, (
+            f"description 过长（加权长度 {weighted_len}，"
+            f"最大 {DESCRIPTION_MAX_WEIGHTED}；中文计2、英文计1）"
+        )
+    desc_tokens = estimate_skill_tokens(desc)
+    if desc_tokens > DESCRIPTION_MAX_TOKENS:
+        return False, (
+            f"description token 超限（约 {desc_tokens}，"
+            f"最大 {DESCRIPTION_MAX_TOKENS}；中文 0.6 / 英文 0.3 token/字符）"
+        )
     if desc != frontmatter["description"].strip():
         return False, (
             "description 不能以 Markdown 标记（如 >、-、*、#）开头；"

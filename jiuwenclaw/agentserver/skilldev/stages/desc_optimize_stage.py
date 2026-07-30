@@ -33,10 +33,13 @@ from time import perf_counter
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import (
     DescOptimizeIteration,
-    SKILL_DESC_MAX_LEN,
     SkillDevEventType,
     SkillDevStage,
     TriggerEvalQuery,
+)
+from jiuwenclaw.agentserver.skilldev.utils.skill_md_validation import (
+    DESCRIPTION_MAX_WEIGHTED,
+    truncate_description_to_weighted_limit,
 )
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
 from jiuwenclaw.agentserver.skilldev.stages.validate_stage import (
@@ -96,7 +99,7 @@ description 出现在模型的 available_skills 列表中，模型仅凭 descrip
 - 用祈使句（"Use when..." 而非 "This skill does..."）
 - 聚焦用户意图而非实现细节
 - 让触发场景具体且可区分
-- 严格不超过 {max_len} 字符
+- 严格不超过加权长度 {max_len}（中文计2、英文计1；纯中文≤512，纯英文≤1024），且 token ≤300（中文 0.6 / 英文 0.3）
 
 请在 <new_description> 标签中只输出新的 description 文本：
 <new_description>新描述内容</new_description>
@@ -483,7 +486,7 @@ class DescOptimizeStageHandler(StageHandler):
             scores_summary=scores_summary,
             failure_details=failure_details,
             history_section=history_section,
-            max_len=SKILL_DESC_MAX_LEN,
+            max_len=DESCRIPTION_MAX_WEIGHTED,
         )
         agent = ctx.create_stage_agent(
             stage_name="desc_optimize_improve",
@@ -513,8 +516,9 @@ class DescOptimizeStageHandler(StageHandler):
         if not new_desc:
             ctx.release_agent_tools(agent)
             return improve_input.current_desc
-        if len(new_desc) > SKILL_DESC_MAX_LEN:
-            new_desc = new_desc[:SKILL_DESC_MAX_LEN].rstrip()
+        new_desc = truncate_description_to_weighted_limit(
+            new_desc, DESCRIPTION_MAX_WEIGHTED
+        )
         ctx.release_agent_tools(agent)
         return new_desc
 

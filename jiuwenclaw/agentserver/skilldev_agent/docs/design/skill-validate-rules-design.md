@@ -130,17 +130,10 @@ ALLOWED_FRONTMATTER_KEYS = {
 |------|------|----------|
 | 类型 | 必须是 `str` | `Description must be a string, got {type}` |
 | 非空 | `.strip()` 后不能为空 | `Description cannot be empty` |
-| 字符上限 | 含 CJK：≤ **512**；否则 ≤ **1024** | `Description is too long ({n} characters). Maximum is {max} characters.` |
+| 字符上限 | 加权长度 ≤ **1024**（CJK 计 2，其余计 1；等价于纯中文 ≤512、纯英文 ≤1024） | `Description is too long (weighted length {n}). Maximum weighted length is 1024 ...` |
+| Token 上限 | ≤ **300**（CJK 0.6 / 其余 0.3 token/字符，向上取整） | `Description token count too high (~{n} tokens). Maximum is 300 tokens ...` |
 
-CJK 判定（`_contains_cjk`）：存在字符 `\u4e00` ≤ char ≤ `\u9fff`。
-
-**Token 上限（当前未启用，代码已注释）**
-
-```python
-DESCRIPTION_MAX_TOKENS = 300
-# desc_tokens = _estimate_tokens(description)
-# if desc_tokens > DESCRIPTION_MAX_TOKENS: ...
-```
+加权计算（`description_weighted_len`）：CJK 字符（`\u4e00`–`\u9fff`）权重为 2，其余为 1。
 
 ### 3.4 `SKILL.md` 正文（body）
 
@@ -150,27 +143,20 @@ frontmatter 闭合 `---` 之后、经 `.lstrip("\n")` 处理的内容。
 |------|------|----------|
 | 非空 | `.strip()` 后不能为空 | `SKILL.md body cannot be empty` |
 | 行数 | ≤ **500** 行（`len(body.splitlines())`） | `SKILL.md body is too long ({n} lines). Maximum is 500 lines.` |
-
-**Token 上限（当前未启用，代码已注释）**
-
-```python
-BODY_MAX_TOKENS = 5000
-# body_tokens = _estimate_tokens(body)
-# if body_tokens > BODY_MAX_TOKENS: ...
-```
+| Token 上限 | ≤ **5000**（CJK 0.6 / 其余 0.3 token/字符，向上取整） | `SKILL.md body token count too high (~{n} tokens). Maximum is 5000 tokens ...` |
 
 ### 3.5 双限策略与 token 估算
 
-`_estimate_tokens(text)` 已实现但未被校验逻辑调用：
+`estimate_skill_tokens(text)` / `_estimate_tokens(text)` 按字符累加后向上取整：
 
-| 文本类型 | 估算系数 |
+| 字符类型 | 估算系数 |
 |----------|----------|
-| 含 CJK | **0.6** token / 字符 |
-| 不含 CJK | **0.3** token / 字符 |
+| CJK（`\u4e00`–`\u9fff`） | **0.6** token / 字符 |
+| 其余 | **0.3** token / 字符 |
 
-结果：`ceil(len(text) * factor)`。
+结果：`ceil(Σ token_per_char)`。
 
-**当前实际生效：** 字符数（description）、行数（body）、name 长度；token 双限尚未落地。
+**当前实际生效：** description 加权字符 + token 双限；body 行数 + token 双限；name 长度。
 
 ---
 
@@ -315,7 +301,7 @@ CLI 在步骤 4/5 失败时输出：`Validation failed: cannot find skill root u
 | `_iter_scannable_files(skill_path, skill_content)` | `SKILL.md` + `scripts/**` UTF-8 / UTF-8 BOM 文本，并返回解码错误 |
 | `_read_utf8_text(path)` | 读取 UTF-8 / UTF-8 BOM 文本；含 NUL 字节时标记为二进制 |
 | `_contains_cjk(text)` | CJK 字符检测 |
-| `_estimate_tokens(text)` | token 估算（当前未接入校验） |
+| `_estimate_tokens(text)` / `estimate_skill_tokens(text)` | token 估算（CJK 0.6 / 其余 0.3） |
 | `_find_duplicate_frontmatter_key(text)` | frontmatter 文本层重复 key |
 | `_is_placeholder(value)` | 凭证占位符豁免 |
 
@@ -357,11 +343,12 @@ Server 侧错误码定义见 `skilldev/error_codes.py`（`999001260`–`99900127
 
 | 常量 | 值 | 生效状态 |
 |------|-----|----------|
-| `DESCRIPTION_MAX_CHARS_CJK` | 512 | ✅ |
-| `DESCRIPTION_MAX_CHARS_EN` | 1024 | ✅ |
-| `DESCRIPTION_MAX_TOKENS` | 300 | ❌（已注释） |
+| `DESCRIPTION_MAX_CHARS_CJK` | 512 | ✅（纯中文等价上限） |
+| `DESCRIPTION_MAX_CHARS_EN` | 1024 | ✅（纯英文等价上限） |
+| `DESCRIPTION_MAX_WEIGHTED` | 1024 | ✅（加权长度上限，CJK=2） |
+| `DESCRIPTION_MAX_TOKENS` | 300 | ✅ |
 | `BODY_MAX_LINES` | 500 | ✅ |
-| `BODY_MAX_TOKENS` | 5000 | ❌（已注释） |
+| `BODY_MAX_TOKENS` | 5000 | ✅ |
 | name 最大长度 | 64 | ✅ |
 | `DANGEROUS_PATTERNS` | 13 条 | ✅ |
 | `CREDENTIAL_PATTERNS` | 9 条 | ✅ |
