@@ -9,7 +9,7 @@
 
 The Web channel provides project-scoped session management. Sessions bind to projects through `project_id`, and can also fall back to mode-specific default projects.
 
-The current implementation adds a `work_mode` dimension to isolate regular work collaboration from code projects. `code` projects support Git status, branch operations, Diff snapshots, live Diff monitoring, and discarding the last turn's file changes. `work` projects keep the regular project/session behavior.
+The current implementation adds a `work_mode` dimension to isolate regular work collaboration from code projects. `code` projects support Git status, branch operations, Diff snapshots, live Diff monitoring, and discarding/redoing the last turn's file changes. `work` projects keep the regular project/session behavior.
 
 ### Core Concepts
 
@@ -17,7 +17,7 @@ The current implementation adds a `work_mode` dimension to isolate regular work 
 |---------|-------------|
 | **Default projects** | Not persisted; dynamically injected by APIs. `default` is the work default project, `default_code` is the code default project. Rename/remove/pin are forbidden |
 | **`work_mode`** | Isolation dimension for projects, sessions, and scheduled tasks. Values: `work` / `code`. Web defaults to `work`; TUI defaults to `code` |
-| **Code project Git capabilities** | Real `code` projects expose Git status, init, branch, Diff, history, monitoring, and discard APIs. Default projects and `work` projects do not expose Git operations |
+| **Code project Git capabilities** | Real `code` projects expose Git status, init, branch, Diff, history, monitoring, and discard/redo APIs. Default projects and `work` projects do not expose Git operations |
 | **Soft delete** | `project.remove` marks `hidden:true` without deleting the record. While hidden, its non-pinned sessions temporarily fall back to the mode-specific default project |
 | **Pinned sessions** | Detached from project groups and fetched via `project.pinned_sessions`, sorted by `pin_order` ascending |
 | **Pinned projects** | Pinned projects appear first, sorted by `pin_order` ascending |
@@ -468,7 +468,7 @@ Returns detail for one historical turn. `change_set_id` takes precedence over `t
 
 ---
 
-## 7. /ws/git Live Monitoring & Discard
+## 7. /ws/git Live Monitoring, Discard & Redo
 
 `/ws/git` uses the same request/response envelope as `/ws`, and also pushes live events.
 
@@ -529,7 +529,7 @@ Releases watcher resources. `all` removes the whole watcher; `files` / `detail` 
 
 ### project.git.discard_turn_changes - Discard last turn file changes
 
-Restores the current session's last agent turn file changes to their pre-turn state, or deletes files created in that turn. On full success, session-specific file_ops for that turn are truncated and Diff watchers are woken. On partial failure, the response uses `ok=false` and keeps file_ops so the operation can be retried.
+Restores the current session's last agent turn file changes to their pre-turn state, or deletes files created in that turn. On full success, session-specific file_ops entries for that turn are soft-deleted (marked `discarded_out` rather than physically removed, preserving snapshots for `redo_turn_changes`) and Diff watchers are woken. On partial failure, the response uses `ok=false` and keeps file_ops so the operation can be retried.
 
 **Request params:** `project_id` (code project ID), `session_id` (must belong to the project).
 
@@ -543,11 +543,39 @@ Restores the current session's last agent turn file changes to their pre-turn st
 | `restored_files` | string[] | Files restored to previous contents |
 | `deleted_files` | string[] | Newly created files deleted by discard |
 | `errors` | object[] | Per-file restore errors |
-| `file_ops_truncated` | boolean | Whether session-specific file_ops were truncated |
+| `file_ops_truncated` | boolean | Whether session-specific file_ops entries were marked `discarded_out` (soft-deleted, preserved for redo) |
 | `global_file_ops_truncated` | boolean | Always `false`; global file_ops are not truncated to avoid cross-session damage |
 | `partial` | boolean | Whether the restore partially failed; when true, top-level `ok=false` and `code=PARTIAL_RESTORE_FAILED` |
 
 **Error codes:** `BAD_REQUEST`, `NOT_FOUND`, `FORBIDDEN`, `SESSION_NOT_BOUND`, `PROJECT_SESSION_MISMATCH`, `SESSION_BUSY`, `NO_TURN_TO_DISCARD`, `PARTIAL_RESTORE_FAILED`
+
+---
+
+### project.git.redo_turn_changes - Redo last turn discarded changes
+
+Symmetric to `discard_turn_changes`: re-applies the file changes that were discarded by `discard_turn_changes` to the working directory, restores visibility of file_ops entries (removes `discarded_out` markers), and clears the turn's `discarded` status (back to `completed`). On success, Diff watchers are woken. On partial failure, returns `ok=false` and keeps the `discarded` status so the operation can be retried.
+
+**Precondition:** The last turn must have been discarded (`status == "discarded"`); otherwise returns `NOTHING_TO_REDO`.
+
+**Request params:** `project_id` (code project ID), `session_id` (must belong to the project).
+
+**Response payload:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | Session ID |
+| `turn_index` | integer | Redone last turn index |
+| `change_set_id` | string \| null | Restored change set ID; null on partial failure |
+| `redone_files` | string[] | Files re-written with agent-modified contents (new_content) |
+| `deleted_files` | string[] | Files deleted by the agent (re-deleted on redo) |
+| `errors` | object[] | Per-file redo errors |
+| `partial` | boolean | Whether the redo partially failed; when true, top-level `ok=false` and `code=PARTIAL_REDO_FAILED` |
+
+**Error codes:** `BAD_REQUEST`, `NOT_FOUND`, `FORBIDDEN`, `SESSION_NOT_BOUND`, `PROJECT_SESSION_MISMATCH`, `SESSION_BUSY`, `NO_TURN_TO_REDO`, `NOTHING_TO_REDO`, `REDO_HISTORY_MISSING`, `PARTIAL_REDO_FAILED`
+
+> **`REDO_HISTORY_MISSING`:** The last turn is `discarded` but no redoable file_ops entries were found (file_ops missing/corrupted/no `discarded_out` markers). The `discarded` status is preserved for investigation.
+>
+> **`NOTHING_TO_REDO`:** The last turn was not discarded (e.g. `status=applied` or `completed`); nothing to redo.
 
 ---
 
@@ -581,3 +609,4 @@ Restores the current session's last agent turn file changes to their pre-turn st
 | `project.git.diff_detail_watch` | `/ws/git` | Watch selected file hunks |
 | `project.git.diff_unwatch` | `/ws/git` | Cancel watches |
 | `project.git.discard_turn_changes` | `/ws/git` | Discard the current session's last turn code changes |
+| `project.git.redo_turn_changes` | `/ws/git` | Redo the current session's last turn discarded changes |

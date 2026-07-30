@@ -917,6 +917,7 @@
       "modelsLoadFailed": "Failed to refresh OpenAI model list",
       "noModelsAvailable": "No OpenAI models were returned. Refresh after authorization completes.",
       "configuredModelUnavailable": "Configured model \"{{model}}\" is not in the OpenAI account model list.",
+      "needLoginForModel": "Please connect your OpenAI account first.",
       "modelNameUseDropdown": "Use the OpenAI model dropdown below",
       "apiBaseManaged": "Managed by the OAuth provider. No manual change is needed.",
       "autoSaving": "Login completed. Saving configuration...",

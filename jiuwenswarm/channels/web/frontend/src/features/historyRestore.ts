@@ -5,6 +5,10 @@ import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
 import { parseTimestampToMs, timestampMsToIso } from '../utils/timestamp';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
 import { normalizeToolCallPayload, normalizeToolResultPayload } from './tool-events/toolEventNormalizer';
+import {
+  buildGoalCompletedContent,
+  isGoalCompletedContent,
+} from '../components/GoalBar/goalCompletedMessage';
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -355,6 +359,10 @@ function extractHistoryMediaItems(record: Record<string, unknown>): MediaItem[] 
   return mediaItems;
 }
 
+function isTruthyHistoryFlag(value: unknown): boolean {
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
 function parseHistoryTimelineEntry(
   record: Record<string, unknown>,
   sessionId: string
@@ -375,6 +383,9 @@ function parseHistoryTimelineEntry(
     }
     const id =
       pickFirstString(record, ['id', 'message_id', 'msg_id']) ?? `hist-user-${sessionId}-${at}`;
+    const isGoalObjectiveMessage =
+      isTruthyHistoryFlag(record.is_goal_objective_message) ||
+      isTruthyHistoryFlag(record.isGoalObjectiveMessage);
     return {
       kind: 'message',
       message: {
@@ -383,6 +394,7 @@ function parseHistoryTimelineEntry(
         content,
         timestamp: at,
         ...(mediaItems.length > 0 ? { mediaItems } : {}),
+        ...(isGoalObjectiveMessage ? { isGoalObjectiveMessage: true } : {}),
       },
     };
   }
@@ -438,7 +450,21 @@ function parseHistoryTimelineEntry(
   const payload = buildEventPayloadForRecord(record);
 
   if (eventType === 'chat.final') {
-    const content = normalizeFinalContent(payload);
+    let content = normalizeFinalContent(payload);
+    const isGoalCompletedMessage =
+      isTruthyHistoryFlag(record.is_goal_completed_message) ||
+      isTruthyHistoryFlag(record.isGoalCompletedMessage) ||
+      isTruthyHistoryFlag(payload.is_goal_completed_message) ||
+      isTruthyHistoryFlag(payload.isGoalCompletedMessage);
+    if (isGoalCompletedMessage && !isGoalCompletedContent(content)) {
+      const evidenceRaw =
+        (typeof record.evidence === 'string' && record.evidence) ||
+        (typeof payload.evidence === 'string' && payload.evidence) ||
+        content;
+      content = buildGoalCompletedContent({
+        evidence: typeof evidenceRaw === 'string' ? evidenceRaw.trim() : '',
+      });
+    }
     if (!content.trim()) {
       return null;
     }

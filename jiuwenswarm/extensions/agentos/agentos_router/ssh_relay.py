@@ -41,6 +41,7 @@ _DEFAULT_CLIENT_KEY_NAMES = (
     "id_rsa",
     "id_dsa",
     "id_ed448",
+    "agent_key",
 )
 
 

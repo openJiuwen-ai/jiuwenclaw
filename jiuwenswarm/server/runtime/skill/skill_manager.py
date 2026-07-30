@@ -40,6 +40,13 @@ from jiuwenswarm.common.utils import (
     is_package_installation,
 )
 
+
+def _get_ssl_verify() -> bool:
+    """延迟导入以规避循环依赖：ssl_config 所在的 tools 包 __init__ 会回引本模块。"""
+    from jiuwenswarm.agents.harness.common.tools.ssl_config import get_ssl_verify
+
+    return get_ssl_verify()
+
 logger = logging.getLogger(__name__)
 
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
@@ -75,10 +82,23 @@ _ONLINE_SEARCH_RRF_K = 60
 _ONLINE_SEARCH_SOURCE_ORDER = {"skillnet": 0, "clawhub": 1}
 
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def _maybe_disable_insecure_warning() -> None:
+    """关闭证书校验时同步静默 urllib3 的 InsecureRequestWarning。
+
+    历史实现为模块导入即全局 disable_warnings，导致即便开启证书校验也仍静默
+    警告；改为按开关条件触发，开启校验时保留警告输出。
+    """
+    if not _get_ssl_verify():
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class _ImportLocalTLSAdapter(HTTPAdapter):
+    """仅在 ssl_verify=false 时挂载，跳过证书/主机名校验。
+
+    开启证书校验（get_ssl_verify() 为 True）时不应 mount 本 Adapter，
+    而是走 requests 默认校验逻辑——调用方负责条件判断。
+    """
+
     def init_poolmanager(self, *args, **kwargs):
         ctx = create_urllib3_context(ssl_version=ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -2422,15 +2442,23 @@ class SkillManager:
         )
 
         def _download_with_requests() -> bytes:
+            ssl_verify = _get_ssl_verify()
+            _maybe_disable_insecure_warning()
             with requests.Session() as session:
-                session.mount("https://", _ImportLocalTLSAdapter())
-                logger.info("[SkillManager] remote import downloading: url=%s", download_url)
+                # 仅在关闭证书校验时挂载跳过校验的 Adapter；开启时走 requests 默认校验。
+                if not ssl_verify:
+                    session.mount("https://", _ImportLocalTLSAdapter())
+                logger.info(
+                    "[SkillManager] remote import downloading: url=%s ssl_verify=%s",
+                    download_url,
+                    ssl_verify,
+                )
                 with session.get(
                     download_url.strip(),
                     timeout=timeout,
                     stream=True,
                     allow_redirects=False,
-                    verify=False,
+                    verify=ssl_verify,
                 ) as response:
                     response.raise_for_status()
                     chunks: list[bytes] = []
