@@ -172,5 +172,5 @@ class DenseSearchTool(Tool):
             return ToolOutput(success=False, error=str(exc))
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
-        if False:
-            yield None
+        """DenseSearchTool is non-streaming; yield the invoke() result once."""
+        yield await self.invoke(inputs, **kwargs)

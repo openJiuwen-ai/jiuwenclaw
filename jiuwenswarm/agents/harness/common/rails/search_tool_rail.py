@@ -154,9 +154,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self._cached_tool_sig: frozenset = frozenset()
         self._search_corpus: List = []
         self._executable_sig: frozenset = frozenset()
-        self._dense_retrieval_enabled = True
-        if self._dense_retrieval_enabled:
-            self._ensure_embedding_model()
+        self._ensure_embedding_model()
 
     # ------------------------------------------------------------------
     # Lifecycle (inlined from base; no longer inherits ProgressiveToolRail)
@@ -509,7 +507,10 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             if am is not None:
                 try:
                     card = am.get(name)
-                except Exception:
+                except Exception as exc:
+                    logger.debug(
+                        "[JiuWenRail] ability_manager.get failed for %s: %s", name, exc
+                    )
                     card = None
                 cid = getattr(card, "id", None) if card else None
                 if cid:
@@ -517,8 +518,10 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             try:
                 if Runner.resource_mgr.get_tool(tool_id=tool_id, session=session) is not None:
                     return True
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "[JiuWenRail] resource_mgr.get_tool probe failed for %s: %s", name, exc
+                )
             # Fallback: ability_manager resolves the card by name → the tool
             # is directly callable in the name-based direct-call model (e.g.
             # session/runtime tools registered via ability_manager.add(card),

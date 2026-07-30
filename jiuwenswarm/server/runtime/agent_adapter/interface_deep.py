@@ -4086,9 +4086,9 @@ class JiuWenSwarmDeepAdapter:
         #     _RailBuildInfo("_tool_retrieval_prompt_rail", self._build_tool_retrieval_prompt_rail),
         # )
         # ── agent-core ProgressiveToolRail（搜索方案，按需检索）──
-        # 由 config 的 progressive_tool_enabled 控制（默认 false = opt-in）。关闭时不注册 →
+        # 由 config 的 progressive_tool_enabled 控制（默认 true = opt-out）。关闭时不注册 →
         # ContextAssembleRail 的 "# 可用工具" 全量列表正常保留（回到 show-all）。
-        if config.get("progressive_tool_enabled", False):
+        if config.get("progressive_tool_enabled", True):
             rail_infos.append(
                 _RailBuildInfo("_progressive_tool_rail", self._build_progressive_tool_rail),
             )

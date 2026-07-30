@@ -10,8 +10,9 @@ logger = logging.getLogger("jiuwenswarm.common.tool_retrieval.embedder")
 
 def ensure_embedding_model(model_name: str = "BAAI/bge-small-zh-v1.5"):
     """Load the embedding model via fastembed; return model or None."""
-    if "HF_ENDPOINT" not in os.environ:
-        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    _was_unset = "HF_ENDPOINT" not in os.environ
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    if _was_unset:
         logger.info(
             "[tool_retrieval] HF_ENDPOINT not set; defaulting to CN mirror "
             "(https://hf-mirror.com). Set HF_ENDPOINT explicitly to override."
