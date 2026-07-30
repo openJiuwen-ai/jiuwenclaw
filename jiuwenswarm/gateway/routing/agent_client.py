@@ -28,6 +28,10 @@ from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_peer,
     format_ws_diagnostics,
 )
+from jiuwenswarm.common.ws_chunking import (
+    is_chunked_message,
+    WireChunkBuffer,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -137,6 +141,8 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._running = False
         # AgentServer send_push：旁路投递，勿进入与 request_id 绑定的 RPC 等待队列
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        # 分片消息重组缓冲区
+        self._chunk_buffer = WireChunkBuffer()
 
     def set_server_push_handler(
         self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
@@ -220,11 +226,29 @@ class WebSocketAgentServerClient(AgentServerClient):
 
     async def _message_receiver_loop(self) -> None:
         """后台任务：从 WebSocket 接收消息并根据 request_id 分发到对应队列."""
+        # 定期清理过期分片的后台任务
+        cleanup_task = asyncio.create_task(self._periodic_chunk_cleanup())
+
         try:
             while self._running and self._ws is not None:
                 try:
                     raw = await self._ws.recv()
                     data = json.loads(raw)
+
+                    # 检查是否为分片消息，如果是则尝试重组
+                    if is_chunked_message(data):
+                        request_id = _wire_request_id_key(data.get("request_id"))
+                        reassembled = await self._chunk_buffer.add_chunk(data, request_id)
+                        if reassembled is None:
+                            # 分片尚未收齐，继续等待
+                            continue
+                        # 重组完成，使用重组后的完整消息
+                        data = reassembled
+                        logger.info(
+                            "[WebSocketAgentServerClient] 分片消息重组完成: request_id=%s",
+                            request_id,
+                        )
+
                     meta = data.get("metadata")
                     if isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY):
                         if self._on_server_push is not None:
@@ -288,7 +312,31 @@ class WebSocketAgentServerClient(AgentServerClient):
                     )
                     await asyncio.sleep(0.1)  # 避免快速循环
         finally:
+            # 停止定期清理任务
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
             logger.info("[WebSocketAgentServerClient] 消息接收任务已停止")
+
+    async def _periodic_chunk_cleanup(self) -> None:
+        """定期清理过期的分片组装，防止丢包导致内存泄漏."""
+        cleanup_interval = 60.0  # 每 60 秒检查一次
+        try:
+            while self._running:
+                await asyncio.sleep(cleanup_interval)
+                pending_before = self._chunk_buffer.pending_count()
+                await self._chunk_buffer.cleanup_expired()
+                pending_after = self._chunk_buffer.pending_count()
+                if pending_before > 0:
+                    logger.info(
+                        "[WebSocketAgentServerClient] 分片缓冲区清理: before=%d after=%d",
+                        pending_before,
+                        pending_after,
+                    )
+        except asyncio.CancelledError:
+            pass
 
     async def _stop_receiver_after_fatal_error(self, exc: BaseException) -> None:
         detail = format_ws_diagnostics(
@@ -302,6 +350,8 @@ class WebSocketAgentServerClient(AgentServerClient):
         async with self._queue_lock:
             for queue in self._message_queues.values():
                 queue.put_nowait(failure)
+        # 清理分片缓冲区
+        await self._chunk_buffer.clear()
         logger.info("[WebSocketAgentServerClient] 接收任务已停止并通知等待队列: %s", detail)
 
     async def disconnect(self) -> None:
@@ -317,6 +367,9 @@ class WebSocketAgentServerClient(AgentServerClient):
 
         # 清理所有队列
         self._message_queues.clear()
+
+        # 清理分片缓冲区
+        await self._chunk_buffer.clear()
 
         # 关闭 WebSocket
         if self._ws is None:
