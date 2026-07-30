@@ -58,6 +58,7 @@ interface TaskItem {
 interface ChatState {
   messages: Message[];
   isProcessing: boolean;
+  hasActiveRequest: boolean;
   isThinking: boolean;  // 思考中状态（显示闪烁动画）
   isPaused: boolean;    // 任务是否暂停
   pausedTask: string | null;  // 暂停的任务描述
@@ -89,6 +90,7 @@ interface ChatState {
   startStreaming: (messageId: string, streamKey?: string) => void;
   stopStreaming: (streamKey?: string) => void;
   setProcessing: (status: boolean) => void;
+  setHasActiveRequest: (v: boolean) => void;
   setThinking: (status: boolean) => void;
   setPaused: (paused: boolean, task?: string | null) => void;
   setInterruptResult: (result: InterruptResultPayload | null) => void;
@@ -121,6 +123,7 @@ interface ChatState {
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   isProcessing: false,
+  hasActiveRequest: false,
   isThinking: false,
   isPaused: false,
   pausedTask: null,
@@ -197,6 +200,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setProcessing: (status) => {
     set({ isProcessing: status });
+  },
+
+  setHasActiveRequest: (v) => {
+    set({ hasActiveRequest: v });
   },
 
   setThinking: (status) => {
