@@ -273,6 +273,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "team.binding.create",
         "team.binding.generate",
         "team.session.bind",
+        "team.mq.publish",
         "session.fork",
         # Agent configuration
         "agents.list",
@@ -376,6 +377,7 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "team.binding.create",
         "team.binding.generate",
         "team.session.bind",
+        "team.mq.publish",
         "session.fork",
         # Agent configuration
         "agents.list",

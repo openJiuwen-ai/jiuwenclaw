@@ -197,6 +197,8 @@ def test_build_cli_route_binding_creates_route_and_install_hook():
     assert binding.channel_id == "tui"
     assert "chat.send" in binding.forward_methods
     assert "history.get" in binding.forward_methods
+    assert "team.mq.publish" in binding.forward_methods
+    assert "team.mq.publish" in binding.forward_no_local_handler_methods
     assert binding.install is not None
 
     binding.install(server)
