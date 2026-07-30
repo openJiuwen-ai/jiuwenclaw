@@ -44,6 +44,12 @@ _CHANGE_SET_LOCK = threading.Lock()
 # 对 turn diff 显示层不可见，但仍保留 old_content，从而不丢失文件回滚能力。
 _REWOUND_KEY = "rewound_out"
 
+# file_ops 条目上的 discard 软删除标记。由 ``discard_turn_changes`` 打上,
+# 与 conversation rewind 的 ``rewound_out`` 区分:redo 只恢复 ``discarded_out``,
+# 不会误暴露 rewind 软隐藏的"未来"条目。两者都对显示层不可见
+# (见 ``_read_agent_history`` 的 ``include_rewound`` 过滤)。
+_DISCARDED_KEY = "discarded_out"
+
 
 class DiffHistoryExpiredError(RuntimeError):
     """历史 diff 索引仍存在但详情已无法重建。"""
@@ -487,6 +493,71 @@ class DiffService:
             self._save_turn_snapshot(session_id, snapshot)
         return change_set_id
 
+    def unmark_turn_discarded(
+        self,
+        session_id: str,
+        turn_index: int,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> str | None:
+        """将指定 turn 的 status 恢复为 completed(与 ``mark_turn_discarded`` 对称).
+
+        1. 将 change_sets.json 中该 entry 的 status 显式设回 ``"completed"``
+           (而非 pop 掉——缺少 status 字段的 turn 在按 change_set_id 读取
+           snapshot 时会与其他路径默认值不一致,显式写回保持状态模型一致)
+        2. 将 snapshot 的 status 同样设回 ``"completed"``
+        3. 去掉 file_ops 中该轮条目的 ``discarded_out`` 标记
+           (只恢复 discard 标记,不触碰 rewind 的 ``rewound_out``,避免
+           误暴露此前 conversation rewind 软隐藏的"未来"条目)
+        """
+        if turn_index <= 0:
+            return None
+        target = self.get_turn_diff(
+            session_id, turn_index=turn_index, project_dir=project_dir,
+            extra_history_roots=extra_history_roots,
+        )
+        change_set_id = str((target or {}).get("change_set_id") or "")
+        if not change_set_id:
+            return None
+
+        # 1. 将 change_sets 的 status 显式设回 completed
+        with _CHANGE_SET_LOCK:
+            entries = self._load_change_sets(session_id)
+            changed = False
+            for entry in entries:
+                if entry.get("change_set_id") == change_set_id:
+                    entry["status"] = "completed"
+                    changed = True
+                    break
+            if changed:
+                self._save_change_sets(session_id, entries)
+
+        # 2. 将 snapshot 的 status 显式设回 completed
+        snapshot = self._load_turn_snapshot(session_id, change_set_id) or target
+        if snapshot is not None:
+            snapshot["status"] = "completed"
+            self._save_turn_snapshot(session_id, snapshot)
+
+        # 3. 去掉 file_ops 中该轮条目的 discarded_out 标记
+        history = self._read_history(session_id)
+        user_count = 0
+        target_timestamp: float | None = None
+        for record in history:
+            if record.get("role") == "user":
+                user_count += 1
+                if user_count == turn_index:
+                    target_timestamp = record.get("timestamp")
+                    break
+        if target_timestamp is not None:
+            self.restore_rewound_entries_by_timestamp(
+                session_id, target_timestamp, project_dir=project_dir,
+                extra_history_roots=extra_history_roots,
+                discarded=True,
+            )
+
+        return change_set_id
+
     def _enrich_with_change_sets(
         self,
         session_id: str,
@@ -634,6 +705,10 @@ class DiffService:
         文件名约定: ``file_ops_{agent_id}_{session_id}.json``,其中 session_id
         始终是 ``.json`` 前的最后一段。使用 ``_{session_id}.json`` 后缀匹配替代
         子串匹配,避免短 session_id 误匹配其他 agent 的 file_ops 文件。
+
+        当 session_id 对应的是父会话时,也接受子 agent 会话(后缀形如
+        ``_sub_{type}_{suffix}``)的 file_ops 文件,使 diff 统计能覆盖子 agent
+        的文件变更。
         """
         if not name.startswith("file_ops_"):
             return False
@@ -641,7 +716,15 @@ class DiffService:
             return False
         if not session_id:
             return not require_session
-        return name.endswith(f"_{session_id}.json")
+        suffix = f"_{session_id}.json"
+        if name.endswith(suffix):
+            return True
+        sub_marker = f"_{session_id}_sub_"
+        marker_pos = name.find(sub_marker, len("file_ops_"))
+        if marker_pos < 0:
+            return False
+        agent_id = name[len("file_ops_"):marker_pos]
+        return bool(agent_id) and "_" not in agent_id
 
     @staticmethod
     def _agent_history_dirs_for_roots(
@@ -785,11 +868,12 @@ class DiffService:
             session_id: 若提供，额外扫描匹配该 session 的 file_ops 文件。
             project_dir: 项目目录路径，若提供则也从项目目录读取 .agent_history。
             extra_history_roots: 额外写入根目录，例如 team/member workspace。
-            include_rewound: 是否包含被标记为 ``rewound_out`` 的条目(软删除快照)。
-                默认 ``False``——**显示层**(turn diff)不应看到它们,否则会展示
-                已被回退掉的 turn 的改动。**还原层**(``get_files_to_restore``)
-                必须传 ``True``:这些快照仍持有文件的原始内容,是回滚能力的唯一
-                来源。详见 ``truncate_file_ops_by_timestamp`` 的 ``soft`` 参数。
+            include_rewound: 是否包含被标记为 ``rewound_out`` / ``discarded_out``
+                的条目(软删除快照)。默认 ``False``——**显示层**(turn diff)不应
+                看到它们,否则会展示已被回退掉的 turn 的改动。**还原层**
+                (``get_files_to_restore`` / ``get_files_to_redo``) 必须传 ``True``:
+                这些快照仍持有文件的原始/修改后内容,是回滚/重做能力的唯一来源。
+                详见 ``truncate_file_ops_by_timestamp`` 的 ``soft`` 参数。
         """
         result: dict[str, Any] = {}
         history_file_priorities: dict[str, int] = {}
@@ -914,7 +998,9 @@ class DiffService:
                         # 合并条目，避免时间戳相近的重复记录
                         for entry in entries:
                             # 软删除的快照默认对显示层不可见（见 include_rewound）
-                            if not include_rewound and entry.get(_REWOUND_KEY):
+                            if not include_rewound and (
+                                entry.get(_REWOUND_KEY) or entry.get(_DISCARDED_KEY)
+                            ):
                                 continue
                             # 检查是否已存在相同时间戳（±1秒）的相同操作
                             ts = entry.get("timestamp", "")
@@ -1885,54 +1971,92 @@ class DiffService:
 
         return files_to_restore
 
-
-    def truncate_file_ops_by_timestamp(
+    def get_files_to_redo(
         self,
         session_id: str,
-        cutoff_ts: float,
+        turn_index: int,
         project_dir: str | None = None,
-        soft: bool = False,
         *,
         extra_history_roots: list[str] | None = None,
-    ) -> None:
-        """截断 file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
+    ) -> dict[str, dict[str, Any]]:
+        """返回需要重新应用的文件及其新内容(与 ``get_files_to_restore`` 对称).
 
-        ``soft`` 决定"截断"的含义，取值应与调用方**是否同时还原了工作区文件**一致:
-
-           - ``soft=False``(硬删除,默认): 条目被物理移除。仅当调用方已经把这些
-             文件写回原始内容时才正确(如 ``discard_turn_changes``)——文件已回到
-             旧状态，快照失去意义。
-           - ``soft=True``(软删除): 条目保留 ``old_content``，只打上 ``rewound_out``
-             标记。用于**只回退对话、不动文件**的场景(``rewind_session`` 的
-             conversation 模式、``compact_partial_session``)。此时硬删除会让文件
-             陷入"已被修改、但系统不再持有其原始内容"的状态，后续任何 /rewind 都
-             无法还原它，且不会报错(issue #2241)。标记后显示层照旧看不到这些条目，
-             还原层仍可用——显示一致性与回滚能力各取所需。
-
-        在 rewind / discard_turn_changes 操作后调用，确保 file_ops 日志与
-        截断后的 history.json / 实际工作区一致。
-
-        清理范围:
-          - **session-specific file_ops**(文件名包含 session_id):
-            全部条目按 timestamp 过滤(因为这些条目只属于该 session)。
-          - **全局 file_ops**(文件名不含 session_id,如 ``file_ops_jiuwenswarm.json``):
-            **不清理**。全局 file_ops 缺少 session 归属字段,若按路径 + timestamp
-            清理会误伤其他 session 在同一文件上的后续修改(详见 P1 修复)。
-            撤销后 last_turn diff 可能残留历史全局记录,这是已知局限——
-            用户撤销本轮后一般不需要查看 last_turn,且 session-specific 日志
-            已足够支撑单 session 场景的精确恢复。
+        discard(soft) 后 file_ops 中 timestamp >= target 的条目被标记
+        ``discarded_out``。本方法找出这些条目,返回它们的 ``new_content``
+        (即 agent 修改后的内容),供 redo 写回文件。
 
         Args:
             session_id: 会话 ID
-            cutoff_ts: 截断阈值（Unix timestamp），>= 此时间的条目将被移除
-            project_dir: 项目目录路径。显式传入可避免底层从 metadata 推断,
-                覆盖 ``channel_metadata.cwd`` 缺失的场景(如 Web/code 模式新会话)。
-                为 ``None`` 时底层从 session metadata 推断(读取顺序见
-                ``_get_project_dir_from_metadata``)。
-            soft: 见上文。调用方未还原工作区文件时必须传 ``True``。
-        """
+            turn_index: 目标重新应用轮次(1-based)
+            project_dir: 项目目录路径(可选)
 
-        # 收集所有 session-specific file_ops 文件
+        Returns:
+            { file_path: { "content": str | None, "action": "write" | "delete" } }
+            content 为 None 表示文件被 agent 删除,redo 时应删除文件。
+        """
+        history = self._read_history(session_id)
+        if not history:
+            return {}
+
+        # 1. 找到目标 turn 的起始时间(第 N 条 user 消息的 timestamp)
+        user_count = 0
+        target_timestamp: float | None = None
+        for record in history:
+            if record.get("role") == "user":
+                user_count += 1
+                if user_count == turn_index:
+                    target_timestamp = record.get("timestamp")
+                    break
+
+        if target_timestamp is None:
+            return {}
+
+        # 2. 读取 file_ops 日志(include_rewound=True 才能看到 discarded_out 条目)
+        agent_history = self._read_agent_history(
+            session_id, project_dir, include_rewound=True,
+            extra_history_roots=extra_history_roots,
+        )
+
+        # 3. 对每个文件,遍历所有 timestamp >= target_timestamp 且被 discard 标记
+        #    的 entry,取**最后一条**的 new_content(即 agent 修改后的最终态)。
+        #    不能取第一条就 break——同一 turn 内同一文件可能被多次编辑,
+        #    取中间态写回会导致 redo 后文件内容与 discard 前不一致。
+        files_to_redo: dict[str, dict[str, Any]] = {}
+        for file_path, entries in agent_history.items():
+            last_entry: dict[str, Any] | None = None
+            for entry in entries:
+                if not entry.get(_DISCARDED_KEY):
+                    continue  # 只看被 discard 标记的条目(非 rewind 的 rewound_out)
+                edit_time = self._iso_to_timestamp(entry["timestamp"])
+                if edit_time >= target_timestamp:
+                    last_entry = entry  # 持续覆盖,保留最后一条
+            if last_entry is not None:
+                if last_entry.get("new_content") is not None:
+                    files_to_redo[file_path] = {
+                        "content": last_entry["new_content"],
+                        "action": "write",
+                    }
+                else:
+                    # new_content 为 None: 文件被 agent 删除,redo 时应删除
+                    files_to_redo[file_path] = {
+                        "content": None,
+                        "action": "delete",
+                    }
+
+        return files_to_redo
+
+    def _collect_session_file_ops_paths(
+        self,
+        session_id: str,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> list[Path]:
+        """收集所有 session-specific file_ops 文件路径。
+
+        扫描范围与 ``truncate_file_ops_by_timestamp`` 一致:
+        agent/user workspace、project_dir、extra_history_roots(含 worktree 容器)。
+        """
         file_ops_paths: list[Path] = []
 
         for base_dir in (get_agent_workspace_dir(), get_user_workspace_dir()):
@@ -1943,7 +2067,6 @@ class DiffService:
                 if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
                     file_ops_paths.append(f)
 
-        # 也从项目目录/额外写入根扫描(显式传入优先,否则从 metadata 推断)
         resolved_project_dir = project_dir or self._get_project_dir_from_metadata(session_id)
         if resolved_project_dir:
             project_hist_dir = Path(resolved_project_dir) / ".agent_history"
@@ -1967,6 +2090,73 @@ class DiffService:
                         if f not in file_ops_paths:
                             file_ops_paths.append(f)
 
+        return file_ops_paths
+
+    def truncate_file_ops_by_timestamp(
+        self,
+        session_id: str,
+        cutoff_ts: float,
+        project_dir: str | None = None,
+        soft: bool = False,
+        *,
+        extra_history_roots: list[str] | None = None,
+        discarded: bool = False,
+    ) -> None:
+        """截断 file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
+
+        ``soft`` 决定"截断"的含义，取值应与调用方**是否同时还原了工作区文件**一致:
+
+           - ``soft=False``(硬删除,默认): 条目被物理移除。仅当调用方已经把这些
+             文件写回原始内容时才正确(如 ``discard_turn_changes``)——文件已回到
+             旧状态，快照失去意义。
+           - ``soft=True``(软删除): 条目保留 ``old_content``，只打上软删除标记。
+             用于**只回退对话、不动文件**的场景(``rewind_session`` 的
+             conversation 模式、``compact_partial_session``)或需要保留快照供
+             redo 的场景(``discard_turn_changes``)。此时硬删除会让文件
+             陷入"已被修改、但系统不再持有其原始内容"的状态，后续任何 /rewind 都
+             无法还原它，且不会报错(issue #2241)。标记后显示层照旧看不到这些条目，
+             还原层仍可用——显示一致性与回滚能力各取所需。
+
+        ``discarded`` 控制 ``soft=True`` 时使用哪种标记(仅 ``soft=True`` 时有意义):
+
+           - ``discarded=False``(默认): 打 ``rewound_out`` 标记(conversation
+             rewind / compact 路径)。``restore_rewound_entries_by_timestamp``
+             默认也只恢复 ``rewound_out``。
+           - ``discarded=True``: 打 ``discarded_out`` 标记(``discard_turn_changes``
+             路径)。与 ``rewound_out`` 区分后,``redo_turn_changes`` 只恢复
+             ``discarded_out`` 条目,不会误暴露此前 conversation rewind 软隐藏的
+             "未来"条目,避免 last turn diff 混入不属于当前 history 的修改。
+
+        在 rewind / discard_turn_changes 操作后调用，确保 file_ops 日志与
+        截断后的 history.json / 实际工作区一致。
+
+        清理范围:
+          - **session-specific file_ops**(文件名包含 session_id):
+            全部条目按 timestamp 过滤(因为这些条目只属于该 session)。
+          - **全局 file_ops**(文件名不含 session_id,如 ``file_ops_jiuwenswarm.json``):
+            **不清理**。全局 file_ops 缺少 session 归属字段,若按路径 + timestamp
+            清理会误伤其他 session 在同一文件上的后续修改(详见 P1 修复)。
+            撤销后 last_turn diff 可能残留历史全局记录,这是已知局限——
+            用户撤销本轮后一般不需要查看 last_turn,且 session-specific 日志
+            已足够支撑单 session 场景的精确恢复。
+
+        Args:
+            session_id: 会话 ID
+            cutoff_ts: 截断阈值（Unix timestamp），>= 此时间的条目将被移除
+            project_dir: 项目目录路径。显式传入可避免底层从 metadata 推断,
+                覆盖 ``channel_metadata.cwd`` 缺失的场景(如 Web/code 模式新会话)。
+                为 ``None`` 时底层从 session metadata 推断(读取顺序见
+                ``_get_project_dir_from_metadata``)。
+            soft: 见上文。调用方未还原工作区文件时必须传 ``True``。
+            discarded: 见上文。``soft=True`` 时决定标记类型。
+        """
+
+        marker = _DISCARDED_KEY if discarded else _REWOUND_KEY
+
+        file_ops_paths = self._collect_session_file_ops_paths(
+            session_id, project_dir, extra_history_roots=extra_history_roots,
+        )
+
         for file_ops_path in file_ops_paths:
             try:
                 data = json.loads(file_ops_path.read_text(encoding="utf-8"))
@@ -1989,8 +2179,8 @@ class DiffService:
                             filtered.append(e)
                         elif soft:
                             # 保留快照(old_content)，仅对显示层隐藏
-                            if not e.get(_REWOUND_KEY):
-                                e[_REWOUND_KEY] = True
+                            if not e.get(marker):
+                                e[marker] = True
                                 truncated = True
                             filtered.append(e)
                         else:
@@ -2006,12 +2196,87 @@ class DiffService:
                         encoding="utf-8",
                     )
                     logger.info(
-                        "truncate_file_ops: cleaned %s (cutoff_ts=%s, soft=%s)",
-                        file_ops_path.name, cutoff_ts, soft,
+                        "truncate_file_ops: cleaned %s (cutoff_ts=%s, soft=%s, marker=%s)",
+                        file_ops_path.name, cutoff_ts, soft, marker,
                     )
             except Exception as exc:
                 logger.warning(
                     "truncate_file_ops: failed to process %s: %s",
+                    file_ops_path, exc,
+                )
+
+    def restore_rewound_entries_by_timestamp(
+        self,
+        session_id: str,
+        cutoff_ts: float,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+        discarded: bool = False,
+    ) -> None:
+        """去掉 file_ops 中 timestamp >= cutoff_ts 的条目的软删除标记.
+
+        与 ``truncate_file_ops_by_timestamp(soft=True)`` 对称:
+        后者加标记(隐藏条目),本方法去标记(恢复条目可见性)。
+        用于 ``redo_turn_changes`` 恢复被 ``discard(soft)`` 隐藏的 file_ops 条目。
+
+        ``discarded`` 控制恢复哪种标记,应与当初打标记时一致:
+
+           - ``discarded=False``(默认): 恢复 ``rewound_out`` 条目
+             (conversation rewind 路径)。
+           - ``discarded=True``: 恢复 ``discarded_out`` 条目
+             (``discard_turn_changes`` → ``redo_turn_changes`` 路径)。
+             只恢复 discard 标记,不触碰 rewind 标记,避免误暴露此前
+             conversation rewind 软隐藏的"未来"条目。
+
+        Args:
+            session_id: 会话 ID
+            cutoff_ts: 阈值(Unix timestamp),>= 此时间的匹配标记条目将被恢复
+            project_dir: 项目目录路径(可选)
+        """
+        marker = _DISCARDED_KEY if discarded else _REWOUND_KEY
+
+        file_ops_paths = self._collect_session_file_ops_paths(
+            session_id, project_dir, extra_history_roots=extra_history_roots,
+        )
+
+        for file_ops_path in file_ops_paths:
+            try:
+                data = json.loads(file_ops_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    continue
+
+                restored = False
+                new_data: dict[str, Any] = {}
+                for file_path, entries in data.items():
+                    if not isinstance(entries, list):
+                        continue
+                    filtered = []
+                    for e in entries:
+                        try:
+                            entry_ts = self._iso_to_timestamp(e.get("timestamp", ""))
+                        except (ValueError, TypeError):
+                            filtered.append(e)
+                            continue
+                        if entry_ts >= cutoff_ts and e.get(marker):
+                            e.pop(marker, None)
+                            restored = True
+                        filtered.append(e)
+                    if filtered:
+                        new_data[file_path] = filtered
+
+                if restored:
+                    file_ops_path.write_text(
+                        json.dumps(new_data, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    logger.info(
+                        "restore_rewound_entries: restored %s (cutoff_ts=%s, marker=%s)",
+                        file_ops_path.name, cutoff_ts, marker,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "restore_rewound_entries: failed to process %s: %s",
                     file_ops_path, exc,
                 )
 

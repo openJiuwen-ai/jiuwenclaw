@@ -499,6 +499,7 @@ function AppContent() {
   const addMessage = useChatStore((s) => s.addMessage);
   const addToolCall = useChatStore((s) => s.addToolCall);
   const addToolResult = useChatStore((s) => s.addToolResult);
+  const settleHistoricalToolExecutions = useChatStore((s) => s.settleHistoricalToolExecutions);
   const prependMessages = useChatStore((s) => s.prependMessages);
   const isProcessing = useChatStore((s) => s.runtimes[sessionId]?.isProcessing ?? false);
   const isPaused = useChatStore((s) => s.runtimes[sessionId]?.isPaused ?? false);
@@ -621,7 +622,10 @@ function AppContent() {
   });
 
   const applyHistoryPageResult = useCallback((sid: string, result: FetchHistoryPageResult) => {
-    prependMessages(sid, result.messages);
+    // 只 stamp 徽章：merge 完成卡只适合整页 replace（首次 history 恢复）。
+    // 这里若再 merge，localStorage 里的完成卡不在本页 messages 里就会被再次注入，
+    // prepend 又不按 id 去重，导致完成卡重复。
+    prependMessages(sid, stampGoalObjectiveMessages(sid, result.messages));
     for (const item of result.toolReplay) {
       if (item.kind === 'tool_call') {
         const n = normalizeToolCallPayload(item.payload);
@@ -654,6 +658,7 @@ function AppContent() {
         );
       }
     }
+    settleHistoricalToolExecutions(sid);
 
     const harnessStore = useHarnessStore.getState();
     const harnessRuntime = harnessStore.getRuntime(sid);
@@ -703,7 +708,7 @@ function AppContent() {
       }));
       store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
     }
-  }, [addToolCall, addToolResult, prependMessages]);
+  }, [addToolCall, addToolResult, prependMessages, settleHistoricalToolExecutions]);
 
   const fetchHistoryPageResult = useCallback(async (
     sid: string,
@@ -1398,6 +1403,7 @@ function AppContent() {
             );
           }
         }
+        settleHistoricalToolExecutions(sessionId);
       },
       onHarnessReplay: (items: HistoryHarnessReplayItem[]) => {
         const harnessStore = useHarnessStore.getState();
@@ -1488,6 +1494,7 @@ function AppContent() {
     addMessage,
     addToolCall,
     addToolResult,
+    settleHistoricalToolExecutions,
     clearMessages,
     clearSubtasks,
     disposeInFlightHistoryHandles,

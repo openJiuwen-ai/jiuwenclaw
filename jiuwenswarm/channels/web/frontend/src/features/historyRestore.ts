@@ -2,8 +2,13 @@ import { Message, MessageRole, UsageSummary, FileDownloadItem, MediaItem, WsEven
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
 import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
+import { parseTimestampToMs, timestampMsToIso } from '../utils/timestamp';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
 import { normalizeToolCallPayload, normalizeToolResultPayload } from './tool-events/toolEventNormalizer';
+import {
+  buildGoalCompletedContent,
+  isGoalCompletedContent,
+} from '../components/GoalBar/goalCompletedMessage';
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -199,22 +204,16 @@ function normalizeHistoryContent(
   }
 }
 
-function recordTimestampIso(record: Record<string, unknown>): string {
-  const ts = record.timestamp;
-  if (typeof ts === 'number' && Number.isFinite(ts)) {
-    const millis = ts > 1_000_000_000_000 ? ts : ts * 1000;
-    const d = new Date(millis);
-    if (!Number.isNaN(d.getTime())) {
-      return d.toISOString();
-    }
-  }
-  if (typeof ts === 'string') {
-    const parsed = Date.parse(ts);
-    if (!Number.isNaN(parsed)) {
-      return new Date(parsed).toISOString();
-    }
-  }
-  return new Date().toISOString();
+function recordTimestampIso(record: Record<string, unknown>): string | undefined {
+  const ms = parseTimestampToMs(record.timestamp);
+  // 缺时间戳时不要用 Date.now()（会撑爆「已完成」耗时），也不要回 ''（Date.parse('')=NaN 会让排序失效）。
+  return timestampMsToIso(ms);
+}
+
+/** 消息排序用：无效时间戳落到 0，避免 NaN - NaN 导致顺序不确定。 */
+function safeTimestampMs(value: unknown): number {
+  const ms = parseTimestampToMs(value);
+  return Number.isFinite(ms) ? ms : 0;
 }
 
 function isTeamModeRecord(record: Record<string, unknown>): boolean {
@@ -360,12 +359,17 @@ function extractHistoryMediaItems(record: Record<string, unknown>): MediaItem[] 
   return mediaItems;
 }
 
+function isTruthyHistoryFlag(value: unknown): boolean {
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
 function parseHistoryTimelineEntry(
   record: Record<string, unknown>,
   sessionId: string
 ): HistoryTimelineEntry | null {
   const role = normalizeHistoryRole(record.role);
-  const at = recordTimestampIso(record);
+  // 无有效时间戳时用空串占位（勿用 Date.now()）；排序/工具构建侧已对空串做防护。
+  const at = recordTimestampIso(record) ?? '';
 
   if (role === 'user') {
     const rawContent = record.content ?? record.text ?? record.body;
@@ -379,6 +383,9 @@ function parseHistoryTimelineEntry(
     }
     const id =
       pickFirstString(record, ['id', 'message_id', 'msg_id']) ?? `hist-user-${sessionId}-${at}`;
+    const isGoalObjectiveMessage =
+      isTruthyHistoryFlag(record.is_goal_objective_message) ||
+      isTruthyHistoryFlag(record.isGoalObjectiveMessage);
     return {
       kind: 'message',
       message: {
@@ -387,6 +394,7 @@ function parseHistoryTimelineEntry(
         content,
         timestamp: at,
         ...(mediaItems.length > 0 ? { mediaItems } : {}),
+        ...(isGoalObjectiveMessage ? { isGoalObjectiveMessage: true } : {}),
       },
     };
   }
@@ -442,7 +450,21 @@ function parseHistoryTimelineEntry(
   const payload = buildEventPayloadForRecord(record);
 
   if (eventType === 'chat.final') {
-    const content = normalizeFinalContent(payload);
+    let content = normalizeFinalContent(payload);
+    const isGoalCompletedMessage =
+      isTruthyHistoryFlag(record.is_goal_completed_message) ||
+      isTruthyHistoryFlag(record.isGoalCompletedMessage) ||
+      isTruthyHistoryFlag(payload.is_goal_completed_message) ||
+      isTruthyHistoryFlag(payload.isGoalCompletedMessage);
+    if (isGoalCompletedMessage && !isGoalCompletedContent(content)) {
+      const evidenceRaw =
+        (typeof record.evidence === 'string' && record.evidence) ||
+        (typeof payload.evidence === 'string' && payload.evidence) ||
+        content;
+      content = buildGoalCompletedContent({
+        evidence: typeof evidenceRaw === 'string' ? evidenceRaw.trim() : '',
+      });
+    }
     if (!content.trim()) {
       return null;
     }
@@ -459,7 +481,7 @@ function parseHistoryTimelineEntry(
           role: 'system',
           content: `team.leader:${JSON.stringify({
             content,
-            timestamp: Date.parse(at),
+            timestamp: safeTimestampMs(at),
           })}`,
           timestamp: at,
         },
@@ -615,11 +637,11 @@ export function parseHistoryJsonFileToTimelinePreview(
     }
     const reasoningText = extractHistoryReasoningText(item);
     if (reasoningText) {
-      reasoningReplay.push({ at: recordTimestampIso(item), text: reasoningText });
+      reasoningReplay.push({ at: recordTimestampIso(item) ?? '', text: reasoningText });
     }
   }
 
-  messages.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  messages.sort((a, b) => safeTimestampMs(a.timestamp) - safeTimestampMs(b.timestamp));
 
   const executions = buildToolExecutionsFromReplay(toolReplay);
   const reasoningSegments = buildReasoningSegmentsFromReplay(sessionId, reasoningReplay);
@@ -644,8 +666,12 @@ function buildReasoningSegmentsFromReplay(
       return;
     }
     seen.add(text);
-    const parsed = Date.parse(item.at);
-    const startedAt = Number.isFinite(parsed) ? parsed - 1 : index;
+    const parsed = parseTimestampToMs(item.at);
+    // 解析失败时跳过该段，勿用 index 当 epoch（会让 startMs≈0，耗时爆炸）
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    const startedAt = parsed - 1;
     segments.push({
       id: `hist-preview-rsn-${sessionId}-${index}`,
       text,
@@ -668,7 +694,15 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
       if (!n.id || byId.has(n.id)) {
         continue;
       }
-      const startedAt = item.at;
+      // 与 buildReasoningSegmentsFromReplay 对齐：无效 at 跳过，避免空串写入 ToolExecution
+      const parsed = parseTimestampToMs(item.at);
+      if (!Number.isFinite(parsed)) {
+        continue;
+      }
+      const startedAt = timestampMsToIso(parsed);
+      if (!startedAt) {
+        continue;
+      }
       byId.set(n.id, {
         toolCallId: n.id,
         toolCall: {
@@ -680,7 +714,7 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
           display_name: n.display_name,
           memberName: n.memberName,
         },
-        status: 'pending',
+        status: 'completed',
         startedAt,
         updatedAt: startedAt,
         timeoutAt: startedAt,
@@ -702,7 +736,12 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
       summary: n.summary,
       skillTree: n.skillTree,
     };
+    const parsed = parseTimestampToMs(item.at);
+    const atIso = Number.isFinite(parsed) ? timestampMsToIso(parsed) : undefined;
     if (!existing) {
+      if (!atIso) {
+        continue;
+      }
       byId.set(n.toolCallId, {
         toolCallId: n.toolCallId,
         toolCall: {
@@ -712,9 +751,9 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
         },
         result,
         status: n.success ? 'completed' : 'error',
-        startedAt: item.at,
-        updatedAt: item.at,
-        timeoutAt: item.at,
+        startedAt: atIso,
+        updatedAt: atIso,
+        timeoutAt: atIso,
       });
       order.push(n.toolCallId);
       continue;
@@ -723,7 +762,7 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
       ...existing,
       result,
       status: n.success ? 'completed' : 'error',
-      updatedAt: item.at,
+      ...(atIso ? { updatedAt: atIso } : {}),
     });
   }
 
@@ -811,7 +850,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
       }
       const reasoningText = extractHistoryReasoningText(record);
       if (reasoningText) {
-        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record), text: reasoningText });
+        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record) ?? '', text: reasoningText });
       }
     }
 
@@ -978,7 +1017,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
       }
       const reasoningText = extractHistoryReasoningText(record);
       if (reasoningText) {
-        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record), text: reasoningText });
+        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record) ?? '', text: reasoningText });
       }
     }
 

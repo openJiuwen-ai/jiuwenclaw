@@ -415,7 +415,8 @@ class IMConversationProcessor:
                 client_provider=client_provider,
                 api_key=api_key,
                 api_base=api_base,
-                verify_ssl=False,
+                verify_ssl=mcc.get("verify_ssl", True),
+                ssl_cert=mcc.get("ssl_cert", None),
                 timeout=180.0,
                 custom_headers=custom_headers,
             )

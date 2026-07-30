@@ -115,8 +115,8 @@ memory:
     enabled: false
     patterns: []
     description:
-      zh: "以下内容禁止记忆：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息"
-      en: "The following content is forbidden to remember: passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers and other sensitive information"
+      zh: "以下内容禁止记忆：（用户自行补充，如身高、体重、姓名等，建议用逗号分隔）"
+      en: "The following content is forbidden to remember: (To be supplemented by users, e.g., height, weight, name, etc. Separate items with commas recommended)"
 
   # ------------------------------------------------------------
   # 外接记忆（External Memory）
@@ -216,7 +216,7 @@ models:
         stream_first_chunk_timeout: 300
         # 流式：分片之间的最大空闲等待时间（秒）
         stream_idle_timeout: 60
-        verify_ssl: false
+        verify_ssl: true
         custom_headers: {}
       model_config_obj:
         temperature: 0.95
@@ -228,7 +228,7 @@ models:
         model_name: ${VIDEO_MODEL_NAME}
         client_provider: ${VIDEO_PROVIDER}
         timeout: 1800
-        verify_ssl: false
+        verify_ssl: true
       model_config_obj:
         temperature: 0.95
   audio:
@@ -237,7 +237,7 @@ models:
         api_key: ${AUDIO_API_KEY}
         model_name: ${AUDIO_MODEL_NAME}
         client_provider: ${AUDIO_PROVIDER}
-        verify_ssl: false
+        verify_ssl: true
         timeout: 1800
       model_config_obj:
         temperature: 0.95
@@ -247,7 +247,7 @@ models:
         api_key: ${VISION_API_KEY}
         model_name: ${VISION_MODEL_NAME}
         client_provider: ${VISION_PROVIDER}
-        verify_ssl: false
+        verify_ssl: true
         timeout: 1800
       model_config_obj:
         temperature: 0.95
@@ -257,7 +257,7 @@ models:
         api_key: ${IMAGE_GEN_API_KEY}
         model_name: ${IMAGE_GEN_MODEL_NAME}
         client_provider: ${IMAGE_GEN_PROVIDER}
-        verify_ssl: false
+        verify_ssl: true
         timeout: 1800
       model_config_obj:
         temperature: 0.95
@@ -282,7 +282,7 @@ acp_agents:
 #       api_base: https://api.deepseek.com
 #       api_key: sk-xxx
 #       timeout: 1800
-#       verify_ssl: false
+#       verify_ssl: true
 #       custom_headers: {}
 #     model_request_config:
 #       model: deepseek-chat
@@ -418,6 +418,7 @@ debug_trace:
     include_reasoning: true         # 记录推理片段
     include_tool_args: true         # 记录工具参数
     include_tool_result: true       # 记录工具结果
+    include_subagent_flow: true     # 采集子 agent chunk 进同一 dump（内置 task / 自定义 / 后台子 agent）
   code:                             # code 模式（code.normal / code.plan …）
     enabled: false
     dump_enabled: true
@@ -426,6 +427,7 @@ debug_trace:
     include_reasoning: true
     include_tool_args: true
     include_tool_result: true
+    include_subagent_flow: true     # 采集子 agent chunk 进同一 dump（内置 task / 自定义 / 后台子 agent）
   limits:
     tool_args_max_chars: 2000       # 工具参数截断阈值
     tool_result_max_chars: 8000     # 工具结果截断阈值
@@ -653,6 +655,8 @@ channels:
         my_user_id: ""
         bot_name: ""
         enable_memory: false
+        # 飞书开放平台 API 域名前缀（留空走官方默认，支持国际版/私有化切换）
+        api_base: https://open.feishu.cn
   feishu_enterprise:
     # 企业飞书多 Bot 配置（每个 bot 会注册为独立 channel: feishu_enterprise:<app_id>）
     # bot_a:
@@ -683,7 +687,7 @@ channels:
         # xiaoyi_claw配置
         uid:
         api_key:
-        push_url:
+        push_url: https://hag.cloud.huawei.com/open-ability-agent/v1/agent-webhook
         file_upload_url:
         # 小艺手机端插件tools调用，会添加相关tools到系统提示词
         phone_tools_enabled: false
@@ -694,6 +698,9 @@ channels:
     allow_from: []
     enabled: false
     send_file_allowed: true
+    # API 域名前缀（留空走官方默认，支持私有化/国际版切换）
+    api_base: https://api.dingtalk.com      # 新版 v1.0 接口域名
+    oapi_base: https://oapi.dingtalk.com    # 旧版 media 接口域名
   telegram:
     # Telegram Bot 配置
     # 从 @BotFather 获取 bot_token

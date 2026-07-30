@@ -916,6 +916,7 @@
       "modelsLoadFailed": "刷新 OpenAI 模型列表失败",
       "noModelsAvailable": "未返回可用 OpenAI 模型，请在授权完成后刷新。",
       "configuredModelUnavailable": "当前配置的模型“{{model}}”不在 OpenAI 账号模型列表中。",
+      "needLoginForModel": "请先连接 OpenAI 账号。",
       "modelNameUseDropdown": "请使用下方 OpenAI 模型下拉框选择",
       "apiBaseManaged": "OAuth Provider 自动维护，无需手动修改",
       "autoSaving": "登录完成，正在自动保存配置...",
@@ -1452,7 +1453,11 @@
         "success": "可用（{{count}}）",
         "error": "不可用",
         "skipped": "未配置"
-      }
+      },
+      "sourceFilterHelp": "默认同时展示 SkillNet 与 ClawHub。点击源标签可筛选结果；至少保留一个源。",
+      "sourceFilterToggle": "点击筛选该源",
+      "sourceFilterKeepOne": "至少保留一个源",
+      "noFilteredResults": "当前筛选条件下没有结果，请重新选择源。"
     },
     "actions": {
       "install": "安装",
@@ -1475,6 +1480,9 @@
       "local": "本地",
       "project": "项目",
       "builtin": "内置",
+      "clawhub": "ClawHub",
+      "skillnet": "SkillNet",
+      "teamskillshub": "TeamSkillsHub",
       "unknown": "未知"
     },
     "sourceLabel": "来源",

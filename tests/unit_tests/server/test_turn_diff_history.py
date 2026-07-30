@@ -1040,6 +1040,37 @@ def test_get_session_extra_history_roots_adds_spawned_member_workspaces(tmp_path
     assert str(tmp_path / "independent" / "poet-song_workspace") in roots
 
 
+def test_get_session_extra_history_roots_discovers_sub_agent_workspaces(tmp_path):
+    """Single-agent mode (no team_name) should still find sub-agent dirs under workspace/sub_agents."""
+    sub_agents_dir = tmp_path / "workspace" / "sub_agents"
+    sub_agents_dir.mkdir(parents=True)
+    (sub_agents_dir / "sess-1_sub_general-purpose_abc").mkdir()
+    (sub_agents_dir / "sess-1_sub_general-purpose_def").mkdir()
+    (sub_agents_dir / "sess-other_sub_general-purpose_xyz").mkdir()
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={
+                "team_name": "",
+                "team_file_monitor_roots": None,
+            },
+        ),
+        patch(
+            "jiuwenswarm.common.utils.get_agent_workspace_dir",
+            return_value=tmp_path / "workspace",
+        ),
+    ):
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            get_session_extra_history_roots,
+        )
+
+        roots = get_session_extra_history_roots("sess-1")
+
+    assert str(sub_agents_dir / "sess-1_sub_general-purpose_abc") in roots
+    assert str(sub_agents_dir / "sess-1_sub_general-purpose_def") in roots
+    assert str(sub_agents_dir / "sess-other_sub_general-purpose_xyz") not in roots
+
+
 def test_is_valid_file_ops_file_uses_suffix_match():
     """session_id 后缀匹配,避免子串误匹配其他 session 的 file_ops 文件。"""
     service = DiffService()
@@ -1059,6 +1090,24 @@ def test_is_valid_file_ops_file_uses_suffix_match():
     # require_session=False 且 session_id=None: 接受所有 file_ops 文件
     assert service._is_valid_file_ops_file("file_ops_agent.json", None)
     assert service._is_valid_file_ops_file("file_ops_agent.json", None, require_session=False)
+
+
+def test_is_valid_file_ops_file_matches_sub_agent_sessions():
+    """父 session_id 也应匹配子 agent 会话的 file_ops 文件(后缀 _sub_{type}_{suffix})。"""
+    service = DiffService()
+    parent = "sess_19fa7d326c9_87aa9a3ff27a"
+    sub_name = "file_ops_93eeae01a6bb439eb7e241a9c8d8d375_sess_19fa7d326c9_87aa9a3ff27a_sub_general-purpose_17a7bada.json"
+    assert service._is_valid_file_ops_file(sub_name, parent)
+    assert service._is_valid_file_ops_file(sub_name, parent, require_session=True)
+    exact_name = "file_ops_jiuwenswarm_sess_19fa7d326c9_87aa9a3ff27a.json"
+    assert service._is_valid_file_ops_file(exact_name, parent)
+    other_parent = "sess_other"
+    assert not service._is_valid_file_ops_file(sub_name, other_parent)
+    assert not service._is_valid_file_ops_file("file_ops_agent_sess_10.json", "sess_1")
+    spoofed = "file_ops_abc_sess-1_sub_def_sess-other.json"
+    assert service._is_valid_file_ops_file(spoofed, "sess-1")
+    empty_agent = "file_ops__sess-1_sub_general-purpose_abc.json"
+    assert not service._is_valid_file_ops_file(empty_agent, "sess-1")
 
 
 def test_multi_history_root_first_wins_for_duplicate_entries(tmp_path, monkeypatch):
