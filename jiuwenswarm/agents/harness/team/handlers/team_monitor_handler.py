@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 _TASK_EVENT_STATUS: dict[MonitorEventType, str] = {
     MonitorEventType.TASK_CREATED: "pending",
     MonitorEventType.TASK_CLAIMED: "in_progress",
-    MonitorEventType.TASK_STARTED: "in_progress",
+    MonitorEventType.TASK_CLAIMED: "in_progress",
     MonitorEventType.TASK_PLAN_REQUEST: "planning",
     MonitorEventType.TASK_PLAN_RESPONSE: "in_progress",
     MonitorEventType.TASK_COMPLETED: "completed",

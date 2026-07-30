@@ -46,7 +46,7 @@ Swarm Skills 不只局限于 jiuwenSwarm 平台。它的核心设计理念——
 ### 2.1 目录结构概览
 
 ```
-team-skill-name/
+swarm-skill-name/
 ├── SKILL.md              # 团队技能入口文件
 ├── roles/                # 角色定义目录
 │   ├── coordinator.md    # 协调者角色
@@ -647,7 +647,7 @@ Swarm Skills 采用标准化的结构定义（5 文件规范），具备跨框�
 
 jiuwenSwarm 提供了 `swarmskill-creator` 技能，帮助用户创建、转换或修改 Swarm Skill。它内置了标准化的模板、决策树和自动化验证器，确保创建的 Swarm Skill 符合规范。
 
-![swarmskill-creator](../en/swarmskill.png)
+![swarmskill-creator](../assets/images/swarmskill-creator.png)
 
 **获取与安装**：
 
@@ -765,15 +765,26 @@ graph TD
 
 **步骤七：验证**
 
-运行自动化验证器，确保 Swarm Skill 符合规范：
+运行自动化验证器，确保 TeamSkill 符合规范：
 
 ```bash
 # 方式一：使用 TUI 内置命令（推荐）
-/teamskills validate path/to/research-report-team/ --type swarmskills
+# 将 <skill_path> 替换为 TeamSkill 的完整绝对路径
+# 注意：TUI 中 ~ 不会被展开，必须使用完整路径如 /root/.jiuwenswarm/agent/workspace/skills/my-team-skill
+# 通用命令模板：/teamskills validate <你的技能绝对路径> --type teamskills
 
-# 方式二：使用独立验证脚本（脚本随 swarmskill-creator 技能提供）
-python scripts/validate_swarmskill.py path/to/research-report-team/
+# 示例：验证系统内置的 swarmskill-creator
+/teamskills validate /root/.jiuwenswarm/agent/workspace/skills/swarmskill-creator --type teamskills
+
+# 方式二：终端脚本验证（shell中~可展开，已给出可运行示例）
+python3 /root/.jiuwenswarm/agent/workspace/skills/swarmskill-creator/scripts/validate_swarmskill.py /root/.jiuwenswarm/agent/workspace/skills/swarmskill-creator
 ```
+
+> **实用提示**：
+> 1. 请将命令中的【你的技能绝对路径】替换为实际路径，不要直接用占位符
+> 2. 你创建的技能默认保存在：~/.jiuwenswarm/agent/workspace/skills/你的技能目录名
+> 3. TUI中执行路径类命令时，必须用完整绝对路径（如/root/xxx），~不会被自动识别
+> 4. 当前系统内置可用技能：swarmskill-creator、skill-creator
 
 验证器检查：
 - 5 文件是否齐全
@@ -824,7 +835,7 @@ python scripts/validate_swarmskill.py path/to/research-report-team/
 /teamskills validate path/to/<swarmskill-name>/ --type swarmskills
 
 # 方式二：使用独立验证脚本（脚本随 swarmskill-creator 技能提供）
-python scripts/validate_swarmskill.py path/to/<swarmskill-name>/
+python3 scripts/validate_swarmskill.py path/to/<swarmskill-name>/
 ```
 
 确保退出码为 0（合规）。
