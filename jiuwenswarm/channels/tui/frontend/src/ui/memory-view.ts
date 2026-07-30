@@ -10,7 +10,10 @@ import { addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
 import { openFileInEditor as openInExternalEditor, openFolderInExplorer, getEditorInfo } from "../core/utils/editor.js";
 import { collectOrderedMemoryFiles, type MemoryFile } from "../core/commands/builtins/memory.js";
-import { getDisplayPath } from "../core/commands/builtins/memory-path-utils.js";
+import {
+  formatMemoryPathForDisplay,
+  getDisplayPath,
+} from "../core/commands/builtins/memory-path-utils.js";
 import { palette, selectListTheme } from "./theme.js";
 import { padToWidth } from "./rendering/text.js";
 import { resolveAction } from "../core/keybindings/resolver.js";
@@ -339,7 +342,7 @@ export class MemoryViewController {
     const projectDir = this.state.projectDir ?? "";
     const gitRoot = this.state.gitRoot ?? null;
     const displayPath = this.showFullPath
-      ? this.lastOpenedPath.replace(/\\/g, "/")
+      ? formatMemoryPathForDisplay(this.lastOpenedPath).replace(/\\/g, "/")
       : getDisplayPath(this.lastOpenedPath, projectDir, gitRoot);
     // 保留原有 "Opened:" / "No GUI explorer detected. ..." 前缀,只替换显示路径
     if (this.statusMessage?.startsWith("Opened: ")) {
@@ -401,7 +404,9 @@ export class MemoryViewController {
   private buildEditItems(files: MVFile[], projectDir: string, gitRoot: string | null): SelectItem[] {
     return files.map((f) => {
       const label = this.fileLabel(f);
-      const dp = this.showFullPath ? f.path.replace(/\\/g, "/") : getDisplayPath(f.path, projectDir, gitRoot);
+      const dp = this.showFullPath
+        ? formatMemoryPathForDisplay(f.path).replace(/\\/g, "/")
+        : getDisplayPath(f.path, projectDir, gitRoot);
       const isGitTracked = gitRoot && f.kind !== "local" && f.kind !== "user";
       const desc = label === dp ? undefined : isGitTracked ? `Checked in at ${dp}` : `Saved in ${dp}`;
       return { value: f.path, label, description: desc };
@@ -447,7 +452,9 @@ export class MemoryViewController {
     const cat = this.modeCategory(mode);
     const projectDir = this.state?.projectDir ?? "";
     const gitRoot = this.state?.gitRoot ?? null;
-    const fmt = (p: string) => (this.showFullPath ? p : getDisplayPath(p, projectDir, gitRoot));
+    const fmt = (p: string) => (
+      this.showFullPath ? formatMemoryPathForDisplay(p) : getDisplayPath(p, projectDir, gitRoot)
+    );
     const items: SelectItem[] = [];
     if (cat === "agent") items.push({ value: openP.memory_dir, label: "Memory Dir", description: fmt(openP.memory_dir) });
     if (cat === "code" && openP.coding_memory_dir) items.push({ value: openP.coding_memory_dir, label: "Coding Memory Dir", description: fmt(openP.coding_memory_dir) });
@@ -516,7 +523,7 @@ export class MemoryViewController {
       const projectDir = this.state?.projectDir ?? "";
       const gitRoot = this.state?.gitRoot ?? null;
       const displayPath = this.showFullPath
-        ? item.value.replace(/\\/g, "/")
+        ? formatMemoryPathForDisplay(item.value).replace(/\\/g, "/")
         : getDisplayPath(item.value, projectDir, gitRoot);
       if (opened) {
         this.statusMessage = `Opened: ${displayPath}`;
@@ -581,7 +588,7 @@ export class MemoryViewController {
   }
 
   private fileLabel(f: MVFile): string {
-    const p = f.path.replace(/\\/g, "/");
+    const p = formatMemoryPathForDisplay(f.path).replace(/\\/g, "/");
     if (f.kind === "user") return "User memory";
     if (f.kind === "local") return "Local memory";
     if (f.kind === "project" && p.endsWith("JIUWENSWARM.md") && !p.endsWith("JIUWENSWARM.local.md")) return "Project memory";

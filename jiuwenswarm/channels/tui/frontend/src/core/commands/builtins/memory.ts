@@ -4,7 +4,12 @@ import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import { getEditorInfo } from "../../utils/editor.js";
-import { getDisplayPath, findGitRoot, isAncestorOrSelfDir } from "./memory-path-utils.js";
+import {
+  findGitRoot,
+  formatMemoryPathForDisplay,
+  getDisplayPath,
+  isAncestorOrSelfDir,
+} from "./memory-path-utils.js";
 
 export interface MemoryFile {
   path: string;
@@ -611,7 +616,7 @@ async function showMemoryStatus(
       if (payload.project_memory.project_dir) {
         items.push({
           label: "Project Dir",
-          value: payload.project_memory.project_dir,
+          value: formatMemoryPathForDisplay(payload.project_memory.project_dir),
         });
       }
     }
@@ -629,7 +634,7 @@ async function showMemoryStatus(
       if (payload.coding_memory.dir) {
         items.push({
           label: "Coding Memory Dir",
-          value: payload.coding_memory.dir,
+          value: formatMemoryPathForDisplay(payload.coding_memory.dir),
         });
       }
     }
@@ -647,7 +652,7 @@ async function showMemoryStatus(
       if (payload.auto_memory.dir) {
         items.push({
           label: "Auto Memory Dir",
-          value: payload.auto_memory.dir,
+          value: formatMemoryPathForDisplay(payload.auto_memory.dir),
         });
       }
     }
@@ -848,7 +853,10 @@ async function openMemoryDir(
           {
             header: "Memory open",
             question: "Select a directory to open:",
-            options: options.map((o) => ({ label: o.label, description: o.value })),
+            options: options.map((o) => ({
+              label: o.label,
+              description: formatMemoryPathForDisplay(o.value),
+            })),
           },
         ],
         "local_command_memory_open",
@@ -868,23 +876,24 @@ async function openMemoryDir(
 
     // 优先调系统文件管理器打开；不支持时(无 GUI 或未注入回调)显示可复制路径提示
     const opened = ctx.openFolder?.(selectedValue);
+    const displayValue = formatMemoryPathForDisplay(selectedValue);
     if (opened) {
-      ctx.addItem(addInfo(ctx.sessionId, `Opened memory folder: ${selectedValue}`, "m"));
+      ctx.addItem(addInfo(ctx.sessionId, `Opened memory folder: ${displayValue}`, "m"));
     } else {
       // 无 GUI explorer(如无头 Linux 服务器)或未注入 openFolder 回调:
       // 显示可复制路径 + 平台命令,避免误导用户以为文件夹已打开。
       let cmd: string;
       if (process.platform === "win32") {
-        cmd = `explorer "${selectedValue}"`;
+        cmd = `explorer "${displayValue}"`;
       } else if (process.platform === "darwin") {
-        cmd = `open "${selectedValue}"`;
+        cmd = `open "${displayValue}"`;
       } else {
-        cmd = `xdg-open "${selectedValue}"`;
+        cmd = `xdg-open "${displayValue}"`;
       }
       ctx.addItem(
         addInfo(
           ctx.sessionId,
-          `No GUI explorer detected. Path: ${selectedValue}\nOpen with:  ${cmd}`,
+          `No GUI explorer detected. Path: ${displayValue}\nOpen with:  ${cmd}`,
           "i",
         ),
       );
