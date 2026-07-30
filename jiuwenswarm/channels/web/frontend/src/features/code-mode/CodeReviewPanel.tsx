@@ -344,6 +344,7 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch }
       ),
     [diffWatch.detailFiles, diffWatch.files]
   );
+  const workingTreeFilePaths = useMemo(() => Object.keys(diffWatch.files).sort(), [diffWatch.files]);
 
   const reviewDocument = useMemo<CodeReviewDocument | null>(() => {
     if (source === 'last_turn') {
@@ -388,8 +389,8 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch }
   }, [project.project_id, sessionId, source, target]);
 
   useEffect(() => {
-    diffWatch.setDetailPaths(source === 'working_tree' ? [...expandedPaths] : []);
-  }, [diffWatch.setDetailPaths, expandedPaths, source]);
+    diffWatch.setDetailPaths(source === 'working_tree' ? workingTreeFilePaths : []);
+  }, [diffWatch.setDetailPaths, source, workingTreeFilePaths]);
 
   const filteredFiles = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -518,7 +519,7 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch }
                   >
                     <button type="button" className="code-review__file-header" onClick={() => toggleFile(file.file_path)} aria-expanded={expanded}>
                       {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                      <span>{file.file_path}</span>
+                      <span className="code-review__file-name">{file.file_path}</span>
                       <span className="code-stat-added">+{file.lines_added}</span>
                       <span className="code-stat-removed">-{file.lines_removed}</span>
                     </button>

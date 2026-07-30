@@ -297,7 +297,6 @@ export function useCodeGitDiffWatch({ projectId, sessionId, enabled }: UseCodeGi
       setFilesReady(false);
       setFilesLoading(false);
       setFilesError(null);
-      setDetailFiles({});
       if (watchId && !filesEnabled) {
         void gitWatchClient.request('project.git.diff_unwatch', { watch_id: watchId, scope: 'detail' }).catch(() => undefined);
         void gitWatchClient.request('project.git.diff_unwatch', { watch_id: watchId, scope: 'files' }).catch(() => undefined);
@@ -339,7 +338,6 @@ export function useCodeGitDiffWatch({ projectId, sessionId, enabled }: UseCodeGi
     const requestSequence = detailRequestSequenceRef.current + 1;
     detailRequestSequenceRef.current = requestSequence;
     if (!projectId || !filesEnabled || detailPaths.length === 0) {
-      setDetailFiles({});
       setDetailLoading(false);
       setDetailError(null);
       if (watchId) {

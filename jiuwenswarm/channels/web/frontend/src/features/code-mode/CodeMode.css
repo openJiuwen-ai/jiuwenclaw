@@ -941,8 +941,17 @@ button.code-environment__row:hover {
   flex: none;
 }
 
-.code-review__file-header > span:nth-child(2) {
-  flex: 1;
+.code-review__file-name {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-review__file-header > .code-stat-added,
+.code-review__file-header > .code-stat-removed {
+  flex: none;
 }
 
 .code-review__empty {
