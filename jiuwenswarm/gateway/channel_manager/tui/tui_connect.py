@@ -3204,7 +3204,7 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         mh.cancel_scheduled_disconnect_cancel(channel_id, session_id)
 
     async def _tui_connect_hook(ws, path):
-        return await _handle_connect(ws, path)
+        return await _handle_connect(ws, path) #TODO 怎么解析后面的操作
 
     return GatewayRouteBinding(
         path=bind.path,

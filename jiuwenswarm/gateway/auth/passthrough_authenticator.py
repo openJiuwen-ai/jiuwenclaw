@@ -1,7 +1,7 @@
 from jiuwenswarm.gateway.auth.credential_authenticator import (
     AuthResult,
     CredentialAuthenticator,
-    AuthContext, UnsupportedOperationError, KeyPair, SSHCertificate,
+    AuthContext,
 )
 
 class PassthroughAuthenticator(CredentialAuthenticator):

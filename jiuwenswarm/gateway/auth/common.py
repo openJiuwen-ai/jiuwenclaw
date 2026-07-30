@@ -58,10 +58,10 @@ def get_remote_addr(ws: Any) -> str:
     return ""
 
 
-async def _handle_connect(ws, path):
+async def _handle_connect(type, ws, path):
     try:
         context = AuthContext(
-            channel_type="web",
+            channel_type=type,
             credentials={"token": extract_token(ws)},
             headers=extract_headers(ws),
             remote_addr=get_remote_addr(ws),
