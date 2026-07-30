@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import List, Any, Union, Optional, Tuple, Dict
 from pydantic import BaseModel
 
@@ -20,6 +21,14 @@ from openjiuwen.core.workflow import WorkflowCard
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
+
+
+@dataclass
+class AddAbilityResult:
+    """Compatibility result for ability registration."""
+    name: str
+    added: bool
+    reason: str = ""
 
 
 class AbilityManager:
@@ -38,31 +47,40 @@ class AbilityManager:
         self._agents: Dict[str, AgentCard] = {}
         self._mcp_servers: Dict[str, McpServerConfig] = {}
 
-    def add(self, ability: Union[Ability, List[Ability]]) -> None:
+    def add(self, ability: Union[Ability, List[Ability]]) -> Union[AddAbilityResult, List[AddAbilityResult]]:
         """Add an ability
 
         Args:
             ability: Ability Card to add
         """
-        def add_single_ability(_ability: Ability):
+        def add_single_ability(_ability: Ability) -> AddAbilityResult:
             if isinstance(_ability, ToolCard):
                 self._tools[_ability.name] = _ability
+                return AddAbilityResult(name=_ability.name, added=True, reason="added_tool")
             elif isinstance(_ability, WorkflowCard):
                 self._workflows[_ability.name] = _ability
+                return AddAbilityResult(name=_ability.name, added=True, reason="added_workflow")
             elif isinstance(_ability, AgentCard):
                 self._agents[_ability.name] = _ability
+                return AddAbilityResult(name=_ability.name, added=True, reason="added_agent")
             elif isinstance(_ability, McpServerConfig):
                 self._mcp_servers[_ability.server_name] = _ability
+                return AddAbilityResult(
+                    name=_ability.server_name,
+                    added=True,
+                    reason="added_mcp_server",
+                )
             else:
                 logger.warning(f"Unknown ability type: {type(_ability)}")
+                return AddAbilityResult(
+                    name=getattr(_ability, "name", str(type(_ability))),
+                    added=False,
+                    reason="unknown_ability_type",
+                )
 
-        if isinstance(ability, Ability):
-            add_single_ability(ability)
-        elif isinstance(ability, List):
-            for item in ability:
-                add_single_ability(item)
-        else:
-            logger.warning(f"Unknown ability type: {type(ability)}")
+        if isinstance(ability, list):
+            return [add_single_ability(item) for item in ability]
+        return add_single_ability(ability)
 
     def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name

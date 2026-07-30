@@ -131,9 +131,11 @@ class JiuClawStreamEventRail(DeepAgentRail):
         if self._abort_requested:
             raise asyncio.CancelledError("Agent abort requested")
 
-        if not ctx.extra.get("_context_fixed") and ctx.context is not None:
+        # Always repair tool-call context before a model round.
+        # The conversation may become incomplete after any prior tool-call
+        # iteration, so a one-time guard is unsafe for multi-iteration ReAct loops.
+        if ctx.context is not None:
             await self._fix_incomplete_tool_context(ctx.context)
-            ctx.extra["_context_fixed"] = True
 
         await self._emit_context_compression(ctx)
         await self._emit_context_usage(ctx)

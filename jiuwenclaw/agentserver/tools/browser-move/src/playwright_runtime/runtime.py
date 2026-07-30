@@ -14,9 +14,9 @@ from jiuwenclaw.browser_timeout_policy import resolve_browser_task_timeout
 from openjiuwen.core.foundation.tool import McpServerConfig, tool
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
-from openjiuwen.core.single_agent.middleware.base import (
+from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
-    AgentMiddleware,
+    AgentRail,
     AnyAgentCallback,
 )
 from playwright_runtime.agents import build_main_agent
@@ -60,7 +60,7 @@ class BrowserAgentRuntime:
         self._browser_list_actions_tool = None
         self._controller: BaseController = ActionController()
 
-    def add_browser_middleware(self, middleware: AgentMiddleware) -> None:
+    def add_browser_middleware(self, middleware: AgentRail) -> None:
         self._service.add_browser_middleware(middleware)
 
     def add_browser_callback(

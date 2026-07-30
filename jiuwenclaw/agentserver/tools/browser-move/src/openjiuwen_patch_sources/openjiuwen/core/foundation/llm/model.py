@@ -1,5 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import json
 from typing import Union, List, Optional, AsyncIterator, Type, Dict
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -15,6 +16,7 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
     AudioGenerationResponse,
     VideoGenerationResponse
 )
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import SiliconFlowModelClient
@@ -126,6 +128,26 @@ class Model:
         Returns:
             AssistantMessage
         """
+        payload = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "stop": stop,
+            "timeout": timeout,
+            "kwargs": kwargs,
+            "client_provider": getattr(self.model_client_config, "client_provider", None),
+            "api_base": getattr(self.model_client_config, "api_base", None),
+        }
+        try:
+            logger.info(
+                "Browser runtime LLM invoke payload: %s",
+                json.dumps(payload, ensure_ascii=False, default=str),
+            )
+        except Exception:
+            logger.info("Browser runtime LLM invoke payload (fallback): %s", str(payload))
         return await self._client.invoke(
             messages=messages,
             stop=stop,
@@ -304,3 +326,46 @@ class Model:
             seed=seed,
             **kwargs
         )
+
+
+def init_model(
+        provider: str,
+        model_name: str,
+        api_key: str,
+        api_base: str,
+        *,
+        temperature: float = 0.95,
+        top_p: float = 0.1,
+        max_tokens: Optional[int] = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        verify_ssl: bool = False,
+        custom_headers: Optional[dict[str, str]] = None,
+) -> Model:
+    """Compatibility factory for code paths importing ``init_model``.
+
+    The browser runtime MCP server imports ``openjiuwen.core.foundation.llm``
+    from the local browser-move patch sources. That patched copy previously
+    omitted the public ``init_model`` helper exported by the installed
+    ``openjiuwen`` package, causing the subprocess to crash on import before
+    any browser tools could be registered.
+    """
+    client_config = ModelClientConfig(
+        client_provider=provider,
+        api_key=api_key,
+        api_base=api_base,
+        timeout=timeout,
+        max_retries=max_retries,
+        verify_ssl=verify_ssl,
+        custom_headers=custom_headers,
+    )
+    request_config = ModelRequestConfig(
+        model=model_name,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+    return Model(
+        model_client_config=client_config,
+        model_config=request_config,
+    )
