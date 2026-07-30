@@ -94,9 +94,15 @@ def resolve_gateway_db_path() -> str | None:
 
 
 def resolve_jiuwenclaw_id() -> str | None:
-    """从环境变量读取当前实例 id；未设置时返回 ``None``。"""
+    """从环境变量读取当前实例 id；未设置时返回 ``None``。
+
+    优先 ``JIUWENCLAW_ID`` / ``JIUWENSWARM_ID``（Manager WS register.ack 写入）；
+    兼容旧的 ``*_PROVISIONED_INSTANCE_ID`` / ``GATEWAY_INSTANCE_ID``。
+    """
     instance_id = (
-        os.getenv("JIUWENSWARM_PROVISIONED_INSTANCE_ID", "").strip()
+        os.getenv("JIUWENCLAW_ID", "").strip()
+        or os.getenv("JIUWENSWARM_ID", "").strip()
+        or os.getenv("JIUWENSWARM_PROVISIONED_INSTANCE_ID", "").strip()
         or os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
         or os.getenv("GATEWAY_INSTANCE_ID", "").strip()
     )

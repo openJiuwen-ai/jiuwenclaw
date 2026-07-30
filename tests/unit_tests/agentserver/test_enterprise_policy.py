@@ -328,7 +328,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
     from jiuwenswarm.common.schema.agent import AgentRequest
 
     monkeypatch.setenv("AGENT_RUNTIME", "1")
-    monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-demo")
+    monkeypatch.setenv("JIUWENCLAW_ID", "sp-demo")
 
     m2 = "22222222-2222-4222-8222-222222222222"
     m5 = "55555555-5555-4555-8555-555555555555"
@@ -444,7 +444,7 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
     from jiuwenswarm.common.schema.agent import AgentRequest
 
     monkeypatch.setenv("AGENT_RUNTIME", "1")
-    monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-current")
+    monkeypatch.setenv("JIUWENCLAW_ID", "sp-current")
     e4 = "44444444-4444-4444-8444-444444444444"
     e3_old = "33333333-3333-4333-8333-333333333333"
     m1 = "11111111-1111-4111-8111-111111111111"
