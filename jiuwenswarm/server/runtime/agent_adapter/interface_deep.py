@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -2741,6 +2742,22 @@ class JiuWenSwarmDeepAdapter:
                 p.get("user_id"),
             )
 
+    def _inject_extension_config_into_inputs(self, inputs: dict[str, Any]) -> None:
+        """将企业策略中的 extension_config 注入 inputs（替代 ee gateway channel_context 透传）。"""
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            return
+        if "extension_config" in inputs:
+            return
+        if self._enterprise_config is None:
+            return
+        ext_config = getattr(self._enterprise_config, "extension_config", None)
+        if ext_config:
+            inputs["extension_config"] = ext_config
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] extension_config injected from enterprise config: count=%s",
+                len(ext_config) if isinstance(ext_config, list) else "?",
+            )
+
     def _refresh_multimodal_configs(
         self,
         config_base: dict[str, Any],
@@ -4421,6 +4438,67 @@ class JiuWenSwarmDeepAdapter:
         return task_rail
 
     @staticmethod
+    def _build_extension_config_debug_rail() -> Any | None:
+        """Build ExtensionConfigDebugRail for extension config end-to-end debugging."""
+        try:
+            from jiuwenswarm.agents.harness.common.rails.extension_config_debug_rail import (
+                ExtensionConfigDebugRail,
+            )
+            rail = ExtensionConfigDebugRail()
+            logger.info("[JiuWenSwarmDeepAdapter] ExtensionConfigDebugRail create success")
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ExtensionConfigDebugRail create failed: %s", exc
+            )
+            rail = None
+        return rail
+
+    @staticmethod
+    def _load_extra_rails_from_env() -> list[Any]:
+        """Load extra DeepAgentRails from AGENT_EXTRA_RAILS env var.
+
+        Env format (semicolon-separated module paths):
+            AGENT_EXTRA_RAILS=path.to.module1;path.to.module2
+
+        Each module must expose a ``register_rails()`` function that returns
+        a list of DeepAgentRail instances. Only honored when AGENT_RUNTIME is set.
+        """
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            return []
+        env_value = os.getenv("AGENT_EXTRA_RAILS", "").strip()
+        if not env_value:
+            return []
+
+        extra_rails: list[Any] = []
+        for module_path in [p.strip() for p in env_value.split(";") if p.strip()]:
+            try:
+                mod = importlib.import_module(module_path)
+                register_fn = getattr(mod, "register_rails", None)
+                if register_fn is None:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] Extra rail module '%s' has no register_rails(), skipping",
+                        module_path,
+                    )
+                    continue
+                rails = register_fn()
+                if rails:
+                    if not isinstance(rails, list):
+                        rails = [rails]
+                    extra_rails.extend(rails)
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] Loaded %d rail(s) from '%s'",
+                        len(rails),
+                        module_path,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] Failed to load extra rails from '%s': %s",
+                    module_path,
+                    exc,
+                )
+        return extra_rails
+
+    @staticmethod
     def _build_multimodal_image_rail(
         enable_image_multimodal: bool | None = None,
     ) -> MultimodalImageRail | None:
@@ -4786,6 +4864,17 @@ class JiuWenSwarmDeepAdapter:
             else:
                 logger.warning("%s Rail %s build returned None", log_prefix, info.attr_name)
 
+        # 从环境变量加载额外 Rails（非侵入式扩展；仅企业版）
+        extra_rails = self._load_extra_rails_from_env()
+        if extra_rails:
+            rails_list.extend(extra_rails)
+            logger.info(
+                "%s Extra rails loaded from env: %s",
+                log_prefix,
+                [type(r).__name__ for r in extra_rails],
+            )
+        stage_timer.mark("extra_rails")
+
         # 用户配置的 hooks（UserHookRail）
         try:
             hooks_config = load_hooks_config(config_base)
@@ -4841,6 +4930,8 @@ class JiuWenSwarmDeepAdapter:
                 },
             ),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
+            # an example to use extension rail (enterprise)
+            # _RailBuildInfo("_extension_config_debug_rail", self._build_extension_config_debug_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
@@ -8716,6 +8807,8 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
+        self._inject_extension_config_into_inputs(inputs)
+
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):
             return AgentResponse(
@@ -9055,6 +9148,8 @@ class JiuWenSwarmDeepAdapter:
 
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
+
+        self._inject_extension_config_into_inputs(inputs)
 
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):

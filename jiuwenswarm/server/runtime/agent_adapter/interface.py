@@ -1175,6 +1175,11 @@ class JiuWenSwarm:
         enable_memory = request.metadata.get("enable_memory", True) if request.metadata else True
         inputs["enable_memory"] = enable_memory
 
+        # 传递 extension_config（供 Rails 消费；仅企业版）
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            if request.metadata and "extension_config" in request.metadata:
+                inputs["extension_config"] = request.metadata["extension_config"]
+
         # 传递 trusted_dirs 参数（用于 RuntimePromptRail 添加路径限制策略）
         if trusted_dirs:
             inputs["trusted_dirs"] = trusted_dirs
