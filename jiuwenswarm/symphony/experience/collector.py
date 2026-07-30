@@ -316,9 +316,13 @@ class ExperienceBaseBuilder:
                     if len(candidates) == 0:
                         break
                     sub = local_sim[np.ix_(group, candidates)]
-                    weakest = sub.min(axis=0)             # min sim vs group, per candidate
+                    # SINGLE-LINKAGE: a candidate joins if it is ≥threshold to
+                    # ANY member of the group (not ALL members). This lets
+                    # transitively-similar patterns merge even when two members
+                    # of the group are only loosely similar to each other.
+                    best_per_candidate = sub.max(axis=0)        # max sim vs group, per candidate
                     score = np.where(
-                        np.all(sub >= threshold, axis=0), weakest, -np.inf,
+                        np.any(sub >= threshold, axis=0), best_per_candidate, -np.inf,
                     )
                     if not np.isfinite(score).any():
                         break
@@ -326,17 +330,27 @@ class ExperienceBaseBuilder:
                     group.append(pick)
                     assigned[pick] = True
 
+                # Re-distill a fresh pattern covering the merged group: feed the
+                # group's existing patterns + pooled representative queries to
+                # the LLM so the survivor pattern subsumes all sub-abilities
+                # rather than just copying the success_count-max one.
                 rep = patterns[ordered[group[0]]]
                 pooled: list[TraceRecord] = []
+                group_patterns: list[str] = []
                 for pos in group:
-                    cluster = cluster_by_id.get(patterns[ordered[pos]].cluster_id)
+                    pat = patterns[ordered[pos]]
+                    group_patterns.append(pat.pattern_description)
+                    cluster = cluster_by_id.get(pat.cluster_id)
                     if cluster:
                         pooled.extend(cluster.success_traces)
+                merged_pattern = self._redistill_merged(
+                    rep, group_patterns, pooled
+                )
                 synthetic_id = -synthetic_counter
                 synthetic_counter += 1
                 cluster_by_id[synthetic_id] = ClusteredQuery(
                     cluster_id=synthetic_id,
-                    centroid_query=rep.pattern_description,
+                    centroid_query=merged_pattern,
                     member_traces=list(pooled),
                     success_traces=list(pooled),
                     failure_traces=[],
@@ -344,14 +358,44 @@ class ExperienceBaseBuilder:
                 merged.append(DistilledPattern(
                     cluster_id=synthetic_id,
                     effective_skills=rep.effective_skills,
-                    pattern_description=rep.pattern_description,
+                    pattern_description=merged_pattern,
                 ))
 
         LOGGER.info(
-            "TraceIndexBuilder: merged %d patterns (threshold=%.2f, similarity-first greedy, bucketed-by-skill)",
+            "TraceIndexBuilder: merged %d patterns (threshold=%.2f, single-linkage greedy, bucketed-by-skill)",
             len(merged), threshold,
         )
         return merged
+
+    def _redistill_merged(
+        self,
+        rep: DistilledPattern,
+        group_patterns: list[str],
+        pooled: list[TraceRecord],
+    ) -> str:
+        """Produce a survivor pattern for a merged group via the LLM.
+
+        Feeds the group's existing clean patterns to TraceDistiller's merge
+        routine, which returns one pattern subsuming all sub-abilities. The
+        LLM also sees a sample of pooled success queries for real phrasing.
+        Falls back to the rep pattern on any failure.
+        """
+        # Dedup patterns, keep order, drop empties.
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for p in group_patterns:
+            if p and p not in seen:
+                seen.add(p)
+                uniq.append(p)
+        skill = (rep.effective_skills or [""])[0] if rep.effective_skills else ""
+        distiller = TraceDistiller(
+            self._llm,
+            self._llm_model,
+            skills_info=self._skills_info,
+            max_workers=self._max_workers,
+            max_success_examples=self._max_success_examples,
+        )
+        return distiller.distill_merged_pattern(skill, uniq, rep.pattern_description)
 
     # ------------------------------------------------------------------
     # Internal

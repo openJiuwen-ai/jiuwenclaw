@@ -36,12 +36,16 @@ def cluster_traces(
         n_clusters: int | None = None,
         min_cluster_size: int = 1,
         cluster_max_examples: int | None = None,
+        max_k: int = 8,
 ) -> list[ClusteredQuery]:
     """Cluster traces: first by skill set, then by semantic similarity.
 
     1. Partition traces by their skill set (frozenset of skill_ids).
-    2. Within each group, embed queries and cluster via FAISS K-Means.
-    3. Split each semantic cluster into success buckets.
+    2. Within each group, embed ALL distinct queries (no sampling — preserves
+       sub-ability coverage) and cluster via FAISS K-Means.
+    3. K is adaptive per skill: min(max_k, max(2, round(sqrt(n/2)))), so small
+       skills get few clusters, large skills are capped at max_k.
+    4. Split each semantic cluster into success buckets.
     """
     if not traces:
         return []
@@ -52,8 +56,6 @@ def cluster_traces(
         key = frozenset(t.skills) if t.skills else frozenset()
         skill_groups.setdefault(key, []).append(t)
 
-    sampler = random.Random(42)
-
     result: list[ClusteredQuery] = []
     cluster_id_counter = 0
 
@@ -63,16 +65,24 @@ def cluster_traces(
         if not group_traces:
             continue
         successes = [t for t in group_traces if t.success]
-        if cluster_max_examples is not None:
-            cap = max(1, cluster_max_examples)
-            successes = (sampler.sample(successes, cap) if len(successes) > cap else successes)
+        # Cluster on the FULL set of distinct queries per skill — no sampling.
+        # (cluster_max_examples is kept only for API compat; ignored here so we
+        # don't drop sub-abilities of large skills. LLM distillation still
+        # caps its own input examples separately via max_success_examples.)
         queries = [t.query for t in successes]
         embeddings = embedder.embed_batch(queries)
+
+        # Adaptive k: sqrt(n/2), capped at max_k, at least 2.
+        n = len(queries)
+        if n_clusters is not None:
+            k = n_clusters
+        else:
+            k = min(max_k, max(2, round((n / 2) ** 0.5)))
 
         labels = _faiss_cluster(
             embeddings,
             max_iterations=50,
-            n_clusters=n_clusters,
+            n_clusters=k,
             min_cluster_size=min_cluster_size,
         )
 
