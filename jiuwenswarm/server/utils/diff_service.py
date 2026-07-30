@@ -1666,7 +1666,12 @@ class DiffService:
         return "".join(kept), large_files
 
     def _get_untracked_files(
-        self, project_dir: str, max_files: int = MAX_FILES
+        self,
+        project_dir: str,
+        max_files: int = MAX_FILES,
+        *,
+        include_hunks: bool = True,
+        hunk_paths: set[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """获取未跟踪文件列表，并读取内容计算行数与 hunk.
 
@@ -1737,28 +1742,32 @@ class DiffService:
                 continue
 
             # 流式逐行读取：完整行数计入 stats（与 tracked 文件 git numstat
-            # 口径一致），但 hunk lines 只保留前 MAX_LINES_PER_FILE 行用于展示，
-            # 避免大文件爆内存。
+            # 口径一致）。仅在 detail 层需要该文件时保留 hunk lines，避免
+            # summary/files 层为未展开文件构造整文件 hunk。
             hunk_lines: list[str] = []
             total_lines = 0
+            wants_hunks = include_hunks and (
+                hunk_paths is None or rel_path in hunk_paths or abs_path in hunk_paths
+            )
             try:
                 with open(abs_path, "r", encoding="utf-8", errors="replace", newline="") as f:
                     for line in f:
                         total_lines += 1
-                        if total_lines <= MAX_LINES_PER_FILE:
+                        if wants_hunks and total_lines <= MAX_LINES_PER_FILE:
                             hunk_lines.append(line.rstrip("\r\n"))
             except OSError:
                 files[abs_path] = entry
                 continue
 
             truncated = total_lines > MAX_LINES_PER_FILE
-            entry["hunks"] = [{
-                "oldStart": 0,
-                "oldLines": 0,
-                "newStart": 1,
-                "newLines": len(hunk_lines),
-                "lines": [f"+{line}" for line in hunk_lines],
-            }]
+            if wants_hunks:
+                entry["hunks"] = [{
+                    "oldStart": 0,
+                    "oldLines": 0,
+                    "newStart": 1,
+                    "newLines": len(hunk_lines),
+                    "lines": [f"+{line}" for line in hunk_lines],
+                }]
             entry["isTruncated"] = truncated
             entry["linesAdded"] = total_lines
             files[abs_path] = entry
@@ -1770,7 +1779,38 @@ class DiffService:
         parts = Path(rel_path).parts
         return any(part in INTERNAL_UNTRACKED_DIRS for part in parts)
 
-    def get_git_diff(self, project_dir: str | None) -> dict[str, Any] | None:
+    @staticmethod
+    def _normalize_hunk_paths(
+        repo_dir: str,
+        hunk_paths: list[str] | set[str] | tuple[str, ...] | None,
+    ) -> set[str] | None:
+        """Normalize requested detail paths to repo-relative POSIX-style paths."""
+        if not hunk_paths:
+            return None
+        result: set[str] = set()
+        for raw in hunk_paths:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            candidate = Path(text)
+            rel = text
+            if candidate.is_absolute():
+                try:
+                    rel = os.path.relpath(str(candidate), repo_dir)
+                except ValueError:
+                    rel = text
+            rel = rel.replace("\\", "/").lstrip("/")
+            result.add(rel)
+        return result or None
+
+    def get_git_diff(
+        self,
+        project_dir: str | None,
+        *,
+        include_files: bool = True,
+        include_hunks: bool = True,
+        hunk_paths: list[str] | set[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any] | None:
         """获取工作区相对于 HEAD 的 git diff，含未跟踪文件行数.
 
         已跟踪文件走 ``git diff HEAD``；untracked 文件（含 unborn HEAD
@@ -1796,6 +1836,8 @@ class DiffService:
             return None
         if self._is_in_transient_git_state(repo_dir):
             return None
+        effective_include_files = include_files or include_hunks
+        requested_hunk_paths = self._normalize_hunk_paths(repo_dir, hunk_paths)
 
         files: dict[str, dict[str, Any]] = {}
         total_files_changed = 0
@@ -1820,25 +1862,49 @@ class DiffService:
                 "files": {},
             }
 
-        if has_tracked_changes:
+        if has_tracked_changes and not effective_include_files and shortstat_stats:
+            total_files_changed += shortstat_stats["filesChanged"]
+            total_added += shortstat_stats["linesAdded"]
+            total_removed += shortstat_stats["linesRemoved"]
+        elif has_tracked_changes:
             numstat_output = self._run_git_command(repo_dir, ["diff", "HEAD", "--numstat"])
-            name_status_output = self._run_git_command(repo_dir, ["diff", "HEAD", "--name-status"])
-            porcelain_status_output = self._run_git_command(
-                repo_dir, ["-c", "core.quotepath=false", "status", "--porcelain=v1"]
-            )
-            diff_output = self._run_git_command(repo_dir, ["diff", "HEAD"])
-            if numstat_output and diff_output:
+            if numstat_output:
                 per_file_stats = self._parse_git_numstat(numstat_output)
-                per_file_status = self._parse_git_name_status(name_status_output or "")
-                per_file_status.update(
-                    self._parse_git_porcelain_status(porcelain_status_output or "")
-                )
                 total_files_changed += len(per_file_stats)
                 total_added += sum(int(stats["added"]) for stats in per_file_stats.values())
                 total_removed += sum(int(stats["removed"]) for stats in per_file_stats.values())
-                filtered_output, large_files = self._split_large_file_diffs(diff_output)
-                all_hunks, truncated_files = self._parse_git_diff_hunks(filtered_output)
 
+                if effective_include_files:
+                    name_status_output = self._run_git_command(repo_dir, ["diff", "HEAD", "--name-status"])
+                    porcelain_status_output = self._run_git_command(
+                        repo_dir, ["-c", "core.quotepath=false", "status", "--porcelain=v1"]
+                    )
+                    per_file_status = self._parse_git_name_status(name_status_output or "")
+                    per_file_status.update(
+                        self._parse_git_porcelain_status(porcelain_status_output or "")
+                    )
+                else:
+                    per_file_status = {}
+
+                all_hunks: dict[str, list[dict[str, Any]]] = {}
+                large_files: set[str] = set()
+                truncated_files: set[str] = set()
+                if include_hunks:
+                    diff_args = ["--literal-pathspecs", "diff", "HEAD"]
+                    if requested_hunk_paths is not None:
+                        rel_paths = sorted(
+                            p for p in requested_hunk_paths
+                            if not Path(p).is_absolute()
+                        )
+                        if rel_paths:
+                            diff_args.extend(["--", *rel_paths])
+                    diff_output = self._run_git_command(repo_dir, diff_args)
+                    if diff_output:
+                        filtered_output, large_files = self._split_large_file_diffs(diff_output)
+                        all_hunks, truncated_files = self._parse_git_diff_hunks(filtered_output)
+
+                if not effective_include_files:
+                    per_file_stats = {}
                 for rel_path, stats in list(per_file_stats.items())[:MAX_FILES]:
                     abs_path = str(Path(repo_dir) / rel_path)
                     is_binary = bool(stats.get("isBinary", False))
@@ -1866,17 +1932,27 @@ class DiffService:
                         "lastEditTime": None,
                     }
 
-        untracked_files = self._get_untracked_files(repo_dir, max_files=max(0, MAX_FILES - len(files)))
+        untracked_files = self._get_untracked_files(
+            repo_dir,
+            max_files=max(0, MAX_FILES - len(files)) if effective_include_files else MAX_FILES,
+            include_hunks=include_hunks,
+            hunk_paths=requested_hunk_paths,
+        )
+        if not effective_include_files:
+            untracked_stats_files = untracked_files
+            untracked_files = {}
+        else:
+            untracked_stats_files = untracked_files
         for file_path, entry in untracked_files.items():
             entry["status"] = "added"
             files[file_path] = entry
-        total_files_changed += len(untracked_files)
+        total_files_changed += len(untracked_stats_files)
         # untracked 文件无 git diff 可统计，_get_untracked_files 已按文件内容
         # 计算行数；此处补回 stats，避免 unborn HEAD 等场景下 lines_added 恒为 0。
-        total_added += sum(int(f.get("linesAdded", 0) or 0) for f in untracked_files.values())
-        total_removed += sum(int(f.get("linesRemoved", 0) or 0) for f in untracked_files.values())
+        total_added += sum(int(f.get("linesAdded", 0) or 0) for f in untracked_stats_files.values())
+        total_removed += sum(int(f.get("linesRemoved", 0) or 0) for f in untracked_stats_files.values())
 
-        if not files:
+        if total_files_changed <= 0 and not files:
             return None
 
         return {
