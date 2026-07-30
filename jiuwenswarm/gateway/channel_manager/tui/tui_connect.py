@@ -49,9 +49,6 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
 )
 from jiuwenswarm.gateway.auth.common import _handle_connect
 
-from jiuwenswarm.gateway.app_gateway import get_auth_handler
-from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext
-
 logger = logging.getLogger(__name__)
 
 
@@ -3204,7 +3201,8 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         mh.cancel_scheduled_disconnect_cancel(channel_id, session_id)
 
     async def _tui_connect_hook(ws, path):
-        return await _handle_connect(ws, path) #TODO 怎么解析后面的操作
+        """WS 建立后、业务消息前的简单鉴权。"""
+        return await _handle_connect(ws, path)
 
     return GatewayRouteBinding(
         path=bind.path,
@@ -3215,5 +3213,5 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         disconnect_handler=_tui_disconnect,
         session_bind_handler=_tui_session_bound,
         ws_channel=bind.ws_channel,
-        connect_hook=_tui_connect_hook,  # 新增
+        connect_hook=_tui_connect_hook,
     )

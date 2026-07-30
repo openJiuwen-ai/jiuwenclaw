@@ -6,23 +6,30 @@ from dataclasses import dataclass, field
 @dataclass
 class AuthContext:
     channel_type: str = ""  # web / tui / ssh
-    credentials: dict = field(default_factory=dict) # 认证凭据（token / public_key / api_key / certificate等）
-    headers: dict = field(default_factory=dict)  # HTTP Headers
-    remote_addr: str = ""  # 客户端地址
+    credentials: dict = field(default_factory=dict)
+    headers: dict = field(default_factory=dict)
+    remote_addr: str = ""
 
 
 # 认证结果
 @dataclass
 class AuthResult:
-    success: bool      # 认证是否成功
-    user_id: str = ""       # 用户ID（认证成功时）
-    error: str = ""        # 错误信息（认证失败时）
-    extensions: dict = field(default_factory=dict)   # 扩展信息（如token解析后的claims）
+    """鉴权结果。
+
+     	     成功时字段约定（身份贯通预留，由调用方写入连接上下文）：
+     	     - ``user_id``: 权威用户身份，后续会话路由 / 注册中心 / 实例创建应使用此值
+     	     - ``extensions``: 可选扩展（如 username、role、auth_method）
+     	     - ``error``: 失败原因
+    """
+    success: bool
+    user_id: str = ""
+    error: str = ""
+    extensions: dict = field(default_factory=dict)
 
 
 # 抽象接口：统一认证和凭证管理
 class CredentialAuthenticator(ABC):
     @abstractmethod
     async def authenticate(self, context: AuthContext) -> AuthResult:
-        """认证用户身份，支持Token、API-KEY、SSH证书等多种认证方式"""
+        """认证用户身份，返回 AuthResult（含可贯通的 user_id）。"""
         pass
