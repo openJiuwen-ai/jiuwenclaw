@@ -1852,7 +1852,8 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _build_mcp_server_config(entry: dict[str, Any]) -> McpServerConfig | None:
-        return build_mcp_server_config(entry)
+        # 传入 server_id_scope 生成稳定的 server_id，避免 reload 时重复注册导致进程泄漏
+        return build_mcp_server_config(entry, server_id_scope="jiuwenswarm")
 
     @staticmethod
     def _extract_enabled_mcp_server_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
