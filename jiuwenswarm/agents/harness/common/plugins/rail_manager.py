@@ -10,6 +10,7 @@ import json
 import logging
 import shutil
 import sys
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
@@ -80,6 +81,12 @@ class RailManager:
         self._registered_rails: set[str] = set()
         # DeepAgent 实例引用，用于 register/unregister
         self._agent_instance: Any = None
+        # 注册状态必须按 DeepAgent 实例隔离。agent 模式会先创建模板 Agent，
+        # 再为每个 session 创建独立 Agent；若只用全局名称集合，后者会被误判为
+        # “已注册”而跳过。弱引用避免 session Agent 回收后被管理器持有。
+        self._agent_rail_instances: weakref.WeakKeyDictionary[
+            Any, dict[str, Any]
+        ] = weakref.WeakKeyDictionary()
         # 缓存已加载的 rail 实例，确保同一个 rail 只实例化一次
         self._rail_instances: dict[str, Any] = {}
 
@@ -286,7 +293,13 @@ class RailManager:
         Returns:
             已注册的 rail 名称集合的副本
         """
-        return self._registered_rails.copy()
+        names = {
+            name
+            for rails_by_name in self._agent_rail_instances.values()
+            for name in rails_by_name
+        }
+        self._registered_rails = names
+        return names.copy()
 
     def delete_extension(self, name: str) -> bool:
         """删除一个扩展（整个文件夹）.
@@ -307,6 +320,8 @@ class RailManager:
         if name in self._registered_rails:
             self._registered_rails.discard(name)
             logger.info("[RailManager] 扩展 '%s' 从已注册集合中移除", name)
+        for rails_by_name in self._agent_rail_instances.values():
+            rails_by_name.pop(name, None)
 
         # 清除缓存的实例
         if name in self._rail_instances:
@@ -359,12 +374,21 @@ class RailManager:
         self._agent_instance = agent_instance
         logger.info("[RailManager] DeepAgent 实例已设置")
 
-    async def hot_reload_rail(self, name: str, enabled: bool) -> None:
+    async def hot_reload_rail(
+        self,
+        name: str,
+        enabled: bool,
+        *,
+        agent_instance: Any | None = None,
+    ) -> None:
         """热更新 rail：根据 enabled 状态注册或注销 rail 实例.
 
         Args:
             name: 扩展名称
             enabled: 是否启用
+            agent_instance: 显式目标 DeepAgent。省略时兼容使用
+                ``set_agent_instance()`` 设置的实例。并发创建 session Agent
+                时应显式传入，避免目标串线。
 
         Raises:
             ValueError: 扩展不存在或未设置 agent 实例
@@ -372,18 +396,27 @@ class RailManager:
         if name not in self._extensions:
             raise ValueError(f"扩展 '{name}' 不存在")
 
-        if self._agent_instance is None:
+        target_agent = (
+            agent_instance if agent_instance is not None else self._agent_instance
+        )
+        if target_agent is None:
             raise ValueError("DeepAgent 实例未设置，请先调用 set_agent_instance()")
+
+        rails_by_name = self._agent_rail_instances.setdefault(target_agent, {})
 
         if enabled:
             # 开启：注册 rail
-            if name in self._registered_rails:
-                logger.warning("[RailManager] 扩展 '%s' 已注册，跳过", name)
+            if name in rails_by_name:
+                logger.warning(
+                    "[RailManager] 扩展 '%s' 已在当前 Agent 注册，跳过", name
+                )
                 return
 
             try:
-                rail_instance = self.load_rail_instance_without_enabled_check(name)
-                await self._agent_instance.register_rail(rail_instance)
+                # Rail 可持有会话上下文、工具注册状态等实例字段，不能跨 Agent 复用。
+                rail_instance = self.create_fresh_rail_instance(name)
+                await target_agent.register_rail(rail_instance)
+                rails_by_name[name] = rail_instance
                 self._registered_rails.add(name)
                 logger.info("[RailManager] 成功注册 rail 扩展: %s", name)
             except Exception as e:
@@ -391,22 +424,36 @@ class RailManager:
                 raise
         else:
             # 关闭：注销 rail
-            if name not in self._registered_rails:
-                logger.warning("[RailManager] 扩展 %s 未注册，跳过", name)
+            if name not in rails_by_name:
+                logger.warning(
+                    "[RailManager] 扩展 %s 未在当前 Agent 注册，跳过", name
+                )
                 return
 
             try:
-                rail_instance = self.load_rail_instance_without_enabled_check(name)
-                await self._agent_instance.unregister_rail(rail_instance)
-                self._registered_rails.discard(name)
+                rail_instance = rails_by_name[name]
+                await target_agent.unregister_rail(rail_instance)
+                del rails_by_name[name]
+                if not any(
+                    name in registered
+                    for registered in self._agent_rail_instances.values()
+                ):
+                    self._registered_rails.discard(name)
                 logger.info("[RailManager] 成功注销 rail 扩展: %s", name)
             except Exception as e:
                 logger.error("[RailManager] 注销 rail 扩展失败: %s, 错误: %s", name, e)
                 raise
 
-    def is_rail_registered(self, name: str) -> bool:
+    def is_rail_registered(
+        self,
+        name: str,
+        *,
+        agent_instance: Any | None = None,
+    ) -> bool:
         """检查 rail 是否已注册."""
-        return name in self._registered_rails
+        if agent_instance is not None:
+            return name in self._agent_rail_instances.get(agent_instance, {})
+        return name in self.get_registered_rail_names()
 
     def get_extensions(self) -> List[dict]:
         """获取所有扩展列表."""
