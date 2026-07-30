@@ -69,7 +69,7 @@ class AgentOSAuthenticator(CredentialAuthenticator):
         try:
             body = resp.json()
         except ValueError:
-            return AuthResult(extensions={"error_code": "INVALID_RESPONSE"})
+            return AuthResult(success=False, extensions={"error_code": "INVALID_RESPONSE"})
         data = body.get("data", {}) if isinstance(body, dict) else {}
 
         # 5. 仅校验身份合法性（valid）；authorized 不参与门禁决策
