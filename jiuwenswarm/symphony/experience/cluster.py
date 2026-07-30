@@ -35,7 +35,6 @@ def cluster_traces(
         embedder: EmbeddingClient,
         n_clusters: int | None = None,
         min_cluster_size: int = 1,
-        cluster_max_examples: int | None = None,
         max_k: int = 8,
 ) -> list[ClusteredQuery]:
     """Cluster traces: first by skill set, then by semantic similarity.
@@ -65,10 +64,9 @@ def cluster_traces(
         if not group_traces:
             continue
         successes = [t for t in group_traces if t.success]
-        # Cluster on the FULL set of distinct queries per skill — no sampling.
-        # (cluster_max_examples is kept only for API compat; ignored here so we
-        # don't drop sub-abilities of large skills. LLM distillation still
-        # caps its own input examples separately via max_success_examples.)
+        # Cluster on the FULL set of distinct queries per skill — no sampling,
+        # so sub-abilities of large skills are preserved. LLM distillation
+        # caps its own input examples separately via max_success_examples.
         queries = [t.query for t in successes]
         embeddings = embedder.embed_batch(queries)
 

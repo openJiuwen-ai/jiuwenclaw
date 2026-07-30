@@ -190,7 +190,7 @@ class TraceDistiller:
                     extra_body={"enable_thinking": False, "thinking": {"type": "disabled"}},
                 )
                 return response.choices[0].message.content or ""
-            except (RateLimitError, OSError, TimeoutError) as exc:
+            except (RateLimitError, OSError) as exc:
                 last_exc = exc
                 wait = min(2 ** attempt, 30)
                 LOGGER.warning(

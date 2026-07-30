@@ -166,7 +166,7 @@ class EmbeddingClient:
                     len(texts), attempt + 1, wait,
                 )
                 time.sleep(wait)
-            except (APITimeoutError, APIConnectionError, OSError, TimeoutError) as exc:
+            except (APITimeoutError, APIConnectionError, OSError) as exc:
                 # Transient transport/timeout errors — retry with backoff.
                 last_exc = exc
                 wait = min(2 ** attempt, 30)
