@@ -8,6 +8,10 @@ from typing import Any, Optional
 from openjiuwen.harness.tools.cron import CronToolBackend, CronToolContext, create_cron_tools
 
 from jiuwenswarm.gateway.cron import CronTargetChannel
+from jiuwenswarm.gateway.cron.dingtalk_routing import (
+    build_dingtalk_cron_session_id_from_context,
+    dingtalk_chat_type_from_metadata,
+)
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
     coerce_cron_job_mode,
@@ -40,6 +44,18 @@ class _CronToolsCronBackend(CronToolBackend):
             else None
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
+        # 钉钉入站用 conversation_type(1/2)，需映射到 cron 的 group/p2p，供推送路由使用。
+        # create_job 以 route.session_id 落盘，这里必须写入 delivery binding，
+        # 不能把 Gateway 内部 dingtalk_… 会话 ID 当成钉钉 staffId。
+        if channel_id == "dingtalk" or channel_id.startswith("dingtalk:"):
+            if not chat_type:
+                chat_type = dingtalk_chat_type_from_metadata(metadata)
+            bound_sid = build_dingtalk_cron_session_id_from_context(
+                session_id=session_id,
+                metadata=metadata,
+            )
+            if bound_sid:
+                session_id = bound_sid
         project_dir = str(metadata.get("project_dir") or "").strip()
         project_id = str(metadata.get("project_id") or "").strip()
         work_mode = str(metadata.get("work_mode") or "").strip()
@@ -347,7 +363,26 @@ def _extract_legacy_params(
             out["delete_after_run"] = bool(data.get("deleteAfterRun"))
 
         context_session_id = getattr(context, "session_id", None)
-        if isinstance(context_session_id, str) and context_session_id.strip():
+        context_metadata = getattr(context, "metadata", None) or {}
+        if not isinstance(context_metadata, dict):
+            context_metadata = {}
+
+        # 钉钉：把发起会话编码进 session_id，避免推送时误用全局 last_*（Issue #2449）。
+        target_channel = str(out.get("targets") or getattr(context, "channel_id", None) or "").strip()
+        if target_channel == "dingtalk" or target_channel.startswith("dingtalk:"):
+            bound_sid = build_dingtalk_cron_session_id_from_context(
+                session_id=context_session_id if isinstance(context_session_id, str) else None,
+                metadata=context_metadata,
+            )
+            if bound_sid:
+                out["session_id"] = bound_sid
+                logger.info(
+                    "[CronRuntimeBridge] _extract_legacy_params: bound dingtalk session_id=%s",
+                    out["session_id"],
+                )
+            elif isinstance(context_session_id, str) and context_session_id.strip():
+                out["session_id"] = context_session_id.strip()
+        elif isinstance(context_session_id, str) and context_session_id.strip():
             out["session_id"] = context_session_id.strip()
             logger.info(
                 "[CronRuntimeBridge] _extract_legacy_params: added session_id=%s from context",
@@ -355,8 +390,7 @@ def _extract_legacy_params(
             )
 
         # 飞书多应用：传递 app_id，用于调度器定位正确的 app 配置
-        context_metadata = getattr(context, "metadata", None) or {}
-        context_app_id = str(context_metadata.get("app_id") or "").strip() if isinstance(context_metadata, dict) else ""
+        context_app_id = str(context_metadata.get("app_id") or "").strip()
         if context_app_id:
             out["app_id"] = context_app_id
 

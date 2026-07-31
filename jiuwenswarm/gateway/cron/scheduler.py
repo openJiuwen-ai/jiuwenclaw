@@ -11,6 +11,10 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
+from jiuwenswarm.gateway.cron.dingtalk_routing import (
+    is_usable_dingtalk_staff_id,
+    resolve_dingtalk_push_metadata,
+)
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
     CronJob,
@@ -1382,6 +1386,18 @@ class CronSchedulerService:
                             metadata["feishu_open_id"] = open_part
                     msg_session_id = chat_part
 
+        # 钉钉：优先用作业绑定的发起会话（Issue #2449）。
+        # Gateway 内部会话 ID（dingtalk_…）不能当 staffId，此时留空走下方 last_* 兜底。
+        if channel_id == "dingtalk" and routing_sid and metadata is None:
+            bound = resolve_dingtalk_push_metadata(routing_sid)
+            if bound is not None:
+                metadata = dict(bound)
+                sender = str(bound.get("dingtalk_sender_id") or "").strip()
+                if is_usable_dingtalk_staff_id(sender):
+                    # 保留 msg_session_id 为 job.session_id（可能是内部会话），
+                    # 仅在 binding 场景用真实 staff 作为发送目标已写入 metadata。
+                    pass
+
         # 针对 feishu/xiaoyi/whatsapp/dingtalk：从 config.yaml 取最近一次可回发的平台身份，写入 metadata
         # 这样即使 cron 推送没有 session_id，也能让 Channel.send 正常路由到对应会话。
         if metadata is None:
@@ -1495,9 +1511,19 @@ class CronSchedulerService:
         if metadata is None:
             metadata = {}
         if channel_id == "dingtalk":
-            # 若作业创建时绑定了 session_id（一般是 sender_id），补给钉钉单聊路由兜底。
+            # 仅用可用的钉钉 staffId / delivery binding 补路由；禁止把 dingtalk_… 内部会话当 staffId。
             if routing_sid and not str(metadata.get("dingtalk_sender_id") or "").strip():
-                metadata["dingtalk_sender_id"] = routing_sid
+                bound = resolve_dingtalk_push_metadata(routing_sid)
+                if bound and is_usable_dingtalk_staff_id(bound.get("dingtalk_sender_id")):
+                    metadata["dingtalk_sender_id"] = bound["dingtalk_sender_id"]
+                    if not str(metadata.get("conversation_id") or "").strip():
+                        metadata["conversation_id"] = bound.get("conversation_id") or ""
+                        metadata["dingtalk_chat_id"] = bound.get("dingtalk_chat_id") or ""
+                    if not str(metadata.get("conversation_type") or "").strip():
+                        metadata["conversation_type"] = bound.get("conversation_type") or "1"
+            # 若 metadata 里误塞了内部会话 ID，清掉以免 batchSend 报 staffId.notExisted。
+            if not is_usable_dingtalk_staff_id(metadata.get("dingtalk_sender_id")):
+                metadata.pop("dingtalk_sender_id", None)
             if not str(metadata.get("conversation_type") or "").strip():
                 metadata["conversation_type"] = "1"
 
