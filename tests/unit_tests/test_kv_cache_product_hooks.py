@@ -371,7 +371,7 @@ async def test_team_product_switch_survives_kvc_context_failure(
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("kvc unavailable")),
     )
 
-    result = await AgentWebSocketServer._apply_session_switch_lifecycle(
+    result = await AgentWebSocketServer._prepare_session_switch_owner(
         owner,
         channel_id="web",
         target_session_id="team_sess_002",
@@ -380,7 +380,7 @@ async def test_team_product_switch_survives_kvc_context_failure(
         reason="session.switch: ",
     )
 
-    assert result == (True, "team")
+    assert result[:2] == (True, "team")
     assert team_manager.prepare_calls == [
         {
             "session_id": "team_sess_002",
@@ -400,7 +400,7 @@ async def test_plan_product_switch_preserves_canonical_mode_when_kvc_hook_fails(
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("kvc unavailable")),
     )
 
-    result = await AgentWebSocketServer._apply_session_switch_lifecycle(
+    result = await AgentWebSocketServer._prepare_session_switch_owner(
         owner,
         channel_id="web",
         target_session_id="plan_sess_002",
@@ -409,4 +409,4 @@ async def test_plan_product_switch_preserves_canonical_mode_when_kvc_hook_fails(
         reason="session.switch: ",
     )
 
-    assert result == (False, "code.normal")
+    assert result[:2] == (False, "code.normal")

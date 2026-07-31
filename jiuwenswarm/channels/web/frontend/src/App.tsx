@@ -348,6 +348,7 @@ function AppContent() {
   /** 仅用于强制重跑「首屏 history」effect：从会话列表恢复时若 sessionId 未变，也要重新拉 history 并恢复 historyPagerMeta */
   const [historyBootstrapKey, setHistoryBootstrapKey] = useState(0);
   const sessionIdRef = useRef(sessionId);
+  const sessionRestoreQueueRef = useRef<Promise<void>>(Promise.resolve());
   const historyLoadingSessionsRef = useRef(new Set<string>());
   const historyRestoreHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
   const historyPageHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
@@ -1820,16 +1821,19 @@ function AppContent() {
     historyPrepending,
   ]);
 
-  const handleRestoreSession = useCallback(
+  const performSessionRestore = useCallback(
     async (targetSessionId: string, targetMode?: string, targetSession?: Session, options?: { skipHistoryLoad?: boolean }) => {
-      const resolvedMode = targetMode ?? targetSession?.mode ?? mode;
+      const previousSessionId = sessionIdRef.current;
+      const previousMode =
+        useSessionStore.getState().getRuntime(previousSessionId)?.mode ?? mode;
+      const resolvedMode = targetMode ?? targetSession?.mode ?? previousMode;
       disposeInFlightHistoryHandles(targetSessionId);
-      if (sessionId && sessionId !== targetSessionId) {
+      if (previousSessionId && previousSessionId !== targetSessionId) {
         try {
           await request('session.switch', {
             session_id: targetSessionId,
-            previous_session_id: sessionId,
-            previous_mode: mode,
+            previous_session_id: previousSessionId,
+            previous_mode: previousMode,
             mode: resolvedMode,
           });
         } catch (error) {
@@ -1906,10 +1910,33 @@ function AppContent() {
       setProcessing,
       setSessionId,
       setThinking,
-      sessionId,
       t,
       upsertSessionMetadata,
     ]
+  );
+
+  const handleRestoreSession = useCallback(
+    (
+      targetSessionId: string,
+      targetMode?: string,
+      targetSession?: Session,
+      options?: { skipHistoryLoad?: boolean },
+    ): Promise<void> => {
+      // WebSocket requests are processed concurrently by AgentServer. Queue
+      // navigation here so rapid A -> B -> C clicks cannot race and let an
+      // older response overwrite the latest selected session.
+      const queuedRestore = sessionRestoreQueueRef.current
+        .catch(() => undefined)
+        .then(() => performSessionRestore(
+          targetSessionId,
+          targetMode,
+          targetSession,
+          options,
+        ));
+      sessionRestoreQueueRef.current = queuedRestore.catch(() => undefined);
+      return queuedRestore;
+    },
+    [performSessionRestore],
   );
 
   const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {

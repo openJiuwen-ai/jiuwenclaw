@@ -119,8 +119,9 @@ logger = logging.getLogger(__name__)
 # task 完成后自动从集合移除(Python 官方推荐模式)。
 _background_permission_reload_tasks: set[asyncio.Task] = set()
 
-# session.create 在 team prepare 完成后回包；可选 KVC 信号异步执行，避免拖慢超时窗口。
-_background_session_create_kvc_tasks: set[asyncio.Task] = set()
+# Session owner preparation completes before the response. Optional KVC signals
+# run after the response so affinity latency cannot fail a UI session change.
+_background_session_kvc_tasks: set[asyncio.Task] = set()
 
 
 async def _reset_active_browser_runtimes_if_available(browser_move: Any) -> int:
@@ -150,20 +151,28 @@ def _log_permission_reload_failure(task: asyncio.Task) -> None:
         )
 
 
-def _log_session_create_kvc_failure(task: asyncio.Task) -> None:
-    """session.create 异步 KVC 失败时记 warning，不影响已成功回包的会话。"""
+def _log_background_session_kvc_failure(task: asyncio.Task) -> None:
+    """Log optional post-response KVC failures without changing session state."""
     if task.cancelled():
         return
     exc = task.exception()
     if exc is not None:
         logger.warning(
-            "[AgentWebSocketServer] session.create KVC failed after ack: %s",
+            "[AgentWebSocketServer] %s failed after ack: %s",
+            task.get_name(),
             exc,
             exc_info=exc,
         )
 
 # Serialize plan-mode restore per session to avoid checkpoint races.
 _session_mode_sync_locks: WeakValueDictionary[str, asyncio.Lock] = (
+    WeakValueDictionary()
+)
+
+# Serialize switch owner preparation and acknowledgements per client
+# connection. AgentServer handles WebSocket frames in independent tasks, so
+# rapid navigation requests would otherwise race even on one socket.
+_session_switch_locks: WeakValueDictionary[str, asyncio.Lock] = (
     WeakValueDictionary()
 )
 
@@ -2605,40 +2614,6 @@ class AgentWebSocketServer:
             reason=reason,
         )
 
-    async def _apply_session_switch_lifecycle(
-        self,
-        *,
-        channel_id: str,
-        target_session_id: str,
-        previous_session_id: str,
-        params: dict[str, Any],
-        reason: str,
-    ) -> tuple[bool, str]:
-        """Keep the product runtime owner independent from optional KVC signals."""
-        (
-            target_is_team,
-            resolved_mode,
-            context,
-            team_manager,
-            dispatch_signals,
-        ) = await self._prepare_session_switch_owner(
-            channel_id=channel_id,
-            target_session_id=target_session_id,
-            previous_session_id=previous_session_id,
-            params=params,
-            reason=reason,
-        )
-        await self._dispatch_session_switch_kvc(
-            channel_id=channel_id,
-            target_session_id=target_session_id,
-            previous_session_id=previous_session_id,
-            reason=reason,
-            context=context,
-            team_manager=team_manager,
-            dispatch_signals=dispatch_signals,
-        )
-        return target_is_team, resolved_mode
-
     async def _handle_session_switch(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Switch product sessions without deleting recoverable session state."""
         params = request.params if isinstance(request.params, dict) else {}
@@ -2653,15 +2628,43 @@ class AgentWebSocketServer:
                 payload={"error": "session_id is required", "code": "BAD_REQUEST"},
                 metadata=request.metadata,
             )
-        else:
-            channel_id = str(request.channel_id or "").strip() or "default"
-            _, resolved_mode = await self._apply_session_switch_lifecycle(
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+            return
+
+        channel_id = str(request.channel_id or "").strip() or "default"
+        lock_key = f"{id(ws)}:{channel_id}"
+        switch_lock = _session_switch_locks.get(lock_key)
+        if switch_lock is None:
+            switch_lock = asyncio.Lock()
+            _session_switch_locks[lock_key] = switch_lock
+
+        async with switch_lock:
+            (
+                _,
+                resolved_mode,
+                context,
+                team_manager,
+                dispatch_signals,
+            ) = await self._prepare_session_switch_owner(
                 channel_id=channel_id,
                 target_session_id=target,
                 previous_session_id=previous_session_id,
                 params=params,
                 reason="session.switch: ",
             )
+            kvc_args: dict[str, Any] | None = None
+            if context is not None and dispatch_signals is not None:
+                kvc_args = {
+                    "channel_id": channel_id,
+                    "target_session_id": target,
+                    "previous_session_id": previous_session_id,
+                    "reason": "session.switch: ",
+                    "context": context,
+                    "team_manager": team_manager,
+                    "dispatch_signals": dispatch_signals,
+                }
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2674,9 +2677,18 @@ class AgentWebSocketServer:
                 metadata=request.metadata,
             )
 
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+
+            if kvc_args is not None:
+                kvc_task = asyncio.create_task(
+                    self._dispatch_session_switch_kvc(**kvc_args),
+                    name=f"session-switch-kvc-{target}",
+                )
+                _background_session_kvc_tasks.add(kvc_task)
+                kvc_task.add_done_callback(_background_session_kvc_tasks.discard)
+                kvc_task.add_done_callback(_log_background_session_kvc_failure)
 
     async def _find_team_session_ids(self, team_name: str) -> list[str]:
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
@@ -7558,9 +7570,9 @@ class AgentWebSocketServer:
                     ),
                     name=f"session-create-kvc-{session_id}",
                 )
-                _background_session_create_kvc_tasks.add(kvc_task)
-                kvc_task.add_done_callback(_background_session_create_kvc_tasks.discard)
-                kvc_task.add_done_callback(_log_session_create_kvc_failure)
+                _background_session_kvc_tasks.add(kvc_task)
+                kvc_task.add_done_callback(_background_session_kvc_tasks.discard)
+                kvc_task.add_done_callback(_log_background_session_kvc_failure)
 
         except Exception as e:
             logger.exception("[AgentServer] session.create failed: %s", e)

@@ -1508,11 +1508,15 @@ async def test_handle_session_switch_delegates_product_lifecycle(
 ):
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
-    lifecycle_calls = []
+    prepare_calls = []
+    kvc_calls = []
 
-    async def _apply_session_switch(**kwargs):
-        lifecycle_calls.append(kwargs)
-        return is_team, resolved_mode
+    async def _prepare_session_switch(**kwargs):
+        prepare_calls.append(kwargs)
+        return is_team, resolved_mode, object(), None, object()
+
+    async def _dispatch_kvc(**kwargs):
+        kvc_calls.append(kwargs)
 
     monkeypatch.setattr(
         agent_ws_server_module,
@@ -1521,9 +1525,10 @@ async def test_handle_session_switch_delegates_product_lifecycle(
     )
     monkeypatch.setattr(
         server,
-        "_apply_session_switch_lifecycle",
-        _apply_session_switch,
+        "_prepare_session_switch_owner",
+        _prepare_session_switch,
     )
+    monkeypatch.setattr(server, "_dispatch_session_switch_kvc", _dispatch_kvc)
 
     request = AgentRequest(
         request_id="req-session-switch",
@@ -1542,7 +1547,7 @@ async def test_handle_session_switch_delegates_product_lifecycle(
         asyncio.Lock(),
     )
 
-    assert lifecycle_calls == [
+    assert prepare_calls == [
         {
             "channel_id": "web",
             "target_session_id": "sess_002",
@@ -1560,6 +1565,156 @@ async def test_handle_session_switch_delegates_product_lifecycle(
         },
         "ok": True,
     }
+    await asyncio.sleep(0)
+    assert len(kvc_calls) == 1
+    assert kvc_calls[0]["target_session_id"] == "sess_002"
+    assert kvc_calls[0]["previous_session_id"] == "sess_001"
+
+
+@pytest.mark.asyncio
+async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
+    """A slow optional affinity signal must not hold the UI switch response."""
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    kvc_started = asyncio.Event()
+    kvc_release = asyncio.Event()
+
+    async def _prepare_session_switch(**_kwargs):
+        return False, "agent.plan", object(), None, object()
+
+    async def _slow_kvc(**_kwargs):
+        kvc_started.set()
+        await kvc_release.wait()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        server,
+        "_prepare_session_switch_owner",
+        _prepare_session_switch,
+    )
+    monkeypatch.setattr(server, "_dispatch_session_switch_kvc", _slow_kvc)
+
+    request = AgentRequest(
+        request_id="req-session-switch-async-kvc",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_SWITCH,
+        params={
+            "mode": "agent.plan",
+            "session_id": "sess_002",
+            "previous_session_id": "sess_001",
+        },
+    )
+
+    await server.handle_session_switch_for_test(
+        fake_ws,
+        request,
+        asyncio.Lock(),
+    )
+    await asyncio.wait_for(kvc_started.wait(), timeout=1.0)
+
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-switch-async-kvc",
+            "payload": {
+                "session_id": "sess_002",
+                "mode": "agent.plan",
+                "switched": True,
+            },
+            "ok": True,
+        }
+    ]
+
+    kvc_release.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_handle_session_switch_serializes_reentrant_requests(monkeypatch):
+    """Rapid switches on one WebSocket must not overlap owner preparation."""
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    first_prepare_started = asyncio.Event()
+    release_first_prepare = asyncio.Event()
+    prepare_order = []
+    active_prepares = 0
+    max_active_prepares = 0
+
+    async def _prepare_session_switch(**kwargs):
+        nonlocal active_prepares, max_active_prepares
+        target_session_id = kwargs["target_session_id"]
+        prepare_order.append(target_session_id)
+        active_prepares += 1
+        max_active_prepares = max(max_active_prepares, active_prepares)
+        if target_session_id == "sess_002":
+            first_prepare_started.set()
+            await release_first_prepare.wait()
+        active_prepares -= 1
+        return False, "agent.plan", None, None, None
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        server,
+        "_prepare_session_switch_owner",
+        _prepare_session_switch,
+    )
+
+    first_request = AgentRequest(
+        request_id="req-session-switch-first",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_SWITCH,
+        params={
+            "mode": "agent.plan",
+            "session_id": "sess_002",
+            "previous_session_id": "sess_001",
+        },
+    )
+    second_request = AgentRequest(
+        request_id="req-session-switch-second",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_SWITCH,
+        params={
+            "mode": "agent.plan",
+            "session_id": "sess_003",
+            "previous_session_id": "sess_002",
+        },
+    )
+
+    first_task = asyncio.create_task(
+        server.handle_session_switch_for_test(
+            fake_ws,
+            first_request,
+            asyncio.Lock(),
+        )
+    )
+    await asyncio.wait_for(first_prepare_started.wait(), timeout=1.0)
+    second_task = asyncio.create_task(
+        server.handle_session_switch_for_test(
+            fake_ws,
+            second_request,
+            asyncio.Lock(),
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert prepare_order == ["sess_002"]
+    assert fake_ws.sent == []
+
+    release_first_prepare.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert prepare_order == ["sess_002", "sess_003"]
+    assert max_active_prepares == 1
+    assert [
+        response["payload"]["session_id"] for response in fake_ws.sent
+    ] == ["sess_002", "sess_003"]
 
 
 @pytest.mark.asyncio
