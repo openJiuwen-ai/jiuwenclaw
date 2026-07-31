@@ -1018,6 +1018,11 @@ class CronSchedulerService:
                         state=state,
                     )
                 await self._mark_last_session_ready(job, exec_session_id)
+                logger.info(
+                    "[Cron] run finished: job_id=%s exec_session_id=%s "
+                    "mode=%s ok=%s result_text_len=%d",
+                    job.id, exec_session_id, mode, ok, len(text or ""),
+                )
                 state.result_text = text
                 state.status = "succeeded" if ok else "failed"
             except asyncio.CancelledError:
