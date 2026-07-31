@@ -12,9 +12,9 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 
 **Core definition:**
 
-**Agent = identity + tools + skills + memory + workspace (includes todos and config)**
+**Agent = identity + tools + skills + memory + workspace + config**
 
-> **Note:** The above 5 items are the core components that make up a single agent. When multiple agents work together, they can form a cross-agent **collaboration capability** for task decomposition and parallel execution.
+> **Note:** The above 6 items are the core components that make up a single agent. The workspace contains runtime data such as todos, sessions, and file storage. When multiple agents work together, they can form a cross-agent **collaboration capability** for task decomposition and parallel execution.
 
 **How it differs from plain LLM chat:**
 
@@ -23,7 +23,8 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 | Execution | Text replies only | Can call tools (files, shell, web search, etc.) |
 | Memory | Short-term, within a session | Long-term across sessions; preferences and history |
 | Skills | Fixed capability | Loadable skill modules for specialized work |
-| Workspace | None | Dedicated workspace for tasks, todos, and state |
+| Workspace | None | Dedicated workspace for tasks, todos, and sessions |
+| Configuration | None | Independent config system for models, channels, permissions |
 | Personalization | None | Identity and config shape tone and behavior |
 
 **How the pieces fit together:**
@@ -37,9 +38,12 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 │  └─────────┘  └─────────┘  └─────────┘  └─────────┘ │
 │  ┌───────────────────────────────────────────────┐ │
 │  │              Workspace                       │ │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────────────┐│ │
-│  │  │  Todo   │  │ Config  │  │    Sessions     ││ │
-│  │  └─────────┘  └─────────┘  └─────────────────┘│ │
+│  │  ┌─────────┐  ┌─────────────────────────────┐ │ │
+│  │  │  Todo   │  │          Sessions            │ │ │
+│  │  └─────────┘  └─────────────────────────────┘ │ │
+│  └───────────────────────────────────────────────┘ │
+│  ┌───────────────────────────────────────────────┐ │
+│  │                Config                         │ │
 │  └───────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────┘
 ```
@@ -47,10 +51,11 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 **Takeaways:**
 
 1. **Identity** — who the agent is and how it communicates  
-2. **Tools** — “hands” for files, search, code, shell, and media  
+2. **Tools** — "hands" for files, search, code, shell, and media  
 3. **Skills** — loadable modules (e.g. Git, document workflows)  
 4. **Memory** — user profile, history, and decisions across sessions  
-5. **Workspace** — the agent’s “desk” for tasks, config, and sessions  
+5. **Workspace** — the agent's "desk" for tasks, todos, and sessions  
+6. **Config** — the agent's "settings panel" for models, channels, and permissions  
 
 > This section is conceptual only. Later sections go into each part in more detail. See also: [Configuration](Configuration.md), [Memory](Memory.md), [Skill Self-Evolution](SkillSelfEvolution.md).
 
