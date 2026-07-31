@@ -132,8 +132,14 @@ def test_do_evolve_rollback_restores_skill_without_rail(monkeypatch, tmp_path: P
     skill_dir = tmp_path / "daily-weather"
     archive_dir = skill_dir / "archive"
     archive_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# current body\n", encoding="utf-8")
-    (skill_dir / "evolutions.json").write_text('{"version":"2.0.0"}', encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: daily-weather\nversion: 2.0.0\n---\n# current body\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "evolutions.json").write_text(
+        '{"skill_id":"daily-weather","version":"v2.0.0","summary":"live-marker","entries":[]}',
+        encoding="utf-8",
+    )
     (archive_dir / "SKILL.v1.0.0.md").write_text("# archived body\n", encoding="utf-8")
     (archive_dir / "evolutions.v1.0.0.json").write_text(
         '{"version":"1.0.0","records":[]}',
@@ -170,6 +176,14 @@ def test_do_evolve_rollback_restores_skill_without_rail(monkeypatch, tmp_path: P
     assert not evo_data.get("records")
     assert evo_data.get("version") == "v1.0.0"
     assert not (archive_dir / "SKILL.v1.0.0.md").exists()
+    # Pre-rollback snapshot archives empty paired evolutions (not a live copy).
+    archived_evo = archive_dir / "evolutions.v2.0.0.json"
+    assert archived_evo.is_file()
+    archived_evo_data = json.loads(archived_evo.read_text(encoding="utf-8"))
+    assert archived_evo_data.get("entries") == []
+    assert archived_evo_data.get("summary") in (None, "")
+    assert archived_evo_data.get("skill_id") == "daily-weather"
+    assert (archive_dir / "SKILL.v2.0.0.md").is_file()
     assert adapter._skill_evolution_rail is None
     assert adapter._model is None
 
@@ -196,6 +210,7 @@ def test_rollback_skill_via_store_continues_when_evo_clear_fails(monkeypatch):
     )
     assert ok is True
     assert evo_ok is False
+    store.archive_current_state.assert_awaited_once_with("daily-weather")
     store.write_skill_content.assert_awaited_once_with("daily-weather", "# archived body\n")
     store.clear_evolutions.assert_awaited_once_with(
         "daily-weather", retain_version="v1.0.0",
@@ -228,6 +243,7 @@ def test_rollback_skill_via_store_retains_frontmatter_version(monkeypatch):
     )
     assert ok is True
     assert evo_ok is True
+    store.archive_current_state.assert_awaited_once_with("daily-weather")
     store.clear_evolutions.assert_awaited_once_with(
         "daily-weather", retain_version="v1.2.0",
     )
