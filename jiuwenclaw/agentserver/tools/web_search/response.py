@@ -50,6 +50,7 @@ def format_web_search_response(
     supplementary_records: list[WebSearchRecord],
     primary_answer: str,
     providers_tried: list[str],
+    warning: str | None = None,
 ) -> str:
     quality_tag = "pass" if quality_passed else "low"
     header = (
@@ -57,6 +58,9 @@ def format_web_search_response(
         f"selected={selected_provider} quality={quality_tag}]"
     )
     lines = [header, "", f"Query: {query}", ""]
+    if warning:
+        lines.append(warning)
+        lines.append("")
     lines.extend(
         _format_records_block(
             f"Results ({len(_dedupe_records(primary_records))}):",
@@ -84,6 +88,7 @@ def format_success_response(
     answer: str,
     supplementary_records: list[WebSearchRecord] | None = None,
     providers_tried: list[str],
+    warning: str | None = None,
 ) -> str:
     return format_web_search_response(
         query,
@@ -94,4 +99,5 @@ def format_success_response(
         supplementary_records=supplementary_records or [],
         primary_answer=answer,
         providers_tried=providers_tried,
+        warning=warning,
     )
