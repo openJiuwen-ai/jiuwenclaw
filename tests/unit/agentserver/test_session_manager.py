@@ -101,6 +101,50 @@ def test_submit_and_wait_once_returns_duplicate_without_rerunning() -> None:
     asyncio.run(scenario())
 
 
+def test_submit_and_wait_once_propagates_running_task_cancellation() -> None:
+    async def scenario() -> None:
+        manager = SessionManager()
+        started = asyncio.Event()
+
+        async def task() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        waiter = asyncio.create_task(
+            manager.submit_and_wait_once("session-1", "permission-1", task)
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await manager.cancel_session_task("session-1")
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiter, timeout=0.1)
+
+    asyncio.run(scenario())
+
+
+def test_submit_and_wait_propagates_running_task_cancellation() -> None:
+    async def scenario() -> None:
+        manager = SessionManager()
+        started = asyncio.Event()
+
+        async def task() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        waiter = asyncio.create_task(
+            manager.submit_and_wait("session-1", task)
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await manager.cancel_session_task("session-1")
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiter, timeout=0.1)
+
+    asyncio.run(scenario())
+
+
 def test_submit_task_once_releases_key_when_enqueue_fails(monkeypatch) -> None:
     async def scenario() -> None:
         manager = SessionManager()

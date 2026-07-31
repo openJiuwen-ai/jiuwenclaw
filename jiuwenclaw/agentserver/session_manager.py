@@ -167,9 +167,17 @@ class SessionManager:
 
         async def wait_task() -> None:
             try:
-                result_future.set_result(await task_func())
+                result = await task_func()
+            except asyncio.CancelledError:
+                if not result_future.done():
+                    result_future.cancel()
+                raise
             except Exception as exc:
-                result_future.set_exception(exc)
+                if not result_future.done():
+                    result_future.set_exception(exc)
+            else:
+                if not result_future.done():
+                    result_future.set_result(result)
 
         if not await self.submit_task_once(session_id, task_key, wait_task):
             return False, None
@@ -195,9 +203,16 @@ class SessionManager:
         async def wrapped_task():
             try:
                 result = await task_func()
-                result_future.set_result(result)
+            except asyncio.CancelledError:
+                if not result_future.done():
+                    result_future.cancel()
+                raise
             except Exception as e:
-                result_future.set_exception(e)
+                if not result_future.done():
+                    result_future.set_exception(e)
+            else:
+                if not result_future.done():
+                    result_future.set_result(result)
 
         self._session_priorities[session_id] -= 1
         priority = self._session_priorities[session_id]
