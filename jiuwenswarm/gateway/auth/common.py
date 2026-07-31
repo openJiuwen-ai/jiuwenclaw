@@ -28,7 +28,7 @@ def headers_to_dict(headers: Any) -> dict[str, str]:
     except Exception:
         return {}
 
-
+#从 URL query / Authorization header / X-Token header 提取 token
 def extract_token_from_path_and_headers(
         path: str,
         headers: Any,
@@ -88,7 +88,7 @@ def _handshake_cache_key(path: str, headers: Any) -> str:
     token = extract_token_from_path_and_headers(path, headers) or ""
     return f"{path}|{token}"
 
-
+# 缓存鉴权结果
 def cache_handshake_auth(path: str, headers: Any, result: AuthResult) -> None:
     _handshake_auth_cache[_handshake_cache_key(path, headers)] = (
         time.monotonic(),
@@ -157,7 +157,7 @@ async def authenticate_handshake(
     authenticator = get_auth_handler()
     return await authenticator.authenticate(context)
 
-# 1. 链接建立后绑定身份
+# 链接建立后绑定身份
 async def bind_ws_auth_from_handshake(
         ws: Any,
         path: str | None = None,
