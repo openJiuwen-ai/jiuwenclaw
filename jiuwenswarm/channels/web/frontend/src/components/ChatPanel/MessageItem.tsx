@@ -37,6 +37,9 @@ import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
+import { fileArtifactId } from '../ArtifactsPanel';
+import { openArtifactPanel } from '../../features/teamPanelState';
+import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -104,7 +107,11 @@ function TeamLeaderPlainTextMessage({
       showAvatar={showAvatar}
     >
       {fileItems && fileItems.length > 0 && (
-        <FileDownloadList files={fileItems} className="w-full md:w-1/2" />
+        <FileDownloadList
+          files={fileItems}
+          className="w-full md:w-1/2"
+          onPreview={(index) => openArtifactPanel(fileArtifactId(fileItems[index]))}
+        />
       )}
       <div className="team-member-message__plain">
         <A2UIMessageContent
@@ -622,7 +629,10 @@ export const MessageItem = memo(function MessageItem({
                   <MediaRenderer items={visibleMediaItems} align="start" />
                 )}
                 {visibleFileItems && (
-                  <FileDownloadList files={visibleFileItems} />
+                  <FileDownloadList
+                    files={visibleFileItems}
+                    onPreview={(index) => openArtifactPanel(fileArtifactId(visibleFileItems[index]))}
+                  />
                 )}
               </>
             )}
@@ -765,9 +775,11 @@ function getFileTypeConfig(mimeType: string | undefined, name: string) {
 function FileDownloadList({
   files,
   className,
+  onPreview,
 }: {
   files: FileDownloadItem[];
   className?: string;
+  onPreview?: (index: number) => void;
 }) {
   const { t } = useTranslation();
   const [expiredSet, setExpiredSet] = useState<Set<number>>(new Set());
@@ -793,13 +805,15 @@ function FileDownloadList({
   const handleDownload = async (file: FileDownloadItem, index: number) => {
     if (expiredSet.has(index)) return;
 
-    // 检查是否在 PyWebView 环境中（exe 模式）
-    const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => Promise<boolean> | boolean } } }).pywebview?.api;
+    // 检查是否在 PyWebView 桌面环境中
+    const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => DesktopSaveApiResult } } }).pywebview?.api;
     if (pywebviewApi?.download_file) {
-      // exe 模式：通过 webview API 下载
-      const success = await pywebviewApi.download_file(file.download_url, file.name || 'download');
-      if (!success) {
-        console.error('Download failed via pywebview API');
+      // 桌面端：通过 webview API 下载
+      const outcome = await executeDesktopSave(() =>
+        pywebviewApi.download_file!(file.download_url, file.name || 'download')
+      );
+      if (outcome === 'failed') {
+        window.alert(t('artifacts.downloadFailed', { name: file.name }));
       }
       return;
     }
@@ -825,38 +839,63 @@ function FileDownloadList({
               'flex items-center gap-3 rounded-lg border px-3 py-2.5  ',
               expired
                 ? 'border-border/50 bg-card/50 cursor-not-allowed opacity-60'
-                : 'border-border bg-card hover:shadow-md hover:border-border-hover cursor-pointer group'
+                : clsx(
+                  'border-border bg-card',
+                  onPreview && 'cursor-pointer group hover:border-border-hover hover:shadow-md'
+                )
             )}
-            onClick={() => handleDownload(file, index)}
+            onClick={() => {
+              if (!expired) onPreview?.(index);
+            }}
           >
-            <div className={`flex-shrink-0 w-10 h-10 rounded-lg ${typeConfig.bg} flex items-center justify-center`}>
-              {typeof typeConfig.icon === 'string' ? (
-                <span className="text-white text-base leading-none select-none">{typeConfig.icon}</span>
-              ) : (
-                typeConfig.icon
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-text leading-snug truncate">{file.name}</div>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none">
-                  {ext || typeConfig.label}
-                </span>
-                <span className="text-xs text-text-muted">{formatFileSize(file.size)}</span>
-                {expired && (
-                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none">
-                    {t('chatUi.fileExpired')}
-                  </span>
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-3 text-left"
+              disabled={expired || !onPreview}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPreview?.(index);
+              }}
+              title={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
+              aria-label={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
+            >
+              <div className={`flex-shrink-0 w-10 h-10 rounded-lg ${typeConfig.bg} flex items-center justify-center`}>
+                {typeof typeConfig.icon === 'string' ? (
+                  <span className="text-white text-base leading-none select-none">{typeConfig.icon}</span>
+                ) : (
+                  typeConfig.icon
                 )}
               </div>
-            </div>
-            <div
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-text leading-snug truncate">{file.name}</div>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none">
+                    {ext || typeConfig.label}
+                  </span>
+                  <span className="text-xs text-text-muted">{formatFileSize(file.size)}</span>
+                  {expired && (
+                    <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none">
+                      {t('chatUi.fileExpired')}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </button>
+            <button
+              type="button"
               className={clsx(
                 'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
                 expired
                   ? 'text-text-muted/40'
-                  : 'text-text-muted group-hover:text-accent group-hover:bg-accent-subtle'
+                  : 'text-text-muted hover:text-accent hover:bg-accent-subtle'
               )}
+              disabled={expired}
+              onClick={(event) => {
+                event.stopPropagation();
+                void handleDownload(file, index);
+              }}
+              title={t('artifacts.download')}
+              aria-label={t('artifacts.download')}
             >
               {expired ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -867,7 +906,7 @@ function FileDownloadList({
                   <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                 </svg>
               )}
-            </div>
+            </button>
           </div>
         );
       })}

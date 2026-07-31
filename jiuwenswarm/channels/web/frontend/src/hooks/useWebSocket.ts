@@ -951,7 +951,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const clearPendingContextCompressionStart = useCallback((sessionId: string) => {
     const pending = pendingContextCompressionStartRef.current.get(sessionId);
     if (pending) {
-      clearTimeout(pending.timer);
+      window.clearTimeout(pending.timer);
       pendingContextCompressionStartRef.current.delete(sessionId);
     }
   }, []);
@@ -965,13 +965,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const key = getTeamMemberContextCompressionKey(sessionId, memberId);
     const pending = pendingTeamMemberContextCompressionStartRef.current.get(key);
     if (!pending) return;
-    clearTimeout(pending.timer);
+    window.clearTimeout(pending.timer);
     pendingTeamMemberContextCompressionStartRef.current.delete(key);
   }, [getTeamMemberContextCompressionKey]);
 
   const clearAllPendingTeamMemberContextCompressionStarts = useCallback(() => {
     for (const pending of pendingTeamMemberContextCompressionStartRef.current.values()) {
-      clearTimeout(pending.timer);
+      window.clearTimeout(pending.timer);
     }
     pendingTeamMemberContextCompressionStartRef.current.clear();
   }, []);
@@ -1028,7 +1028,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const pending: PendingContextCompressionStart = {
           runtimeState,
           shown: false,
-          timer: setTimeout(() => {
+          timer: window.setTimeout(() => {
             const current = pendingContextCompressionStartRef.current.get(sessionId);
             if (current !== pending) return;
             pending.shown = true;
@@ -1108,7 +1108,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const pending: PendingContextCompressionStart = {
           runtimeState,
           shown: false,
-          timer: setTimeout(() => {
+          timer: window.setTimeout(() => {
             if (pendingTeamMemberContextCompressionStartRef.current.get(key) !== pending) return;
             pending.shown = true;
             setTeamMemberContextCompressionStatus(sessionId, memberId, {
@@ -1157,7 +1157,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   useEffect(() => {
     return () => {
       pendingContextCompressionStartRef.current.forEach((pending) => {
-        clearTimeout(pending.timer);
+        window.clearTimeout(pending.timer);
       });
       pendingContextCompressionStartRef.current.clear();
       clearAllPendingTeamMemberContextCompressionStarts();

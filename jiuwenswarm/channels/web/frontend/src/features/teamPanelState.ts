@@ -17,10 +17,12 @@ interface UseTeamPanelStateResult {
   teamAreaActiveTab: TabType;
   teamAreaActiveDetailTab: TeamDetailTab;
   teamAreaSelectedMemberId?: string;
+  teamAreaSelectedArtifactId?: string;
   setTeamAreaExpanded: (expanded: boolean) => void;
   setTeamAreaActiveTab: (tab: TabType) => void;
   setTeamAreaActiveDetailTab: (tab: TeamDetailTab) => void;
   setTeamAreaSelectedMemberId: (memberId: string) => void;
+  setTeamAreaSelectedArtifactId: (artifactId: string) => void;
 }
 
 function loadTeamPanelState(): TeamPanelState {
@@ -61,6 +63,17 @@ export function openTeamPanel(
   notifyTeamPanelState(nextState);
 }
 
+export function openArtifactPanel(selectedArtifactId: string): void {
+  const nextState: TeamPanelState = {
+    ...loadTeamPanelState(),
+    expanded: true,
+    activeTab: 'artifacts',
+    selectedArtifactId,
+  };
+  saveTeamPanelState(nextState);
+  notifyTeamPanelState(nextState);
+}
+
 export function useTeamPanelState(): UseTeamPanelStateResult {
   const [state, setState] = useState<TeamPanelState>(loadTeamPanelState);
 
@@ -89,6 +102,10 @@ export function useTeamPanelState(): UseTeamPanelStateResult {
     updateState({ selectedMemberId });
   }, [updateState]);
 
+  const setTeamAreaSelectedArtifactId = useCallback((selectedArtifactId: string) => {
+    updateState({ selectedArtifactId });
+  }, [updateState]);
+
   useEffect(() => {
     function handleTeamPanelStateChange(event: Event) {
       setState((event as CustomEvent<TeamPanelState>).detail);
@@ -105,9 +122,11 @@ export function useTeamPanelState(): UseTeamPanelStateResult {
     teamAreaActiveTab: state.activeTab,
     teamAreaActiveDetailTab: state.activeDetailTab,
     teamAreaSelectedMemberId: state.selectedMemberId,
+    teamAreaSelectedArtifactId: state.selectedArtifactId,
     setTeamAreaExpanded,
     setTeamAreaActiveTab,
     setTeamAreaActiveDetailTab,
     setTeamAreaSelectedMemberId,
+    setTeamAreaSelectedArtifactId,
   };
 }

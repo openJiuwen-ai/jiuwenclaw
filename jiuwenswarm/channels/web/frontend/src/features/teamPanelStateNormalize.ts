@@ -6,6 +6,7 @@ export interface TeamPanelState {
   activeTab: TeamPanelActiveTab;
   activeDetailTab: TeamPanelDetailTab;
   selectedMemberId?: string;
+  selectedArtifactId?: string;
 }
 
 export const DEFAULT_TEAM_PANEL_STATE: TeamPanelState = {
@@ -42,12 +43,17 @@ export function normalizeTeamPanelState(value: unknown): TeamPanelState {
     typeof raw.selectedMemberId === 'string' && raw.selectedMemberId.trim()
       ? raw.selectedMemberId
       : undefined;
+  const selectedArtifactId =
+    typeof raw.selectedArtifactId === 'string' && raw.selectedArtifactId.trim()
+      ? raw.selectedArtifactId
+      : undefined;
 
   return {
     expanded: typeof raw.expanded === 'boolean' ? raw.expanded : DEFAULT_TEAM_PANEL_STATE.expanded,
     activeTab,
     activeDetailTab,
     ...(selectedMemberId ? { selectedMemberId } : {}),
+    ...(selectedArtifactId ? { selectedArtifactId } : {}),
   };
 }
 

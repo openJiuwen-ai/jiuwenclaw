@@ -24,12 +24,14 @@ test('normalizeTeamPanelState keeps valid values', () => {
       activeTab: 'planning',
       activeDetailTab: 'group',
       selectedMemberId: 'agent-1',
+      selectedArtifactId: 'artifact-1',
     }),
     {
       expanded: true,
       activeTab: 'planning',
       activeDetailTab: 'group',
       selectedMemberId: 'agent-1',
+      selectedArtifactId: 'artifact-1',
     },
   );
 });
@@ -41,6 +43,7 @@ test('normalizeTeamPanelState falls back for invalid enum fields', () => {
       activeTab: 'unknown-tab',
       activeDetailTab: 123,
       selectedMemberId: '',
+      selectedArtifactId: ' ',
     }),
     {
       expanded: false,

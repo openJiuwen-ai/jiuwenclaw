@@ -34,6 +34,7 @@ import {
   type HistoryHarnessReplayItem,
   type FetchHistoryPageResult,
 } from './features/historyRestore';
+import { prefetchHistoryPages } from './features/historyPagination';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -345,6 +346,9 @@ function AppContent() {
   const hasChangesRef = useRef(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyPrepending, setHistoryPrepending] = useState(false);
+  const [historyRetrySessions, setHistoryRetrySessions] = useState<ReadonlySet<string>>(
+    () => new Set()
+  );
   /** 仅用于强制重跑「首屏 history」effect：从会话列表恢复时若 sessionId 未变，也要重新拉 history 并恢复 historyPagerMeta */
   const [historyBootstrapKey, setHistoryBootstrapKey] = useState(0);
   const sessionIdRef = useRef(sessionId);
@@ -369,6 +373,20 @@ function AppContent() {
   const historyRestoreFromPanelHintRef = useRef(false);
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
 
+  const setHistoryRetryAvailable = useCallback((sid: string, available: boolean) => {
+    setHistoryRetrySessions((current) => {
+      if (current.has(sid) === available) {
+        return current;
+      }
+      const next = new Set(current);
+      if (available) {
+        next.add(sid);
+      } else {
+        next.delete(sid);
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -381,10 +399,12 @@ function AppContent() {
     teamAreaActiveTab,
     teamAreaActiveDetailTab,
     teamAreaSelectedMemberId,
+    teamAreaSelectedArtifactId,
     setTeamAreaExpanded,
     setTeamAreaActiveTab,
     setTeamAreaActiveDetailTab,
     setTeamAreaSelectedMemberId,
+    setTeamAreaSelectedArtifactId,
   } = useTeamPanelState();
 
   useEffect(() => {
@@ -535,6 +555,7 @@ function AppContent() {
       const prevToken = historyBackgroundPrefetchTokensRef.current.get(targetSid) ?? 0;
       historyBackgroundPrefetchTokensRef.current.set(targetSid, prevToken + 1);
       historyLoadingSessionsRef.current.delete(targetSid);
+      setHistoryRetryAvailable(targetSid, false);
       if (targetSid === sessionIdRef.current) {
         setHistoryPrepending(false);
         setHistoryLoadingMore(false);
@@ -564,7 +585,7 @@ function AppContent() {
     ])) {
       cancelSession(targetSid);
     }
-  }, [setLoadingHistory]);
+  }, [setHistoryRetryAvailable, setLoadingHistory]);
 
   useEffect(() => () => disposeInFlightHistoryHandles(), [disposeInFlightHistoryHandles]);
   const todos = useTodoStore((s) => s.runtimes[sessionId]?.todos ?? []);
@@ -779,43 +800,48 @@ function AppContent() {
   }, [applyHistoryPageResult, setHistoryPagerMeta]);
 
   const startBackgroundHistoryPrefetch = useCallback((sid: string, initialLoadedPages: number, initialTotalPages: number) => {
-    if (initialLoadedPages >= initialTotalPages) return;
+    if (initialLoadedPages >= initialTotalPages || historyLoadingSessionsRef.current.has(sid)) {
+      return;
+    }
     const token = (historyBackgroundPrefetchTokensRef.current.get(sid) ?? 0) + 1;
     historyBackgroundPrefetchTokensRef.current.set(sid, token);
+    historyLoadingSessionsRef.current.add(sid);
+    setHistoryRetryAvailable(sid, false);
+    if (sessionIdRef.current === sid) {
+      setHistoryPrepending(true);
+    }
 
     void (async () => {
-      let loadedPages = initialLoadedPages;
-      let totalPages = initialTotalPages;
-      while (
-        token === historyBackgroundPrefetchTokensRef.current.get(sid) &&
-        loadedPages < totalPages
-      ) {
-        if (historyLoadingSessionsRef.current.has(sid)) {
-          return;
+      try {
+        const outcome = await prefetchHistoryPages({
+          initialLoadedPages,
+          initialTotalPages,
+          isCurrent: () => token === historyBackgroundPrefetchTokensRef.current.get(sid),
+          fetchPage: (pageIdx, totalPages) =>
+            fetchHistoryPageResult(sid, pageIdx, totalPages),
+          applyPage: (page) => {
+            applyLoadedHistoryPage(sid, page);
+          },
+          waitForNextPaint,
+        });
+        if (
+          outcome === 'failed' &&
+          token === historyBackgroundPrefetchTokensRef.current.get(sid)
+        ) {
+          setHistoryRetryAvailable(sid, true);
         }
-        const nextPage = loadedPages + 1;
-        historyLoadingSessionsRef.current.add(sid);
-        if (sessionIdRef.current === sid) {
-          setHistoryPrepending(true);
-        }
-        const page = await fetchHistoryPageResult(sid, nextPage, totalPages);
+      } finally {
         historyLoadingSessionsRef.current.delete(sid);
         if (sessionIdRef.current === sid) {
           setHistoryPrepending(false);
         }
-        if (
-          page == null ||
-          token !== historyBackgroundPrefetchTokensRef.current.get(sid)
-        ) {
-          return;
-        }
-        applyLoadedHistoryPage(sid, page);
-        loadedPages = nextPage;
-        totalPages = page.totalPages;
-        await waitForNextPaint();
       }
     })();
-  }, [applyLoadedHistoryPage, fetchHistoryPageResult]);
+  }, [
+    applyLoadedHistoryPage,
+    fetchHistoryPageResult,
+    setHistoryRetryAvailable,
+  ]);
 
   const upsertSessionMetadata = useCallback((session: Session, options: { setCurrent?: boolean } = {}) => {
     const sessionStore = useSessionStore.getState();
@@ -1792,23 +1818,40 @@ function AppContent() {
     const nextPage = historyPagerMeta.loadedPages + 1;
     const fallbackTotal = historyPagerMeta.totalPages;
     const prevToken = historyBackgroundPrefetchTokensRef.current.get(sid) ?? 0;
-    historyBackgroundPrefetchTokensRef.current.set(sid, prevToken + 1);
+    const token = prevToken + 1;
+    historyBackgroundPrefetchTokensRef.current.set(sid, token);
     historyLoadingSessionsRef.current.add(sid);
+    setHistoryRetryAvailable(sid, false);
     setHistoryLoadingMore(true);
     setLoadingHistory(sid, true);
-    const page = await fetchHistoryPageResult(sid, nextPage, fallbackTotal);
-    if (page) {
-      applyLoadedHistoryPage(sid, page);
-      startBackgroundHistoryPrefetch(sid, page.pageIdx, page.totalPages);
+    let page: LoadedHistoryPage | null = null;
+    try {
+      page = await fetchHistoryPageResult(sid, nextPage, fallbackTotal);
+      if (
+        page &&
+        token === historyBackgroundPrefetchTokensRef.current.get(sid)
+      ) {
+        applyLoadedHistoryPage(sid, page);
+      }
+    } finally {
+      historyLoadingSessionsRef.current.delete(sid);
+      setHistoryLoadingMore(false);
+      setLoadingHistory(sid, false);
     }
-    historyLoadingSessionsRef.current.delete(sid);
-    setHistoryLoadingMore(false);
-    setLoadingHistory(sid, false);
+    if (token !== historyBackgroundPrefetchTokensRef.current.get(sid)) {
+      return;
+    }
+    if (!page) {
+      setHistoryRetryAvailable(sid, true);
+      return;
+    }
+    startBackgroundHistoryPrefetch(sid, page.pageIdx, page.totalPages);
   }, [
     applyLoadedHistoryPage,
     fetchHistoryPageResult,
     historyPagerMeta,
     sessionId,
+    setHistoryRetryAvailable,
     setLoadingHistory,
     startBackgroundHistoryPrefetch,
   ]);
@@ -1820,6 +1863,7 @@ function AppContent() {
       totalPages: historyPagerMeta.totalPages,
       loadingMore: historyLoadingMore,
       prepending: historyPrepending,
+      retryAvailable: historyRetrySessions.has(sessionId),
       onLoadMore: handleLoadMoreHistory,
     };
   }, [
@@ -1827,6 +1871,8 @@ function AppContent() {
     historyLoadingMore,
     historyPagerMeta,
     historyPrepending,
+    historyRetrySessions,
+    sessionId,
   ]);
 
   const handleRestoreSession = useCallback(
@@ -2236,11 +2282,13 @@ function AppContent() {
                     teamAreaActiveDetailTab={teamAreaActiveDetailTab}
                     teamAreaSelectedMemberId={teamAreaSelectedMemberId}
                     codeReviewTarget={codeReviewTarget}
+                    teamAreaSelectedArtifactId={teamAreaSelectedArtifactId}
                     setTeamAreaExpanded={setTeamAreaExpanded}
                     setTeamAreaActiveTab={setTeamAreaActiveTab}
                     setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
                     setTeamAreaSelectedMemberId={setTeamAreaSelectedMemberId}
                     setCodeReviewTarget={setCodeReviewTarget}
+                    setTeamAreaSelectedArtifactId={setTeamAreaSelectedArtifactId}
                   />
                 )}
               </div>
