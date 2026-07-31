@@ -902,6 +902,14 @@ def _workflow_path_argument(node: ast.Call) -> ast.AST | None:
     return keyword.value if keyword is not None else None
 
 
+def _workflow_path_is_missing_or_empty(node: ast.AST | None) -> bool:
+    if node is None:
+        return True
+    if not isinstance(node, ast.Constant):
+        return False
+    return not isinstance(node.value, str) or not node.value.strip()
+
+
 def _is_budget_attribute(node: ast.AST, name: str) -> bool:
     return (
         isinstance(node, ast.Attribute)
@@ -1075,14 +1083,7 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                     if path_argument is not None
                     else None
                 )
-                if path_argument is None or (
-                    isinstance(path_argument, ast.Constant)
-                    and (
-                        not isinstance(path_argument.value, str)
-                        or not path_literal
-                        or not path_literal.strip()
-                    )
-                ):
+                if _workflow_path_is_missing_or_empty(path_argument):
                     errors.append(
                         f"line {line}: workflow() requires a non-empty child workflow name/path"
                     )
