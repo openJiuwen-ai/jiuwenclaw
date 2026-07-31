@@ -926,7 +926,7 @@ function AppContent() {
       void request(HISTORY_GET_METHOD, {
         session_id: sid,
         page_idx: pageIdx,
-      }).catch((error) => {
+      }, { isStream: true }).catch((error) => {
         pageHandle.dispose();
         if (historyPageHandlesRef.current.get(pageKey) === pageHandle) {
           historyPageHandlesRef.current.delete(pageKey);
@@ -1737,7 +1737,7 @@ function AppContent() {
         await request(HISTORY_GET_METHOD, {
           session_id: sessionId,
           page_idx: 1,
-        });
+        }, { isStream: true });
       } catch (error) {
         historyRestoreFromPanelHintRef.current = false;
         restoreHandle.dispose();

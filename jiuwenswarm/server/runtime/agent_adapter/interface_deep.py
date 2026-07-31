@@ -8105,6 +8105,49 @@ class JiuWenSwarmDeepAdapter:
             session_id,
         )
 
+        # [context-restore] Rebuild conversation context from history.jsonl
+        # on session resume (e.g., after process restart).
+        #
+        # Root cause: the checkpointer only persists DeepAgent runtime state
+        # (iteration / task_plan / plan_mode), NOT the LLM message history.
+        # The conversation messages live in the react_agent's context_engine
+        # (in-memory).  After a restart the context_engine is empty, so the
+        # agent responds as if the conversation never happened — even though
+        # history.jsonl has every prior turn.
+        #
+        # Fix: reuse ``rewind_session_context`` (the same code path used by
+        # the explicit "rewind" operation) to load history.jsonl and rebuild
+        # the context_engine via ``context_engine.create_context()``.  This
+        # runs once per session-adapter creation (i.e., once per restart).
+        try:
+            from jiuwenswarm.server.runtime.session.session_history import (
+                history_exists,
+            )
+
+            if history_exists(session_id):
+                from jiuwenswarm.agents.harness.common.session_ops_service import (
+                    rewind_session_context,
+                )
+
+                restored = await rewind_session_context(
+                    deep_agent=self._instance,
+                    session_id=session_id,
+                    turn_index=-1,
+                )
+                if restored:
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] context restored from "
+                        "history on session resume: session_id=%s",
+                        session_id,
+                    )
+        except Exception as restore_exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] context restore from history "
+                "failed: session_id=%s error=%s",
+                session_id,
+                restore_exc,
+            )
+
     async def prepare_session(
         self,
         *,
