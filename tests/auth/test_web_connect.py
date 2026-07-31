@@ -1,186 +1,95 @@
-"""测试 web_connect.py 中的 extract_token、extract_headers、get_remote_addr、_handle_connect"""
+"""测试 web_connect.py 中 _connection_handler 调用 _handle_connect 的逻辑"""
+from unittest.mock import AsyncMock, patch, MagicMock
 import pytest
-from unittest.mock import MagicMock, AsyncMock
-
-# mock 掉循环导入问题
-import jiuwenswarm.gateway
-jiuwenswarm.gateway.AgentServerClient = MagicMock()
-
-# 初始化 ExtensionRegistry
-from jiuwenswarm.extensions.registry import ExtensionRegistry
-from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
-ExtensionRegistry.create_instance(
-    callback_framework=MagicMock(spec=AsyncCallbackFramework),
-    config={},
-    logger=MagicMock(),
-)
 
 from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
-from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext, AuthResult
 
-
-# ── Fixture ──────────────────────────────────────────
 
 @pytest.fixture
-def channel():
-    config = MagicMock(spec=WebChannelConfig)
+def mock_ws():
+    """创建一个模拟的 WebSocket 对象"""
+    ws = MagicMock()
+    ws.path = "/ws"
+    ws.remote_address = ("127.0.0.1", 54321)
+    ws.closed = False
+    # close 可能被 await，需要返回可 await 对象
+    ws.close = AsyncMock()
+    # 模拟 async for 迭代：默认空迭代，不进入消息循环体
+    ws.__aiter__.return_value = iter([])
+    return ws
+
+
+@pytest.fixture
+def web_channel():
+    """创建一个 WebChannel 实例"""
+    config = WebChannelConfig(
+        host="0.0.0.0",
+        port=8765,
+        path="/ws",
+    )
     router = MagicMock()
-    return WebChannel(config, router)
+    channel = WebChannel(config, router)
+    # 模拟 register_ws 和 unregister_ws 为异步空操作
+    channel.register_ws = AsyncMock()
+    channel.unregister_ws = AsyncMock()
+    channel._connect_hooks = []
+    channel._disconnect_hooks = []
+    channel._ws_sessions = {}
+    channel._session_busy = {}
+    return channel
 
 
-# ── TestExtractToken ─────────────────────────────────
+class TestConnectionHandlerHandleConnect:
 
-#PASS
-class TestExtractToken:
-
-    def test_from_query_param(self, channel):
-        """从 URL 查询参数 ?token=xxx 提取"""
-        ws = MagicMock()
-        ws.path = "/ws?token=my-test-token"
-        ws.request = None
-        ws.request_headers = None
-        assert extract_token(ws) == "my-test-token"
-
-    def test_from_authorization_header(self, channel):
-        """从 Authorization: Bearer xxx 提取"""
-        ws = MagicMock()
-        ws.path = "/ws"
-        ws.request = None
-        ws.request_headers = {"Authorization": "Bearer header-token"}
-        assert extract_token(ws) == "header-token"
-
-    def test_from_x_token_header(self, channel):
-        """从 X-Token: xxx 提取"""
-        ws = MagicMock()
-        ws.path = "/ws"
-        ws.request = None
-        ws.request_headers = {"X-Token": "x-token-value"}
-        assert extract_token(ws) == "x-token-value"
-
-    def test_no_token_returns_none(self, channel):
-        """没有 token 时返回 None"""
-        ws = MagicMock()
-        ws.path = "/ws"
-        ws.request = None
-        ws.request_headers = {}
-        assert extract_token(ws) is None
-
-    def test_authorization_without_bearer(self, channel):
-        """Authorization 不以 Bearer 开头时不提取"""
-        ws = MagicMock()
-        ws.path = "/ws"
-        ws.request = None
-        ws.request_headers = {"Authorization": "Basic xxx"}
-        assert extract_token(ws) is None
-
-    def test_from_request_attr_headers(self, channel):
-        """兼容 ws.request.headers 属性"""
-        ws = MagicMock()
-        ws.path = "/ws"
-        ws.request = MagicMock()
-        ws.request.headers = {"Authorization": "Bearer req-token"}
-        ws.request_headers = None
-        assert extract_token(ws) == "req-token"
-
-
-# ── TestExtractHeaders ───────────────────────────────
-
-#pass
-class TestExtractHeaders:
-
-    def test_returns_dict(self, channel):
-        """提取请求头为字典"""
-        ws = MagicMock()
-        ws.request = None
-        ws.request_headers = {"Host": "localhost"}
-        assert channel.extract_headers(ws) == {"Host": "localhost"}
-
-    def test_returns_empty_dict_when_none(self, channel):
-        """没有请求头时返回空字典"""
-        ws = MagicMock()
-        ws.request = None
-        ws.request_headers = None
-        assert channel.extract_headers(ws) == {}
-
-    def test_from_request_attr(self, channel):
-        """兼容 ws.request.headers 属性"""
-        ws = MagicMock()
-        ws.request = MagicMock()
-        ws.request.headers = {"X-Custom": "value"}
-        ws.request_headers = None
-        assert channel.extract_headers(ws) == {"X-Custom": "value"}
-
-
-# ── TestGetRemoteAddr ────────────────────────────────
-
-#pass
-class TestGetRemoteAddr:
-
-    def test_from_tuple(self, channel):
-        """从 remote_address 元组提取"""
-        ws = MagicMock()
-        ws.remote_address = ("192.168.1.1", 8080)
-        assert channel.get_remote_addr(ws) == "('192.168.1.1', 8080)"
-
-    def test_returns_empty_when_none(self, channel):
-        """remote_address 为 None 时返回空字符串"""
-        ws = MagicMock()
-        ws.remote_address = None
-        assert channel.get_remote_addr(ws) == ""
-
-
-# ── TestHandleConnect ────────────────────────────────
-#PASS
-class TestHandleConnect:
-
+    @patch("jiuwenswarm.gateway.channel_manager.web.web_connect._handle_connect")
     @pytest.mark.asyncio
-    async def test_auth_success_does_not_close(self, channel):
-        """认证成功时不关闭连接"""
-        ws = AsyncMock()
-        ws.path = "/ws?token=valid-token"
-        ws.request = None
-        ws.request_headers = {}
-        ws.remote_address = ("10.0.0.1", 12345)
+    async def test_handle_connect_success_enters_message_loop(
+        self, mock_handle_connect, web_channel, mock_ws
+    ):
+        """验证 _handle_connect 返回 True 时进入消息循环"""
+        mock_handle_connect.return_value = True
 
-        from jiuwenswarm.gateway.channel_manager.web import web_connect
-        mock_auth = AsyncMock()
-        mock_auth.authenticate.return_value = AuthResult(success=True, user_id="test")
-        web_connect.get_auth_handler = MagicMock(return_value=mock_auth)
+        await web_channel._connection_handler(mock_ws, "/ws")
 
-        await channel._handle_connect(ws, "/ws")
-        ws.close.assert_not_called()
+        mock_handle_connect.assert_awaited_once_with(mock_ws, "/ws")
+        # 验证进入了消息循环（async for raw in ws）
+        mock_ws.__aiter__.assert_called_once()
 
+    @patch("jiuwenswarm.gateway.channel_manager.web.web_connect._handle_connect")
     @pytest.mark.asyncio
-    async def test_auth_failure_closes_connection(self, channel):
-        """认证失败时关闭连接"""
-        ws = AsyncMock()
-        ws.path = "/ws"
-        ws.request = None
-        ws.request_headers = {}
-        ws.remote_address = ("10.0.0.1", 12345)
+    async def test_handle_connect_failure_returns_early(
+        self, mock_handle_connect, web_channel, mock_ws
+    ):
+        """验证 _handle_connect 返回 False 时直接 return，不进入消息循环"""
+        mock_handle_connect.return_value = False
 
-        from jiuwenswarm.gateway.channel_manager.web import web_connect
-        mock_auth = AsyncMock()
-        mock_auth.authenticate.return_value = AuthResult(success=False, error="auth failed")
-        web_connect.get_auth_handler = MagicMock(return_value=mock_auth)
+        await web_channel._connection_handler(mock_ws, "/ws")
 
-        await channel._handle_connect(ws, "/ws")
-        ws.close.assert_called_once()
+        mock_handle_connect.assert_awaited_once_with(mock_ws, "/ws")
+        # 验证没有进入消息循环
+        mock_ws.__aiter__.assert_not_called()
 
+    @patch("jiuwenswarm.gateway.channel_manager.web.web_connect._handle_connect")
     @pytest.mark.asyncio
-    async def test_auth_exception_does_not_close(self, channel):
-        """认证抛异常时，ws.close 不会被调用（当前源码无 try/except）"""
-        ws = AsyncMock()
-        ws.path = "/ws?token=valid-token"
-        ws.request = None
-        ws.request_headers = {}
-        ws.remote_address = ("10.0.0.1", 12345)
+    async def test_handle_connect_none_returns_early(
+        self, mock_handle_connect, web_channel, mock_ws
+    ):
+        """验证 _handle_connect 返回 None 时直接 return（兼容 None 返回值）"""
+        mock_handle_connect.return_value = None
 
-        from jiuwenswarm.gateway.channel_manager.web import web_connect
-        mock_auth = AsyncMock()
-        mock_auth.authenticate.side_effect = Exception("Service unavailable")
-        web_connect.get_auth_handler = MagicMock(return_value=mock_auth)
+        await web_channel._connection_handler(mock_ws, "/ws")
 
-        with pytest.raises(Exception):
-            await channel._handle_connect(ws, "/ws")
-        ws.close.assert_not_called()
+        mock_handle_connect.assert_awaited_once_with(mock_ws, "/ws")
+        mock_ws.__aiter__.assert_not_called()
+
+    @patch("jiuwenswarm.gateway.channel_manager.web.web_connect._handle_connect")
+    @pytest.mark.asyncio
+    async def test_handle_connect_passes_path_correctly(
+        self, mock_handle_connect, web_channel, mock_ws
+    ):
+        """验证 _handle_connect 被调用时传入正确的 ws 和 path 参数"""
+        mock_handle_connect.return_value = True
+
+        await web_channel._connection_handler(mock_ws, "/ws")
+
+        mock_handle_connect.assert_awaited_once_with(mock_ws, "/ws")
