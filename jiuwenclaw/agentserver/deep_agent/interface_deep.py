@@ -3473,8 +3473,8 @@ class JiuWenClawDeepAdapter:
         self,
         config: dict[str, Any],
         config_base: dict[str, Any] | None = None,
-    ) -> tuple[list[Any], Any | None]:
-        """Return rail replacements and a progressive rail to retire after configure.
+    ) -> tuple[list[Any], list[Any]]:
+        """Return rail replacements and rails to retire after configure.
 
         Only rails that require a **new object** enter ``rails_list``. Rails updated
         in-place (PermissionRail, DisabledToolsRail) must not pass the same instance,
@@ -3501,27 +3501,25 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] reload_agent_config hook trigger failed: %s", exc)
 
+        rails_to_unregister: list[Any] = []
+
         # SkillEvolutionRail: respond to react.evolution.enabled on hot reload.
         # core's _hot_reload_rails retires registered rails whose type appears in
         # rails_list, then loads rails_list entries. Passing the SAME object → core
         # unregisters the stale twin but skips loading (unload-only). Passing a NEW
         # object → unregister stale + load new. Omitting the type → retained.
         evolution_enabled = bool(config.get("evolution", {}).get("enabled", False))
-        # 'retain' | ('retire', old_rail) | ('create', new_rail)
-        evolution_rail_action: tuple[str, Any] | None = None
+        new_evolution_rail = None
         if self._skill_evolution_rail is not None and not evolution_enabled:
-            # enabled true->false: retire the live rail. Pass the original object so
-            # core unregisters it without loading a replacement.
-            evolution_rail_action = ("retire", self._skill_evolution_rail)
-            self._skill_evolution_rail = None
+            # Keep the live reference until configure and explicit unregister succeed.
+            rails_to_unregister.append(self._skill_evolution_rail)
             logger.info(
-                "[JiuWenClawDeepAdapter] SkillEvolutionRail retiring on reload (evolution disabled)"
+                "[JiuWenClawDeepAdapter] SkillEvolutionRail staged for unregister "
+                "on reload (evolution disabled)"
             )
         elif self._skill_evolution_rail is None and evolution_enabled:
             # enabled false->true: build a fresh rail and load it.
             new_evolution_rail = self._build_skill_evolution_rail(config)
-            if new_evolution_rail is not None:
-                evolution_rail_action = ("create", new_evolution_rail)
         elif self._skill_evolution_rail is not None and evolution_enabled:
             # enabled unchanged (on): in-place update LLM / auto_save, rail retained.
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
@@ -3534,8 +3532,11 @@ class JiuWenClawDeepAdapter:
             extra_skill_dir=extra_skill_dir,
         )
 
-        if not self._filesystem_rail_enabled_for_profile():
-            self._filesystem_rail = None
+        if (
+            not self._filesystem_rail_enabled_for_profile()
+            and self._filesystem_rail is not None
+        ):
+            rails_to_unregister.append(self._filesystem_rail)
 
         # --- SkillCredentialInjectionRail hot-update (before permission rail) ---
         skill_credential_rail_newly_created = False
@@ -3555,11 +3556,10 @@ class JiuWenClawDeepAdapter:
         # ProgressiveToolRail can be enabled or disabled through hot reload.
         old_progressive_tool_rail = self._progressive_tool_rail
         progressive_tool_rail = self._build_progressive_tool_rail(config)
-        progressive_tool_rail_to_unregister = None
         if progressive_tool_rail is not None:
             self._progressive_tool_rail = progressive_tool_rail
         elif old_progressive_tool_rail is not None:
-            progressive_tool_rail_to_unregister = old_progressive_tool_rail
+            rails_to_unregister.append(old_progressive_tool_rail)
 
         # Update disabled_tools_rail config in-place (no re-init needed)
         disabled_tools_rail_newly_created = False
@@ -3604,11 +3604,8 @@ class JiuWenClawDeepAdapter:
         # SkillCredentialInjectionRail: only add when newly created (in-place update otherwise)
         if skill_credential_rail_newly_created and self._skill_credential_injection_rail is not None:
             rails_list.append(self._skill_credential_injection_rail)
-        # SkillEvolutionRail: append the staged rail so core drives its lifecycle.
-        # 'retire' passes the old object (unload-only); 'create' passes a new object.
-        if evolution_rail_action is not None:
-            _action, _rail = evolution_rail_action
-            rails_list.append(_rail)
+        if new_evolution_rail is not None:
+            rails_list.append(new_evolution_rail)
         logger.info(
             "[JiuWenClawDeepAdapter]  DIAGNOSTIC: rails_list 构建完成 " 
             "| rails_count=%d " 
@@ -3619,7 +3616,7 @@ class JiuWenClawDeepAdapter:
             any(type(r).__name__ == "RuntimePromptRail" for r in rails_list),
         )
 
-        return rails_list, progressive_tool_rail_to_unregister
+        return rails_list, rails_to_unregister
 
     async def _get_tool_cards(self, agent_card_id: str, *, mode: str = "agent.plan"):
         """Get tool cards with session-qualified resource_mgr registration."""
@@ -4432,13 +4429,6 @@ class JiuWenClawDeepAdapter:
             agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
             self._sync_multimodal_tools_for_runtime()
 
-            if not self._filesystem_rail_enabled_for_profile() and self._filesystem_rail is not None:
-                try:
-                    await self._instance.unregister_rail(self._filesystem_rail)
-                except Exception as exc:
-                    logger.warning("[JiuWenClawDeepAdapter] ACP filesystem rail unregister failed: %s", exc)
-                self._filesystem_rail = None
-
             self._sync_registered_skill_dirs_snapshot()
             if env_touches_shared_skills_dirs(env_overrides):
                 logger.info(
@@ -4446,7 +4436,7 @@ class JiuWenClawDeepAdapter:
                     self._registered_skill_dirs,
                 )
 
-            rails_list, progressive_tool_rail_to_unregister = (
+            rails_list, rails_to_unregister = (
                 await self._get_current_agent_rails(config, config_base)
             )
 
@@ -4479,13 +4469,31 @@ class JiuWenClawDeepAdapter:
             )
 
             self._instance.configure(deep_cfg)
-            if progressive_tool_rail_to_unregister is not None:
-                await self._instance.unregister_rail(progressive_tool_rail_to_unregister)
-                if self._progressive_tool_rail is progressive_tool_rail_to_unregister:
-                    self._progressive_tool_rail = None
+            rail_cache_attrs = (
+                "_progressive_tool_rail",
+                "_skill_evolution_rail",
+                "_filesystem_rail",
+            )
+            first_unregister_error: Exception | None = None
+            for rail in rails_to_unregister:
+                try:
+                    await self._instance.unregister_rail(rail)
+                except Exception as exc:
+                    if first_unregister_error is None:
+                        first_unregister_error = exc
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] %s unregister on reload failed: %s",
+                        type(rail).__name__,
+                        exc,
+                    )
+                    continue
+                for attr_name in rail_cache_attrs:
+                    if getattr(self, attr_name, None) is rail:
+                        setattr(self, attr_name, None)
+                        break
                 logger.info(
-                    "[JiuWenClawDeepAdapter] ProgressiveToolRail unregistered on reload "
-                    "(tool_lazy_load disabled)"
+                    "[JiuWenClawDeepAdapter] %s unregistered on reload",
+                    type(rail).__name__,
                 )
             # configure() rebuilds ability_manager from tool_cards; multimodal tools
             # registered before configure are dropped — re-sync after configure.
@@ -4526,6 +4534,11 @@ class JiuWenClawDeepAdapter:
             self._memory_cache_fingerprint = new_memory_fp
             self._embed_fingerprint = new_embed_fp
             self._task_memory_fingerprint = new_task_fp
+
+            # configure() has already applied; finish runtime reconciliation before
+            # reporting an incomplete rail cleanup to the caller.
+            if first_unregister_error is not None:
+                raise first_unregister_error
 
             logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
             return ReloadResult(applied=True)

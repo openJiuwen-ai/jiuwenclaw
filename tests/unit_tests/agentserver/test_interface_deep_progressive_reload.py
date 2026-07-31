@@ -22,6 +22,7 @@ class _ProgressiveRailReloadHarness(JiuWenClawDeepAdapter):
         adapter._instance.unregister_rail = AsyncMock()
         adapter._skill_evolution_rail = None
         adapter._skill_rail = None
+        adapter._filesystem_rail = None
         adapter._context_engineering_rail = None
         adapter._memory_rail = None
         adapter._lsp_rail = None
@@ -50,7 +51,7 @@ class _ProgressiveRailReloadHarness(JiuWenClawDeepAdapter):
 
     async def get_current_agent_rails(
         self, config: dict[str, Any]
-    ) -> tuple[list[Any], Any | None]:
+    ) -> tuple[list[Any], list[Any]]:
         return await self._get_current_agent_rails(config, {"react": config})
 
 
@@ -67,13 +68,13 @@ async def test_reload_stages_progressive_rail_for_unregister_when_disabled():
     old_rail = MagicMock(name="old-progressive-tool-rail")
     adapter._progressive_tool_rail = old_rail
 
-    rails, rail_to_unregister = await adapter.get_current_agent_rails(
+    rails, rails_to_unregister = await adapter.get_current_agent_rails(
         _react_config(enabled=False)
     )
 
     adapter._instance.unregister_rail.assert_not_awaited()
     assert adapter._progressive_tool_rail is old_rail
-    assert rail_to_unregister is old_rail
+    assert rails_to_unregister == [old_rail]
     assert old_rail not in rails
 
 
@@ -81,12 +82,12 @@ async def test_reload_stages_progressive_rail_for_unregister_when_disabled():
 async def test_reload_has_no_progressive_unregister_when_already_disabled():
     adapter = _ProgressiveRailReloadHarness.for_test()
 
-    rails, rail_to_unregister = await adapter.get_current_agent_rails(
+    rails, rails_to_unregister = await adapter.get_current_agent_rails(
         _react_config(enabled=False)
     )
 
     adapter._instance.unregister_rail.assert_not_awaited()
-    assert rail_to_unregister is None
+    assert rails_to_unregister == []
     assert rails == []
 
 
@@ -98,12 +99,29 @@ async def test_reload_replaces_progressive_rail_when_still_enabled():
     adapter._progressive_tool_rail = old_rail
     adapter._build_progressive_tool_rail.return_value = new_rail
 
-    rails, rail_to_unregister = await adapter.get_current_agent_rails(
+    rails, rails_to_unregister = await adapter.get_current_agent_rails(
         _react_config(enabled=True)
     )
 
     adapter._instance.unregister_rail.assert_not_awaited()
-    assert rail_to_unregister is None
+    assert rails_to_unregister == []
     assert adapter._progressive_tool_rail is new_rail
     assert new_rail in rails
+    assert old_rail not in rails
+
+
+@pytest.mark.asyncio
+async def test_reload_stages_filesystem_rail_for_unregister_when_profile_disables_it():
+    adapter = _ProgressiveRailReloadHarness.for_test()
+    old_rail = MagicMock(name="old-filesystem-rail")
+    adapter._filesystem_rail = old_rail
+    adapter._filesystem_rail_enabled_for_profile.return_value = False
+
+    rails, rails_to_unregister = await adapter.get_current_agent_rails(
+        _react_config(enabled=False)
+    )
+
+    adapter._instance.unregister_rail.assert_not_awaited()
+    assert adapter._filesystem_rail is old_rail
+    assert rails_to_unregister == [old_rail]
     assert old_rail not in rails

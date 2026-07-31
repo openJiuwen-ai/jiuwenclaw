@@ -461,7 +461,7 @@ class _DeepAdapterReloadHarness:
                     self._apply_model_to_react_agent = MagicMock()
                     self._refresh_fork_agent_executor_model = MagicMock()
                     self._make_deep_agent_config = MagicMock(return_value=MagicMock())
-                    self._get_current_agent_rails = AsyncMock(return_value=([], None))
+                    self._get_current_agent_rails = AsyncMock(return_value=([], []))
                     self.load_user_rails = AsyncMock()
                     self._handle_memory_rail_by_config = AsyncMock()
                     self._handle_external_memory_rail_by_config = AsyncMock()
@@ -1074,7 +1074,7 @@ async def test_create_agent_replays_yaml_sandbox_to_sysop(monkeypatch: pytest.Mo
     )
 
     async def _empty_rails(self, c, cb):
-        return [], None
+        return [], []
     monkeypatch.setattr(mod.JiuWenClawDeepAdapter, "_get_current_agent_rails", _empty_rails)
 
     async def _noop(*a, **kw):
@@ -1549,18 +1549,22 @@ async def test_force_apply_clears_stale_pending_reload():
 
 
 @pytest.mark.asyncio
-async def test_reload_unregisters_progressive_rail_only_after_configure():
+async def test_reload_unregisters_staged_rails_only_after_configure():
     adapter = _DeepAdapterReloadHarness.build(working=False)
     adapter.configure_for_force_apply_test()
-    old_rail = MagicMock(name="old-progressive-tool-rail")
-    adapter._progressive_tool_rail = old_rail
-    adapter._get_current_agent_rails.return_value = ([], old_rail)
+    progressive_rail = MagicMock(name="old-progressive-tool-rail")
+    evolution_rail = MagicMock(name="old-evolution-rail")
+    filesystem_rail = MagicMock(name="old-filesystem-rail")
+    adapter._progressive_tool_rail = progressive_rail
+    adapter._skill_evolution_rail = evolution_rail
+    adapter._filesystem_rail = filesystem_rail
+    staged_rails = [progressive_rail, evolution_rail, filesystem_rail]
+    adapter._get_current_agent_rails.return_value = ([], staged_rails)
     events = []
     adapter._instance.configure.side_effect = lambda _config: events.append("configure")
 
     async def _unregister(rail):
-        assert rail is old_rail
-        events.append("unregister")
+        events.append(f"unregister:{rail._mock_name}")
 
     adapter._instance.unregister_rail = AsyncMock(side_effect=_unregister)
 
@@ -1584,17 +1588,31 @@ async def test_reload_unregisters_progressive_rail_only_after_configure():
         )
 
     assert result.applied is True
-    assert events == ["configure", "unregister"]
+    assert events == [
+        "configure",
+        "unregister:old-progressive-tool-rail",
+        "unregister:old-evolution-rail",
+        "unregister:old-filesystem-rail",
+    ]
     assert adapter._progressive_tool_rail is None
+    assert adapter._skill_evolution_rail is None
+    assert adapter._filesystem_rail is None
 
 
 @pytest.mark.asyncio
-async def test_reload_keeps_progressive_rail_when_configure_fails():
+async def test_reload_keeps_staged_rails_when_configure_fails():
     adapter = _DeepAdapterReloadHarness.build(working=False)
     adapter.configure_for_force_apply_test()
-    old_rail = MagicMock(name="old-progressive-tool-rail")
-    adapter._progressive_tool_rail = old_rail
-    adapter._get_current_agent_rails.return_value = ([], old_rail)
+    progressive_rail = MagicMock(name="old-progressive-tool-rail")
+    evolution_rail = MagicMock(name="old-evolution-rail")
+    filesystem_rail = MagicMock(name="old-filesystem-rail")
+    adapter._progressive_tool_rail = progressive_rail
+    adapter._skill_evolution_rail = evolution_rail
+    adapter._filesystem_rail = filesystem_rail
+    adapter._get_current_agent_rails.return_value = (
+        [],
+        [progressive_rail, evolution_rail, filesystem_rail],
+    )
     adapter._instance.unregister_rail = AsyncMock()
     adapter._instance.configure.side_effect = RuntimeError("configure failed")
 
@@ -1619,7 +1637,78 @@ async def test_reload_keeps_progressive_rail_when_configure_fails():
             )
 
     adapter._instance.unregister_rail.assert_not_awaited()
-    assert adapter._progressive_tool_rail is old_rail
+    assert adapter._progressive_tool_rail is progressive_rail
+    assert adapter._skill_evolution_rail is evolution_rail
+    assert adapter._filesystem_rail is filesystem_rail
+
+
+@pytest.mark.asyncio
+async def test_reload_finishes_post_configure_work_after_unregister_failures():
+    adapter = _DeepAdapterReloadHarness.build(working=False)
+    adapter.configure_for_force_apply_test()
+    progressive_rail = MagicMock(name="old-progressive-tool-rail")
+    evolution_rail = MagicMock(name="old-evolution-rail")
+    filesystem_rail = MagicMock(name="old-filesystem-rail")
+    adapter._progressive_tool_rail = progressive_rail
+    adapter._skill_evolution_rail = evolution_rail
+    adapter._filesystem_rail = filesystem_rail
+    adapter._rebind_progressive_tool_rail_after_reload = MagicMock()
+    adapter._get_current_agent_rails.return_value = (
+        [],
+        [progressive_rail, evolution_rail, filesystem_rail],
+    )
+    events = []
+    adapter._instance.configure.side_effect = lambda _config: events.append("configure")
+
+    async def _unregister(rail):
+        events.append(f"unregister:{rail._mock_name}")
+        if rail is progressive_rail:
+            raise RuntimeError("progressive unregister failed")
+        if rail is evolution_rail:
+            raise RuntimeError("evolution unregister failed")
+
+    adapter._instance.unregister_rail = AsyncMock(side_effect=_unregister)
+
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        return_value={"react": {"agent_name": "a"}},
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
+        return_value="mfp",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_engine",
+        return_value="builtin",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_config_cache",
+    ), patch(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_task_memory_service",
+    ):
+        with pytest.raises(RuntimeError, match="progressive unregister failed"):
+            await adapter.reload_agent_config(
+                config_base={"models": {"default": {}}},
+                _force_apply=True,
+            )
+
+    assert events == [
+        "configure",
+        "unregister:old-progressive-tool-rail",
+        "unregister:old-evolution-rail",
+        "unregister:old-filesystem-rail",
+    ]
+    assert adapter._progressive_tool_rail is progressive_rail
+    assert adapter._skill_evolution_rail is evolution_rail
+    assert adapter._filesystem_rail is None
+    assert adapter._sync_multimodal_tools_for_runtime.call_count == 2
+    adapter._rebind_progressive_tool_rail_after_reload.assert_called_once_with()
+    adapter._apply_model_to_react_agent.assert_called_once_with(adapter._model)
+    adapter._refresh_fork_agent_executor_model.assert_called_once_with()
+    adapter._maybe_recreate_sys_operation.assert_called_once_with()
+    adapter._handle_memory_rail_by_config.assert_awaited_once_with("agent.plan")
+    adapter._handle_external_memory_rail_by_config.assert_awaited_once()
+    adapter._apply_registered_skill_dirs_to_runtime_rails.assert_called_once_with()
+    assert adapter._memory_engine_snapshot == "builtin"
+    assert adapter._embed_fingerprint == "new"
+    assert adapter._memory_cache_fingerprint == "mfp"
 
 
 @pytest.mark.asyncio

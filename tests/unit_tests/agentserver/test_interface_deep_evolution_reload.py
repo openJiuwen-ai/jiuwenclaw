@@ -3,9 +3,9 @@
 """Unit tests for SkillEvolutionRail hot-reload lifecycle in _get_current_agent_rails.
 
 Covers the three reload states introduced for the evolution on/off toggle:
-  * retire  — evolution.enabled true->false: live rail dropped, OLD object passed
-              to rails_list so core unregisters it (unload-only), and the cached
-              instance reference is cleared.
+  * retire  — evolution.enabled true->false: the OLD object is staged for explicit
+              unregister after configure succeeds, then its cached reference is
+              cleared.
   * create  — evolution.enabled false->true: a fresh rail is built and the NEW object
               passed to rails_list so core loads it; the cached reference is updated.
   * retain  — evolution.enabled unchanged (on): the rail is updated in-place and NOT
@@ -86,7 +86,7 @@ class _EvolutionRailReloadHarness(JiuWenClawDeepAdapter):
             self, config: dict[str, Any], config_base: dict[str, Any] | None = None
     ) -> list[Any]:
         """Expose the protected rail assembly entrypoint."""
-        rails, _progressive_rail_to_unregister = await self._get_current_agent_rails(
+        rails, _rails_to_unregister = await self._get_current_agent_rails(
             config, config_base
         )
         return rails
@@ -148,16 +148,18 @@ async def test_reload_create_skipped_when_build_returns_none(adapter, monkeypatc
 
 @pytest.mark.asyncio
 async def test_reload_retires_evolution_rail_when_disabled(adapter, monkeypatch):
-    """enabled true->false: the live rail is cleared and the OLD object appended (unload-only)."""
+    """enabled true->false: stage the live rail for explicit unregister."""
     live = MagicMock(name="live-evolution-rail")
     adapter._skill_evolution_rail = live
 
-    rails = await adapter.get_current_agent_rails(_evolution_config(enabled=False))
+    rails, rails_to_unregister = await adapter._get_current_agent_rails(
+        _evolution_config(enabled=False)
+    )
 
-    # The original object is passed so core unregisters it without loading a twin.
-    assert live in rails
-    # Cached reference is dropped so subsequent reloads see "not live".
-    assert adapter._skill_evolution_rail is None
+    assert live not in rails
+    assert rails_to_unregister == [live]
+    # Keep the cached reference until configure and unregister both succeed.
+    assert adapter._skill_evolution_rail is live
     # No fresh build is attempted when retiring.
     adapter._build_skill_evolution_rail.assert_not_called()
 
@@ -200,11 +202,14 @@ async def test_reload_appends_evolution_rail_only_once(adapter, monkeypatch):
     rails = await adapter.get_current_agent_rails(_evolution_config(enabled=True))
     assert sum(1 for r in rails if r is adapter._skill_evolution_rail) == 1
 
-    # retire path -> exactly the (now stale) old object, cached ref cleared.
+    # retire path -> old object is staged outside rails_list for explicit unregister.
     stale = adapter._skill_evolution_rail
-    rails = await adapter.get_current_agent_rails(_evolution_config(enabled=False))
-    assert sum(1 for r in rails if r is stale) == 1
-    assert adapter._skill_evolution_rail is None
+    rails, rails_to_unregister = await adapter._get_current_agent_rails(
+        _evolution_config(enabled=False)
+    )
+    assert stale not in rails
+    assert rails_to_unregister == [stale]
+    assert adapter._skill_evolution_rail is stale
 
 
 @pytest.mark.asyncio
