@@ -37,6 +37,7 @@ _LOG_LABEL = "[OpenAbilityWebSocketClient]"
 _STREAM_TRAILING_MESSAGE_GRACE_SECONDS = 0.7
 _DEFAULT_UNARY_REQUEST_TIMEOUT_SECONDS = 600.0
 _WS_MAX_SIZE = 8 * 2**20
+_OA_INBOUND_DELTA_PREVIEW_CHARS = 200
 
 
 def _wire_request_id_key(request_id: Any) -> str:
@@ -58,6 +59,36 @@ def _build_ws_origin(uri: str) -> str | None:
         return None
     scheme = "https" if parsed.scheme == "wss" else "http"
     return f"{scheme}://{parsed.netloc}"
+
+
+def _log_oa_inbound_frame(
+    data: dict[str, Any],
+    *,
+    session_id: str,
+    sandbox_id: str,
+) -> None:
+    """Log the decoded OA frame before Gateway routing or normalization."""
+    if not logger.isEnabledFor(logging.INFO):
+        return
+
+    body = data.get("body")
+    body = body if isinstance(body, dict) else {}
+    delta = body.get("delta")
+    if isinstance(delta, str):
+        delta_preview = delta[:_OA_INBOUND_DELTA_PREVIEW_CHARS]
+    elif delta is None:
+        delta_preview = ""
+    else:
+        rendered_delta = json.dumps(delta, ensure_ascii=False, default=str)
+        delta_preview = rendered_delta[:_OA_INBOUND_DELTA_PREVIEW_CHARS]
+
+    logger.info(
+        "[STREAM_DIAG][OA_IN] session_id=%s sandbox_id=%s request_id=%s delta_preview=%r",
+        session_id,
+        sandbox_id,
+        data.get("request_id"),
+        delta_preview,
+    )
 
 
 class OpenAbilityWebSocketClient(AgentServerClient):
@@ -93,6 +124,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         )
         self._server_ready = False
         self._message_queues: dict[str, asyncio.Queue] = {}
+        self._request_session_ids: dict[str, str] = {}
         self._queue_lock = asyncio.Lock()
         self._cancelled_request_ids: set[str] = set()
         self._receiver_task: asyncio.Task | None = None
@@ -181,6 +213,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                 pass
             self._receiver_task = None
         self._message_queues.clear()
+        self._request_session_ids.clear()
         if self._ws is None:
             return
         try:
@@ -218,6 +251,16 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                         )
                         continue
                     request_id = _wire_request_id_key(data.get("request_id"))
+                    session_id = (
+                        self._request_session_ids.get(request_id)
+                        or str(data.get("session_id") or "").strip()
+                        or "n/a"
+                    )
+                    _log_oa_inbound_frame(
+                        data,
+                        session_id=session_id,
+                        sandbox_id=self._sandbox_id,
+                    )
                     meta = data.get("metadata")
                     if isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY):
                         if self._on_server_push is not None:
@@ -340,6 +383,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
             )
         queue: asyncio.Queue = asyncio.Queue()
         self._message_queues[rid] = queue
+        self._request_session_ids[rid] = session_id
         try:
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
@@ -399,6 +443,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
             )
         queue: asyncio.Queue = asyncio.Queue()
         self._message_queues[rid] = queue
+        self._request_session_ids[rid] = session_id
         try:
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
@@ -451,6 +496,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
 
     async def _drain_and_remove_queue(self, rid: str) -> None:
         async with self._queue_lock:
+            self._request_session_ids.pop(rid, None)
             queue = self._message_queues.get(rid)
             if queue is None:
                 return
