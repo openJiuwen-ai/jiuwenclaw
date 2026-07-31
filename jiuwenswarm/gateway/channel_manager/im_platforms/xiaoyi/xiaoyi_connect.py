@@ -656,6 +656,39 @@ class XiaoyiChannel(BaseChannel):
                                 logger.warning(f"XiaoyiChannel 发送文件响应失败 ({url_key}): {e}")
             return
 
+        # Handle chat.html_card event (H5 card via clawH5; URL already resolved by toolkit)
+        if self.config.mode == "xiaoyi_claw" and msg.event_type == EventType.CHAT_HTML_CARD:
+            payload = msg.payload if isinstance(msg.payload, dict) else {}
+            cards_info = payload.get("cardsInfo")
+            if not isinstance(cards_info, list) or not cards_info:
+                url = str(payload.get("url") or "").strip()
+                if url:
+                    cards_info = [
+                        {
+                            "cardName": "clawH5",
+                            "cardData": {"url": url},
+                            "displayType": "DisplayFaCard",
+                        }
+                    ]
+            if cards_info:
+                message_id = str(msg.id or task_id or "")
+                for url_key, ws in self._ws_connections.items():
+                    if ws:
+                        try:
+                            await self._send_html_card_response(
+                                session_id, task_id, message_id, cards_info, url_key
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "XiaoyiChannel 发送 HTML 卡片失败 (%s): %s", url_key, e
+                            )
+            else:
+                logger.warning(
+                    "XiaoyiChannel chat.html_card 缺少 cardsInfo/url，跳过 session_id=%s",
+                    session_id,
+                )
+            return
+
         if should_send_as_status_update(msg.event_type):
             if is_team_session and msg.event_type in {
                 EventType.CHAT_TOOL_CALL,
@@ -2128,6 +2161,55 @@ class XiaoyiChannel(BaseChannel):
                 return
         except Exception as e:
             logger.error(f"XiaoyiChannel 发送文件响应失败: {e}")
+
+    async def _send_html_card_response(
+        self,
+        session_id: str,
+        task_id: str,
+        message_id: str,
+        cards_info: list[dict[str, Any]],
+        url_key: str,
+    ) -> None:
+        """发送 HTML H5 卡片（对齐 openclaw sendCard / clawH5）."""
+        try:
+            rpc_id = message_id or task_id
+            payload = {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "result": {
+                    "taskId": task_id,
+                    "kind": "artifact-update",
+                    "append": False,
+                    "lastChunk": True,
+                    "final": False,
+                    "artifact": {
+                        "artifactId": str(uuid.uuid4()),
+                        "parts": [
+                            {
+                                "kind": "data",
+                                "data": {"cardsInfo": cards_info},
+                            }
+                        ],
+                    },
+                },
+            }
+            response = {
+                "msgType": "agent_response",
+                "agentId": self.config.agent_id,
+                "sessionId": session_id,
+                "taskId": task_id,
+                "msgDetail": json.dumps(payload, ensure_ascii=False),
+            }
+            logger.info(
+                "[A2A_CARD] Sending html card session_id=%s task_id=%s cards=%s",
+                session_id,
+                task_id,
+                len(cards_info),
+            )
+            await self._safe_ws_send(url_key, response)
+        except Exception as e:
+            logger.error("XiaoyiChannel 发送 HTML 卡片失败: %s", e)
+            raise
 
     async def _safe_ws_send(self, url_key: str, payload: dict[str, Any]) -> None:
         ws = self._ws_connections.get(url_key)

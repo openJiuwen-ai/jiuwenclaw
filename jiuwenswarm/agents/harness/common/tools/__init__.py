@@ -18,6 +18,9 @@ from .memory_tools import (
 from .send_file_to_user import (
     SendFileToolkit,
 )
+from .send_html_card import (
+    SendHtmlCardToolkit,
+)
 from .skill_toolkits import (
     SkillToolkit,
 )
@@ -63,6 +66,7 @@ __all__ = [
     "set_group_chat_mode",
     "is_group_chat_mode",
     "SendFileToolkit",
+    "SendHtmlCardToolkit",
     "SkillToolkit",
     "is_skill_retrieval_enabled",
     "SkillRetrievalToolkit",

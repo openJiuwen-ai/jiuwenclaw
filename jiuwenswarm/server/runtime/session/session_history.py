@@ -246,7 +246,7 @@ _TEAM_RELEVANT_EVENT_TYPES = frozenset({
     "team.task",
     "team.event",
     "chat.tool_call", "chat.tracer_agent",
-    "chat.final", "chat.tool_result", "chat.file",
+    "chat.final", "chat.tool_result", "chat.file", "chat.html_card",
 })
 
 
@@ -258,7 +258,7 @@ def _is_team_relevant(item: dict[str, Any]) -> bool:
         if et in ("chat.tool_call", "chat.tracer_agent"):
             mode = item.get("mode")
             return isinstance(mode, str) and mode.strip().lower() == "team"
-        if et in ("chat.final", "chat.tool_result", "chat.file"):
+        if et in ("chat.final", "chat.tool_result", "chat.file", "chat.html_card"):
             role = item.get("role")
             return isinstance(role, str) and role.strip().lower() == "teammate"
         return True
