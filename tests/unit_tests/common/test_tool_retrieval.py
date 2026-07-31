@@ -95,8 +95,8 @@ class FakeModel:
         ("获取任务详情", "cron_get_job", 0.5),
         ("切换任务状态", "cron_toggle_job", 0.5),
         ("运行任务", "cron_run_job", 0.5),
-        ("memory search", "memory_search", 0.0),          # no verb in query
-        ("搜索记忆", "memory_search", 0.0),                # "搜索" not in verb map
+        ("memory search", "memory_search", 0.5),          # "search" verb in query matches name token
+        ("搜索记忆", "memory_search", 0.5),                # "搜索" now in verb map, matches "search" token
         ("创建定时任务", "cron_create_job", 0.5),          # CN-only create intent
     ],
 )

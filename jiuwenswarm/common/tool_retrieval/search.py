@@ -24,6 +24,11 @@ VERB_INTENT = (
     (("get",), ("获取", "get")),
     (("toggle",), ("切换", "开关", "toggle")),
     (("run",), ("运行", "执行", "run", "runs")),
+    (("send", "deliver"), ("发送", "投递", "传送", "send", "deliver")),
+    (("search",), ("搜索", "查找", "检索", "search")),
+    (("read",), ("读取", "阅读", "read")),
+    (("write",), ("写入", "保存", "write")),
+    (("edit",), ("编辑", "edit")),
 )
 
 
