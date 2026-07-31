@@ -79,6 +79,20 @@ def _build_file_extra(params: dict) -> dict | None:
     return {"files": result} if result else None
 
 
+def _permission_response_key(request: AgentRequest) -> str | None:
+    """Return the opaque request key for a permission continuation."""
+    if request.req_method not in (ReqMethod.CHAT_SEND, ReqMethod.CHAT_RESUME):
+        return None
+    params = request.params if isinstance(request.params, dict) else {}
+    answers = params.get("answers")
+    if not isinstance(answers, list) or not answers:
+        return None
+    request_id = params.get("request_id")
+    if not isinstance(request_id, str):
+        return None
+    return request_id or None
+
+
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.session_manager import SessionManager
 from jiuwenclaw.agentserver.session_metadata import (
@@ -1371,7 +1385,35 @@ class JiuWenClaw:
                         )
                 return await adapter.process_message_impl(request, inputs)
 
-            result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
+            permission_key = _permission_response_key(request)
+            if permission_key is not None:
+                accepted, result = await self._session_manager.submit_and_wait_once(
+                    session_id,
+                    permission_key,
+                    run_agent_task,
+                )
+                if not accepted:
+                    logger.info(
+                        "[JiuWenClaw] permission_response_deduplicated "
+                        "session_id=%s task_key=%s request_id=%s",
+                        session_id,
+                        permission_key,
+                        request.request_id,
+                    )
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={
+                            "code": "duplicate_permission_response",
+                            "deduplicated": True,
+                        },
+                        metadata=request.metadata,
+                    )
+            else:
+                result = await self._session_manager.submit_and_wait(
+                    session_id,
+                    run_agent_task,
+                )
 
             if result.ok and result.payload.get("content"):
                 content = result.payload["content"]
@@ -1630,8 +1672,36 @@ class JiuWenClaw:
                     # Team模式后续请求：直接异步执行，不排队。Team 模式支持并发，不需要排队。
                     asyncio.create_task(run_stream_task())
                 else:
-                    # 其他情况：通过 SessionManager 排队执行。同 session 内按 FIFO 顺序执行。
-                    await self._session_manager.submit_task(session_id, run_stream_task)
+                    permission_key = _permission_response_key(request)
+                    if permission_key is not None:
+                        accepted = await self._session_manager.submit_task_once(
+                            session_id,
+                            permission_key,
+                            run_stream_task,
+                        )
+                        if not accepted:
+                            logger.info(
+                                "[JiuWenClaw] permission_response_deduplicated "
+                                "session_id=%s task_key=%s request_id=%s",
+                                session_id,
+                                permission_key,
+                                request.request_id,
+                            )
+                            yield AgentResponseChunk(
+                                request_id=request.request_id,
+                                channel_id=request.channel_id,
+                                payload={
+                                    "code": "duplicate_permission_response",
+                                    "deduplicated": True,
+                                },
+                                is_complete=True,
+                            )
+                            return
+                    else:
+                        await self._session_manager.submit_task(
+                            session_id,
+                            run_stream_task,
+                        )
                 try:
                     # 1.生产者-消费者模式：run_stream_task 生产 → 循环消费 → yield 转发
                     # 2.历史记录异步写入：不阻塞流式转发
