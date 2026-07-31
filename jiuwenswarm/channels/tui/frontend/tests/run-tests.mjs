@@ -145,11 +145,14 @@ assert.ok(
     .includes("完整审计记录"),
 );
 
-// A long/scrollable transcript must not capture drag events: users should be
-// able to select and copy completed responses with the terminal's native UI.
-assert.equal(shouldCaptureTerminalMouse(false, false), false);
-assert.equal(shouldCaptureTerminalMouse(true, false), true);
-assert.equal(shouldCaptureTerminalMouse(false, true), true);
+// Mouse tracking is enabled for pending questions, interactive overlays, and
+// scrollable transcripts (so the wheel can page history). When the transcript
+// fits on screen (transcriptMayScroll=false) and no overlay is active, tracking
+// stays off to preserve the terminal's native text selection / copy.
+assert.equal(shouldCaptureTerminalMouse(false, false, false), false);
+assert.equal(shouldCaptureTerminalMouse(true, false, false), true);
+assert.equal(shouldCaptureTerminalMouse(false, true, false), true);
+assert.equal(shouldCaptureTerminalMouse(false, false, true), true);
 
 const teamSnapshot = {
   connectionStatus: "connected",
@@ -300,6 +303,68 @@ assert.equal(
 );
 assert.equal(stripAnsi(btwPulseDim.join("\n")), stripAnsi(btwPulseBright.join("\n")));
 assert.notEqual(btwPulseDim.join("\n"), btwPulseBright.join("\n"));
+
+function handleBtwOverlayKey(data, { composerText = "", pendingQuestion = null } = {}) {
+  let clears = 0;
+  let interrupts = 0;
+  let deletes = 0;
+  const navigations = [];
+  const screen = Object.create(AppScreen.prototype);
+  Object.assign(screen, {
+    btwOverlayScrollOffset: 0,
+    editor: { getText: () => composerText },
+    state: {
+      getSnapshot: () => ({ btwPendingQuestion: pendingQuestion }),
+      clearBtwOverlay: () => {
+        clears += 1;
+      },
+      requestLocalInterrupt: () => {
+        interrupts += 1;
+      },
+      navigateBtw: (direction) => {
+        navigations.push(direction);
+      },
+      deleteCurrentBtwEntry: () => {
+        deletes += 1;
+      },
+      setBtwActive: () => undefined,
+    },
+    tui: {
+      terminal: { rows: 40 },
+      requestRender: () => undefined,
+    },
+  });
+
+  return {
+    handled: screen.handleBtwOverlayScrollInput(data),
+    clears,
+    interrupts,
+    navigations,
+    deletes,
+  };
+}
+
+// Enter/Space retain composer behavior when it has text; the new dismiss and
+// paging keys must coexist with existing history navigation and deletion.
+const btwKeyCases = [
+  ["space with input", " ", { composerText: "/btw" }, { handled: false, clears: 0 }],
+  ["enter with input", "\r", { composerText: "/btw next" }, { handled: false, clears: 0 }],
+  ["enter dismiss", "\r", {}, { handled: true, clears: 1, interrupts: 0 }],
+  ["space dismiss", " ", {}, { handled: true, clears: 1 }],
+  ["ctrl+c completed", "\x03", {}, { handled: true, interrupts: 0 }],
+  ["ctrl+c pending", "\x03", { pendingQuestion: "next" }, { handled: true, interrupts: 1 }],
+  ["history left", "\x1b[D", { composerText: "draft" }, { navigations: [-1], clears: 0 }],
+  ["history right", "\x1b[C", { composerText: "draft" }, { navigations: [1], clears: 0 }],
+  ["delete", "x", { composerText: "draft" }, { deletes: 1, clears: 0 }],
+  ["page up", "\x10", { composerText: "draft" }, { handled: true, clears: 0 }],
+  ["page down", "\x0e", { composerText: "draft" }, { handled: true, clears: 0 }],
+];
+for (const [name, data, options, expected] of btwKeyCases) {
+  const result = handleBtwOverlayKey(data, options);
+  for (const [key, value] of Object.entries(expected)) {
+    assert.deepEqual(result[key], value, `${name}: ${key}`);
+  }
+}
 
 const slashCommands = AppScreen.prototype.buildSlashCommands.call({
   commands: {

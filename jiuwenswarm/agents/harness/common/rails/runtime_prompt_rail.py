@@ -44,6 +44,7 @@ class RuntimePromptRail(DeepAgentRail):
         timezone_offset: int = 8,
     ) -> None:
         super().__init__()
+        self._agent = None
         self.system_prompt_builder = None
         self.attachment_manager = None
         self._language = language
@@ -51,6 +52,7 @@ class RuntimePromptRail(DeepAgentRail):
         self._trusted_dirs: list[str] | None = None
         self._cwd: str | None = None
         self._project_dir: str | None = None
+        self._workspace_dir: str | None = None
         self._model_name: str = ""
         self._mode: str = ""
         self._session_id: str | None = None
@@ -58,6 +60,7 @@ class RuntimePromptRail(DeepAgentRail):
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
+        self._agent = agent
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
@@ -71,6 +74,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("browser_tool_policy")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
             self.system_prompt_builder.remove_section("trusted_dirs_policy")
+        self._agent = None
         self.system_prompt_builder = None
         self.attachment_manager = None
 
@@ -86,12 +90,31 @@ class RuntimePromptRail(DeepAgentRail):
         """per-request 更新可信目录。"""
         self._trusted_dirs = trusted_dirs
 
-    def set_runtime_paths(self, *, cwd: str | None = None, project_dir: str | None = None) -> None:
-        """Per-request stable project identity and dynamic cwd."""
+    def set_runtime_paths(
+        self,
+        *,
+        cwd: str | None = None,
+        project_dir: str | None = None,
+        workspace_dir: str | None = None,
+    ) -> None:
+        """Per-request stable project identity, dynamic cwd and own workspace.
+
+        Args:
+            cwd: Working directory shell runs in and relative paths resolve against.
+            project_dir: Project root, when the request is bound to one.
+            workspace_dir: This agent's own workspace (artifacts, memory, skills
+                view). Team members each have their own; falls back to the
+                process-wide agent workspace when unset.
+        """
         self._cwd = cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
         self._project_dir = (
             project_dir.strip()
             if isinstance(project_dir, str) and project_dir.strip()
+            else None
+        )
+        self._workspace_dir = (
+            workspace_dir.strip()
+            if isinstance(workspace_dir, str) and workspace_dir.strip()
             else None
         )
 
@@ -161,6 +184,41 @@ class RuntimePromptRail(DeepAgentRail):
             logger.debug("Failed to read configured model names: %s", exc)
             return []
 
+    def _resolve_current_mode(
+        self,
+        ctx: AgentCallbackContext,
+        configured_mode: str,
+    ) -> str:
+        """用 DeepAgent session state 覆盖 code 模式的请求初始快照。"""
+        if configured_mode not in {"code", "code.normal", "code.plan"}:
+            return configured_mode
+
+        agent = self._agent or ctx.agent
+        load_state = getattr(agent, "load_state", None)
+        if not callable(load_state) or ctx.session is None:
+            return configured_mode
+
+        try:
+            state = load_state(ctx.session)
+            plan_state = getattr(state, "plan_mode", None)
+            if isinstance(plan_state, dict):
+                plan_mode = plan_state.get("mode")
+            else:
+                plan_mode = getattr(plan_state, "mode", None)
+        except Exception as exc:
+            logger.debug(
+                "[RuntimePromptRail] Failed to resolve live agent mode: %s",
+                exc,
+            )
+            return configured_mode
+
+        normalized = str(plan_mode or "").strip().lower()
+        if normalized == "plan":
+            return "code.plan"
+        if normalized in {"normal", "auto"}:
+            return "code.normal"
+        return configured_mode
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         if not self.system_prompt_builder:
             return
@@ -178,13 +236,13 @@ class RuntimePromptRail(DeepAgentRail):
         # ── time ──
         if not self._force_english and self._language == "cn":
             time_content = (
-                f"# 时间说明\n\n"
+                "# 时间说明\n\n"
                 "- 当用户询问“最新、当前、今年、本年、实时、近期”等信息并需要搜索时，"
                 "搜索 query 必须优先使用当前年份或日期"
             )
         else:
             time_content = (
-                f"# Time Description\n\n"
+                "# Time Description\n\n"
                 "- When the user asks for latest/current/this-year/recent information and search is needed, "
                 "search queries must prefer the current year or date."
             )
@@ -225,7 +283,10 @@ class RuntimePromptRail(DeepAgentRail):
             or "unknown"
         ).strip()
         available_models_str = ", ".join(available_models) if available_models else model
-        mode = (runtime_state.get("mode") or self._mode or "unknown").strip()
+        configured_mode = str(
+            runtime_state.get("mode") or self._mode or "unknown"
+        ).strip()
+        mode = self._resolve_current_mode(ctx, configured_mode)
         # Language section controls the model's *response* language and must
         # follow the user's preferred language.  ``_force_english`` only
         # affects system-prompt scaffolding (time / runtime / env sections),
@@ -435,7 +496,10 @@ class RuntimePromptRail(DeepAgentRail):
         if self._channel in ("tui", "web"):
             # Trusted directories policy for TUI and Web mode
             trusted_dirs = self._existing_dirs(self._trusted_dirs)
-            agent_workspace_dir = str(get_agent_workspace_dir())
+            # This agent's own workspace. Team members each own one; without
+            # it (single-agent runs) the process-wide agent workspace is the
+            # same directory anyway.
+            agent_workspace_dir = self._existing_dir(self._workspace_dir) or str(get_agent_workspace_dir())
             config_dir = str(get_user_workspace_dir() / "config")
             project_dir = self._existing_dir(self._project_dir)
             runtime_cwd = (

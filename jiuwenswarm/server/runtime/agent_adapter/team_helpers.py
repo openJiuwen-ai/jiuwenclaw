@@ -1489,6 +1489,10 @@ async def process_team_message_stream(
             )
         if isinstance(getattr(request, "params", None), dict):
             request_metadata.setdefault("mode", request.params.get("mode"))
+            request_metadata.setdefault(
+                "supports_user_interaction",
+                request.params.get("supports_user_interaction") is not False,
+            )
         resolved_mode = str(request_metadata.get("mode") or "").strip()
         # Page-selected model name (from chat page model selector). Used as a
         # fallback for team members whose ``modes.team.agents.*.model`` is not

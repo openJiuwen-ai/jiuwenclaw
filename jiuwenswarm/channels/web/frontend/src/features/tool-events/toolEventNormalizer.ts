@@ -72,6 +72,8 @@ export interface NormalizedToolCall {
   arguments: Record<string, unknown>;
   description?: string;
   formatted_args?: string;
+  /** 后端下发的可读展示名（部分工具带），前端优先直接展示，省去本地推断。 */
+  display_name?: string;
   memberName?: string;
 }
 
@@ -106,6 +108,11 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
     typeof toolCallPayload.formatted_args === 'string'
       ? toolCallPayload.formatted_args
       : undefined;
+  const displayNameRaw =
+    (typeof toolCallPayload.display_name === 'string' && toolCallPayload.display_name) ||
+    (typeof toolCallPayload.displayName === 'string' && toolCallPayload.displayName) ||
+    '';
+  const display_name = displayNameRaw.trim() || undefined;
   const memberName = resolveMemberName(toolCallPayload, payload);
 
   return {
@@ -114,6 +121,7 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
     arguments: parseArguments(toolCallPayload.arguments),
     description,
     formatted_args,
+    display_name,
     memberName,
   };
 }

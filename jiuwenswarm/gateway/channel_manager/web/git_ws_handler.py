@@ -101,6 +101,8 @@ class GitDiffWebSocketHandler:
             await self._handle_diff_unwatch(ws, req_id, params)
         elif method == "project.git.discard_turn_changes":
             await self._handle_discard_turn_changes(ws, req_id, params)
+        elif method == "project.git.redo_turn_changes":
+            await self._handle_redo_turn_changes(ws, req_id, params)
         else:
             await self._channel.send_response(
                 ws, req_id, ok=False,
@@ -398,6 +400,7 @@ class GitDiffWebSocketHandler:
                 session_id=session_id_for_status or None,
                 include_files=True,
                 include_hunks=True,
+                hunk_paths=detail_files if source == "current" else None,
             )
             status_dict = status.to_dict(include_hunks=True)
             files_dict = self._extract_files(status_dict, source) or {}
@@ -620,6 +623,13 @@ class GitDiffWebSocketHandler:
         #   会让失败文件失去重试所需的日志。有错误时返回 partial 并保留日志。
         # 注意 3(P1 修复):显式传入 proj.project_dir,与 restore_session_files 一致,
         #   确保扫描到项目目录下的 session-specific file_ops。
+        # 注意 4:使用 soft=True 保留 file_ops 条目(打 discarded_out 标记)而非物理
+        #   删除,使 redo_turn_changes 可通过去标记恢复条目可见性。显示层
+        #   (_read_agent_history include_rewound=False)自动隐藏标记条目,
+        #   last_turn diff 行为与 hard 截断一致。
+        #   使用 discarded=True 打 ``discarded_out`` 而非 ``rewound_out``:与
+        #   conversation rewind 的标记区分后,redo 只恢复 discard 标记,
+        #   不会误暴露 rewind 软隐藏的"未来"条目。
         restore_errors = restore_result.get("errors", []) or []
         file_ops_truncated = False
         discarded_change_set_id: str | None = None
@@ -635,6 +645,8 @@ class GitDiffWebSocketHandler:
             await asyncio.to_thread(
                 diff_service.truncate_file_ops_by_timestamp,
                 session_id, cut_timestamp,
+                soft=True,
+                discarded=True,
                 project_dir=proj.project_dir,
                 extra_history_roots=extra_history_roots,
             )
@@ -674,6 +686,224 @@ class GitDiffWebSocketHandler:
                 if is_partial else None
             ),
             code="PARTIAL_RESTORE_FAILED" if is_partial else None,
+        )
+
+    async def _handle_redo_turn_changes(
+        self, ws: Any, req_id: str, params: dict[str, Any],
+    ) -> None:
+        """重新应用本轮被撤销的代码修改(与 ``discard_turn_changes`` 对称).
+
+        将当前会话最后一轮被 ``discard_turn_changes`` 撤销的文件变更重新
+        应用到工作区,恢复 file_ops 日志条目的可见性,并清除该轮的
+        discarded 状态。
+
+        前置条件:
+          - project_id 指向 code 模式的 Git 项目
+          - session_id 非空
+          - 会话非忙碌(agent 未在执行)
+          - 最后一轮已被 discard(status == "discarded")
+        """
+        project_id = str(params.get("project_id") or "").strip()
+        proj, err, code = self._resolve_git_project(project_id, cache_bust=True)
+        if proj is None:
+            await self._channel.send_response(ws, req_id, ok=False, error=err, code=code)
+            return
+
+        session_id = str(params.get("session_id") or "").strip()
+        if not session_id:
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error="session_id is required", code="BAD_REQUEST",
+            )
+            return
+
+        # 校验 session 与 project 的绑定关系(与 discard 对称)
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+        try:
+            session_meta = await asyncio.to_thread(
+                get_session_metadata, session_id,
+                cache_bust=True, enable_writeback=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[GitWS] redo_turn_changes: failed to read session metadata "
+                "(session=%s): %s", session_id, exc,
+            )
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error=f"failed to read session metadata: {exc}",
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        session_project_id = str(session_meta.get("project_id") or "").strip()
+        if not session_project_id:
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error="session has no project_id binding; cannot verify project ownership",
+                code="SESSION_NOT_BOUND",
+            )
+            return
+        if session_project_id != project_id:
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error=(
+                    f"session_id does not belong to project_id: "
+                    f"expected {project_id}, got {session_project_id}"
+                ),
+                code="PROJECT_SESSION_MISMATCH",
+            )
+            return
+
+        # 校验会话非忙碌
+        if self._channel.is_session_busy(session_id):
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error="session is busy; stop the current run before redoing changes",
+                code="SESSION_BUSY",
+            )
+            return
+
+        # 获取最后一轮 turn_index 和 timestamp
+        from jiuwenswarm.agents.harness.common.session_ops_service import (
+            get_last_turn_info,
+        )
+        last_turn = await asyncio.to_thread(
+            get_last_turn_info, session_id=session_id,
+        )
+        turn_index = last_turn["turn_index"]
+
+        if turn_index <= 0:
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error="no turn to redo: session has no user messages",
+                code="NO_TURN_TO_REDO",
+            )
+            return
+
+        # 校验最后一轮已被 discard:只有已撤销的轮次才能 redo
+        from jiuwenswarm.server.utils.diff_service import get_diff_service
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            get_session_extra_history_roots,
+        )
+        extra_history_roots = get_session_extra_history_roots(session_id)
+        diff_service = get_diff_service()
+        target_turn = await asyncio.to_thread(
+            diff_service.get_turn_diff,
+            session_id, turn_index=turn_index,
+            project_dir=proj.project_dir,
+            extra_history_roots=extra_history_roots,
+        )
+        turn_status = str((target_turn or {}).get("status") or "")
+        if turn_status != "discarded":
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error=(
+                    f"last turn (index={turn_index}) is not discarded "
+                    f"(status={turn_status or 'unknown'}); nothing to redo"
+                ),
+                code="NOTHING_TO_REDO",
+            )
+            return
+
+        # 重新应用被撤销的文件修改(写回 new_content)
+        from jiuwenswarm.agents.harness.common.session_ops_service import (
+            redo_session_files,
+        )
+        try:
+            redo_result = await asyncio.to_thread(
+                redo_session_files,
+                session_id=session_id,
+                turn_index=turn_index,
+                project_dir=proj.project_dir,
+                extra_history_roots=extra_history_roots,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[GitWS] redo_turn_changes: redo failed "
+                "(session=%s project=%s): %s",
+                session_id, project_id, exc,
+            )
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error=f"failed to redo session files: {exc}",
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        # 清除 discarded 状态 + 恢复 file_ops 条目可见性(去 discarded_out 标记)
+        # 与 discard 对称:后者 mark_turn_discarded + truncate(soft=True, discarded=True),
+        # 这里 unmark_turn_discarded(含 restore_rewound_entries(discarded=True))
+        redo_errors = redo_result.get("errors", []) or []
+        redone_files = redo_result.get("redone_files", []) or []
+        deleted_files = redo_result.get("deleted_files", []) or []
+
+        # 空 redo 防护:turn 状态是 discarded 但没有找到任何可恢复的文件条目
+        # (file_ops 缺失/损坏/没被打 discarded_out 标记)。若继续 unmark 会把
+        # 状态改回 completed,用户看到"成功"但实际没有恢复任何文件,且 discarded
+        # 状态丢失无法重试。这里直接返回失败,保留 discarded 状态供排查/重试。
+        if not redo_errors and not redone_files and not deleted_files:
+            logger.warning(
+                "[GitWS] redo_turn_changes: no redoable files found "
+                "(session=%s turn=%s project=%s); discarded_out entries missing",
+                session_id, turn_index, project_id,
+            )
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error=(
+                    "no redoable files found: file_ops for this discarded turn "
+                    "is missing or has no discarded_out entries; "
+                    "discarded status preserved"
+                ),
+                code="REDO_HISTORY_MISSING",
+                payload={
+                    "session_id": session_id,
+                    "turn_index": turn_index,
+                    "redone_files": [],
+                    "deleted_files": [],
+                    "errors": [],
+                },
+            )
+            return
+
+        restored_change_set_id: str | None = None
+        if not redo_errors:
+            restored_change_set_id = await asyncio.to_thread(
+                diff_service.unmark_turn_discarded,
+                session_id, turn_index,
+                project_dir=proj.project_dir,
+                extra_history_roots=extra_history_roots,
+            )
+
+        # 唤醒 git watcher 重算
+        try:
+            self._registry.mark_dirty(project_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[GitWS] mark_dirty failed after redo_turn_changes "
+                "(project=%s): %s", project_id, exc,
+            )
+
+        is_partial = bool(redo_errors)
+        await self._channel.send_response(
+            ws, req_id, ok=not is_partial,
+            payload={
+                "session_id": session_id,
+                "turn_index": turn_index,
+                "change_set_id": restored_change_set_id,
+                "redone_files": redone_files,
+                "deleted_files": deleted_files,
+                "errors": redo_errors,
+                "partial": is_partial,
+            },
+            error=(
+                f"partial failure: {len(redo_errors)} file(s) failed to redo; "
+                "discarded status not cleared, retryable"
+                if is_partial else None
+            ),
+            code="PARTIAL_REDO_FAILED" if is_partial else None,
         )
 
     @staticmethod

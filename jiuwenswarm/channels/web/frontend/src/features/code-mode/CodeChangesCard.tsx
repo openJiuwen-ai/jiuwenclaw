@@ -14,6 +14,7 @@ export function CodeChangesCard({ diff, refreshing = false, onRefresh, onReview 
   const files = Object.values(diff.files);
   const visibleFiles = expanded ? files : files.slice(0, 3);
   const reviewTarget: CodeReviewTarget = {
+    source: 'last_turn',
     changeSetId: diff.change_set_id,
     turnIndex: diff.turn_index,
   };

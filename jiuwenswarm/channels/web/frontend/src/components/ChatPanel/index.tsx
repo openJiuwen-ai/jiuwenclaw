@@ -55,6 +55,12 @@ interface ChatPanelProps {
     media_items?: Record<string, unknown>[];
     files?: Record<string, unknown>;
   }>;
+  onPersistDocuments: (content: string, mediaItems: MediaItem[]) => Promise<{
+    content?: string;
+    query?: string;
+    media_items?: Record<string, unknown>[];
+    files?: Record<string, unknown>;
+  }>;
   onInterrupt: (newInput?: string) => void;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
@@ -88,20 +94,6 @@ interface ChatPanelProps {
   onClearGoal?: (sessionId: string) => void;
   /** 目标 active 但当前无处理中任务时，消息入队后主动排空一次，见 InputArea.tsx 对应调用点 */
   onDrainTaskQueueIfIdle?: (sessionId: string) => void;
-}
-
-function ThinkingIndicator() {
-  return (
-    <div className="flex justify-start animate-rise">
-      <div className="chat-bubble assistant chat-reading-indicator">
-        <div className="chat-reading-indicator__dots">
-          <span />
-          <span />
-          <span />
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }) {
@@ -660,6 +652,7 @@ function scrollToBottom(el: HTMLDivElement): void {
 export function ChatPanel({
   onSendMessage,
   onPersistMedia,
+  onPersistDocuments,
   onInterrupt,
   onCancel,
   onSwitchMode,
@@ -1098,8 +1091,6 @@ export function ChatPanel({
                   <SubtaskProgress />
                   {/* 内联审批卡片（演进审批 & 权限审批共用） */}
                   <InlineQuestionCard onSubmit={onUserAnswer} />
-                  {/* 思考中指示器 */}
-                  {isThinking && <ThinkingIndicator />}
                   <ContextCompressionLines
                     runtime={contextCompressionRuntime}
                     summary={contextCompressionSummary}
@@ -1125,6 +1116,7 @@ export function ChatPanel({
                 <InputArea
                   onSubmit={handleSendMessage}
                   onPersistMedia={onPersistMedia}
+                  onPersistDocuments={onPersistDocuments}
                   onInterrupt={onInterrupt}
                   onCancel={onCancel}
                   onSwitchMode={onSwitchMode}
@@ -1165,6 +1157,7 @@ export function ChatPanel({
           <InputArea
             onSubmit={handleSendMessage}
             onPersistMedia={onPersistMedia}
+            onPersistDocuments={onPersistDocuments}
             onInterrupt={onInterrupt}
             onCancel={onCancel}
             onSwitchMode={onSwitchMode}

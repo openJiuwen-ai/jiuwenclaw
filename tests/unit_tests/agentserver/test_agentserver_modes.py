@@ -271,6 +271,27 @@ def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
     assert inputs["trusted_dirs"] == ["/tmp/project"]
 
 
+def test_build_inputs_propagates_user_interaction_capability(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-non-interactive",
+        channel_id="tui",
+        session_id="tui_session",
+        params={
+            "query": "hello",
+            "supports_user_interaction": False,
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert inputs["supports_user_interaction"] is False
+
+
 def test_build_inputs_does_not_map_team_plan_approval_answers_to_interactive_input(monkeypatch):
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
@@ -1371,6 +1392,38 @@ def test_deep_adapter_registers_ask_user_rail_when_entering_fast_mode(monkeypatc
 
     assert ask_user_rail in adapter._instance.registered
     assert adapter._ask_user_rail is ask_user_rail
+
+
+def test_deep_adapter_disables_and_restores_ask_user_for_request_capability(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    class FakeInstance:
+        def __init__(self):
+            self.registered = []
+            self.unregistered = []
+
+        async def register_rail(self, rail):
+            self.registered.append(rail)
+
+        async def unregister_rail(self, rail):
+            self.unregistered.append(rail)
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = FakeInstance()
+    existing_rail = object()
+    restored_rail = object()
+    adapter._ask_user_rail = existing_rail
+    monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: restored_rail)
+
+    asyncio.run(adapter._set_user_interaction_enabled(False))
+
+    assert adapter._instance.unregistered == [existing_rail]
+    assert adapter._ask_user_rail is None
+
+    asyncio.run(adapter._set_user_interaction_enabled(True))
+
+    assert adapter._instance.registered == [restored_rail]
+    assert adapter._ask_user_rail is restored_rail
 
 
 def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch, tmp_path):
