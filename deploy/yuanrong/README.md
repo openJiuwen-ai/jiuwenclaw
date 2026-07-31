@@ -209,6 +209,22 @@ vim .env.custom
 - **部署顺序**：同时部署时，jiuwenswarm 先于 gateway 部署；卸载时，gateway 先于 jiuwenswarm 卸载
 - **down jiuwenswarm**：仅删除 yr master 上注册的函数元信息，不卸载 jiuwenswarm pip 包、不停止 openyuanrong 集群
 
+## SSH 主机密钥校验（known_hosts）
+
+Gateway 到 YuanRong 前端 2222 端口的南向 SSH relay，默认尝试使用 `gateway.agentos.ssh.known_hosts_path`（留空时回退到 `client_keys_dir/known_hosts`，即 `/root/.ssh/known_hosts`）进行 SSH 主机密钥校验，防御中间人攻击（MITM）。当 `known_hosts` 文件**不存在、为空或损坏不可读**时，连接不会因此失败，而是退回**不校验主机密钥**继续建连
+
+### 推荐预置步骤
+
+在受控跳板机上一次性完成（前端主机密钥轮换时需重新执行）：
+
+```
+# 1. 取得前端 2222 端口的主机公钥
+ssh-keyscan -p 2222 <MASTER_NODE_IP> >> /root/.ssh/known_hosts
+
+# 2. 人工核对指纹与部署记录一致（重要，防止首次即被劫持）
+ssh-keygen -F "[<MASTER_NODE_IP>]:2222" -l
+```
+
 ## Gateway 实例配置
 
 通过 `.env.custom` 中的 `JIUWENSWARM_INSTANCE_NAME` 可配置 gateway 实例名：
