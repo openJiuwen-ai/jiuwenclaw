@@ -1597,6 +1597,29 @@ async def _run(
     message_handler.set_channel_manager(channel_manager)
     updater_service = UpdaterService()
 
+    async def _sync_agent_prewarm_channels() -> None:
+        try:
+            env = e2a_from_agent_fields(
+                request_id=f"agent-prewarm-sync-{uuid_module.uuid4().hex[:8]}",
+                channel_id="",
+                req_method=ReqMethod.AGENT_PREWARM_SYNC,
+                params={
+                    "enabled_channels": sorted(set(channel_manager.enabled_channels)),
+                },
+            )
+            resp = await client.send_request(env)
+            if not getattr(resp, "ok", False):
+                raise RuntimeError(
+                    f"agent.prewarm.sync rejected: {getattr(resp, 'payload', None)}"
+                )
+        except Exception as exc:  # noqa: BLE001 - prewarm never blocks Gateway config
+            logger.warning("[App] agent.prewarm.sync failed (non-fatal): %s", exc)
+
+    async def _periodic_agent_prewarm_sync() -> None:
+        while True:
+            await asyncio.sleep(60)
+            await _sync_agent_prewarm_channels()
+
     async def _on_config_saved(
             updated_env_keys: set[str] | None = None,
             *,
@@ -1654,6 +1677,11 @@ async def _run(
                     logger.warning("[App] agent.reload_config validation error (non-fatal): %s", err_str)
                     return False
                 raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
+
+            asyncio.create_task(
+                _sync_agent_prewarm_channels(),
+                name="agent-prewarm-sync-after-config",
+            )
 
             if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
                 restart_env = e2a_from_agent_fields(
@@ -2482,8 +2510,21 @@ async def _run(
             else:
                 logger.info("[App] channels.ssh missing or invalid, SshChannel disabled")
 
+        asyncio.create_task(
+            _sync_agent_prewarm_channels(),
+            name="agent-prewarm-sync-after-channel-change",
+        )
+
     channel_manager.set_config_callback(_apply_channel_config)
     await channel_manager.set_config(initial_channels_conf)
+    asyncio.create_task(
+        _sync_agent_prewarm_channels(),
+        name="agent-prewarm-sync-after-startup",
+    )
+    prewarm_sync_task = asyncio.create_task(
+        _periodic_agent_prewarm_sync(),
+        name="agent-prewarm-periodic-sync",
+    )
 
     await channel_manager.start_dispatch()
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
@@ -2528,6 +2569,11 @@ async def _run(
     except asyncio.CancelledError:
         pass
     finally:
+        prewarm_sync_task.cancel()
+        try:
+            await prewarm_sync_task
+        except asyncio.CancelledError:
+            pass
         if a2a_task is not None:
             a2a_task.cancel()
             try:

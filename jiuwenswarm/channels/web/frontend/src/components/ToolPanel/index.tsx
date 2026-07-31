@@ -281,7 +281,12 @@ export function ToolPanel({
   }, [isConnected, setMemoryUsage]);
 
   useEffect(() => {
-    if (mode !== 'team' || !isConnected || !sessionId?.startsWith('sess_')) {
+    if (
+      mode !== 'team'
+      || !isConnected
+      || !sessionId
+      || !(sessionId.startsWith('sess_') || sessionId.startsWith('web_'))
+    ) {
       if (sessionId) setTeamHistoryMessages(sessionId, []);
       hydratedTeamHistorySessionRef.current = null;
       loadingTeamHistorySessionRef.current = null;

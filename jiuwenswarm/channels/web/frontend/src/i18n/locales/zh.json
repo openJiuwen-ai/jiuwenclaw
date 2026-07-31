@@ -467,7 +467,7 @@
     "restore": "恢复会话",
     "restoreDisabledNotConnected": "连接断开，无法恢复会话",
     "restoreDisabledProcessing": "助手处理中，请结束当前任务后再恢复会话",
-    "restoreDisabledUnsupported": "仅支持恢复 web 前端会话（sess_）",
+    "restoreDisabledUnsupported": "仅支持恢复 Web 前端会话（sess_ / web_）",
     "restoreEmpty": "该会话没有可恢复的消息（为空或均被过滤）。仍可在此继续对话。",
     "delete": "删除会话",
     "teamLabel": "团队：{{team}}",

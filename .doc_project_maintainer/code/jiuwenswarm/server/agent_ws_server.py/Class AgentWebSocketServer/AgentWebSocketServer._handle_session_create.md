@@ -24,14 +24,14 @@ health:
   observability: partial
   performance_risk: medium
 audit:
-  status: agent_audited
+  status: audit_expired
   auditor: codex
   audited_at: 2026-07-14T11:39:39Z
   audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
   audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
   audited_symbol_hash: sha256:33487351f0a252dd739869feacd05acef75371d18829a892b7f4d27be460572e
   confidence: confirmed
-  expired_reason: null
+  expired_reason: "Implementation changed on 2026-07-31 for AgentServer-owned IDs, create_token idempotency, project-first validation, and warm-pool claims; no independent symbol health re-audit was performed."
 issues:
   - id: ISSUE-001
     dimension: boundary_safety
@@ -67,7 +67,7 @@ issues:
 
 ## Actual Role
 
-The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
+Validates project/work-mode binding, rejects explicit new IDs, claims an AgentServer-owned warm or warming session, writes metadata, and returns prewarm status. The linked audit details describe the previous implementation and remain historical until re-audited.
 
 ## Audit Details
 

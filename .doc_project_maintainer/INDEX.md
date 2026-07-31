@@ -32,6 +32,12 @@ Status: partial. A 2026-07-15 semantic-hash scan at `10afedf2` found 0 expired a
 - [AgentServer Plan Mode Exit](project/flows/agentserver-plan-mode-exit.md)
 - [AgentServer Scheduled Auto-Harness](project/flows/agentserver-schedule-auto-harness.md)
 - [AgentServer History Stream](project/flows/agentserver-history-stream.md)
+- [Session Prewarm And Allocation](project/flows/session-prewarm-allocation.md)
+
+## Decisions And Recent Changes
+
+- [ADR-0001](decisions/ADR-0001-agentserver-owned-prewarmed-sessions.md): AgentServer owns prewarmed session identity.
+- [CHG-20260731-001](changes/records/CHG-20260731-001-session-prewarm-allocation.md): session allocation and DeepAgent prewarming.
 
 ## Priority Code Symbols
 

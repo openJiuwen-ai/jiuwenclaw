@@ -35,7 +35,9 @@ class FakeAgentManager:
         self.session_id = session_id
         self.client_capabilities = client_capabilities or {}
         self.initialize_calls = []
-        self.create_session_calls = []
+        self.claim_session_calls = []
+        self.activated_sessions = []
+        self.released_sessions = []
 
     async def initialize(self, channel_id="", extra_config=None):
         self.initialize_calls.append(
@@ -43,9 +45,22 @@ class FakeAgentManager:
         )
         return self.capabilities
 
-    async def create_session(self, channel_id="", session_id=None):
-        self.create_session_calls.append({"channel_id": channel_id, "session_id": session_id})
-        return session_id or self.session_id
+    async def claim_prewarmed_session(self, **kwargs):
+        self.claim_session_calls.append(kwargs)
+        eligible = bool(kwargs.get("prewarm_eligible")) and not bool(
+            kwargs.get("is_swarm")
+        )
+        return types.SimpleNamespace(
+            session_id=self.session_id,
+            prewarm_hit=eligible,
+            prewarm_status="ready" if eligible else "bypassed",
+        )
+
+    def activate_session_prewarm(self, session_id):
+        self.activated_sessions.append(session_id)
+
+    async def release_session_prewarm_claim(self, session_id):
+        self.released_sessions.append(session_id)
 
     def get_client_capabilities(self, channel_id=""):
         return dict(self.client_capabilities)
@@ -768,12 +783,14 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
         request_id="req-session-create",
         channel_id="acp",
         req_method=ReqMethod.SESSION_CREATE,
-        params={},
+        params={"create_token": "create-acp-001"},
     )
 
     await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
 
-    assert fake_manager.create_session_calls == [{"channel_id": "acp", "session_id": None}]
+    assert len(fake_manager.claim_session_calls) == 1
+    assert fake_manager.claim_session_calls[0]["channel_id"] == "acp"
+    assert fake_manager.claim_session_calls[0]["create_token"] == "create-acp-001"
     metadata = json.loads((sessions_root / "acp_session_001" / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["mode"] == "agent"
     assert fake_ws.sent == [
@@ -785,6 +802,8 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "prewarm_hit": True,
+                "prewarm_status": "ready",
             },
             "ok": True,
         }
@@ -792,7 +811,7 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_handle_session_create_returns_explicit_session_id(monkeypatch, tmp_path):
+async def test_handle_session_create_rejects_explicit_session_id(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="unused-default")
     server.set_agent_manager_for_test(fake_manager)
@@ -810,25 +829,25 @@ async def test_handle_session_create_returns_explicit_session_id(monkeypatch, tm
         request_id="req-session-create-explicit",
         channel_id="acp",
         req_method=ReqMethod.SESSION_CREATE,
-        params={"session_id": "sess_explicit_001"},
+        params={
+            "session_id": "sess_explicit_001",
+            "create_token": "create-explicit-001",
+        },
     )
 
     await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
 
-    assert fake_manager.create_session_calls == [
-        {"channel_id": "acp", "session_id": "sess_explicit_001"}
-    ]
+    assert fake_manager.claim_session_calls == []
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create-explicit",
             "payload": {
-                "sessionId": "sess_explicit_001",
-                "session_id": "sess_explicit_001",
-                "projectId": "default",
-                "projectDir": "",
-                "workMode": "work",
+                "error": (
+                    "session.create no longer accepts session_id; "
+                    "use session.switch to restore"
+                ),
             },
-            "ok": True,
+            "ok": False,
         }
     ]
 
@@ -881,6 +900,7 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
             "project_id": "proj_code",
             "work_mode": "work",
             "_work_mode_explicit": False,
+            "create_token": "create-code-project",
         },
     )
 
@@ -895,6 +915,8 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
                 "projectId": "proj_code",
                 "projectDir": code_project.project_dir,
                 "workMode": "code",
+                "prewarm_hit": True,
+                "prewarm_status": "ready",
             },
             "ok": True,
         }
@@ -905,7 +927,7 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
 async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path):
     """session.create 在 team prepare 后回包；可选 KVC 异步，避免拖慢前端超时窗口。"""
     server = AgentWebSocketServerHarness()
-    fake_manager = FakeAgentManager(session_id="unused-default")
+    fake_manager = FakeAgentManager(session_id="sess_async_kvc_001")
     server.set_agent_manager_for_test(fake_manager)
     fake_ws = FakeWebSocket()
     prepare_calls = []
@@ -935,7 +957,7 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
         request_id="req-session-create-async-kvc",
         channel_id="web",
         req_method=ReqMethod.SESSION_CREATE,
-        params={"session_id": "sess_async_kvc_001", "mode": "agent"},
+        params={"mode": "agent", "create_token": "create-async-kvc"},
     )
 
     create_task = asyncio.create_task(
@@ -954,6 +976,8 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "prewarm_hit": True,
+                "prewarm_status": "ready",
             },
             "ok": True,
         }
@@ -970,7 +994,7 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
 async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_path):
     """team prepare 必须在 create 成功回包前完成，避免与首条 chat.send 竞态。"""
     server = AgentWebSocketServerHarness()
-    fake_manager = FakeAgentManager(session_id="unused-default")
+    fake_manager = FakeAgentManager(session_id="team_sess_001")
     fake_team_manager = FakeTeamManager()
     server.set_agent_manager_for_test(fake_manager)
     fake_ws = FakeWebSocket()
@@ -1001,7 +1025,7 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
         request_id="req-session-create-team",
         channel_id="web",
         req_method=ReqMethod.SESSION_CREATE,
-        params={"mode": "team", "session_id": "team_sess_001"},
+        params={"mode": "team", "create_token": "create-team-001"},
     )
 
     create_task = asyncio.create_task(
@@ -1021,13 +1045,15 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "prewarm_hit": False,
+                "prewarm_status": "bypassed",
             },
             "ok": True,
         }
     ]
-    assert fake_manager.create_session_calls == [
-        {"channel_id": "web", "session_id": "team_sess_001"}
-    ]
+    assert len(fake_manager.claim_session_calls) == 1
+    assert fake_manager.claim_session_calls[0]["channel_id"] == "web"
+    assert fake_manager.claim_session_calls[0]["prewarm_eligible"] is False
     assert fake_team_manager.prepare_session_switch_calls == [
         {"session_id": "team_sess_001", "reason": "session.create switch: "}
     ]

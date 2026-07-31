@@ -559,6 +559,42 @@ class CronSchedulerService:
             )
         return "__cron__", f"cron_{ts}_{job.id}"
 
+    async def _allocate_single_agent_session(
+        self,
+        job: CronJob,
+        *,
+        mode: str,
+        project_dir: str,
+        run_id: str,
+    ) -> str:
+        env = e2a_from_agent_fields(
+            request_id=f"cron-session-create-{run_id}",
+            channel_id="__cron__",
+            req_method=ReqMethod.SESSION_CREATE,
+            params={
+                "create_token": f"cron:{run_id}",
+                "mode": mode,
+                "is_swarm": False,
+                "project_id": job.project_id or "",
+                "project_dir": project_dir,
+                "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
+                "model_name": job.model_name or None,
+                "cron_id": job.id,
+            },
+            is_stream=False,
+            timestamp=self._now_fn(),
+        )
+        response = await self._agent_client.send_request(env)
+        payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
+        if not response.ok:
+            raise RuntimeError(str(payload.get("error") or "cron session.create failed"))
+        session_id = str(
+            payload.get("session_id") or payload.get("sessionId") or ""
+        ).strip()
+        if not session_id:
+            raise RuntimeError("cron session.create returned empty session_id")
+        return session_id
+
     def _schedule_event(self, at_dt: datetime, kind: str, job_id: str, run_id: str) -> None:
         at_ts = float(at_dt.timestamp())
         self._seq += 1
@@ -903,6 +939,7 @@ class CronSchedulerService:
             mode = CRON_JOB_DEFAULT_MODE
             channel_id = ""
             exec_session_id = ""
+            envelope = None
             try:
                 mode = str(job.mode or CRON_JOB_DEFAULT_MODE).strip() or CRON_JOB_DEFAULT_MODE
                 if state.exec_channel_id and state.exec_session_id:
@@ -921,6 +958,15 @@ class CronSchedulerService:
                         "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
                     )
                     exec_project_dir = ""
+                if not is_team_cron_mode(mode):
+                    exec_session_id = await self._allocate_single_agent_session(
+                        job,
+                        mode=mode,
+                        project_dir=exec_project_dir,
+                        run_id=run_id,
+                    )
+                    state.exec_channel_id = "__cron__"
+                    state.exec_session_id = exec_session_id
                 cron_meta = {
                     "job_id": job.id,
                     "job_name": job.name,

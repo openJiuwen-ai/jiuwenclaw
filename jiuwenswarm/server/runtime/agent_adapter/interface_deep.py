@@ -5367,8 +5367,40 @@ class JiuWenSwarmDeepAdapter:
         project_dir: str | None = None
         supports_user_interaction: bool = True
 
+    async def configure_session_runtime(
+        self,
+        *,
+        session_id: str,
+        channel_id: str,
+        mode: str,
+        project_dir: str | None = None,
+    ) -> None:
+        """Apply session-stable runtime state without request-bound capabilities."""
+        await self._apply_runtime_config(
+            self._RuntimeConfig(
+                session_id=session_id,
+                mode=mode,
+                request_id=None,
+                channel_id=channel_id,
+                request_metadata=None,
+                project_dir=project_dir,
+                cwd=project_dir,
+                workspace=project_dir,
+                supports_user_interaction=True,
+            ),
+            bind_request=False,
+        )
+
     async def _update_runtime_config(self, runtime_config: "_RuntimeConfig") -> None:
-        """Register per-request tools for current agent execution."""
+        """Bind request-scoped runtime state immediately before real input."""
+        await self._apply_runtime_config(runtime_config, bind_request=True)
+
+    async def _apply_runtime_config(
+        self,
+        runtime_config: "_RuntimeConfig",
+        *,
+        bind_request: bool,
+    ) -> None:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
@@ -5392,7 +5424,9 @@ class JiuWenSwarmDeepAdapter:
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
             self._runtime_prompt_rail.set_channel(resolved_channel)
-            self._runtime_prompt_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+            self._runtime_prompt_rail.set_trusted_dirs(
+                runtime_config.trusted_dirs if bind_request else None
+            )
             self._runtime_prompt_rail.set_runtime_paths(
                 cwd=task_cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
@@ -5406,7 +5440,7 @@ class JiuWenSwarmDeepAdapter:
         # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
         permission_rail = getattr(self, "_permission_rail", None)
-        if permission_rail is not None:
+        if permission_rail is not None and bind_request:
             try:
                 permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
             except Exception:
@@ -5438,18 +5472,19 @@ class JiuWenSwarmDeepAdapter:
             runtime_config.request_id,
             channel_id=runtime_config.channel_id,
         )
-        self._refresh_acp_runtime_tools(
-            runtime_config.session_id,
-            runtime_config.request_id,
-            runtime_config.channel_id,
-            runtime_config.request_metadata,
-        )
+        if bind_request:
+            self._refresh_acp_runtime_tools(
+                runtime_config.session_id,
+                runtime_config.request_id,
+                runtime_config.channel_id,
+                runtime_config.request_metadata,
+            )
         self._update_prompt_for_mode(runtime_config.mode, resolved_language)
 
         # 处理两种场景的记忆工具移除：
         # 1. 群聊数字分身模式（group_digital_avatar=True + avatar_mode=True）：移除写入工具，但保留读取工具
         # 2. 记忆完全禁用（enable_memory=False + group_digital_avatar=True + avatar_mode=True）：移除所有记忆工具（读取和写入）
-        perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+        perm_ctx = TOOL_PERMISSION_CONTEXT.get() if bind_request else None
         if perm_ctx is not None:
             # 判断是否为群聊数字分身模式
             is_group_digital_avatar = perm_ctx.group_digital_avatar and perm_ctx.avatar_mode
@@ -5516,31 +5551,43 @@ class JiuWenSwarmDeepAdapter:
     async def start_interaction(self, session_id: str) -> None:
         """Bind a product Session and start this adapter's DeepAgent interaction loop.
 
-        Public entry for the facade/session-pool path. No-op when
-        ``create_instance`` has not produced an underlying agent yet. Failures
-        are logged and swallowed — same contract as the former inline start.
+        Public entry for the facade/session-pool path. A missing instance or
+        failed readiness check propagates so the warm pool cannot publish a
+        partially initialized slot.
         """
         if self._instance is None:
-            return
-        try:
-            from openjiuwen.core.session.agent import create_agent_session
+            raise RuntimeError("DeepAgent instance is not initialized")
+        from openjiuwen.core.session.agent import create_agent_session
 
-            session = create_agent_session(
-                session_id=session_id,
-                card=getattr(self._instance, "card", None),
-            )
-            await session.pre_run(inputs={})
-            await self._instance.start(session=session)
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] start completed: session_id=%s",
-                session_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] start failed: session_id=%s error=%s",
-                session_id,
-                exc,
-            )
+        session = create_agent_session(
+            session_id=session_id,
+            card=getattr(self._instance, "card", None),
+        )
+        await session.pre_run(inputs={})
+        await self._instance.start(session=session)
+        if getattr(self._instance, "_interaction_started", True) is not True:
+            raise RuntimeError(f"DeepAgent interaction did not become ready: {session_id}")
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] start completed: session_id=%s",
+            session_id,
+        )
+
+    async def prepare_session(
+        self,
+        *,
+        session_id: str,
+        channel_id: str,
+        mode: str,
+        project_dir: str | None = None,
+    ) -> None:
+        """Create a session child and apply stable runtime state without input."""
+        adapter = await self._get_or_create_session_adapter(session_id)
+        await adapter.configure_session_runtime(
+            session_id=session_id,
+            channel_id=channel_id,
+            mode=mode,
+            project_dir=project_dir,
+        )
 
     async def stop_interaction(self) -> None:
         """Stop this adapter's DeepAgent interaction loop if it was started."""

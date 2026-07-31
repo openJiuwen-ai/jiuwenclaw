@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import os
+import secrets
 import shutil
 import sys
 import time
@@ -37,7 +38,6 @@ from jiuwenswarm.common.config import (
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
-from jiuwenswarm.common.work_mode import DEFAULT_PROJECT_ID_CODE
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -1478,170 +1478,54 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         )
 
     async def _session_create(ws, req_id, params, session_id, user_id=None):
-        from jiuwenswarm.common.utils import get_agent_sessions_dir
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            get_session_metadata,
-            init_session_metadata,
-        )
-
         if not isinstance(params, dict):
             await channel.send_response(
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
             )
             return
-        target = str(params.get("session_id") or "").strip()
-        if not target:
-            await channel.send_response(
-                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
-            )
-            return
-        # TUI 前置归属解析(设计文档 §4.1.6):按 cwd/project_dir 固定 work_mode="code"
-        # 查找/创建 code 项目并绑定真实 project_id;无目录或解析失败归 default_code
-        resolved_project_id = ""
-        resolved_project_dir = ""
-        work_mode = "code"
-        try:
-            from jiuwenswarm.server.runtime.session.project_store import (
-                find_or_create_code_project_for_tui_params,
-            )
-            proj = find_or_create_code_project_for_tui_params(params)
-            if proj is not None:
-                resolved_project_id = proj.project_id
-                resolved_project_dir = proj.project_dir
-                work_mode = proj.work_mode or "code"
-        except Exception:  # noqa: BLE001
-            # 解析失败(冲突/权限等)不阻断会话创建,会话归 default_code
-            logger.warning(
-                "[TUI] session.create project pre-resolution failed: "
-                "session_id=%s project_dir=%r cwd=%r",
-                target,
-                params.get("project_dir") if isinstance(params, dict) else None,
-                params.get("cwd") if isinstance(params, dict) else None,
-                exc_info=True,
-            )
-        workspace_session_dir = get_agent_sessions_dir()
-        workspace_session_dir.mkdir(parents=True, exist_ok=True)
-        session_dir = workspace_session_dir / target
-        if session_dir.exists():
+        real_client = _resolve_agent_client(agent_client)
+        if real_client is None:
             await channel.send_response(
                 ws,
                 req_id,
                 ok=False,
-                error="session already exists",
-                code="ALREADY_EXISTS",
+                error="AgentServer is unavailable",
+                code="SERVICE_UNAVAILABLE",
             )
             return
-        session_dir.mkdir()
-        # 初始化元数据（与 web channel 对齐）；同步写入 channel_metadata，
-        # 避免 /clear 后立刻 /resume（current dir）因缺少路径而被过滤（Issue #2503）
-        channel_meta = build_tui_session_create_channel_metadata(
-            params, resolved_project_dir
-        )
-        # 预解析失败但请求仍带路径时，顶层 project_dir 也用请求路径，便于读侧回退
-        top_project_dir = resolved_project_dir or (
-            (channel_meta or {}).get("project_dir") or ""
-        )
-        init_session_metadata(
-            session_id=target,
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        create_params = dict(params)
+        create_params.pop("session_id", None)
+        create_params.setdefault("create_token", secrets.token_hex(16))
+        env = e2a_from_agent_fields(
+            request_id=req_id,
             channel_id="tui",
-            title=str(params.get("title") or "").strip(),
-            mode=params.get("mode", "code.normal"),
-            project_dir=top_project_dir,
-            project_id=resolved_project_id,
-            work_mode=work_mode,
-            channel_metadata=channel_meta,
+            req_method=ReqMethod.SESSION_CREATE,
+            params=create_params,
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=user_id or getattr(ws, "_gateway_user_id", None),
         )
-        # 触发 SessionStart hook
-        mh = bind.message_handler
-        if mh:
-            mh.trigger_session_start_hook(target, source="tui")
-        # TUI /new and /clear switch away from the previous product session
-        # through this local handler. Prefer the canonical AgentServer owner
-        # dispatch so Plan and Team follow the same lifecycle as Web.
-        previous_session_id = str(params.get("previous_session_id") or "").strip()
-        lifecycle_forwarded = False
-        real_client = (
-            agent_client.get("value")
-            if isinstance(agent_client, dict)
-            else agent_client
-        )
-        if real_client is not None:
-            try:
-                from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-                from jiuwenswarm.common.schema.message import ReqMethod
-
-                lifecycle_params = dict(params)
-                lifecycle_params["session_id"] = target
-                env = e2a_from_agent_fields(
-                    request_id=req_id,
-                    channel_id="tui",
-                    session_id=target,
-                    req_method=ReqMethod.SESSION_SWITCH,
-                    params=lifecycle_params,
-                    is_stream=False,
-                    timestamp=time.time(),
-                    user_id=user_id or getattr(ws, "_gateway_user_id", None),
-                )
-                response = await real_client.send_request(env)
-                lifecycle_forwarded = bool(response.ok)
-                if not response.ok:
-                    logger.warning(
-                        "[cli session.create] session.switch lifecycle forward rejected; "
-                        "falling back locally: target_session_id=%s previous_session_id=%s",
-                        target,
-                        previous_session_id,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "[cli session.create] session.switch lifecycle forward failed; "
-                    "falling back locally: target_session_id=%s error=%s",
-                    target,
-                    exc,
-                )
-
-        previous_session_changed = (
-            bool(previous_session_id)
-            and previous_session_id not in {"new", target}
-        )
-        if not lifecycle_forwarded and previous_session_changed:
-            from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
-                dispatch_offload_session_kv_cache,
-                is_kv_cache_affinity_enabled,
+        try:
+            response = await _send_tui_agent_request(
+                real_client, env, label="session.create"
             )
-
-            try:
-                affinity_enabled = is_kv_cache_affinity_enabled()
-            except Exception as exc:
-                affinity_enabled = False
-                logger.warning(
-                    "[cli session.create] affinity gate failed; KVC hook skipped: "
-                    "previous_session_id=%s error=%s",
-                    previous_session_id,
-                    exc,
-                )
-            if affinity_enabled:
-                try:
-                    previous_metadata = get_session_metadata(previous_session_id)
-                    previous_mode = str(previous_metadata.get("mode") or "").strip().lower()
-                    if previous_mode not in {"team", "team.plan", "code.team"}:
-                        dispatch_offload_session_kv_cache(
-                            session_id=previous_session_id,
-                            parent_session_id=previous_session_id,
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "[cli session.create] Plan KVC hook failed; continuing: "
-                        "previous_session_id=%s error=%s",
-                        previous_session_id,
-                        exc,
-                    )
-        # 响应带最终归属(设计文档 §4.1.6):未绑定真实项目时归 default_code
-        await channel.send_response(ws, req_id, ok=True, payload={
-            "session_id": target,
-            "project_id": resolved_project_id or DEFAULT_PROJECT_ID_CODE,
-            "project_dir": top_project_dir,
-            "work_mode": work_mode,
-        })
+        except Exception as exc:  # noqa: BLE001
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="SERVICE_UNAVAILABLE"
+            )
+            return
+        payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=bool(response.ok),
+            payload=payload if response.ok else None,
+            error=None if response.ok else str(payload.get("error") or "session.create failed"),
+            code=None if response.ok else str(payload.get("code") or "SESSION_CREATE_FAILED"),
+        )
 
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata

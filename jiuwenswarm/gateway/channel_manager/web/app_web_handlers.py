@@ -1537,6 +1537,40 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             name=f"{name}.clear_agent_config_cache",
         )
 
+    def _schedule_agent_prewarm_sync(name: str) -> None:
+        """Reconcile project-derived warm keys without delaying the Web RPC."""
+
+        async def _sync() -> None:
+            try:
+                from jiuwenswarm.common.e2a.gateway_normalize import (
+                    e2a_from_agent_fields,
+                )
+                from jiuwenswarm.common.schema.message import ReqMethod
+
+                real_client = _resolve(agent_client)
+                if real_client is None:
+                    return
+                cm = _resolve(channel_manager)
+                enabled_channels = list(getattr(cm, "enabled_channels", []) or [])
+                env = e2a_from_agent_fields(
+                    request_id=f"agent-prewarm-project-{uuid.uuid4().hex[:8]}",
+                    channel_id="web",
+                    req_method=ReqMethod.AGENT_PREWARM_SYNC,
+                    params={"enabled_channels": sorted(set(enabled_channels))},
+                    is_stream=False,
+                    timestamp=time.time(),
+                )
+                response = await real_client.send_request(env)
+                if not getattr(response, "ok", False):
+                    logger.warning(
+                        "[Project] agent.prewarm.sync rejected: %s",
+                        getattr(response, "payload", None),
+                    )
+            except Exception as exc:  # noqa: BLE001 - maintenance is non-blocking
+                logger.warning("[Project] agent.prewarm.sync failed: %s", exc)
+
+        asyncio.create_task(_sync(), name=f"{name}.agent_prewarm_sync")
+
     def _resolve_env_vars(value: Any) -> Any:
         """Recursively resolve environment variables in config values."""
         if isinstance(value, str):
@@ -2700,95 +2734,52 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST",
             )
             return
-        session_id_to_create = params.get("session_id")
-        if not isinstance(session_id_to_create, str) or not session_id_to_create.strip():
+        resolved_agent_client = _resolve(agent_client)
+        if resolved_agent_client is None:
             await channel.send_response(
-                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST",
+                ws,
+                req_id,
+                ok=False,
+                error="AgentServer is unavailable",
+                code="SERVICE_UNAVAILABLE",
             )
             return
-        session_id_to_create = session_id_to_create.strip()
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
 
-        # Step 1: 归一化 work_mode / project_id / project_dir 三元组
-        from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
-        binding = resolve_session_work_mode_params(params, channel_id=channel.channel_id)
-        if binding.error:
-            await channel.send_response(
-                ws, req_id, ok=False, error=binding.error, code=binding.code,
-            )
-            return
-
-        # Step 2: 校验 project_id / project_dir 绑定关系(存在性、路径一致性)
-        project_id, project_dir, p_err, p_code = project_store.resolve_session_project_binding(
-            binding.project_id, binding.project_dir
-        )
-        if p_err:
-            await channel.send_response(
-                ws, req_id, ok=False, error=p_err, code=p_code,
-            )
-            return
-
-        # Step 3: 确定最终 work_mode
-        # 对真实 project_id: 最终 work_mode 以 Project 记录为准;若请求显式传了
-        # work_mode 且与 Project 不一致 → BAD_REQUEST(设计文档 §4.1.6)
-        # 对默认项目: 使用 binding 归一化的 work_mode
-        # has_explicit_work_mode 由 resolve_session_work_mode_params 统一计算,
-        # 不再从 params 直接判定(避免 gateway 注入通道默认值后被误判为显式)
-        if not is_default_project_id(project_id):
-            proj = project_store.get_project_by_id(project_id, cache_bust=True)
-            if proj is not None:
-                project_work_mode = proj.work_mode or DEFAULT_WEB_WORK_MODE
-                if binding.has_explicit_work_mode and project_work_mode != binding.work_mode:
-                    await channel.send_response(
-                        ws, req_id, ok=False,
-                        error=f"work_mode mismatch: project is '{project_work_mode}' \
-                            but request specified '{binding.work_mode}'",
-                        code="BAD_REQUEST",
-                    )
-                    return
-                final_work_mode = project_work_mode
-            else:
-                # 竞态: project 已被其他进程删除/隐藏。
-                # 不创建指向不存在项目的会话,返回 NOT_FOUND 由调用方决定回退策略。
-                await channel.send_response(
-                    ws, req_id, ok=False,
-                    error=f"project not found: {project_id}",
-                    code="NOT_FOUND",
-                )
-                return
+        create_params = dict(params)
+        create_params.pop("session_id", None)
+        authenticated_user_id = str(user_id or "").strip()
+        if authenticated_user_id:
+            create_params["user_id"] = authenticated_user_id
         else:
-            final_work_mode = binding.work_mode
-
-        workspace_session_dir = get_agent_sessions_dir()
-        if not workspace_session_dir.exists():
-            workspace_session_dir.mkdir(parents=True)
-        session_dir = workspace_session_dir / session_id_to_create
-        if session_dir.exists():
+            create_params.pop("user_id", None)
+        create_params.setdefault("create_token", secrets.token_hex(16))
+        env = e2a_from_agent_fields(
+            request_id=req_id,
+            channel_id=channel.channel_id,
+            req_method=ReqMethod.SESSION_CREATE,
+            params=create_params,
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=authenticated_user_id or None,
+        )
+        try:
+            response = await resolved_agent_client.send_request(env)
+        except Exception as exc:  # noqa: BLE001
             await channel.send_response(
-                ws, req_id, ok=False, error="session already exists", code="ALREADY_EXISTS",
+                ws, req_id, ok=False, error=str(exc), code="SERVICE_UNAVAILABLE"
             )
             return
-        session_dir.mkdir()
-
-        # 初始化会话元数据
-        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
-        # User identity comes exclusively from the authenticated WebSocket handshake.
-        init_session_metadata(
-            session_id=session_id_to_create,
-            channel_id=params.get("channel_id", ""),
-            user_id=str(user_id or "").strip(),
-            title=params.get("title", ""),
-            mode=params.get("mode", "unknown"),
-            project_dir=project_dir,
-            project_id=project_id,
-            work_mode=final_work_mode,
+        payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=bool(response.ok),
+            payload=payload if response.ok else None,
+            error=None if response.ok else str(payload.get("error") or "session.create failed"),
+            code=None if response.ok else str(payload.get("code") or "SESSION_CREATE_FAILED"),
         )
-
-        await channel.send_response(ws, req_id, ok=True, payload={
-            "session_id": session_id_to_create,
-            "project_id": project_id,
-            "project_dir": project_dir,
-            "work_mode": final_work_mode,
-        })
 
     async def _session_rename(ws, req_id, params, session_id):
         """重命名会话标题(查询/设置/清除三种语义),复用 apply_session_rename。
@@ -3384,6 +3375,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     proj.project_id, proj.project_dir, exc,
                 )
         project_payload = _project_info_payload(proj)
+        _schedule_agent_prewarm_sync("project.create")
         await channel.send_response(ws, req_id, ok=True, payload={
             "project_id": proj.project_id,
             "project_dir": proj.project_dir,
@@ -3569,6 +3561,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if registry is not None:
             registry.cleanup_project(project_id)
         project_store.reindex_project_pin_orders()
+        _schedule_agent_prewarm_sync("project.remove")
         await channel.send_response(
             ws, req_id, ok=True, payload={
                 "project_id": project_id,
@@ -3645,6 +3638,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="project is not hidden", code="CONFLICT",
             )
             return
+        _schedule_agent_prewarm_sync("project.restore")
         await channel.send_response(
             ws, req_id, ok=True, payload={
                 "project_id": restored.project_id,

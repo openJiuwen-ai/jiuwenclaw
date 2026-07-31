@@ -1478,6 +1478,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.AGENT_RELOAD_CONFIG:
                 await self._handle_agent_reload_config(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.AGENT_PREWARM_SYNC:
+                await self._handle_agent_prewarm_sync(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.EXTENSIONS_LIST:
                 await self._handle_extensions_list(ws, request, send_lock)
                 return
@@ -2085,6 +2088,7 @@ class AgentWebSocketServer:
             request.metadata = dict(request.metadata or {})
             request.metadata["project_dir"] = project_dir
 
+        await self._agent_manager.wait_for_session_prewarm(request.session_id)
         agent = await self._agent_manager.get_agent(
             channel_id=channel_id,
             mode=agent_mode,
@@ -4543,7 +4547,10 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(e)},
+                payload={
+                    "error": str(e),
+                    "code": "BAD_REQUEST" if isinstance(e, ValueError) else "SESSION_CREATE_FAILED",
+                },
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
@@ -6969,6 +6976,35 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
+    async def _handle_agent_prewarm_sync(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Reconcile background prewarming for the Gateway's live channels."""
+        params = request.params if isinstance(request.params, dict) else {}
+        raw_channels = params.get("enabled_channels")
+        if not isinstance(raw_channels, list):
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "enabled_channels must be a list", "code": "BAD_REQUEST"},
+            )
+        else:
+            stats = await self._agent_manager.sync_prewarm_channels(
+                [str(channel) for channel in raw_channels],
+                config=params.get("config"),
+                env=params.get("env"),
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=stats,
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
     async def _handle_agent_reload_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
             params = request.params or {}
@@ -7380,10 +7416,10 @@ class AgentWebSocketServer:
             mode, _, canonical_mode = resolve_agent_request_mode(params.get("mode", "agent"))
             explicit_session_id = params.get("session_id")
             previous_session_id = str(params.get("previous_session_id") or "").strip()
-            session_id = await self._agent_manager.create_session(
-                channel_id=channel_id,
-                session_id=str(explicit_session_id).strip() if isinstance(explicit_session_id, str) else None,
-            )
+            if isinstance(explicit_session_id, str) and explicit_session_id.strip():
+                raise ValueError(
+                    "session.create no longer accepts session_id; use session.switch to restore"
+                )
             # Step 1: 归一化 work_mode / project_id / project_dir 三元组
             # (与 web _session_create 共用同一 helper，保持主路径/fallback 一致)
             from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
@@ -7482,9 +7518,54 @@ class AgentWebSocketServer:
             params["project_dir"] = project_dir
             params["work_mode"] = final_work_mode
 
+            is_swarm = bool(params.get("is_swarm")) or canonical_mode in {
+                "team",
+                "team.plan",
+                "code.team",
+            }
+            prewarm_eligible = (
+                not is_swarm
+                and canonical_mode in {"agent", "code", "code.normal"}
+            )
+            create_token = str(params.get("create_token") or "").strip()
+            if not create_token:
+                raise ValueError("create_token is required")
+            claim = await self._agent_manager.claim_prewarmed_session(
+                channel_id=channel_id,
+                project_id=project_id,
+                project_dir=project_dir,
+                work_mode=final_work_mode,
+                is_swarm=is_swarm,
+                prewarm_eligible=prewarm_eligible,
+                create_token=create_token,
+            )
+            session_id = claim.session_id
+
             # 会话目录已存在则拒绝,避免覆盖既有会话元数据(与 web 本地 handler 一致)
             session_dir = get_agent_sessions_dir() / session_id
-            if session_dir.exists():
+            if (session_dir / "metadata.json").is_file():
+                self._agent_manager.activate_session_prewarm(session_id)
+                if create_token:
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=True,
+                        payload={
+                            "sessionId": session_id,
+                            "session_id": session_id,
+                            "projectId": project_id,
+                            "projectDir": project_dir,
+                            "workMode": final_work_mode,
+                            "prewarm_hit": claim.prewarm_hit,
+                            "prewarm_status": claim.prewarm_status,
+                        },
+                    )
+                    wire = encode_agent_response_for_wire(
+                        resp, response_id=request.request_id
+                    )
+                    async with send_lock:
+                        await send_wire_payload(ws, wire)
+                    return
                 resp = AgentResponse(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -7507,7 +7588,9 @@ class AgentWebSocketServer:
                 project_dir=project_dir,
                 project_id=project_id,
                 work_mode=final_work_mode,
+                cron_id=str(params.get("cron_id") or "").strip(),
             )
+            self._agent_manager.activate_session_prewarm(session_id)
 
             # team prepare 必须在 ack 前完成，避免首条 chat.send 与分布式切换竞态；
             # 可选 KVC 信号放到回包后异步，避免拖慢 create RPC。
@@ -7537,6 +7620,8 @@ class AgentWebSocketServer:
                     "projectId": project_id,
                     "projectDir": project_dir,
                     "workMode": final_work_mode,
+                    "prewarm_hit": claim.prewarm_hit,
+                    "prewarm_status": claim.prewarm_status,
                 },
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -7564,6 +7649,9 @@ class AgentWebSocketServer:
 
         except Exception as e:
             logger.exception("[AgentServer] session.create failed: %s", e)
+            await self._agent_manager.release_session_prewarm_claim(
+                locals().get("session_id")
+            )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -7604,7 +7692,7 @@ class AgentWebSocketServer:
             if not source:
                 raise ValueError("source_session_id is required")
             if not target:
-                raise ValueError("target_session_id is required")
+                target = await self._agent_manager.create_session(channel_id=channel_id)
 
             # 1. Filesystem fork (copies history.json, writes metadata)
             result = fork_session(

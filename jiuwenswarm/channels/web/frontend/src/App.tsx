@@ -232,12 +232,6 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-function generateSessionId(): string {
-  const ts = Date.now().toString(16);
-  const rand = generateUuidV4().replaceAll('-', '').slice(0, 12);
-  return `sess_${ts}_${rand}`;
-}
-
 function downloadDataUrl(dataUrl: string, filename: string): void {
   const link = document.createElement('a');
   link.href = dataUrl;
@@ -1598,7 +1592,6 @@ function AppContent() {
       if (creatingSessionRef.current) return;
       creatingSessionRef.current = true;
       useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, true);
-      const newSid = generateSessionId();
       const newRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
       const runtimeSettings = {
         mode: newRuntime?.mode ?? mode,
@@ -1614,8 +1607,9 @@ function AppContent() {
       };
       try {
         const createParams: Record<string, unknown> = {
-          session_id: newSid,
+          create_token: generateUuidV4(),
           mode: runtimeSettings.mode,
+          is_swarm: runtimeSettings.mode === 'team',
           title: createConversationTitle(content).slice(0, 100),
           work_mode: workContext.work_mode,
         };
@@ -1625,7 +1619,7 @@ function AppContent() {
           createParams.previous_mode = previousSession.mode;
         }
         if (runtimeSettings.selectedModelName) {
-          createParams.model = runtimeSettings.selectedModelName;
+          createParams.model_name = runtimeSettings.selectedModelName;
         }
         if (workContext.project_id) {
           createParams.project_id = workContext.project_id;
@@ -1633,7 +1627,8 @@ function AppContent() {
         if (workContext.project_dir) {
           createParams.project_dir = workContext.project_dir;
         }
-        const created = await createConversationSession(request, createParams, newSid);
+        const created = await createConversationSession(request, createParams);
+        const newSid = created.session_id;
         const createdSession = registerCreatedConversation(
           created.session_id,
           runtimeSettings,

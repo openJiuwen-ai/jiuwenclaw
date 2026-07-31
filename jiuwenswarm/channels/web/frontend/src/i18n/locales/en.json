@@ -466,7 +466,7 @@
     "restore": "Restore session",
     "restoreDisabledNotConnected": "Disconnected: cannot restore session",
     "restoreDisabledProcessing": "Assistant is busy: wait until idle to restore a session",
-    "restoreDisabledUnsupported": "Only web frontend sessions (sess_) can be restored",
+    "restoreDisabledUnsupported": "Only Web frontend sessions (sess_ / web_) can be restored",
     "restoreEmpty": "This session has no restorable messages (empty or filtered). You can still chat from here.",
     "delete": "Delete session",
     "teamLabel": "Team: {{team}}",
