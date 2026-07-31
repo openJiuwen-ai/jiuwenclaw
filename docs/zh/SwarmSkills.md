@@ -879,7 +879,7 @@ python3 scripts/validate_swarmskill.py path/to/<swarmskill-name>/
 | 提供示例 | 在 examples/ 中提供使用示例，降低学习成本 |
 | 格言要有对抗性 | 每个角色的 motto 应体现独特视角，避免角色收敛 |
 | 验证不可跳过 | 每次创建或修改后都必须运行验证器 |
-| 描述遵循简洁原则 | SKILL.md description ≤4 行、≤500 字符，采用 WHAT / WHEN / NOT 结构 |
+| 描述遵循简洁原则 | SKILL.md description ≤4 行、建议 ≤500 字符，硬上限 1024，采用 WHAT / WHEN / NOT 结构 |
 
 ---
 

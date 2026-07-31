@@ -148,7 +148,7 @@ This swarm skill uses a specialization pipeline pattern (Pattern C) to organize 
 - **`name`**: Unique skill identifier; must match the directory name (kebab-case, conventionally ending with `-team`).
 - **`kind`**: Must be `team-skill` (note: not `type`), distinguishing Swarm Skills from regular Agent Skills.
 - **`roles`**: Role list; **at least 2 roles required**, each role must include `id` (role identifier), `purpose` (one-line responsibility description, ≤150 characters), `skills` (dependent skill list), and `tools` (dependent tool list).
-- **`description`**: Skill description following conciseness principles (≤4 lines, ≤500 characters), using WHAT / WHEN / NOT three-line structure.
+- **`description`**: Skill description following conciseness principles (≤4 lines, recommended ≤500 characters, hard limit 1024), using WHAT / WHEN / NOT three-line structure.
 
 #### roles/\*.md — Role Definitions
 
@@ -869,7 +869,7 @@ After publishing, you can continuously iterate:
 | Provide examples                           | Include usage examples in examples/ to reduce learning cost                                         |
 | Adversarial mottos                         | Each role's motto should reflect a unique perspective, preventing role convergence                  |
 | Validation is mandatory                    | Run the validator after every creation or modification                                              |
-| Description follows conciseness principles | SKILL.md description ≤4 lines, ≤500 characters, using WHAT / WHEN / NOT structure                   |
+| Description follows conciseness principles | SKILL.md description ≤4 lines, recommended ≤500 characters, hard limit 1024, using WHAT / WHEN / NOT structure |
 
 ***
 
