@@ -105,11 +105,15 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         "根据 parameters 构造参数后直接发起 tool call，"
         "不会改变 tools 列表。\n"
         "\n"
-        "3. 优先使用专业工具（如 memory_search、cron_create_job）"
+        "3. 如果当前对话历史中已有某工具的 schema（来自之前的 "
+        "`search_tools` 返回），切勿再次搜索同一工具，"
+        "直接根据已有 schema 构造参数并调用。\n"
+        "\n"
+        "4. 优先使用专业工具（如 memory_search、cron_create_job）"
         "而非通用替代（如 bash、edit_file）。"
         "专业工具提供结构化数据和状态管理。\n"
         "\n"
-        "4. 工作流程：查看导航 → 搜索需要的工具 → 直接按名称调用。\n"
+        "5. 工作流程：查看导航 → 搜索需要的工具 → 直接按名称调用。\n"
     )
 
     _RULES_EN = (
@@ -125,11 +129,15 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         "registered and directly callable by name — construct arguments from "
         "the parameters and call directly. The tools list stays unchanged.\n"
         "\n"
-        "3. Prefer specialized tools (e.g. memory_search, cron_create_job) "
+        "3. If a tool's schema already appears in conversation history "
+        "(from a previous `search_tools` result), do NOT search for it "
+        "again — reuse the existing schema and call directly.\n"
+        "\n"
+        "4. Prefer specialized tools (e.g. memory_search, cron_create_job) "
         "over general substitutes (e.g. bash, edit_file). "
         "Specialized tools provide structured data and state management.\n"
         "\n"
-        "4. Workflow: check navigation → search for needed tools → call "
+        "5. Workflow: check navigation → search for needed tools → call "
         "directly by name.\n"
     )
 
@@ -142,6 +150,8 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self._meta_tool_names: Set[str] = set()
         self._owned_tool_names: Set[str] = set()
         self._cached_all_tool_infos: List[ToolInfo] = []
+        self._deep_agent = None
+        self._runtime_agent = None
         # JiuWen retrieval knobs.
         self._desc_cap = int(getattr(config, "tool_retrieval_desc_cap", 256))
         self._embedding_model_name = getattr(
@@ -162,6 +172,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
 
     async def before_invoke(self, ctx):
         # Refresh the full tool inventory from ability_manager (each turn).
+        self._runtime_agent = ctx.agent
         self._cached_all_tool_infos = await self._list_tool_infos(ctx.agent)
         session = getattr(ctx, "session", None)
         self._init_visible_tools(
@@ -227,6 +238,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     def init(self, agent) -> None:
+        self._deep_agent = agent
         language = getattr(self._config, "language", "cn") or "cn"
         agent_id = getattr(getattr(agent, "card", None), "id", None)
         from jiuwenswarm.agents.harness.common.tools.search_tool import DenseSearchTool
