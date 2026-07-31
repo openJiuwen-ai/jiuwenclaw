@@ -4,15 +4,8 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import sys
-
-from jiuwenswarm.dotenv_early import parse_dotenv_early
-
-parse_dotenv_early("jiuwenswarm")
-
-logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
 
 def main() -> None:
@@ -20,10 +13,19 @@ def main() -> None:
     # 参数解析）被 Ctrl+C 中断时，避免抛出裸 KeyboardInterrupt 堆栈——与
     # run_chat 内部的优雅退出语义（exit 130）保持一致。
     try:
+        import logging
+
+        logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+
+        from jiuwenswarm.dotenv_early import parse_dotenv_early
+        parse_dotenv_early("jiuwenswarm")
+
         from jiuwenswarm.cli.chat import build_parser as build_chat_parser
         from jiuwenswarm.cli.chat import run_chat
     except KeyboardInterrupt:
-        logging.warning("Interrupted during startup. Exiting.")
+        # logging 可能尚未绑定（import logging 被中断时），用 stderr 兜底；
+        # 后续两处 except 的 logging 已绑定，仍用 logging.warning。
+        sys.stderr.write("Interrupted during startup. Exiting.\n")
         sys.exit(130)
 
     if os.environ.get("JIUWENSWARM_SKIP_DOTENV", "").strip() != "1":
