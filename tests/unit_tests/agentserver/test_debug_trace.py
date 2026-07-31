@@ -143,11 +143,6 @@ class TestSettings:
         self._cfg(monkeypatch, {"code": {"otel_enabled": False}})
         assert not resolve_debug_trace_settings(mode="code.normal", request_debug=True).otel_enabled
 
-    def test_config_global_enabled(self, monkeypatch):
-        self._cfg(monkeypatch, {"enabled": True})
-        s = resolve_debug_trace_settings(mode="agent.plan", request_debug=False)
-        assert s.enabled and s.dump_enabled
-
     def test_config_mode_enabled(self, monkeypatch):
         # only agent mode enabled -> code disabled
         self._cfg(monkeypatch, {"agent": {"enabled": True}})
@@ -155,32 +150,32 @@ class TestSettings:
         assert not resolve_debug_trace_settings(mode="code.normal", request_debug=False).enabled
 
     def test_config_dump_disabled_escape_hatch(self, monkeypatch):
-        self._cfg(monkeypatch, {"enabled": True, "code": {"dump_enabled": False}})
+        self._cfg(monkeypatch, {"code": {"enabled": True, "dump_enabled": False}})
         s = resolve_debug_trace_settings(mode="code.normal", request_debug=False)
         assert s.enabled and not s.dump_enabled
 
     def test_config_include_toggles(self, monkeypatch):
-        self._cfg(monkeypatch, {"enabled": True, "code": {"include_reasoning": False}})
+        self._cfg(monkeypatch, {"code": {"include_reasoning": False}})
         s = resolve_debug_trace_settings(mode="code.normal", request_debug=False)
         assert s.include_reasoning is False
         assert s.include_model_output is True  # untouched default
 
     def test_config_limits_override(self, monkeypatch):
-        self._cfg(monkeypatch, {"enabled": True, "limits": {"tool_args_max_chars": 100}})
+        self._cfg(monkeypatch, {"limits": {"tool_args_max_chars": 100}})
         s = resolve_debug_trace_settings(mode="agent.plan", request_debug=False)
         assert s.tool_args_max_chars == 100
         assert s.tool_result_max_chars == 8000  # untouched default
 
     def test_config_max_model_output_chars(self, monkeypatch):
-        self._cfg(monkeypatch, {"enabled": True, "limits": {"max_model_output_chars": 500}})
+        self._cfg(monkeypatch, {"limits": {"max_model_output_chars": 500}})
         s = resolve_debug_trace_settings(mode="agent.plan", request_debug=False)
         assert s.max_model_output_chars == 500
         # empty/null -> no cap
-        self._cfg(monkeypatch, {"enabled": True, "limits": {"max_model_output_chars": ""}})
+        self._cfg(monkeypatch, {"limits": {"max_model_output_chars": ""}})
         assert resolve_debug_trace_settings(mode="agent.plan", request_debug=False).max_model_output_chars is None
 
     def test_config_redaction(self, monkeypatch):
-        self._cfg(monkeypatch, {"enabled": True, "redaction": {"redact_completions": True}})
+        self._cfg(monkeypatch, {"redaction": {"redact_completions": True}})
         s = resolve_debug_trace_settings(mode="agent.plan", request_debug=False)
         assert s.redact_completions is True
         assert s.redact_prompts is False

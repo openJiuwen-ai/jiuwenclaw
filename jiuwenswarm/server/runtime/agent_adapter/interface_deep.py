@@ -42,6 +42,7 @@ from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.sys_operation import (
     SysOperation,
     SysOperationCard,
@@ -1267,6 +1268,76 @@ class JiuWenSwarmDeepAdapter:
             return None
         return self._resolve_interrupt_session_id(loop_sid)
 
+    async def _clear_pending_ask_user_interrupt_for_supplement(
+        self,
+        session_id: str | None,
+    ) -> bool:
+        """Drop a superseded pure ask_user round without leaving an open tool call."""
+        instance = getattr(self, "_instance", None)
+        loop_session = getattr(instance, "_loop_session", None)
+        loop_sid = self._deep_agent_loop_session_id()
+        target_sid = self._resolve_interrupt_session_id(session_id)
+        if loop_session is None or loop_sid != target_sid:
+            return False
+
+        try:
+            state = loop_session.get_state(INTERRUPTION_KEY)
+            interrupted_tools = getattr(state, "interrupted_tools", None)
+            if not isinstance(interrupted_tools, dict) or not interrupted_tools:
+                return False
+            if any(
+                getattr(getattr(entry, "tool_call", None), "name", None) != "ask_user"
+                for entry in interrupted_tools.values()
+            ):
+                return False
+
+            ai_message = getattr(state, "ai_message", None)
+            pending_calls = list(getattr(ai_message, "tool_calls", None) or [])
+            if not pending_calls or any(
+                getattr(tool_call, "name", None) != "ask_user"
+                for tool_call in pending_calls
+            ):
+                return False
+
+            react_agent = getattr(instance, "react_agent", None)
+            context_engine = getattr(react_agent, "context_engine", None)
+            context = (
+                context_engine.get_context(session_id=target_sid)
+                if context_engine is not None
+                else None
+            )
+            messages = list(context.get_messages() or []) if context is not None else []
+            last_calls = list(getattr(messages[-1], "tool_calls", None) or []) if messages else []
+            pending_signature = [
+                (getattr(tool_call, "id", None), getattr(tool_call, "name", None))
+                for tool_call in pending_calls
+            ]
+            last_signature = [
+                (getattr(tool_call, "id", None), getattr(tool_call, "name", None))
+                for tool_call in last_calls
+            ]
+            if last_signature != pending_signature:
+                return False
+
+            context.pop_messages(1, with_history=True)
+            loop_session.update_state({INTERRUPTION_KEY: None})
+            await context_engine.save_contexts(loop_session)
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] interrupt(supplement): failed to inspect "
+                "pending ask_user state session=%s",
+                target_sid,
+                exc_info=True,
+            )
+            return False
+
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] interrupt(supplement): cleared pending "
+            "ask_user state session=%s",
+            target_sid,
+        )
+        return True
+
     def _is_deep_agent_executing_for_session(self, session_id: str) -> bool:
         """True when the shared DeepAgent still runs stream/task-loop work for *session_id*."""
         instance = getattr(self, "_instance", None)
@@ -1852,7 +1923,8 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _build_mcp_server_config(entry: dict[str, Any]) -> McpServerConfig | None:
-        return build_mcp_server_config(entry)
+        # 传入 server_id_scope 生成稳定的 server_id，避免 reload 时重复注册导致进程泄漏
+        return build_mcp_server_config(entry, server_id_scope="jiuwenswarm")
 
     @staticmethod
     def _extract_enabled_mcp_server_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
@@ -4949,6 +5021,34 @@ class JiuWenSwarmDeepAdapter:
         self._last_mode = mode
         await self._update_agent_rails()
 
+    @staticmethod
+    def _user_interaction_rail_attribute() -> str:
+        return "_ask_user_rail"
+
+    async def _set_user_interaction_enabled(self, enabled: bool) -> None:
+        """Expose ``ask_user`` only when the requesting client can answer it."""
+        attr_name = self._user_interaction_rail_attribute()
+        rail = getattr(self, attr_name, None)
+        if enabled:
+            if rail is None:
+                rail = self._build_structured_ask_user_rail()
+                if rail is not None:
+                    await self._instance.register_rail(rail)
+                    setattr(self, attr_name, rail)
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] StructuredAskUserRail enabled "
+                        "for interactive request"
+                    )
+            return
+
+        if rail is not None:
+            await self._instance.unregister_rail(rail)
+            setattr(self, attr_name, None)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] StructuredAskUserRail disabled "
+                "for non-interactive request"
+            )
+
     async def _update_agent_rails(self) -> None:
         """agent 模式：注册 agent 专属 rails（原 plan 档能力并集）。"""
         if self._task_planning_rail is None:
@@ -5265,6 +5365,7 @@ class JiuWenSwarmDeepAdapter:
         cwd: str | None = None
         workspace: str | None = None
         project_dir: str | None = None
+        supports_user_interaction: bool = True
 
     async def _update_runtime_config(self, runtime_config: "_RuntimeConfig") -> None:
         """Register per-request tools for current agent execution."""
@@ -5328,6 +5429,7 @@ class JiuWenSwarmDeepAdapter:
         )
 
         await self._update_rails_for_mode(runtime_config.mode)
+        await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
         await self._update_tools_for_mode(
             runtime_config.mode, runtime_config.session_id, runtime_config.request_id
         )
@@ -6200,6 +6302,8 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction cancel failed",
                 intent,
             )
+        if intent == "supplement" and isinstance(new_input, str) and new_input.strip():
+            await self._clear_pending_ask_user_interrupt_for_supplement(request.session_id)
         message = "任务已切换" if intent == "supplement" else "任务已取消"
 
         payload: dict[str, Any] = {
@@ -7528,6 +7632,9 @@ class JiuWenSwarmDeepAdapter:
                     cwd=inputs.get("cwd"),
                     workspace=inputs.get("workspace_dir"),
                     project_dir=inputs.get("project_dir"),
+                    supports_user_interaction=inputs.get(
+                        "supports_user_interaction", True
+                    ),
                 )
             )
             inputs = dict(inputs)
@@ -7777,6 +7884,9 @@ class JiuWenSwarmDeepAdapter:
                     trusted_dirs=inputs.get("trusted_dirs"),
                     cwd=inputs.get("cwd"),
                     project_dir=inputs.get("project_dir"),
+                    supports_user_interaction=inputs.get(
+                        "supports_user_interaction", True
+                    ),
                 )
             )
 
@@ -8001,6 +8111,9 @@ class JiuWenSwarmDeepAdapter:
                     cwd=inputs.get("cwd"),
                     workspace=inputs.get("workspace_dir"),
                     project_dir=inputs.get("project_dir"),
+                    supports_user_interaction=inputs.get(
+                        "supports_user_interaction", True
+                    ),
                 )
             )
             if self._stream_event_rail is not None:

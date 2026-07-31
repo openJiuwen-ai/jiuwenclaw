@@ -5,6 +5,27 @@ import { dirname, join, parse, relative } from "node:path";
 // ---------------------------------------------------------------------------
 // Path display utilities (aligned with Claude Code's getDisplayPath)
 // ---------------------------------------------------------------------------
+
+/**
+ * 格式化 /memory 中展示的路径，不修改实际用于文件操作的原始路径。
+ *
+ * Windows 路径可能分别来自 Node 前端和 Python 后端，盘符大小写不一致。
+ * 此处只将展示盘符转为大写，路径分隔符、目录名和文件名均保持不变。
+ */
+export function formatMemoryPathForDisplay(filePath: string): string {
+  // Windows 命名空间路径：\\?\d:\repo -> \\?\D:\repo
+  const namespacedPath = filePath.replace(
+    /^((?:\\\\\?\\|\/\/\?\/))([A-Za-z]):(?=[\\/]|$)/,
+    (_match, prefix: string, drive: string) => `${prefix}${drive.toUpperCase()}:`,
+  );
+
+  // 普通 Windows 路径：d:\repo -> D:\repo
+  return namespacedPath.replace(
+    /^([A-Za-z]):(?=[\\/]|$)/,
+    (_match, drive: string) => `${drive.toUpperCase()}:`,
+  );
+}
+
 //
 // 统一的路径展示工具：从 memory.ts 的 getDisplayPath 与 app-screen.ts 的
 // mvDisplayPath 合并而来。二者原本各有侧重——
@@ -47,10 +68,10 @@ export function getDisplayPath(
   projectDir: string,
   gitRoot?: string | null,
 ): string {
-  const fileSlashes = filePath.replace(/\\/g, "/");
+  const fileSlashes = formatMemoryPathForDisplay(filePath).replace(/\\/g, "/");
   const fileNorm = process.platform === "win32" ? fileSlashes.toLowerCase() : fileSlashes;
   const homeDir = homedir();
-  const homeDirSlashes = homeDir.replace(/\\/g, "/");
+  const homeDirSlashes = formatMemoryPathForDisplay(homeDir).replace(/\\/g, "/");
   const homeDirNorm = process.platform === "win32" ? homeDirSlashes.toLowerCase() : homeDirSlashes;
 
   // Collect all valid candidate paths, then pick the shortest
@@ -66,9 +87,9 @@ export function getDisplayPath(
   // 的 projectDir 相对路径(必带 ../ 前缀)。
   const fileInsideProject = isAncestorOrSelfDir(projectDir, filePath);
   if (resolvedGitRoot && fileInsideProject) {
-    const gitRootSlashes = resolvedGitRoot.replace(/\\/g, "/");
+    const gitRootSlashes = formatMemoryPathForDisplay(resolvedGitRoot).replace(/\\/g, "/");
     const gitRootNorm = process.platform === "win32" ? gitRootSlashes.toLowerCase() : gitRootSlashes;
-    const projectDirSlashes = projectDir.replace(/\\/g, "/");
+    const projectDirSlashes = formatMemoryPathForDisplay(projectDir).replace(/\\/g, "/");
     const projectDirNorm = process.platform === "win32" ? projectDirSlashes.toLowerCase() : projectDirSlashes;
     // Only use git root as base if projectDir is inside the git repo
     if (projectDirNorm.startsWith(gitRootNorm + "/") || projectDirNorm === gitRootNorm) {
@@ -83,7 +104,7 @@ export function getDisplayPath(
 
   // Candidate 2: relative from projectDir (skip cross-drive & "../" paths)
   // 允许空字符串(file === projectDir → 显示 ".");跳过 ../ 前缀(不友好)。
-  const projectDirSlashes = projectDir.replace(/\\/g, "/");
+  const projectDirSlashes = formatMemoryPathForDisplay(projectDir).replace(/\\/g, "/");
   const projectDirNorm = process.platform === "win32" ? projectDirSlashes.toLowerCase() : projectDirSlashes;
   const relFromProj = relative(projectDirNorm, fileNorm);
   if (!relFromProj.startsWith("/") && !/^[A-Za-z]:/.test(relFromProj) && !relFromProj.startsWith("..")) {

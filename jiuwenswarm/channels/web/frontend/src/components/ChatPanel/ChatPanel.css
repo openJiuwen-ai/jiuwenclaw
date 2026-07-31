@@ -2593,19 +2593,15 @@ overflow: hidden;
 
 .chat-input-local-alerts {
   position: absolute;
+  top: 24px;
   left: 50%;
-  bottom: calc(100% + 16px);
-  z-index: 30;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: min(620px, calc(100vw - 64px));
+  width: min(620px, calc(100% - 32px));
   transform: translateX(-50%);
   pointer-events: none;
-}
-
-.chat-welcome__composer .chat-input-local-alerts {
-  bottom: calc(100% + 104px);
 }
 
 .chat-input-local-alert {

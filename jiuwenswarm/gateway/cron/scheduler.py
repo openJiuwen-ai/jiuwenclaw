@@ -469,9 +469,28 @@ class CronSchedulerService:
                 run_id in self._run_tasks
                 and not self._run_tasks[run_id].done()
             )
-            if not already_active:
+            # 崩溃恢复保护：gateway 重启后 _runs/_run_tasks 清空，already_active
+            # 失效。若 wake_dt 已在过去（本应在崩溃前触发的 wake），重排 wake 会
+            # 立即触发 _on_wake 创建新 agent task（新 session_id），而 AgentServer
+            # 上原 task 可能还在跑 → 重复执行。此时跳过 wake 重排，宁可丢结果也
+            # 不重复触发。push 事件也不排（崩溃后 _runs 无 state，_on_push 会重建
+            # state 并推占位——但此时根本没有执行，推占位会误导用户）。
+            # 仅当内存无该 run 记录时启用此保护（existing is None 即崩溃重启特征）。
+            wake_already_passed = wake_dt.timestamp() <= now
+            crash_recovery_skip = existing is None and wake_already_passed
+            if not already_active and not crash_recovery_skip:
                 self._schedule_event(wake_dt, "wake", job.id, run_id)
-            self._schedule_event(push_dt, "push", job.id, run_id)
+            # push 事件：已 active 时仍需排入——_on_push 内部有 pushed_final 兜底，
+            # 若 agent 还没完成到达 push 时间会推"正在执行中"占位，完成后 push_update
+            # 仍可补发最终结果。崩溃恢复分支除外（无 state、无执行，推占位会误导）。
+            if not crash_recovery_skip:
+                self._schedule_event(push_dt, "push", job.id, run_id)
+            if crash_recovery_skip:
+                logger.info(
+                    "[Cron] reload skip wake+push (crash recovery, wake_dt in past) "
+                    "job=%s run_id=%s wake_dt=%s",
+                    job.id, run_id, wake_dt.isoformat(),
+                )
 
         self._sync_store_mtime()
         self._reload_event.set()
@@ -1011,7 +1030,26 @@ class CronSchedulerService:
                 self._agent_client.send_request(envelope),
                 timeout=timeout_seconds,
             )
-            return _extract_text_from_agent_payload(resp.payload), bool(resp.ok)
+            text = _extract_text_from_agent_payload(resp.payload)
+            ok = bool(resp.ok)
+            # 成功但 result_text 为空：响应格式与 _extract_text_from_agent_payload
+            # 的识别字段不匹配（如 E2A result 非 dict、或字段名不在 error/content/
+            # heartbeat/text 之内）。若放任空字符串进入 state.result_text，会触发
+            # _on_push_update 的 "empty result_text" 跳过 → 真实结果永不补发、
+            # 占位永久留在界面。这里降级为失败并生成可见文案，触发 error 兜底通道。
+            if ok and not text:
+                payload_keys = (
+                    list(resp.payload.keys())
+                    if isinstance(resp.payload, dict)
+                    else type(resp.payload).__name__
+                )
+                logger.warning(
+                    "[Cron] unary succeeded but result_text empty request_id=%s payload_keys=%s",
+                    getattr(envelope, "request_id", ""),
+                    payload_keys,
+                )
+                return "[cron] 任务执行完成但未返回结果内容", False
+            return text, ok
         except asyncio.TimeoutError:
             timeout_min = max(1, int(timeout_seconds // 60))
             logger.warning(
@@ -1173,6 +1211,14 @@ class CronSchedulerService:
             return
 
         # Not ready: send placeholder
+        # 幂等保护：reload 或 push reschedule 可能对同一 run_id 重复排入 push 事件，
+        # 若 result_text 仍为空会反复推占位。已推过就不再推。
+        if state.placeholder_sent:
+            logger.info(
+                "[Cron] _on_push skipped placeholder: already sent run_id=%s job=%s",
+                run_id, job.id,
+            )
+            return
         placeholder = f"{job.name} 正在执行中，结果稍后补发（push_at={state.push_at_iso}）"
         await self._push_to_targets(job, state, text=placeholder, is_placeholder=True)
         state.placeholder_sent = True
@@ -1229,6 +1275,13 @@ class CronSchedulerService:
         }
         channel_id = (job.targets or "").strip()
         if not channel_id:
+            # targets 为空：占位/真实结果/push_update 补发均会在此静默丢失。
+            # 不 raise 以免中断事件循环，但必须留日志让问题可见（历史 bug：
+            # agent 跑完用户却看不到任何消息）。
+            logger.warning(
+                "[Cron] push skipped: empty targets job=%s run_id=%s is_placeholder=%s status=%s",
+                job.id, state.run_id, bool(is_placeholder), state.status,
+            )
             return
 
         # 企业飞书：优先用作业里绑定的 SessionMap session_id（feishu::chat_id::bot_id::...），

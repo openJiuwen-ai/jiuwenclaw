@@ -18,7 +18,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentDeleted,
     AgentManager,
     AgentRuntime,
-    THIRD_PARTY_AGENT_TYPES,
+    is_third_party_agent_type,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     DEFAULT_AGENT_WORKSPACE_ROOT,
@@ -400,8 +400,9 @@ class AgentOSRouterClient(AgentServerClient):
             if self._uses_direct_yuanrong(agent_type):
                 ssh_relay.fail_session(
                     relay_session,
-                    "jiuwenswarm uses YuanRong URN invoke and has no AgentOS "
-                    "sandbox for SSH; switch to a third-party agent_type first",
+                    "builtin agent_type has no AgentOS sandbox for SSH; run "
+                    "3rdagent.switch first or provide a remote command so "
+                    "agent_type can be derived from its first token",
                 )
                 return
             runtime = await self._resolve_agent(envelope, acquire=True)
@@ -447,12 +448,24 @@ class AgentOSRouterClient(AgentServerClient):
             await self._agent_manager.release(runtime.key)
 
     def _apply_current_agent_type_for_ssh(self, envelope: E2AEnvelope) -> None:
-        """SSH 接入跟随用户当前 agent_type（由 3rdagent.switch 记录）。"""
+        """SSH 接入跟随用户当前 agent_type（由 3rdagent.switch 记录）。
+
+        未 switch / 仍为内置 ``jiuwenswarm`` 时，取 SSH 远程指令首词作为
+        agent_type。
+        """
         params = envelope.params if isinstance(envelope.params, dict) else {}
         if str(params.get("agent_type") or "").strip():
             return
         user_id = str(envelope.user_id or "").strip()
         current = self.get_current_agent_type(user_id)
+        if self._uses_direct_yuanrong(current):
+            command = str(params.get("command") or "").strip()
+            if not command:
+                ctx = envelope.channel_context
+                if isinstance(ctx, dict):
+                    command = str(ctx.get("command") or "").strip()
+            token = command.split(maxsplit=1)[0].lower() if command else ""
+            current = token or BUILTIN_AGENT_TYPE
         params = dict(params)
         params["agent_type"] = current
         envelope.params = params
@@ -560,7 +573,7 @@ class AgentOSRouterClient(AgentServerClient):
         return reaped
 
     async def _create_agent(self, agent_info: AgentInfo) -> AgentInfo:
-        if agent_info.agent_type not in THIRD_PARTY_AGENT_TYPES:
+        if not is_third_party_agent_type(agent_info.agent_type):
             raise UnsupportedAgentType(
                 f"sandbox create is only supported for third-party "
                 f"agent_type, got: {agent_info.agent_type}"

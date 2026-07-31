@@ -2695,11 +2695,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const toolResult = normalizeToolResultPayload(payload);
         const activeSessionId = getPayloadSessionId(payload) || undefined;
-        const shutdownMemberId =
-          (toolResult.toolCallId
-            ? shutdownMemberToolCallRef.current.get(toolResult.toolCallId)
-            : undefined) ||
-          getShutdownMemberFromToolResult(toolResult);
+        // Only trust the result text — "Member shutdown: member_name=X"
+        // means success.  Error messages (e.g. "still holds active task")
+        // do NOT match the regex, so a failed shutdown will NOT remove the
+        // member from the frontend panel.
+        const shutdownMemberId = getShutdownMemberFromToolResult(toolResult);
         if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) {
           const memberId =
             getTeamPayloadMemberName(payload) ||
