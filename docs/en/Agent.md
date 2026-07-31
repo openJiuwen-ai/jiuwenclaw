@@ -181,6 +181,7 @@ C:\Users\<username>\.jiuwenswarm\
 │   └── builtin_rules.yaml           # Built-in rules
 │
 ├── agent/                           # Agent-related data
+│   ├── sessions/                    # Session history storage
 │   └── workspace/                   # Agent workspace
 │       ├── AGENT_ZH.md              # Agent bootstrap config (Chinese)
 │       ├── AGENT_EN.md              # Agent bootstrap config (English)
@@ -192,9 +193,10 @@ C:\Users\<username>\.jiuwenswarm\
 │       ├── HEARTBEAT_EN.md          # Heartbeat tasks (English)
 │       ├── USER.md                  # User profile and preferences
 │       ├── memory/                  # Agent memory store
+│       ├── todo/                    # Agent todo items storage
 │       └── skills/                  # Skills
 │
-├── todo/                            # Todo items storage
+├── todo/                            # Global todo items storage
 ├── gateway/                         # Gateway data
 ├── logs/                            # Log files
 ├── memory/                          # Global memory store
@@ -202,14 +204,13 @@ C:\Users\<username>\.jiuwenswarm\
 └── web/                             # Web channel assets
 ```
 
-> **Note:** Session history is stored in an internal database, not as file directories. You can view and manage session history through the Web UI.
-
 **Key files:**
 
 | Path | Purpose | Edit? | If you change it |
 |------|---------|-------|------------------|
 | `config/config.yaml` | Models, channels, permissions, memory | Advanced users, carefully | Affects models, channels, security; restart required |
 | `config/builtin_rules.yaml` | Built-in rules | Not recommended | Changes default system behavior |
+| `agent/sessions/` | Session history storage | Auto-managed by system | Affects session history; manage via Web UI |
 | `agent/workspace/AGENT_ZH.md` | Bootstrap config (Chinese) | Yes, when needed | Affects startup behavior |
 | `agent/workspace/IDENTITY_ZH.md` | Identity (Chinese) | Customizable | Affects how the agent sees its role |
 | `agent/workspace/SOUL_ZH.md` | Values and persona (Chinese) | Customizable | Affects tone and style |
@@ -217,7 +218,8 @@ C:\Users\<username>\.jiuwenswarm\
 | `agent/workspace/USER.md` | User profile and preferences | Auto-managed by system | Affects personalization; update via agent conversation |
 | `agent/workspace/skills/` | Skills | Add skills | Extends capabilities |
 | `agent/workspace/memory/` | Memory store (user profile, episodic, semantic) | Do not edit by hand | Risk of corrupting memory data |
-| `todo/` | Todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
+| `agent/workspace/todo/` | Agent todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
+| `todo/` | Global todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
 | `logs/` | Logs | View only | Used for troubleshooting |
 
 **Example (Windows):**
@@ -225,19 +227,22 @@ C:\Users\<username>\.jiuwenswarm\
 ```text
 C:\Users\Administrator\.jiuwenswarm\
 ├── config\config.yaml
-├── todo\
-├── agent\workspace\
-│   ├── AGENT_ZH.md
-│   ├── AGENT_EN.md
-│   ├── IDENTITY_ZH.md
-│   ├── IDENTITY_EN.md
-│   ├── SOUL_ZH.md
-│   ├── SOUL_EN.md
-│   ├── HEARTBEAT_ZH.md
-│   ├── HEARTBEAT_EN.md
-│   ├── USER.md
-│   ├── memory\
-│   └── skills\
+├── todo\                            # Global todo items
+├── agent\
+│   ├── sessions\                    # Session history
+│   └── workspace\
+│       ├── AGENT_ZH.md
+│       ├── AGENT_EN.md
+│       ├── IDENTITY_ZH.md
+│       ├── IDENTITY_EN.md
+│       ├── SOUL_ZH.md
+│       ├── SOUL_EN.md
+│       ├── HEARTBEAT_ZH.md
+│       ├── HEARTBEAT_EN.md
+│       ├── USER.md
+│       ├── memory\
+│       ├── todo\                    # Agent todo items
+│       └── skills\
 ```
 
 > **Notes:**  
