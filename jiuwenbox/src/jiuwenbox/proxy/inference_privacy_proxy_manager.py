@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from jiuwenbox.log_sanitizer import sanitize_text
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.proxy.inference_privacy_proxy import InferencePrivacyProxyConfig, ProxyRoute, InferencePrivacyProxy
 
@@ -44,7 +45,7 @@ class ProxyInstance:
 
     def add_log(self, line: str) -> None:
         timestamp = datetime.now(timezone.utc).isoformat()
-        self.log_lines.append(f"[{timestamp}] {line}")
+        self.log_lines.append(f"[{timestamp}] {sanitize_text(line)}")
         if len(self.log_lines) > self._log_max_lines:
             self.log_lines = self.log_lines[-self._log_max_lines:]
 
