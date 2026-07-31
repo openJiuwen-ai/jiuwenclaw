@@ -348,11 +348,13 @@ function extractHistoryMediaItems(record: Record<string, unknown>): MediaItem[] 
 
   if (isRecord(record.files)) {
     appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_images);
+    appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_documents);
   }
   if (isRecord(record.event_payload)) {
     appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.media_items);
     if (isRecord(record.event_payload.files)) {
       appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_images);
+      appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_documents);
     }
   }
 
