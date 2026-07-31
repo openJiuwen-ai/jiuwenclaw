@@ -301,19 +301,36 @@ class CronSchedulerService:
     def is_running(self) -> bool:
         return self._running
 
-    async def _cancel_agent_session(self, state: CronRunState) -> None:
+    async def _cancel_agent_session(
+        self,
+        state: CronRunState,
+        *,
+        reason: str = "ghost",
+    ) -> None:
         """Fire-and-forget: 向 AgentServer 发送 CHAT_CANCEL 中断请求。
 
-        当 cron_jobs.json 被删除或 job 被移除后，gateway 的 asyncio Task
-        被 task.cancel() 取消，但这只终止了 gateway 端等待响应的协程。
-        AgentServer 不知道请求已被取消，会继续执行 LLM 调用。此方法
-        主动发送中断请求，让后端也停止处理，彻底消灭"幽灵任务"。
+        触发场景:
+        - ``reason="ghost"``: cron_jobs.json 被删除或 job 被移除后，gateway
+          的 asyncio Task 被 task.cancel() 取消，但这只终止了 gateway 端
+          等待响应的协程。AgentServer 不知道请求已被取消，会继续执行 LLM
+          调用。此方法主动发送中断请求，让后端也停止处理，彻底消灭"幽灵任务"。
+        - ``reason="timeout"``: unary 超时分支（_run_unary_cron_job）在
+          ``asyncio.wait_for`` 超时后仅取消了 gateway 端等待协程，若不
+          主动 cancel，AgentServer 端的 task 会继续跑到完成——飞书等渠道
+          会先收到"超时"文案，但任务实际仍在后台正常完成，结果到达 gateway
+          时已无人接收而被丢弃（用户反馈"超时但结果正常完成"的矛盾现象）。
+
+        session_id 必须用真实执行会话 ``state.exec_session_id``（格式
+        ``cron_{ts}_{job.id}``）。AgentServer 的 ``_stop_session_interrupt_work``
+        按 ``request.session_id`` 定位 in-flight task；若用旧占位
+        ``cron_{job_id}`` 与真实会话不匹配，cancel 请求落不到点上。
         """
+        target_session_id = (state.exec_session_id or "").strip() or f"cron_{state.job_id}"
         try:
             interrupt_env = e2a_from_agent_fields(
                 request_id=f"cron-cancel-{state.run_id}",
                 channel_id="__cron__",
-                session_id=f"cron_{state.job_id}",
+                session_id=target_session_id,
                 req_method=ReqMethod.CHAT_CANCEL,
                 params={"cron": {"job_id": state.job_id, "run_id": state.run_id}},
                 is_stream=False,
@@ -321,19 +338,23 @@ class CronSchedulerService:
             )
             await self._agent_client.send_request(interrupt_env)
             logger.info(
-                "[Cron] AgentServer interrupt sent for ghost task: "
-                "job_id=%s run_id=%s",
+                "[Cron] AgentServer interrupt sent (%s): "
+                "job_id=%s run_id=%s session_id=%s",
+                reason,
                 state.job_id,
                 state.run_id,
+                target_session_id,
             )
         except (OSError, RuntimeError) as exc:
             # Fire-and-forget: 网络断开、连接超时或 AgentServer 不可达
             # 都不影响主流程，只是最佳努力的中断
             logger.warning(
-                "[Cron] AgentServer interrupt failed for ghost task "
-                "(non-critical): job_id=%s run_id=%s error=%s",
+                "[Cron] AgentServer interrupt failed (%s, non-critical): "
+                "job_id=%s run_id=%s session_id=%s error=%s",
+                reason,
                 state.job_id,
                 state.run_id,
+                target_session_id,
                 exc,
             )
 
@@ -898,6 +919,7 @@ class CronSchedulerService:
                     text, ok = await self._run_unary_cron_job(
                         envelope=envelope,
                         timeout_seconds=timeout_seconds,
+                        state=state,
                     )
                 await self._mark_last_session_ready(job, exec_session_id)
                 state.result_text = text
@@ -1024,6 +1046,7 @@ class CronSchedulerService:
         *,
         envelope: Any,
         timeout_seconds: float,
+        state: CronRunState,
     ) -> tuple[str, bool]:
         try:
             resp = await asyncio.wait_for(
@@ -1057,6 +1080,12 @@ class CronSchedulerService:
                 timeout_seconds,
                 getattr(envelope, "request_id", ""),
             )
+            # asyncio.wait_for 超时仅取消 gateway 端等待协程，AgentServer 端
+            # 的 task 不受影响会继续跑到完成——飞书等渠道会先收到"超时"文案，
+            # 但任务实际仍在后台正常完成，结果回到 gateway 时已无人接收而被
+            # 丢弃（用户反馈"超时但结果正常完成"的矛盾现象）。对齐 team 流式
+            # 超时分支（_run_team_stream_job）主动发 CHAT_CANCEL，让后端真正停止。
+            await self._cancel_agent_session(state, reason="timeout")
             return f"[cron] 任务执行超时（>{timeout_min}min）", False
 
     async def _run_team_stream_job(
