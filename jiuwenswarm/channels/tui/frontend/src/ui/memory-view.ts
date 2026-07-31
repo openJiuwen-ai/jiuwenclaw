@@ -477,7 +477,7 @@ export class MemoryViewController {
         );
         // Any missing file shown by the edit panel may be created. Paths that
         // were not supplied by the panel remain subject to the existing rejection.
-        const isCreatablePanelFile = selectedFile?.exists === false;
+        const isCreatablePanelFile = selectedFile?.exists !== undefined;
 
         if (!isCreatablePanelFile) {
           this.statusMessage = "Cannot edit: memory file does not exist.";
