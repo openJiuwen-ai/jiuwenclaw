@@ -4,7 +4,7 @@
 // app-screen.ts 通过持有 MemoryViewController 实例并委托调用其方法来使用。
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
@@ -475,21 +475,11 @@ export class MemoryViewController {
         const selectedFile = this.state?.files.find(
           (file) => memoryPathKey(file.path) === memoryPathKey(filePath),
         );
-        const projectRoot = this.state?.gitRoot || this.state?.projectDir || "";
-        // Only the three placeholders synthesized by collectOrderedMemoryFiles are creatable.
-        const allowedPlaceholderPaths = new Map<string, string>();
-        if (projectRoot) {
-          allowedPlaceholderPaths.set(memoryPathKey(join(projectRoot, "JIUWENSWARM.md")), "project");
-          allowedPlaceholderPaths.set(memoryPathKey(join(projectRoot, "JIUWENSWARM.local.md")), "local");
-        }
-        if (this.state?.userMemoryPath) {
-          allowedPlaceholderPaths.set(memoryPathKey(this.state.userMemoryPath), "user");
-        }
-        const isCreatablePlaceholder =
-          selectedFile?.exists === false &&
-          allowedPlaceholderPaths.get(memoryPathKey(filePath)) === selectedFile.kind;
+        // Any missing file shown by the edit panel may be created. Paths that
+        // were not supplied by the panel remain subject to the existing rejection.
+        const isCreatablePanelFile = selectedFile?.exists === false;
 
-        if (!isCreatablePlaceholder) {
+        if (!isCreatablePanelFile) {
           this.statusMessage = "Cannot edit: memory file does not exist.";
           this.tui.requestRender();
           return;
