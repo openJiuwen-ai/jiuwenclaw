@@ -34,8 +34,13 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
-from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent
+from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+try:
+    from jiuwenclaw.utils import build_default_headers
+except ImportError:  # pragma: no cover - browser runtime can still run without repo helpers
+    build_default_headers = None
 
 
 
@@ -235,12 +240,14 @@ class ReActAgentConfig(BaseModel):
         self.api_key = api_key
         self.api_base = api_base
         self.model_name = model_name
+        custom_headers = build_default_headers("") if build_default_headers else None
 
         self.model_client_config = ModelClientConfig(
             client_provider=provider,
             api_key=api_key,
             api_base=api_base,
-            verify_ssl=verify_ssl
+            verify_ssl=verify_ssl,
+            custom_headers=custom_headers,
         )
         self.model_config_obj = ModelRequestConfig(
             model_name=model_name
@@ -301,6 +308,13 @@ class ReActAgent(BaseAgent):
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
         return ReActAgentConfig()
+
+    @staticmethod
+    def _summarize_tool_result(tool_result: Any, max_len: int = 600) -> str:
+        text = str(tool_result)
+        if len(text) <= max_len:
+            return text
+        return f"{text[:max_len]}...(truncated {len(text) - max_len} chars)"
 
     def configure(self, config: ReActAgentConfig) -> 'BaseAgent':
         """Set configuration
@@ -368,6 +382,11 @@ class ReActAgent(BaseAgent):
     ) -> AssistantMessage:
         """Call LLM with messages and optional tools
 
+        When the model client config's custom headers include
+        ``Accept: text/event-stream`` (set by build_default_headers
+        in sandbox mode), use ``llm.stream()`` to match the SSE
+        response format.  Otherwise fall back to ``llm.invoke()``.
+
         Args:
             messages: Message list (BaseMessage or dict)
             tools: Optional tool definitions (List[ToolInfo])
@@ -376,10 +395,38 @@ class ReActAgent(BaseAgent):
             AssistantMessage from LLM
         """
         llm = self._get_llm()
-        return await llm.invoke(
-            model=self._config.model_name,
-            messages=messages,
-            tools=tools
+
+        custom_headers = getattr(
+            self._config.model_client_config, "custom_headers", None
+        ) or {}
+        accept = custom_headers.get("Accept", "") or custom_headers.get("accept", "")
+        if "text/event-stream" not in accept:
+            return await llm.invoke(
+                model=self._config.model_name,
+                messages=messages,
+                tools=tools
+            )
+
+        # Streaming path: accumulate chunks to match Accept: text/event-stream
+        accumulated_chunk = None
+        async for chunk in llm.stream(
+                model=self._config.model_name,
+                messages=messages,
+                tools=tools
+        ):
+            if accumulated_chunk is None:
+                accumulated_chunk = chunk
+            else:
+                accumulated_chunk = accumulated_chunk + chunk
+
+        if accumulated_chunk is None:
+            return AssistantMessage(content="", tool_calls=[])
+
+        return AssistantMessage(
+            content=accumulated_chunk.content or "",
+            tool_calls=accumulated_chunk.tool_calls or [],
+            usage_metadata=accumulated_chunk.usage_metadata,
+            reasoning_content=accumulated_chunk.reasoning_content,
         )
 
     async def _init_context(
@@ -466,18 +513,20 @@ class ReActAgent(BaseAgent):
                 f"ReAct iteration {iteration + 1}/{self._config.max_iterations}"
             )
 
-            # Get context window with system messages and tools
-            context_window = await context.get_context_window(
-                system_messages=system_messages,
-                tools=tools if tools else None,
-            )
-
             # Hook: before model call
             await self._execute_callbacks(
                 AgentCallbackEvent.BEFORE_MODEL_CALL,
                 inputs=inputs,
                 iteration=iteration + 1,
-                messages=context_window.get_messages()
+                messages=context.get_messages()
+            )
+
+            # Build context window after callbacks so any context repair or
+            # prompt mutation performed in before_model_call takes effect
+            # for the current LLM request instead of the next iteration.
+            context_window = await context.get_context_window(
+                system_messages=system_messages,
+                tools=tools if tools else None,
             )
 
             # Call LLM with messages and tools from context window
@@ -527,7 +576,10 @@ class ReActAgent(BaseAgent):
 
                 # Process results and add tool messages to context
                 for idx, (tool_result, tool_msg) in enumerate(results):
-                    logger.info(f"Tool result: {tool_result}")
+                    logger.info(
+                        "Tool result: "
+                        f"{self._summarize_tool_result(tool_result)}"
+                    )
                     await context.add_messages(tool_msg)
 
                     # Hook: after tool call
