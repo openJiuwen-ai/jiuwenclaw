@@ -55,6 +55,7 @@ class AgentRuntimeSpec(TypedDict, total=False):
     rootfs: AgentRootfsSpec
     cpu: int
     memory: int
+    code_path: str
 
 
 @dataclass
