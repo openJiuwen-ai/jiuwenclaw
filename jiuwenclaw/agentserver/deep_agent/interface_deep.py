@@ -6320,8 +6320,10 @@ class JiuWenClawDeepAdapter:
 
         After restoring the skill body, always clears live ``evolutions.json``
         (empty evolution log), retaining the restored SKILL.md frontmatter
-        version or defaulting to ``v1.0.0``. Archive files under ``archive/``
-        are unchanged except the consumed body archive version.
+        version or defaulting to ``v1.0.0``. The pre-rollback snapshot archives
+        an empty paired ``evolutions.v*.json`` (all evolution archives are empty
+        by design). The consumed target body archive version is removed from
+        ``archive/``.
 
         Returns ``(success, evo_cleared)``. ``evo_cleared`` is meaningful only
         when ``success`` is True; False means body was rolled back but the live
