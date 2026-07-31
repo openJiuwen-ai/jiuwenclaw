@@ -268,6 +268,12 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "extensions.delete",
         "extensions.toggle",
         "session.switch",
+        "team.templates.list",
+        "team.bindings.list",
+        "team.binding.create",
+        "team.binding.generate",
+        "team.session.bind",
+        "team.mq.publish",
         "session.fork",
         # Agent configuration
         "agents.list",
@@ -366,6 +372,12 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "extensions.delete",
         "extensions.toggle",
         "session.switch",
+        "team.templates.list",
+        "team.bindings.list",
+        "team.binding.create",
+        "team.binding.generate",
+        "team.session.bind",
+        "team.mq.publish",
         "session.fork",
         # Agent configuration
         "agents.list",
@@ -1275,10 +1287,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         try:
             try:
-                response = await _probe(1)
+                response = await _probe(3)
             except Exception as first_exc:  # noqa: BLE001
                 logger.info(
-                    "[cli config.validate_model] max_tokens=1 failed, retrying with 16: %s",
+                    "[cli config.validate_model] max_tokens=3 failed, retrying with 16: %s",
                     first_exc,
                 )
                 response = await _probe(16)
@@ -1299,8 +1311,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             content = response.get("content", "")
         else:
             content = str(response)
-
-        if not (isinstance(content, str) and content.strip()):
+        reasoning_content = getattr(response, "reasoning_content", None) if hasattr(response,
+                                                                                    "reasoning_content") else None
+        has_valid_response = (isinstance(content, str) and content) or (
+                isinstance(reasoning_content, str) and reasoning_content
+        )
+        if not has_valid_response:
             await channel.send_response(
                 ws,
                 req_id,
@@ -1388,8 +1404,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             s["session_id"] = session_id
             normalized_sessions.append(s)
         all_sessions = normalized_sessions
-        # 按项目目录过滤 + 排除当前会话（对齐 Claude Code /resume 行为）
-        # all_projects=True 时跳过项目过滤，列出所有项目的会话（对齐 CC 的 Ctrl+A）
+        # 按项目目录过滤 + 排除当前会话（对齐 /resume 行为）
+        # all_projects=True 时跳过项目过滤，列出所有项目的会话（Ctrl+A）
         show_all_projects = (
             bool(params.get("all_projects"))
             if isinstance(params, dict) else False
@@ -1628,7 +1644,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         })
 
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
-        from jiuwenswarm.common.utils import get_agent_sessions_dir
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -1694,7 +1709,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 code="AGENT_UNAVAILABLE",
             )
             return
-        session_dir = get_agent_sessions_dir() / target
+        from jiuwenswarm.common.utils import get_agent_sessions_dir
+        from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
+
+        session_dir, invalid_reason = resolve_session_dir(
+            target, sessions_root=get_agent_sessions_dir()
+        )
+        if session_dir is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=invalid_reason or "invalid session_id", code="BAD_REQUEST"
+            )
+            return
         if not session_dir.exists():
             await channel.send_response(
                 ws, req_id, ok=False, error="session not found", code="NOT_FOUND"
@@ -2736,6 +2761,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _model_name = resolve_env_vars(str(mcc.get("model_name", "")))
                     _api_key = resolve_env_vars(str(mcc.get("api_key", "")))
                     return {
+                        "index": i,
                         "name": _resolved_alias or _model_name,
                         "alias": _resolved_alias,
                         "model_name": _model_name,

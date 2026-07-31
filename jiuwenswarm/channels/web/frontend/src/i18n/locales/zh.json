@@ -260,6 +260,9 @@
     "removeTask": "移除任务",
     "addImage": "添加图片",
     "addImageDisabled": "处理中或录音中不可添加图片",
+    "addFile": "添加文件",
+    "addFileDisabled": "处理中或录音中不可添加文件",
+    "addAttachment": "添加附件",
     "removeImage": "移除图片",
     "sendTask": "发送消息，但不打断模型运行",
     "editTask": "编辑",
@@ -917,6 +920,7 @@
       "modelsLoadFailed": "刷新 OpenAI 模型列表失败",
       "noModelsAvailable": "未返回可用 OpenAI 模型，请在授权完成后刷新。",
       "configuredModelUnavailable": "当前配置的模型“{{model}}”不在 OpenAI 账号模型列表中。",
+      "needLoginForModel": "请先连接 OpenAI 账号。",
       "modelNameUseDropdown": "请使用下方 OpenAI 模型下拉框选择",
       "apiBaseManaged": "OAuth Provider 自动维护，无需手动修改",
       "autoSaving": "登录完成，正在自动保存配置...",
@@ -1453,7 +1457,11 @@
         "success": "可用（{{count}}）",
         "error": "不可用",
         "skipped": "未配置"
-      }
+      },
+      "sourceFilterHelp": "默认同时展示 SkillNet 与 ClawHub。点击源标签可筛选结果；至少保留一个源。",
+      "sourceFilterToggle": "点击筛选该源",
+      "sourceFilterKeepOne": "至少保留一个源",
+      "noFilteredResults": "当前筛选条件下没有结果，请重新选择源。"
     },
     "actions": {
       "install": "安装",
@@ -1476,6 +1484,9 @@
       "local": "本地",
       "project": "项目",
       "builtin": "内置",
+      "clawhub": "ClawHub",
+      "skillnet": "SkillNet",
+      "teamskillshub": "TeamSkillsHub",
       "unknown": "未知"
     },
     "sourceLabel": "来源",
@@ -1904,6 +1915,42 @@
     "waitingTasks": "等待任务",
     "messageQueue": "消息队列",
     "parallelProgress": "并行任务执行中 ({{completedCount}}/{{total}} 完成)",
+    "turnRunning": "任务执行",
+    "turnElapsed": "任务用时",
+    "workCompleted": "已完成 {{duration}}",
+    "workCompletedFallback": "已完成",
+    "workCompletedBoth": "已完成 {{thinking}} 次思考，{{tools}} 次工具调用 · {{duration}}",
+    "workCompletedBothNoDuration": "已完成 {{thinking}} 次思考，{{tools}} 次工具调用",
+    "workCompletedThinking": "已完成 {{thinking}} 次思考 · {{duration}}",
+    "workCompletedThinkingNoDuration": "已完成 {{thinking}} 次思考",
+    "workCompletedTools": "已完成 {{tools}} 次工具调用 · {{duration}}",
+    "workCompletedToolsNoDuration": "已完成 {{tools}} 次工具调用",
+    "reasoning": {
+      "thinking": "思考中…",
+      "thought": "已完成思考"
+    },
+    "toolAction": {
+      "write": "写入",
+      "read": "读取",
+      "edit": "编辑",
+      "delete": "删除",
+      "move": "移动",
+      "rename": "重命名",
+      "list": "列出",
+      "search": "搜索",
+      "glob": "查找",
+      "webSearch": "联网搜索",
+      "fetch": "抓取",
+      "run": "执行",
+      "runCode": "运行代码",
+      "upload": "上传",
+      "sendFile": "发送文件",
+      "todoCreate": "创建待办",
+      "todoModify": "更新待办",
+      "todoList": "查看待办",
+      "todoGet": "读取待办",
+      "skill": "查看技能"
+    },
     "subtask": {
       "starting": "启动中...",
       "toolCall": "调用 {{tool}} (#{{count}})",
@@ -1922,12 +1969,18 @@
       "truncated": "结果已截断"
     },
     "toolGroup": {
-      "executed": "已执行 {{totalPairs}} 次工具调用",
+      "running": "正在{{label}}",
+      "completed": "已完成{{label}}",
+      "category": {
+        "file": "文件操作",
+        "search": "搜索",
+        "code": "代码执行",
+        "system": "系统调用",
+        "other": "工具调用"
+      },
       "sessionExecuted": "{{count}} 个会话任务已完成",
       "sessionCompleted": "会话任务已完成",
       "sessionFailed": "会话失败",
-      "pending": "{{pendingCount}} 个执行中",
-      "timeout": "{{timeoutCount}} 个超时",
       "latest": "↓ 最新"
     },
     "teamActivity": {
@@ -2184,7 +2237,7 @@
     "workDescription": "处理办公、协作和通用任务",
     "codeDescription": "在项目目录中查看并修改代码",
     "environment": "环境信息",
-    "changes": "本轮变更",
+    "changes": "变更",
     "review": "审核"
   },
   "multiSession": {

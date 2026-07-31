@@ -294,8 +294,8 @@ class ReasonerUtils:
                 api_key=model_config.model_info.api_key,
                 api_base=model_config.model_info.api_base,
                 timeout=model_config.model_info.timeout,
-                verify_ssl=False,
-                ssl_cert=None,
+                verify_ssl=getattr(model_config.model_info, "verify_ssl", True),
+                ssl_cert=getattr(model_config.model_info, "ssl_cert", None),
             )
             model_request_config = ModelRequestConfig(
                 model=model_config.model_info.model_name,

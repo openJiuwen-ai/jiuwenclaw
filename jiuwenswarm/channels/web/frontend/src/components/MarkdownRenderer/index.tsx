@@ -6,6 +6,7 @@ import clsx from 'clsx';
 import type { MermaidConfig } from 'mermaid';
 import type { Element as HastElement } from 'hast';
 import { getSvgNaturalHeight, getSvgNaturalWidth } from '../../utils/svgDimensions';
+import { unescapeLiteralNewlines } from '../../utils/finalContent';
 import { Check, Copy, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
 import './MarkdownRenderer.css';
 
@@ -326,13 +327,49 @@ function MarkdownPre({
   return <pre {...props}>{children}</pre>;
 }
 
+function MarkdownTable({ children, ...props }: HTMLAttributes<HTMLTableElement>) {
+  return (
+    <div className='chat-markdown-table-wrap'>
+      <table {...props}>{children}</table>
+    </div>
+  );
+}
+
+/**
+ * 修复被压成一行的 GFM 表格：行与行之间只剩 ` | |`，remark-gfm 无法识别。
+ * 已是多行标准表格时原样返回。
+ */
+export function repairCollapsedGfmTables(content: string): string {
+  if (!content.includes('|') || !/\|[-: ]{3,}/.test(content)) {
+    return content;
+  }
+
+  const lines = content.split(/\r?\n/);
+  const tableLines = lines.filter((line) => /^\s*\|.*\|\s*$/.test(line));
+  if (tableLines.length >= 3) {
+    return content;
+  }
+
+  let next = content;
+  // 「正文|页码」标题与表头粘连（左侧须为正文文字，避免拆开 |---| 分隔行）
+  next = next.replace(/([\u4e00-\u9fffA-Za-z0-9*])\|(?=\s*[^\s|\-:])/g, '$1\n\n|');
+  // 行与行之间的 `| |` / `||` → 换行（分隔行内部是 `|---`，不会命中）
+  next = next.replace(/\|\s*(?=\|)/g, '|\n');
+  return next;
+}
+
 export function MarkdownRenderer({ content, className, testId }: MarkdownRendererProps) {
-  const contentLines = useMemo(() => content.split(/\r\n|\n|\r/), [content]);
+  const markdown = useMemo(
+    () => repairCollapsedGfmTables(unescapeLiteralNewlines(content)),
+    [content]
+  );
+  const contentLines = useMemo(() => markdown.split(/\r\n|\n|\r/), [markdown]);
 
   const components = useMemo(
     () => ({
       a: MarkdownLink,
       pre: (props: HTMLAttributes<HTMLPreElement> & { node?: HastElement }) => <MarkdownPre {...props} contentLines={contentLines} />,
+      table: MarkdownTable,
     }),
     [contentLines]
   );
@@ -340,7 +377,7 @@ export function MarkdownRenderer({ content, className, testId }: MarkdownRendere
   return (
     <div className={className} data-testid={testId}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {content}
+        {markdown}
       </ReactMarkdown>
     </div>
   );

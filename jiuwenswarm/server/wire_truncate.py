@@ -76,6 +76,10 @@ _HISTORY_COLLAPSE_KEEP_KEYS = {
     "source_member",
     "name",
     "status",
+    "goal_id",
+    "is_goal_objective_message",
+    "is_goal_completed_message",
+    "evidence",
 }
 
 _WORKFLOW_SNAPSHOT_KEEP_KEYS = {

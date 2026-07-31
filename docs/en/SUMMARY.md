@@ -43,6 +43,7 @@
   - [ACP Plugin Usage](ACP_Client_Config.md)
   - [Desktop auto-update design](WindowsAutoUpdateDesign.md)
   - [Logging System](Logs.md)
+  - [Debug Trace](DebugTrace.md)
 - [Development practices](development-practices/README.md)
   - [Daily report generator practice](development-practices/JiuwenSwarm-Daily-Report-Generator.md)
   - [Code review assistant practice](development-practices/JiuwenSwarm-Code-Review-Assistant.md)

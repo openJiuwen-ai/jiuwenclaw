@@ -303,19 +303,24 @@ async def handle_memory_edit(
     content_preview = ""
     kind = _classify_memory_file(resolved, workspace)
 
-    if exists:
-        try:
-            text = Path(resolved).read_text(encoding="utf-8", errors="replace")
-            lines = text.splitlines()[:20]
-            content_preview = "\n".join(lines)
-            if len(text.splitlines()) > 20:
-                content_preview += "\n... (truncated)"
-        except OSError:
-            pass
-    else:
-        parent = Path(resolved).parent
-        parent.mkdir(parents=True, exist_ok=True)
-        Path(resolved).touch()
+    if not exists:
+        return {
+            "path": resolved,
+            "exists": False,
+            "content_preview": "",
+            "kind": kind,
+            "editable": False,
+            "reason": "memory file does not exist",
+        }
+
+    try:
+        text = Path(resolved).read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()[:20]
+        content_preview = "\n".join(lines)
+        if len(text.splitlines()) > 20:
+            content_preview += "\n... (truncated)"
+    except OSError:
+        pass
 
     return {
         "path": resolved,

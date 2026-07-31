@@ -601,3 +601,94 @@ def test_stream_end_skips_final_when_already_emitted() -> None:
         had_assistant_output=True,
         emitted_terminal_chat_final=True,
     )
+
+
+def test_record_goal_set_history_writes_objective_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.append_history_record",
+        lambda **kwargs: captured.append(kwargs),
+    )
+    req = AgentRequest(
+        request_id="r1",
+        channel_id="web",
+        session_id="s1",
+        req_method=ReqMethod.COMMAND_GOAL,
+        params={"mode": "agent"},
+    )
+    JiuWenSwarmDeepAdapter._record_goal_set_history_if_needed(
+        req,
+        action="set",
+        result_type="goal_stream",
+        goal_payload={"goal_id": "g1", "objective": "ship it"},
+    )
+    assert len(captured) == 1
+    assert captured[0]["role"] == "user"
+    assert captured[0]["content"] == "ship it"
+    assert captured[0]["extra"]["is_goal_objective_message"] is True
+    assert captured[0]["extra"]["goal_id"] == "g1"
+
+    captured.clear()
+    JiuWenSwarmDeepAdapter._record_goal_set_history_if_needed(
+        req,
+        action="pause",
+        result_type="ok",
+        goal_payload={"goal_id": "g1", "objective": "ship it"},
+    )
+    assert captured == []
+
+
+def test_record_goal_completed_history_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.append_history_record",
+        lambda **kwargs: captured.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.load_history_records",
+        lambda _sid: [],
+    )
+    JiuWenSwarmDeepAdapter._record_goal_completed_history_if_needed(
+        session_id="s1",
+        channel_id="web",
+        channel_metadata=None,
+        mode="agent",
+        goal_payload={
+            "goal_id": "g1",
+            "status": "completed",
+            "last_assessment": {"evidence": "all done"},
+        },
+    )
+    assert len(captured) == 1
+    assert captured[0]["extra"]["is_goal_completed_message"] is True
+    assert captured[0]["extra"]["id"] == "goal-completed-g1"
+    assert captured[0]["content"].startswith("goal.completed:")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.load_history_records",
+        lambda _sid: [
+            {
+                "id": "goal-completed-g1",
+                "is_goal_completed_message": True,
+                "goal_id": "g1",
+            }
+        ],
+    )
+    captured.clear()
+    JiuWenSwarmDeepAdapter._record_goal_completed_history_if_needed(
+        session_id="s1",
+        channel_id="web",
+        channel_metadata=None,
+        mode="agent",
+        goal_payload={"goal_id": "g1", "status": "completed"},
+    )
+    assert captured == []
+
+    JiuWenSwarmDeepAdapter._record_goal_completed_history_if_needed(
+        session_id="s1",
+        channel_id="web",
+        channel_metadata=None,
+        mode="agent",
+        goal_payload={"goal_id": "g2", "status": "active"},
+    )
+    assert captured == []

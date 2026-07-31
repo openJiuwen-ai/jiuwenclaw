@@ -363,6 +363,15 @@ class TeamManager:
         """Return the active Runner-owned team name for the session."""
         return self._active_team_names.get(session_id)
 
+    def get_runtime_team_snapshot(self) -> dict[str, dict[str, str]]:
+        """Return session -> team runtime status for active/pending team runs."""
+        snapshot: dict[str, dict[str, str]] = {}
+        for sid, team_name in self._active_team_names.items():
+            snapshot[sid] = {"team_name": team_name, "state": "active"}
+        for sid, team_name in self._pending_team_names.items():
+            snapshot.setdefault(sid, {"team_name": team_name, "state": "pending"})
+        return snapshot
+
     def _get_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
         """Return the lock that serializes lifecycle operations for a session."""
         if self._is_distributed_mode(get_config()):
@@ -487,6 +496,9 @@ class TeamManager:
         session_id: str,
         *,
         requested_model_name: str | None = None,
+        template_id: str | None = None,
+        template_snapshot: dict[str, Any] | None = None,
+        strict_template: bool = False,
     ) -> TeamAgentSpec:
         config_base = get_config()
         # Keep dependency checks scoped to distributed mode to make the
@@ -513,6 +525,9 @@ class TeamManager:
         spec_dict = load_team_spec_dict(
             config_base=config_base,
             requested_model_name=requested_model_name,
+            template_id=template_id,
+            template_snapshot=template_snapshot,
+            strict_template=strict_template,
         )
         spec_dict = TeamManager._normalize_team_identity_fields(spec_dict)
         if TeamManager._is_distributed_mode(config_base):
@@ -562,6 +577,59 @@ class TeamManager:
 
         return TeamAgentSpec.model_validate(spec_dict)
 
+    @staticmethod
+    def _lookup_bound_team_identity(session_id: str) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        metadata = get_session_metadata(session_id, cache_bust=True)
+        team_name = str(metadata.get("team_name") or "").strip()
+        template_id = str(metadata.get("team_template_id") or "").strip()
+        template_snapshot: dict[str, Any] | None = None
+        if team_name:
+            from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
+            from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity, ensure_team_entity_for_binding
+
+            binding = get_team_binding_store().get(team_name)
+            if binding is not None:
+                if not template_id:
+                    template_id = binding.template_id
+                entity = ensure_team_entity_for_binding(binding, config_base=get_config())
+            else:
+                legacy_snapshot = (
+                    copy.deepcopy(metadata.get("team_template_snapshot"))
+                    if isinstance(metadata.get("team_template_snapshot"), dict)
+                    else None
+                )
+                entity = ensure_team_entity(
+                    team_name=team_name,
+                    template_id=template_id,
+                    template_snapshot=legacy_snapshot,
+                    config_base=get_config(),
+                )
+            if entity is not None:
+                template_id = entity.template_id
+                template_snapshot = copy.deepcopy(entity.template_snapshot)
+        return team_name or None, template_id or None, template_snapshot
+
+    def _load_session_team_spec(
+        self,
+        session_id: str,
+        *,
+        requested_model_name: str | None = None,
+    ) -> tuple[TeamAgentSpec, bool]:
+        team_name, template_id, template_snapshot = self._lookup_bound_team_identity(session_id)
+        load_kwargs: dict[str, Any] = {}
+        if requested_model_name is not None:
+            load_kwargs["requested_model_name"] = requested_model_name
+        if template_id is not None:
+            load_kwargs["template_id"] = template_id
+            load_kwargs["strict_template"] = template_snapshot is None
+        if template_snapshot is not None:
+            load_kwargs["template_snapshot"] = template_snapshot
+        spec = self._load_team_spec(session_id, **load_kwargs)
+        if team_name:
+            spec.team_name = team_name
+            return spec, True
+        return spec, False
+
 
     async def get_swarm_enriched_team_spec(
         self,
@@ -596,11 +664,12 @@ class TeamManager:
 
         config_base = get_config()
         await self._ensure_postgresql_for_leader(config_base)
-        spec = self._load_team_spec(
+        spec, has_binding = self._load_session_team_spec(
             session_id,
             requested_model_name=requested_model_name,
         )
-        self._apply_session_scoped_team_name(spec, session_id=session_id)
+        if not has_binding:
+            self._apply_session_scoped_team_name(spec, session_id=session_id)
         self.apply_team_plan_mode(spec, request_metadata=request_metadata)
         enrich_team_spec_for_swarm(
             spec,
@@ -1026,11 +1095,12 @@ class TeamManager:
         config_base = get_config()
         await self._ensure_postgresql_for_leader(config_base)
         logger.info("[TeamManager] building TeamAgentSpec: session_id=%s", session_id)
-        spec = self._load_team_spec(session_id)
-        self._apply_session_scoped_team_name(
-            spec,
-            session_id=session_id,
-        )
+        spec, has_binding = self._load_session_team_spec(session_id)
+        if not has_binding:
+            self._apply_session_scoped_team_name(
+                spec,
+                session_id=session_id,
+            )
 
         resolved_mode = str((request_metadata or {}).get("mode") or "").strip()
         # Provider-based assembly: source every member capability from the shared

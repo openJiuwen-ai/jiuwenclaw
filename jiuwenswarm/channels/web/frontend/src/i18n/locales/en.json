@@ -259,6 +259,9 @@
     "removeTask": "Remove task",
     "addImage": "Add image",
     "addImageDisabled": "Cannot add images while processing or recording",
+    "addFile": "Add file",
+    "addFileDisabled": "Cannot add files while processing or recording",
+    "addAttachment": "Add attachment",
     "removeImage": "Remove image",
     "sendTask": "Send message without interrupting model",
     "editTask": "Edit",
@@ -917,6 +920,7 @@
       "modelsLoadFailed": "Failed to refresh OpenAI model list",
       "noModelsAvailable": "No OpenAI models were returned. Refresh after authorization completes.",
       "configuredModelUnavailable": "Configured model \"{{model}}\" is not in the OpenAI account model list.",
+      "needLoginForModel": "Please connect your OpenAI account first.",
       "modelNameUseDropdown": "Use the OpenAI model dropdown below",
       "apiBaseManaged": "Managed by the OAuth provider. No manual change is needed.",
       "autoSaving": "Login completed. Saving configuration...",
@@ -1452,7 +1456,11 @@
         "success": "Available ({{count}})",
         "error": "Unavailable",
         "skipped": "Not configured"
-      }
+      },
+      "sourceFilterHelp": "SkillNet and ClawHub are shown by default. Click a source chip to filter results; keep at least one source selected.",
+      "sourceFilterToggle": "Click to filter this source",
+      "sourceFilterKeepOne": "Keep at least one source selected",
+      "noFilteredResults": "No results for the current source filter. Select another source."
     },
     "actions": {
       "install": "Install",
@@ -1475,6 +1483,9 @@
       "local": "Local",
       "project": "Project",
       "builtin": "Built-in",
+      "clawhub": "ClawHub",
+      "skillnet": "SkillNet",
+      "teamskillshub": "TeamSkillsHub",
       "unknown": "Unknown"
     },
     "sourceLabel": "Source",
@@ -1903,6 +1914,42 @@
     "waitingTasks": "Waiting Tasks",
     "messageQueue": "Message Queue",
     "parallelProgress": "Parallel tasks running ({{completedCount}}/{{total}} complete)",
+    "turnRunning": "Running",
+    "turnElapsed": "Took",
+    "workCompleted": "Completed {{duration}}",
+    "workCompletedFallback": "Completed",
+    "workCompletedBoth": "Completed {{thinking}} thoughts, {{tools}} tool calls · {{duration}}",
+    "workCompletedBothNoDuration": "Completed {{thinking}} thoughts, {{tools}} tool calls",
+    "workCompletedThinking": "Completed {{thinking}} thoughts · {{duration}}",
+    "workCompletedThinkingNoDuration": "Completed {{thinking}} thoughts",
+    "workCompletedTools": "Completed {{tools}} tool calls · {{duration}}",
+    "workCompletedToolsNoDuration": "Completed {{tools}} tool calls",
+    "reasoning": {
+      "thinking": "Thinking…",
+      "thought": "Thought"
+    },
+    "toolAction": {
+      "write": "Write",
+      "read": "Read",
+      "edit": "Edit",
+      "delete": "Delete",
+      "move": "Move",
+      "rename": "Rename",
+      "list": "List",
+      "search": "Search",
+      "glob": "Find",
+      "webSearch": "Web search",
+      "fetch": "Fetch",
+      "run": "Run",
+      "runCode": "Run code",
+      "upload": "Upload",
+      "sendFile": "Send file",
+      "todoCreate": "Create todos",
+      "todoModify": "Update todos",
+      "todoList": "List todos",
+      "todoGet": "Get todo",
+      "skill": "View skill"
+    },
     "subtask": {
       "starting": "Starting...",
       "toolCall": "Calling {{tool}} (#{{count}})",
@@ -1921,12 +1968,18 @@
       "truncated": "result truncated"
     },
     "toolGroup": {
-      "executed": "{{totalPairs}} tool calls executed",
+      "running": "Running {{label}}",
+      "completed": "Completed {{label}}",
+      "category": {
+        "file": "file operations",
+        "search": "searches",
+        "code": "code executions",
+        "system": "system calls",
+        "other": "tool calls"
+      },
       "sessionExecuted": "{{count}} session tasks completed",
       "sessionCompleted": "Session task completed",
       "sessionFailed": "Session failed",
-      "pending": "{{pendingCount}} running",
-      "timeout": "{{timeoutCount}} timed out",
       "latest": "↓ Latest"
     },
     "teamActivity": {
@@ -2180,7 +2233,7 @@
     "workDescription": "Office, collaboration, and general tasks",
     "codeDescription": "Inspect and modify code in a project directory",
     "environment": "Environment",
-    "changes": "Current Turn Changes",
+    "changes": "Changes",
     "review": "Review"
   },
   "multiSession": {

@@ -1052,6 +1052,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     # ─── Rail 生命周期(mode切换) ───────────────────
 
+    def _user_interaction_rail_attribute(self) -> str:
+        return "_code_ask_user_rail"
+
     async def _update_rails_for_mode(self, mode: str) -> None:
         """Code 模式下的 rail 生命周期管理.
 
@@ -1217,6 +1220,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         # code 模式始终走 _update_rails_for_mode 的 code 逻辑
         await self._update_rails_for_mode(runtime_config.mode)
+        await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
         await self._update_tools_for_mode(runtime_config.mode, runtime_config.session_id, runtime_config.request_id)
         await self._update_session_tools(
             runtime_config.session_id,

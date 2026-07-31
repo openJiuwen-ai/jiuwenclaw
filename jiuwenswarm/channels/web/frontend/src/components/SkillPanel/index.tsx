@@ -14,6 +14,7 @@ import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
 import { OnlineSkillSearchPanel } from "../../features/OnlineSkillSearchPanel";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
+import { getSkillAvatar } from "../../utils/skillAvatar";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { Switch } from "../Switch";
@@ -27,6 +28,8 @@ const GRAPH_READING_MIN_VISIBLE_MS = 500;
 
 type SkillItem = {
   name: string;
+  /** 展示名（保留安装来源的原始大小写，如 ClawHub 的 Weather）；缺省回退到 name */
+  display_name?: string;
   description: string;
   source: string;
   version: string;
@@ -139,6 +142,9 @@ function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSou
   if (source === "local") return t('skills.source.local');
   if (source === "project") return t('skills.source.project');
   if (source === "builtin") return t('skills.source.builtin');
+  if (source === "clawhub") return t('skills.source.clawhub');
+  if (source === "skillnet") return t('skills.source.skillnet');
+  if (source === "teamskillshub") return t('skills.source.teamskillshub');
   return source || t('skills.source.unknown');
 }
 
@@ -728,6 +734,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     return result.filter((skill) => {
       const haystack = [
         skill.name,
+        skill.display_name,
         skill.description,
         skill.author,
         coerceStringList(skill.tags).join(" "),
@@ -1206,32 +1213,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     },
     [fetchSkills, handleBackToList, t, withSession]
   );
-
-  const avatarColors = [
-    "bg-red-500",
-    "bg-orange-500",
-    "bg-amber-500",
-    "bg-yellow-500",
-    "bg-lime-500",
-    "bg-green-500",
-    "bg-emerald-500",
-    "bg-teal-500",
-    "bg-cyan-500",
-    "bg-sky-500",
-    "bg-blue-500",
-    "bg-indigo-500",
-    "bg-violet-500",
-    "bg-purple-500",
-    "bg-fuchsia-500",
-    "bg-pink-500",
-    "bg-rose-500",
-  ];
-
-  const getSkillAvatar = (name: string) => {
-    const firstChar = name.charAt(0).toUpperCase();
-    const colorIndex = name.charCodeAt(0) % avatarColors.length;
-    return { firstChar, color: avatarColors[colorIndex] };
-  };
 
   const renderActionButton = (skill: SkillItem) => {
     const plugin = installedSkillMap.get(skill.name);
@@ -1976,6 +1957,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {listState === "success" && builtinSkills.length > 0 && (
                     builtinSkills.map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
+                      const displayName = skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
                       const isToggling = actionTarget === `toggle:${skill.name}`;
                       const isInstalled = installedSkillMap.has(skill.name) || skill.source === "local";
@@ -1995,7 +1977,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                                 <div className="min-w-0">
                                   <div className="text-base font-semibold text-text-strong">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                     {skill.description || t('skills.noDescription')}
@@ -2031,7 +2013,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <div className="text-sm font-semibold text-text-strong truncate">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                     {skill.description || t('skills.noDescription')}
@@ -2125,7 +2107,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       </div>
                       <div>
                         <div className="text-lg font-semibold text-text-strong">
-                          {selectedSkill.name}
+                          {selectedSkill.display_name || selectedSkill.name}
                         </div>
                         <div className="text-sm text-text-muted mt-1">
                           {selectedSkill.description || t('skills.noDescription')}
@@ -2257,6 +2239,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {listState === "success" &&
                     getMySkillsFiltered().map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
+                      const displayName = skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
                       const isToggling = actionTarget === `toggle:${skill.name}`;
                       return (
@@ -2274,7 +2257,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                                 <div className="min-w-0">
                                   <div className="text-base font-semibold text-text-strong">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                     {skill.description || t('skills.noDescription')}
@@ -2308,7 +2291,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <div className="text-sm font-semibold text-text-strong truncate">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                     {skill.description || t('skills.noDescription')}
