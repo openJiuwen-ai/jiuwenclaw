@@ -4,7 +4,7 @@
 
 Migrated from JiuClawReActAgent:
   - _emit_tool_call / _emit_tool_result / _emit_todo_updated / _emit_context_compression
-  - _fix_incomplete_tool_context
+  - fix_incomplete_tool_context
   - Pause checkpoint logic
 """
 from __future__ import annotations
@@ -132,7 +132,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             raise asyncio.CancelledError("Agent abort requested")
 
         if not ctx.extra.get("_context_fixed") and ctx.context is not None:
-            await self._fix_incomplete_tool_context(ctx.context)
+            await self.fix_incomplete_tool_context(ctx.context)
             ctx.extra["_context_fixed"] = True
 
         await self._emit_context_compression(ctx)
@@ -196,7 +196,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
-            await self._fix_incomplete_tool_context(ctx.context)
+            await self.fix_incomplete_tool_context(ctx.context)
 
     # ------------------------------------------------------------------
     # Private helpers (migrated from JiuClawReActAgent)
@@ -486,7 +486,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             return "{}"
         return "{}"
 
-    async def _fix_incomplete_tool_context(self, context: Any) -> None:
+    async def fix_incomplete_tool_context(self, context: Any) -> None:
         """Fix incomplete context: ensure assistant messages with tool_calls have matching tool messages."""
         try:
             messages = context.get_messages()

@@ -16,7 +16,7 @@ from typing import Any, AsyncIterator
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.single_agent import AgentCard, create_agent_session
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperation, SysOperationCard
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.rails import SecurityRail
@@ -106,6 +106,9 @@ class SkillDevDeepAdapter:
         self._stale_instance_ids: set[str] = set()
         self._task_id: str | None = None
         self._session_history: SkillDevSessionHistoryService | None = None
+        # 流式执行期间强引用当前 AgentSession，供中断时落盘 checkpointer
+        self._current_agent_session: Any | None = None
+        self._interrupt_persisted: bool = False
 
     def get_instance(self):
         return self._instance
@@ -344,6 +347,13 @@ class SkillDevDeepAdapter:
         cid = request.channel_id
         has_streamed_content = False
         accumulated_text = ""
+        aborted = False
+        agent_session = create_agent_session(
+            session_id=session_id,
+            card=self._instance.card,
+        )
+        self._current_agent_session = agent_session
+        self._interrupt_persisted = False
 
         def _add_task_id(payload: dict[str, Any]) -> dict[str, Any]:
             task_id = self._get_task_id()
@@ -390,13 +400,17 @@ class SkillDevDeepAdapter:
                 channel_id=cid or "",
                 event_type_prefix="skilldev",
             ):
-                async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+                async for chunk in Runner.run_agent_streaming(
+                    self._instance, inputs, session=agent_session
+                ):
                     if self._is_stream_aborted():
+                        aborted = True
                         break
                     if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                         parsed = self._parse_stream_chunk(chunk, has_streamed_content=has_streamed_content)
                         if parsed is not None:
                             if self._is_stream_aborted():
+                                aborted = True
                                 break
                             if accumulated_text:
                                 yield _make_chunk(
@@ -411,6 +425,7 @@ class SkillDevDeepAdapter:
                     chunk_type = chunk.type
                     payload = chunk.payload
                     if self._is_stream_aborted():
+                        aborted = True
                         break
 
                     if chunk_type == "llm_usage":
@@ -473,20 +488,26 @@ class SkillDevDeepAdapter:
                         if file_ready is not None:
                             yield _make_chunk(file_ready)
 
-                if accumulated_text:
+                if accumulated_text and not aborted:
                     yield _make_chunk(
                         _add_task_id({"event_type": "skilldev.agent_output", "delta": accumulated_text})
                     )
         except asyncio.CancelledError:
+            aborted = True
             logger.info(
                 "[session=%s] [SkillDevDeepAdapter] stream task cancelled: request_id=%s",
                 session_id,
                 rid,
             )
+            await self._persist_interrupted_turn(agent_session)
             raise
         except Exception as exc:
             logger.exception("[session=%s] [SkillDevDeepAdapter] stream task failed: %s", session_id, exc)
             yield _make_chunk({"event_type": "skilldev.error", "error": str(exc)})
+        finally:
+            if aborted:
+                await self._persist_interrupted_turn(agent_session)
+            self._current_agent_session = None
 
         if emit_terminal:
             yield AgentResponseChunk(
@@ -1298,6 +1319,67 @@ class SkillDevDeepAdapter:
         rail = self._stream_event_rail
         return rail is not None and bool(getattr(rail, "abort_requested", False))
 
+    def _resolve_context_engine(self, instance: Any | None = None) -> Any | None:
+        """Locate the ContextEngine on the DeepAgent / ReActAgent instance."""
+        inst = instance if instance is not None else self._instance
+        if inst is None:
+            return None
+        react = getattr(inst, "_react_agent", None)
+        engine = getattr(react, "context_engine", None) if react is not None else None
+        if engine is not None:
+            return engine
+        return getattr(inst, "context_engine", None)
+
+    async def _persist_interrupted_turn(self, session: Any | None = None) -> None:
+        """Persist in-memory conversation (incl. aborted turn) to checkpointer.
+
+        Called before destroying the agent instance on cancel/supplement so the
+        next skilldev.chat with the same conversation_id can reload history.
+        """
+        if self._interrupt_persisted:
+            return
+        session = session if session is not None else self._current_agent_session
+        instance = self._instance
+        if session is None or instance is None:
+            return
+
+        engine = self._resolve_context_engine(instance)
+        if engine is None:
+            logger.warning(
+                "[SkillDevDeepAdapter] skip interrupt persist: no context_engine"
+            )
+            return
+
+        try:
+            sid = ""
+            getter = getattr(session, "get_session_id", None)
+            if callable(getter):
+                sid = str(getter() or "")
+            ctx = engine.get_context(session_id=sid) if sid else None
+            if ctx is not None and self._stream_event_rail is not None:
+                await self._stream_event_rail.fix_incomplete_tool_context(ctx)
+
+            await engine.save_contexts(session)
+            save_state = getattr(instance, "save_state", None)
+            if callable(save_state):
+                try:
+                    save_state(session)
+                except Exception:
+                    logger.exception(
+                        "[session=%s] [SkillDevDeepAdapter] save_state on interrupt failed",
+                        sid or "?",
+                    )
+            await session.post_run()
+            self._interrupt_persisted = True
+            logger.info(
+                "[session=%s] [SkillDevDeepAdapter] interrupted turn persisted to checkpointer",
+                sid or "?",
+            )
+        except Exception:
+            logger.exception(
+                "[SkillDevDeepAdapter] failed to persist interrupted turn"
+            )
+
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         intent = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
         logger.info(
@@ -1317,6 +1399,7 @@ class SkillDevDeepAdapter:
                 self._stream_event_rail.abort()
             if self._instance is not None:
                 await self._instance.abort()
+            await self._persist_interrupted_turn()
             self._cancel_ask_user_for_request(request)
             self.cleanup_task_resources()
             self._instance = None
@@ -1326,6 +1409,7 @@ class SkillDevDeepAdapter:
                 self._stream_event_rail.abort()
             if self._instance is not None:
                 await self._instance.abort()
+            await self._persist_interrupted_turn()
             self._cancel_ask_user_for_request(request)
             self.cleanup_task_resources()
             self._instance = None
