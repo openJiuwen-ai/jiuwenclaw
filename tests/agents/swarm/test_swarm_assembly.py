@@ -1802,6 +1802,16 @@ def test_team_plan_leader_structured_ask_user_provider_builds() -> None:
     ).__name__ == "StructuredAskUserRail"
 
 
+def test_non_interactive_team_omits_structured_ask_user_provider() -> None:
+    context = SwarmBuildContext(
+        mode="team",
+        role="leader",
+        request_metadata={"supports_user_interaction": False},
+    )
+
+    assert code_rails.build_structured_ask_user({}, context) is None
+
+
 def test_structured_ask_user_language_uses_team_leader_preferred_language() -> None:
     team_leader = SwarmBuildContext(
         mode="team",

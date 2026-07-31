@@ -1100,6 +1100,9 @@ class JiuWenSwarm:
             "query": final_query,
             "channel": channel,
             "language": language,
+            # Only an explicit false disables interactive tools. Existing
+            # clients that omit this capability remain backward compatible.
+            "supports_user_interaction": params.get("supports_user_interaction") is not False,
         }
         if _request_debug:
             inputs["_request_debug"] = True
@@ -1847,6 +1850,12 @@ class JiuWenSwarm:
                     if ok and str(action or "").strip().lower() == "set":
                         objective = str(params.get("objective") or "").strip()
                         if objective:
+                            goal_obj = goal_result.get("goal")
+                            goal_id = (
+                                str(goal_obj.get("goal_id") or "").strip() or None
+                                if isinstance(goal_obj, dict)
+                                else None
+                            )
                             append_history_record(
                                 session_id=session_id,
                                 request_id=request.request_id,
@@ -1856,6 +1865,10 @@ class JiuWenSwarm:
                                 timestamp=time.time(),
                                 channel_metadata=request.metadata,
                                 mode=params.get("mode", "unknown"),
+                                extra={
+                                    "goal_id": goal_id,
+                                    "is_goal_objective_message": True,
+                                },
                             )
                     # Keep message for callers that read payload.message; also
                     # mirror into error on failure so Gateway top-level error

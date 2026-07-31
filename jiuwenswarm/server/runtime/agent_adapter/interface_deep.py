@@ -42,6 +42,7 @@ from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.sys_operation import (
     SysOperation,
     SysOperationCard,
@@ -1281,6 +1282,76 @@ class JiuWenSwarmDeepAdapter:
             return None
         return self._resolve_interrupt_session_id(loop_sid)
 
+    async def _clear_pending_ask_user_interrupt_for_supplement(
+        self,
+        session_id: str | None,
+    ) -> bool:
+        """Drop a superseded pure ask_user round without leaving an open tool call."""
+        instance = getattr(self, "_instance", None)
+        loop_session = getattr(instance, "_loop_session", None)
+        loop_sid = self._deep_agent_loop_session_id()
+        target_sid = self._resolve_interrupt_session_id(session_id)
+        if loop_session is None or loop_sid != target_sid:
+            return False
+
+        try:
+            state = loop_session.get_state(INTERRUPTION_KEY)
+            interrupted_tools = getattr(state, "interrupted_tools", None)
+            if not isinstance(interrupted_tools, dict) or not interrupted_tools:
+                return False
+            if any(
+                getattr(getattr(entry, "tool_call", None), "name", None) != "ask_user"
+                for entry in interrupted_tools.values()
+            ):
+                return False
+
+            ai_message = getattr(state, "ai_message", None)
+            pending_calls = list(getattr(ai_message, "tool_calls", None) or [])
+            if not pending_calls or any(
+                getattr(tool_call, "name", None) != "ask_user"
+                for tool_call in pending_calls
+            ):
+                return False
+
+            react_agent = getattr(instance, "react_agent", None)
+            context_engine = getattr(react_agent, "context_engine", None)
+            context = (
+                context_engine.get_context(session_id=target_sid)
+                if context_engine is not None
+                else None
+            )
+            messages = list(context.get_messages() or []) if context is not None else []
+            last_calls = list(getattr(messages[-1], "tool_calls", None) or []) if messages else []
+            pending_signature = [
+                (getattr(tool_call, "id", None), getattr(tool_call, "name", None))
+                for tool_call in pending_calls
+            ]
+            last_signature = [
+                (getattr(tool_call, "id", None), getattr(tool_call, "name", None))
+                for tool_call in last_calls
+            ]
+            if last_signature != pending_signature:
+                return False
+
+            context.pop_messages(1, with_history=True)
+            loop_session.update_state({INTERRUPTION_KEY: None})
+            await context_engine.save_contexts(loop_session)
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] interrupt(supplement): failed to inspect "
+                "pending ask_user state session=%s",
+                target_sid,
+                exc_info=True,
+            )
+            return False
+
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] interrupt(supplement): cleared pending "
+            "ask_user state session=%s",
+            target_sid,
+        )
+        return True
+
     def _is_deep_agent_executing_for_session(self, session_id: str) -> bool:
         """True when the shared DeepAgent still runs stream/task-loop work for *session_id*."""
         instance = getattr(self, "_instance", None)
@@ -1866,7 +1937,8 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _build_mcp_server_config(entry: dict[str, Any]) -> McpServerConfig | None:
-        return build_mcp_server_config(entry)
+        # 传入 server_id_scope 生成稳定的 server_id，避免 reload 时重复注册导致进程泄漏
+        return build_mcp_server_config(entry, server_id_scope="jiuwenswarm")
 
     @staticmethod
     def _extract_enabled_mcp_server_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
@@ -4963,6 +5035,34 @@ class JiuWenSwarmDeepAdapter:
         self._last_mode = mode
         await self._update_agent_rails()
 
+    @staticmethod
+    def _user_interaction_rail_attribute() -> str:
+        return "_ask_user_rail"
+
+    async def _set_user_interaction_enabled(self, enabled: bool) -> None:
+        """Expose ``ask_user`` only when the requesting client can answer it."""
+        attr_name = self._user_interaction_rail_attribute()
+        rail = getattr(self, attr_name, None)
+        if enabled:
+            if rail is None:
+                rail = self._build_structured_ask_user_rail()
+                if rail is not None:
+                    await self._instance.register_rail(rail)
+                    setattr(self, attr_name, rail)
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] StructuredAskUserRail enabled "
+                        "for interactive request"
+                    )
+            return
+
+        if rail is not None:
+            await self._instance.unregister_rail(rail)
+            setattr(self, attr_name, None)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] StructuredAskUserRail disabled "
+                "for non-interactive request"
+            )
+
     async def _update_agent_rails(self) -> None:
         """agent 模式：注册 agent 专属 rails（原 plan 档能力并集）。"""
         if self._task_planning_rail is None:
@@ -5279,6 +5379,7 @@ class JiuWenSwarmDeepAdapter:
         cwd: str | None = None
         workspace: str | None = None
         project_dir: str | None = None
+        supports_user_interaction: bool = True
 
     async def _update_runtime_config(self, runtime_config: "_RuntimeConfig") -> None:
         """Register per-request tools for current agent execution."""
@@ -5342,6 +5443,7 @@ class JiuWenSwarmDeepAdapter:
         )
 
         await self._update_rails_for_mode(runtime_config.mode)
+        await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
         await self._update_tools_for_mode(
             runtime_config.mode, runtime_config.session_id, runtime_config.request_id
         )
@@ -5710,17 +5812,32 @@ class JiuWenSwarmDeepAdapter:
             return None
         return str(getattr(kind, "value", kind))
 
-    def _begin_visible_chat_content(self) -> dict[str, Any] | None:
+    def _begin_visible_chat_content(
+        self, stream_is_user_originated: bool = False
+    ) -> dict[str, Any] | None:
         """Stamp content provenance; inject a bubble-split final on user→goal.
 
         When the shared stream switches from user-round text to goal-round text
         without a terminal ``chat.final`` in between, emit an empty final so the
         frontend can ``stopStreaming`` and open a new bubble.
+
+        ``stream_is_user_originated`` marks a *plain user chat* consumer stream
+        (i.e. not a ``command.goal`` / attach-goal stream). Such a stream can be
+        hijacked by a goal round **before** the user round emits its first
+        visible token (slow first token + an early goal insert). In that timing
+        ``prev`` is still ``None`` yet a boundary final is still required, so the
+        goal answer opens its own bubble instead of merging into the (empty) user
+        bubble. Non-user-originated streams keep the strict ``prev == "user"``
+        rule so a pure goal stream never gets a spurious final at its head.
         """
         kind = self._current_interaction_run_kind()
         prev = self._stream_content_run_kind
         boundary: dict[str, Any] | None = None
-        if prev == "user" and kind == "goal":
+        switched_from_user = prev == "user" and kind == "goal"
+        hijacked_before_user_token = (
+            stream_is_user_originated and kind == "goal" and prev is None
+        )
+        if switched_from_user or hijacked_before_user_token:
             boundary = {"event_type": "chat.final", "content": ""}
             self._stream_content_run_kind = None
         if kind is not None:
@@ -6199,6 +6316,8 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction cancel failed",
                 intent,
             )
+        if intent == "supplement" and isinstance(new_input, str) and new_input.strip():
+            await self._clear_pending_ask_user_interrupt_for_supplement(request.session_id)
         message = "任务已切换" if intent == "supplement" else "任务已取消"
 
         payload: dict[str, Any] = {
@@ -6979,6 +7098,7 @@ class JiuWenSwarmDeepAdapter:
         if not objective:
             return
         params = request.params if isinstance(request.params, dict) else {}
+        goal_id = str(goal_payload.get("goal_id") or "").strip() or None
         append_history_record(
             session_id=request.session_id or "default",
             request_id=request.request_id,
@@ -6988,6 +7108,79 @@ class JiuWenSwarmDeepAdapter:
             timestamp=time.time(),
             channel_metadata=request.metadata,
             mode=params.get("mode", "unknown"),
+            extra={
+                "goal_id": goal_id,
+                "is_goal_objective_message": True,
+            },
+        )
+
+    @staticmethod
+    def _goal_completed_history_exists(session_id: str, goal_id: str) -> bool:
+        """Return True when this session already persisted a completion card for goal_id."""
+        message_id = f"goal-completed-{goal_id}"
+        try:
+            for rec in load_history_records(session_id):
+                if not isinstance(rec, dict):
+                    continue
+                if str(rec.get("id") or "") == message_id:
+                    return True
+                if rec.get("is_goal_completed_message") and str(rec.get("goal_id") or "") == goal_id:
+                    return True
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] goal completed history lookup failed: session_id=%s goal_id=%s",
+                session_id,
+                goal_id,
+                exc_info=True,
+            )
+        return False
+
+    @staticmethod
+    def _record_goal_completed_history_if_needed(
+        *,
+        session_id: str,
+        channel_id: str,
+        channel_metadata: dict[str, Any] | None,
+        mode: str | None,
+        goal_payload: dict[str, Any] | None,
+    ) -> None:
+        """Persist a goal-completed card once when status first becomes completed."""
+        if not isinstance(goal_payload, dict):
+            return
+        status = goal_payload.get("status")
+        status_value = getattr(status, "value", status)
+        if str(status_value or "").strip().lower() != "completed":
+            return
+        goal_id = str(goal_payload.get("goal_id") or "").strip()
+        if not goal_id:
+            return
+        sid = (session_id or "default").strip() or "default"
+        if JiuWenSwarmDeepAdapter._goal_completed_history_exists(sid, goal_id):
+            return
+
+        evidence = ""
+        last_assessment = goal_payload.get("last_assessment")
+        if isinstance(last_assessment, dict):
+            evidence = str(last_assessment.get("evidence") or "").strip()
+        # Keep the existing frontend GoalCompletedCard wire format so history
+        # restore / localStorage merge keep working without a content-parser fork.
+        content = "goal.completed:" + json.dumps({"evidence": evidence}, ensure_ascii=False)
+        message_id = f"goal-completed-{goal_id}"
+        append_history_record(
+            session_id=sid,
+            request_id=message_id,
+            channel_id=channel_id,
+            role="assistant",
+            content=content,
+            timestamp=time.time(),
+            channel_metadata=channel_metadata,
+            mode=mode,
+            extra={
+                "id": message_id,
+                "goal_id": goal_id,
+                "is_goal_completed_message": True,
+                "evidence": evidence,
+            },
         )
 
     @staticmethod
@@ -7453,6 +7646,9 @@ class JiuWenSwarmDeepAdapter:
                     cwd=inputs.get("cwd"),
                     workspace=inputs.get("workspace_dir"),
                     project_dir=inputs.get("project_dir"),
+                    supports_user_interaction=inputs.get(
+                        "supports_user_interaction", True
+                    ),
                 )
             )
             inputs = dict(inputs)
@@ -7702,6 +7898,9 @@ class JiuWenSwarmDeepAdapter:
                     trusted_dirs=inputs.get("trusted_dirs"),
                     cwd=inputs.get("cwd"),
                     project_dir=inputs.get("project_dir"),
+                    supports_user_interaction=inputs.get(
+                        "supports_user_interaction", True
+                    ),
                 )
             )
 
@@ -7877,6 +8076,18 @@ class JiuWenSwarmDeepAdapter:
                 had_assistant_output = True
             if event_type == "chat.final":
                 emitted_terminal_chat_final = True
+            # Persist goal-completed cards at the stream yield choke point so
+            # every goal.updated path (typed chunk / dict chunk) is covered once
+            # without touching the pure payload parser.
+            if event_type == GOAL_UPDATED_EVENT_TYPE:
+                goal_obj = payload.get("goal")
+                self._record_goal_completed_history_if_needed(
+                    session_id=session_id,
+                    channel_id=cid,
+                    channel_metadata=request.metadata if isinstance(request.metadata, dict) else None,
+                    mode=mode,
+                    goal_payload=goal_obj if isinstance(goal_obj, dict) else None,
+                )
             return payload
 
         cron_context_tokens = self._bind_runtime_cron_context(
@@ -7914,6 +8125,9 @@ class JiuWenSwarmDeepAdapter:
                     cwd=inputs.get("cwd"),
                     workspace=inputs.get("workspace_dir"),
                     project_dir=inputs.get("project_dir"),
+                    supports_user_interaction=inputs.get(
+                        "supports_user_interaction", True
+                    ),
                 )
             )
             if self._stream_event_rail is not None:
@@ -8169,6 +8383,16 @@ class JiuWenSwarmDeepAdapter:
                     )
                 )
             run_failure: tuple[str, str] | None = None
+            # A plain user-chat consumer stream (not a command.goal / attach-goal
+            # stream). Only these may be hijacked by a goal round before the user
+            # round produces its first visible token; used to allow a bubble
+            # split even when ``prev`` is still None. Pure goal streams keep the
+            # strict prev=="user" rule inside ``_begin_visible_chat_content``.
+            stream_is_user_originated = (
+                pending_goal_op is None
+                and not attach_goal_request
+                and not goal_stream_request
+            )
             async for chunk in interaction_stream:
                 if _debug_logger is not None:
                     _debug_logger.feed(chunk)
@@ -8182,7 +8406,7 @@ class JiuWenSwarmDeepAdapter:
                     # Only stamp provenance / inject split on new visible deltas.
                     # A late user-round chat.final must keep the prior content kind.
                     if isinstance(parsed, dict) and parsed.get("event_type") == "chat.delta":
-                        boundary = self._begin_visible_chat_content()
+                        boundary = self._begin_visible_chat_content(stream_is_user_originated)
                         if boundary is not None:
                             yield AgentResponseChunk(
                                 request_id=rid,
@@ -8262,7 +8486,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if reasoning_payload is None:
                         continue
-                    boundary = self._begin_visible_chat_content()
+                    boundary = self._begin_visible_chat_content(stream_is_user_originated)
                     if boundary is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -8300,7 +8524,7 @@ class JiuWenSwarmDeepAdapter:
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
-                    boundary = self._begin_visible_chat_content()
+                    boundary = self._begin_visible_chat_content(stream_is_user_originated)
                     if boundary is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -9472,6 +9696,10 @@ class JiuWenSwarmDeepAdapter:
                 if role == "user":
                     recapworthy.append(SimpleNamespace(role="user", content=content))
                 elif role == "assistant":
+                    # Goal-completed cards are UI-only history facts; never feed them
+                    # back into model recap context.
+                    if rec.get("is_goal_completed_message"):
+                        continue
                     event_type = rec.get("event_type")
                     # 只包含 assistant 的最终回复和 compact summary
                     if event_type in ("chat.final", "context.compact_summary") or not event_type:
@@ -9849,6 +10077,8 @@ class JiuWenSwarmDeepAdapter:
                 if cleaned:
                     messages.append(UserMessage(content=cleaned))
             elif role == "assistant":
+                if rec.get("is_goal_completed_message"):
+                    continue
                 if event_type in ("chat.final", "context.compact_summary", "context.rewind_summary") or not event_type:
                     if event_type in ("context.compact_boundary",):
                         continue

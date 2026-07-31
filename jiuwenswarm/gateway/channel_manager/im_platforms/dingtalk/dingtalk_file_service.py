@@ -102,6 +102,8 @@ class DingTalkFileService:
         client_id: str,
         get_token_func: Callable[[], asyncio.coroutines.Coroutine[Any, Any, str | None]],
         http_client: httpx.AsyncClient,
+        api_base: str,
+        oapi_base: str,
         max_download_size: int = 100 * 1024 * 1024,
         download_timeout: int = 60,
         workspace_dir: str = "",
@@ -115,6 +117,8 @@ class DingTalkFileService:
             max_download_size: 最大下载文件大小（字节）
             download_timeout: 下载超时时间（秒）
             workspace_dir: 工作空间目录
+            api_base: 新版 v1.0 接口域名前缀
+            oapi_base: 旧版 media 接口域名前缀
         """
         self._client_id = client_id
         self._get_token = get_token_func
@@ -122,6 +126,8 @@ class DingTalkFileService:
         self._max_download_size = max_download_size
         self._download_timeout = download_timeout
         self._workspace_dir = workspace_dir
+        self._api_base = api_base
+        self._oapi_base = oapi_base
         self._download_semaphore = asyncio.Semaphore(3)
 
     def _get_download_dir(self, file_category: str) -> str:
@@ -158,7 +164,7 @@ class DingTalkFileService:
             logger.error("[DingTalkFileService] 无法获取 access_token")
             return None
 
-        url = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
+        url = f"{self._api_base}/v1.0/robot/messageFiles/download"
         # 钉钉下载 API 使用 POST 方法，参数放在请求体中
         body = {
             "downloadCode": download_code,
@@ -441,7 +447,7 @@ class DingTalkFileService:
 
         # 使用钉钉旧版 API（与 dingtalk-stream SDK 一致）
         from urllib.parse import quote_plus
-        url = f"https://oapi.dingtalk.com/media/upload?access_token={quote_plus(token)}"
+        url = f"{self._oapi_base}/media/upload?access_token={quote_plus(token)}"
 
         try:
             filename = os.path.basename(file_path)

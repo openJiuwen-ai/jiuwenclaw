@@ -216,7 +216,7 @@ models:
         stream_first_chunk_timeout: 300
         # 流式：分片之间的最大空闲等待时间（秒）
         stream_idle_timeout: 60
-        verify_ssl: false
+        verify_ssl: true
         custom_headers: {}
       model_config_obj:
         temperature: 0.95
@@ -228,7 +228,7 @@ models:
         model_name: ${VIDEO_MODEL_NAME}
         client_provider: ${VIDEO_PROVIDER}
         timeout: 1800
-        verify_ssl: false
+        verify_ssl: true
       model_config_obj:
         temperature: 0.95
   audio:
@@ -237,7 +237,7 @@ models:
         api_key: ${AUDIO_API_KEY}
         model_name: ${AUDIO_MODEL_NAME}
         client_provider: ${AUDIO_PROVIDER}
-        verify_ssl: false
+        verify_ssl: true
         timeout: 1800
       model_config_obj:
         temperature: 0.95
@@ -247,7 +247,7 @@ models:
         api_key: ${VISION_API_KEY}
         model_name: ${VISION_MODEL_NAME}
         client_provider: ${VISION_PROVIDER}
-        verify_ssl: false
+        verify_ssl: true
         timeout: 1800
       model_config_obj:
         temperature: 0.95
@@ -257,7 +257,7 @@ models:
         api_key: ${IMAGE_GEN_API_KEY}
         model_name: ${IMAGE_GEN_MODEL_NAME}
         client_provider: ${IMAGE_GEN_PROVIDER}
-        verify_ssl: false
+        verify_ssl: true
         timeout: 1800
       model_config_obj:
         temperature: 0.95
@@ -282,7 +282,7 @@ acp_agents:
 #       api_base: https://api.deepseek.com
 #       api_key: sk-xxx
 #       timeout: 1800
-#       verify_ssl: false
+#       verify_ssl: true
 #       custom_headers: {}
 #     model_request_config:
 #       model: deepseek-chat
@@ -402,14 +402,13 @@ agent_observability:
 # ============================================================
 # 控制非 team 模式（agent.* / code.*）的人类可读本地 dump。
 # 生效逻辑（resolve_debug_trace_settings）：
-#   debug_enabled = 请求带 /debug OR debug_trace.enabled OR debug_trace.<mode>.enabled
+#   debug_enabled = 请求带 /debug OR debug_trace.<mode>.enabled
 #   dump_enabled  = debug_enabled AND debug_trace.<mode>.dump_enabled != false
 # dump 写入 ~/.jiuwenswarm/.agent/traces/ 或 .code/traces/（按模式）。
 # 与 agent_observability（OTel span）相互独立：本块只管本地文本 dump，
 # OTel 接入在后续阶段。
 # ============================================================
 debug_trace:
-  enabled: false                    # 全局开关（true=所有模式常开 dump）
   agent:                            # agent 模式（agent.plan / agent.fast …）
     enabled: false                  # 仅 agent 模式开关
     dump_enabled: true              # debug 开启时是否写本地 dump
@@ -655,6 +654,8 @@ channels:
         my_user_id: ""
         bot_name: ""
         enable_memory: false
+        # 飞书开放平台 API 域名前缀（留空走官方默认，支持国际版/私有化切换）
+        api_base: https://open.feishu.cn
   feishu_enterprise:
     # 企业飞书多 Bot 配置（每个 bot 会注册为独立 channel: feishu_enterprise:<app_id>）
     # bot_a:
@@ -685,7 +686,7 @@ channels:
         # xiaoyi_claw配置
         uid:
         api_key:
-        push_url:
+        push_url: https://hag.cloud.huawei.com/open-ability-agent/v1/agent-webhook
         file_upload_url:
         # 小艺手机端插件tools调用，会添加相关tools到系统提示词
         phone_tools_enabled: false
@@ -696,6 +697,9 @@ channels:
     allow_from: []
     enabled: false
     send_file_allowed: true
+    # API 域名前缀（留空走官方默认，支持私有化/国际版切换）
+    api_base: https://api.dingtalk.com      # 新版 v1.0 接口域名
+    oapi_base: https://oapi.dingtalk.com    # 旧版 media 接口域名
   telegram:
     # Telegram Bot 配置
     # 从 @BotFather 获取 bot_token

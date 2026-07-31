@@ -595,6 +595,7 @@ function AppContent() {
     isConnected,
     request,
     persistMedia,
+    persistDocuments,
     sendMessage,
     sendStructuredChatContent,
     pause,
@@ -622,7 +623,10 @@ function AppContent() {
   });
 
   const applyHistoryPageResult = useCallback((sid: string, result: FetchHistoryPageResult) => {
-    prependMessages(sid, result.messages);
+    // 只 stamp 徽章：merge 完成卡只适合整页 replace（首次 history 恢复）。
+    // 这里若再 merge，localStorage 里的完成卡不在本页 messages 里就会被再次注入，
+    // prepend 又不按 id 去重，导致完成卡重复。
+    prependMessages(sid, stampGoalObjectiveMessages(sid, result.messages));
     for (const item of result.toolReplay) {
       if (item.kind === 'tool_call') {
         const n = normalizeToolCallPayload(item.payload);
@@ -1705,6 +1709,14 @@ function AppContent() {
     return persistMedia(content, currentSessionId, mediaItems);
   }, [persistMedia]);
 
+  const handlePersistDocuments = useCallback((content: string, mediaItems: MediaItem[]) => {
+    const currentSessionId = sessionIdRef.current;
+    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) {
+      return Promise.reject(new Error('会话未就绪，请稍后重试'));
+    }
+    return persistDocuments(content, currentSessionId, mediaItems);
+  }, [persistDocuments]);
+
   useEffect(() => {
     return setA2UIActionHandler((message) => {
       const currentSessionId = sessionIdRef.current;
@@ -2175,6 +2187,7 @@ function AppContent() {
                     <ChatPanel
                       onSendMessage={handleSendMessage}
                       onPersistMedia={handlePersistMedia}
+                      onPersistDocuments={handlePersistDocuments}
                       onInterrupt={handleInterrupt}
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}

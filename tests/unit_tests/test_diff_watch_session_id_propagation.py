@@ -154,13 +154,14 @@ def _make_fake_status_factory():
     status_calls: list[dict] = []
 
     def fake_get_project_diff_status(
-        *, project, session_id, include_files, include_hunks,
+        *, project, session_id, include_files, include_hunks, hunk_paths=None,
     ):
         status_calls.append({
             "project_id": project.project_id,
             "session_id": session_id,
             "include_files": include_files,
             "include_hunks": include_hunks,
+            "hunk_paths": hunk_paths,
         })
         return SimpleNamespace(
             to_dict=lambda include_hunks=False: {
@@ -291,6 +292,7 @@ async def test_files_source_current_passes_no_session_id():
     assert len(status_calls) == 1
     # 修复后:source="current" 不传 session_id
     assert status_calls[0]["session_id"] is None
+    assert status_calls[0]["hunk_paths"] is None
     resp = channel.responses[0]
     assert resp["ok"] is True
 
@@ -323,6 +325,7 @@ async def test_files_source_last_turn_passes_session_id():
 
     assert len(status_calls) == 1
     assert status_calls[0]["session_id"] == "sess-1"
+    assert status_calls[0]["hunk_paths"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +362,7 @@ async def test_detail_source_current_passes_no_session_id():
     assert len(status_calls) == 1
     # 修复后:source="current" 不传 session_id
     assert status_calls[0]["session_id"] is None
+    assert status_calls[0]["hunk_paths"] == ["a.py"]
     resp = channel.responses[0]
     assert resp["ok"] is True
 
@@ -414,7 +418,7 @@ async def test_current_only_subscription_survives_file_ops_failure():
     handler = _make_handler(channel, registry)
 
     def fake_get_project_diff_status(
-        *, project, session_id, include_files, include_hunks,
+        *, project, session_id, include_files, include_hunks, hunk_paths=None,
     ):
         if session_id is not None:
             # 模拟 file_ops 历史读取失败

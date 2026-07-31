@@ -5,6 +5,10 @@ import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
 import { parseTimestampToMs, timestampMsToIso } from '../utils/timestamp';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
 import { normalizeToolCallPayload, normalizeToolResultPayload } from './tool-events/toolEventNormalizer';
+import {
+  buildGoalCompletedContent,
+  isGoalCompletedContent,
+} from '../components/GoalBar/goalCompletedMessage';
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -281,21 +285,12 @@ function normalizeHistoryMediaItem(value: unknown): MediaItem | null {
     return null;
   }
 
-  const rawType = typeof value.type === 'string' ? value.type.trim().toLowerCase() : 'image';
-  if (rawType && rawType !== 'image') {
-    return null;
-  }
-
   const path = pickFirstString(value, ['path', 'url']);
   if (!path) {
     return null;
   }
 
-  const mimeType = pickFirstString(value, ['mime_type', 'mimeType']) ?? 'image/png';
-  if (!mimeType.startsWith('image/')) {
-    return null;
-  }
-
+  const mimeType = pickFirstString(value, ['mime_type', 'mimeType']) ?? 'application/octet-stream';
   const filename = pickFirstString(value, ['filename', 'name']) ?? filenameFromPath(path);
   const size = typeof value.size_bytes === 'number'
     ? value.size_bytes
@@ -303,8 +298,27 @@ function normalizeHistoryMediaItem(value: unknown): MediaItem | null {
       ? value.sizeBytes
       : undefined;
 
+  const rawType = typeof value.type === 'string' ? value.type.trim().toLowerCase() : '';
+  let type: MediaItem['type'];
+  if (rawType === 'image' || rawType === 'audio' || rawType === 'video' || rawType === 'document') {
+    type = rawType;
+  } else if (mimeType.startsWith('image/')) {
+    type = 'image';
+  } else if (mimeType.startsWith('audio/')) {
+    type = 'audio';
+  } else if (mimeType.startsWith('video/')) {
+    type = 'video';
+  } else {
+    type = 'document';
+  }
+
+  // Keep legacy image-only filtering for ambiguous image records without type.
+  if (type === 'image' && !mimeType.startsWith('image/') && rawType !== 'image') {
+    return null;
+  }
+
   return {
-    type: 'image',
+    type,
     filename,
     path,
     mime_type: mimeType,
@@ -344,15 +358,21 @@ function extractHistoryMediaItems(record: Record<string, unknown>): MediaItem[] 
 
   if (isRecord(record.files)) {
     appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_images);
+    appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_documents);
   }
   if (isRecord(record.event_payload)) {
     appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.media_items);
     if (isRecord(record.event_payload.files)) {
       appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_images);
+      appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_documents);
     }
   }
 
   return mediaItems;
+}
+
+function isTruthyHistoryFlag(value: unknown): boolean {
+  return value === true || value === 'true' || value === 1 || value === '1';
 }
 
 function parseHistoryTimelineEntry(
@@ -375,6 +395,9 @@ function parseHistoryTimelineEntry(
     }
     const id =
       pickFirstString(record, ['id', 'message_id', 'msg_id']) ?? `hist-user-${sessionId}-${at}`;
+    const isGoalObjectiveMessage =
+      isTruthyHistoryFlag(record.is_goal_objective_message) ||
+      isTruthyHistoryFlag(record.isGoalObjectiveMessage);
     return {
       kind: 'message',
       message: {
@@ -383,6 +406,7 @@ function parseHistoryTimelineEntry(
         content,
         timestamp: at,
         ...(mediaItems.length > 0 ? { mediaItems } : {}),
+        ...(isGoalObjectiveMessage ? { isGoalObjectiveMessage: true } : {}),
       },
     };
   }
@@ -438,7 +462,21 @@ function parseHistoryTimelineEntry(
   const payload = buildEventPayloadForRecord(record);
 
   if (eventType === 'chat.final') {
-    const content = normalizeFinalContent(payload);
+    let content = normalizeFinalContent(payload);
+    const isGoalCompletedMessage =
+      isTruthyHistoryFlag(record.is_goal_completed_message) ||
+      isTruthyHistoryFlag(record.isGoalCompletedMessage) ||
+      isTruthyHistoryFlag(payload.is_goal_completed_message) ||
+      isTruthyHistoryFlag(payload.isGoalCompletedMessage);
+    if (isGoalCompletedMessage && !isGoalCompletedContent(content)) {
+      const evidenceRaw =
+        (typeof record.evidence === 'string' && record.evidence) ||
+        (typeof payload.evidence === 'string' && payload.evidence) ||
+        content;
+      content = buildGoalCompletedContent({
+        evidence: typeof evidenceRaw === 'string' ? evidenceRaw.trim() : '',
+      });
+    }
     if (!content.trim()) {
       return null;
     }

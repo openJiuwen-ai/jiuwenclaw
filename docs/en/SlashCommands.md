@@ -374,7 +374,7 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
      - `both` → `session.rewind_and_restore`
      - `conversation` → `session.rewind`
      - `code` → `session.restore_files`
-- After rewind: TUI clears the transcript and reloads history; if the rewinded content contains user input, it is automatically filled into the input box.
+- After rewind: TUI clears the transcript and reloads history; if the rewound content contains user input, it is automatically filled into the input box.
 - Limitation: Rewinding does not affect files edited manually or via bash commands.
 - Examples:
   - `/rewind` — Interactive turn selection and restore mode confirmation

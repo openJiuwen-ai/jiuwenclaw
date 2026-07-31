@@ -811,8 +811,8 @@ class LLMController(BaseController):
                 api_key=self.config.model.model_info.api_key,
                 api_base=self.config.model.model_info.api_base,
                 timeout=self.config.model.model_info.timeout,
-                verify_ssl=False,
-                ssl_cert=None,
+                verify_ssl=getattr(self.config.model.model_info, "verify_ssl", True),
+                ssl_cert=getattr(self.config.model.model_info, "ssl_cert", None),
             )
             model_request_config = ModelRequestConfig(
                 model=self.config.model.model_info.model_name,

@@ -957,6 +957,7 @@ select {
     --chat-page-max-width: 920px;
     --chat-page-gutter: clamp(12px, 3vw, 40px);
     --chat-content-width: min(var(--chat-page-max-width), calc(100% - (var(--chat-page-gutter) * 2)));
+    position: relative;
   }
 
   .chat-scroll {

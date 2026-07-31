@@ -81,9 +81,8 @@ function flattenConfigEntries(
   return flattened.length > 0 ? flattened : prefix ? [{ label: prefix, value: "{}" }] : [];
 }
 
-function maskSensitive(value: string): string {
-  if (!value || value.length <= 8) return "***";
-  return `${value.slice(0, 4)}****${value.slice(-4)}`;
+function maskSensitive(_value: string): string {
+  return "******";
 }
 
 function groupConfigSchemaByGroup(
@@ -121,7 +120,7 @@ async function applyConfigSet(
           title: "Config Updated",
           items: [
             { label: "key", value: key },
-            { label: "value", value: schema.sensitive ? "***" : value },
+            { label: "value", value: schema.sensitive ? "******" : value },
             { label: "applied", value: String(result.applied_without_restart) },
           ],
         },
@@ -147,6 +146,17 @@ function buildConfigDisplayItems(
   for (const [k, v] of Object.entries(payload)) {
     if (k !== "schema" && k !== "app_version") {
       displayPayload[k] = v;
+    }
+  }
+  // 敏感项一律 mask 为 ******，避免 /config get 泄露明文密钥
+  const sensitiveKeys = new Set(
+    (payload.schema ?? []).filter((s) => s.sensitive).map((s) => s.key),
+  );
+  for (const k of Object.keys(displayPayload)) {
+    if (sensitiveKeys.has(k)) {
+      const raw = displayPayload[k];
+      const text = typeof raw === "string" ? raw : raw === null || raw === undefined ? "" : String(raw);
+      displayPayload[k] = text ? "******" : text;
     }
   }
   // 若用户指定了 key 但后端未返回该字段，应明确提示未找到，而不是 fallback 回全部配置

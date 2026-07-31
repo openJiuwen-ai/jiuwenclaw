@@ -260,6 +260,9 @@
     "removeTask": "移除任务",
     "addImage": "添加图片",
     "addImageDisabled": "处理中或录音中不可添加图片",
+    "addFile": "添加文件",
+    "addFileDisabled": "处理中或录音中不可添加文件",
+    "addAttachment": "添加附件",
     "removeImage": "移除图片",
     "sendTask": "发送消息，但不打断模型运行",
     "editTask": "编辑",
@@ -916,6 +919,7 @@
       "modelsLoadFailed": "刷新 OpenAI 模型列表失败",
       "noModelsAvailable": "未返回可用 OpenAI 模型，请在授权完成后刷新。",
       "configuredModelUnavailable": "当前配置的模型“{{model}}”不在 OpenAI 账号模型列表中。",
+      "needLoginForModel": "请先连接 OpenAI 账号。",
       "modelNameUseDropdown": "请使用下方 OpenAI 模型下拉框选择",
       "apiBaseManaged": "OAuth Provider 自动维护，无需手动修改",
       "autoSaving": "登录完成，正在自动保存配置...",
@@ -2232,7 +2236,7 @@
     "workDescription": "处理办公、协作和通用任务",
     "codeDescription": "在项目目录中查看并修改代码",
     "environment": "环境信息",
-    "changes": "本轮变更",
+    "changes": "变更",
     "review": "审核"
   },
   "multiSession": {
