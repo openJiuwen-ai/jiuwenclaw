@@ -26,6 +26,12 @@ _DEBUG_TRACE_LOGGER: ContextVar[Optional["DebugTraceLogger"]] = ContextVar(
     default=None,
 )
 
+# session_id -> logger registry. The per-request ContextVar can't reach the
+# subagent dispatch sites: they run in the DeepAgent supervisor task created at
+# session setup, before any /debug request. They hold the
+# parent Session, so they look the logger up by id here.
+_LOGGERS_BY_SESSION: dict[str, "DebugTraceLogger"] = {}
+
 
 def get_debug_trace_logger() -> Optional["DebugTraceLogger"]:
     """Return the active run's logger, or ``None`` when not in a debug run."""
@@ -42,8 +48,38 @@ def reset_debug_trace_logger(token: Token) -> None:
     _DEBUG_TRACE_LOGGER.reset(token)
 
 
+def register_debug_trace_logger(session_id: str, logger: "DebugTraceLogger") -> None:
+    """Register *logger* as the active logger for *session_id*.
+
+    Pairs with :func:`unregister_debug_trace_logger`; the adapter calls these at
+    run start / end so dispatch sites running outside the request's ContextVar
+    scope (the DeepAgent supervisor task) can still recover the logger via
+    :func:`get_debug_trace_logger_for_session`.
+    """
+    if session_id:
+        _LOGGERS_BY_SESSION[session_id] = logger
+
+
+def unregister_debug_trace_logger(session_id: str) -> None:
+    """Drop the logger registered for *session_id* (no-op if none / id empty)."""
+    if session_id:
+        _LOGGERS_BY_SESSION.pop(session_id, None)
+
+
+def get_debug_trace_logger_for_session(session_id: str) -> Optional["DebugTraceLogger"]:
+    """Return the logger registered for *session_id*, or ``None``.
+
+    Fallback for dispatch sites that run in a task whose context snapshot predates
+    the per-request ContextVar binding (see ``_LOGGERS_BY_SESSION`` note).
+    """
+    return _LOGGERS_BY_SESSION.get(session_id) if session_id else None
+
+
 __all__ = [
     "get_debug_trace_logger",
     "set_debug_trace_logger",
     "reset_debug_trace_logger",
+    "register_debug_trace_logger",
+    "unregister_debug_trace_logger",
+    "get_debug_trace_logger_for_session",
 ]

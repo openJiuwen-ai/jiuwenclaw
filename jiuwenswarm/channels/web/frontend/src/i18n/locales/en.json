@@ -259,6 +259,9 @@
     "removeTask": "Remove task",
     "addImage": "Add image",
     "addImageDisabled": "Cannot add images while processing or recording",
+    "addFile": "Add file",
+    "addFileDisabled": "Cannot add files while processing or recording",
+    "addAttachment": "Add attachment",
     "removeImage": "Remove image",
     "sendTask": "Send message without interrupting model",
     "editTask": "Edit",
@@ -916,6 +919,7 @@
       "modelsLoadFailed": "Failed to refresh OpenAI model list",
       "noModelsAvailable": "No OpenAI models were returned. Refresh after authorization completes.",
       "configuredModelUnavailable": "Configured model \"{{model}}\" is not in the OpenAI account model list.",
+      "needLoginForModel": "Please connect your OpenAI account first.",
       "modelNameUseDropdown": "Use the OpenAI model dropdown below",
       "apiBaseManaged": "Managed by the OAuth provider. No manual change is needed.",
       "autoSaving": "Login completed. Saving configuration...",
@@ -1451,7 +1455,11 @@
         "success": "Available ({{count}})",
         "error": "Unavailable",
         "skipped": "Not configured"
-      }
+      },
+      "sourceFilterHelp": "SkillNet and ClawHub are shown by default. Click a source chip to filter results; keep at least one source selected.",
+      "sourceFilterToggle": "Click to filter this source",
+      "sourceFilterKeepOne": "Keep at least one source selected",
+      "noFilteredResults": "No results for the current source filter. Select another source."
     },
     "actions": {
       "install": "Install",
@@ -1474,6 +1482,9 @@
       "local": "Local",
       "project": "Project",
       "builtin": "Built-in",
+      "clawhub": "ClawHub",
+      "skillnet": "SkillNet",
+      "teamskillshub": "TeamSkillsHub",
       "unknown": "Unknown"
     },
     "sourceLabel": "Source",
@@ -2223,7 +2234,7 @@
     "workDescription": "Office, collaboration, and general tasks",
     "codeDescription": "Inspect and modify code in a project directory",
     "environment": "Environment",
-    "changes": "Current Turn Changes",
+    "changes": "Changes",
     "review": "Review"
   },
   "multiSession": {

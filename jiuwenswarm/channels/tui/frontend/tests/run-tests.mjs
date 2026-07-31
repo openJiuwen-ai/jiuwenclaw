@@ -145,11 +145,14 @@ assert.ok(
     .includes("完整审计记录"),
 );
 
-// A long/scrollable transcript must not capture drag events: users should be
-// able to select and copy completed responses with the terminal's native UI.
-assert.equal(shouldCaptureTerminalMouse(false, false), false);
-assert.equal(shouldCaptureTerminalMouse(true, false), true);
-assert.equal(shouldCaptureTerminalMouse(false, true), true);
+// Mouse tracking is enabled for pending questions, interactive overlays, and
+// scrollable transcripts (so the wheel can page history). When the transcript
+// fits on screen (transcriptMayScroll=false) and no overlay is active, tracking
+// stays off to preserve the terminal's native text selection / copy.
+assert.equal(shouldCaptureTerminalMouse(false, false, false), false);
+assert.equal(shouldCaptureTerminalMouse(true, false, false), true);
+assert.equal(shouldCaptureTerminalMouse(false, true, false), true);
+assert.equal(shouldCaptureTerminalMouse(false, false, true), true);
 
 const teamSnapshot = {
   connectionStatus: "connected",

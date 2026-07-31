@@ -103,6 +103,12 @@ from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
+from jiuwenswarm.gateway.document_attachments import (
+    coerce_document_parse_flag,
+    parse_existing_document,
+    persist_and_parse_documents,
+)
+from jiuwenswarm.common.document_parser import DEFAULT_MAX_CHARS, supported_formats
 from jiuwenswarm.server.runtime.session import project_store
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
@@ -2899,8 +2905,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
 
-        workspace_session_dir = get_agent_sessions_dir()
-        session_dir = workspace_session_dir / session_id_to_delete
+        from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
+
+        session_dir, invalid_reason = resolve_session_dir(
+            session_id_to_delete, sessions_root=get_agent_sessions_dir()
+        )
+        if session_dir is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=invalid_reason or "invalid session_id", code="BAD_REQUEST",
+            )
+            return
         if not session_dir.exists():
             await channel.send_response(
                 ws, req_id, ok=False, error="session not found", code="NOT_FOUND",
@@ -4084,6 +4098,290 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "status": status_payload,
         })
 
+    def _strict_bool_param(
+        params: dict, key: str, *, default: bool,
+    ) -> tuple[bool, str | None]:
+        """严格解析布尔参数:只接受 JSON ``true``/``false``。
+
+        字符串 ``"false"``、``"true"``、整数 ``0``/``1`` 等均被拒绝,
+        避免前端误传字符串导致 ``bool("false") == True`` 的陷阱。
+        对 ``force``/``delete``/``no_verify`` 等高影响参数尤为重要。
+
+        Returns:
+            ``(value, error_or_none)``: 参数缺失时返回 ``(default, None)``;
+            类型非法时返回 ``(default, error_message)``。
+        """
+        if key not in params:
+            return default, None
+        val = params[key]
+        # 注意:bool 是 int 的子类,必须先检查 bool 再检查 int
+        if isinstance(val, bool):
+            return val, None
+        return default, (
+            f"{key} must be a JSON boolean (true/false), "
+            f"got {type(val).__name__}: {val!r}"
+        )
+
+    async def _project_git_commit(ws, req_id, params, session_id):
+        """提交当前工作区改动到当前分支(设计文档 §4.9 ``project.git.commit``)。
+
+        ``stage_all=true`` 先 ``git add -A`` 暂存全部;``paths`` 显式指定暂存路径
+        (与 ``stage_all`` 互斥)。``amend=true`` 覆盖最近一次提交。成功后调
+        ``mark_dirty`` 触发 /ws/git 立即重算(HEAD/is_dirty/stats 变化)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        proj, err, code = _resolve_git_project(project_id, cache_bust=True)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=err, code=code, payload={},
+            )
+            return
+        message = params.get("message")
+        if message is None:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="message is required", code="BAD_REQUEST",
+            )
+            return
+        if not isinstance(message, str):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=(
+                    f"message must be a string, "
+                    f"got {type(message).__name__}: {message!r}"
+                ),
+                code="BAD_REQUEST",
+            )
+            return
+        if not message.strip():
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="message must not be empty", code="BAD_REQUEST",
+            )
+            return
+        paths_param = params.get("paths")
+        paths: list[str] | None = None
+        if paths_param is not None:
+            if not isinstance(paths_param, list):
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error="paths must be an array of strings", code="BAD_REQUEST",
+                )
+                return
+            # 严格校验:任一元素非字符串或空白即拒绝,而非静默过滤。
+            # 否则 ["a.py", 123] 会只提交 a.py,调用方以为两个路径都处理了。
+            paths = []
+            for idx, p in enumerate(paths_param):
+                if not isinstance(p, str):
+                    await channel.send_response(
+                        ws, req_id, ok=False,
+                        error=(
+                            f"paths[{idx}] must be a string, "
+                            f"got {type(p).__name__}: {p!r}"
+                        ),
+                        code="BAD_REQUEST",
+                    )
+                    return
+                if not p.strip():
+                    await channel.send_response(
+                        ws, req_id, ok=False,
+                        error=f"paths[{idx}] must not be empty or whitespace",
+                        code="BAD_REQUEST",
+                    )
+                    return
+                paths.append(p)
+            # 显式传了空数组:调用方意图是只提交指定路径,但没有路径——拒绝。
+            if not paths:
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error="paths is empty",
+                    code="BAD_REQUEST",
+                )
+                return
+        # amend 需在 stage_all 之前解析:amend=true 时 stage_all 默认 False,
+        # 避免"只改 commit message 的 amend"意外把所有未暂存改动塞进上一条提交。
+        amend, sb_err = _strict_bool_param(params, "amend", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        # stage_all 默认值推导:
+        #   - 未传 paths 且非 amend → True(常规提交,暂存全部)
+        #   - 传了 paths → False(只暂存指定路径)
+        #   - amend=true → False(除非显式传 stage_all=true,否则不自动暂存)
+        stage_all_default = (paths_param is None) and not amend
+        stage_all, sb_err = _strict_bool_param(
+            params, "stage_all", default=stage_all_default,
+        )
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        if stage_all and paths:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="stage_all and paths are mutually exclusive",
+                code="BAD_REQUEST",
+            )
+            return
+        no_verify, sb_err = _strict_bool_param(params, "no_verify", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        from jiuwenswarm.server.runtime.session.project_git import (
+            get_project_git_service,
+        )
+        service = get_project_git_service()
+        try:
+            op_result = await asyncio.to_thread(
+                service.commit,
+                proj, message,
+                stage_all=stage_all,
+                paths=paths,
+                amend=amend,
+                no_verify=no_verify,
+            )
+        except Exception as exc:  # noqa: BLE001
+            git_error = getattr(exc, "git_error", None)
+            if git_error is not None:
+                await _send_git_error_response(ws, req_id, git_error)
+                return
+            logger.warning(
+                "[ProjectGit] commit failed (project=%s): %s",
+                proj.project_id, exc,
+            )
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=f"handler error: {exc}",
+                code="INTERNAL_ERROR",
+            )
+            return
+        if not op_result.success:
+            # 失败路径也唤醒 watcher:staging 可能已改变 index(如 git add 成功
+            # 但 commit 失败),watcher 重算后通过 /ws/git 推送最新 staged/dirty
+            # 状态,避免前端 UI 短时间失真。service 层返回的 repo_status 已反映
+            # 暂存后的真实状态(非 pre_status)。
+            _mark_git_watcher_dirty(proj.project_id)
+            await _send_git_error_response(ws, req_id, op_result.error)
+            return
+        # 写后即时刷新 /ws/git summary(HEAD/is_dirty/stats 变化)
+        _mark_git_watcher_dirty(proj.project_id)
+        status_payload = _build_git_status_payload(proj, op_result.repo_status)
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "committed": True,
+            "commit_hash": op_result.commit_hash,
+            "amended": bool(amend),
+            "status": status_payload,
+        })
+
+    async def _project_git_push(ws, req_id, params, session_id):
+        """推送本地分支到远程(设计文档 §4.10 ``project.git.push``)。
+
+        ``remote`` 默认 ``origin``;``branch`` 不传时用当前分支(detached HEAD
+        须显式传 ``branch``)。``force=true`` 使用 ``--force-with-lease``(更安全)。
+        ``delete=true`` 删除远程分支(与 ``set_upstream``/``force`` 互斥)。push
+        涉及网络,超时独立配置(``GIT_PUSH_TIMEOUT_SEC``,默认 60s)。成功后调
+        ``mark_dirty`` 刷新 /ws/git(主要更新 upstream 字段)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        proj, err, code = _resolve_git_project(project_id, cache_bust=True)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=err, code=code, payload={},
+            )
+            return
+        remote = str(params.get("remote") or "origin").strip() or "origin"
+        branch_param = params.get("branch")
+        branch: str | None = None
+        if branch_param is not None:
+            if not isinstance(branch_param, str):
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error=(
+                        f"branch must be a string, "
+                        f"got {type(branch_param).__name__}: {branch_param!r}"
+                    ),
+                    code="BAD_REQUEST",
+                )
+                return
+            branch = branch_param.strip() or None
+        set_upstream, sb_err = _strict_bool_param(params, "set_upstream", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        force, sb_err = _strict_bool_param(params, "force", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        delete, sb_err = _strict_bool_param(params, "delete", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        if delete and (set_upstream or force):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="delete is mutually exclusive with set_upstream and force",
+                code="BAD_REQUEST",
+            )
+            return
+        from jiuwenswarm.server.runtime.session.project_git import (
+            get_project_git_service,
+        )
+        service = get_project_git_service()
+        try:
+            op_result = await asyncio.to_thread(
+                service.push,
+                proj,
+                remote=remote,
+                branch=branch,
+                set_upstream=set_upstream,
+                force=force,
+                delete=delete,
+            )
+        except Exception as exc:  # noqa: BLE001
+            git_error = getattr(exc, "git_error", None)
+            if git_error is not None:
+                await _send_git_error_response(ws, req_id, git_error)
+                return
+            logger.warning(
+                "[ProjectGit] push failed (project=%s): %s",
+                proj.project_id, exc,
+            )
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=f"handler error: {exc}",
+                code="INTERNAL_ERROR",
+            )
+            return
+        if not op_result.success:
+            await _send_git_error_response(ws, req_id, op_result.error)
+            return
+        # push 主要影响 upstream 字段;调 mark_dirty 让 watcher 重算并推送
+        _mark_git_watcher_dirty(proj.project_id)
+        status_payload = _build_git_status_payload(proj, op_result.repo_status)
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "pushed": True,
+            "remote": op_result.pushed_remote or remote,
+            "branch": branch or op_result.repo_status.branch,
+            "deleted": bool(delete),
+            "upstream_set": bool(set_upstream),
+            "status": status_payload,
+        })
+
     async def _project_git_diff_status(ws, req_id, params, session_id):
         """拉取当前分支 diff 和上一轮对话 diff 的快照(设计文档 §4.1.16)。
 
@@ -4446,12 +4744,97 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.exception("[media.persist] failed: %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
             return
-        payload = {
-            key: normalized[key]
-            for key in ("content", "query", "media_items", "files")
-            if key in normalized
-        }
+        # G.EXP.04: 多 key + 条件过滤不用推导式，改为显式循环。
+        payload = {}
+        for key in ("content", "query", "media_items", "files"):
+            if key in normalized:
+                payload[key] = normalized[key]
         await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _document_persist(ws, req_id, params, session_id):
+        """Upload documents (PDF/DOCX/XLSX/ipynb/...) and parse via AutoFileParser."""
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        normalized = dict(params)
+        parse = coerce_document_parse_flag(normalized.get("parse", True), default=True)
+        max_chars_raw = normalized.get("max_chars", DEFAULT_MAX_CHARS)
+        try:
+            max_chars = int(max_chars_raw)
+        except (TypeError, ValueError):
+            max_chars = DEFAULT_MAX_CHARS
+        max_chars = max(1, min(max_chars, 500_000))
+        try:
+            await persist_and_parse_documents(
+                normalized,
+                session_id,
+                parse=parse,
+                max_chars=max_chars,
+            )
+        except Exception as exc:
+            logger.exception("[document.persist] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+        # G.EXP.04: 多 key + 条件过滤不用推导式，改为显式循环。
+        payload = {}
+        for key in (
+            "content",
+            "query",
+            "media_items",
+            "files",
+            "documents",
+            "document_errors",
+            "supported_formats",
+        ):
+            if key in normalized:
+                payload[key] = normalized[key]
+        if "supported_formats" not in payload:
+            payload["supported_formats"] = supported_formats()
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _document_parse(ws, req_id, params, session_id):
+        """Parse an already-uploaded document path with AutoFileParser (+ ipynb)."""
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        path = str(params.get("path") or "").strip()
+        if not path:
+            await channel.send_response(ws, req_id, ok=False, error="path is required", code="BAD_REQUEST")
+            return
+        max_chars_raw = params.get("max_chars", DEFAULT_MAX_CHARS)
+        try:
+            max_chars = int(max_chars_raw)
+        except (TypeError, ValueError):
+            max_chars = DEFAULT_MAX_CHARS
+        max_chars = max(1, min(max_chars, 500_000))
+        try:
+            result = await parse_existing_document(
+                path,
+                session_id=session_id,
+                max_chars=max_chars,
+            )
+        except FileNotFoundError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="NOT_FOUND")
+            return
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+            return
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+            return
+        except Exception as exc:
+            logger.exception("[document.parse] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _document_formats(ws, req_id, params, session_id):
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={"supported_formats": supported_formats()},
+        )
 
     async def _chat_resume(ws, req_id, params, session_id):
         await channel.send_response(
@@ -5521,6 +5904,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("project.git.init", _project_git_init)
     channel.register_method("project.git.switch_branch", _project_git_switch_branch)
     channel.register_method("project.git.create_branch", _project_git_create_branch)
+    channel.register_method("project.git.commit", _project_git_commit)
+    channel.register_method("project.git.push", _project_git_push)
     channel.register_method("project.git.diff_status", _project_git_diff_status)
     channel.register_method("project.git.turn_diff_list", _project_git_turn_diff_list)
     channel.register_method("project.git.turn_diff", _project_git_turn_diff)
@@ -5548,6 +5933,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("chat.send", _chat_send)
     channel.register_method("media.persist", _media_persist)
+    channel.register_method("document.persist", _document_persist)
+    channel.register_method("document.parse", _document_parse)
+    channel.register_method("document.formats", _document_formats)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("chat.user_answer", _chat_user_answer)

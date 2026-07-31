@@ -258,6 +258,10 @@ jiuwenswarm chat "Hello, introduce yourself"
 | `echo "analyze main.py" \| jiuwenswarm chat` | Pipe stdin |
 | `jiuwenswarm chat` | No args + interactive TTY → enter REPL mode |
 
+Single-message, piped, and JSON/JSONL invocations are non-interactive, so the
+runtime does not expose the `ask_user` tool to the Agent. Use REPL mode without
+a prompt argument when the Agent needs to ask follow-up questions or present options.
+
 ### Options
 
 | Option | Default | Description |
@@ -378,7 +382,7 @@ jiuwenswarm chat --jsonl "analyze README" | jq
 | 1 | Agent returned an error |
 | 2 | CLI usage or invalid mode |
 | 3 | Gateway unavailable |
-| 4 | Interactive input required but stdin is not a TTY |
+| 4 | The current invocation does not support interactive input |
 | 130 | Interrupted by user |
 
 ### Relationship with TUI

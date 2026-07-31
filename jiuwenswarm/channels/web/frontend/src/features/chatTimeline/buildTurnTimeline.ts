@@ -7,6 +7,7 @@ import { getMessageActor } from '../../components/ChatPanel/MessageItem';
 import { collectViewedSkillIds } from '../../components/ChatPanel/ToolGroupDisplay';
 import { isTeamMemberCollaborationMessage } from '../../components/ChatPanel/teamEventUtils';
 import { isA2UIClientEventContent } from '../a2ui/a2uiContent';
+import { parseTimestampToMs } from '../../utils/timestamp';
 
 const legacyMessageKeyCache = new WeakMap<Message, string>();
 let legacyMessageKeyCounter = 0;
@@ -79,6 +80,9 @@ export type RenderItem =
       turnId: number;
       startMs: number;
       endMs: number;
+      /** 工作活动跨度（工具/思考/助手气泡），不含用户消息，供「已完成」耗时 */
+      workStartMs: number;
+      workEndMs: number;
       isLastTurn: boolean;
       hasWork: boolean;
     };
@@ -87,11 +91,7 @@ export type RenderItem =
  * 将普通消息与工具执行合并为统一时间线，按时间升序渲染。
  */
 export function toTimestampMs(value: string | undefined): number {
-  if (!value) {
-    return Number.NaN;
-  }
-  const ts = Date.parse(value);
-  return Number.isNaN(ts) ? Number.NaN : ts;
+  return parseTimestampToMs(value);
 }
 
 function compareTimelineItems(a: TimelineItem, b: TimelineItem): number {
@@ -396,15 +396,21 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   const out: RenderItem[] = [];
   let startMs = Number.POSITIVE_INFINITY;
   let endMs = Number.NEGATIVE_INFINITY;
+  let workStartMs = Number.POSITIVE_INFINITY;
+  let workEndMs = Number.NEGATIVE_INFINITY;
   let hasActivity = false;
   let hasWork = false;
   let turnId = 0;
   let seq = 0;
 
-  const acc = (value: number) => {
-    if (!Number.isFinite(value)) return;
+  const acc = (value: number, asWork = false) => {
+    if (!Number.isFinite(value) || value <= 0) return;
     if (value < startMs) startMs = value;
     if (value > endMs) endMs = value;
+    if (asWork) {
+      if (value < workStartMs) workStartMs = value;
+      if (value > workEndMs) workEndMs = value;
+    }
   };
   const flush = (isLastTurn: boolean) => {
     const shouldShow = (isLastTurn && isProcessing) || hasActivity;
@@ -415,6 +421,8 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
         turnId,
         startMs,
         endMs,
+        workStartMs: Number.isFinite(workStartMs) ? workStartMs : startMs,
+        workEndMs: Number.isFinite(workEndMs) ? workEndMs : endMs,
         isLastTurn,
         hasWork,
       });
@@ -422,6 +430,8 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
     }
     startMs = Number.POSITIVE_INFINITY;
     endMs = Number.NEGATIVE_INFINITY;
+    workStartMs = Number.POSITIVE_INFINITY;
+    workEndMs = Number.NEGATIVE_INFINITY;
     hasActivity = false;
     hasWork = false;
   };
@@ -430,7 +440,7 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
     if (item.type === 'message' && item.message.role === 'user') {
       flush(false);
       turnId += 1;
-      acc(toTimestampMs(item.message.timestamp));
+      acc(toTimestampMs(item.message.timestamp), false);
       out.push(item);
       continue;
     }
@@ -439,17 +449,27 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       hasWork = true;
       turnId = item.turnId;
       for (const execution of item.executions) {
-        acc(toTimestampMs(execution.startedAt));
-        acc(toTimestampMs(execution.updatedAt));
+        // 只采信事件时间：startedAt 始终可用；updatedAt 仅在真实结束（completed/error）时计入。
+        // pending/timeout 的 updatedAt 常被巡检写成 Date.now()，会把「已完成」撑成跨夜几小时。
+        acc(toTimestampMs(execution.startedAt), true);
+        if (execution.status === 'completed' || execution.status === 'error') {
+          acc(toTimestampMs(execution.updatedAt), true);
+        }
       }
     } else if (item.type === 'message') {
       hasActivity = true;
-      acc(toTimestampMs(item.message.timestamp));
+      acc(toTimestampMs(item.message.timestamp), true);
     } else if (item.type === 'reasoning') {
       hasActivity = true;
       hasWork = true;
       turnId = item.turnId;
-      acc(item.segment.startedAt);
+      // reasoning.startedAt 必须是真实 epoch ms；忽略 0/过小哨兵，避免撑爆耗时
+      if (item.segment.startedAt > 1_000_000_000_000) {
+        acc(item.segment.startedAt, true);
+      }
+      if (typeof item.segment.closedAt === 'number' && item.segment.closedAt > 1_000_000_000_000) {
+        acc(item.segment.closedAt, true);
+      }
     }
     out.push(item);
   }
@@ -464,6 +484,8 @@ export type TurnWorkMeta = {
   firstWorkKey: string | null;
   startMs: number;
   endMs: number;
+  workStartMs: number;
+  workEndMs: number;
   showAvatar: boolean;
   thinkingCount: number;
   toolCount: number;
@@ -515,6 +537,8 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
         firstWorkKey: prev?.firstWorkKey ?? null,
         startMs: item.startMs,
         endMs: item.endMs,
+        workStartMs: item.workStartMs,
+        workEndMs: item.workEndMs,
         showAvatar: prev?.showAvatar ?? true,
         thinkingCount: prev?.thinkingCount ?? 0,
         toolCount: prev?.toolCount ?? 0,
@@ -545,6 +569,8 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
         firstWorkKey: item.key,
         startMs: Number.NaN,
         endMs: Number.NaN,
+        workStartMs: Number.NaN,
+        workEndMs: Number.NaN,
         showAvatar: item.showAvatar,
         thinkingCount: item.type === 'reasoning' ? 1 : 0,
         toolCount: item.type === 'toolGroup' ? countToolsInGroup(item) : 0,
@@ -581,6 +607,17 @@ export const STREAK_FOLD_TRANSITION_DELAY_MS = 160;
 /** streak 展开态 key：绑 turnId + 轮次内 ordinal，避免 firstKey 变化导致展开态丢失 */
 export function streakExpandKey(turnId: number, ordinal: number): string {
   return `streak-${turnId}-${ordinal}`;
+}
+
+export function completedWorkDurationMs(meta: Pick<TurnWorkMeta, 'workStartMs' | 'workEndMs' | 'startMs' | 'endMs'>): number {
+  // 从用户发话算到本轮最后一次工作活动，包含等待首包/思考的时间。
+  // 不要用 workStart→workEnd：那会丢掉「发完后一直在想」的等待，出现思考 9s、已完成却只显示 3s。
+  const start = Number.isFinite(meta.startMs) ? meta.startMs : meta.workStartMs;
+  const end = Number.isFinite(meta.workEndMs) ? meta.workEndMs : meta.endMs;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    return 0;
+  }
+  return Math.max(0, end - start);
 }
 
 function isReasoningSettledForStreak(segment: ReasoningSegment, nowMs: number): boolean {

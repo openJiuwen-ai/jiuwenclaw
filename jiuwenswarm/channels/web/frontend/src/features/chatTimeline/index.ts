@@ -12,6 +12,7 @@ export {
   getMessageRenderKey,
   toTimestampMs,
   streakExpandKey,
+  completedWorkDurationMs,
   REASONING_COLLAPSE_DELAY_MS,
   STREAK_FOLD_TRANSITION_DELAY_MS,
   type TimelineItem,

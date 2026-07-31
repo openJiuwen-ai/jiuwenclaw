@@ -126,15 +126,18 @@ const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
 
 /**
  * Terminal mouse reporting takes ownership of drag events, which prevents the
- * terminal's native text selection and copy behaviour. Keep it scoped to UI
- * states that actually need mouse events; a scrollable transcript can still be
- * navigated with the keyboard without making the whole chat unselectable.
+ * terminal's native text selection and copy behaviour. Scope it to UI states
+ * that actually need mouse events (pending questions / interactive overlays)
+ * AND to scrollable transcripts: a transcript taller than the viewport needs
+ * mouse tracking so the wheel can page history, which costs native selection
+ * only while content overflows. Short transcripts stay selectable.
  */
 export function shouldCaptureTerminalMouse(
   pendingQuestionActive: boolean,
   interactiveOverlayActive: boolean,
+  transcriptMayScroll: boolean,
 ): boolean {
-  return pendingQuestionActive || interactiveOverlayActive;
+  return pendingQuestionActive || interactiveOverlayActive || transcriptMayScroll;
 }
 const CONFIRM_ACTION_RE = /\*\*(?:Agent wants to|Tool `[^`]+` requires your approval)([^*]*)\*\*/i;
 const PLAN_REJECT_INPUT_RE = /(\s+\[ .+ \])$/;
@@ -780,12 +783,89 @@ function fallbackAtFileSuggestions(
   return suggestions.length > 0 ? { items: suggestions, prefix: atPrefix } : null;
 }
 
+/**
+ * 放宽 pi-tui Editor 的行内 slash 补全触发。
+ *
+ * pi-tui 的 `isInSlashCommandContext`（打字母时是否触发 slash 补全）是 private 方法，
+ * 硬编码 `isSlashMenuAllowed()(=cursorLine===0) && trimStart().startsWith("/")`（行首限制）。
+ * private 无法用子类 public 覆盖（TS2415），故用运行时 monkey-patch 直接替换实例方法：
+ * 仍要求光标在第一行，但触发条件放宽为"最后一个 token 以 / 开头"，使行内 `/skill` 也能触发。
+ */
+function patchEditorInlineSlash(editor: Editor): void {
+  const target = editor as unknown as {
+    state: { cursorLine: number; lines: string[]; cursorCol: number };
+    isInSlashCommandContext: (textBeforeCursor: string) => boolean;
+    isAtStartOfMessage: () => boolean;
+  };
+
+  // Patch 1: 打字母时的触发判断
+  target.isInSlashCommandContext = function (textBeforeCursor: string): boolean {
+    if (this.state.cursorLine !== 0) return false;
+    const tokens = textBeforeCursor.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] ?? "";
+    return lastToken.startsWith("/");
+  };
+
+  // Patch 2: 打 `/` 首字符时的触发判断
+  // 放宽为：仍要求第一行，但允许 `/` 前有内容，只要 `/` 是当前 token 的开头。
+  target.isAtStartOfMessage = function (): boolean {
+    if (this.state.cursorLine !== 0) return false;
+    const currentLine = this.state.lines[this.state.cursorLine] || "";
+    const beforeCursor = currentLine.slice(0, this.state.cursorCol);
+    const tokens = beforeCursor.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] ?? "";
+    return lastToken === "/";
+  };
+}
+
 class ComposerAutocompleteProvider implements AutocompleteProvider {
   constructor(
     private readonly inner: AutocompleteProvider,
     private readonly cwd: string,
     private readonly memoryArgCompletion?: (sub: string) => Promise<{ label: string; description: string }[]>,
+    // 行内 skill 补全候选源。
+    // 内层 CombinedAutocompleteProvider 硬编码"行首 /"，
+    // 行内 /skill 不会进它的命令补全分支，故外层自备 skill 列表在行内自行补全。
+    private readonly skillCommands: readonly InstalledSkillEntry[] = [],
+    /** 补全把整行变成 /<名字> 时回调，供上层区分「补全带来的提交」与「用户回车」。 */
+    private readonly onSlashNameCompleted?: (name: string) => void,
   ) {}
+
+  /** 光标前最后一个 token（以空白切分）。 */
+  private static lastToken(textBeforeCursor: string): string {
+    const parts = textBeforeCursor.split(/\s+/);
+    return parts[parts.length - 1] ?? "";
+  }
+
+  /** 是否为"行内 skill 补全"场景：最后 token 形如 /xxx 且它不是整行第一个 token。 */
+  private isInlineSkillContext(textBeforeCursor: string): boolean {
+    const last = ComposerAutocompleteProvider.lastToken(textBeforeCursor);
+    if (!last.startsWith("/")) return false;
+    // 行首（整行只有这一个 token）交给内层库处理；行内才由外层接管。
+    const trimmed = textBeforeCursor.replace(/\s+$/, "");
+    return trimmed.length > last.length;
+  }
+
+  /** 用最后 token 的 / 后缀去 fuzzy 匹配已装 skill，生成候选。 */
+  private inlineSkillSuggestions(textBeforeCursor: string): {
+    items: AutocompleteItem[];
+    prefix: string;
+  } | null {
+    const last = ComposerAutocompleteProvider.lastToken(textBeforeCursor);
+    const term = last.slice(1).toLowerCase(); // 去掉开头 /
+    const matched = this.skillCommands.filter((s) =>
+      s.name.toLowerCase().includes(term),
+    );
+    if (matched.length === 0) return null;
+    return {
+      items: matched.map((s) => ({
+        value: s.name,
+        label: s.name,
+        ...(s.description ? { description: s.description } : {}),
+      })),
+      prefix: last,
+    };
+  }
 
   async getSuggestions(
     lines: string[],
@@ -795,11 +875,23 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
   ) {
     const currentLine = lines[cursorLine] ?? "";
     const textBeforeCursor = currentLine.slice(0, cursorCol);
-    const isCommandNameCompletion =
-      textBeforeCursor.startsWith("/") && !textBeforeCursor.includes(" ");
+    // 命令名补全触发：
+    // 光标前最后一个 token 以 / 开头 → 补全命令+skill 全集（不区分行首/行内）。
+    const tokens = textBeforeCursor.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] ?? "";
+    const isCommandNameCompletion = lastToken.startsWith("/");
 
     if (isCommandNameCompletion && cursorCol !== currentLine.length) {
       return null;
+    }
+
+    // 行内 skill 补全：内层库 CombinedAutocompleteProvider 硬编码"行首 /"（只认整行
+    // 第一个字符是 /），行内 `/xxx` 不会进它的命令补全。外层在此接管行内场景。
+    if (this.isInlineSkillContext(textBeforeCursor)) {
+      const result = this.inlineSkillSuggestions(textBeforeCursor);
+      if (result) {
+        return result;
+      }
     }
 
     // /memory edit|toggle + 空格：直接调用 completion 获取文件/key 列表，绕过 CombinedAutocompleteProvider
@@ -873,10 +965,26 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
   ) {
     const currentLine = lines[cursorLine] ?? "";
     const textBeforeCursor = currentLine.slice(0, cursorCol);
+    // 行首/行内统一：命令或 skill 名补全的 prefix 形如 /xxx（无第二个 /）。
+    // 原逻辑要求整行等于 prefix（强制行首），现改为比较光标前最后一个 token，
+    // 使行内 /skill 也能应用补全。
+    const lastToken = textBeforeCursor.split(/\s+/).pop() ?? "";
     const isCommandNameCompletion = prefix.startsWith("/") && !prefix.slice(1).includes("/");
 
-    if (isCommandNameCompletion && textBeforeCursor !== prefix) {
+    if (isCommandNameCompletion && lastToken !== prefix) {
       return { lines, cursorLine, cursorCol };
+    }
+
+    // 行内 skill 补全应用：内层库 applyCompletion 的 isSlashCommand 要求 /
+    // 前面为空（行首），行内会误走 path 分支。外层在此自行替换最后一个 /token。
+    if (isCommandNameCompletion && this.isInlineSkillContext(textBeforeCursor)) {
+      const before = textBeforeCursor.slice(0, textBeforeCursor.length - lastToken.length);
+      const afterCursor = currentLine.slice(cursorCol);
+      const newLine = `${before}/${item.value} ${afterCursor}`;
+      const newLines = [...lines];
+      newLines[cursorLine] = newLine;
+      const newCol = before.length + item.value.length + 2; // "/" + name + 空格
+      return { lines: newLines, cursorLine, cursorCol: newCol };
     }
 
     const result = this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
@@ -887,6 +995,11 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
       const newLines = [...result.lines];
       newLines[result.cursorLine] = line + " ";
       return { lines: newLines, cursorLine: result.cursorLine, cursorCol: result.cursorCol + 1 };
+    }
+
+    if (isCommandNameCompletion && this.onSlashNameCompleted) {
+      const completed = (result.lines[result.cursorLine] ?? "").trim().match(/^\/(\S+)$/);
+      if (completed?.[1]) this.onSlashNameCompleted(completed[1]);
     }
 
     return result;
@@ -1474,7 +1587,7 @@ function formatConfigValue(schema: ConfigItemSchema, val: string): string {
   }
   if (schema.sensitive) {
     if (!val) return "(空)";
-    return val.length > 8 ? `${val.slice(0, 4)}****${val.slice(-4)}` : "***";
+    return "******";
   }
   return val || "(空)";
 }
@@ -1612,6 +1725,8 @@ export class AppScreen implements Component, Focusable {
   private mouseTrackingEnabled = false;
   /** Previous session title for terminal window title sync. */
   private previousSessionTitle: string = "";
+  /** 刚由补全填入的 /<名字>，用于识别补全回车连带的那次提交。 */
+  private slashNameCompletion: { name: string; at: number } | null = null;
 
   constructor(
     private readonly tui: TUI,
@@ -1620,6 +1735,7 @@ export class AppScreen implements Component, Focusable {
     private readonly exit: () => void,
   ) {
     this.editor = new Editor(tui, editorTheme, { paddingX: 1, autocompleteMaxVisible: 6 });
+    patchEditorInlineSlash(this.editor);  // 方案 E：行内 slash 补全 monkey-patch
     this.composerAutocompleteProvider = this.rebuildAutocompleteProvider();
     this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
     // Whenever CommandService refreshes its installed-skills cache (on first
@@ -3041,6 +3157,10 @@ export class AppScreen implements Component, Focusable {
       pendingInput,
       pendingInputBaseline,
     ).length;
+    const approximateFixedHeight =
+      questionLines.length + editorLines.length + composerPreviewLines.length + 2;
+    const transcriptMayScroll =
+      transcriptLineCount > Math.max(0, this.tui.terminal.rows - approximateFixedHeight);
     const interactiveOverlayActive =
       this.startupPromptList !== null ||
       this.resumeSessionList !== null ||
@@ -3055,7 +3175,11 @@ export class AppScreen implements Component, Focusable {
       this.configEditorState !== null ||
       this.questionList !== null;
     this.setMouseTrackingEnabled(
-      shouldCaptureTerminalMouse(snapshot.pendingQuestion !== null, interactiveOverlayActive),
+      shouldCaptureTerminalMouse(
+        snapshot.pendingQuestion !== null,
+        interactiveOverlayActive,
+        transcriptMayScroll,
+      ),
     );
     if (
       this.transcriptScrollOffset > 0 &&
@@ -3272,6 +3396,63 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (text.startsWith("/")) {
+      // /<installedSkill> 行首分流：命中已装 skill 时当普通消息发送（content 原样
+      // 保留 /<skill> 前缀，skill 名由 extractSkillsFromContent 提取注入 params.skills）。
+      // 未命中已装 skill 的 /xxx 不在此拦截，继续走下面的命令分支（仍可能 Unknown command）。
+      {
+        const slashMatch = text.match(/^\/(\S+)/);
+        const firstToken = slashMatch?.[1] ?? "";
+        const installedSkill = firstToken
+          ? this.commands.getInstalledSkills().find((s) => s.name === firstToken)
+          : undefined;
+        if (installedSkill) {
+          // 只有 /<skill> 而没有内容时没什么可发的。pi-tui 在补全弹窗上按回车会
+          // 「应用补全」并顺势提交（见其 editor 的 tui.select.confirm 分支），这一下
+          // 只是补全，所以把补全结果放回输入框等用户补内容；用户自己再回车才提示为空。
+          if (text === `/${installedSkill.name}`) {
+            const justCompleted =
+              this.slashNameCompletion?.name === installedSkill.name &&
+              Date.now() - this.slashNameCompletion.at < 1000;
+            this.slashNameCompletion = null;
+            if (justCompleted) {
+              this.editor.setText(`${text} `);
+              this.tui.requestRender();
+              return;
+            }
+            this.editor.addToHistory(text);
+            this.editor.setText("");
+            this.state.addItem(addCommandEcho(snapshot.sessionId, text));
+            this.state.addItem(
+              addError(snapshot.sessionId, `${text} 后面需要跟内容，例如 ${text} 帮我做…`),
+            );
+            return;
+          }
+          this.slashNameCompletion = null;
+          this.beginPendingSubmittedInput(text, snapshot);
+          const extractedSkills = this.extractSkillsFromContent(content);
+          const requestId = this.state.sendMessage(
+            content,
+            attachments,
+            undefined,
+            undefined,
+            extractedSkills,
+          );
+          if (!requestId) {
+            this.clearPendingSubmittedInput();
+            this.state.addItem({
+              kind: "error",
+              id: `offline-${Date.now()}`,
+              sessionId: snapshot.sessionId,
+              content: "offline: waiting for reconnect",
+              at: new Date().toISOString(),
+            });
+            return;
+          }
+          this.editor.addToHistory(text);
+          this.editor.setText("");
+          return;
+        }
+      }
       // Check for mode switch when there's ongoing work
       if (/^\/(?:mode|switch)\s/.test(text) && snapshot.cancellableWork) {
         const currentMode = snapshot.mode;
@@ -3455,7 +3636,8 @@ export class AppScreen implements Component, Focusable {
     }
 
     this.beginPendingSubmittedInput(text, snapshot);
-    const requestId = this.state.sendMessage(content, attachments);
+    const extractedSkills = this.extractSkillsFromContent(content);
+    const requestId = this.state.sendMessage(content, attachments, undefined, undefined, extractedSkills);
     if (!requestId) {
       this.clearPendingSubmittedInput();
       this.state.addItem({
@@ -4293,19 +4475,17 @@ export class AppScreen implements Component, Focusable {
     const snapshot = this.state.getSnapshot();
     try {
       const payload = await this.state.request<ModelListPayload>("command.model", {});
-      const models = payload.available_models ?? [];
       const current = payload.current ?? "unknown";
-      if (models.length === 0) {
+      const modelsMeta = payload.models ?? [];
+      const skipped = modelsMeta.filter((m) => isReservedMultimodalModelKey(m.name));
+      const selectableWithOrigIdx = modelsMeta
+        .filter((meta) => meta.name && !isReservedMultimodalModelKey(meta.name))
+        .map((meta) => ({ name: meta.name, origIdx: meta.index, meta }));
+      const selectable = selectableWithOrigIdx.map((entry) => entry.name);
+      if (modelsMeta.length === 0) {
         this.openEmptyModelList(current, "No models configured");
         return;
       }
-
-      const skipped = models.filter((m) => isReservedMultimodalModelKey(m));
-      // 构建 selectable 时保留在完整 models 列表中的原始索引，避免 reserved 模型过滤后索引错位
-      const selectableWithOrigIdx = models
-        .map((m, i) => ({ name: m, origIdx: i }))
-        .filter((entry) => !isReservedMultimodalModelKey(entry.name));
-      const selectable = selectableWithOrigIdx.map((entry) => entry.name);
       if (skipped.length > 0) {
         this.state.addItem(
           addInfo(
@@ -4320,18 +4500,16 @@ export class AppScreen implements Component, Focusable {
         return;
       }
 
-      const modelsMeta = payload.models ?? [];
       // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
       // 回退到 name-matching（兼容不带 is_current 的旧后端）
       const currentIdx = selectableWithOrigIdx.findIndex((entry) => {
-        const meta = modelsMeta[entry.origIdx];
-        return meta?.is_current === true;
+        return entry.meta?.is_current === true;
       });
       const fallbackCurrentIdx = currentIdx < 0 ? selectable.findIndex((m) => m === current) : currentIdx;
       const nameOccurrence: Record<string, number> = {};
       const items = selectableWithOrigIdx.map((entry, i) => {
         const m = entry.name;
-        const meta = modelsMeta[entry.origIdx];
+        const meta = entry.meta;
         const isCurrent = i === fallbackCurrentIdx;
         const seq = (nameOccurrence[m] ?? 0) + 1;
         nameOccurrence[m] = seq;
@@ -4353,9 +4531,8 @@ export class AppScreen implements Component, Focusable {
           const _mk = (mm: ModelMeta | undefined) =>
             `${mm?.model_provider ?? ""}|${mm?.api_base ?? ""}`;
           const myFingerprint = _mk(meta);
-          // selectableWithOrigIdx 与 selectable 同序，origIdx 索引回 modelsMeta
           const conflictCount = selectableWithOrigIdx.reduce((acc, ent) => {
-            const xm = modelsMeta[ent.origIdx];
+            const xm = ent.meta;
             return xm && _mk(xm) === myFingerprint ? acc + 1 : acc;
           }, 0);
           if (conflictCount > 1) {
@@ -4515,7 +4692,7 @@ export class AppScreen implements Component, Focusable {
   }
 
   private createModelForm(mode: "add" | "edit", target?: { index: number }): ModelFormState {
-    const meta = target ? this.modelList?.modelsMeta[target.index] : undefined;
+    const meta = target ? this.modelList?.modelsMeta.find((m) => m.index !== undefined && m.index === target.index) : undefined;
     const fields: Record<ModelFormField, string> = {
       model_name: mode === "edit" ? meta?.model_name ?? "" : "",
       alias: mode === "edit" ? meta?.alias ?? "" : "",
@@ -4803,8 +4980,8 @@ export class AppScreen implements Component, Focusable {
       return "reasoning_level must be default, off, low, medium, or high";
     }
     if (trimmed.alias) {
-      const conflict = state.modelsMeta.find((model, index) => {
-        if (state.inputMode === "edit" && index === state.target?.index) return false;
+      const conflict = state.modelsMeta.find((model) => {
+        if (state.inputMode === "edit" && model.index !== undefined && model.index === state.target?.index) return false;
         return (model.alias || "") === trimmed.alias || model.model_name === trimmed.alias;
       });
       if (conflict) {
@@ -7414,6 +7591,33 @@ export class AppScreen implements Component, Focusable {
     };
   }
 
+  /**
+   * 从消息文本里提取被 /<skillName> 标记的已装 skill 名（用于 params.skills）。
+   *
+   * 规则：
+   * - 遍历已装 skill 名，在 content 里搜 `/<完整名>`。无空格也识别（如 `/doc写文档`）。
+   * - `/` 前必须是行首或空白（`(^|\s)/name`），避免 `路径a/doc` 这种误命中。
+   * - skill 名后必须是词边界（`/name\b`），避免 `/docs`、`/doc123` 这类更长非 skill
+   *   文本被当成短 skill 名误命中（如 `/docs` 不该命中 `doc`）。
+   *   u 模式下 CJK 字符不属于 `\w`，故 `/doc写文档` 的 `doc` 后是 `\b` 边界，正常命中。
+   * - content 本身不改动，仅返回命中的 skill 名（去重，按 content 中出现位置排序）。
+   */
+  private extractSkillsFromContent(content: string): string[] {
+    if (!content) return [];
+    const installed = this.commands.getInstalledSkills();
+    const found: { name: string; idx: number }[] = [];
+    for (const skill of installed) {
+      const escaped = skill.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(^|\\s)/${escaped}\\b`, "u");
+      const match = re.exec(content);
+      if (match && !found.some((f) => f.name === skill.name)) {
+        found.push({ name: skill.name, idx: match.index });
+      }
+    }
+    found.sort((a, b) => a.idx - b.idx);
+    return found.map((f) => f.name);
+  }
+
   private handleConfigEditorInput(data: string): void {
     if (!this.configEditorState) return;
     const state = this.configEditorState;
@@ -7695,7 +7899,7 @@ export class AppScreen implements Component, Focusable {
     currentValues: Record<string, string>,
   ): Promise<void> {
     const isReset = this.configEditorState?.mode === "reset";
-    const valueDisplay = schema.sensitive ? "***" : value;
+    const valueDisplay = schema.sensitive ? "******" : value;
     const statusLabel = isReset ? "已重置" : "已应用";
     const restartLabel = isReset ? "已重置(需重启)" : "需重启";
 
@@ -8035,7 +8239,7 @@ export class AppScreen implements Component, Focusable {
           schema.type === "toggle"
             ? val === "true" ? "Enabled" : "Disabled"
             : schema.sensitive
-              ? val.length > 8 ? `${val.slice(0, 4)}****${val.slice(-4)}` : "***"
+              ? val ? "******" : "(empty)"
               : val || "(empty)";
         items.push({
           value: schema.key,
@@ -8578,6 +8782,10 @@ export class AppScreen implements Component, Focusable {
       // /memory edit|toggle 参数 completion 回调（绕过 CombinedAutocompleteProvider 的子命令名候选项）
       async (sub: string) => {
         return this.ensureMvController().getMemoryCompletions(sub);
+      },
+      skills, // ← 传给外层，用于行内 skill 补全
+      (name: string) => {
+        this.slashNameCompletion = { name, at: Date.now() };
       },
     );
   }

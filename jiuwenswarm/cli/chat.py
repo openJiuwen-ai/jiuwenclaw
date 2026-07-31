@@ -45,6 +45,7 @@ from jiuwenswarm.cli.events import (
     event_kind,
     is_content_final,
     is_terminal_event,
+    needs_user_input,
 )
 from jiuwenswarm.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
 
@@ -382,7 +383,12 @@ def _validate_args(args: argparse.Namespace) -> int | None:
     return None
 
 
-def _build_request(args: argparse.Namespace, prompt: str) -> dict:
+def _build_request(
+    args: argparse.Namespace,
+    prompt: str,
+    *,
+    supports_user_interaction: bool = False,
+) -> dict:
     session_id = args.session or _generate_session_id()
     cwd = str(Path(args.cwd or os.getcwd()).resolve())
     project_dir = str(Path(args.project_dir or cwd).resolve())
@@ -412,6 +418,7 @@ def _build_request(args: argparse.Namespace, prompt: str) -> dict:
             "cwd": cwd,
             "project_dir": project_dir,
             "trusted_dirs": trusted_dirs,
+            "supports_user_interaction": supports_user_interaction,
             # V2: 显式发 agent_ref，支撑同 session 切 mode 不串窗（设计 §5.2 场景 2）。
             # gateway 用 (channel, scope, agent_ref) 3 元组注册/查找，AgentServer 回带
             # 同值，切换 mode 后旧 agent 的延迟 chunk 不会错路由到新 agent 的 UI 区块。
@@ -426,6 +433,14 @@ async def _spinner_loop(renderer: HumanRenderer) -> None:
         await asyncio.sleep(0.2)
 
 
+def _request_supports_user_interaction(request: dict) -> bool:
+    params = request.get("params", {})
+    return (
+        not isinstance(params, dict)
+        or params.get("supports_user_interaction") is not False
+    )
+
+
 async def _run_interactive_loop(
     client: GatewayClient,
     renderer: HumanRenderer,
@@ -434,6 +449,7 @@ async def _run_interactive_loop(
     timeout: float | None = None,
 ) -> int:
     interrupted = False
+    supports_user_interaction = _request_supports_user_interaction(request)
     # `timeout` is the TOTAL response timeout (matches --help/docs). We track
     # the deadline and compute the remaining budget for each recv() call so
     # long-running streams still respect the overall cap. When unset, a
@@ -627,6 +643,7 @@ async def _run_interactive_loop(
                             "mode": request["params"]["mode"],
                             "cwd": request["params"].get("cwd", ""),
                             "project_dir": request["params"].get("project_dir", ""),
+                            "supports_user_interaction": supports_user_interaction,
                         },
                     })
                     renderer.ensure_loading()
@@ -707,7 +724,7 @@ async def _run_interactive_loop(
                     renderer.ensure_loading()
             elif kind == "interactive":
                 renderer.clear_loading()
-                if sys.stdin.isatty():
+                if supports_user_interaction and sys.stdin.isatty():
                     request_id = payload.get("request_id", "")
                     source = payload.get("source", "")
                     options = payload.get("options", [])
@@ -770,6 +787,7 @@ async def _run_interactive_loop(
                                     "answers": answers,
                                     "source": source,
                                     "mode": request["params"]["mode"],
+                                    "supports_user_interaction": True,
                                 },
                             })
                         else:
@@ -787,7 +805,10 @@ async def _run_interactive_loop(
                     except ConnectionError:
                         return 0
                 else:
-                    logger.error("interactive input required but stdin is not a TTY: %s", event_type)
+                    logger.error(
+                        "interactive input is unavailable for this chat invocation: %s",
+                        event_type,
+                    )
                     return 4
             elif event_type == "plan.mode_exited":
                 # Agent exited plan mode (user approved). Subsequent
@@ -844,6 +865,7 @@ async def _run_interactive_loop(
                             "mode": request["params"]["mode"],
                             "cwd": request["params"].get("cwd", ""),
                             "project_dir": request["params"].get("project_dir", ""),
+                            "supports_user_interaction": supports_user_interaction,
                         },
                     })
                     renderer.ensure_loading()
@@ -879,6 +901,7 @@ async def _run_interactive_loop(
                             "mode": request["params"]["mode"],
                             "cwd": request["params"].get("cwd", ""),
                             "project_dir": request["params"].get("project_dir", ""),
+                            "supports_user_interaction": supports_user_interaction,
                         },
                     })
                     # After sending the follow-up, the previous stream's
@@ -924,6 +947,12 @@ async def _run_jsonl_loop(
         event_type = data.get("event", "")
         payload = data.get("payload", {})
         renderer.handle_event(event_type, payload)
+        if needs_user_input(event_type) and not _request_supports_user_interaction(request):
+            logger.error(
+                "interactive input is unavailable for this chat invocation: %s",
+                event_type,
+            )
+            return 4
         if event_type == "chat.error":
             return 1
         if is_terminal_event(event_type, payload):
@@ -969,6 +998,13 @@ async def _run_json_loop(
             pass
         else:
             renderer.handle_event(event_type, payload)
+        if needs_user_input(event_type) and not _request_supports_user_interaction(request):
+            logger.error(
+                "interactive input is unavailable for this chat invocation: %s",
+                event_type,
+            )
+            renderer.output()
+            return 4
         if is_terminal_event(event_type, payload):
             if team_mode and event_type == "chat.final":
                 if payload.get("event_type") == "team.error":
@@ -983,6 +1019,8 @@ async def _run_json_loop(
 async def _run_chat(
     args: argparse.Namespace,
     prompt: str,
+    *,
+    supports_user_interaction: bool = False,
 ) -> int:
     gateway_url = args.gateway_url or _build_default_gateway_url()
 
@@ -1000,7 +1038,13 @@ async def _run_chat(
         _print_connection_hint(gateway_url, args)
         return 3
 
-    request = _build_request(args, prompt)
+    request = _build_request(
+        args,
+        prompt,
+        supports_user_interaction=(
+            supports_user_interaction and not args.json and not args.jsonl
+        ),
+    )
 
     # Persist explicitly-provided trusted dirs after building the request
     # so _build_request still sees the original trusted_dirs for the prompt.
@@ -1042,6 +1086,7 @@ def run_chat(args: argparse.Namespace) -> int:
         return error
 
     is_team_mode = args.mode in ("team", "team.plan", "code.team")
+    supports_user_interaction = False
 
     if args.prompt:
         prompt = " ".join(args.prompt)
@@ -1062,6 +1107,7 @@ def run_chat(args: argparse.Namespace) -> int:
             return 0
         if not prompt:
             return 0
+        supports_user_interaction = True
     else:
         return _run_repl(args)
 
@@ -1082,7 +1128,13 @@ def run_chat(args: argparse.Namespace) -> int:
         # so the user gets a chance to clean up from previous sessions.
         _prompt_and_cleanup_dirs()
 
-        return asyncio.run(_run_chat(args, prompt))
+        return asyncio.run(
+            _run_chat(
+                args,
+                prompt,
+                supports_user_interaction=supports_user_interaction,
+            )
+        )
     except KeyboardInterrupt:
         logger.warning("Interrupted. Exiting (press Ctrl+C again during chat to cancel a running task).")
         return 130
@@ -1127,7 +1179,13 @@ def _run_repl(args: argparse.Namespace) -> int:
             if line.strip() in ("/exit", "/quit", "/q"):
                 logger.info("<exit>")
                 break
-            exit_code = asyncio.run(_run_chat(args, line.strip()))
+            exit_code = asyncio.run(
+                _run_chat(
+                    args,
+                    line.strip(),
+                    supports_user_interaction=True,
+                )
+            )
             if exit_code == 130:
                 # Task was interrupted via Ctrl+C — cancel was already sent,
                 # stay in the REPL for the next prompt instead of exiting.
