@@ -47,7 +47,6 @@ from openjiuwen.harness.workspace.workspace import Workspace
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
     _CRON_TOOL_CHANNEL_ID,
-    _agent_def_to_subagent_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
@@ -63,7 +62,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
     StructuredAskUserRail,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
+from jiuwenswarm.agents.harness.common.memory.config import is_memory_enabled
 from jiuwenswarm.agents.harness.common.tools import (
     SkillToolkit,
 )
@@ -364,6 +363,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "SysOperationRail", "CodingMemoryRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名
+        "DesignRail",  # SDD 状态机（wave-1），受 modes.code.sdd.enabled 门控
     })
 
     def __init__(self) -> None:
@@ -621,6 +621,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_code_task_planning_rail", self._build_code_task_planning_rail),
             _RailBuildInfo("_code_agent_rail", self._build_code_agent_rail),
             _RailBuildInfo("_code_plan_approval_rail", self._build_plan_approval_rail),
+            _RailBuildInfo("_design_rail", self._build_design_rail),
         ]
 
         # 动态 Rails — 从 config.yaml::modes.code.rails 读取
@@ -894,6 +895,54 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[JiuwenSwarmCodeAdapter] ProjectMemoryRail create failed: %s", exc,
+            )
+            return None
+
+    def _build_design_rail(self) -> Any | None:
+        """构建 DesignRail（SDD 状态机，wave-1：需求分析与设计）.
+
+        条件挂载固定 Rail：受 ``modes.code.sdd.enabled`` 开关控制，关闭
+        （默认）返回 None，存量行为零回归（NFR-001）。开启时构造
+        DesignRail（内部加载+校验 config.yaml，校验失败抛异常被此处
+        try/except 捕获 → 返回 None，BC-005），绝不抛异常以免 agent 创建失败。
+        DesignRail 挂载时注册 ``sdd_advance`` 工具（rail-owns-tools 模式，
+        仅 code + sdd=true 可见，team/deep 零感知）。
+        """
+        try:
+            import jiuwenswarm.agents.harness.code.rails.sdd.design_rail as _dr_pkg
+            from pathlib import Path
+
+            from jiuwenswarm.agents.harness.code.rails.sdd.design_rail import (
+                DesignRail as _DesignRail,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuwenSwarmCodeAdapter] DesignRail import failed: %s", exc
+            )
+            return None
+
+        config_base = get_config() or {}
+        code_cfg = (config_base.get("modes") or {}).get("code") or {}
+        sdd_cfg = code_cfg.get("sdd") or {}
+        if not sdd_cfg.get("enabled", False):
+            logger.info(
+                "[JiuwenSwarmCodeAdapter] DesignRail disabled by modes.code.sdd.enabled"
+            )
+            return None
+
+        try:
+            rail_pkg_dir = Path(_dr_pkg.__file__).resolve().parent
+            rail = _DesignRail(
+                rail_pkg_dir=rail_pkg_dir,
+                project_dir=self._project_dir or os.getcwd(),
+            )
+            logger.info("[JiuwenSwarmCodeAdapter] DesignRail create success")
+            return rail
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuwenSwarmCodeAdapter] DesignRail create failed (config "
+                "validation or construction error): %s",
+                exc,
             )
             return None
 

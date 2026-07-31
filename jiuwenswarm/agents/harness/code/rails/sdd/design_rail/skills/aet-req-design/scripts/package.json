@@ -1,0 +1,12 @@
+{
+  "name": "requirements-designer-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Scripts for requirements designer workflow",
+  "dependencies": {
+    "diff": "^5.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
