@@ -1188,7 +1188,7 @@ async def test_handle_team_binding_generate_uses_tiny_agent_result_for_name(monk
         generation_prompts.append(description)
         assert config_base is config
         assert template_id == "research"
-        return "team_setup_task"
+        return "team-setup-task"
 
     monkeypatch.setattr(team_module, "generate_team_name", fake_generate_team_name)
     monkeypatch.setattr(
@@ -1210,8 +1210,8 @@ async def test_handle_team_binding_generate_uses_tiny_agent_result_for_name(monk
     await server.handle_team_binding_generate_for_test(fake_ws, request, asyncio.Lock())
 
     assert fake_ws.sent[0]["ok"] is True
-    assert fake_ws.sent[0]["payload"]["team"]["team_name"] == "team_setup_task"
-    assert binding_store.get("team_setup_task") is not None
+    assert fake_ws.sent[0]["payload"]["team"]["team_name"] == "team-setup-task"
+    assert binding_store.get("team-setup-task") is not None
     assert generation_prompts == ["新建一个team_name为123的team"]
 
     duplicate_request = AgentRequest(
@@ -1223,8 +1223,8 @@ async def test_handle_team_binding_generate_uses_tiny_agent_result_for_name(monk
     await server.handle_team_binding_generate_for_test(fake_ws, duplicate_request, asyncio.Lock())
 
     assert fake_ws.sent[1]["ok"] is True
-    assert fake_ws.sent[1]["payload"]["team"]["team_name"] == "team_setup_task_2"
-    assert binding_store.get("team_setup_task_2") is not None
+    assert fake_ws.sent[1]["payload"]["team"]["team_name"] == "team-setup-task_2"
+    assert binding_store.get("team-setup-task_2") is not None
 
 
 @pytest.mark.asyncio
