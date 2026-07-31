@@ -23,7 +23,7 @@ import {
 } from '../../types';
 import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
-import { MediaRenderer } from './MediaRenderer';
+import { MediaRenderer, stripUploadDocumentBlocks } from './MediaRenderer';
 import { A2UIMessageContent } from '../../features/a2ui/A2UIMessageContent';
 import { QaSummaryCard } from '../InteractionSlot/QaSummaryCard';
 import { isQaSummaryContent } from '../InteractionSlot/qaSummary';
@@ -214,6 +214,8 @@ interface MessageItemProps {
   autoSpeak?: boolean;
   showAvatar?: boolean;
   disableA2UIInteraction?: boolean;
+  hideMeta?: boolean;
+  enableAssistantAvatar?: boolean;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -221,6 +223,8 @@ export const MessageItem = memo(function MessageItem({
   autoSpeak = false,
   showAvatar = true,
   disableA2UIInteraction = false,
+  hideMeta = false,
+  enableAssistantAvatar = false,
 }: MessageItemProps) {
   const { t } = useTranslation();
   const {
@@ -318,7 +322,9 @@ export const MessageItem = memo(function MessageItem({
 
   const handleCopy = useCallback(async () => {
     if (!content) return;
-    const copyContent = a2uiContentToText(content) || content;
+    const raw = role === 'user' ? stripUploadDocumentBlocks(content) : content;
+    if (!raw) return;
+    const copyContent = a2uiContentToText(raw) || raw;
     try {
       await navigator.clipboard.writeText(copyContent);
     } catch {
@@ -333,7 +339,7 @@ export const MessageItem = memo(function MessageItem({
     }
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
-  }, [content]);
+  }, [content, role]);
 
   // 自动朗读新消息（仅助手消息，由父组件通过 autoSpeak 控制）
   useEffect(() => {
@@ -537,24 +543,39 @@ export const MessageItem = memo(function MessageItem({
 
   // 用户/助手消息
   const isUser = role === 'user';
+  const displayContent = isUser ? stripUploadDocumentBlocks(content) : content;
   const showTTS = Boolean(
     !isUser && !isStreaming && content && (ttsSupported || audioBase64)
   );
-  const showCopy = Boolean(content) && !isStreaming;
+  const showCopy = Boolean(isUser ? displayContent : content) && !isStreaming;
   const isPlaying = audioBase64 ? isAudioPlaying : isSpeaking;
   const visibleMediaItems = mediaItems?.length ? mediaItems : null;
   const visibleFileItems = fileItems?.length ? fileItems : null;
-  const hasBubbleContent =
-    isUser || Boolean(content) || Boolean(visibleMediaItems) || Boolean(visibleFileItems);
+  const hasDisplayText = Boolean(displayContent);
+  const hasBubbleContent = isUser
+    ? hasDisplayText || isStreaming
+    : Boolean(content) || Boolean(visibleMediaItems) || Boolean(visibleFileItems);
+
+  const withAssistantAvatar = !isUser && enableAssistantAvatar;
 
   return (
     <div className={clsx(
-      'flex mb-3 animate-rise',
-      isUser ? 'justify-end' : 'justify-start'
+      'flex animate-rise',
+      isUser ? 'justify-end' : 'justify-start',
+      withAssistantAvatar && 'assistant-row'
     )}>
+      {withAssistantAvatar && (
+        <div className="assistant-row__avatar" aria-hidden={!showAvatar}>
+          {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
+        </div>
+      )}
       <div className="chat-bubble-wrapper max-w-[82%] min-w-0">
         {!isUser && (
           <div className="hidden" data-testid="thinking-summary" aria-hidden="true" />
+        )}
+
+        {isUser && visibleMediaItems && (
+          <MediaRenderer items={visibleMediaItems} align="end" variant="above" />
         )}
 
         {hasBubbleContent && (
@@ -569,9 +590,10 @@ export const MessageItem = memo(function MessageItem({
           >
             {isStreaming ? (
               isUser ? (
-                <StreamingContent content={content} isStreaming={true} />
+                <StreamingContent content={displayContent} />
               ) : (
                 <A2UIMessageContent
+                  key={`${id}-streaming`}
                   content={content}
                   messageId={id}
                   isStreaming={true}
@@ -582,19 +604,22 @@ export const MessageItem = memo(function MessageItem({
             ) : (
               <>
                 {isUser ? (
-                  <div className="chat-text">
-                    <span className="whitespace-pre-wrap">{renderRichContent(content)}</span>
-                  </div>
+                  hasDisplayText ? (
+                    <div className="chat-text">
+                      <span className="whitespace-pre-wrap">{renderRichContent(displayContent)}</span>
+                    </div>
+                  ) : null
                 ) : (
                   <A2UIMessageContent
+                    key={`${id}-final`}
                     content={content}
                     messageId={id}
                     disableInteraction={disableA2UIInteraction}
                     testId="thinking-body"
                   />
                 )}
-                {visibleMediaItems && (
-                  <MediaRenderer items={visibleMediaItems} />
+                {!isUser && visibleMediaItems && (
+                  <MediaRenderer items={visibleMediaItems} align="start" />
                 )}
                 {visibleFileItems && (
                   <FileDownloadList files={visibleFileItems} />
@@ -622,7 +647,7 @@ export const MessageItem = memo(function MessageItem({
           </div>
         )}
 
-        {!isStreaming && (
+        {!isStreaming && !hideMeta && (
           <div
             className={clsx(
               'flex items-center gap-3 text-sm mt-2 text-text-muted',

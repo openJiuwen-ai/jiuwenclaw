@@ -709,6 +709,67 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
 
 
 @pytest.mark.asyncio
+async def test_config_set_preserves_deleted_template_for_bound_team(monkeypatch, tmp_path):
+    from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
+    from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStore
+
+    channel = FakeWebChannel()
+    recorded: list[dict] = []
+    binding_store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
+    binding_store.create(team_name="research_team", template_id="beta")
+    entity_store = TeamEntityStore(tmp_path / ".agent_teams")
+    current_config = {
+        "preferred_language": "zh",
+        "modes": {
+            "team": {
+                "alpha": {"team_name": "alpha", "leader": {"member_name": "alpha_leader"}},
+                "beta": {"team_name": "beta", "leader": {"member_name": "beta_leader"}},
+            }
+        },
+    }
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: current_config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
+        lambda payload: recorded.append(payload),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: binding_store,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
+        lambda: entity_store,
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-preserve",
+        {
+            "agents": {"agent_1": {"model": {"provider": "OpenAI"}}},
+            "team": [{"team_name": "alpha", "leader": {"agent_key": "agent_1"}}],
+        },
+        "sess-1",
+    )
+
+    entity = entity_store.get("research_team")
+    assert recorded and recorded[0]["team"][0]["team_name"] == "alpha"
+    assert entity is not None
+    assert entity.template_id == "beta"
+    assert entity.template_snapshot["leader"]["member_name"] == "beta_leader"
+    assert channel.responses[-1]["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_config_set_returns_bad_request_when_team_payload_is_invalid(monkeypatch):
     channel = FakeWebChannel()
 
@@ -716,6 +777,10 @@ async def test_config_set_returns_bad_request_when_team_payload_is_invalid(monke
 
     monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
                         lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"modes": {"team": {}}},
+    )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
         lambda payload: (_ for _ in ()).throw(ValueError("duplicate team_name: alpha_team")),

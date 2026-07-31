@@ -1646,7 +1646,13 @@ function OpenAIAccountAuthPanel({
   }, [modelOptions]);
   const currentModelName = (model.model_name || "").trim();
   const selectedModelName = visibleModelOptions.includes(currentModelName) ? currentModelName : "";
-  const hasUnavailableConfiguredModel = Boolean(currentModelName && !selectedModelName && !loadingModels);
+  const hasStoredAuth = Boolean(status?.authenticated);
+  const hasUnavailableConfiguredModel = Boolean(
+    currentModelName && !selectedModelName && !loadingModels && hasStoredAuth,
+  );
+  const needsLoginForConfiguredModel = Boolean(
+    currentModelName && !selectedModelName && !loadingModels && !hasStoredAuth,
+  );
 
   const handleModelSelectChange = (modelName: string) => {
     if (!visibleModelOptions.includes(modelName)) return;
@@ -1654,7 +1660,6 @@ function OpenAIAccountAuthPanel({
     void onModelPatch({ model_name: modelName });
   };
 
-  const hasStoredAuth = Boolean(status?.authenticated);
   const authenticated = Boolean(hasStoredAuth && !status?.needs_refresh);
   const statusLabel = authenticated
     ? t("config.openaiAccount.connected")
@@ -1766,7 +1771,11 @@ function OpenAIAccountAuthPanel({
             <option key={modelId} value={modelId}>{modelId}</option>
           ))}
         </select>
-        {hasUnavailableConfiguredModel ? (
+        {needsLoginForConfiguredModel ? (
+          <div className="mt-1 text-[11px] text-warn">
+            {t("config.openaiAccount.needLoginForModel")}
+          </div>
+        ) : hasUnavailableConfiguredModel ? (
           <div className="mt-1 text-[11px] text-warn">
             {t("config.openaiAccount.configuredModelUnavailable", { model: currentModelName })}
           </div>
@@ -4406,17 +4415,17 @@ export function ConfigPanel({
             {error}
           </div>
         ) : null}
-        {!error && hasMissingRequiredModelFields ? (
+        {!error && configTab !== "model" && hasMissingRequiredModelFields ? (
           <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
           </div>
         ) : null}
-        {!error && hasMissingModelApiBase ? (
+        {!error && configTab !== "model" && hasMissingModelApiBase ? (
           <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.apiBaseRequired')}
           </div>
         ) : null}
-        {!error && hasMissingModelName ? (
+        {!error && configTab !== "model" && hasMissingModelName ? (
           <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.modelNameRequired')}
           </div>

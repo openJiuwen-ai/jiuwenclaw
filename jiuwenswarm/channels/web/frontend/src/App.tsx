@@ -499,6 +499,7 @@ function AppContent() {
   const addMessage = useChatStore((s) => s.addMessage);
   const addToolCall = useChatStore((s) => s.addToolCall);
   const addToolResult = useChatStore((s) => s.addToolResult);
+  const settleHistoricalToolExecutions = useChatStore((s) => s.settleHistoricalToolExecutions);
   const prependMessages = useChatStore((s) => s.prependMessages);
   const isProcessing = useChatStore((s) => s.runtimes[sessionId]?.isProcessing ?? false);
   const isPaused = useChatStore((s) => s.runtimes[sessionId]?.isPaused ?? false);
@@ -513,6 +514,7 @@ function AppContent() {
   const messages = useChatStore((s) => s.runtimes[sessionId]?.messages ?? []);
   const isLoadingHistory = useChatStore((s) => s.runtimes[sessionId]?.isLoadingHistory ?? false);
   const replaceHistoryMessages = useChatStore((s) => s.replaceHistoryMessages);
+  const restoreReasoningSegments = useChatStore((s) => s.restoreReasoningSegments);
   const isRestoringHistorySession = isLoadingHistory && !historyPagerMeta && messages.length === 0;
   const isRestoringTeamHistory = mode === 'team' && isRestoringHistorySession;
 
@@ -593,6 +595,7 @@ function AppContent() {
     isConnected,
     request,
     persistMedia,
+    persistDocuments,
     sendMessage,
     sendStructuredChatContent,
     pause,
@@ -620,7 +623,10 @@ function AppContent() {
   });
 
   const applyHistoryPageResult = useCallback((sid: string, result: FetchHistoryPageResult) => {
-    prependMessages(sid, result.messages);
+    // 只 stamp 徽章：merge 完成卡只适合整页 replace（首次 history 恢复）。
+    // 这里若再 merge，localStorage 里的完成卡不在本页 messages 里就会被再次注入，
+    // prepend 又不按 id 去重，导致完成卡重复。
+    prependMessages(sid, stampGoalObjectiveMessages(sid, result.messages));
     for (const item of result.toolReplay) {
       if (item.kind === 'tool_call') {
         const n = normalizeToolCallPayload(item.payload);
@@ -632,6 +638,7 @@ function AppContent() {
             arguments: n.arguments,
             description: n.description,
             formatted_args: n.formatted_args,
+            display_name: n.display_name,
             memberName: n.memberName,
           },
           { startedAt: item.at }
@@ -652,6 +659,7 @@ function AppContent() {
         );
       }
     }
+    settleHistoricalToolExecutions(sid);
 
     const harnessStore = useHarnessStore.getState();
     const harnessRuntime = harnessStore.getRuntime(sid);
@@ -691,7 +699,17 @@ function AppContent() {
         }
       }
     }
-  }, [addToolCall, addToolResult, prependMessages]);
+
+    if (result.reasoningReplay.length > 0) {
+      const store = useChatStore.getState();
+      const current = store.runtimes[sid]?.reasoningSegments ?? [];
+      const currentItems = current.map((segment) => ({
+        at: new Date(segment.startedAt + 1).toISOString(),
+        text: segment.text,
+      }));
+      store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
+    }
+  }, [addToolCall, addToolResult, prependMessages, settleHistoricalToolExecutions]);
 
   const fetchHistoryPageResult = useCallback(async (
     sid: string,
@@ -1365,6 +1383,7 @@ function AppContent() {
                 arguments: n.arguments,
                 description: n.description,
                 formatted_args: n.formatted_args,
+                display_name: n.display_name,
                 memberName: n.memberName,
               },
               { startedAt: item.at }
@@ -1385,6 +1404,7 @@ function AppContent() {
             );
           }
         }
+        settleHistoricalToolExecutions(sessionId);
       },
       onHarnessReplay: (items: HistoryHarnessReplayItem[]) => {
         const harnessStore = useHarnessStore.getState();
@@ -1426,6 +1446,9 @@ function AppContent() {
             }
           }
         }
+      },
+      onReasoningReplay: (items) => {
+        restoreReasoningSegments(sessionId, items);
       },
       onError: (message) => {
         console.warn('[history.restore]', message);
@@ -1472,12 +1495,14 @@ function AppContent() {
     addMessage,
     addToolCall,
     addToolResult,
+    settleHistoricalToolExecutions,
     clearMessages,
     clearSubtasks,
     disposeInFlightHistoryHandles,
     setLoadingHistory,
     setHistoryPagerMeta,
     replaceHistoryMessages,
+    restoreReasoningSegments,
     startBackgroundHistoryPrefetch,
   ]);
 
@@ -1521,7 +1546,7 @@ function AppContent() {
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
     const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
-    const projectDir = selectedProject?.project_dir ?? currentRuntime?.projectDirectory ?? null;
+    const projectDir = options.project?.project_dir ?? selectedProject?.project_dir ?? null;
     disposeInFlightHistoryHandles(
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
@@ -1683,6 +1708,14 @@ function AppContent() {
     }
     return persistMedia(content, currentSessionId, mediaItems);
   }, [persistMedia]);
+
+  const handlePersistDocuments = useCallback((content: string, mediaItems: MediaItem[]) => {
+    const currentSessionId = sessionIdRef.current;
+    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) {
+      return Promise.reject(new Error('会话未就绪，请稍后重试'));
+    }
+    return persistDocuments(content, currentSessionId, mediaItems);
+  }, [persistDocuments]);
 
   useEffect(() => {
     return setA2UIActionHandler((message) => {
@@ -2154,6 +2187,7 @@ function AppContent() {
                     <ChatPanel
                       onSendMessage={handleSendMessage}
                       onPersistMedia={handlePersistMedia}
+                      onPersistDocuments={handlePersistDocuments}
                       onInterrupt={handleInterrupt}
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}

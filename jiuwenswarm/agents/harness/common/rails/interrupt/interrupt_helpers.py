@@ -147,8 +147,9 @@ def build_permission_rail(
             Instead of replacing the entire ``permissions`` section with the
             in-memory snapshot (which may contain stale entries that were
             already deleted from config.yaml), we first re-read the current
-            on-disk permissions, then merge only the *approval_overrides*
-            and *external_directory* deltas from ``permissions`` into it.
+            on-disk permissions, then merge only the *approval_overrides*、
+            *file_guard*（及过渡期 *external_directory*）deltas from
+            ``permissions`` into it.
             This prevents re-creating tool-level entries (e.g. ``bash: ask``)
             that the user has already removed via the webui.
             """
@@ -164,13 +165,17 @@ def build_permission_rail(
                 if not isinstance(on_disk_perms, dict):
                     on_disk_perms = {}
 
-                # Only overlay approval_overrides & external_directory;
+                # Overlay path-related deltas + approval_overrides;
                 # keep on-disk tools/defaults/rules to avoid restoring
                 # entries the user already deleted via webui.
                 merged = dict(on_disk_perms)
                 overrides_new = permissions.get("approval_overrides")
                 if overrides_new is not None:
                     merged["approval_overrides"] = overrides_new
+                # 路径信任写 file_guard.paths（agent-core §5.5.6）；过渡期仍接受旧 external_directory
+                fg_new = permissions.get("file_guard")
+                if fg_new is not None:
+                    merged["file_guard"] = fg_new
                 ext_dir_new = permissions.get("external_directory")
                 if ext_dir_new is not None:
                     merged["external_directory"] = ext_dir_new

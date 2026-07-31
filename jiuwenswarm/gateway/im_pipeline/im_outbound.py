@@ -105,7 +105,8 @@ class IMOutboundPipeline:
                 client_provider=client_provider,
                 api_key=api_key,
                 api_base=api_base,
-                verify_ssl=False,
+                verify_ssl=mcc_raw.get("verify_ssl", True),
+                ssl_cert=mcc_raw.get("ssl_cert", None),
                 custom_headers=custom_headers,
             )
             reasoning_mcc = {
