@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import sys
 from pathlib import Path
 
 import yaml
@@ -21,6 +23,75 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 JIUWENBOX_POLICY_PATH_ENV = "JIUWENBOX_POLICY_PATH"
+
+
+def _resolve_tool_paths(policy: SecurityPolicy) -> SecurityPolicy:
+    """Windows 下自动检测 tool_paths 空字段, 用 sys.executable 反推.
+
+    基底 windows-policy.yaml 随 wheel 打包, tool_paths 不能写死开发者机器路径
+    (D:\\Files\\python313 等). 这里在 load_policy 内存合并后, 对空的 tool_paths
+    字段做运行时检测填充: agent-server 进程用 OfficeAce 预制 python 跑 →
+    sys.executable 直接给到 OfficeAce/tools/python/python.exe, 反推出 tools 目录.
+
+    只填空字段: 基底/副本显式配的值不覆盖. 检测到的路径校验 os.path.isdir,
+    无效则跳过该字段 (降级到留空, 由后续依赖系统 PATH 的逻辑兜底). 不落盘
+    (符合 load_policy 不生成合并文件的机制).
+
+    非 win32 直接返回原 policy (tool_paths 仅 Windows 用).
+    """
+    if sys.platform != "win32":
+        return policy
+    try:
+        fs = policy.windows.filesystem
+        tp = fs.tool_paths
+    except AttributeError:
+        return policy
+    filled: dict[str, str] = {}
+
+    # python_dir: sys.executable 所在目录 (python.exe 同级).
+    if not (tp.python_dir or "").strip():
+        try:
+            py_dir = str(Path(sys.executable).parent)
+            if Path(py_dir, "python.exe").is_file():
+                filled["python_dir"] = py_dir
+        except OSError:
+            pass
+
+    # node_dir: 从 python_dir 往上找 tools/node (OfficeAce 结构: tools/python + tools/node).
+    if not (tp.node_dir or "").strip() and filled.get("python_dir"):
+        py_dir = Path(filled["python_dir"])
+        # python_dir 形如 <root>/tools/python → node 在 <root>/tools/node.
+        for ancestor in (py_dir.parent, *py_dir.parents):
+            cand = ancestor / "node"
+            if (cand / "node.exe").is_file():
+                filled["node_dir"] = str(cand)
+                break
+
+    # git_dir / bash_path: OfficeAce 包未必带 git, 从 PATH 检测; 检测不到留空.
+    if not (tp.git_dir or "").strip():
+        git_exe = shutil.which("git")
+        if git_exe:
+            # git.exe 多在 <git_root>/cmd 或 <git_root>/bin 或 mingw64/bin;
+            # git_dir 期望是安装根 (含 usr/bin/bash.exe).
+            git_path = Path(git_exe)
+            for ancestor in (git_path.parent, *git_path.parents):
+                if (ancestor / "usr" / "bin" / "bash.exe").is_file():
+                    filled["git_dir"] = str(ancestor)
+                    if not (tp.bash_path or "").strip():
+                        filled["bash_path"] = str(ancestor / "usr" / "bin" / "bash.exe")
+                    break
+
+    if not filled:
+        return policy
+    # 用 model_copy 更新 (SecurityPolicy/ToolPaths 是 pydantic model, 不可变约束下用 copy).
+    new_tp = tp.model_copy(update=filled)
+    new_fs = fs.model_copy(update={"tool_paths": new_tp})
+    new_windows = policy.windows.model_copy(update={"filesystem": new_fs})
+    logger.info(
+        "tool_paths 自动检测填充: %s",
+        ", ".join(f"{k}={v}" for k, v in filled.items()),
+    )
+    return policy.model_copy(update={"windows": new_windows})
 
 # Top-level YAML keys that don't represent sandbox-related configuration.
 # A policy file whose effective sandbox-config keys are empty (i.e. its
@@ -111,7 +182,7 @@ class PolicyReader:
         if not self.policy_path.exists() or (
             self.policy_path.resolve() == base_path.resolve()
         ):
-            return base_policy
+            return _resolve_tool_paths(base_policy)
 
         # 有副本: 合并基底 + 副本 (副本用户配置叠加基底; list 追加, dict 深合并).
         try:
@@ -122,11 +193,13 @@ class PolicyReader:
                 "User policy copy %s unreadable (%s); using base only",
                 self.policy_path, exc,
             )
-            return base_policy
+            return _resolve_tool_paths(base_policy)
         if not isinstance(override_data, dict) or not override_data:
-            return base_policy
+            return _resolve_tool_paths(base_policy)
 
-        return self.policy_engine.merge_policy(base_policy, override_data)
+        return _resolve_tool_paths(
+            self.policy_engine.merge_policy(base_policy, override_data)
+        )
 
     def load_policy_from_file(self, path: Path) -> SecurityPolicy:
         """从单文件加载 (不合并, 用于 per-sandbox policy 文件)."""

@@ -127,11 +127,18 @@ windows:
     # WinError 2/5. 在此配置后: ① 加进 read ACL 预装 (含 Execute) ② 拼进
     # 子进程 PATH. 全部留空则跳过, 依赖系统 PATH + 默认预装目录
     # (适合工具装在 %ProgramFiles% / %SystemRoot% 等默认路径的场景).
+    #
+    # 运行时自动检测 (policy_reader._resolve_tool_paths): 留空字段在 box-server
+    # load_policy 时用 sys.executable 反推 — agent-server 用 OfficeAce 预制
+    # python 跑 (OfficeAce/tools/python/python.exe, 自带 CPython+pywin32) →
+    # sys.executable 反推出 tools 目录, 填 python_dir/node_dir; git_dir/bash_path
+    # 从 PATH 检测 (OfficeAce 包未必带 git). 显式填写的字段不被覆盖.
+    # 开发环境 (relay-claw 源码 + venv): sys.executable 指向 .venv\Scripts\python.exe.
     tool_paths:
-      git_dir: 'D:\Files\Git'        # Git 安装根 (含 usr/bin/bash.exe). 单引号: YAML 里反斜杠不转义
-      node_dir: 'D:\Files\nodeJs'       # Node.js 安装目录 (含 node.exe)
-      python_dir: 'D:\Files\python313'     # 标准 CPython 目录 (含 python.exe, 非 uv venv)
-      bash_path: 'D:\Files\Git\usr\bin\bash.exe'      # bash.exe 全路径 (git_dir 未覆盖时用)
+      git_dir: ''        # 运行时自动检测; OfficeAce 包未带 git 时留空 (需用户装 git)
+      node_dir: ''       # 运行时自动检测 (OfficeAce tools/node)
+      python_dir: ''     # 运行时自动检测 (sys.executable 反推)
+      bash_path: ''      # git_dir 解析后自动拼 usr/bin/bash.exe
 
   network:
     # wfp_loopback_proxy: WFP Block 所有出站 + Permit loopback:port_range.
