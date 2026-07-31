@@ -138,11 +138,10 @@ The browser lifecycle is:
 |--------|-----------|-------------|
 | Frontend BrowserPanel | `jiuwenswarm/channels/web/frontend/src/components/BrowserPanel/index.tsx` | Reads and saves Chrome path and display mode |
 | Backend Web RPC handlers | `jiuwenswarm/gateway/channel_manager/web/app_web_handlers.py` | Provides `path.get`, `path.set` endpoints |
-| Chrome launch script | `jiuwenswarm/agents/harness/common/tools/browser_start_client.py` | Launches Chrome with remote debugging from `config.yaml` |
 | Browser MCP integration | `jiuwenswarm/agents/harness/common/tools/browser_tools.py` | MCP client, auto-start wrapper, configuration builder |
-| Browser runtime MCP server | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime_mcp_server.py` | Runtime MCP server entry |
+| Chrome launch and management | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/drivers/managed_browser.py` | `ManagedBrowserDriver`: port allocation, Chrome process management, profile reuse |
 | Browser runtime orchestration | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/runtime.py` | Runtime orchestration layer |
-| Browser task execution | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/service.py` | Task execution, session reuse, timeout guardrails |
+| Browser task execution | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/service.py` | Task execution, session reuse, timeout guardrails, driver lifecycle management |
 | Browser runtime config | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/config.py` | Playwright MCP and runtime configuration parsing |
 
 ## 7. Summary
