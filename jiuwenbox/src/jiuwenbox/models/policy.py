@@ -844,6 +844,10 @@ class WindowsNetworkPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["wfp_loopback_proxy", "disabled"] = "wfp_loopback_proxy"
+    # 网络总开关 (officeAce sandbox.network.set). True = 拒绝所有出站访问
+    # (win_proxy EgressFilter 检测到即短路拒绝, 不清空 allow/blocked_domains,
+    # 用户配置原样保留, 关掉总开关即恢复). 默认 false.
+    disable_all: bool = False
     egress: NetworkRulePolicy = Field(default_factory=NetworkRulePolicy)
     ingress: NetworkRulePolicy = Field(default_factory=NetworkRulePolicy)
 

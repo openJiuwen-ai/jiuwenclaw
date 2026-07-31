@@ -314,11 +314,14 @@ async def lifespan(_application: FastAPI):
                 logger.exception(
                     "ensure_windows_setup 失败; Windows 沙箱可能不可用",
                 )
-            # 启动出站代理 (egress 规则取根 policy 的 windows.network.egress).
+            # 启动出站代理 (egress 规则取根 policy 的 windows.network; 基底+副本已合并).
             try:
                 root_policy = policy_reader.load_policy()
                 egress = root_policy.windows.network.egress
                 ingress = root_policy.windows.network.ingress
+                # disable_all 总开关 (officeAce sandbox.network.set): True 时 EgressFilter
+                # 短路拒绝所有出站, 用户 allow/blocked_domains 原样保留 (关掉即恢复).
+                net_disable_all = bool(root_policy.windows.network.disable_all)
                 _win_proxy_stop = asyncio.Event()
                 _win_proxy_task, _win_proxy_stop = await win_proxy.serve_windows_proxy(
                     egress=egress,
@@ -326,6 +329,7 @@ async def lifespan(_application: FastAPI):
                     port_range_start=root_policy.windows.proxy.port_range_start,
                     port_range_end=root_policy.windows.proxy.port_range_end,
                     stop_event=_win_proxy_stop,
+                    disable_all=net_disable_all,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(

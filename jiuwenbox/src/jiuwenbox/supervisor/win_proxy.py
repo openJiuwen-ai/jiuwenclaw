@@ -51,9 +51,13 @@ class EgressFilter:
         self,
         egress: NetworkRulePolicy,
         ingress: NetworkRulePolicy | None = None,
+        disable_all: bool = False,
     ) -> None:
         self.egress = egress
         self.ingress = ingress
+        # 网络总开关 (officeAce sandbox.network.set disable_all). True 时短路拒绝所有
+        # 出站, 不清空 allow/blocked_domains (用户配置原样保留, 关掉总开关即恢复).
+        self.disable_all = bool(disable_all)
         # 预解析: 域名不在这里解析 (运行时按目标域名动态解析), 只预建 IP/端口集合.
         self._blocked_ips = self._parse_networks(egress.blocked_ips)
         self._allowed_ips = self._parse_networks(egress.allowed_ips)
@@ -101,6 +105,8 @@ class EgressFilter:
         """判定是否放行 (host, port). 返回 (allowed, reason).
 
         语义对齐 Linux supervisor/network.py 的 iptables 规则:
+          0. disable_all 总开关置位 → 直接拒绝 (officeAce sandbox.network.set;
+             不清空 allow/blocked_domains, 用户配置原样保留, 关掉即恢复).
           1. blocked_domains / blocked_ips / blocked_ports 命中 -> 拒绝.
           2. allow 规则按维度独立判定 (OR), 任一命中即放行:
              - allowed_domains / allowed_ips 是一条 ACCEPT-by-host 规则;
@@ -109,6 +115,8 @@ class EgressFilter:
              旧版在 IP+port 同时存在时做 AND, 比 Linux 严).
           3. 无任何 allow 规则: 按 default.
         """
+        if self.disable_all:
+            return False, "network disabled (disable_all)"
         if not host:
             return False, "empty host"
 
@@ -455,15 +463,19 @@ async def serve_windows_proxy(
     port_range_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
     port_range_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
     stop_event: asyncio.Event | None = None,
+    disable_all: bool = False,
 ) -> tuple[asyncio.Task, asyncio.Event]:
     """启动 Windows 出站代理, 监听端口范围.
 
     返回 (proxy_task, stop_event). 调用方 ``stop_event.set()`` 即可让所有
     监听任务优雅退出. proxy_task 是汇总所有端口 server 的总任务.
+
+    ``disable_all`` (officeAce sandbox.network.set): True 时 EgressFilter 短路
+    拒绝所有出站, 不清空 allow/blocked_domains (用户配置保留, 关掉即恢复).
     """
     if stop_event is None:
         stop_event = asyncio.Event()
-    egress_filter = EgressFilter(egress, ingress)
+    egress_filter = EgressFilter(egress, ingress, disable_all=disable_all)
     tasks = [
         asyncio.create_task(
             _serve_port(port, egress_filter, stop_event),

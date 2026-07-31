@@ -2611,8 +2611,22 @@ class JiuWenClawDeepAdapter:
                 )
                 sysop_card = create_local_sysop_card(work_dir=work_dir)
             if sysop_card is None:
-                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")
-                return None
+                # 沙箱 sysop_card 创建失败 (create_sandbox_sysop_card 内部异常:
+                # 文件白名单路径不存在 / policy 校验失败 / Linux bind_mount 失败 等)
+                # 不阻塞任务 —— 回退 local 模式继续执行, 让用户任务跑完而非直接报错.
+                # 只有"进入沙箱执行后"失败 (sysop 已建好, 执行命令时失败) 才抛错,
+                # 那是执行阶段, 不在此处.
+                if sandbox_enabled and sandbox_url and sandbox_type:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] sandbox sysop_card is None "
+                        "(create_sandbox_sysop_card failed); fallback to LOCAL mode"
+                    )
+                    sysop_card = create_local_sysop_card(work_dir=work_dir)
+                if sysop_card is None:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] local fallback sysop_card also None"
+                    )
+                    return None
 
             isolation_key_template = JiuWenClawDeepAdapter._sys_operation_isolation_key(sysop_card)
             registered_sys_operation = (
@@ -2640,10 +2654,49 @@ class JiuWenClawDeepAdapter:
                         registered_sys_operation.id,
                     )
                     return registered_sys_operation
+                # 沙箱 sysop add 失败 (sandbox 进程创建失败 / provider 注册失败等):
+                # 不阻塞任务 —— 回退 local card 重试一次. local card 的 add 也失败
+                # 才真正 return None (留给调用方报错).
+                is_sandbox_card = (
+                    sysop_card.mode == OperationMode.SANDBOX
+                    and sandbox_enabled
+                    and sandbox_url
+                    and sandbox_type
+                )
+                if is_sandbox_card:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] sandbox add_sys_operation failed (%s); "
+                        "fallback to LOCAL mode and retry",
+                        result.msg(),
+                    )
+                    local_card = create_local_sysop_card(work_dir=work_dir)
+                    local_result = Runner.resource_mgr.add_sys_operation(local_card)
+                    if local_result.is_ok():
+                        return Runner.resource_mgr.get_sys_operation(local_card.id)
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] local fallback add also failed: %s",
+                        local_result.msg(),
+                    )
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", result.msg())
                 return None
             return Runner.resource_mgr.get_sys_operation(sysop_card.id)
         except Exception as exc:  # noqa: BLE001
+            # 整个 _create_sys_operation 异常 (非 add 阶段): 若原本要走沙箱, 回退 local.
+            if sandbox_enabled and sandbox_url and sandbox_type:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] _create_sys_operation raised (%s); "
+                    "fallback to LOCAL mode", exc,
+                )
+                try:
+                    local_card = create_local_sysop_card(work_dir=work_dir)
+                    local_result = Runner.resource_mgr.add_sys_operation(local_card)
+                    if local_result.is_ok():
+                        return Runner.resource_mgr.get_sys_operation(local_card.id)
+                except Exception as fallback_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] local fallback after exception failed: %s",
+                        fallback_exc,
+                    )
             logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", exc)
             return None
 

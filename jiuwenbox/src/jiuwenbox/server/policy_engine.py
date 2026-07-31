@@ -305,7 +305,7 @@ class PolicyEngine:
     @staticmethod
     def load_policy_from_file(path: str | Path) -> SecurityPolicy:
         """Load a SecurityPolicy from a YAML file."""
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         return SecurityPolicy.model_validate(data)
 

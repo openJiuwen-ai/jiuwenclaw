@@ -239,65 +239,8 @@ class AgentWebSocketServer:
         return self._port
 
     # ---------- 生命周期 ----------
-
-    @staticmethod
-    def _parse_sandbox_host_port(url: str) -> tuple[str, int]:
-        """从 sandbox url 解析 host:port; 默认 127.0.0.1:8321."""
-        from urllib.parse import urlparse
-
-        try:
-            parsed = urlparse(url)
-            host = parsed.hostname or "127.0.0.1"
-            port = parsed.port or 8321
-        except Exception:  # noqa: BLE001
-            host, port = "127.0.0.1", 8321
-        return host, int(port)
-
-    @staticmethod
-    def _is_tcp_port_bindable(host: str, port: int) -> bool:
-        """``True`` 表示能在 ``host:port`` 上 bind 成功 (即没被占用)。"""
-        import socket
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            try:
-                sock.bind((host, port))
-            except OSError:
-                return False
-            return True
-        finally:
-            sock.close()
-
-    @staticmethod
-    def _pick_free_tcp_port(host: str) -> int:
-        """让内核挑一个空闲端口 (``bind`` 到 0)。"""
-        import socket
-
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind((host, 0))
-            return int(sock.getsockname()[1])
-
-    def _allocate_internal_jiuwenbox_port(self, host: str, preferred_port: int) -> int:
-        """internal 模式下确定 jiuwenbox 实际监听端口。
-
-        - 若本 runner 已在 ``host:preferred_port`` 上拥有一个仍在跑的 jiuwenbox, 复用;
-        - 否则若 ``preferred_port`` 当前无人占用, 用之;
-        - 再否则让内核挑一个空闲端口。
-        """
-        from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
-
-        runner = JiuwenBoxRunner.instance()
-        if runner.is_owned_listener(host, preferred_port):
-            return preferred_port
-        if self._is_tcp_port_bindable(host, preferred_port):
-            return preferred_port
-        new_port = self._pick_free_tcp_port(host)
-        logger.warning(
-            "[AgentWebSocketServer] jiuwenbox preferred port %s:%d is busy; "
-            "allocating fresh port %d for new jiuwenbox instance",
-            host, preferred_port, new_port,
-        )
-        return new_port
+    # 端口解析/分配工具已抽到 jiuwenclaw.agentserver.sandbox.port_util (Linux/Windows
+    # 共用, 照搬 jiuwenswarm PR #4088), 本类直接调用, 不再内联。
 
     async def _bootstrap_internal_jiuwenbox(self) -> None:
         """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
@@ -357,31 +300,38 @@ class AgentWebSocketServer:
                 )
                 return
 
-            # Windows: 把用户配置 (文件白/黑名单, 网络域名) 渲染进运行时 policy 副本,
-            # 用副本替代打包基底作为 box-server 的 root policy (用户配置追加在基底后面,
-            # 不改源模板). 副本 = 基底 windows-policy.yaml + user_overrides 合并.
-            # Linux 不走 windows-policy, 保持原 policy_path (default-policy.yaml 等).
+            # Windows: policy = 打包基底 (windows-policy.yaml, 随 wheel, default) +
+            # workspace 副本 (windows-policy.runtime.yaml, 用户 user_config) 合并,
+            # 由 box-server PolicyReader.load_policy 做 (不生成合并文件, 机制对齐
+            # config.yaml template+override). 这里只把副本路径作为 JIUWENBOX_POLICY_PATH
+            # 注入 box-server (基底由 box-server 自己 base_policy_path() 解析).
+            # 副本不存在则建空骨架 (首次). Linux 不走 windows-policy, 保持原 policy_path.
             if sys.platform == "win32":
                 try:
                     from jiuwenclaw.agentserver.sandbox_policy_render import (
-                        render_runtime_policy,
+                        _ensure_copy_exists,
                     )
-                    runtime_policy = render_runtime_policy()
+                    runtime_policy = _ensure_copy_exists()
                     if runtime_policy is not None and runtime_policy.is_file():
                         policy_path = runtime_policy
                         logger.info(
-                            "[AgentWebSocketServer][sandbox] using runtime policy copy: %s",
+                            "[AgentWebSocketServer][sandbox] using runtime policy copy: %s "
+                            "(box-server merges base + copy)",
                             policy_path,
                         )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "[AgentWebSocketServer][sandbox] render_runtime_policy failed, "
+                        "[AgentWebSocketServer][sandbox] ensure runtime copy failed, "
                         "fall back to base policy: %s",
                         exc,
                     )
 
-            host, preferred_port = self._parse_sandbox_host_port(url)
-            port = self._allocate_internal_jiuwenbox_port(host, preferred_port)
+            from jiuwenclaw.agentserver.sandbox.port_util import (
+                allocate_internal_jiuwenbox_port,
+                parse_sandbox_host_port,
+            )
+            host, preferred_port = parse_sandbox_host_port(url)
+            port = allocate_internal_jiuwenbox_port(host, preferred_port)
             if port != preferred_port:
                 url = f"http://{host}:{port}"
                 logger.info(

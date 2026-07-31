@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from jiuwenbox.bundled_configs import default_policy_path
+from jiuwenbox.bundled_configs import base_policy_path
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import SecurityPolicy
 from jiuwenbox.server.policy_engine import PolicyEngine
@@ -71,22 +71,65 @@ class PolicyReader:
 
     @staticmethod
     def _resolve_policy_path() -> Path:
+        """副本 (user_config) 路径: ``JIUWENBOX_POLICY_PATH`` env 指向 workspace 下
+        的稀疏用户副本; 未设则回落打包基底 (退化为"只读基底"行为, 兼容旧用法).
+        """
         env_path = os.environ.get(JIUWENBOX_POLICY_PATH_ENV)
         if env_path:
             return Path(env_path).expanduser()
-        return default_policy_path()
+        # 未配副本: 回落基底 (兼容旧用法, 退化为只读基底, 无 user_config 合并).
+        return base_policy_path()
 
     def load_policy(self) -> SecurityPolicy:
-        if self.policy_path.exists():
-            return self.policy_engine.load_policy_from_file(self.policy_path)
+        """读基底 (框架 default, 打包随 wheel) + 副本 (用户 user_config) 合并.
 
-        logger.warning(
-            "Default policy file not found at %s, falling back to SecurityPolicy defaults",
-            self.policy_path,
-        )
-        return SecurityPolicy()
+        - 基底: ``base_policy_path()`` (windows-policy.yaml / default-policy.yaml),
+          随 wheel 升级, 提供 default 值; 热更新场景新字段经此生效.
+        - 副本: ``self.policy_path`` (``JIUWENBOX_POLICY_PATH`` env 指向 workspace 下
+          稀疏 user_config, 只存用户可配字段, 用 policy 字段名 e.g.
+          ``windows.filesystem.allow_read`` / ``windows.network.egress.allowed_domains``).
+          副本不存在 → 只读基底 (退化为无 user_config).
+        - 合并: ``policy_engine.merge_policy(基底, 副本)`` — dict 深合并, list 追加去重
+          (用户白名单叠加基底必需集, 不丢); 不生成合并文件 (与 jiuwenclaw config.yaml
+          template+override 机制对齐, 但用 list 追加语义而非替换).
+        """
+        base_path = base_policy_path()
+        try:
+            with open(base_path, encoding="utf-8") as f:
+                base_data = yaml.safe_load(f) or {}
+        except OSError as exc:
+            logger.warning(
+                "Base policy %s unreadable (%s); falling back to SecurityPolicy defaults",
+                base_path, exc,
+            )
+            base_data = {}
+        if not isinstance(base_data, dict):
+            base_data = {}
+        base_policy = SecurityPolicy.model_validate(base_data)
+
+        # 无副本 / 副本路径等于基底 (未配 env) → 直接用基底.
+        if not self.policy_path.exists() or (
+            self.policy_path.resolve() == base_path.resolve()
+        ):
+            return base_policy
+
+        # 有副本: 合并基底 + 副本 (副本用户配置叠加基底; list 追加, dict 深合并).
+        try:
+            with open(self.policy_path, encoding="utf-8") as f:
+                override_data = yaml.safe_load(f) or {}
+        except OSError as exc:
+            logger.warning(
+                "User policy copy %s unreadable (%s); using base only",
+                self.policy_path, exc,
+            )
+            return base_policy
+        if not isinstance(override_data, dict) or not override_data:
+            return base_policy
+
+        return self.policy_engine.merge_policy(base_policy, override_data)
 
     def load_policy_from_file(self, path: Path) -> SecurityPolicy:
+        """从单文件加载 (不合并, 用于 per-sandbox policy 文件)."""
         return self.policy_engine.load_policy_from_file(path)
 
     def is_proxy_only(self) -> bool:
