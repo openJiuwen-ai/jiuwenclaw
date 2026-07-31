@@ -3272,7 +3272,8 @@ export class AppScreen implements Component, Focusable {
     const { content, attachments } = this.buildOutgoingMessage(text);
 
     const snapshot = this.state.getSnapshot();
-    if (!content && !(snapshot.pendingQuestion && this.otherInputMode)) return;
+    // Other 自定义输入模式下空内容不得提交（#2330），避免触发黄色 thinking。
+    if (!content) return;
 
     if (snapshot.pendingQuestion) {
       if (this.questionList !== null) {

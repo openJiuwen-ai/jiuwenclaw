@@ -1301,10 +1301,15 @@ class JiuWenSwarm:
                             else:
                                 answer_value = custom_input
                         elif len(cleaned_options) == 1:
-                            answer_value = cleaned_options[0]
+                            # Bare "Other" without custom text is incomplete (#2330).
+                            sole = cleaned_options[0]
+                            answer_value = "" if sole == "Other" else sole
                         elif cleaned_options:
-                            # Multi-select: preserve the full list of selections.
-                            answer_value = cleaned_options
+                            # Multi-select: preserve real choices; drop placeholder-only Other.
+                            normal_options = [
+                                option for option in cleaned_options if option != "Other"
+                            ]
+                            answer_value = normal_options if normal_options else ""
                         else:
                             answer_value = ""
                     elif custom_input:

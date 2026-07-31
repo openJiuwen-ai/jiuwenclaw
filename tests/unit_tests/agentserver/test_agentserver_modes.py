@@ -558,6 +558,48 @@ def test_build_inputs_merges_multi_select_custom_input(monkeypatch):
     }
 
 
+def test_build_inputs_drops_bare_other_without_custom_input(monkeypatch):
+    """Regression for #2330: empty Other must not become answer value \"Other\"."""
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-answer",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "tool-ask-1",
+            "source": "ask_user_interrupt",
+            "answers": [
+                {
+                    "question": "选择技术栈？",
+                    "selected_options": ["Other"],
+                    "custom_input": "",
+                },
+                {
+                    "question": "多选模块？",
+                    "selected_options": ["Other"],
+                    "custom_input": "   ",
+                },
+            ],
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-1": {
+            "answers": {},
+        }
+    }
+
+
 def test_chat_answer_routes_team_plan_confirm_interrupt_to_adapter(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
