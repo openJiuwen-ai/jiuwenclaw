@@ -69,12 +69,11 @@ export function TeamMemberMessageFrame({
 }) {
   return (
     <div className="team-member-message animate-fade-in">
-      {showAvatar && (
-        <div className="team-member-message__header">
-          <TeamMemberAvatar member={member} />
-        </div>
-      )}
-      <div className={clsx('team-member-message__body', !showAvatar && 'is-continued', contentClassName)}>
+      {/* 始终占住头像列，避免 showAvatar 在多轮/折叠间切换时整列塌掉看起来像「头像消失」。 */}
+      <div className="team-member-message__header" aria-hidden={!showAvatar}>
+        {showAvatar ? <TeamMemberAvatar member={member} /> : null}
+      </div>
+      <div className={clsx('team-member-message__body', contentClassName)}>
         {children}
       </div>
     </div>
@@ -193,6 +192,11 @@ function renderRichContent(content: string): ReactNode[] {
 }
 
 export function getMessageActor(message: Message): string | null {
+  // team-leader 气泡偶发会落成 assistant；按 id 识别，避免 team 聚类把头像判丢。
+  if (message.id?.startsWith('team-leader-')) {
+    return 'team_leader';
+  }
+
   if (message.role !== 'system') {
     return null;
   }
@@ -200,10 +204,6 @@ export function getMessageActor(message: Message): string | null {
   if (message.content?.startsWith('team.event:')) {
     const event = parseTeamEventMessage(message);
     return event?.fromMember || null;
-  }
-
-  if (message.id?.startsWith('team-leader-')) {
-    return 'team_leader';
   }
 
   return null;
@@ -565,6 +565,7 @@ export const MessageItem = memo(function MessageItem({
       withAssistantAvatar && 'assistant-row'
     )}>
       {withAssistantAvatar && (
+        // 始终保留头像占位，与 team 布局一致，避免连续气泡时整列消失。
         <div className="assistant-row__avatar" aria-hidden={!showAvatar}>
           {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
         </div>

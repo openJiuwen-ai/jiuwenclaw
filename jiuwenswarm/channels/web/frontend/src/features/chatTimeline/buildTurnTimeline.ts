@@ -347,49 +347,55 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
     isTeamMode
   );
 
-  if (!isTeamMode) {
-    let clusterActive = false;
-    for (const renderItem of renderItemsWithNotices) {
-      if (renderItem.type === 'reasoning' || renderItem.type === 'toolGroup') {
-        renderItem.showAvatar = !clusterActive;
-        clusterActive = true;
-        continue;
-      }
-      if (renderItem.type === 'message') {
-        if (renderItem.message.role === 'assistant') {
-          renderItem.showAvatar = !clusterActive;
-          clusterActive = true;
-        } else {
-          renderItem.showAvatar = false;
-          clusterActive = false;
-        }
-      }
-    }
-    return insertTurnSummaries(renderItemsWithNotices, isProcessing);
-  }
-
-  let clusterBlockActive = false;
-  for (const renderItem of renderItemsWithNotices) {
-    if (renderItem.type === 'reasoning' || renderItem.type === 'toolGroup') {
-      renderItem.showAvatar = !clusterBlockActive;
-      clusterBlockActive = true;
-      continue;
-    }
-    if (renderItem.type !== 'message') {
-      continue;
-    }
-
-    const actor = getMessageActor(renderItem.message);
-    if (actor === 'team_leader') {
-      renderItem.showAvatar = !clusterBlockActive;
-      clusterBlockActive = true;
-      continue;
-    }
-
-    clusterBlockActive = false;
-  }
-
+  assignTurnTopAvatars(renderItemsWithNotices, isTeamMode);
   return insertTurnSummaries(renderItemsWithNotices, isProcessing);
+}
+
+/**
+ * 同一轮（同一 turnId）里，leader/助手/思考/工具只允许最顶部一颗头像。
+ * 成员气泡可保留自己的头像，但不得重置 leader 簇（否则同轮会冒出一串头像）。
+ */
+function assignTurnTopAvatars(items: RenderItem[], isTeamMode: boolean): void {
+  const claimedLeaderTurns = new Set<number>();
+
+  const claimLeaderAvatar = (turnId: number): boolean => {
+    if (claimedLeaderTurns.has(turnId)) {
+      return false;
+    }
+    claimedLeaderTurns.add(turnId);
+    return true;
+  };
+
+  for (const item of items) {
+    if (item.type === 'reasoning' || item.type === 'toolGroup') {
+      item.showAvatar = claimLeaderAvatar(item.turnId);
+      continue;
+    }
+
+    if (item.type !== 'message') {
+      continue;
+    }
+
+    if (item.message.role === 'user') {
+      item.showAvatar = false;
+      continue;
+    }
+
+    if (!isTeamMode) {
+      item.showAvatar =
+        item.message.role === 'assistant' ? claimLeaderAvatar(item.turnId) : false;
+      continue;
+    }
+
+    const actor = getMessageActor(item.message);
+    if (actor === 'team_leader' || item.message.role === 'assistant') {
+      item.showAvatar = claimLeaderAvatar(item.turnId);
+      continue;
+    }
+
+    // 其他成员：自己的头像；不影响本轮 leader 是否已占用顶部位
+    item.showAvatar = Boolean(actor);
+  }
 }
 
 function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): RenderItem[] {
@@ -583,8 +589,40 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
     }
     const isLast = Number.isFinite(lastTurnId) && meta.turnId === lastTurnId;
     meta.completed = !(isProcessing && isLast);
+    // 折叠条是该轮顶部锚点：只要本轮有可折叠工作，头像就归折叠条，避免被中间气泡抢走后整轮「没头像」。
+    if (meta.hasWork) {
+      meta.showAvatar = true;
+    }
   }
   return map;
+}
+
+/**
+ * 「已完成」折叠条应挂在该轮第一个可折叠项上。
+ * 若工具前还有 hideMeta 开场白，锚在那句上，避免展开后开场白跑到折叠条上面。
+ */
+export function buildTurnFoldAnchorKeys(
+  items: RenderItem[],
+  turnWorkMeta: Map<number, TurnWorkMeta>
+): Map<number, string> {
+  const anchors = new Map<number, string>();
+  for (const item of items) {
+    if (item.type === 'turnSummary' || item.turnId < 0 || anchors.has(item.turnId)) {
+      continue;
+    }
+    const meta = turnWorkMeta.get(item.turnId);
+    if (!meta?.completed || !meta.hasWork) {
+      continue;
+    }
+    if (item.type === 'message' && item.hideMeta) {
+      anchors.set(item.turnId, item.key);
+      continue;
+    }
+    if (item.type === 'reasoning' || item.type === 'toolGroup') {
+      anchors.set(item.turnId, item.key);
+    }
+  }
+  return anchors;
 }
 
 export type LiveWorkStreak = {
@@ -609,6 +647,9 @@ export function streakExpandKey(turnId: number, ordinal: number): string {
   return `streak-${turnId}-${ordinal}`;
 }
 
+/** 单轮耗时超过该阈值视为时间戳异常（历史脏数据/巡检污染），回退到更窄的 work 跨度。 */
+const MAX_PLAUSIBLE_TURN_MS = 24 * 60 * 60 * 1000;
+
 export function completedWorkDurationMs(meta: Pick<TurnWorkMeta, 'workStartMs' | 'workEndMs' | 'startMs' | 'endMs'>): number {
   // 从用户发话算到本轮最后一次工作活动，包含等待首包/思考的时间。
   // 不要用 workStart→workEnd：那会丢掉「发完后一直在想」的等待，出现思考 9s、已完成却只显示 3s。
@@ -617,7 +658,43 @@ export function completedWorkDurationMs(meta: Pick<TurnWorkMeta, 'workStartMs' |
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
     return 0;
   }
-  return Math.max(0, end - start);
+  let duration = Math.max(0, end - start);
+  if (duration <= MAX_PLAUSIBLE_TURN_MS) {
+    return duration;
+  }
+  // 用户时间戳异常偏旧时，退回纯工作活动跨度，避免「任务用时」飙到数小时/数天。
+  if (
+    Number.isFinite(meta.workStartMs) &&
+    Number.isFinite(meta.workEndMs) &&
+    meta.workEndMs >= meta.workStartMs
+  ) {
+    duration = Math.max(0, meta.workEndMs - meta.workStartMs);
+  }
+  if (duration > MAX_PLAUSIBLE_TURN_MS) {
+    return 0;
+  }
+  return duration;
+}
+
+/** TurnElapsed / CompletedWorkChip 共用：统一用同一套起止点，避免上下两处数字对不上。 */
+export function turnElapsedRangeMs(meta: Pick<TurnWorkMeta, 'workStartMs' | 'workEndMs' | 'startMs' | 'endMs'>): {
+  startMs: number;
+  endMs: number;
+} {
+  const start = Number.isFinite(meta.startMs) ? meta.startMs : meta.workStartMs;
+  const end = Number.isFinite(meta.workEndMs) ? meta.workEndMs : meta.endMs;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return {
+      startMs: Number.isFinite(meta.startMs) ? meta.startMs : 0,
+      endMs: Number.isFinite(meta.endMs) ? meta.endMs : 0,
+    };
+  }
+  const duration = completedWorkDurationMs(meta);
+  // 若走了异常回退，把展示区间收成与 duration 一致，避免 TurnElapsed 仍用脏 startMs。
+  if (duration > 0 && duration !== Math.max(0, end - start) && Number.isFinite(meta.workStartMs)) {
+    return { startMs: meta.workStartMs, endMs: meta.workStartMs + duration };
+  }
+  return { startMs: start, endMs: start + duration };
 }
 
 function isReasoningSettledForStreak(segment: ReasoningSegment, nowMs: number): boolean {

@@ -1385,6 +1385,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           clearedTeamPanelSessionRef.current.delete(sessionId);
         }
         useChatStore.getState().setPaused(sessionId, false);
+        // 执行中追问：先收尾上一轮仍在 streaming 的 leader，避免新一轮气泡/头像挂错簇
+        closeActiveTeamLeaderMessages(sessionId);
+        useChatStore.getState().closeReasoning(sessionId);
       }
       try {
         let outgoingContent = content.replace(/\{\{skill:([^}]+)\}\}/g, '$1');
@@ -1455,6 +1458,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
     },
     [
+      closeActiveTeamLeaderMessages,
       persistDocuments,
       persistMedia,
       request,
