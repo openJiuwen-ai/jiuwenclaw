@@ -230,6 +230,7 @@ from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
 
 from jiuwenswarm.agents.harness.common.tools import (
     SendFileToolkit,
+    SendHtmlCardToolkit,
     SkillRetrievalToolkit,
     SkillToolkit,
     is_skill_retrieval_enabled,
@@ -1172,6 +1173,7 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+        self._send_html_card_toolkit: SendHtmlCardToolkit | None = None
 
     def _schedule_runtime_state_write(
         self,
@@ -6103,7 +6105,7 @@ class JiuWenSwarmDeepAdapter:
         request_id: str | None,
         channel_id: str | None = None,
     ) -> None:
-        """刷新每请求相关的 cron / send_file 工具运行时状态。
+        """刷新每请求相关的 cron / send_file / send_html_card 工具运行时状态。
 
         两者的工具实例都只建一次：cron 见 ``_ensure_cron_tools_registered``，
         send_file 首次注册后改走 ``update_runtime_context``。这里每次请求只做
@@ -6144,6 +6146,38 @@ class JiuWenSwarmDeepAdapter:
                     self._instance.ability_manager.add(sf_tool.card)
             else:
                 self._send_file_toolkit.update_runtime_context(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel_id=channel_for_tool,
+                    metadata=metadata_for_tool,
+                )
+
+        # send_html_card：由 channels.<channel>.send_html_card_allowed 控制
+        # 未配置时仅 xiaoyi 默认开启（H5 卡片仅小艺端消费）
+        send_html_card_enabled = (
+            config_base.get("channels", {}).get(channel, {}).get("send_html_card_allowed")
+        )
+        if send_html_card_enabled is None:
+            send_html_card_enabled = (channel == "xiaoyi")
+        if send_html_card_enabled and request_id and session_id:
+            channel_for_tool = _CRON_TOOL_CHANNEL_ID.get()
+            metadata_for_tool = _CRON_TOOL_METADATA.get()
+            already_registered_html = any(
+                getattr(existing, "name", "").startswith("send_html_card")
+                for existing in (self._instance.ability_manager.list() or [])
+            )
+            if not already_registered_html:
+                self._send_html_card_toolkit = SendHtmlCardToolkit(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel_id=channel_for_tool,
+                    metadata=metadata_for_tool,
+                )
+                for html_tool in self._send_html_card_toolkit.get_tools():
+                    Runner.resource_mgr.add_tool(html_tool)
+                    self._instance.ability_manager.add(html_tool.card)
+            elif self._send_html_card_toolkit is not None:
+                self._send_html_card_toolkit.update_runtime_context(
                     request_id=request_id,
                     session_id=session_id,
                     channel_id=channel_for_tool,

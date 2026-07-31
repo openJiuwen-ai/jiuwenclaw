@@ -46,6 +46,7 @@ OUTPUT_SCAN_TOOLS = frozenset({
     "send_sms",
     "message",
     "send_file_to_user",
+    "send_html_card",
     "pdf",
 })
 
@@ -62,6 +63,7 @@ MESSAGE_TOOLS = frozenset({
     "send_sms",
     "message",
     "send_file_to_user",
+    "send_html_card",
 })
 
 # OpenClaw / sandbox aliases → canonical tool behavior in scanners.py

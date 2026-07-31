@@ -722,6 +722,7 @@ channels:
     #   enabled: false
   xiaoyi:
     send_file_allowed: true
+    send_html_card_allowed: true
     apps:
       - name: 小艺默认应用
         # 华为小艺 A2A 配置

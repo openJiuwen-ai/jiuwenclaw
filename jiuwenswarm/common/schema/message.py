@@ -229,6 +229,7 @@ class EventType(Enum):
     CHAT_RETRACT = "chat.retract"
     CHAT_MEDIA = "chat.media"
     CHAT_FILE = "chat.file"
+    CHAT_HTML_CARD = "chat.html_card"
     CHAT_TOOL_CALL = "chat.tool_call"
     CHAT_TOOL_UPDATE = "chat.tool_update"
     CHAT_TOOL_RESULT = "chat.tool_result"

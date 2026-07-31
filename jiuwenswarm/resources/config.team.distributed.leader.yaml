@@ -349,6 +349,7 @@ channels:
     # 小艺手机端插件tools调用，会添加相关tools到系统提示词
     phone_tools_enabled: false
     send_file_allowed: true
+    send_html_card_allowed: true
   dingtalk:
     # 钉钉应用配置
     client_id:
