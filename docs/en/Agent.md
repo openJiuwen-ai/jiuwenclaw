@@ -14,6 +14,8 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 
 **Agent = identity + tools + skills + memory + workspace (includes todos and config)**
 
+> **Note:** The above 5 items are the core components that make up a single agent. When multiple agents work together, they can form a cross-agent **collaboration capability** for task decomposition and parallel execution.
+
 **How it differs from plain LLM chat:**
 
 | Aspect | Plain LLM chat | JiuwenSwarm agent |
@@ -58,19 +60,19 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 
 ### What an agent is made of
 
-An agent has seven main areas. You can focus on the ones you care about.
+An agent consists of **6 core components** and **1 collaboration capability** (multi-agent collaboration). You can focus on the ones you care about.
 
 **Overview:**
 
-| Part | Role | User focus | Main effect |
-|------|------|------------|-------------|
-| **Identity** | Who the agent is, tone, style | Customizable | Conversation style and behavior |
-| **Workspace** | Tasks, todos, sessions, runtime data | Good to understand | Task tracking and persistence |
-| **Tools** | Files, web, code, shell, media | Usually no edits | What operations are possible |
-| **Skills** | Professional modules (Git, PPT, etc.) | Load as needed | Extra capabilities |
-| **Memory** | Preferences, history, decisions | Mostly automatic | Continuity and personalization |
-| **Config** | Models, channels, permissions | Advanced users | Model, security, channel behavior |
-| **Multi-Agent Collaboration** | Supports team-based workflows for parallel operation | Enable as needed | Task decomposition and efficiency |
+| Part | Type | Role | User focus | Main effect |
+|------|------|------|------------|-------------|
+| **Identity** | Core component | Who the agent is, tone, style | Customizable | Conversation style and behavior |
+| **Workspace** | Core component | Tasks, todos, sessions, runtime data | Good to understand | Task tracking and persistence |
+| **Tools** | Core component | Files, web, code, shell, media | Usually no edits | What operations are possible |
+| **Skills** | Core component | Professional modules (Git, PPT, etc.) | Load as needed | Extra capabilities |
+| **Memory** | Core component | Preferences, history, decisions | Mostly automatic | Continuity and personalization |
+| **Config** | Core component | Models, channels, permissions | Advanced users | Model, security, channel behavior |
+| **Multi-Agent Collaboration** | Collaboration capability | Supports team-based workflows for parallel operation | Enable as needed | Task decomposition and efficiency |
 
 **Details:**
 
