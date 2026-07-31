@@ -3,8 +3,7 @@
 // 管理 /memory 的四个页签（edit/status/toggle/open）的交互、渲染和状态。
 // app-screen.ts 通过持有 MemoryViewController 实例并委托调用其方法来使用。
 
-import * as fs from "node:fs";
-import * as path from "node:path";
+import { existsSync } from "node:fs";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
@@ -459,13 +458,10 @@ export class MemoryViewController {
   private async handleSelect(tab: MemoryViewTab, item: SelectItem, mode: string, _projectDir: string): Promise<void> {
     if (tab === "edit" && item.value && item.value !== "__display__") {
       const filePath = item.value;
-      if (!fs.existsSync(filePath)) {
-        try {
-          fs.mkdirSync(path.dirname(filePath), { recursive: true });
-          fs.writeFileSync(filePath, "", "utf-8");
-        } catch {
-          // 创建失败仍尝试打开，让编辑器报错
-        }
+      if (!existsSync(filePath)) {
+        this.statusMessage = "Cannot edit: memory file does not exist.";
+        this.tui.requestRender();
+        return;
       }
       // 打开编辑器前先冻结列表(进入不可操作态)。编辑器关闭后由 onExit 退出列表
       // 并提示编辑成功(含编辑器来源与环境变量切换提示),与 CC memory.tsx 行为一致:

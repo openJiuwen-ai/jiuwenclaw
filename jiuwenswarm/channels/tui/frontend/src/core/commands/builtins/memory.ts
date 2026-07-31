@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
@@ -467,10 +467,9 @@ async function editMemoryByPath(
 
     if (isAncestorMemFile) {
       const displayPath = getDisplayPath(path, projectDir);
-      // 文件不存在则先创建(与后端 handle_memory_edit 的 touch 行为对齐)
       if (!existsSync(path)) {
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, "");
+        ctx.addItem(addError(ctx.sessionId, `Cannot edit: ${path} — memory file does not exist.`));
+        return;
       }
       if (ctx.openInEditor) {
         const { source, value } = getEditorInfo();
