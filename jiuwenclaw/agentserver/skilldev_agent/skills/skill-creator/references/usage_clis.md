@@ -43,6 +43,7 @@ Wrap the full CLI command in `exec(command: "...")`. The cliDefinition `name` is
 
 - String / number / array params → `--<paramName> <placeholder>`.
 - Boolean params → include `--<paramName>` only when the workflow needs the true value.
+- Never use single-dash flags (`-a`, `-m`); all flags must use double-dash prefix (`--a`, `--m` or the full `--<paramName>` form).   
 - Include every field in `inputSchema.required`. If `inputSchema` (or its `properties`) is missing or empty, the command is just the prefix.
 - Include optional fields only when the workflow needs them or the user requested them. Preserve parameter names exactly as defined in `inputSchema.properties`.
 
@@ -98,7 +99,7 @@ From the example:
 | --- | --- | --- |
 | `name` | Fixed command prefix inside `exec(command: "...")` + block heading / `- **toolName**`. | Never replace the prefix with user input. |
 | `description` | Decide when the CLI should be called. | — |
-| `inputSchema` | Build flags and the 调用表. | Include all `required` inputs; preserve param names exactly. |
+| `inputSchema` | Build flags and the 调用表. | Include all `required` inputs; preserve param names exactly; flags must use `--` double-dash prefix (e.g. `--a`, `--module`) — single-dash flags (`-x`) are forbidden. |
 
 - The assembled command is always the `command` string of `exec(command: "...")`; never split it into separate structured fields.
 - User values belong only in flag values — never in the command prefix or flag names.
