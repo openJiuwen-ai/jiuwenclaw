@@ -3,7 +3,8 @@
 // 管理 /memory 的四个页签（edit/status/toggle/open）的交互、渲染和状态。
 // app-screen.ts 通过持有 MemoryViewController 实例并委托调用其方法来使用。
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
@@ -18,6 +19,11 @@ import { padToWidth } from "./rendering/text.js";
 import { resolveAction } from "../core/keybindings/resolver.js";
 
 // ── 类型定义 ──
+
+function memoryPathKey(filePath: string): string {
+  const resolved = resolve(filePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
 
 export type MemoryViewTab = "edit" | "status" | "toggle" | "open";
 
@@ -466,9 +472,42 @@ export class MemoryViewController {
     if (tab === "edit" && item.value && item.value !== "__display__") {
       const filePath = item.value;
       if (!existsSync(filePath)) {
-        this.statusMessage = "Cannot edit: memory file does not exist.";
-        this.tui.requestRender();
-        return;
+        const selectedFile = this.state?.files.find(
+          (file) => memoryPathKey(file.path) === memoryPathKey(filePath),
+        );
+        const projectRoot = this.state?.gitRoot || this.state?.projectDir || "";
+        // Only the three placeholders synthesized by collectOrderedMemoryFiles are creatable.
+        const allowedPlaceholderPaths = new Map<string, string>();
+        if (projectRoot) {
+          allowedPlaceholderPaths.set(memoryPathKey(join(projectRoot, "JIUWENSWARM.md")), "project");
+          allowedPlaceholderPaths.set(memoryPathKey(join(projectRoot, "JIUWENSWARM.local.md")), "local");
+        }
+        if (this.state?.userMemoryPath) {
+          allowedPlaceholderPaths.set(memoryPathKey(this.state.userMemoryPath), "user");
+        }
+        const isCreatablePlaceholder =
+          selectedFile?.exists === false &&
+          allowedPlaceholderPaths.get(memoryPathKey(filePath)) === selectedFile.kind;
+
+        if (!isCreatablePlaceholder) {
+          this.statusMessage = "Cannot edit: memory file does not exist.";
+          this.tui.requestRender();
+          return;
+        }
+
+        try {
+          mkdirSync(dirname(filePath), { recursive: true });
+          writeFileSync(filePath, "", { encoding: "utf-8", flag: "wx" });
+          selectedFile.exists = true;
+        } catch {
+          // If another process created the selected placeholder concurrently,
+          // continue opening it; otherwise preserve the existing failure behavior.
+          if (!existsSync(filePath)) {
+            this.statusMessage = "Cannot edit: memory file does not exist.";
+            this.tui.requestRender();
+            return;
+          }
+        }
       }
       // 打开编辑器前先冻结列表(进入不可操作态)。编辑器关闭后由 onExit 退出列表
       // 并提示编辑成功(含编辑器来源与环境变量切换提示),与 CC memory.tsx 行为一致:
