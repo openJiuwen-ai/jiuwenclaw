@@ -40,7 +40,13 @@ export function CodeEnvironmentPanel({ project, isProcessing, diffWatch, onRevie
         </small>
       </button>
       <div className="code-environment__row code-environment__row--branch">
-        <CodeBranchSelector project={project} compact variant="environment" disabled={isProcessing} />
+        <CodeBranchSelector
+          project={project}
+          compact
+          variant="environment"
+          disabled={isProcessing}
+          liveRepo={diffWatch.summary?.repo ?? null}
+        />
       </div>
     </section>
   );
