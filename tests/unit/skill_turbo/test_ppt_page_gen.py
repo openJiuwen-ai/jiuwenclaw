@@ -295,6 +295,91 @@ def test_visible_page_marker_normalization_preserves_main_content_and_metadata()
 
 
 @pytest.mark.unit
+def test_strip_unsupported_fullpage_overlay_removes_scanlines_cover() -> None:
+    """全页 inset:0 + repeating-linear-gradient + mix-blend-mode 的空遮罩须被移除。
+
+    复现 page-12“透明罩”：.scanlines 被 html-to-pptx 栅格化为覆盖整页的图片。
+    """
+    html = """<div class="ppt-slide" type="content">
+<style>
+.scanlines{position:absolute;inset:0;pointer-events:none;z-index:5;
+  background:repeating-linear-gradient(0deg,rgba(0,255,255,0.04) 0px,rgba(0,255,255,0.04) 1px,transparent 1px,transparent 4px);
+  mix-blend-mode:screen;}
+.cyber-card{background:#15151F;border:1px solid #00FFFF;}
+</style>
+  <div class="scanlines"></div>
+  <div class="content-safe flex flex-col" style="position:relative;z-index:10;">
+    <h1>标题</h1><p>正文内容</p>
+  </div>
+</div>"""
+
+    result = ppg._strip_unsupported_fullpage_overlays(html)
+
+    assert '<div class="scanlines"></div>' not in result
+    assert "正文内容" in result
+    assert "cyber-card" in result  # 无关规则与内容不受影响
+
+
+@pytest.mark.unit
+def test_strip_unsupported_fullpage_overlay_keeps_individual_scanline_bars() -> None:
+    """独立小尺寸 solid-color scanline 条（非全页、无不支持属性）不得被误删。"""
+    html = """<div class="ppt-slide" type="content">
+<style>.scanline{position:absolute;left:0;right:0;height:1px;opacity:0.4;}</style>
+  <div class="scanline" style="top:100px;background:#00FFFF;"></div>
+  <div class="scanline" style="top:640px;background:#FF00FF;"></div>
+  <div class="content-safe"><h1>标题</h1></div>
+</div>"""
+
+    result = ppg._strip_unsupported_fullpage_overlays(html)
+
+    assert result.count('class="scanline"') == 2
+    assert "标题" in result
+
+
+@pytest.mark.unit
+def test_strip_unsupported_fullpage_overlay_handles_inline_style_cover() -> None:
+    """内联 style 的全页栅格化遮罩同样须被移除。"""
+    html = """<div class="ppt-slide" type="content">
+  <div style="position:absolute;inset:0;background:repeating-linear-gradient(0deg,rgba(0,0,0,0.04) 0,rgba(0,0,0,0.04) 1px,transparent 1px,transparent 4px);mix-blend-mode:screen;"></div>
+  <div class="content-safe"><h1>标题</h1></div>
+</div>"""
+
+    result = ppg._strip_unsupported_fullpage_overlays(html)
+
+    assert "repeating-linear-gradient" not in result
+    assert '<div style="position:absolute;inset:0;' not in result
+    assert "标题" in result
+
+
+@pytest.mark.unit
+def test_strip_unsupported_fullpage_overlay_skips_non_overlay_empty_div() -> None:
+    """无不支持属性的空 div（如 spacer）不得被误删。"""
+    html = """<div class="ppt-slide" type="content">
+  <div class="spacer"></div>
+  <div class="content-safe"><h1>标题</h1></div>
+</div>"""
+
+    result = ppg._strip_unsupported_fullpage_overlays(html)
+
+    assert '<div class="spacer"></div>' in result
+    assert "标题" in result
+
+
+@pytest.mark.unit
+def test_strip_unsupported_fullpage_overlay_skips_overlay_div_with_content() -> None:
+    """有内容子节点的遮罩 div 不得被删（只删空 div，保证安全）。"""
+    html = """<div class="ppt-slide" type="content">
+<style>.overlay{position:absolute;inset:0;background:repeating-linear-gradient(0deg,#fff 0,#fff 1px,transparent 1px,transparent 4px);}</style>
+  <div class="overlay"><p>遮罩内文案</p></div>
+  <div class="content-safe"><h1>标题</h1></div>
+</div>"""
+
+    result = ppg._strip_unsupported_fullpage_overlays(html)
+
+    assert "遮罩内文案" in result
+
+
+@pytest.mark.unit
 def test_page_worker_removes_page_marker_without_extra_llm_call() -> None:
     marked_html = _VALID_HTML.replace(
         "<h1>历史文化介绍</h1>",
