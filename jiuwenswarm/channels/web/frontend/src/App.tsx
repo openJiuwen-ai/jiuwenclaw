@@ -1956,7 +1956,10 @@ function AppContent() {
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
     const runtime = useChatStore.getState().getRuntime(deleteTarget.session_id);
-    if (runtime?.isProcessing || runtime?.pendingQuestion) return;
+    if (runtime?.isProcessing || runtime?.pendingQuestion) {
+      setDialogError(t('multiSession.deleteRunningDisabled'));
+      return;
+    }
     setDialogBusy(true); setDialogError(null);
     try {
       const deletedSession = deleteTarget;

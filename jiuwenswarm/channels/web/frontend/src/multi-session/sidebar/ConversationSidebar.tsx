@@ -196,7 +196,10 @@ function ConversationListItem({
   const title = getSessionTitle(session, t('multiSession.untitled'));
   const errorMessage = runtime?.error || runtime?.executionError || null;
   const indicator = getSessionIndicator(runtime, unread, session.is_processing === true, Boolean(errorMessage));
-  const deleteDisabled = indicator === 'processing' || indicator === 'waiting';
+  const deleteDisabled =
+    runtime?.isProcessing === true ||
+    session.is_processing === true ||
+    Boolean(runtime?.pendingQuestion);
 
   let status: React.ReactNode;
   if (indicator === 'waiting') {
