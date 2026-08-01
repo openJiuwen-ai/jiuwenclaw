@@ -493,14 +493,43 @@ class _GitSnapshot:
     """Git state as of a conversation's first turn, held for its whole life.
 
     Attributes:
+        head: Raw ``HEAD`` file contents when the snapshot was taken. Checking
+            it costs a file read rather than a subprocess, which is what makes
+            it affordable to verify on every turn.
         branch: Current branch name, or "HEAD" when detached.
         status: ``git status --short`` output, capped at 50 lines.
         recent_commits: ``git log --oneline -5`` output.
     """
 
+    head: str
     branch: str
     status: str
     recent_commits: str
+
+
+def _read_git_head(head_file: str) -> str:
+    """Read the HEAD pointer directly, without spawning git.
+
+    Changes whenever the checkout moves — switching branches rewrites the
+    symbolic ref, and a detached checkout writes a different commit id — while
+    staying untouched by ordinary edits to the working tree. That makes it a
+    cheap way to tell "the conversation moved to a different checkout" apart
+    from "the user edited a file", which need opposite treatment: the former
+    must invalidate the snapshot, the latter must not.
+
+    Args:
+        head_file: Absolute path to the git directory's HEAD file.
+
+    Returns:
+        Stripped file contents, or an empty string when it cannot be read —
+        in which case the caller degrades to holding the snapshot as-is.
+    """
+    if not head_file:
+        return ""
+    try:
+        return Path(head_file).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 @dataclass(frozen=True)
@@ -512,11 +541,15 @@ class _StableGitFacts:
         user_name: ``user.name`` from git config; empty when unset.
         main_branch: First of origin/main, origin/master, main, master that
             resolves; empty when none do.
+        head_file: Absolute path to the git directory's HEAD file. Resolved via
+            git so it is correct for a subdirectory, a worktree or a submodule,
+            where it is nowhere near ``<project_dir>/.git/HEAD``.
     """
 
     is_repo: bool
     user_name: str
     main_branch: str
+    head_file: str
 
 
 _STABLE_GIT_FACTS: dict[str, _StableGitFacts] = {}
@@ -557,14 +590,23 @@ def _resolve_stable_git_facts(
     is_repo = run_git(["rev-parse", "--is-inside-work-tree"]) == "true"
     user_name = ""
     main_branch = ""
+    head_file = ""
     if is_repo:
         user_name = run_git(["config", "user.name"])
         for candidate in ("origin/main", "origin/master", "main", "master"):
             if run_git(["rev-parse", "--verify", "--quiet", candidate]):
                 main_branch = candidate
                 break
+        git_dir = run_git(["rev-parse", "--absolute-git-dir"])
+        if git_dir:
+            head_file = str(Path(git_dir) / "HEAD")
 
-    facts = _StableGitFacts(is_repo=is_repo, user_name=user_name, main_branch=main_branch)
+    facts = _StableGitFacts(
+        is_repo=is_repo,
+        user_name=user_name,
+        main_branch=main_branch,
+        head_file=head_file,
+    )
     with _STABLE_GIT_FACTS_LOCK:
         _STABLE_GIT_FACTS[cache_key] = facts
     return facts
@@ -1912,9 +1954,10 @@ class JiuWenSwarmDeepAdapter:
         self,
         project_dir: str,
         session_id: str | None,
+        head_file: str,
         run_git: Callable[[list[str]], str],
     ) -> _GitSnapshot:
-        """Return this conversation's git snapshot, taking it on the first turn.
+        """Return this conversation's git snapshot, re-taking it if HEAD moved.
 
         The prompt these values feed states plainly that it is "the git status
         at the start of the conversation" which "will not update during the
@@ -1923,23 +1966,34 @@ class JiuWenSwarmDeepAdapter:
         prompt's own contract and, because the text sits in the cached prefix,
         invalidates the model's KV cache for every later turn.
 
+        Working-tree edits therefore do not refresh it: the agent either made
+        them itself (and has them in its history) or can run git on demand.
+        Moving the checkout is different — a branch switch changes which
+        branch a commit would land on, and invalidates status and recent
+        commits wholesale — so HEAD is checked each turn and a move re-takes
+        the snapshot. That check is a file read, not a subprocess, which is why
+        it can run on the hot path at all.
+
         Args:
             project_dir: Directory the git commands run in.
             session_id: Conversation the snapshot belongs to; a new session
                 takes a fresh one.
+            head_file: Absolute path to the git directory's HEAD file.
             run_git: Callable running git in ``project_dir`` and returning
                 stripped stdout, or an empty string on failure.
 
         Returns:
-            The snapshot for this conversation.
+            The snapshot for this conversation and checkout.
         """
         cache_key = f"{project_dir}\0{session_id or ''}"
+        head = _read_git_head(head_file)
         cached = self._session_git_snapshots.get(cache_key)
-        if cached is not None:
+        if cached is not None and cached.head == head:
             return cached
 
         status_lines = run_git(["status", "--short"]).splitlines()
         snapshot = _GitSnapshot(
+            head=head,
             branch=run_git(["rev-parse", "--abbrev-ref", "HEAD"]) or "HEAD",
             status="\n".join(status_lines[:50]),
             recent_commits=run_git(["log", "--oneline", "-5"]),
@@ -1985,6 +2039,7 @@ class JiuWenSwarmDeepAdapter:
                         snapshot = self._resolve_session_git_snapshot(
                             project_dir,
                             session_id,
+                            stable_facts.head_file,
                             _run_git,
                         )
                         git_branch = snapshot.branch
@@ -6082,7 +6137,11 @@ class JiuWenSwarmDeepAdapter:
 
         stage_timer = StageTimer()
         try:
-            await self._apply_runtime_config_stages(runtime_config, stage_timer, bind_request)
+            await self._apply_runtime_config_stages(
+                runtime_config,
+                stage_timer,
+                bind_request=bind_request,
+            )
         finally:
             total_ms = stage_timer.total_ms()
             log_runtime_config_stages = _stage_breakdown_logger(

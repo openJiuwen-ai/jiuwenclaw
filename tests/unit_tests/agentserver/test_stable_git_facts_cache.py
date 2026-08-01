@@ -28,6 +28,8 @@ def _make_runner(calls: list[list[str]], *, is_repo: bool = True) -> callable:
             return "alan"
         if args[0] == "rev-parse" and "--verify" in args:
             return "abc123" if args[-1] == "origin/master" else ""
+        if args[:2] == ["rev-parse", "--absolute-git-dir"]:
+            return "/repo/.git"
         return ""
 
     return _run
@@ -46,8 +48,10 @@ def test_stable_facts_are_resolved_once_per_project() -> None:
     assert first.user_name == "alan"
     # origin/main is probed first and misses, origin/master answers.
     assert first.main_branch == "origin/master"
-    # is-inside-work-tree + user.name + two probes, and nothing on later turns.
-    assert len(calls) == 4
+    # Resolved via git, so it is right for a subdirectory, worktree or submodule.
+    assert first.head_file.endswith("HEAD")
+    # is-inside-work-tree + user.name + two probes + git-dir, then nothing.
+    assert len(calls) == 5
 
 
 def test_non_repo_skips_the_remaining_probes() -> None:

@@ -447,7 +447,9 @@ class RuntimePromptRail(DeepAgentRail):
 
             git_lines = [
                 "This is the git status at the start of the conversation. "
-                "Note that this status is a snapshot in time, and will not update during the conversation.",
+                "Note that this status is a snapshot in time, and will not update during the conversation. "
+                "Run git yourself when you need the current state — for example before staging or "
+                "committing, or after anything may have changed the working tree.",
                 f"Current branch: {git_branch}",
             ]
             if git_main_branch:
