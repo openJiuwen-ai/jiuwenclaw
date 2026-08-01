@@ -2783,6 +2783,23 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             work_mode=final_work_mode,
         )
 
+        # 触发 SessionStart hook（与 TUI /new 路径对齐，详见
+        # MessageHandler.trigger_session_start_hook / GatewayHookHandler.on_session_start）。
+        # Web 的 session.create 走本地路径不转发 AgentServer，因此在此显式触发，
+        # 否则配置在 hooks.SessionStart 下的 command/prompt 永不执行。
+        _hook_mh = _resolve(message_handler)
+        if _hook_mh is not None:
+            try:
+                _hook_mh.trigger_session_start_hook(
+                    session_id_to_create, source=channel.channel_id or "web",
+                )
+            except Exception:
+                logger.warning(
+                    "web session.create: trigger_session_start_hook failed for %s",
+                    session_id_to_create,
+                    exc_info=True,
+                )
+
         await channel.send_response(ws, req_id, ok=True, payload={
             "session_id": session_id_to_create,
             "project_id": project_id,
