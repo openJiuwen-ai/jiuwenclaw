@@ -489,6 +489,21 @@ def _stage_breakdown_logger(total_ms: float, threshold_ms: float) -> Callable[..
 
 
 @dataclass(frozen=True)
+class _GitSnapshot:
+    """Git state as of a conversation's first turn, held for its whole life.
+
+    Attributes:
+        branch: Current branch name, or "HEAD" when detached.
+        status: ``git status --short`` output, capped at 50 lines.
+        recent_commits: ``git log --oneline -5`` output.
+    """
+
+    branch: str
+    status: str
+    recent_commits: str
+
+
+@dataclass(frozen=True)
 class _StableGitFacts:
     """Git facts about a project that do not change between turns of a chat.
 
@@ -1051,6 +1066,11 @@ class JiuWenSwarmDeepAdapter:
         # Language the currently registered cron tools were built for, or None
         # when they are not registered yet. Doubles as the rebuild condition.
         self._cron_tools_registered_language: str | None = None
+        # Git snapshot per (project dir, session), taken on a conversation's
+        # first turn. Held on the adapter rather than module-globally so it is
+        # reclaimed with the session instead of accumulating for the life of
+        # the process.
+        self._session_git_snapshots: dict[str, _GitSnapshot] = {}
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._model_name_to_keys: dict[str, list[str]] = {}
@@ -1888,6 +1908,45 @@ class JiuWenSwarmDeepAdapter:
             return self._model_request_config.model_name or "unknown"
         return "unknown"
 
+    def _resolve_session_git_snapshot(
+        self,
+        project_dir: str,
+        session_id: str | None,
+        run_git: Callable[[list[str]], str],
+    ) -> _GitSnapshot:
+        """Return this conversation's git snapshot, taking it on the first turn.
+
+        The prompt these values feed states plainly that it is "the git status
+        at the start of the conversation" which "will not update during the
+        conversation" — but they used to be re-read on every turn, so editing a
+        single file rewrote the system prompt mid-conversation. That breaks the
+        prompt's own contract and, because the text sits in the cached prefix,
+        invalidates the model's KV cache for every later turn.
+
+        Args:
+            project_dir: Directory the git commands run in.
+            session_id: Conversation the snapshot belongs to; a new session
+                takes a fresh one.
+            run_git: Callable running git in ``project_dir`` and returning
+                stripped stdout, or an empty string on failure.
+
+        Returns:
+            The snapshot for this conversation.
+        """
+        cache_key = f"{project_dir}\0{session_id or ''}"
+        cached = self._session_git_snapshots.get(cache_key)
+        if cached is not None:
+            return cached
+
+        status_lines = run_git(["status", "--short"]).splitlines()
+        snapshot = _GitSnapshot(
+            branch=run_git(["rev-parse", "--abbrev-ref", "HEAD"]) or "HEAD",
+            status="\n".join(status_lines[:50]),
+            recent_commits=run_git(["log", "--oneline", "-5"]),
+        )
+        self._session_git_snapshots[cache_key] = snapshot
+        return snapshot
+
     def _write_runtime_state(
         self,
         mode: str,
@@ -1923,12 +1982,14 @@ class JiuWenSwarmDeepAdapter:
                     if stable_facts.is_repo:
                         git_user = stable_facts.user_name
                         git_main_branch = stable_facts.main_branch
-                        # Re-read every turn: these are what the user changes
-                        # while talking to the agent.
-                        git_branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"]) or "HEAD"
-                        git_status_lines = _run_git(["status", "--short"]).splitlines()
-                        git_status = "\n".join(git_status_lines[:50])
-                        git_recent_commits = _run_git(["log", "--oneline", "-5"])
+                        snapshot = self._resolve_session_git_snapshot(
+                            project_dir,
+                            session_id,
+                            _run_git,
+                        )
+                        git_branch = snapshot.branch
+                        git_status = snapshot.status
+                        git_recent_commits = snapshot.recent_commits
                 except Exception:
                     pass
 
@@ -8774,6 +8835,11 @@ class JiuWenSwarmDeepAdapter:
             "input_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
+            # Prompt tokens the provider served from its KV cache. Reported as a
+            # hit rate below: it is the direct read on whether the cached prefix
+            # is holding steady across turns, which is what keeps a 30k-token
+            # prompt from being re-processed on every message.
+            "cache_tokens": 0,
             "input_cost": 0.0,
             "output_cost": 0.0,
             "total_cost": 0.0,
@@ -9225,7 +9291,12 @@ class JiuWenSwarmDeepAdapter:
                         else {}
                     )
                     if isinstance(usage_meta, dict):
-                        for token in ("input_tokens", "output_tokens", "total_tokens"):
+                        for token in (
+                            "input_tokens",
+                            "output_tokens",
+                            "total_tokens",
+                            "cache_tokens",
+                        ):
                             usage_accumulator[token] += usage_meta.get(token, 0) or 0
                         for cost in ("input_cost", "output_cost", "total_cost"):
                             usage_accumulator[cost] += usage_meta.get(cost, 0.0) or 0.0
@@ -9523,6 +9594,11 @@ class JiuWenSwarmDeepAdapter:
             "output_tokens": usage_accumulator["output_tokens"],
             "total_tokens": usage_accumulator["total_tokens"],
         }
+        input_tokens = usage_accumulator["input_tokens"]
+        if input_tokens > 0:
+            cache_tokens = usage_accumulator["cache_tokens"]
+            summary["cache_tokens"] = cache_tokens
+            summary["cache_hit_rate"] = f"{cache_tokens / input_tokens:.1%}"
         if usage_accumulator["input_cost"] > 0:
             summary["input_cost"] = round(usage_accumulator["input_cost"], 6)
         if usage_accumulator["output_cost"] > 0:
