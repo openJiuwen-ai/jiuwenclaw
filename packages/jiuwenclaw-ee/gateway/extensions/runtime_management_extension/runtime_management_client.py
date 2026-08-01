@@ -795,11 +795,12 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     **_ch_kwargs,
                 )
 
-                # 从 service_template 中提取 service_id，如果存在则使用，否则让 ServiceHandler 自动生成 UUID
-                handler_service_id = cfg.get("service_id") if "service_id" in cfg else None
-
+                # Pod 实例 id 必须全局唯一（UUID），绝不复用业务逻辑 service_id：
+                # 同 scope 二次冷启动会与池中已有实例撞号 → _evacuate_same_id_locked 挤出正在干活的 Pod
+                # （叠加持锁扩容即为死锁导火索）。业务 service_id 仍保留在 service_template 里供
+                # deploy_controller / 日志使用，但不进入 ServiceHandler.id / endpoint_id。
                 return ServiceHandler(
-                    service_id=handler_service_id,
+                    service_id=None,
                     total_concurrency=(
                         int(cfg["service_concurrency"])
                         if cfg.get("service_concurrency") is not None
