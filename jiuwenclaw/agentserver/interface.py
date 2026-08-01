@@ -1544,7 +1544,6 @@ class JiuWenClaw:
         )
 
         permission_key = _permission_response_key(request)
-        tenant_tokens, mem_token = self._bind_tenant_request_context()
         try:
             # 权限 continuation 只应恢复已有工具中断，不应执行普通用户请求的 preparation。
             # 这些 hooks 中部分会在 SessionManager 串行边界外读写 checkpoint，
@@ -1582,12 +1581,19 @@ class JiuWenClaw:
             cid = request.channel_id
 
             # Team 模式：使用原始 query，而不是 build_user_prompt 包装后的内容
+            team_query_is_interactive_input = False
             if is_team_mode:
-                inputs["query"] = raw_query
+                from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+                team_query_is_interactive_input = isinstance(inputs.get("query"), InteractiveInput)
+                if not team_query_is_interactive_input:
+                    inputs["query"] = raw_query
                 logger.info(
                     "[JiuWenClaw] Team模式使用原始query: %s",
-                    raw_query[:100] if raw_query else "",
-                    extra={'user_visible': 'progress'}
+                    raw_query[:100]
+                    if isinstance(raw_query, str) and raw_query
+                    else type(inputs.get("query")).__name__,
+                    extra={'user_visible': 'progress'},
                 )
 
             # cloud memory: before chat hook
@@ -1611,20 +1617,22 @@ class JiuWenClaw:
             # Team 模式: 检查是否是后续请求（需要绕过 Session Manager）
             is_team_first_request = True
             if is_team_mode:
-                from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
+                from jiuwenclaw.agentserver.deep_agent.team_helpers import _team_session_has_runtime
                 from jiuwenclaw.agentserver.team import get_team_manager
-                team_manager = get_team_manager()
-                team_scope = RuntimeScopeKey.from_ids(
-                    getattr(self, "_env_service_id", None) or getattr(self, "_service_id", None),
-                    getattr(self, "_env_agent_id", None) or getattr(self, "_agent_id", None),
-                    session_id,
-                )
-                is_team_first_request = not team_manager.has_stream_task(team_scope)
+
+                team_manager = get_team_manager(request.channel_id)
+                if team_query_is_interactive_input:
+                    # Interrupt-resume answers must bypass the session queue and flow into team_helpers.
+                    is_team_first_request = False
+                else:
+                    is_team_first_request = not await _team_session_has_runtime(
+                        team_manager, session_id
+                    )
                 logger.info(
-                    "[JiuWenClaw] Team模式: scope=%s session_id=%s is_first=%s",
-                    team_scope.tenant(),
+                    "[JiuWenClaw] Team模式: session_id=%s is_first=%s interactive_input=%s",
                     session_id,
                     is_team_first_request,
+                    team_query_is_interactive_input,
                 )
                 if is_team_first_request:
                     logger.info(
@@ -1936,7 +1944,6 @@ class JiuWenClaw:
                 await self._try_apply_adapter_pending_reload()
         finally:
             await self._cleanup_request_scoped_mcp(request.request_id)
-            self._reset_tenant_request_context(tenant_tokens, mem_token)
 
     @staticmethod
     def _extract_request_mcp_payload(request) -> dict | None:

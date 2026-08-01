@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Team configuration loader."""
 
@@ -12,13 +12,46 @@ from typing import Any
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 
 from jiuwenclaw.config import get_config
-from jiuwenclaw.utils import get_agent_skills_dir
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_ITERATIONS = 200
 _DEFAULT_COMPLETION_TIMEOUT = 600.0
 _DEFAULT_AGENT_WORKSPACE = {"stable_base": True}
+_DEFAULT_TEAM_WORKSPACE = {"enabled": True}
+_DEFAULT_TRANSPORT = {"type": "inprocess"}
+
+
+def _select_first_modes_team(config_base: dict[str, Any]) -> dict[str, Any]:
+    modes_raw = config_base.get("modes", {})
+    if not isinstance(modes_raw, dict):
+        return {}
+
+    teams_raw = modes_raw.get("team", {})
+    if not isinstance(teams_raw, dict):
+        return {}
+
+    for team_name, team_raw in teams_raw.items():
+        if isinstance(team_raw, dict):
+            logger.debug("[TeamConfigLoader] selected team from modes.team: %s", team_name)
+            return team_raw
+
+    return {}
+
+
+def _resolve_team_raw_for_storage(config_base: dict[str, Any]) -> dict[str, Any]:
+    selected = _select_first_modes_team(config_base)
+    if selected:
+        return selected
+
+    legacy_team = config_base.get("team", {})
+    if isinstance(legacy_team, dict) and legacy_team:
+        return legacy_team
+
+    if any(key in config_base for key in ("team_name", "leader", "agents", "storage", "predefined_members")):
+        return config_base
+
+    return {}
 
 
 def resolve_team_sqlite_db_path(config_base: dict[str, Any] | None = None) -> Path | None:
@@ -26,7 +59,7 @@ def resolve_team_sqlite_db_path(config_base: dict[str, Any] | None = None) -> Pa
     if config_base is None:
         config_base = get_config()
 
-    team_raw = config_base.get("team", {})
+    team_raw = _resolve_team_raw_for_storage(config_base)
     if not isinstance(team_raw, dict):
         return None
 
@@ -53,9 +86,51 @@ def resolve_team_sqlite_db_path(config_base: dict[str, Any] | None = None) -> Pa
     return get_agent_teams_home() / conn_str
 
 
-def _build_default_model_dict(config_base: dict[str, Any]) -> dict[str, Any]:
-    model_config = config_base.get("models", {}).get("default", {})
-    model_client_config = model_config.get("model_client_config", {})
+def _resolve_default_model_config(
+    config_base: dict[str, Any],
+    *,
+    requested_model_name: str | None = None,
+) -> dict[str, Any]:
+    models_raw = config_base.get("models", {})
+    if not isinstance(models_raw, dict):
+        return {}
+
+    defaults_raw = models_raw.get("defaults")
+    if isinstance(defaults_raw, list):
+        # When the caller (chat page) provides a requested model name, prefer
+        # the entry whose ``model_client_config.model_name`` matches it so
+        # team members without an explicit ``modes.team.agents.*.model`` fall
+        # back to the page-selected model instead of the first list item.
+        requested = (requested_model_name or "").strip()
+        if requested:
+            for item in defaults_raw:
+                if not isinstance(item, dict):
+                    continue
+                mcc = item.get("model_client_config") or {}
+                if isinstance(mcc, dict) and mcc.get("model_name") == requested:
+                    return item
+
+        for item in defaults_raw:
+            if isinstance(item, dict):
+                return item
+
+    legacy_default = models_raw.get("default")
+    if isinstance(legacy_default, dict):
+        return legacy_default
+
+    return {}
+
+
+def _build_default_model_dict(
+    config_base: dict[str, Any],
+    *,
+    requested_model_name: str | None = None,
+) -> dict[str, Any]:
+    model_config = _resolve_default_model_config(
+        config_base,
+        requested_model_name=requested_model_name,
+    )
+    model_client_config = dict(model_config.get("model_client_config", {}))
     model_request_config = dict(model_config.get("model_config_obj", {}))
 
     model_name = model_client_config.get("model_name", "")
@@ -79,7 +154,7 @@ def _resolve_storage_config(storage_raw: dict[str, Any]) -> dict[str, Any]:
     if "connection_string" not in storage_params:
         return storage_dict
 
-    db_path = resolve_team_sqlite_db_path({"team": {"storage": storage_dict}})
+    db_path = resolve_team_sqlite_db_path({"storage": storage_dict})
     if db_path is None:
         return storage_dict
 
@@ -117,8 +192,16 @@ def _build_agent_spec_dict(
     return merged
 
 
-def _build_agents_config(team_raw: dict[str, Any], config_base: dict[str, Any]) -> dict[str, Any]:
-    default_model = _build_default_model_dict(config_base)
+def _build_agents_config(
+    team_raw: dict[str, Any],
+    config_base: dict[str, Any],
+    *,
+    requested_model_name: str | None = None,
+) -> dict[str, Any]:
+    default_model = _build_default_model_dict(
+        config_base,
+        requested_model_name=requested_model_name,
+    )
     default_workspace, max_iterations, completion_timeout = _build_agent_defaults()
 
     agents_raw = team_raw.get("agents", {})
@@ -126,12 +209,32 @@ def _build_agents_config(team_raw: dict[str, Any], config_base: dict[str, Any]) 
         logger.warning("[TeamConfigLoader] agents config is empty, using default leader/teammate")
         agents_raw = {"leader": {}, "teammate": {}}
 
+    top_agents = config_base.get("agents", {})
+    if not isinstance(top_agents, dict):
+        top_agents = {}
+
     agents: dict[str, Any] = {}
     for agent_key, raw_agent_config in agents_raw.items():
-        agent_config = dict(raw_agent_config) if isinstance(raw_agent_config, dict) else {}
-        # No longer auto-fill all skills
-        # When skills not configured, member won't copy any skill to own directory
-        # Global skills are copied to team shared directory, accessible via .team/{team_name}/skills
+        if isinstance(raw_agent_config, str) and raw_agent_config.startswith("$"):
+            ref_name = raw_agent_config[1:]
+            if ref_name in top_agents:
+                agent_config = deepcopy(top_agents[ref_name])
+                logger.debug(
+                    "[TeamConfigLoader] resolved agent reference $%s -> agents.%s",
+                    ref_name,
+                    ref_name,
+                )
+            else:
+                logger.warning(
+                    "[TeamConfigLoader] agent reference '$%s' not found in top-level agents, using defaults",
+                    ref_name,
+                )
+                agent_config = {}
+        else:
+            agent_config = dict(raw_agent_config) if isinstance(raw_agent_config, dict) else {}
+        # No longer auto-fill all skills from global into each member by default.
+        # On spawn, each member workspace exposes only its configured skill links.
+        # Team-shared skills are maintained in the team workspace skill view.
         agent_spec = _build_agent_spec_dict(
             agent_config,
             default_model=default_model,
@@ -150,24 +253,56 @@ def _build_agents_config(team_raw: dict[str, Any], config_base: dict[str, Any]) 
             completion_timeout=completion_timeout,
         )
 
+    if set(agents.keys()) == {"leader"}:
+        logger.info(
+            "[TeamConfigLoader] agents config contains only leader; "
+            "adding default teammate template"
+        )
+        agents["teammate"] = _build_agent_spec_dict(
+            {},
+            default_model=default_model,
+            default_workspace=default_workspace,
+            max_iterations=max_iterations,
+            completion_timeout=completion_timeout,
+        )
+
     return agents
 
 
 def _build_workspace_spec(team_raw: dict[str, Any]) -> dict[str, Any] | None:
     workspace_raw = team_raw.get("workspace")
-    if not isinstance(workspace_raw, dict) or "enabled" not in workspace_raw:
-        return None
+    if not isinstance(workspace_raw, dict):
+        workspace_spec = deepcopy(_DEFAULT_TEAM_WORKSPACE)
+        workspace_spec.setdefault("version_control", False)
+        return workspace_spec
 
     workspace_spec = deepcopy(workspace_raw)
+    workspace_spec.setdefault("enabled", True)
     workspace_spec.setdefault("version_control", False)
     return workspace_spec
 
 
+def _build_transport_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
+    transport_raw = team_raw.get("transport")
+    if not isinstance(transport_raw, dict):
+        return deepcopy(_DEFAULT_TRANSPORT)
+
+    transport_spec = deepcopy(transport_raw)
+    transport_spec.setdefault("type", "inprocess")
+    return transport_spec
+
+
 def _build_leader_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
     leader_raw = team_raw.get("leader", {})
+    leader_name = (
+        str(leader_raw.get("name", "")).strip()
+        or str(leader_raw.get("display_name", "")).strip()
+        or "TeamLeader"
+    )
     return {
         "member_name": leader_raw.get("member_name", "team_leader"),
         "display_name": leader_raw.get("display_name", "Team Leader"),
+        "name": leader_name,
         "persona": leader_raw.get("persona", "天才项目管理专家"),
     }
 
@@ -188,38 +323,82 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
             logger.warning("[TeamConfigLoader] skipped predefined member without member_name: %s", item)
             continue
 
+        identity_name = item.get("name") or item.get("display_name")
+        if not identity_name or not str(identity_name).strip():
+            logger.warning(
+                "[TeamConfigLoader] skipped predefined member without name/display_name: %s",
+                item,
+            )
+            continue
+
         member_spec = deepcopy(item)
         member_spec["member_name"] = member_name
-        member_spec.setdefault("display_name", member_name)
+        member_spec["display_name"] = str(identity_name).strip()
         member_spec["persona"] = member_spec.get("persona") or ""
+        # openjiuwen TeamMemberSpec 现按 role_type 判别联合类型，缺省补 teammate
+        role_type = str(member_spec.get("role_type") or "").strip()
+        member_spec["role_type"] = role_type or "teammate"
 
         predefined_members.append(member_spec)
 
     return predefined_members
 
 
-def load_team_spec_dict(session_id: str) -> dict[str, Any]:
-    """Load team config and build a TeamAgentSpec-compatible dict."""
-    config_base = get_config()
-    team_raw = config_base.get("team", {})
+def _resolve_enable_permissions(config_base: dict[str, Any], team_raw: dict[str, Any]) -> bool:
+    """Resolve the effective team-permission toggle.
+
+    The effective value is ``permissions.enabled`` (global) AND
+    ``enable_permissions`` (team-level). Both must be true for
+    TeamPermissionRail to mount on teammates.
+    """
+    global_enabled = bool((config_base.get("permissions") or {}).get("enabled", False))
+    team_enabled = bool(team_raw.get("enable_permissions", False))
+    return global_enabled and team_enabled
+
+
+def load_team_spec_dict(
+    config_base: dict[str, Any] | None = None,
+    *,
+    requested_model_name: str | None = None,
+) -> dict[str, Any]:
+    """Load team config and build a TeamAgentSpec-compatible dict.
+
+    When ``requested_model_name`` is provided (e.g. from the chat page model
+    selector), team members without an explicit ``modes.team.agents.*.model``
+    fall back to the matching entry in ``models.defaults`` instead of the
+    first list item.
+    """
+    if config_base is None:
+        config_base = get_config()
+    team_raw = _select_first_modes_team(config_base)
 
     if not team_raw:
-        logger.warning("[TeamConfigLoader] no team config found, using defaults")
+        logger.warning("[TeamConfigLoader] no modes.team config found, using defaults")
         team_raw = {}
 
-    agents = _build_agents_config(team_raw, config_base)
+    agents = _build_agents_config(
+        team_raw,
+        config_base,
+        requested_model_name=requested_model_name,
+    )
     spec_dict = deepcopy(team_raw)
+    spec_dict.pop("enable_team_plan", None)
 
-    spec_dict["team_name"] = f"{team_raw.get('team_name', 'team')}_{session_id}"
+    spec_dict["team_name"] = str(team_raw.get("team_name", "team")).strip() or "team"
     spec_dict["lifecycle"] = team_raw.get("lifecycle", "persistent")
     spec_dict["teammate_mode"] = team_raw.get("teammate_mode", "build_mode")
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
+    spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
+    spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents
+    spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()
 
     workspace_spec = _build_workspace_spec(team_raw)
     if workspace_spec is not None:
         spec_dict["workspace"] = workspace_spec
+
+    spec_dict["transport"] = _build_transport_spec(team_raw)
 
     predefined_members = _build_predefined_members(team_raw)
     if predefined_members:

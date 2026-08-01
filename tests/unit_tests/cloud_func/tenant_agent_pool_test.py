@@ -68,6 +68,9 @@ class TestTenantAgentPool(TestCase):
 
         mock_agent_instance = MagicMock()
         mock_agent_instance.create_instance = AsyncMock()
+        # Layer1 bind: pool unpacks (tenant_tokens, mem_token); bare MagicMock is empty.
+        mock_agent_instance._bind_tenant_request_context.return_value = ([], None)
+        mock_agent_instance._reset_tenant_request_context = MagicMock()
 
         async def _fake_process_message_stream(request):
             return
@@ -104,6 +107,9 @@ class TestTenantAgentPool(TestCase):
                 mode="agent",
             ))
             await run_stream_request(handler, req2)
+
+            mock_agent_instance._bind_tenant_request_context.assert_called()
+            mock_agent_instance._reset_tenant_request_context.assert_called()
 
         asyncio.run(_run())
 

@@ -55,6 +55,8 @@ class RuntimePromptRail(DeepAgentRail):
         self._tz = timezone(timedelta(hours=timezone_offset))
         self._agent_name = agent_name
         self._model_name = model_name
+        self._mode: str = ""
+        self._session_id: str | None = None
         self._workspace_dir = workspace_dir
         self._agent_id = agent_id
         self._service_id = service_id
@@ -69,6 +71,22 @@ class RuntimePromptRail(DeepAgentRail):
             self._registered_skill_dirs = None
             return
         self._registered_skill_dirs = [str(d) for d in dirs if str(d).strip()]
+
+    def set_model_name(self, model_name: str) -> None:
+        """Per-request model name used in the runtime prompt section."""
+        self._model_name = model_name or ""
+
+    def set_mode(self, mode: str) -> None:
+        """Per-request mode label (team/plan/…); stored for prompt/runtime context."""
+        self._mode = mode or ""
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """Per-request session id for session-scoped runtime context."""
+        self._session_id = (
+            session_id.strip()
+            if isinstance(session_id, str) and session_id.strip()
+            else None
+        )
 
     def _skills_dirs_display(self, workspace_root: Path) -> str:
         if self._registered_skill_dirs:
@@ -364,16 +382,16 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
                 |------|---------|------------|
                 | `{config_dir}` | Configuration | Do not modify lightly; bad config can cause failures |
                 | `{resolved_workspace}` | Identity and task info | You may update this to better serve your user |
-                | `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory; 
+                | `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory;
                 consult it anytime |
-                | `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records; 
+                | `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records;
                 call memory_index after creating/editing |
                 | `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
                 | `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
 
                 ## Configuration
 
-                Be careful with your configuration. If changes are required, remember to restart your service 
+                Be careful with your configuration. If changes are required, remember to restart your service
                 afterwards.
 
                 | Path | Purpose |
@@ -383,7 +401,7 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
 
                 ## File Output and Sending Guidelines
 
-                Generated artifacts (code files, documents, data files, etc.) produced during user task execution 
+                Generated artifacts (code files, documents, data files, etc.) produced during user task execution
                 should be stored according to the following rules:
 
                 ### Files to Deliver to User
@@ -402,15 +420,16 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
 
                 ## Sending Files
 
-                When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it 
+                When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it
                 in these scenarios:
-                - Task completion produces files that need to be delivered to the user (reports, documents, 
+                - Task completion produces files that need to be delivered to the user (reports, documents,
                 data files, images, etc.)
                 - User explicitly requests to download, export, or receive files
                 - User asks how to obtain generated files
-                - After the user actively invokes file generation/modification tools such as `write_file` and `write_text_file`
+                - After the user actively invokes file generation/modification tools such as
+                  `write_file` and `write_text_file`
 
-                **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user` 
+                **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user`
                 tool."""
 
         self.system_prompt_builder.add_section(PromptSection(

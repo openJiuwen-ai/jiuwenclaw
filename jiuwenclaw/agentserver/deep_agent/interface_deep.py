@@ -307,10 +307,8 @@ from jiuwenclaw.agentserver.skill_manager import (
     resolve_string_or_list_config,
 )
 from jiuwenclaw.agentserver.tools.memory_tools import (
-    bind_memory_agent_id,
     init_memory_manager_async,
     get_decorated_tools,
-    reset_memory_agent_id,
 )
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -1247,7 +1245,7 @@ def _build_context_engineering_rail(config: dict[str, Any],
         return context_rail
     except Exception as exc:
         logger.warning("[JiuWenClawDeepAdapter] ContextEngineeringRail create failed: %s", exc,
-                      extra={'user_visible': 'progress'})
+                       extra={'user_visible': 'progress'})
         return None
 
 
@@ -1399,7 +1397,6 @@ class JiuWenClawDeepAdapter:
         self._last_runtime_mode: str = "agent.plan"
         self._chat_env_overlay_token: Token | None = None
         self._chat_env_ns_token: Token | None = None
-        self._chat_memory_agent_id_token: Token | None = None
         self._chat_browser_runtime_pin: Any | None = None
         set_skill_credential_provider(
             lambda: (
@@ -1483,7 +1480,6 @@ class JiuWenClawDeepAdapter:
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
         self._skill_manager = skill_manager
-
 
     @staticmethod
     def _is_acp_tool_profile(config: dict[str, Any] | None = None) -> bool:
@@ -2155,8 +2151,8 @@ class JiuWenClawDeepAdapter:
             item
             for item in self._tool_cards
             if (
-                   item.card.name if hasattr(item, "card") else item.name
-               ) not in tool_names
+                item.card.name if hasattr(item, "card") else item.name
+            ) not in tool_names
         ]
 
     def _sync_multimodal_tools_for_runtime(self) -> None:
@@ -2254,7 +2250,6 @@ class JiuWenClawDeepAdapter:
         except Exception as e:
             logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e,
                          extra={'user_visible': 'critical'})
-
 
     @staticmethod
     def _normalize_model_client_config_dict(mcc: dict) -> dict:
@@ -2564,10 +2559,10 @@ class JiuWenClawDeepAdapter:
         try:
             rail = ResponsePromptRail()
             logger.info("[JiuWenClawDeepAdapter] ResponsePromptRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] ResponsePromptRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             rail = None
         return rail
 
@@ -2686,10 +2681,10 @@ class JiuWenClawDeepAdapter:
         try:
             fs_rail = FileSystemRail()
             logger.info("[JiuWenClawDeepAdapter] FileSystemRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] FileSystemRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             fs_rail = None
         return fs_rail
 
@@ -2702,7 +2697,7 @@ class JiuWenClawDeepAdapter:
         extra_skill_dir: str | None = None,
     ) -> JiuWenSkillUseRail | None:
         """Build JiuWenSkillUseRail (per-session qualified skill tools).
-        
+
         Args:
             config: React config dict
             include_tools: Whether to include harness read_file/code/bash tools
@@ -2712,7 +2707,7 @@ class JiuWenClawDeepAdapter:
         try:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode,
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
             # Must match react.context_engine_config.max_active_skill_bodies (ContextEngineConfig);
             # otherwise SkillUseRail.init overwrites the merged yaml cap with the rail default (1).
             react_cec = (config.get("react") or {}).get("context_engine_config")
@@ -2722,7 +2717,7 @@ class JiuWenClawDeepAdapter:
                     max_bodies = int(react_cec["max_active_skill_bodies"])
                 except (TypeError, ValueError):
                     max_bodies = DEFAULT_MAX_ACTIVE_SKILL_BODIES
-            
+
             skills_dirs = self._registered_skill_dirs_for_rail()
             if extra_skill_dir:
                 skills_dirs = list(skills_dirs) + [extra_skill_dir]
@@ -2750,10 +2745,10 @@ class JiuWenClawDeepAdapter:
                 )
             skill_rail = JiuWenSkillUseRail(**skill_rail_kwargs)
             logger.info("[JiuWenClawDeepAdapter] JiuWenSkillUseRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] SkillUseRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             skill_rail = None
         return skill_rail
 
@@ -2784,7 +2779,7 @@ class JiuWenClawDeepAdapter:
             )
         except Exception as exc:
             logger.warning("[JiuWenClaw] SkillEvolutionRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             skill_evolution_rail = None
         return skill_evolution_rail
 
@@ -2853,10 +2848,10 @@ class JiuWenClawDeepAdapter:
         try:
             stream_event_rail = JiuClawStreamEventRail()
             logger.info("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             stream_event_rail = None
         return stream_event_rail
 
@@ -2877,10 +2872,10 @@ class JiuWenClawDeepAdapter:
         try:
             task_execution_rail = TaskExecutionRail()
             logger.info("[JiuWenClawDeepAdapter] TaskExecutionRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             task_execution_rail = None
         return task_execution_rail
 
@@ -2891,10 +2886,10 @@ class JiuWenClawDeepAdapter:
             from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
             rail = TelemetryRail()
             logger.info("[JiuWenClawDeepAdapter] TelemetryRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] TelemetryRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             rail = None
         return rail
 
@@ -2918,7 +2913,6 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
-
     def _build_task_planning_rail(self, config: dict[str, Any] | None = None) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
@@ -2930,10 +2924,10 @@ class JiuWenClawDeepAdapter:
             rail_kwargs = resolve_task_planning_rail_kwargs(react_cfg)
             task_planning_rail = TaskPlanningRail(**rail_kwargs)
             logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] TaskPlanningRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             task_planning_rail = None
         return task_planning_rail
 
@@ -2943,10 +2937,10 @@ class JiuWenClawDeepAdapter:
         try:
             subagent_rail = SubagentRail()
             logger.info("[JiuWenClawDeepAdapter] SubagentRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] SubagentRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             subagent_rail = None
         return subagent_rail
 
@@ -2955,10 +2949,10 @@ class JiuWenClawDeepAdapter:
         try:
             security_prompt_rail = SecurityRail()
             logger.info("[JiuWenClawDeepAdapter] SecurityPromptRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] SecurityPromptRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             security_prompt_rail = None
         return security_prompt_rail
 
@@ -2972,7 +2966,7 @@ class JiuWenClawDeepAdapter:
             has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config",
-                          extra={'user_visible': 'progress'})
+                               extra={'user_visible': 'progress'})
                 return None
             self._is_proactive_memory = is_proactive_memory(mode, config)
             memory_rail = MemoryRail(
@@ -2984,10 +2978,10 @@ class JiuWenClawDeepAdapter:
                 is_proactive=self._is_proactive_memory
             )
             logger.info("[JiuWenClawDeepAdapter] MemoryRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             memory_rail = None
         return memory_rail
 
@@ -3008,7 +3002,7 @@ class JiuWenClawDeepAdapter:
             has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail: no embedding config, skipping",
-                          extra={'user_visible': 'progress'})
+                               extra={'user_visible': 'progress'})
                 return None
 
             # 获取语言和 workspace 目录
@@ -3029,12 +3023,12 @@ class JiuWenClawDeepAdapter:
                 language="cn" if language == "zh" else "en",
             )
             logger.info("[JiuWenClawDeepAdapter] CodingMemoryRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
             return coding_memory_rail
 
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             return None
 
     @staticmethod
@@ -3043,10 +3037,10 @@ class JiuWenClawDeepAdapter:
         try:
             lsp_rail = LspRail()
             logger.info("[JiuWenClawDeepAdapter] LspRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] LspRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             lsp_rail = None
         return lsp_rail
 
@@ -3055,10 +3049,10 @@ class JiuWenClawDeepAdapter:
         try:
             heartbeat_rail = HeartbeatRail()
             logger.info("[JiuWenClawDeepAdapter] HeartbeatRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] HeartbeatRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             heartbeat_rail = None
         return heartbeat_rail
 
@@ -3069,11 +3063,11 @@ class JiuWenClawDeepAdapter:
             from jiuwenclaw.agentserver.deep_agent.rails.avatar_rail import AvatarPromptRail
             rail = AvatarPromptRail()
             logger.info("[JiuWenClawDeepAdapter] AvatarPromptRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
             return rail
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] AvatarPromptRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             return None
 
     @staticmethod
@@ -3157,10 +3151,10 @@ class JiuWenClawDeepAdapter:
             )
             rail.set_registered_skill_dirs(self._registered_skill_dirs_for_rail())
             logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success",
-                       extra={'user_visible': 'progress'})
+                        extra={'user_visible': 'progress'})
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] RuntimePromptRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             rail = None
         return rail
 
@@ -3190,7 +3184,7 @@ class JiuWenClawDeepAdapter:
             )
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] DisabledToolsRail create failed: %s", exc,
-                          extra={'user_visible': 'progress'})
+                           extra={'user_visible': 'progress'})
             rail = None
         return rail
 
@@ -3388,7 +3382,6 @@ class JiuWenClawDeepAdapter:
                 logger.warning("[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name)
         logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list),
                     [type(r).__name__ for r in rails_list])
-
 
         if self._task_execution_rail is None:
             logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail missing after _build_agent_rails")
@@ -3607,9 +3600,9 @@ class JiuWenClawDeepAdapter:
         if new_evolution_rail is not None:
             rails_list.append(new_evolution_rail)
         logger.info(
-            "[JiuWenClawDeepAdapter]  DIAGNOSTIC: rails_list 构建完成 " 
-            "| rails_count=%d " 
-            "| rails_names=[%s] " 
+            "[JiuWenClawDeepAdapter]  DIAGNOSTIC: rails_list 构建完成 "
+            "| rails_count=%d "
+            "| rails_names=[%s] "
             "| has_runtime_prompt_rail=%s",
             len(rails_list),
             ", ".join(type(r).__name__ for r in rails_list),
@@ -3904,7 +3897,6 @@ class JiuWenClawDeepAdapter:
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
-
 
         # Keep constructor-injected tenant workspace by default.
         # Only override when request explicitly provides workspace_dir.
@@ -4216,7 +4208,6 @@ class JiuWenClawDeepAdapter:
             )
         sid, aid = self._env_ns_ids()
         ns_token = bind_agent_env_ns(sid, aid)
-        mem_aid_token = bind_memory_agent_id(aid)
         # Formula B full tip; always bind (incl. {}) — seal S1
         overlay = build_effective_env_overlay(service_id=sid, agent_id=aid)
         env_token = bind_task_env_overlay(overlay)
@@ -4226,7 +4217,6 @@ class JiuWenClawDeepAdapter:
         # Pack ns_token into env_token path via attribute? Return 4-tuple would break callers.
         # Store ns token on instance for end().
         self._chat_env_ns_token = ns_token
-        self._chat_memory_agent_id_token = mem_aid_token
         # Pin browser runtime generation after tip/ns bind so this request keeps
         # the credential generation captured at start across mid-request reloads.
         try:
@@ -4257,10 +4247,6 @@ class JiuWenClawDeepAdapter:
         if ns_token is not None:
             reset_agent_env_ns(ns_token)
             self._chat_env_ns_token = None
-        mem_aid_token = getattr(self, "_chat_memory_agent_id_token", None)
-        if mem_aid_token is not None:
-            reset_memory_agent_id(mem_aid_token)
-            self._chat_memory_agent_id_token = None
         pin = getattr(self, "_chat_browser_runtime_pin", None)
         if pin is not None:
             try:
@@ -4883,7 +4869,6 @@ class JiuWenClawDeepAdapter:
         channel = str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         send_file_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
 
-
         send_file_channel_allowed = send_file_enabled or channel == "officeclaw"
         has_send_file_request_context = bool(request_id and session_id)
         if send_file_channel_allowed and has_send_file_request_context:
@@ -5026,12 +5011,11 @@ class JiuWenClawDeepAdapter:
         if isinstance(output_dir, str) and output_dir.strip():
             set_effective_request_output_dir(output_dir.strip())
             logger.info(
-                "[JiuWenClawDeepAdapter] output_dir 设置完成: output_dir=%s " 
+                "[JiuWenClawDeepAdapter] output_dir 设置完成: output_dir=%s "
                 "(effective_project_dir=%s)",
                 output_dir.strip(),
                 resolved_workspace_dir
             )
-
 
             #  方案A：动态更新write_file工具描述，注入output_dir路径
             # 让Agent在工具选择阶段就能看到推荐的保存位置
@@ -5048,18 +5032,15 @@ class JiuWenClawDeepAdapter:
                         # 更新工具描述，在参数说明中注入output_dir推荐路径
                         original_description = write_file_tool.card.description or ""
                         output_dir_hint = (
-                            f"\n\n推荐保存路径：{output_dir.strip()}\n\n" 
+                            f"\n\n推荐保存路径：{output_dir.strip()}\n\n"
                             f"参数 file_path 推荐使用：{output_dir.strip()}/filename.ext"
                         )
-
 
                         # 创建新的描述（保留原描述 + 添加output_dir提示）
                         enhanced_description = original_description + output_dir_hint
 
-
                         # 更新工具卡片描述
                         write_file_tool.card.description = enhanced_description
-
 
                         logger.info(
                             "[JiuWenClawDeepAdapter] ✅ write_file工具描述已更新，注入output_dir路径: %s (tool_id=%s)",
@@ -5080,13 +5061,12 @@ class JiuWenClawDeepAdapter:
         else:
             set_effective_request_output_dir(None)
 
-
         #  诊断日志：观察 RuntimePromptRail 实例状态
         logger.info(
-            "[JiuWenClawDeepAdapter]  DIAGNOSTIC: RuntimePromptRail 状态检查 " 
-            "| request_id=%s " 
-            "| _runtime_prompt_rail is %s " 
-            "| output_dir ContextVar=%s " 
+            "[JiuWenClawDeepAdapter]  DIAGNOSTIC: RuntimePromptRail 状态检查 "
+            "| request_id=%s "
+            "| _runtime_prompt_rail is %s "
+            "| output_dir ContextVar=%s "
             "| workspace_dir=%s",
             params.request_id,
             "None (未创建)" if self._runtime_prompt_rail is None else "已创建",
@@ -5134,8 +5114,8 @@ class JiuWenClawDeepAdapter:
         # 0. engine=none 时全局移除所有记忆工具（优先级最高）
         # 1. 群聊数字分身模式（group_digital_avatar=True + avatar_mode=True）：移除写入工具，但保留读取工具
         # 2. 记忆完全禁用（enable_memory=False + group_digital_avatar=True + avatar_mode=True）：移除所有记忆工具（读取和写入）
-        _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search",\
-             "memory_get", "memory_index")
+        _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search",
+                             "memory_get", "memory_index")
         if not is_builtin_memory_allowed(get_config()):
             for tool_name in _all_memory_tools:
                 try:
@@ -5149,20 +5129,20 @@ class JiuWenClawDeepAdapter:
             should_disable_memory = False
             if perm_ctx is not None:
                 is_group_digital_avatar = (
-                        perm_ctx.group_digital_avatar
-                        and perm_ctx.avatar_mode
+                    perm_ctx.group_digital_avatar
+                    and perm_ctx.avatar_mode
                 )
 
                 should_disable_memory = (
-                        not perm_ctx.enable_memory
-                        and perm_ctx.group_digital_avatar
-                        and perm_ctx.avatar_mode
+                    not perm_ctx.enable_memory
+                    and perm_ctx.group_digital_avatar
+                    and perm_ctx.avatar_mode
                 )
 
             # 场景2：记忆完全禁用 - 移除所有记忆工具
             if should_disable_memory:
-                _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search",\
-                     "memory_get", "memory_index")
+                _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search",
+                                     "memory_get", "memory_index")
                 for tool_name in _all_memory_tools:
                     try:
                         self._instance.ability_manager.remove(tool_name)
@@ -6268,8 +6248,8 @@ class JiuWenClawDeepAdapter:
         if dry_run:
             return {
                 "output": (
-                        f"**Skill '{skill_name}' 整理预览（dry-run，未执行）：**\n\n"
-                        + "\n".join(summary_lines)
+                    f"**Skill '{skill_name}' 整理预览（dry-run，未执行）：**\n\n"
+                    + "\n".join(summary_lines)
                 ),
                 "result_type": "answer",
             }
@@ -6279,8 +6259,8 @@ class JiuWenClawDeepAdapter:
         )
         return {
             "output": (
-                    f"**Skill '{skill_name}' 整理完成：** {result_text}\n\n"
-                    f"**操作详情：**\n" + "\n".join(summary_lines)
+                f"**Skill '{skill_name}' 整理完成：** {result_text}\n\n"
+                f"**操作详情：**\n" + "\n".join(summary_lines)
             ),
             "result_type": "answer",
         }
@@ -8316,21 +8296,34 @@ class JiuWenClawDeepAdapter:
             getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
         )
 
-        # Team 模式处理
+        # Team mode handling (current: mode=team only; team.plan / code.team not supported)
         if mode == "team":
             from jiuwenclaw.agentserver.deep_agent.team_helpers import process_team_message_stream
 
+            resolved_model = self._resolve_model_for_request(request)
+            self._apply_model_to_react_agent(resolved_model)
+            if self._runtime_prompt_rail:
+                self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
+                self._runtime_prompt_rail.set_mode(mode)
+                self._runtime_prompt_rail.set_session_id(session_id)
+
             team_scope = RuntimeScopeKey.from_adapter(self, session_id=session_id)
-            async for chunk in process_team_message_stream(
-                request,
-                inputs,
-                self._instance,
-                runtime_scope=team_scope,
-            ):
-                yield chunk
-            reset_request_id(token_request_id)
-            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
-            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
+            try:
+                async for chunk in process_team_message_stream(
+                    request,
+                    inputs,
+                    self._instance,
+                    runtime_scope=team_scope,
+                ):
+                    yield chunk
+            finally:
+                reset_request_id(token_request_id)
+                _reset_llm_trace_tokens(
+                    token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model
+                )
+                await self._on_chat_request_end(
+                    chat_env_token, chat_fp_token, chat_skill_dirs_token
+                )
             return
 
         # 拦截斜杠命令
@@ -8589,14 +8582,14 @@ class JiuWenClawDeepAdapter:
                                 tool_info = parsed.get("tool_call", {})
                                 tool_name = tool_info.get("name") if isinstance(tool_info, dict) else str(tool_info)
                                 logger.info(f"[JiuWenClawDeepAdapter] 开始执行工具: {tool_name}",
-                                           extra={'user_visible': 'critical'})
+                                            extra={'user_visible': 'critical'})
                             elif event_type == "chat.tool_result":
                                 tool_name = parsed.get("tool_name", "unknown")
                                 logger.info(f"[JiuWenClawDeepAdapter] 工具执行完成: {tool_name}",
-                                           extra={'user_visible': 'critical'})
+                                            extra={'user_visible': 'critical'})
                             elif event_type == "chat.error":
                                 logger.error(f"[JiuWenClawDeepAdapter] 工具执行失败: {parsed.get('error', 'unknown')}",
-                                            extra={'user_visible': 'critical'})
+                                             extra={'user_visible': 'critical'})
                             if accumulated_text:
                                 delta_payload: dict[str, Any] = {"event_type": "chat.delta",
                                                                  "content": accumulated_text}
@@ -8606,7 +8599,7 @@ class JiuWenClawDeepAdapter:
                                 yield AgentResponseChunk(
                                     request_id=rid,
                                     channel_id=cid,
-                                payload=delta_payload,
+                                    payload=delta_payload,
                                     is_complete=False,
                                 )
                                 accumulated_text = ""
@@ -9743,12 +9736,12 @@ class JiuWenClawDeepAdapter:
                         }
                         if isinstance(result_info, dict):
                             result_payload["tool_name"] = (
-                                    result_info.get("tool_name")
-                                    or result_info.get("name")
+                                result_info.get("tool_name")
+                                or result_info.get("name")
                             )
                             result_payload["tool_call_id"] = (
-                                    result_info.get("tool_call_id")
-                                    or result_info.get("toolCallId")
+                                result_info.get("tool_call_id")
+                                or result_info.get("toolCallId")
                             )
                             raw_output = result_info.get("raw_output")
                             if raw_output is None:
@@ -10068,7 +10061,7 @@ class JiuWenClawDeepAdapter:
                         "(need 'builtin' or 'both'). "
                         "Set memory.engine=builtin in config.yaml or MEMORY_ENGINE=builtin env var.",
                         (config or {}).get("memory", {}).get("engine", "builtin")
-                         if isinstance(config, dict) else "unknown",
+                        if isinstance(config, dict) else "unknown",
                     )
                 if not is_memory_enabled(mode, config):
                     logger.warning(
@@ -10085,7 +10078,7 @@ class JiuWenClawDeepAdapter:
                 self._cleanup_builtin_memory_artifacts()
 
     async def _init_builtin_memory_manager(self, mode: str,
-        config: dict) -> None:
+                                           config: dict) -> None:
         """初始化 MemoryIndexManager/WikiManager + 注册工具 + 注入 memory prompt section。"""
         _, memory_agent_id = self._env_ns_ids()
         await init_memory_manager_async(

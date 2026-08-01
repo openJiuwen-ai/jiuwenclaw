@@ -164,17 +164,36 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
     payload = getattr(chunk, "payload", {})
 
     if chunk_type == "controller_output" and payload is not None:
-        inner_t = getattr(payload, "type", None)
+        ctrl_payload = payload
+        inner_t = getattr(ctrl_payload, "type", None)
+        if inner_t is None and isinstance(ctrl_payload, dict):
+            inner_t = ctrl_payload.get("type")
         inner_val = (
             getattr(inner_t, "value", inner_t) if inner_t is not None else None
         )
         if inner_val == "task_completion":
             return None
         if inner_val == "task_failed":
+            data = getattr(ctrl_payload, "data", None)
+            if data is None and isinstance(ctrl_payload, dict):
+                data = ctrl_payload.get("data", [])
             error = next(
-                (item.text for item in payload.data if hasattr(item, "text")),
-                "任务执行失败",
+                (
+                    item.text
+                    for item in (data or [])
+                    if hasattr(item, "text") and str(item.text or "").strip()
+                ),
+                None,
             )
+            if error is None:
+                error = next(
+                    (
+                        str(item.get("text"))
+                        for item in (data or [])
+                        if isinstance(item, dict) and str(item.get("text") or "").strip()
+                    ),
+                    "任务执行失败",
+                )
             return {"event_type": "chat.error", "error": error}
 
     if chunk_type == "llm_output":
@@ -431,7 +450,7 @@ def _parse_event_typed_chunk(chunk: Any) -> dict[str, Any]:
         return chunk
 
     result = {"event_type": getattr(chunk, "event_type", "unknown")}
-    
+
     # 优先使用 Pydantic 的 model_dump/dict 方法
     if hasattr(chunk, "model_dump"):
         # Pydantic v2 - mode='json' 会将 datetime 转换为 ISO 格式字符串
