@@ -128,6 +128,7 @@ async def test_runtime_config_syncs_channel_and_task_workspace(monkeypatch):
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_resolve_runtime_language", lambda self: "cn")
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_write_runtime_state", lambda self, **kwargs: None)
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_rails_for_mode", async_noop)
+    monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_set_user_interaction_enabled", async_noop)
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_tools_for_mode", async_noop)
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_session_tools", async_noop)
     monkeypatch.setattr(

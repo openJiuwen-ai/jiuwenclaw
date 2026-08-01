@@ -52,6 +52,7 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
     agent = MagicMock()
     manager = MagicMock()
     manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = manager
@@ -67,6 +68,7 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
     assert sub_mode == "plan"
     assert resolved_agent is agent
     manager.get_agent.assert_awaited_once()
+    manager.wait_for_session_prewarm.assert_awaited_once_with(session_id)
 
 
 @pytest.mark.asyncio
@@ -80,6 +82,7 @@ async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     agent = MagicMock()
     manager = MagicMock()
     manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = manager
@@ -109,6 +112,7 @@ async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
         project_dir="/tmp/locked-project",
         sub_mode=None,
     )
+    manager.wait_for_session_prewarm.assert_awaited_once_with("sess_team_project")
 
 
 @pytest.mark.asyncio
@@ -294,6 +298,7 @@ async def test_prepare_chat_turn_skips_approval_for_interrupt_resume() -> None:
     agent = MagicMock()
     manager = MagicMock()
     manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = manager
@@ -315,6 +320,7 @@ async def test_prepare_chat_turn_skips_approval_for_interrupt_resume() -> None:
     assert mode == "code"
     assert sub_mode == "plan"
     manager.get_agent.assert_awaited_once()
+    manager.wait_for_session_prewarm.assert_awaited_once_with(session_id)
 
 
 @pytest.mark.asyncio

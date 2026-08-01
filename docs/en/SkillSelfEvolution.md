@@ -61,7 +61,7 @@ To see which skills have pending evolution experience, you can enter:
 
 The system lists all skills containing pending evolution records and their specific content summaries.
 
-![Evolution overview](../assets/images/skill演进_信息总览.png)
+![Evolution overview](../assets/images/skill演进_查看和整理经验.png)
 
 ### 2.5 Manage Evolution Experience
 

@@ -419,7 +419,12 @@ def _run_instance_with_pid(commands: list[tuple[str, list[str], Path]],
     processes: dict[str, subprocess.Popen[bytes]] = {}
     try:
         for cmd_name, cmd_args, cwd in commands:
-            processes[cmd_name] = _start_process(cmd_name, cmd_args, cwd)
+            processes[cmd_name] = _start_process(
+                cmd_name,
+                cmd_args,
+                cwd,
+                ports=config.ports,
+            )
 
         write_pid_file(config, os.getpid(), time.time())
         logging.info(f"[start_services] Instance '{config.name}' started")
@@ -481,12 +486,36 @@ def _build_commands(mode: str, dotenv_path: Path | None = None) -> list[tuple[st
     return commands
 
 
-def _start_process(name: str, cmd: list[str], cwd: Path) -> subprocess.Popen[bytes]:
+def _start_process(
+    name: str,
+    cmd: list[str],
+    cwd: Path,
+    *,
+    ports: dict[str, int] | None = None,
+) -> subprocess.Popen[bytes]:
     """Start a single subprocess."""
     import json
+    from jiuwenswarm.dotenv_early import CLI_PORTS_ENV_FLAG
+
     logging.info(f"[start_services] starting {name}: {' '.join(cmd)} (cwd={cwd})")
     env = os.environ.copy()
     env["JIUWENSWARM_START_CMD"] = json.dumps(sys.argv[:])
+    if ports:
+        # Inject the resolved port group and mark the child so
+        # load_dotenv_runtime(override=True) cannot clobber it with a stale
+        # ~/.jiuwenswarm/config/.env residue (issue #2749: banner 19001 vs
+        # Gateway bind 20001).
+        env.update(
+            {
+                CLI_PORTS_ENV_FLAG: "1",
+                "AGENT_SERVER_PORT": str(ports["agent_server"]),
+                "AGENT_PORT": str(ports["agent_server"]),
+                "WEB_PORT": str(ports["web"]),
+                "GATEWAY_PORT": str(ports["gateway"]),
+                "FRONTEND_PORT": str(ports["frontend"]),
+            }
+        )
+        env.pop("AGENT_SERVER_URL", None)
     return subprocess.Popen(cmd, cwd=str(cwd), env=env)
 
 
@@ -666,7 +695,10 @@ def _wait_for_services_ready(
         _print_port_banner(targets, ready)
 
 
-def _run_processes(commands: list[tuple[str, list[str], Path]]) -> int:
+def _run_processes(
+    commands: list[tuple[str, list[str], Path]],
+    ports: dict[str, int],
+) -> int:
     """Run processes and wait for them.
 
     Args:
@@ -678,9 +710,9 @@ def _run_processes(commands: list[tuple[str, list[str], Path]]) -> int:
     processes: dict[str, subprocess.Popen[bytes]] = {}
     try:
         for name, cmd, cwd in commands:
-            processes[name] = _start_process(name, cmd, cwd)
+            processes[name] = _start_process(name, cmd, cwd, ports=ports)
 
-        _wait_for_services_ready(_resolve_runtime_ports(), processes)
+        _wait_for_services_ready(ports, processes)
 
         while True:
             for name, proc in processes.items():
@@ -728,7 +760,7 @@ def _run(mode: str) -> int:
     if not commands:
         logging.info(f"[start_services] no commands to run for mode: {mode}")
         return 2
-    return _run_processes(commands)
+    return _run_processes(commands, cmd.config.ports)
 
 
 def _action_list() -> int:

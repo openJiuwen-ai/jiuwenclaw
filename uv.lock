@@ -674,6 +674,24 @@ wheels = [
 ]
 
 [[package]]
+name = "claude-agent-sdk"
+version = "0.2.128"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "mcp" },
+    { name = "sniffio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a7/e8/3a9622b31f9ee22274e13a620e5e75ac38454d14538391b2fe3bc7eb76dc/claude_agent_sdk-0.2.128.tar.gz", hash = "sha256:2ac7b2b3bc56ae9037fd284c8690d3dafab9493ecd28d8974bba79a418e1b800", size = 309369, upload-time = "2026-07-25T01:48:25.884Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/45/ff/03613a38a84285cd85f114fc26d4431f545d2b3b344eb8f69f9b0f18f3c6/claude_agent_sdk-0.2.128-py3-none-macosx_11_0_arm64.whl", hash = "sha256:2e47ee95be68cb07612fd5288a40f3307763da5a5adf66d6e03ea49dc0495c9c", size = 75183825, upload-time = "2026-07-25T01:48:30.45Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/df/2adbd3077f1a1cada39cd1508990d4008a8ac9ec74c801b24b1b302348b0/claude_agent_sdk-0.2.128-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:55e8fa28918af5620f391692efe80527ad9f2294cec14dadeea93c5161dbefc4", size = 80305667, upload-time = "2026-07-25T01:48:35.091Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/56/776a41af67a53d794b420dcd2f1075b585ed3725faa9827164f4a2e945dd/claude_agent_sdk-0.2.128-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:6c10cc1c5403b2b0b3d8deb79ad5271a8e49b9db6460193599b91f49f16b4cf7", size = 84617823, upload-time = "2026-07-25T01:48:39.297Z" },
+    { url = "https://files.pythonhosted.org/packages/17/1c/37044abbddf2141c4eeb6cc8e15a486491549a27283029d73db2c4f3c3b7/claude_agent_sdk-0.2.128-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:cc4a0f20337e227fe16f00edf7cbe109349707adb440fe51ca6c44f9f8d7d21a", size = 85663462, upload-time = "2026-07-25T01:48:43.982Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/c9/ffbd8113080f87a4cd7bbfc8b00a974ea7189e3f666b5d7a2903dec7b74f/claude_agent_sdk-0.2.128-py3-none-win_amd64.whl", hash = "sha256:37b87c8e75daa2a6dc74da6d788e0981a2e5e3a6be80cfa4c287abce2bf70e0b", size = 85566882, upload-time = "2026-07-25T01:48:48.635Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1786,7 +1804,7 @@ dependencies = [
     { name = "lxml" },
     { name = "mutagen" },
     { name = "numpy" },
-    { name = "openjiuwen" },
+    { name = "openjiuwen", extra = ["claude", "codex"] },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -1832,7 +1850,6 @@ harmony = [
     { name = "dingtalk-stream" },
     { name = "discord-py" },
     { name = "fastapi" },
-    { name = "gitcode-api" },
     { name = "google-genai" },
     { name = "greenlet" },
     { name = "httptools" },
@@ -1849,7 +1866,6 @@ harmony = [
     { name = "opentelemetry-sdk" },
     { name = "pgvector" },
     { name = "pillow" },
-    { name = "portalocker" },
     { name = "pydantic" },
     { name = "python-multipart" },
     { name = "python-socks" },
@@ -1937,7 +1953,6 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'harmony'", specifier = ">=0.115" },
     { name = "gitcode-api", specifier = ">=1.2.20" },
-    { name = "gitcode-api", marker = "extra == 'harmony'", specifier = ">=1.2.20" },
     { name = "google-genai", specifier = ">=1.68.0" },
     { name = "google-genai", marker = "extra == 'harmony'", specifier = ">=1.68.0" },
     { name = "greenlet", specifier = ">=3.3.2" },
@@ -1957,8 +1972,8 @@ requires-dist = [
     { name = "mutagen", specifier = ">=1.47.0" },
     { name = "mutagen", marker = "extra == 'harmony'", specifier = ">=1.47.0" },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "openjiuwen", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
+    { name = "openjiuwen", extras = ["claude", "codex"], git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "opentelemetry-api", specifier = ">=1.28.0" },
     { name = "opentelemetry-api", marker = "extra == 'harmony'", specifier = ">=1.28.0" },
@@ -1973,7 +1988,6 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.2.0" },
     { name = "pillow", marker = "extra == 'harmony'", specifier = ">=12.2.0" },
     { name = "portalocker", specifier = ">=3.2.0" },
-    { name = "portalocker", marker = "extra == 'harmony'", specifier = ">=3.2.0" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic", marker = "extra == 'harmony'", specifier = ">=2.0" },
@@ -2855,6 +2869,34 @@ wheels = [
 ]
 
 [[package]]
+name = "openai-codex"
+version = "0.144.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "openai-codex-cli-bin" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b9/7d/4b999b0ddd05c22d83cc2e879c95e1e92e3b7808b58ac561c4ea91fca1c4/openai_codex-0.144.4.tar.gz", hash = "sha256:91c63a7cb213441569f130e593386b34657ab9e726ae88af255f0ecb8de08ea5", size = 68324, upload-time = "2026-07-17T23:42:17.013Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/35/5d2a13e38d91278019f18757ac10426d2649b7ec6f031818c792f64559e9/openai_codex-0.144.4-py3-none-any.whl", hash = "sha256:de1513a6e94b9a8d7728a3b74298bc1469428ade10ba0ef2d5db47dd1cb606f5", size = 76244, upload-time = "2026-07-17T23:42:15.658Z" },
+]
+
+[[package]]
+name = "openai-codex-cli-bin"
+version = "0.144.4"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/79/30/7e457c007a32aa7333a78438a9f532504c3b77a1ea57e7808855712c2c0f/openai_codex_cli_bin-0.144.4-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:4d587d152d5f0aa25f21ded4d08aac5150da48639b29fc3e57b2a8b413d06903", size = 126851183, upload-time = "2026-07-15T00:14:00.171Z" },
+    { url = "https://files.pythonhosted.org/packages/65/eb/64c180514a2cc3e2500e486813f5a8d7f7e349342e9bebd78d99ddd9791a/openai_codex_cli_bin-0.144.4-py3-none-macosx_11_0_arm64.whl", hash = "sha256:05db505a9c7f020f58b70837a94e00d32a50086986c267bcc44ea97b573d4a05", size = 116474758, upload-time = "2026-07-15T00:14:08.177Z" },
+    { url = "https://files.pythonhosted.org/packages/85/34/921ab692c7ed140941a91e39b84c6deafddb45072793f3a5f6dcbf86f59a/openai_codex_cli_bin-0.144.4-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:cd4bb31b8a477a3adba22139c8c493693fa5292ba21e86eef08ace3e96c41294", size = 119437596, upload-time = "2026-07-15T00:14:17.418Z" },
+    { url = "https://files.pythonhosted.org/packages/25/62/39e630cf8b7b2e2444a5a6669235a6cd88004869a25bb7f3f629ed35638c/openai_codex_cli_bin-0.144.4-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:4106229c38f37245c3eea8d904426afd45b8bf19831765715647f5402f757c06", size = 128817757, upload-time = "2026-07-15T00:14:30.539Z" },
+    { url = "https://files.pythonhosted.org/packages/23/24/318f91a95baaff845307e529d138d42a7202e6bd0e626556058eab3dead5/openai_codex_cli_bin-0.144.4-py3-none-musllinux_1_1_aarch64.whl", hash = "sha256:d2d3fada11731938e3d3e3660819d5324b7f92e825a0ed5aede63100b36ffc9a", size = 119437594, upload-time = "2026-07-15T00:14:39.327Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/a0/65e6fd3a6fba52639937801d9ce517b0c48026458723bb9f08eb07a1dd35/openai_codex_cli_bin-0.144.4-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:70fb62ed7755e332dd8b00ed48e22ee16df10f4a977335039e237cd330490df3", size = 128817755, upload-time = "2026-07-15T00:14:47.849Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/8a/3ab5fc97352e8f780d472c8dd6d7504d6a670cd7dede106d461ac1171999/openai_codex_cli_bin-0.144.4-py3-none-win_amd64.whl", hash = "sha256:56e142974467332f1f669b89f2636e06b3ada09413512abb2f24c33b4a4f59fc", size = 140595092, upload-time = "2026-07-15T00:14:58.484Z" },
+    { url = "https://files.pythonhosted.org/packages/70/1a/3aa52ab8f89e0f596b6eea835e3f3494697da51917d3231f5f48f92e2bcb/openai_codex_cli_bin-0.144.4-py3-none-win_arm64.whl", hash = "sha256:2ad01058db7181323ae7c6217e560702e38c4f107595b99ab1d0abc9f184890a", size = 130665105, upload-time = "2026-07-15T00:15:08.861Z" },
+]
+
+[[package]]
 name = "openapi-pydantic"
 version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2869,7 +2911,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.16"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#788acbd2586aca724332e40f14dd56ebf6cdee49" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#b28b4f3a6248f116a66c97c8a73f2b89432dd3f5" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -2910,6 +2952,12 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+claude = [
+    { name = "claude-agent-sdk" },
+]
+codex = [
+    { name = "openai-codex" },
+]
 postgres = [
     { name = "asyncpg" },
 ]

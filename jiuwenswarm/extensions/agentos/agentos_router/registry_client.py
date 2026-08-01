@@ -21,7 +21,7 @@ from urllib.parse import quote
 import httpx
 
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
-    SUPPORTED_AGENT_TYPES,
+    BUILTIN_AGENT_TYPE,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.models import AgentInfo, ImageInfo
 
@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 KIND_THIRD_PARTY = "三方"
 KIND_JIUWEN = "九问"
 _JIUWEN_FRAMEWORKS = frozenset({"jiuwenswarm", "jiuwen-report"})
+# Offline registry stub default list when no framework filter is given.
+_LOCAL_STUB_FRAMEWORKS = frozenset({BUILTIN_AGENT_TYPE})
 
 
 @dataclass(frozen=True)
@@ -326,7 +328,7 @@ class RegistryClient:
             names = (
                 [str(framework).strip()]
                 if framework and str(framework).strip()
-                else sorted(SUPPORTED_AGENT_TYPES)
+                else sorted(_LOCAL_STUB_FRAMEWORKS)
             )
             return [
                 ImageEntry(

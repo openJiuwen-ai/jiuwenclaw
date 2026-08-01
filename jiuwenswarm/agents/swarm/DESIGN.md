@@ -54,7 +54,7 @@
 
 ## 2. openjiuwen Spec 与注册底座（依赖，不在本模块）
 
-安装位置：`/Users/alan/Developer/alan_workspace/agent-core/openjiuwen/agent_teams/schema/`。
+安装位置：openjiuwen `agent_teams/schema/`（框架依赖，不在本模块仓库内）。
 
 ### 2.1 Spec 模型（pydantic，可 JSON round-trip）
 

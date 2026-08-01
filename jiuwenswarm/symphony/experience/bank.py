@@ -538,8 +538,15 @@ class ExperienceBank:
         skill_ids: list[str],
         success_count: int = 1,
     ) -> ExperienceItem:
-        """Create an ExperienceItem with auto-generated embedding and id."""
-        text_for_embedding = query_pattern + "\n" + "\n".join(query_examples)
+        """Create an ExperienceItem with auto-generated embedding and id.
+
+        The embedding is derived from ``query_pattern`` only — a generalized
+        template carries the skill's intent cleanly, while concatenating raw
+        query_examples would dilute it with concrete entities and let
+        same-domain (but wrong) skills cross the threshold. ``query_examples``
+        is still stored on the item for display / debugging, just not embedded.
+        """
+        text_for_embedding = query_pattern or ""
         embedding = self._embedder.embed(text_for_embedding)
 
         return ExperienceItem(

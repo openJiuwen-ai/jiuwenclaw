@@ -34,6 +34,9 @@ def main() -> None:
             load_dotenv(dotenv_path=get_env_file(), override=False)
         except ImportError:
             pass
+        except KeyboardInterrupt:
+            logging.warning("Interrupted during startup. Exiting.")
+            sys.exit(130)
 
     argv = sys.argv[1:]
     if argv and argv[0] == "chat":

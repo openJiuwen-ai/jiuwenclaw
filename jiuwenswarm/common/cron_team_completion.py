@@ -228,5 +228,10 @@ def apply_cron_team_round_event(state: dict[str, Any], event: dict[str, Any]) ->
             _apply_team_member_event(state, nested)
     elif event_type == "team.completed":
         state["team_round_completed"] = True
+    elif event_type == "chat.error":
+        error = event.get("error")
+        if isinstance(error, str) and error.strip():
+            state["leader_text"] = error.strip()
+        state["leader_final_seen"] = True
         state["open_team_tasks"] = {}
         state["active_team_members"] = {}

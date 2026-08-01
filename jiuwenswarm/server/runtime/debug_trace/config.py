@@ -4,7 +4,7 @@
 
 Merges the request-level ``/debug`` flag with the ``debug_trace`` config block:
 
-    debug_enabled = request_debug OR debug_trace.enabled OR debug_trace.<mode>.enabled
+    debug_enabled = request_debug OR debug_trace.<mode>.enabled
     dump_enabled  = debug_enabled AND debug_trace.<mode>.dump_enabled != false
 
 Per-mode ``include_*`` toggles, ``limits`` and ``redaction`` are read with
@@ -86,7 +86,6 @@ def resolve_debug_trace_settings(*, mode: str, request_debug: bool) -> DebugTrac
 
     debug_enabled = bool(
         request_debug
-        or cfg.get("enabled")
         or mode_cfg.get("enabled")
     )
     dump_enabled = debug_enabled and (mode_cfg.get("dump_enabled", True) is not False)

@@ -94,7 +94,6 @@ class ExperienceBankBuildConfig:
     skill_cluster_num: int | None = None
     pattern_merge_threshold: float = 0.9
     query_examples_count: int = 5
-    cluster_max_examples: int | None = None
 
 
 @dataclass

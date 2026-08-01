@@ -908,14 +908,18 @@ class GitDiffWatcherRegistry:
         diff_service = get_diff_service()
 
         # 项目级 ``current``(工作区 diff)与 session_id 无关,使用所有 watcher 的
-        # include_files/include_hunks 并集计算一次,跨 session 复用。并集确保任意
-        # watcher 需要的文件/hunk 数据都已包含(设计文档 §2.5)。
-        union_need_files = any(w.files_source for w in watches)
-        union_need_hunks = any(
-            w.detail_source and w.detail_files for w in watches
+        # current 订阅需求并集计算一次,跨 session 复用。summary 只取统计,
+        # files 只取元数据,detail 仅为已展开文件计算 hunk。
+        current_need_files = any(
+            w.files_source == "current"
+            or (w.detail_source == "current" and w.detail_files)
+            for w in watches
         )
-        union_include_files = union_need_files or union_need_hunks
-        union_include_hunks = union_need_hunks
+        current_detail_files: set[str] = set()
+        for watch in watches:
+            if watch.detail_source == "current" and watch.detail_files:
+                current_detail_files.update(watch.detail_files)
+        current_need_hunks = bool(current_detail_files)
 
         # 用 asyncio.to_thread 包裹同步 Git 命令,避免阻塞事件循环。
         # 所有错误(结构性 + 临时性)都向上抛出,由 _poll_loop 统一推送
@@ -928,8 +932,13 @@ class GitDiffWatcherRegistry:
             service.get_project_diff_status,
             project=proj,
             session_id=None,
-            include_files=union_include_files,
-            include_hunks=union_include_hunks,
+            include_files=current_need_files,
+            include_hunks=current_need_hunks,
+            hunk_paths=current_detail_files or None,
+        )
+        revision = _build_revision(
+            "gitdiff",
+            _fingerprint(project_id, base_status.generated_at),
         )
 
         repo_root = base_status.repo.repo_root
@@ -941,13 +950,19 @@ class GitDiffWatcherRegistry:
             session_groups.setdefault(watch.session_id, []).append(watch)
 
         for session_id, group_watches in session_groups.items():
-            # 该 session 组的 include_files/include_hunks(可能是并集的子集)
-            need_files = any(w.files_source for w in group_watches)
-            need_hunks = any(
-                w.detail_source and w.detail_files for w in group_watches
+            # 该 session 组的 last_turn include_files/include_hunks 需求。
+            # current 已在项目级分层计算;last_turn 暂时保持现有 file_ops 路径,
+            # 但不把 current detail 需求错误扩大到 last_turn。
+            last_turn_need_files = any(
+                w.files_source == "last_turn"
+                or (w.detail_source == "last_turn" and w.detail_files)
+                for w in group_watches
             )
-            include_files = need_files or need_hunks
-            include_hunks = need_hunks
+            last_turn_need_hunks = any(
+                w.detail_source == "last_turn" and w.detail_files
+                for w in group_watches
+            )
+            serialize_hunks = current_need_hunks or last_turn_need_hunks
 
             # 计算 session 级 ``last_turn`` diff(不复用跨 session)。
             # 直接调 ``get_turn_diff_summaries`` + ``_convert_turn_diff``,避免再次调
@@ -987,8 +1002,8 @@ class GitDiffWatcherRegistry:
                     last_turn = _convert_turn_diff(
                         turns[0],
                         repo_root=repo_root,
-                        include_files=include_files,
-                        include_hunks=include_hunks,
+                        include_files=last_turn_need_files,
+                        include_hunks=last_turn_need_hunks,
                     )
 
             # 合并:复用项目级 ``current`` + session 级 ``last_turn``。
@@ -1004,7 +1019,7 @@ class GitDiffWatcherRegistry:
                 last_turn=last_turn,
                 generated_at=base_status.generated_at,
             )
-            status_dict = merged_status.to_dict(include_hunks=include_hunks)
+            status_dict = merged_status.to_dict(include_hunks=serialize_hunks)
 
             for watch in group_watches:
                 summary_fp = _summary_fingerprint(
@@ -1012,21 +1027,27 @@ class GitDiffWatcherRegistry:
                 )
                 if summary_fp != watch.last_summary_fingerprint:
                     watch.last_summary_fingerprint = summary_fp
-                    await self._push_diff_changed(watch, status_dict, summary_fp)
+                    await self._push_diff_changed(
+                        watch, status_dict, summary_fp, revision,
+                    )
 
                 if watch.files_source:
                     files_dict = self._extract_files(status_dict, watch.files_source)
                     files_fp = _files_fingerprint(files_dict)
                     if files_fp != watch.last_files_fingerprint:
                         watch.last_files_fingerprint = files_fp
-                        await self._push_files_changed(watch, status_dict, files_dict, files_fp)
+                        await self._push_files_changed(
+                            watch, status_dict, files_dict, files_fp, revision,
+                        )
 
                 if watch.detail_source and watch.detail_files:
                     files_dict = self._extract_files(status_dict, watch.detail_source)
                     detail_fp = _detail_fingerprint(files_dict, watch.detail_files)
                     if detail_fp != watch.last_detail_fingerprint:
                         watch.last_detail_fingerprint = detail_fp
-                        await self._push_detail_changed(watch, status_dict, files_dict, detail_fp)
+                        await self._push_detail_changed(
+                            watch, status_dict, files_dict, detail_fp, revision,
+                        )
 
     @staticmethod
     def _extract_files(
@@ -1048,6 +1069,7 @@ class GitDiffWatcherRegistry:
         watch: GitDiffWatch,
         status_dict: dict[str, Any],
         fingerprint: str,
+        revision: str | None = None,
     ) -> None:
         """推送 ``project.git.diff_changed`` 事件(设计文档 §3.6)。
 
@@ -1065,7 +1087,7 @@ class GitDiffWatcherRegistry:
             "session_id": watch.session_id,
             "scope": "summary",
             "change_type": "summary",
-            "revision": _build_revision("gitdiff", fingerprint),
+            "revision": revision or _build_revision("gitdiff", fingerprint),
             "repo": {
                 "is_git": repo.get("is_git", False),
                 "repo_root": repo.get("repo_root"),
@@ -1120,6 +1142,7 @@ class GitDiffWatcherRegistry:
         status_dict: dict[str, Any],
         files_dict: dict[str, Any] | None,
         fingerprint: str,
+        revision: str | None = None,
     ) -> None:
         """推送 ``project.git.diff_files_changed`` 事件(设计文档 §3.6)。"""
         if self._channel is None:
@@ -1134,7 +1157,7 @@ class GitDiffWatcherRegistry:
             "session_id": watch.session_id,
             "source": watch.files_source,
             "change_type": "files",
-            "revision": _build_revision("gitdiff", fingerprint),
+            "revision": revision or _build_revision("gitdiff", fingerprint),
             "files": files_no_hunks,
         }
         if watch.files_source == "last_turn":
@@ -1157,6 +1180,7 @@ class GitDiffWatcherRegistry:
         status_dict: dict[str, Any],
         files_dict: dict[str, Any] | None,
         fingerprint: str,
+        revision: str | None = None,
     ) -> None:
         """推送 ``project.git.diff_detail_changed`` 事件(设计文档 §3.6)。"""
         if self._channel is None:
@@ -1175,7 +1199,7 @@ class GitDiffWatcherRegistry:
             "session_id": watch.session_id,
             "source": watch.detail_source,
             "change_type": "detail",
-            "revision": _build_revision("gitdiff", fingerprint),
+            "revision": revision or _build_revision("gitdiff", fingerprint),
             "files": detail_files,
         }
         if watch.detail_source == "last_turn":

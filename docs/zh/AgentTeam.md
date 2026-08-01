@@ -223,7 +223,7 @@ Agent Team 模式下同样支持技能（Skills）的使用和开发。团队中
 2. **共享工具资源**：团队共享技能可以让所有成员使用同一套工具，避免重复开发
 3. **协作效率提升**：技能可以让 Agent 更高效地完成分配的任务
 
-> 有关 Team Skills 的详细使用和开发教程，请参阅 [Team Skill 开发指南](TeamSkills.md)。
+> 有关 Team Skills 的详细使用和开发教程，请参阅 [SwarmSkills 指南](SwarmSkills.md)。
 
 ### 2.5 Team Memory
 
@@ -283,7 +283,7 @@ Leader Agent 接收目标后，分析任务：
 - 需要角色：行业分析师、竞争分析师、技术分析师、市场分析师、报告撰写专家
 - 执行计划：先调研，再分析，最后撰写
 
-![leader analysis](../assets/images/leader 分析需求.png)
+![leader analysis](../assets/images/leader分析需求.png)
 
 **Leader 组建团队**
 
@@ -294,7 +294,7 @@ Leader Agent 组建团队：
 - 市场分析师：负责市场前景预测
 - 报告撰写专家：负责报告整合与撰写
 
-![leader build teams](../assets/images/leader 组建团队.png)
+![leader build teams](../assets/images/leader组建团队.png)
 
 **Team Agent 执行**
 Team Agent 接收指派任务后，开始执行
@@ -308,7 +308,7 @@ Leader Agent 整合所有结果：
 - 整合最终报告
 - 向用户交付成果
 
-![Team execute tasks](../assets/images/leader 总结结果.png)
+![Team execute tasks](../assets/images/leader总结结果.png)
 
 ### 4.4 产出结果
 
@@ -318,7 +318,7 @@ Leader Agent 整合所有结果：
 - 技术趋势总结
 - 数据图表展示
 
-![Team execute tasks](../assets/images/team 结果.png)
+![Team execute tasks](../assets/images/team结果.png)
 
 
 ---

@@ -61,7 +61,7 @@ Skill 自动演进功能通过在配置信息中开启自演进配置项 `evolut
 
 系统会列出所有包含待演进记录的 Skill 及具体内容摘要。
 
-![信息总览](../assets/images/skill演进_信息总览.png)
+![信息总览](../assets/images/skill演进_查看和整理经验.png)
 
 ### 2.5 管理演进经验
 
