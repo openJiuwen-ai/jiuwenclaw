@@ -559,6 +559,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # code 模式不传: vision_model_config, audio_model_config,
         # context_engine_config（completion_timeout 已从配置读取传入）
 
+        # Cron tools belong to the agent's standing toolset, not to any one
+        # request; build them here so the first turn does not pay for it either.
+        self._ensure_cron_tools_registered(self._parent_session_id)
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
         await self._register_mcp_servers_from_config(config_base, tag="code")

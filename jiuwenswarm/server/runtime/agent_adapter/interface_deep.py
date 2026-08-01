@@ -914,6 +914,9 @@ class JiuWenSwarmDeepAdapter:
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
         )
+        # Language the currently registered cron tools were built for, or None
+        # when they are not registered yet. Doubles as the rebuild condition.
+        self._cron_tools_registered_language: str | None = None
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._model_name_to_keys: dict[str, list[str]] = {}
@@ -5020,6 +5023,9 @@ class JiuWenSwarmDeepAdapter:
         setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
         self._sync_a2x_runtime_state()
+        # Cron tools belong to the agent's standing toolset, not to any one
+        # request; build them here so the first turn does not pay for it either.
+        self._ensure_cron_tools_registered(self._parent_session_id)
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
         await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
@@ -5605,32 +5611,70 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:
             logger.debug("[JiuWenSwarmDeepAdapter] 清理 multi-session 工具失败: %s", exc)
 
+    def _ensure_cron_tools_registered(self, session_id: str | None) -> None:
+        """Register this agent's cron tools once, rebuilding only when they change.
+
+        The tool instances carry no per-request state: their context object and
+        owner id are fixed for the adapter's lifetime, and the target channel is
+        read from a contextvar at call time (see ``_bind_runtime_cron_context``).
+        Only the language is baked into the instances, so that is the whole
+        rebuild condition. Registering them per request instead re-bound eight
+        ids in the process-global resource manager every turn, each one a
+        remove + add pair that logged a refresh warning.
+
+        Args:
+            session_id: Session the current turn belongs to. Heartbeat and cron
+                sessions drive the scheduler themselves and get no cron tools.
+        """
+        if session_id is not None and session_id.startswith(("heartbeat", "cron")):
+            return
+        language = self._resolve_runtime_language()
+        registered_names = {
+            getattr(existing, "name", "")
+            for existing in (self._instance.ability_manager.list() or [])
+        }
+        # The language fingerprint alone is not enough: rebuilding the agent (a
+        # skill or plugin install re-runs ``create_instance``) hands this adapter
+        # a fresh, empty AbilityManager while the fingerprint still reads as
+        # registered, which would silently drop the cron tools for good.
+        if self._cron_tools_registered_language == language and (registered_names & _CRON_TOOL_NAMES):
+            return
+        try:
+            cron_tools = self._build_cron_tools()
+            if not cron_tools:
+                return
+            for existing in list(self._instance.ability_manager.list() or []):
+                if getattr(existing, "name", "") in _CRON_TOOL_NAMES:
+                    self._instance.ability_manager.remove(existing.name)
+            for cron_tool in cron_tools:
+                self._register_agent_owned_tool(cron_tool, self._tool_owner_id())
+                self._instance.ability_manager.add(cron_tool.card)
+            self._cron_tools_registered_language = language
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] %d cron tools registered: language=%s",
+                len(cron_tools),
+                language,
+            )
+        except Exception as exc:
+            logger.error("[JiuWenSwarmDeepAdapter] 定时工具注册失败: %s", exc)
+
     async def _update_session_tools(
         self,
         session_id: str | None,
         request_id: str | None,
         channel_id: str | None = None,
     ) -> None:
-        """注册 cron 和 send_file 工具（与 mode 无关，每次请求刷新）。"""
-        # 定时工具：按当前 session 的 channel 注册（contextvar 已由 _bind_runtime_cron_context 设置）
-        if session_id is None or not session_id.startswith(("heartbeat", "cron")):
-            try:
-                cron_tools = self._build_cron_tools()
-                if cron_tools:
-                    logger.info(
-                        "[JiuWenSwarmDeepAdapter] Registering %d cron tools", len(cron_tools)
-                    )
-                    for existing in list(self._instance.ability_manager.list() or []):
-                        if getattr(existing, "name", "") in _CRON_TOOL_NAMES:
-                            self._instance.ability_manager.remove(existing.name)
-                    for cron_tool in cron_tools:
-                        self._register_agent_owned_tool(cron_tool, self._tool_owner_id())
-                        self._instance.ability_manager.add(cron_tool.card)
-                    logger.info("[JiuWenSwarmDeepAdapter] Cron tools registered successfully")
-            except Exception as exc:
-                logger.error("[JiuWenSwarmDeepAdapter] 定时工具注册失败: %s", exc)
+        """刷新每请求相关的 cron / send_file 工具运行时状态。
 
-        # send_file 工具：由 channels.<channel>.send_file_allowed 控制，每次请求重新注册
+        两者的工具实例都只建一次：cron 见 ``_ensure_cron_tools_registered``，
+        send_file 首次注册后改走 ``update_runtime_context``。这里每次请求只做
+        幂等检查和运行时上下文更新。
+        """
+        self._ensure_cron_tools_registered(session_id)
+
+        # send_file 工具：由 channels.<channel>.send_file_allowed 控制。工具实例只建一次，
+        # 之后每次请求只用 update_runtime_context 刷新 request_id/session_id/channel 等
+        # 运行时上下文（cron 同理，见上）。
         # channel_id/metadata 由调用前的 _bind_runtime_cron_context 已写入 contextvar
         config_base = get_config()
         channel = (
