@@ -13,7 +13,7 @@ from jiuwenswarm.common.stage_timer import StageTimer
 def _fake_clock(monkeypatch: pytest.MonkeyPatch):
     """Drive the timer off a hand-advanced clock so timings are exact."""
     now = {"t": 100.0}
-    monkeypatch.setattr("jiuwenswarm.common.stage_timer.time.monotonic", lambda: now["t"])
+    monkeypatch.setattr("jiuwenswarm.common.stage_timer.monotonic", lambda: now["t"])
 
     def advance(seconds: float) -> None:
         now["t"] += seconds
