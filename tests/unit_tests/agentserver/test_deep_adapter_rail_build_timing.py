@@ -17,16 +17,25 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
 
 
 class _RecordingLogger:
-    """Logger double capturing the args of each call."""
+    """Logger double capturing the level and args of each call.
+
+    Levels are tracked separately because both breakdown branches now go to
+    the same logger: which one ran is a question about level, not about which
+    logger object received the line.
+    """
 
     def __init__(self) -> None:
         self.records: list[tuple[str, tuple]] = []
+        self.info_records: list[tuple[str, tuple]] = []
+        self.debug_records: list[tuple[str, tuple]] = []
 
     def info(self, msg: str, *args) -> None:
         self.records.append((msg, args))
+        self.info_records.append((msg, args))
 
     def debug(self, msg: str, *args, **kwargs) -> None:
         self.records.append((msg, args))
+        self.debug_records.append((msg, args))
 
     def warning(self, msg: str, *args, **kwargs) -> None:
         self.records.append((msg, args))
@@ -179,5 +188,43 @@ def test_fast_build_stays_at_debug(loggers, monkeypatch: pytest.MonkeyPatch) -> 
 
     adapter._instantiate_rails([_RailBuildInfo("_x_rail", lambda: object())], {})
 
-    assert not any("agent rails built" in rec[0] for rec in server_log.records)
-    assert any("agent rails built" in rec[0] for rec in module_log.records)
+    assert not any("agent rails built" in rec[0] for rec in server_log.info_records)
+    assert any("agent rails built" in rec[0] for rec in server_log.debug_records)
+
+
+def test_quiet_breakdown_still_reaches_the_agent_log_stream(loggers) -> None:
+    """The sub-threshold breakdown is the one that explains un-slow time.
+
+    Routing it to the module logger used to hide it entirely: that sink runs
+    at INFO, so a DEBUG line there went nowhere.
+    """
+    server_log, module_log = loggers
+
+    log = interface_deep._stage_breakdown_logger(1.0, 100.0)
+    log("[AgentServer] probe")
+
+    assert module_log.records == []
+    assert len(server_log.debug_records) == 1
+
+
+def test_threshold_override_forces_info(monkeypatch: pytest.MonkeyPatch, loggers) -> None:
+    """Profiling runs need every breakdown, not just the slow ones."""
+    server_log, _ = loggers
+    monkeypatch.setenv(interface_deep._STAGE_LOG_THRESHOLD_ENV, "0")
+
+    interface_deep._stage_breakdown_logger(0.1, 10_000.0)("[AgentServer] probe")
+
+    assert len(server_log.info_records) == 1
+
+
+def test_non_numeric_override_falls_back_to_the_site_threshold(
+    monkeypatch: pytest.MonkeyPatch, loggers
+) -> None:
+    """A typo in the env var must not silently change reporting."""
+    server_log, module_log = loggers
+    monkeypatch.setenv(interface_deep._STAGE_LOG_THRESHOLD_ENV, "not-a-number")
+
+    interface_deep._stage_breakdown_logger(500.0, 100.0)("[AgentServer] probe")
+
+    assert len(server_log.info_records) == 1
+    assert any("ignoring non-numeric" in rec[0] for rec in module_log.records)

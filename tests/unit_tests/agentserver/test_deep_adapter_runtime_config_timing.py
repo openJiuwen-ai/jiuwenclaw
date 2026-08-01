@@ -11,16 +11,25 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmD
 
 
 class _RecordingLogger:
-    """Logger double capturing the formatted message of each call."""
+    """Logger double capturing the level and formatted message of each call.
+
+    Levels are tracked separately because both breakdown branches now go to
+    the same logger: which one ran is a question about level, not about which
+    logger object received the line.
+    """
 
     def __init__(self) -> None:
         self.records: list[tuple[str, tuple]] = []
+        self.info_records: list[tuple[str, tuple]] = []
+        self.debug_records: list[tuple[str, tuple]] = []
 
     def info(self, msg: str, *args) -> None:
         self.records.append((msg, args))
+        self.info_records.append((msg, args))
 
     def debug(self, msg: str, *args, **kwargs) -> None:
         self.records.append((msg, args))
+        self.debug_records.append((msg, args))
 
 
 def _make_adapter(stages: list[str]) -> JiuWenSwarmDeepAdapter:
@@ -82,8 +91,8 @@ async def test_slow_turn_is_reported_at_info(loggers, monkeypatch: pytest.Monkey
 
     await adapter._update_runtime_config(runtime_config)
 
-    assert len(server_log.records) == 1
-    assert module_log.records == []
+    assert len(server_log.info_records) == 1
+    assert server_log.debug_records == []
 
 
 @pytest.mark.asyncio
@@ -96,8 +105,8 @@ async def test_fast_turn_stays_at_debug(loggers, monkeypatch: pytest.MonkeyPatch
 
     await adapter._update_runtime_config(runtime_config)
 
-    assert server_log.records == []
-    assert len(module_log.records) == 1
+    assert server_log.info_records == []
+    assert len(server_log.debug_records) == 1
 
 
 @pytest.mark.asyncio

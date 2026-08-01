@@ -451,6 +451,41 @@ _SLOW_RUNTIME_CONFIG_MS = 50.0
 # per-turn one: this is cold-start budget, not time-to-first-token.
 _SLOW_RAIL_BUILD_MS = 100.0
 
+# Profiling escape hatch: overrides every stage-breakdown threshold, in
+# milliseconds. Set it to 0 to report all breakdowns at INFO. The thresholds
+# above are tuned to stay quiet on a healthy run, which is the wrong setting
+# when the question is "where did this un-slow half second go".
+_STAGE_LOG_THRESHOLD_ENV = "JIUWENSWARM_SLOW_STAGE_MS"
+
+
+def _stage_breakdown_logger(total_ms: float, threshold_ms: float) -> Callable[..., None]:
+    """Pick the level a stage breakdown should be reported at.
+
+    Both branches go through ``server_logger`` on purpose. The quiet branch
+    used to go to this module's standard-logging logger, which put it in a
+    different sink running at INFO — so the sub-threshold breakdown, the one
+    needed to explain time that is not obviously slow, was never visible
+    anywhere.
+
+    Args:
+        total_ms: Measured total for the stage group.
+        threshold_ms: Site-specific bar above which the breakdown is INFO.
+
+    Returns:
+        The logging callable to emit the breakdown with.
+    """
+    override = os.environ.get(_STAGE_LOG_THRESHOLD_ENV)
+    if override is not None:
+        try:
+            threshold_ms = float(override)
+        except ValueError:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ignoring non-numeric %s=%s",
+                _STAGE_LOG_THRESHOLD_ENV,
+                override,
+            )
+    return server_logger.info if total_ms >= threshold_ms else server_logger.debug
+
 
 @dataclass
 class _RailBuildInfo:
@@ -4369,9 +4404,7 @@ class JiuWenSwarmDeepAdapter:
         stage_timer.mark("observability_rail")
 
         total_ms = stage_timer.total_ms()
-        log_rail_build = (
-            server_logger.info if total_ms >= _SLOW_RAIL_BUILD_MS else logger.debug
-        )
+        log_rail_build = _stage_breakdown_logger(total_ms, _SLOW_RAIL_BUILD_MS)
         log_rail_build(
             "[AgentServer] agent rails built: adapter=%s count=%d total_ms=%.1f %s",
             type(self).__name__,
@@ -5925,10 +5958,8 @@ class JiuWenSwarmDeepAdapter:
             await self._apply_runtime_config_stages(runtime_config, stage_timer, bind_request)
         finally:
             total_ms = stage_timer.total_ms()
-            log_runtime_config_stages = (
-                server_logger.info
-                if total_ms >= _SLOW_RUNTIME_CONFIG_MS
-                else logger.debug
+            log_runtime_config_stages = _stage_breakdown_logger(
+                total_ms, _SLOW_RUNTIME_CONFIG_MS
             )
             log_runtime_config_stages(
                 "[AgentServer] runtime config applied: session_id=%s mode=%s total_ms=%.1f %s",
