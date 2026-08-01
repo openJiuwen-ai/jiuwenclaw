@@ -753,9 +753,15 @@ def install_wfp_filters(
                     keeps_alive=keeps,
                 )
 
-            # --- Permit filters (V4 + V6) for loopback + port range ---
-            # 为端口范围内每个端口装一个独立 Permit filter (放行整个范围).
-            # filter key 形如 <base_key>-<port>, 幂等安装/卸载.
+            # --- Permit filters (V4 + V6) for loopback (全端口, 临时验证) ---
+            # 临时方案: Permit 条件 = user + loopback (去掉 port 限制), 放行
+            # jbx-sandbox 访问 127.0.0.1 任意端口. 原因: pptx-craft convert 的
+            # render server 用 get-port 随机选端口 (ensure-chromium-Cz31J7Bx.js
+            # startRenderServer: const port = await getPort()), 不在固定范围,
+            # 原来每端口一个 Permit (放行 60080-60089) 无法覆盖随机端口 → chromium
+            # 访问 render server (如 127.0.0.1:6298) 被 Block → ERR_NETWORK_ACCESS_DENIED.
+            # 此为验证根因的临时全放开; 定稿方案待定 (可能改 render server 用固定端口,
+            # 或沙箱侧动态 Permit render server 端口).
             for layer, base_key in (
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V4, const.JBX_FILTER_PERMIT_KEY_V4),
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V6, const.JBX_FILTER_PERMIT_KEY_V6),
@@ -766,26 +772,23 @@ def install_wfp_filters(
                 # IPv6 ::1 条件 (FWP_V6_ADDR_AND_MASK=257), BFE 因 condition
                 # 类型与 layer 不匹配返回 0x80320027, 主路径失败降级防火墙.
                 is_v4 = (layer == const.FWPM_LAYER_ALE_AUTH_CONNECT_V4)
-                for port in range(permit_port_start, permit_port_end + 1):
-                    user_cond, user_ka = _build_ale_user_condition(sandbox_user_sid)
-                    keeps.append(user_ka)
-                    if is_v4:
-                        lb_cond, lb_ka = _build_loopback_v4_condition()
-                    else:
-                        lb_cond, lb_ka = _build_loopback_v6_condition()
-                    keeps.append(lb_ka)
-                    port_cond = _build_port_eq_condition(port)
-                    # S9: port_key 必须是合法 UUID (旧版 f"{base}-{port}" 非法,
-                    # _guid_from_str 报 ValueError)。用 uuid5 派生确定性 GUID。
-                    port_key = _permit_filter_guid_str(base_key, port)
-                    _add_filter(
-                        engine, port_key, layer, sublayer_key,
-                        [user_cond, lb_cond, port_cond],
-                        const.FWP_ACTION_PERMIT,
-                        const.FWP_WEIGHT_PERMIT,
-                        f"JiuwenBox-Permit-Loopback-{base_key}-{port}",
-                        keeps_alive=keeps,
-                    )
+                user_cond, user_ka = _build_ale_user_condition(sandbox_user_sid)
+                keeps.append(user_ka)
+                if is_v4:
+                    lb_cond, lb_ka = _build_loopback_v4_condition()
+                else:
+                    lb_cond, lb_ka = _build_loopback_v6_condition()
+                keeps.append(lb_ka)
+                # Permit filter: user + loopback, 无 port 条件 (放行所有 loopback 端口).
+                # key 用 base_key 本身 (固定合法 UUID), 幂等安装/卸载.
+                _add_filter(
+                    engine, base_key, layer, sublayer_key,
+                    [user_cond, lb_cond],
+                    const.FWP_ACTION_PERMIT,
+                    const.FWP_WEIGHT_PERMIT,
+                    f"JiuwenBox-Permit-Loopback-{base_key}",
+                    keeps_alive=keeps,
+                )
 
             fwpu.FwpmTransactionCommit0(engine)
         except Exception:
@@ -817,15 +820,19 @@ def uninstall_wfp_filters(
             const.JBX_FILTER_BLOCK_KEY_V6,
         ):
             _delete_filter_by_key(fwpu, engine, fkey)
-        # Permit filter (每端口一个 key, S9: 用 uuid5 派生, 与 install 一致)。
+        # Permit filter: 当前用固定 base_key (全端口放行); 兼容旧版每端口一个 key
+        # (uuid5 派生 per-port), 仍遍历删旧残留, 再删固定 key.
         for base_key in (
             const.JBX_FILTER_PERMIT_KEY_V4,
             const.JBX_FILTER_PERMIT_KEY_V6,
         ):
+            # 删旧 per-port 残留 (兼容之前装的 60080-60089 各端口 filter).
             for port in range(permit_port_start, permit_port_end + 1):
                 _delete_filter_by_key(
                     fwpu, engine, _permit_filter_guid_str(base_key, port),
                 )
+            # 删当前固定 key (全端口放行 filter).
+            _delete_filter_by_key(fwpu, engine, base_key)
         try:
             hr = fwpu.FwpmSubLayerDeleteByKey0(
                 engine, ctypes.byref(_guid_from_str(const.JBX_SUBLAYER_KEY)),

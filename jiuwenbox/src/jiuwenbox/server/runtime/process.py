@@ -2967,13 +2967,24 @@ class ProcessRuntime(RuntimeAdapter):
             )
         # 沙箱可写临时区注入: 受限 token 写不了宿主 %TEMP%
         # (C:\Users\...\AppData\Local\Temp), 导致 Playwright mkdtemp EPERM.
-        # TEMP/TMP 指向 sandbox workspace 下 .tmp (box-server 是 owner, 合成 SID
-        # ACL 允许受限 token 写 → 解决 EPERM). 放在 win_tool_dirs 块外确保生效.
-        # 不设 PLAYWRIGHT_BROWSERS_PATH — 让 Playwright 装在默认位置
-        # (%LOCALAPPDATA%\ms-playwright, jbx-sandbox profile 下), 由 install/
-        # apply_sandbox_acl 对该路径授权, 不桥接、不重定向.
+        # TEMP/TMP 指向 jbx-sandbox profile 下的每沙箱隔离子目录
+        # (<profile>\AppData\Local\Temp\jiuwenbox\<sandbox_id>); profile 根目录
+        # 由 CreateProcessWithLogonW(LOGON_WITH_PROFILE) 加载, 这里用标准路径
+        # (C:\Users\jbx-sandbox; 同名残留 profile 会建 .000 后缀, 第一跳 token
+        # 还没拿到无法 API 解析, 用 env 已注入的 USERPROFILE 或标准名).
+        # 安装目录 ms-playwright 仍共用 (jbx-sandbox\AppData\Local\ms-playwright),
+        # 已装的 chromium 跨沙箱复用, 不重下. 不设 PLAYWRIGHT_BROWSERS_PATH.
         env = dict(env) if env else {}
-        win_tmp_dir = os.path.join(workspace, ".tmp")
+        _sandbox_sub = sandbox_id
+        # profile 根: 优先用 env 里已有的 USERPROFILE (调用方注入), 否则标准路径.
+        _profile_root = (env.get("USERPROFILE") or "").strip()
+        if not _profile_root:
+            _profile_root = os.path.join(
+                os.environ.get("SystemDrive", r"C:"), "Users", "jbx-sandbox",
+            )
+        win_tmp_dir = os.path.join(
+            _profile_root, "AppData", "Local", "Temp", "jiuwenbox", _sandbox_sub,
+        )
         try:
             os.makedirs(win_tmp_dir, exist_ok=True)
         except OSError as _e:
@@ -2983,6 +2994,11 @@ class ProcessRuntime(RuntimeAdapter):
             )
         env.setdefault("TEMP", win_tmp_dir)
         env.setdefault("TMP", win_tmp_dir)
+        # 补 profile 变量 (第一跳 runner env 缺这些, profile 加载只在不传 env
+        # block 时自动填; 我们传了 env block → 需显式补, 否则 child 继承不到).
+        env.setdefault("USERPROFILE", _profile_root)
+        env.setdefault("LOCALAPPDATA", os.path.join(_profile_root, "AppData", "Local"))
+        env.setdefault("APPDATA", os.path.join(_profile_root, "AppData", "Roaming"))
         logger.info(
             "[SandboxWin] %s sandbox-writable temp injected: TEMP=%s",
             sandbox_id, win_tmp_dir,

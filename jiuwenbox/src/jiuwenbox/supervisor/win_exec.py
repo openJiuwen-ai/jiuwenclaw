@@ -78,6 +78,68 @@ _log_sub_lock = _threading.Lock()
 _proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START
 _proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END
 
+# 本地落盘日志: runner 执行 exec 的过程日志直接写 jbx-sandbox profile 下,
+# 不依赖 control_port 长连回传 (回传链断/卡死时, 本地仍有完整过程日志可查).
+# 路径: C:\Users\jbx-sandbox\jiuwenbox-logs\<sandbox_id>\runner.log
+# (jbx-sandbox 对自己 profile 有完全控制权, 可写). runner_main 启动时初始化.
+_local_log_path: str | None = None
+_local_log_file = None  # file object
+_local_log_lock = _threading.Lock()
+
+
+def _init_local_log(sandbox_id: str) -> None:
+    """初始化本地落盘日志文件 (runner 启动时调一次).
+
+    runner 以 jbx-sandbox 身份跑, 其 profile 根 = C:\\Users\\jbx-sandbox (HOME).
+    日志写 <profile>\\jiuwenbox-logs\\<sandbox_id>\\runner.log. 失败则不落盘
+    (降级为只回传, 不影响主流程).
+    """
+    global _local_log_path, _local_log_file
+    import os as _os
+    try:
+        # runner env 可能缺 USERPROFILE/HOME (CreateProcessWithLogonW 传了 env block
+        # 不自动填 profile 变量), 多路兜底拿 jbx-sandbox profile 根:
+        # 1. env USERPROFILE (调用方注入); 2. get_sandbox_profile_dir() (API 拿真实路径,
+        # 处理 .000 后缀); 3. 标准路径 C:\Users\jbx-sandbox (最后兜底).
+        home = _os.environ.get("USERPROFILE") or ""
+        if not home or not _os.path.isdir(home):
+            try:
+                api_home = get_sandbox_profile_dir()
+                if api_home and _os.path.isdir(api_home):
+                    home = api_home
+            except Exception:  # noqa: BLE001
+                pass
+        if not home or not _os.path.isdir(home):
+            _sd = _os.environ.get("SystemDrive", r"C:")
+            home = _os.path.join(_sd, "Users", "jbx-sandbox")
+        if not _os.path.isdir(home):
+            return
+        log_dir = _os.path.join(home, "jiuwenbox-logs", sandbox_id)
+        _os.makedirs(log_dir, exist_ok=True)
+        path = _os.path.join(log_dir, "runner.log")
+        _local_log_path = path
+        _local_log_file = open(path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        _local_log_path = None
+        _local_log_file = None
+
+
+def _local_log(level: str, msg: str, exc: str | None = None) -> None:
+    """写一行本地日志 (带时间戳, 线程安全). best-effort, 不抛."""
+    import time as _time
+    if _local_log_file is None:
+        return
+    try:
+        ts = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime())
+        line = f"{ts} [{level}] {msg}"
+        if exc:
+            line += f"\n{exc}"
+        with _local_log_lock:
+            _local_log_file.write(line + "\n")
+            _local_log_file.flush()
+    except (OSError, ValueError):
+        pass
+
 
 def _push_log(level: str, msg: str, exc: str | None = None) -> None:
     """往所有日志订阅连接 push 一个 log 帧 (best-effort, 不抛错).
@@ -121,6 +183,8 @@ def _push_log(level: str, msg: str, exc: str | None = None) -> None:
             logger.info("[runner] %s", msg)
     except Exception:  # noqa: BLE001
         pass
+    # 落盘到本地日志文件 (不依赖回传链, control_port 断/卡死时仍可查过程).
+    _local_log(level, msg, exc)
 
 
 def _require_windows() -> None:
@@ -721,6 +785,56 @@ def _get_runner_primary_token() -> int:
     return int(h_token.value)
 
 
+# userenv.dll: GetUserProfileDirectoryW (拿 jbx-sandbox profile 路径).
+_userenv: ctypes.WinDLL | None = None
+
+
+def _get_userenv() -> ctypes.WinDLL:
+    """userenv.dll 的 GetUserProfileDirectoryW: 从 token 拿用户 profile 目录."""
+    global _userenv
+    if _userenv is None:
+        _userenv = ctypes.WinDLL("userenv", use_last_error=True)
+        _userenv.GetUserProfileDirectoryW.argtypes = [
+            wintypes.HANDLE,             # hToken
+            wintypes.LPWSTR,             # lpProfileDir
+            ctypes.POINTER(wintypes.DWORD),  # lpcchSize (in/out, WCHAR 数)
+        ]
+        _userenv.GetUserProfileDirectoryW.restype = wintypes.BOOL
+    return _userenv
+
+
+def get_sandbox_profile_dir() -> str | None:
+    """拿 jbx-sandbox 的 profile 目录 (如 C:\\Users\\jbx-sandbox).
+
+    用 runner primary token (jbx-sandbox 身份) 调 GetUserProfileDirectoryW,
+    返回 profile 根目录. 失败返回 None (调用方降级). 比 hardcode
+    C:\\Users\\jbx-sandbox 稳: 同名残留 profile 会建 .000 后缀, 路径不固定,
+    必须 API 拿真实路径. token 用完即关.
+    """
+    kernel32 = _get_kernel32()
+    try:
+        token = _get_runner_primary_token()
+    except OSError:
+        return None
+    try:
+        userenv = _get_userenv()
+        size = wintypes.DWORD(0)
+        # 第一次探 size (传 NULL buf, 返回所需 WCHAR 数含末尾 NUL).
+        userenv.GetUserProfileDirectoryW(wintypes.HANDLE(token), None, ctypes.byref(size))
+        if size.value == 0:
+            return None
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not userenv.GetUserProfileDirectoryW(
+            wintypes.HANDLE(token), buf, ctypes.byref(size),
+        ):
+            return None
+        return buf.value or None
+    except OSError:
+        return None
+    finally:
+        kernel32.CloseHandle(wintypes.HANDLE(token))
+
+
 def _create_process_as_user(
     restricted_token: int,
     command: list[str],
@@ -760,14 +874,38 @@ def _create_process_as_user(
         _val = os.environ.get(_var)
         if _val:
             env.setdefault(_var, _val)
-    # 沙箱可写临时区: 受限 token 写不了宿主 %TEMP% (C:\Users\liubuyu\AppData\
-    # Local\Temp), Playwright mkdtemp 会 EPERM. 把 TEMP/TMP 指向 sandbox
-    # workspace 下 .tmp (box-server 是 owner, 合成 SID ACL 允许受限 token 写).
-    # 其余 profile 路径 (LOCALAPPDATA/APPDATA/USERPROFILE/HOME) 不覆盖 —
-    # 让它们保持 jbx-sandbox 的默认值, Playwright 浏览器装在默认位置
-    # (%LOCALAPPDATA%\ms-playwright), 由 install/apply_sandbox_acl 对该路径授权,
-    # 不桥接、不重定向到共享目录.
-    if workspace:
+    # 沙箱可写临时区 + profile 变量补全.
+    # 第二跳 child env 来自 header (agent-core), 不含 jbx-sandbox profile 变量
+    # (LOCALAPPDATA/USERPROFILE/APPDATA/TEMP 全空, 实测 child 里这些变量为空,
+    # Playwright 仅靠 os.homedir() fallback 才装对路径). 这里用 runner token
+    # (jbx-sandbox 身份) 拿 profile 目录, 补全 profile 变量 + 把 TEMP 指向
+    # jbx-sandbox profile 下的每沙箱隔离子目录:
+    #   <profile>\AppData\Local\Temp\jiuwenbox\<sandbox_id>\
+    # 设计: 下载临时目录在 jbx-sandbox profile 下 (和安装目录 ms-playwright 同根);
+    # 每沙箱隔离子目录 (sandbox_id 取自 workspace 末段), 删沙箱时清理不串扰;
+    # 安装目录 ms-playwright 仍共用 (jbx-sandbox\AppData\Local\ms-playwright),
+    # 已装的 chromium 跨沙箱复用, 不重下.
+    # 降级: 拿不到 profile (非 win32 / token 失败) → 回落 workspace/.tmp (旧行为).
+    _sandbox_id = os.path.basename(workspace.rstrip("\\/")) if workspace else None
+    if _sandbox_id:
+        _profile_dir = get_sandbox_profile_dir()
+        if _profile_dir:
+            _child_tmp = os.path.join(
+                _profile_dir, "AppData", "Local", "Temp", "jiuwenbox", _sandbox_id,
+            )
+            try:
+                os.makedirs(_child_tmp, exist_ok=True)
+            except OSError:
+                _child_tmp = None
+            if _child_tmp:
+                env["TEMP"] = _child_tmp
+                env["TMP"] = _child_tmp
+                # 补全 profile 变量 (child 本该从 profile 继承, 但 header env 不带).
+                env.setdefault("USERPROFILE", _profile_dir)
+                env.setdefault("LOCALAPPDATA", os.path.join(_profile_dir, "AppData", "Local"))
+                env.setdefault("APPDATA", os.path.join(_profile_dir, "AppData", "Roaming"))
+    # 降级: 拿不到 profile → 回落 workspace/.tmp (旧行为, box-server owner 可写).
+    if "TEMP" not in env and workspace:
         _child_tmp = os.path.join(workspace, ".tmp")
         try:
             os.makedirs(_child_tmp, exist_ok=True)
@@ -775,7 +913,7 @@ def _create_process_as_user(
             pass
         env["TEMP"] = _child_tmp
         env["TMP"] = _child_tmp
-    else:
+    elif "TEMP" not in env:
         for _var in ("TEMP", "TMP"):
             _val = os.environ.get(_var)
             if _val:
@@ -920,8 +1058,12 @@ def runner_main(argv: list[str]) -> int:
         "runner 启动: sandbox_id=%s workspace=%s control_port=%s",
         args.sandbox_id, args.workspace, args.control_port,
     )
+    # 初始化本地落盘日志 (jbx-sandbox profile 下, 不依赖回传链).
+    # 必须在 _push_log 之前初始化, 之后所有 _push_log 自动落盘一份.
+    _init_local_log(args.sandbox_id)
     _push_log("INFO", f"runner 启动: sandbox_id={args.sandbox_id} "
-               f"workspace={args.workspace} control_port={args.control_port}")
+               f"workspace={args.workspace} control_port={args.control_port}"
+               f" local_log={_local_log_path}")
 
     # runner 由 CreateProcessWithLogonW + CREATE_NO_WINDOW 拉起, stderr 无落盘.
     # 任何早期异常 (尤其 _create_restricted_token) 会让 runner 静默退出,
@@ -1168,6 +1310,9 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             )
         finally:
             _get_kernel32().CloseHandle(wintypes.HANDLE(_self_token))
+        _push_log("INFO",
+                   f"exec child 已启动: pid={pid} cmd={command[:3] if command else []!r} "
+                   f"workdir={workdir} timeout_s={header.get('timeout')}")
         # runner 不再需要 child 端的写端/读端副本.
         kernel32.CloseHandle(child_in_read)
         kernel32.CloseHandle(child_out_write)
@@ -1183,16 +1328,47 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             kernel32.CloseHandle(child_in_write)
         else:
             kernel32.CloseHandle(child_in_write)
-        # 等待子进程退出, 再读 stdout. 顺序不能反: 若先 read 再 wait, child 崩溃
-        # (如 0xc0000142 STATUS_DLL_INIT_FAILED) 后其继承的 stdout 写端可能未
-        # 干净关闭 → pipe 不 EOF → runner read 阻塞 → control_port 无响应 →
-        # box-server 端 exec 超时 (timed out). 先 wait 让内核回收 child 持有的
-        # 所有 handle (含 stdout 写端), 再 drain stdout 能拿到 EOF.
-        # 用带超时的循环 wait 而非 INFINITE: 防 child stdout 写满 pipe (64KB) 后
-        # 阻塞在 write 等 runner 读 → 互相死锁. child 超时预算取调用方传的 timeout
-        # (box-server payload["timeout"], 单位秒, 如 playwright install 的 600s),
-        # 缺省 120s. 旧版硬编码 120000ms 不读 caller timeout → bash 工具传 600s
-        # 也被 120s 强杀, 导致长命令被误杀.
+        # 等待子进程退出 + 后台 drain stdout pipe (并行, 防死锁).
+        # 旧逻辑: 先 wait 进程退出再读 stdout. 致命缺陷: child (如 npx playwright
+        # install) 写大量进度到 stdout pipe, pipe 64KB 写满后 child 阻塞在 write
+        # 等 reader 读; 但 runner 在 wait (不读) → child 永不退出 → runner 永远
+        # 等不到 → 死锁, 卡满 timeout 强杀 (实测: 沙箱内 bash -lc npx install 必现,
+        # 但 stdout 重定向到文件则正常退出 — 证明是 pipe 写满死锁, 非 bash/npx 问题).
+        # 修复: 起后台线程持续 drain pipe (child 写多少读多少, pipe 不满, child 不
+        # 阻塞), 主线程同时 wait 进程. 进程退出后 join 后台线程拿完整 stdout.
+        import msvcrt  # type: ignore[import-not-found]
+        read_fd = msvcrt.open_osfhandle(
+            int(child_out_read.value), os.O_RDONLY | os.O_BINARY,
+        )
+        out_buf = bytearray()
+        _drain_exc: list = []
+
+        def _drain_pipe() -> None:
+            """后台线程: 持续读 stdout pipe 直到 EOF (写端全关) 或出错.
+
+            阻塞式 os.read: 有数据就读, 无数据阻塞等; 写端全关时 read 返回 b'' (EOF).
+            child 正常退出后其所有 handle (含 pipe 写端) 被内核回收 → pipe EOF → 本
+            线程自然结束. 读到的数据存 out_buf (线程间共享, GIL 保护 list/bytearray
+            append 原子). 超过 MAX_STDOUT_BYTES 截断后停止读 (防恶意对端撑爆内存).
+            """
+            try:
+                while True:
+                    try:
+                        chunk = os.read(read_fd, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    out_buf.extend(chunk)
+                    if len(out_buf) > MAX_STDOUT_BYTES:
+                        del out_buf[MAX_STDOUT_BYTES:]
+                        break
+            except Exception as exc:  # noqa: BLE001
+                _drain_exc.append(exc)
+
+        _drain_thread = _threading.Thread(target=_drain_pipe, name="stdout-drain", daemon=True)
+        _drain_thread.start()
+
         INFINITE = 0xFFFFFFFF
         WAIT_TIMEOUT_MS = 500
         deadline_waited_ms = 0
@@ -1205,6 +1381,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             _caller_timeout_s = 120
         WAIT_BUDGET_MS = _caller_timeout_s * 1000
         _child_killed = False  # child 是否被超时强杀 (强杀后 stdout pipe 可能不 EOF)
+        _last_heartbeat_ms = 0
         while True:
             result = kernel32.WaitForSingleObject(
                 wintypes.HANDLE(proc_handle), WAIT_TIMEOUT_MS,
@@ -1212,77 +1389,41 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             if result == 0:  # WAIT_OBJECT_0: child 已退出
                 break
             deadline_waited_ms += WAIT_TIMEOUT_MS
+            # 每 30s 打一次心跳, 记录 child 仍在跑.
+            if deadline_waited_ms - _last_heartbeat_ms >= 30000:
+                _last_heartbeat_ms = deadline_waited_ms
+                _push_log("INFO",
+                          f"exec child 等待中: pid={pid} waited={deadline_waited_ms}ms/"
+                          f"{WAIT_BUDGET_MS}ms stdout_buf={len(out_buf)}B "
+                          f"cmd={command[:3] if command else []!r}")
             if deadline_waited_ms >= WAIT_BUDGET_MS:
-                # child 长时间不退出 (可能 stdout 写满死锁, 或 child 卡住),
-                # 强杀避免 runner 永久挂起. 后续 exec 还能继续 (单连接不杀 runner).
+                # child 长时间不退出, 强杀. 后续 exec 还能继续 (单连接不杀 runner).
                 kernel32.TerminateProcess(wintypes.HANDLE(proc_handle), 1)
                 _child_killed = True
                 _push_log("WARNING",
                           f"exec child 超时未退出 ({WAIT_BUDGET_MS}ms) 强杀, "
                           f"cmd={command[:3] if command else []!r}")
                 break
-        # 读取子进程 stdout 全部输出.
-        # 用 os.fdopen 包装 child_out_read handle -> 文件对象.
-        import msvcrt  # type: ignore[import-not-found]
-        read_fd = msvcrt.open_osfhandle(
-            int(child_out_read.value), os.O_RDONLY | os.O_BINARY,
-        )
-        out_buf = bytearray()
-        # 强杀后的 stdout 读取必须带超时, 不能阻塞等 EOF: TerminateProcess 只杀
-        # 直接 child (bash), 但 child 起的孙进程 (node/npm/下载子进程) 继承了
-        # stdout pipe 写端仍持有 → pipe 不 EOF → fh.read 永久阻塞 → runner accept
-        # 循环卡死 → 后续所有 exec IPC 全 timeout (实测: npx playwright install
-        # 超时强杀后, 整个 sandbox 后续 bash 全 timed out + WinError 10053).
-        # 正常退出 (child 自己关闭写端) 则 pipe 会 EOF, 用阻塞读完整输出.
-        # 强杀后用 PeekNamedPipe 轮询 + 总期限读, 超时即放弃残缺 stdout 跳出, 不卡 runner.
-        # (Windows select 只支持 socket, pipe 用 win32pipe.PeekNamedPipe 探测可读字节数.)
-        if _child_killed:
-            import time as _time
-            import win32pipe  # type: ignore[import-not-found]
-            _drain_deadline = _time.monotonic() + 5.0
-            _read_handle = int(child_out_read.value)
-            while True:
-                if _time.monotonic() >= _drain_deadline:
-                    _push_log("DEBUG",
-                              f"exec stdout 读超时跳过 (child 强杀后 pipe 不 EOF), "
-                              f"cmd={command[:3] if command else []!r}")
-                    break
-                try:
-                    _avail, _ = win32pipe.PeekNamedPipe(_read_handle, 0)
-                except Exception:
-                    # pipe 已无效 (handle 关闭等): 视为 EOF.
-                    break
-                if _avail > 0:
-                    try:
-                        chunk = os.read(read_fd, min(_avail, 65536))
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    out_buf.extend(chunk)
-                    if len(out_buf) > MAX_STDOUT_BYTES:
-                        out_buf = out_buf[:MAX_STDOUT_BYTES]
-                        break
-                else:
-                    # 暂无数据, 短睡再轮询 (PeekNamedPipe 无数据时也可能因写端全关
-                    # 而后续返回 EOF, 但孙进程仍持写端时永远不 EOF — 靠 deadline 兜底).
-                    _time.sleep(0.1)
-            # 强杀分支用的是裸 os.read(fd), fdopen 分支会自动关 fd; 这里显式关
-            # 避免 osfhandle→fd 映射泄漏 (底层 handle 由 finally CloseHandle 关).
+        # 进程已退出 (正常或强杀). 等 drain 线程结束 (最多 5s, 防孙进程持写端不 EOF).
+        _drain_thread.join(timeout=5.0)
+        if _drain_thread.is_alive():
+            # drain 还活着 = pipe 不 EOF (孙进程仍持写端). 放弃读剩余, 关 fd 强制 drain 退出.
+            _push_log("DEBUG",
+                      f"exec stdout drain 超时未结束 (孙进程持 pipe 写端), "
+                      f"cmd={command[:3] if command else []!r}")
             try:
                 os.close(read_fd)
             except OSError:
                 pass
         else:
-            with os.fdopen(read_fd, "rb") as fh:
-                while True:
-                    chunk = fh.read(65536)
-                    if not chunk:
-                        break
-                    out_buf.extend(chunk)
-                    if len(out_buf) > MAX_STDOUT_BYTES:
-                        out_buf = out_buf[:MAX_STDOUT_BYTES]
-                        break
+            # drain 已正常结束 (EOF), 但 fdopen/裸 read 分支可能没关 fd — 显式关防泄漏.
+            # 注意: drain 线程里 os.read 失败/EOF 后 fd 仍开着, 这里统一关.
+            try:
+                os.close(read_fd)
+            except OSError:
+                pass
+        if _drain_exc:
+            _push_log("WARNING", f"exec stdout drain 线程异常: {_drain_exc[0]}")
         exit_code = wintypes.DWORD()
         kernel32.GetExitCodeProcess(
             wintypes.HANDLE(proc_handle), ctypes.byref(exit_code),
@@ -1290,6 +1431,9 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         kernel32.CloseHandle(wintypes.HANDLE(proc_handle))
         ec = int(exit_code.value)
         out_text = bytes(out_buf).decode("utf-8", errors="replace")
+        _push_log("INFO",
+                   f"exec child 结束: pid={pid} exit_code={ec} killed={_child_killed} "
+                   f"stdout_len={len(out_text)} cmd={command[:3] if command else []!r}")
         _send_response(stream, {
             "ok": True,
             "exit_code": ec,
