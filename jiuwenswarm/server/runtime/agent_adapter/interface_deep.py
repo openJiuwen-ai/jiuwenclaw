@@ -446,10 +446,11 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
 # at this scale is directly visible in time-to-first-token.
 _SLOW_RUNTIME_CONFIG_MS = 50.0
 
-# Total rail-construction cost above which the per-rail breakdown is worth an
-# INFO line. Rails are built once per agent, so the bar sits higher than the
-# per-turn one: this is cold-start budget, not time-to-first-token.
-_SLOW_RAIL_BUILD_MS = 100.0
+# Rail construction reports unconditionally: it happens once per agent, not per
+# turn, so a line per cold start is not noise, and cold start is precisely the
+# budget nobody can otherwise account for. The earlier 100 ms bar was above the
+# real cost, which meant the breakdown never appeared at INFO on a normal run.
+_SLOW_RAIL_BUILD_MS = 0.0
 
 # Profiling escape hatch: overrides every stage-breakdown threshold, in
 # milliseconds. Set it to 0 to report all breakdowns at INFO. The thresholds
@@ -485,6 +486,73 @@ def _stage_breakdown_logger(total_ms: float, threshold_ms: float) -> Callable[..
                 override,
             )
     return server_logger.info if total_ms >= threshold_ms else server_logger.debug
+
+
+@dataclass(frozen=True)
+class _StableGitFacts:
+    """Git facts about a project that do not change between turns of a chat.
+
+    Attributes:
+        is_repo: Whether the directory is inside a git work tree.
+        user_name: ``user.name`` from git config; empty when unset.
+        main_branch: First of origin/main, origin/master, main, master that
+            resolves; empty when none do.
+    """
+
+    is_repo: bool
+    user_name: str
+    main_branch: str
+
+
+_STABLE_GIT_FACTS: dict[str, _StableGitFacts] = {}
+_STABLE_GIT_FACTS_LOCK = threading.Lock()
+
+
+def _resolve_stable_git_facts(
+    git_bin: str,
+    project_dir: str,
+    run_git: Callable[[list[str]], str],
+) -> _StableGitFacts:
+    """Resolve the per-project git facts once and reuse them afterwards.
+
+    ``_write_runtime_state`` runs on every turn and used to spawn up to nine git
+    subprocesses each time. Six of them answered questions whose answers cannot
+    change while a conversation is in progress — whether the directory is a repo,
+    who the committer is, and which of the four candidate names the main branch
+    goes by — so they are resolved once per project directory. Branch, status and
+    recent commits stay live, because those are exactly what changes while the
+    user works.
+
+    Args:
+        git_bin: Resolved git executable, part of the cache key so a toolchain
+            switch is not served a stale answer.
+        project_dir: Directory the git commands run in.
+        run_git: Callable running git in ``project_dir`` and returning stripped
+            stdout, or an empty string on failure.
+
+    Returns:
+        The cached facts for this project directory.
+    """
+    cache_key = f"{git_bin}\0{project_dir}"
+    with _STABLE_GIT_FACTS_LOCK:
+        cached = _STABLE_GIT_FACTS.get(cache_key)
+    if cached is not None:
+        return cached
+
+    is_repo = run_git(["rev-parse", "--is-inside-work-tree"]) == "true"
+    user_name = ""
+    main_branch = ""
+    if is_repo:
+        user_name = run_git(["config", "user.name"])
+        for candidate in ("origin/main", "origin/master", "main", "master"):
+            if run_git(["rev-parse", "--verify", "--quiet", candidate]):
+                main_branch = candidate
+                break
+
+    facts = _StableGitFacts(is_repo=is_repo, user_name=user_name, main_branch=main_branch)
+    with _STABLE_GIT_FACTS_LOCK:
+        _STABLE_GIT_FACTS[cache_key] = facts
+    return facts
 
 
 @dataclass
@@ -1851,18 +1919,16 @@ class JiuWenSwarmDeepAdapter:
                     return result.stdout.strip() if result.returncode == 0 else ""
 
                 try:
-                    inside = _run_git(["rev-parse", "--is-inside-work-tree"])
-                    if inside == "true":
+                    stable_facts = _resolve_stable_git_facts(git_bin, project_dir, _run_git)
+                    if stable_facts.is_repo:
+                        git_user = stable_facts.user_name
+                        git_main_branch = stable_facts.main_branch
+                        # Re-read every turn: these are what the user changes
+                        # while talking to the agent.
                         git_branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"]) or "HEAD"
                         git_status_lines = _run_git(["status", "--short"]).splitlines()
                         git_status = "\n".join(git_status_lines[:50])
                         git_recent_commits = _run_git(["log", "--oneline", "-5"])
-                        git_user = _run_git(["config", "user.name"])
-
-                        for candidate in ("origin/main", "origin/master", "main", "master"):
-                            if _run_git(["rev-parse", "--verify", "--quiet", candidate]):
-                                git_main_branch = candidate
-                                break
                 except Exception:
                     pass
 
