@@ -153,6 +153,7 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
 from jiuwenswarm.common.config import get_model_names
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
+from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool, unregister_tool
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
@@ -400,6 +401,12 @@ async def _get_persistent_checkpointer_lock() -> asyncio.Lock:
             _PERSISTENT_CHECKPOINTER_LOCK = asyncio.Lock()
             _PERSISTENT_CHECKPOINTER_LOCK_LOOP = current
     return _PERSISTENT_CHECKPOINTER_LOCK
+
+# Persistence identity of the single-agent card. It is the entity segment of
+# every checkpointer key ("{session_id}:agent:{card_id}:..."), so it must stay
+# constant across restarts; tool ownership is scoped separately, see
+# ``JiuWenSwarmDeepAdapter._tool_owner_id``.
+_AGENT_CARD_ID = "jiuwenswarm"
 
 _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
     {
@@ -2292,6 +2299,18 @@ class JiuWenSwarmDeepAdapter:
     ) -> tuple[list[Any], bool]:
         """统一处理一组工具的热更新：启用时注册，禁用时移除。
 
+        Ownership is read off each card (``ToolCard.stateless``), the same way
+        ``_get_tool_cards`` registers the group on the create path, so a reload
+        cannot re-register a group under a different id than it was built with.
+        A group that must stay shared declares it inside its ``create_fn``.
+
+        Args:
+            current_tools: Currently registered instances of this group.
+            registered: Whether the group is registered right now.
+            enabled: Whether config wants the group enabled.
+            create_fn: Builds fresh instances when the group turns on.
+            warn_label: Group name used in the failure log line.
+
         Returns:
             (updated_tools, updated_registered)
         """
@@ -2303,8 +2322,9 @@ class JiuWenSwarmDeepAdapter:
         if not registered:
             try:
                 new_tools = create_fn()
+                owner_id = self._tool_owner_id()
                 for tool in new_tools:
-                    Runner.resource_mgr.add_tool(tool)
+                    register_tool(tool, owner_id)
                     self._append_tool_card(tool.card)
                     if self._instance is not None and hasattr(self._instance, "ability_manager"):
                         self._instance.ability_manager.add(tool.card)
@@ -2315,12 +2335,17 @@ class JiuWenSwarmDeepAdapter:
         return current_tools, registered
 
     def _remove_registered_tools(self, tools: list[Any]) -> None:
-        """Remove tool instances from ability manager and resource manager."""
+        """Remove tool instances from ability manager and resource manager.
+
+        Only agent-owned registrations leave the process-global resource
+        manager; a shared instance is dropped from this agent's ability manager
+        alone, because other adapters may still be running on it.
+        """
         if not tools:
             return
         for tool in tools:
             try:
-                Runner.resource_mgr.remove_tool(tool.card.id)
+                unregister_tool(tool)
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] remove tool failed: %s",
@@ -2416,7 +2441,12 @@ class JiuWenSwarmDeepAdapter:
                 )
 
     def _create_skill_retrieval_tools(self) -> list[Any]:
-        """Create Agentic skill retrieval tools using the current visible-skill provider."""
+        """Create Agentic skill retrieval tools using the current visible-skill provider.
+
+        Declared shared: skill retrieval reads a process-wide skill index, and
+        splitting it per session adapter would give each one its own view of a
+        catalogue that is meant to be common.
+        """
         if not is_skill_retrieval_enabled():
             logger.info("[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit skipped: disabled")
             return []
@@ -2424,7 +2454,7 @@ class JiuWenSwarmDeepAdapter:
             manager=self._skill_manager,
             visible_skill_names=self._visible_skill_names_for_list_skill,
         )
-        tools = skill_retrieval_toolkit.get_tools()
+        tools = mark_stateless(skill_retrieval_toolkit.get_tools())
         logger.info(
             "[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit built: tools=%s",
             [tool.card.name for tool in tools],
@@ -2499,7 +2529,9 @@ class JiuWenSwarmDeepAdapter:
 
     def _sync_multimodal_tools_for_runtime(self) -> None:
         """Sync multimodal tool registration after config reload."""
-        agent_id = self._instance.card.id if self._instance else None
+        # The owner id, not ``card.id``: these instances are agent-owned, and a
+        # reload must rebuild them under the same owner the create path used.
+        agent_id = self._tool_owner_id()
         self._vision_tools, self._vision_tools_registered = self._sync_tool_group(
             current_tools=self._vision_tools,
             registered=self._vision_tools_registered,
@@ -2529,24 +2561,25 @@ class JiuWenSwarmDeepAdapter:
         )
 
         _, self._video_tool_registered = self._sync_tool_group(
-            current_tools=[video_understanding],
+            current_tools=mark_stateless([video_understanding]),
             registered=self._video_tool_registered,
             enabled=bool(self._video_model_config),
-            create_fn=lambda: [video_understanding],
+            create_fn=lambda: mark_stateless([video_understanding]),
             warn_label="video tool",
         )
 
         _, self._image_gen_tool_registered = self._sync_tool_group(
-            current_tools=[generate_image],
+            current_tools=mark_stateless([generate_image]),
             registered=self._image_gen_tool_registered,
             enabled=bool(self._image_gen_model_config),
-            create_fn=lambda: [generate_image],
+            create_fn=lambda: mark_stateless([generate_image]),
             warn_label="generate_image tool",
         )
 
     def _sync_paid_search_tool_for_runtime(self) -> None:
         """Sync paid-search tool registration after config reload."""
-        agent_id = self._instance.card.id if self._instance else None
+        # The owner id, not ``card.id``; see ``_sync_multimodal_tools_for_runtime``.
+        agent_id = self._tool_owner_id()
         tools, self._paid_search_registered = self._sync_tool_group(
             current_tools=[self._paid_search_tool] if self._paid_search_tool else [],
             registered=self._paid_search_registered,
@@ -2574,7 +2607,7 @@ class JiuWenSwarmDeepAdapter:
             current_tools=self._symphony_tools,
             registered=self._symphony_tools_registered,
             enabled=enabled,
-            create_fn=lambda: SymphonyToolkit().get_tools(config_base),
+            create_fn=lambda: mark_stateless(SymphonyToolkit().get_tools(config_base)),
             warn_label="symphony tools",
         )
 
@@ -4324,6 +4357,7 @@ class JiuWenSwarmDeepAdapter:
         return DeepAgentConfig(
             model=model,
             card=agent_card,
+            tool_owner_id=self._tool_owner_id(),
             system_prompt=build_agent_identity_prompt(
                 language=self._resolve_prompt_language(),
             ),
@@ -4428,13 +4462,80 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._permission_rail)
         return rails_list
 
+    def _tool_owner_id(self) -> str:
+        """Return the owner id qualifying this adapter's tool registrations.
+
+        ``AgentCard.id`` is a persistence identity shared by every adapter, so
+        using it as the tool owner made concurrent sessions register under the
+        same ids and silently overwrite each other's instances. Scoping
+        ownership by session keeps them apart and lets
+        ``AbilityManager.teardown_tools`` reclaim exactly this adapter's share
+        on cleanup, while checkpointer keys keep using the stable card id.
+
+        Session ids come from clients, so the two kinds of owner live in
+        separate namespaces rather than sharing one flat suffix: without the
+        ``s`` marker a session literally named "root" would produce the root
+        adapter's owner id and the two would overwrite each other's tools, which
+        is the very collision this id exists to prevent.
+
+        Returns:
+            Owner id for this adapter: ``"<card id>_s_<session>"`` for a
+            session-scoped adapter, ``"<card id>_root"`` for the root adapter.
+        """
+        if self._is_session_scoped_adapter:
+            return f"{_AGENT_CARD_ID}_s_{self._session_adapter_key(self._parent_session_id)}"
+        return f"{_AGENT_CARD_ID}_root"
+
+    @staticmethod
+    def _register_shared_tool(tool: Any) -> None:
+        """Declare a tool instance shared across adapters, then register it.
+
+        Shared here means one instance serves every adapter in the process: the
+        bare id is kept and a repeated registration is an idempotent no-op, so
+        the first registrant wins instead of adapters racing to replace each
+        other. Two kinds of tool take this path — module-level ``@tool``
+        singletons, and toolkits whose backing manager is deliberately
+        process-wide (skills, symphony), where per-session instances would split
+        state that is meant to be shared.
+
+        Args:
+            tool: Tool instance to share process-wide.
+        """
+        mark_stateless([tool])
+        register_tool(tool, None)
+
+    def _register_agent_owned_tool(self, tool: Any, owner_id: str) -> None:
+        """Register a tool instance owned exclusively by this adapter's agent.
+
+        ``_get_tool_cards`` runs before ``create_deep_agent``, so there is no
+        AbilityManager to route through yet; :func:`register_tool` applies the
+        contract it would have applied, which keeps two things true: rebuilding
+        an agent rebinds the id to the fresh instance instead of failing as a
+        duplicate, and the registration stays reclaimable by
+        ``AbilityManager.teardown_tools`` on cleanup.
+
+        A card that already declares itself shared wins over the call site: the
+        two must agree or teardown would look for an id that was never
+        registered, so the declaration on the card is the one that counts.
+
+        Args:
+            tool: Per-agent tool instance to register.
+            owner_id: Owner id that this adapter's agent registers under.
+        """
+        if getattr(tool.card, "stateless", False):
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] tool %s is declared shared; registering it as shared"
+                " despite the agent-owned call site",
+                tool.card.name,
+            )
+        register_tool(tool, owner_id)
+
     async def _get_tool_cards(self, agent_id: str):
         """Get tool cards."""
         tool_cards = []
 
         for wtool in [wiki_ingest, wiki_query, wiki_lint]:
-            if not Runner.resource_mgr.get_tool(wtool.card.id):
-                Runner.resource_mgr.add_tool(wtool)
+            self._register_shared_tool(wtool)
             tool_cards.append(wtool.card)
 
         # 付费搜索工具：有任意一个付费 key 就注册
@@ -4442,13 +4543,13 @@ class JiuWenSwarmDeepAdapter:
             self._paid_search_tool = WebPaidSearchTool(
                 language=self._resolve_runtime_language(), agent_id=agent_id
             )
-            Runner.resource_mgr.add_tool(self._paid_search_tool)
+            self._register_agent_owned_tool(self._paid_search_tool, agent_id)
             tool_cards.append(self._paid_search_tool.card)
             self._paid_search_registered = True
 
         for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
             tool_instance = tool_cls(agent_id=agent_id)
-            Runner.resource_mgr.add_tool(tool_instance)
+            self._register_agent_owned_tool(tool_instance, agent_id)
             tool_cards.append(tool_instance.card)
 
         self._vision_tools = []
@@ -4460,7 +4561,7 @@ class JiuWenSwarmDeepAdapter:
                     vision_model_config=self._vision_model_config,
                     agent_id=agent_id,
                 ):
-                    Runner.resource_mgr.add_tool(tool)
+                    self._register_agent_owned_tool(tool, agent_id)
                     tool_cards.append(tool.card)
                     self._vision_tools.append(tool)
                 self._vision_tools_registered = bool(self._vision_tools)
@@ -4476,7 +4577,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             self._audio_tools = self._iter_runtime_audio_tools(agent_id)
             for tool in self._audio_tools:
-                Runner.resource_mgr.add_tool(tool)
+                self._register_agent_owned_tool(tool, agent_id)
                 tool_cards.append(tool.card)
             self._audio_tools_registered = bool(self._audio_tools)
         except Exception as exc:
@@ -4489,7 +4590,7 @@ class JiuWenSwarmDeepAdapter:
         self._video_tool_registered = False
         if self._video_model_config:
             try:
-                Runner.resource_mgr.add_tool(video_understanding)
+                self._register_shared_tool(video_understanding)
                 tool_cards.append(video_understanding.card)
                 self._video_tool_registered = True
             except Exception as exc:
@@ -4502,7 +4603,7 @@ class JiuWenSwarmDeepAdapter:
         self._image_gen_tool_registered = False
         if self._image_gen_model_config:
             try:
-                Runner.resource_mgr.add_tool(generate_image)
+                self._register_shared_tool(generate_image)
                 tool_cards.append(generate_image.card)
                 self._image_gen_tool_registered = True
             except Exception as exc:
@@ -4548,7 +4649,7 @@ class JiuWenSwarmDeepAdapter:
             ]
             try:
                 for xt in _xiaoyi_tools:
-                    Runner.resource_mgr.add_tool(xt)
+                    self._register_shared_tool(xt)
                     tool_cards.append(xt.card)
                 self._xiaoyi_phone_tools_registered = True
                 logger.info(
@@ -4563,8 +4664,7 @@ class JiuWenSwarmDeepAdapter:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
             skill_tool_names: list[str] = []
             for tool in skill_toolkit.get_tools():
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
+                self._register_shared_tool(tool)
                 tool_cards.append(tool.card)
                 skill_tool_names.append(tool.card.name)
             logger.info(
@@ -4579,8 +4679,7 @@ class JiuWenSwarmDeepAdapter:
                 self._skill_retrieval_tools = self._create_skill_retrieval_tools()
                 skill_retrieval_tool_names: list[str] = []
                 for tool in self._skill_retrieval_tools:
-                    if not Runner.resource_mgr.get_tool(tool.card.id):
-                        Runner.resource_mgr.add_tool(tool)
+                    self._register_shared_tool(tool)
                     tool_cards.append(tool.card)
                     skill_retrieval_tool_names.append(tool.card.name)
                 self._skill_retrieval_tools_registered = bool(self._skill_retrieval_tools)
@@ -4602,8 +4701,7 @@ class JiuWenSwarmDeepAdapter:
             symphony_tool_names: list[str] = []
             symphony_tools = symphony_toolkit.get_tools(config_base)
             for tool in symphony_tools:
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
+                self._register_shared_tool(tool)
                 tool_cards.append(tool.card)
                 symphony_tool_names.append(tool.card.name)
             self._symphony_tools = list(symphony_tools)
@@ -4624,8 +4722,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             acp_cfg = get_config().get("acp_agents")
             if isinstance(acp_cfg, dict) and acp_cfg:
-                if not Runner.resource_mgr.get_tool(acp_chat.card.id):
-                    Runner.resource_mgr.add_tool(acp_chat)
+                self._register_shared_tool(acp_chat)
                 tool_cards.append(acp_chat.card)
                 logger.info("[JiuWenSwarmDeepAdapter] acp_chat tool registered")
         except Exception as exc:
@@ -4635,10 +4732,9 @@ class JiuWenSwarmDeepAdapter:
 
     def _build_cron_tools(self) -> list[Any]:
         """Build cron tools from the shared runtime bridge."""
-        agent_id = self._instance.card.id if self._instance else None
         return self._cron_runtime.build_tools(
             context=self._runtime_cron_tool_context,
-            agent_id=agent_id,
+            agent_id=self._tool_owner_id(),
             language=self._resolve_runtime_language(),
         )
 
@@ -4738,9 +4834,9 @@ class JiuWenSwarmDeepAdapter:
         model = self._create_model(config_base)
         if self._is_session_scoped_adapter:
             await self._try_init_a2x_client(config_base)
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
+        agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
 
-        tool_cards = await self._get_tool_cards(agent_card.id)
+        tool_cards = await self._get_tool_cards(self._tool_owner_id())
         self._tool_cards = tool_cards
         await asyncio.sleep(0)
 
@@ -4761,6 +4857,7 @@ class JiuWenSwarmDeepAdapter:
         common_kwargs = dict(
             model=model,
             card=agent_card,
+            tool_owner_id=self._tool_owner_id(),
             system_prompt=build_agent_identity_prompt(
                 language=self._resolve_prompt_language(),
             ),
@@ -5083,7 +5180,7 @@ class JiuWenSwarmDeepAdapter:
             await self._try_init_a2x_client(config_base, reload=True)
             self._sync_a2x_runtime_state()
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
+        agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
         self._sync_multimodal_tools_for_runtime()
         self._sync_paid_search_tool_for_runtime()
         self._sync_symphony_tools_for_runtime(config_base)
@@ -5409,8 +5506,7 @@ class JiuWenSwarmDeepAdapter:
                         if getattr(existing, "name", "") in _CRON_TOOL_NAMES:
                             self._instance.ability_manager.remove(existing.name)
                     for cron_tool in cron_tools:
-                        if not Runner.resource_mgr.get_tool(cron_tool.card.id):
-                            Runner.resource_mgr.add_tool(cron_tool)
+                        self._register_agent_owned_tool(cron_tool, self._tool_owner_id())
                         self._instance.ability_manager.add(cron_tool.card)
                     logger.info("[JiuWenSwarmDeepAdapter] Cron tools registered successfully")
             except Exception as exc:
@@ -5443,7 +5539,7 @@ class JiuWenSwarmDeepAdapter:
                     metadata=metadata_for_tool,
                 )
                 for sf_tool in self._send_file_toolkit.get_tools():
-                    Runner.resource_mgr.add_tool(sf_tool)
+                    self._register_agent_owned_tool(sf_tool, self._tool_owner_id())
                     self._instance.ability_manager.add(sf_tool.card)
             else:
                 self._send_file_toolkit.update_runtime_context(
@@ -5475,7 +5571,10 @@ class JiuWenSwarmDeepAdapter:
                     self._instance.ability_manager.remove(existing.name)
         for existing in list(self._instance.ability_manager.list() or []):
             if getattr(existing, "name", "") in acp_tool_names:
-                self._instance.ability_manager.remove(existing.name)
+                # ``remove_ability`` (not ``remove``) so the previous request's
+                # instance also leaves the process-global resource manager
+                # instead of piling up under a dead id.
+                self._instance.ability_manager.remove_ability(existing.name)
 
         fs_enabled, terminal_enabled = self._acp_runtime_tools_enabled(request_metadata)
         has_runtime_capability = fs_enabled or terminal_enabled
@@ -5492,7 +5591,7 @@ class JiuWenSwarmDeepAdapter:
                         continue
                 elif not terminal_enabled:
                     continue
-                Runner.resource_mgr.add_tool(tool)
+                self._register_agent_owned_tool(tool, self._tool_owner_id())
                 self._instance.ability_manager.add(tool.card)
 
         if channel_id == "acp":

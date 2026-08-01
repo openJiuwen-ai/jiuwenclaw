@@ -102,7 +102,14 @@ class _FakeResourceManager:
         self.added: list[str] = []
         self.removed: list[str] = []
 
-    def add_tool(self, tool: SimpleNamespace) -> None:
+    def add_tool(
+        self,
+        tool: SimpleNamespace,
+        *,
+        tag: object | None = None,
+        refresh: bool = False,
+        skip_if_exists: bool = False,
+    ) -> None:
         self.added.append(tool.card.name)
 
     def remove_tool(self, tool_id: str) -> None:
@@ -388,6 +395,7 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
     fake_instance = _FakeRuntimeInstance()
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = fake_instance
+    adapter._is_session_scoped_adapter = False
     adapter._tool_cards = []
     adapter._symphony_tools = []
     adapter._symphony_tools_registered = False
@@ -431,12 +439,15 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
     assert adapter._symphony_tools == []
     assert adapter._symphony_tools_registered is False
     assert adapter._tool_cards == []
-    assert fake_resource.removed == [
+    # Symphony tools are shared across adapters, so disabling them here detaches
+    # them from this agent only; the process-global registration stays for any
+    # sibling adapter still running on it.
+    assert fake_resource.removed == []
+    assert fake_instance.ability_manager.removed == [
         "symphony_read_score",
         "symphony_refresh_score",
         "symphony_compose_score",
     ]
-    assert fake_instance.ability_manager.removed == fake_resource.removed
 
 
 @pytest.mark.asyncio

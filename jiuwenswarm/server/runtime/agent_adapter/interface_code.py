@@ -46,6 +46,7 @@ from openjiuwen.harness.workspace.workspace import Workspace
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
+    _AGENT_CARD_ID,
     _CRON_TOOL_CHANNEL_ID,
     _agent_def_to_subagent_config,
     _deep_agent_kv_cache_affinity_config,
@@ -69,6 +70,7 @@ from jiuwenswarm.agents.harness.common.tools import (
 )
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
     resolve_project_coding_memory_workspace_path,
@@ -457,9 +459,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return
 
         model = self._create_model(config_base)
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
+        agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
 
-        tool_cards = await self._get_tool_cards(agent_card.id)
+        tool_cards = await self._get_tool_cards(self._tool_owner_id())
         self._tool_cards = tool_cards
 
         # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
@@ -489,6 +491,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._instance = create_deep_agent(
             model=model,
             card=agent_card,
+            tool_owner_id=self._tool_owner_id(),
             system_prompt=build_code_system_prompt(),
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
@@ -1248,8 +1251,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _set_user_todo_workspace(self._agent_workspace_dir)
             _set_user_todo_channel_id(_CRON_TOOL_CHANNEL_ID.get())
             for tool in _get_user_todo_tools():
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
+                self._register_shared_tool(tool)
                 self._instance.ability_manager.add(tool.card)
         except ImportError:
             pass
@@ -1260,8 +1262,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         return self.build_code_tool_cards(agent_id)
 
     def build_code_tool_cards(self, agent_id: str) -> list[Any]:
-        """Get tool cards for code mode — from config.yaml::modes.code.tools."""
+        """Get tool cards for code mode — from config.yaml::modes.code.tools.
 
+        ``modes.code.tools`` is an open extension point, so ownership is read
+        off each card rather than guessed from the build func: a card that does
+        not declare itself shared is treated as agent-owned, which is the safe
+        default (a shared instance registered per agent costs an extra object;
+        an agent-owned instance registered as shared would pin the first
+        session's state for the whole process).
+
+        Args:
+            agent_id: Owner id this adapter registers its own instances under.
+
+        Returns:
+            The cards of every successfully registered configured tool.
+        """
         tool_cards = []
 
         config_base = get_config()
@@ -1278,12 +1293,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 continue
             if isinstance(result, list):
                 for tool_instance in result:
-                    if not Runner.resource_mgr.get_tool(tool_instance.card.id):
-                        Runner.resource_mgr.add_tool(tool_instance)
+                    register_tool(tool_instance, agent_id)
                     tool_cards.append(tool_instance.card)
             else:
-                if not Runner.resource_mgr.get_tool(result.card.id):
-                    Runner.resource_mgr.add_tool(result)
+                register_tool(result, agent_id)
                 tool_cards.append(result.card)
             logger.info(
                 "[JiuwenSwarmCodeAdapter] Tool %s registered from config",
@@ -1350,14 +1363,20 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return None
 
     def _build_skill_toolkit(self, agent_id: str) -> list[Any] | None:
-        """构建 SkillToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）."""
+        """构建 SkillToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）.
+
+        Declared shared for the same reason as the deep adapter's path: skill
+        install/status is a process-wide conversation, so one toolkit instance
+        has to serve every adapter.
+        """
         try:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
+            tools = mark_stateless(skill_toolkit.get_tools())
             logger.info(
                 "[JiuwenSwarmCodeAdapter] SkillToolkit built: tools=%s",
-                [t.card.name for t in skill_toolkit.get_tools()],
+                [t.card.name for t in tools],
             )
-            return skill_toolkit.get_tools()
+            return tools
         except Exception as exc:
             logger.warning("[JiuwenSwarmCodeAdapter] skill_toolkit build failed: %s", exc)
             return None
