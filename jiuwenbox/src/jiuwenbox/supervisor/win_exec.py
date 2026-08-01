@@ -389,12 +389,20 @@ def _build_env_block(env: dict[str, str]) -> ctypes.c_wchar_p:
     return ctypes.create_unicode_buffer(block)
 
 
+def _hmac_compare(a: str, b: str) -> bool:
+    """恒定时间字符串比较 (防时序侧信道泄露 token)."""
+    import hmac
+    return hmac.compare_digest(a, b)
+
+
 def _build_runner_command(
     sandbox_id: str,
     workspace: str,
     proxy_port_start: int,
     proxy_port_end: int,
     control_port: int,
+    *,
+    control_token: str | None = None,
 ) -> str:
     """构造 runner 命令行 (CreateProcessWithLogonW 的 lpCommandLine).
 
@@ -427,6 +435,10 @@ def _build_runner_command(
         "--proxy-port-end", str(proxy_port_end),
         "--control-port", str(control_port),
     ]
+    # P0-6: 鉴权 token 经命令行参数传 (与 control_port 同方式, 避开 env 块 WinError 87).
+    # runner 首帧校验 header["token"] == control_token, 不匹配拒绝连接.
+    if control_token:
+        parts += ["--control-token", control_token]
     # Windows 命令行需要引号包裹含空格的参数.
     quoted = []
     for p in parts:
@@ -447,12 +459,17 @@ def two_hop_spawn(
     proxy_port_end: int,
     control_port: int,
     env: dict[str, str] | None = None,
+    control_token: str | None = None,
 ) -> "tuple[int, int, int]":
     """第一跳: 以 jbx-sandbox 身份启动 runner (CREATE_SUSPENDED).
 
     Runner 以挂起状态启动, 调用方在 AssignProcessToJobObject 之后调用
     win_job.resume_process(thread_handle) 恢复执行 (review MAJOR #1:
     设计 6.8 要求 SUSPEND→Assign→Resume, 否则 Job 逃逸窗口).
+
+    control_token: box-server 分配的随机鉴权 token (P0-6), 经 --control-token
+    命令行参数传 runner, runner 首帧校验 header["token"] == control_token,
+    不匹配拒绝. 防本机任意进程 connect control_port 越权 exec.
 
     Returns:
         (runner_pid, runner_process_handle, runner_thread_handle):
@@ -466,6 +483,7 @@ def two_hop_spawn(
 
     cmd = _build_runner_command(
         sandbox_id, workspace, proxy_port_start, proxy_port_end, control_port,
+        control_token=control_token,
     )
 
     # runner 不再用 stdin/stdout pipe (改 TCP loopback). control_port 走命令行参数
@@ -1046,7 +1064,11 @@ def runner_main(argv: list[str]) -> int:
     parser.add_argument("--proxy-port-start", type=int, default=const.DEFAULT_PROXY_PORT_RANGE_START)
     parser.add_argument("--proxy-port-end", type=int, default=const.DEFAULT_PROXY_PORT_RANGE_END)
     parser.add_argument("--control-port", type=int, required=True)
+    # P0-6: 鉴权 token (box-server 分配, 首帧校验). 旧版 runner 无鉴权, 本机任意
+    # 进程可 connect control_port 越权 exec; 现要求首帧 header["token"] 匹配.
+    parser.add_argument("--control-token", default="")
     args = parser.parse_args(argv)
+    control_token = args.control_token
 
     # 记录代理端口到模块级, 供 _create_process_as_user 自动注入 HTTP_PROXY env.
     global _proxy_port_start, _proxy_port_end
@@ -1117,6 +1139,21 @@ def runner_main(argv: list[str]) -> int:
                 _send_error_response(conn, f"invalid request header: {exc}")
                 conn.close()
                 continue
+
+            # P0-6: 鉴权 token 校验 (首帧). control_token 非空时, header 必须带
+            # 匹配的 "token"; 不匹配/缺失则拒绝 (防本机任意进程越权 exec).
+            # control_token 为空 (旧版兼容/未传) 时跳过校验.
+            if control_token:
+                _req_token = header.get("token")
+                if not _req_token or not _hmac_compare(str(_req_token), control_token):
+                    _push_log("WARNING",
+                              f"拒绝未授权连接: token 不匹配 (req_type={header.get('type')})")
+                    try:
+                        _send_error_response(conn, "unauthorized: invalid or missing token")
+                    except OSError:
+                        pass
+                    conn.close()
+                    continue
 
             req_type = header.get("type")
             # 日志订阅长连: box-server 创建 sandbox 后主动 connect 发此帧.

@@ -39,6 +39,7 @@ import copy
 import hashlib
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,83 @@ def _norm_str_list(values: list[Any]) -> list[str]:
     return [str(v) for v in values if str(v).strip()]
 
 
+# P0-7: 输入校验. 黑白名单经 WS 接口下发, 原实现只 str().strip() 无校验,
+# 含路径越界/控制字符/非法域名的串被原样写进副本 → 进 WFP/文件 ACL, 制造
+# 安全错觉. 这里分路径 (Path.resolve 防越界 + 绝对路径) 与域名 (正则校验) 两类.
+
+
+def _validate_file_path(value: str) -> str:
+    """校验单个文件路径白/黑名单条目, 返回规范化后的绝对路径.
+
+    要求绝对路径 (Windows 形如 C:\\... 或 POSIX /...), 拒绝相对路径与含
+    控制字符/空字节的串. 不要求路径当前存在 (黑名单路径可能尚未创建).
+    """
+    from urllib.parse import unquote
+    s = str(value).strip()
+    if not s:
+        raise ValueError("empty path")
+    # 解码 URL 编码后仍校验控制字符 (防 %00 等绕过).
+    decoded = unquote(s)
+    if "\x00" in s or "\x00" in decoded or any(ord(c) < 32 and c not in "\t" for c in s):
+        raise ValueError(f"path contains control characters: {s!r}")
+    # 绝对路径校验: Windows 盘符 C:\\ 或 POSIX / 开头. 拒绝相对路径 (避免越界).
+    from pathlib import PureWindowsPath, PurePosixPath
+    is_abs = PureWindowsPath(s).is_absolute() or PurePosixPath(s).is_absolute()
+    if not is_abs:
+        raise ValueError(f"path must be absolute: {s!r}")
+    return s
+
+
+def _norm_file_paths(values: list[Any]) -> list[str]:
+    """规范化并校验文件路径列表 (白/黑名单). 不合格条目记 warning 跳过, 不整体失败."""
+    result: list[str] = []
+    for v in values:
+        try:
+            p = _validate_file_path(v)
+            if p not in result:
+                result.append(p)
+        except ValueError as exc:
+            logger.warning("[sandbox.files] 跳过非法路径条目: %s", exc)
+    return result
+
+
+# 域名格式: 通配 *.example.com / example.com / sub.example.com:port 不允许
+# (WFP 比对按域名不含端口, 端口在 win_proxy EgressFilter 另外控制).
+_DOMAIN_RE = re.compile(
+    r"^(?:\*\.)?"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,}$"
+)
+
+
+def _validate_domain(value: str) -> str:
+    """校验单个域名白/黑名单条目, 返回原样字符串 (WFP/win_proxy 按域名比对)."""
+    s = str(value).strip().lower()
+    if not s:
+        raise ValueError("empty domain")
+    if "\x00" in s or any(ord(c) < 32 for c in s):
+        raise ValueError(f"domain contains control characters: {value!r}")
+    # 拒绝含端口/路径/查询的串 (WFP 域名条件不含这些, 误配会被静默不匹配).
+    if any(c in s for c in ":/?#"):
+        raise ValueError(f"domain must not contain port/path/query: {value!r}")
+    if not _DOMAIN_RE.match(s):
+        raise ValueError(f"invalid domain format: {value!r}")
+    return s
+
+
+def _norm_domains(values: list[Any]) -> list[str]:
+    """规范化并校验域名列表. 不合格条目记 warning 跳过."""
+    result: list[str] = []
+    for v in values:
+        try:
+            d = _validate_domain(v)
+            if d not in result:
+                result.append(d)
+        except ValueError as exc:
+            logger.warning("[sandbox.network] 跳过非法域名条目: %s", exc)
+    return result
+
+
 # ----------------------------------------------------------------------------
 # get / set: 读写副本的 windows 段 (用户配置原始值, 不含基底)
 # ----------------------------------------------------------------------------
@@ -168,8 +246,9 @@ def set_sandbox_files_config(allow: list[Any], deny: list[Any]) -> dict[str, Any
     """
     if not isinstance(allow, list) or not isinstance(deny, list):
         raise ValueError("allow and deny must be lists")
-    allow_norm = _norm_str_list(allow)
-    deny_norm = _norm_str_list(deny)
+    # P0-7: 路径校验 (绝对路径 + 无控制字符), 非法条目 warning 跳过.
+    allow_norm = _norm_file_paths(allow)
+    deny_norm = _norm_file_paths(deny)
     data = _load_copy()
     fs = data["windows"]["filesystem"]
     fs["allow_read"] = list(allow_norm)
@@ -208,8 +287,9 @@ def set_sandbox_network_config(
         raise ValueError("disable_all must be boolean")
     if not isinstance(allow_domains, list) or not isinstance(deny_domains, list):
         raise ValueError("allow_domains and deny_domains must be lists")
-    allow_norm = _norm_str_list(allow_domains)
-    deny_norm = _norm_str_list(deny_domains)
+    # P0-7: 域名校验 (格式 + 无端口/路径/控制字符), 非法条目 warning 跳过.
+    allow_norm = _norm_domains(allow_domains)
+    deny_norm = _norm_domains(deny_domains)
     data = _load_copy()
     net = data["windows"]["network"]
     net["disable_all"] = disable_all

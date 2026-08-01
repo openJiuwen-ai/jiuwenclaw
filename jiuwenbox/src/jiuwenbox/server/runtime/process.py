@@ -3039,6 +3039,11 @@ class ProcessRuntime(RuntimeAdapter):
         # 分配 TCP loopback 控制端口 (OS 自动分配空闲端口), env 注入给 runner,
         # runner bind 做 server, box-server 每次 exec connect. 对齐 Linux AF_UNIX.
         control_port = _alloc_loopback_port()
+        # P0-6: 分配随机鉴权 token, 经命令行参数传 runner, 每次 exec 帧校验.
+        # 防本机任意进程 connect control_port 越权 exec (loopback 全端口放开后
+        # 跨沙箱串扰面扩大, token 校验是必要防线).
+        import secrets as _secrets
+        control_token = _secrets.token_urlsafe(32)
         runner_pid, proc_handle, thread_handle = win_exec.two_hop_spawn(
             sandbox_id,
             sandbox_user=user,
@@ -3047,6 +3052,7 @@ class ProcessRuntime(RuntimeAdapter):
             proxy_port_start=proxy_start,
             proxy_port_end=proxy_end,
             control_port=control_port,
+            control_token=control_token,
             env=env,
         )
         logger.info(
@@ -3057,6 +3063,7 @@ class ProcessRuntime(RuntimeAdapter):
         self._win_runners[sandbox_id] = {
             "pid": runner_pid,
             "control_port": control_port,  # TCP loopback, 每次 exec connect
+            "control_token": control_token,  # P0-6 鉴权 token
             "process_handle": proc_handle,
             "thread_handle": thread_handle,  # Job assign+resume 后 CloseHandle
             "workspace": workspace,
@@ -3130,7 +3137,7 @@ class ProcessRuntime(RuntimeAdapter):
         stop_evt = threading.Event()
         log_thread = threading.Thread(
             target=self._win_log_reader_blocking,
-            args=(sandbox_id, control_port, stop_evt),
+            args=(sandbox_id, control_port, stop_evt, control_token),
             name=f"win-runner-log-{sandbox_id}",
             daemon=True,
         )
@@ -3364,13 +3371,20 @@ class ProcessRuntime(RuntimeAdapter):
         body_bytes: bytes | None,
         want_body: bool,
         read_timeout: float | None = None,
+        control_token: str | None = None,
     ) -> "tuple[dict[str, Any] | None, bytes]":
         """同步执行一次 runner TCP roundtrip (在 executor 线程调用).
 
         每次 exec/file-op 新建一条 TCP 连接: connect 127.0.0.1:control_port
         -> 发 header 帧 (+可选 body 帧) -> 读响应帧 (->可选 body 帧) -> close.
         对齐 Linux AF_UNIX 的 _connect_daemon_socket (一连接一请求).
+
+        control_token: box-server 分配的随机 token (P0-6 鉴权). runner 首帧校验
+        header["token"] == control_token, 不匹配拒绝. 防本机任意进程越权 exec.
         """
+        # P0-6: 注入鉴权 token 到 header payload (runner 首帧校验).
+        if control_token:
+            payload = {**payload, "token": control_token}
         import json
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(DAEMON_CONNECT_TIMEOUT_SECONDS)
@@ -3430,6 +3444,7 @@ class ProcessRuntime(RuntimeAdapter):
                         runner["control_port"],
                         request_type, payload, body_bytes, False,
                         read_timeout=read_timeout,
+                        control_token=runner.get("control_token"),
                     ),
                 )
                 return response
@@ -3453,9 +3468,11 @@ class ProcessRuntime(RuntimeAdapter):
             try:
                 response, content = await loop.run_in_executor(
                     None,
-                    self._win_roundtrip_blocking,
-                    runner["control_port"],
-                    request_type, payload, None, True,
+                    lambda: self._win_roundtrip_blocking(
+                        runner["control_port"],
+                        request_type, payload, None, True,
+                        control_token=runner.get("control_token"),
+                    ),
                 )
                 return response, content
             except (OSError, ConnectionError, ValueError) as exc:
@@ -3489,7 +3506,12 @@ class ProcessRuntime(RuntimeAdapter):
             sock.settimeout(DAEMON_SHUTDOWN_TIMEOUT_SECONDS)
             try:
                 sock.connect(("127.0.0.1", runner["control_port"]))
-                send_frame(sock, encode_request(request_type=REQUEST_TYPE_SHUTDOWN))
+                # P0-6: shutdown 帧也带鉴权 token (runner 首帧校验).
+                payload: dict[str, Any] = {}
+                _ct = runner.get("control_token")
+                if _ct:
+                    payload["token"] = _ct
+                send_frame(sock, encode_request(request_type=REQUEST_TYPE_SHUTDOWN, payload=payload))
                 # runner 收 shutdown 后会回 {"ok": True} 并退出, 读一下 drain.
                 try:
                     recv_frame(sock, DAEMON_MAX_RESPONSE_BYTES)
@@ -3503,6 +3525,7 @@ class ProcessRuntime(RuntimeAdapter):
     @staticmethod
     def _win_log_reader_blocking(
         sandbox_id: str, control_port: int, stop_evt: threading.Event,
+        control_token: str | None = None,
     ) -> None:
         """后台线程: connect control_port 发 subscribe_log 握手, 持续读 runner
         push 的 log 帧并打印到 box-server 日志.
@@ -3516,6 +3539,10 @@ class ProcessRuntime(RuntimeAdapter):
         任意阶段的 log/error/traceback 发回本进程, 由 box-server 主日志打印.
         """
         prefix = f"[win-runner][sandbox={sandbox_id}]"
+        # P0-6: subscribe_log 握手帧也带鉴权 token (runner 首帧校验).
+        _sub_payload: dict[str, Any] = {}
+        if control_token:
+            _sub_payload["token"] = control_token
         sock: socket.socket | None = None
         # 握手重试: runner bind 可能晚于此处 connect (resume -> runner_main 有延迟).
         for _attempt in range(50):
@@ -3525,7 +3552,7 @@ class ProcessRuntime(RuntimeAdapter):
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(DAEMON_CONNECT_TIMEOUT_SECONDS)
                 sock.connect(("127.0.0.1", control_port))
-                send_frame(sock, encode_request(request_type=REQUEST_TYPE_SUBSCRIBE_LOG))
+                send_frame(sock, encode_request(request_type=REQUEST_TYPE_SUBSCRIBE_LOG, payload=_sub_payload))
                 # runner 收到 subscribe_log 后不回响应, 直接把该连接入订阅集;
                 # 此处不读响应, 把 sock 转长读模式.
                 sock.settimeout(None)  # 阻塞读, 直到有帧或连接断开.

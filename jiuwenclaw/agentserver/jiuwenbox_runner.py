@@ -326,6 +326,7 @@ class JiuwenBoxRunner:
         timeout: float = 30.0,
         startup_mode: str = "internal",
         policy_path: Optional[Path] = None,
+        extra_env: Optional[dict[str, str]] = None,
     ) -> bool:
         """确保 jiuwenbox 在 ``host:port`` 已就绪。
 
@@ -338,6 +339,10 @@ class JiuwenBoxRunner:
             policy_path: jiuwenbox 启动时使用的 policy 文件路径; 仅在
                 ``startup_mode='internal'`` 下生效, 通过 ``JIUWENBOX_POLICY_PATH``
                 环境变量传给子进程。
+            extra_env: 传给 box-server 子进程的额外 env (P0-5: 收口 env 透传,
+                避免全量 dict(os.environ) 把 agent-server 敏感凭据灌进子进程 +
+                避免 os.environ 全局污染). 仅 JIUWENBOX_* / PYTHONPATH 等白名单
+                键会从父进程继承, 其余敏感 env (token/API key/DB 口令) 不透传.
 
         Returns:
             True 表示启动 / 已运行并通过健康检查; False 表示超时未就绪。
@@ -437,8 +442,31 @@ class JiuwenBoxRunner:
                 "--port",
                 str(port),
             ]
+            # 构造 box-server 子进程 env (P0-5 收口: 不全量 dict(os.environ),
+            # 避免 agent-server 的敏感凭据 token/API key/DB 口令灌进子进程).
+            # 只继承白名单键 (PATH/SystemRoot 等子进程运行必需) + JIUWENBOX_*
+            # (调用方经 extra_env 传入的动态路径), 其余敏感 env 不透传.
+            _ENV_ALLOWLIST = {
+                "PATH", "PATHEXT", "SystemRoot", "windir", "COMSPEC",
+                "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
+                "HOME", "LANG", "LC_ALL", "LC_CTYPE",
+                "PYTHONPATH", "PYTHONHOME", "PYTHONIOENCODING",
+                "JIUWENCLAW_DATA_DIR", "OFFICE_CLAW_DATA_DIR",
+            }
+            env: dict[str, str] = {}
+            for _k in _ENV_ALLOWLIST:
+                _v = os.environ.get(_k)
+                if _v:
+                    env[_k] = _v
+            # JIUWENBOX_* 前缀键全部继承 (box-server 运行时依赖: policy 路径/
+            # venv 目录/runner python/skills 目录 等, 由调用方经 extra_env 注入).
+            for _k, _v in os.environ.items():
+                if _k.startswith("JIUWENBOX_") and _k not in env:
+                    env[_k] = _v
+            # extra_env (调用方显式传入) 覆盖, 权限最高.
+            if extra_env:
+                env.update({str(k): str(v) for k, v in extra_env.items()})
             # 若 jiuwenbox 未安装到 site-packages, 尝试用仓库内源码目录注入 PYTHONPATH
-            env = dict(os.environ)
             local_src = _resolve_jiuwenbox_src_dir()
             if local_src is not None:
                 existing = env.get("PYTHONPATH", "")

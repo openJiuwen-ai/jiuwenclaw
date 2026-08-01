@@ -318,17 +318,26 @@ USER_PRIV_USER = 1
 
 
 def _generate_password() -> str:
-    """生成 jbx-sandbox 用户密码.
+    """生成 jbx-sandbox 用户随机密码.
 
-    调试阶段固定为 ``"000000"``, 方便排查 (随机密码会因 uninstall 不删用户 +
-    create_sandbox_user 已存在不重设密码导致用户密码与注册表不一致, 见 1326).
-    后期改为从配置文件读取 (用户可配).
+    用 ``secrets.token_urlsafe`` 生成强随机密码 (长度 ~SANDBOX_USER_PASSWORD_LENGTH
+    字符的 URL 安全 base64). 持久化靠 DPAPI 注册表 (见 install 流程
+    ``_save_sandbox_user_password``): install 时存一次, 后续 install/运行时经
+    ``get_sandbox_user_password`` 读回, 重启后仍可登录. 已存在用户不重设密码
+    (见 ``_create_sandbox_user``), 避免运行中沙箱凭据失效.
     """
-    return "000000"
+    import secrets
+    # token_urlsafe(n) 返回 ~1.3n 字符; 取 48 字节字节熵 (~64 字符), 满足密码
+    # 复杂度策略 (含字母数字, 无需符号即可过 Windows 强密码策略).
+    return secrets.token_urlsafe(48)
 
 
-def _create_sandbox_user(password: str) -> None:
-    """创建 jbx-sandbox 本地用户 (幂等: 已存在则跳过)."""
+def _create_sandbox_user(password: str) -> bool:
+    """创建 jbx-sandbox 本地用户 (幂等: 已存在则跳过).
+
+    Returns: True=本次新建用户 (password 已设为用户密码); False=用户已存在
+    (未改密码, 调用方应用 DPAPI 旧密码而非本次传入的 password 存注册表).
+    """
     netapi32 = _get_netapi32()
     info = _USER_INFO_1()
     # LPWSTR (c_wchar_p) 字段直接赋 str: ctypes 自动转为以 NUL 结尾的宽字符串
@@ -352,15 +361,15 @@ def _create_sandbox_user(password: str) -> None:
     # 原代码误写 2236, 导致幂等重装时遇到已存在用户被当失败 raise.
     if ret == 0:
         logger.info("创建沙箱用户 %s 成功", const.SANDBOX_USER_NAME)
+        return True
     elif ret == 2224:
-        # 用户已存在: 不重设密码. _generate_password 固定返回 "000000", 每次
-        # install 生成的密码都是同一个值, 用户真实密码与注册表存的密码本就
-        # 一致, 重设纯属多余. 且 NetUserSetInfo 重设简单密码 "000000" 会撞本地
-        # 密码复杂度策略 → ret=87 → install 失败回滚 (实测). 若密码因外部改动
-        # 与注册表不一致, 由 _verify_or_reset_sandbox_user_password 在 install
-        # 末尾 LogonUserW 探测失败时统一兜底重设 (那里只重设一次, 且走 install
-        # 提权上下文). 这里直接信任已存在用户.
-        logger.info("沙箱用户 %s 已存在, 跳过 (密码固定, 不重设)", const.SANDBOX_USER_NAME)
+        # 用户已存在: 不重设密码. 随机密码下, 本次 _generate_password 生成的新
+        # 随机密码与用户实际密码不一致 → 不能用它存 DPAPI (否则重现 1326). 调用
+        # 方应改用 get_sandbox_user_password() 读 DPAPI 旧密码存注册表 (保持一致),
+        # 或读不到时 (旧版固定密码升级) 由 _verify_or_reset 重设. NetUserSetInfo
+        # 重设会撞密码复杂度策略的担忧已由强随机密码消除 (token_urlsafe 过策略).
+        logger.info("沙箱用户 %s 已存在, 跳过 (不重设密码, 用 DPAPI 旧密码)", const.SANDBOX_USER_NAME)
+        return False
     else:
         raise RuntimeError(
             f"NetUserAdd 失败: ret={ret} err={err.value}"
@@ -892,8 +901,20 @@ def install(
     # 非致命: 隐藏登录界面用户、DPAPI 密码加密、合成 SID 缓存、读 ACL 预装 (S11)。
     try:
         # 1. 创建用户 + 组 (致命: S8 修后 _add_user_to_group 失败会 raise).
-        password = _generate_password()
-        _create_sandbox_user(password)
+        new_password = _generate_password()
+        created = _create_sandbox_user(new_password)
+        if created:
+            # 新建用户: 用本次生成的随机密码, 存 DPAPI (后续 install/运行时读回).
+            password = new_password
+        else:
+            # 用户已存在: 不能用本次新生成的随机密码 (与用户实际密码不一致 → 1326).
+            # 读 DPAPI 旧密码保持一致; 读不到 (旧版固定 "000000" 升级, 或 DPAPI 损坏)
+            # 则用新随机密码并 NetUserSetInfo 重设用户密码对齐 (强随机过复杂度策略).
+            password = get_sandbox_user_password()
+            if not password:
+                password = new_password
+                _set_user_password(const.SANDBOX_USER_NAME, password)
+                logger.info("jbx-sandbox DPAPI 无旧密码, 已重设为新随机密码")
         _add_user_to_group()
         # 从登录界面隐藏 jbx-sandbox 用户 (非致命).
         try:
@@ -909,7 +930,10 @@ def install(
         # 2. 查 SID 并存注册表.
         sid = _lookup_user_sid(const.SANDBOX_USER_NAME)
         _reg_set_str(const.REG_VALUE_SANDBOX_USER_SID, sid)
-        # 密码用 DPAPI 加密存储 (机器范围). 简化: 用 win32crypt.
+        # 密码用 DPAPI 加密存储 (机器范围, CryptProtectData flag=0 = 机器绑定).
+        # 持久化: DPAPI blob 存 HKLM 注册表, 重启后 get_sandbox_user_password 经
+        # CryptUnprotectData 解密读回 (同一机器同一用户上下文). 新建用户用本次
+        # 随机密码; 已存在用户用 DPAPI 旧密码 (保持与用户实际密码一致).
         try:
             import win32crypt  # type: ignore[import-not-found]
             enc = win32crypt.CryptProtectData(
@@ -1146,9 +1170,10 @@ def _verify_or_reset_sandbox_user_password() -> None:
     """验证 jbx-sandbox 密码与注册表一致, 不一致则重设.
 
     install 失败回滚时 NetUserDel 可能没删干净 (权限/进程占用), 用户残留旧
-    密码, 注册表 DPAPI 密码 (固定 000000) 与之不一致 → CreateProcessWithLogonW
-    WinError 1326. 幂等检查看不到. 这里 LogonUserW 测登录, 失败则用
-    NetUserSetInfo 重设密码为注册表值. liubuyu 是 jbx-sandbox 创建者, 有权重设.
+    密码, 注册表 DPAPI 密码与之不一致 → CreateProcessWithLogonW WinError 1326.
+    幂等检查看不到. 这里 LogonUserW 测登录, 失败则用 NetUserSetInfo 重设密码
+    为注册表值. liubuyu 是 jbx-sandbox 创建者, 有权重设. 随机密码 (token_urlsafe)
+    过 Windows 密码复杂度策略, 重设不会撞 ret=87.
     """
     import ctypes
     password = get_sandbox_user_password()
@@ -1260,7 +1285,14 @@ def uninstall() -> None:
     # 删用户后 LookupAccountName 查不到 SID, 但 DeleteProfileW 按 SID 字符串
     # 仍可工作. 先用注册表缓存的当前 SID 调 DeleteProfileW, 再兜底清理
     # C:\Users\jbx-sandbox* 历史 .000/.001 拋留目录 (反复 reinstall 堆积).
+    # SID 取值: 注册表缓存优先, 读不到 (install 早期失败回滚) 则 LookupAccountName
+    # 实时取当前 SID (P1-9: 旧版只用注册表缓存, install 早期失败时缓存是旧 SID).
     sid_str = get_sandbox_user_sid()
+    if not sid_str:
+        try:
+            sid_str = _lookup_user_sid(const.SANDBOX_USER_NAME)
+        except Exception:  # noqa: BLE001
+            sid_str = None
     if sid_str:
         _delete_profile_by_sid(sid_str)
     _purge_stale_profile_dirs()
@@ -1282,8 +1314,12 @@ def uninstall() -> None:
         logger.warning("NetLocalGroupDel 返回 %d (继续)", ret)
     else:
         logger.info("删除沙箱组 %s", const.SANDBOX_USER_GROUP)
-    # 仅清注册表标记 (其他值 SANDBOX_USER_SID/PW 等保留也无害, reinstall 会覆盖).
+    # 清注册表标记 + 密码/SID 缓存 (P1-9: 改随机密码后旧 DPAPI blob 必须清,
+    # 否则 reinstall 覆盖不彻底会重现 1326; SYNTHETIC_WRITE_SID 合成 SID 固定
+    # 可保留, reinstall 不变).
     _reg_set_str(const.REG_VALUE_INSTALLED, "")
+    _reg_set_str(const.REG_VALUE_SANDBOX_USER_PW, "")
+    _reg_set_str(const.REG_VALUE_SANDBOX_USER_SID, "")
     logger.info("Windows 沙箱卸载完成")
 
 

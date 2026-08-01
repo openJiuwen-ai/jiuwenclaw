@@ -85,6 +85,28 @@ _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
 _SYSTEM_PROMPT_USER_HISTORY_PATTERN = re.compile(r"(\[[^\]\n]*用户\]\s*)(.*?)(\s*\[/对话历史\])", re.DOTALL)
 
 
+def _is_std_cpython(python_exe: str) -> bool:
+    """判断 python.exe 是否标准 CPython 安装 (非 venv trampoline/launcher).
+
+    jbx-sandbox 跑不了 uv trampoline/venv launcher (WinError 5), runner 必须用
+    标准 CPython. 判定: 同目录有 python3*.dll (CPython 根目录特征), 且不在
+    .../Scripts/ 子目录 (venv 的 python.exe 在 Scripts/ 下, 无 python3*.dll).
+    """
+    p = Path(python_exe)
+    try:
+        if not p.is_file():
+            return False
+    except OSError:
+        return False
+    parent = p.parent
+    # venv 的 python.exe 在 <venv>/Scripts/ 下, 同目录无 python3*.dll.
+    if parent.name.lower() == "scripts":
+        return False
+    # 标准 CPython 根目录有 python313.dll / python312.dll 等.
+    has_dll = any(parent.glob("python3*.dll"))
+    return has_dll
+
+
 def _mask_text_for_log(value: str) -> str:
     return "******" if len(value) <= 20 else f"{value[:5]}******{value[-5:]}"
 
@@ -346,31 +368,60 @@ class AgentWebSocketServer:
             #     jbx-sandbox 跑不了 uv trampoline/venv launcher (WinError 5 / os error 5),
             #     runner 必须用自包含的标准 CPython. dev 实测设 D:\Files\python313,
             #     打包环境设 tools/python/python.exe. 探测候选路径, 找到即注入.
+            #
+            # P0-5: 不写 os.environ (主进程全局污染, 后续所有子进程继承), 改构造
+            # sandbox_env dict 经 ensure_running(extra_env=...) 传给 box-server 子进程.
+            sandbox_env: dict[str, str] = {}
             try:
                 from jiuwenclaw.runtime.pip_env import (
                     ensure_runtime_venv, resolve_base_python,
                 )
                 venv_dir = ensure_runtime_venv()
-                os.environ["JIUWENBOX_VENV_DIR"] = str(venv_dir)
+                sandbox_env["JIUWENBOX_VENV_DIR"] = str(venv_dir)
                 bundled_python = resolve_base_python()
-                os.environ["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
-                if not (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
+                sandbox_env["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
+                if not (sandbox_env.get("JIUWENBOX_RUNNER_PYTHON")
+                        or os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
                     logger.info("[AgentWebSocketServer][sandbox] JIUWENBOX_RUNNER_PYTHON 未注入探测候选路径...")
-                    for _cand in (
-                        r"D:\Files\python313\python.exe",  # dev 实测机
-                        r"C:\Python313\python.exe",
-                        r"C:\Python312\python.exe",
-                        str(Path(__file__).resolve().parents[2] / "tools" / "python" / "python.exe"),  # 打包
-                    ):
-                        if _cand and Path(_cand).is_file():
-                            os.environ["JIUWENBOX_RUNNER_PYTHON"] = _cand
+                    # 探测标准 CPython (非 venv trampoline): jbx-sandbox 跑不了 uv
+                    # trampoline/venv launcher (WinError 5). 候选顺序:
+                    #   1. 打包 tools/python (OfficeAce 自带 CPython)
+                    #   2. 系统安装 C:\Python3* (逐版本 glob)
+                    #   3. %LOCALAPPDATA%\Programs\Python\Python3* (用户级安装)
+                    #   4. PATH 里的 python.exe (校验非 venv: 不在 .../Scripts/ 下,
+                    #      且同目录有 python3.dll 证明是 CPython 根)
+                    # 不硬编码 dev 机路径 (原 D:\Files\python313 是 dev 实测机, 不通用).
+                    import shutil as _shutil
+                    import glob as _glob
+                    _runner_py: str | None = None
+                    _candidates: list[str] = []
+                    # 1. 打包
+                    _candidates.append(
+                        str(Path(__file__).resolve().parents[2] / "tools" / "python" / "python.exe"))
+                    # 2. C:\Python3* (系统安装, 逐版本 glob 覆盖 3.10-3.13+)
+                    _candidates += sorted(_glob.glob(r"C:\Python3*\python.exe"))
+                    # 3. %LOCALAPPDATA%\Programs\Python\Python3* (用户级安装)
+                    _lad = os.environ.get("LOCALAPPDATA", "")
+                    if _lad:
+                        _candidates += sorted(_glob.glob(
+                            str(Path(_lad) / "Programs" / "Python" / "Python3*" / "python.exe")))
+                    for _cand in _candidates:
+                        if _cand and Path(_cand).is_file() and _is_std_cpython(_cand):
+                            _runner_py = _cand
                             break
+                    # 4. PATH 里的 python.exe (校验非 venv)
+                    if not _runner_py:
+                        _which = _shutil.which("python") or _shutil.which("python3")
+                        if _which and _is_std_cpython(_which):
+                            _runner_py = _which
+                    if _runner_py:
+                        sandbox_env["JIUWENBOX_RUNNER_PYTHON"] = _runner_py
                 logger.info(
                     "[AgentWebSocketServer][sandbox] injected env: "
                     "JIUWENBOX_VENV_DIR=%s, JIUWENBOX_BUNDLED_PYTHON=%s, "
                     "JIUWENBOX_RUNNER_PYTHON=%s",
                     venv_dir, bundled_python.parent,
-                    os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "<未注入>",
+                    sandbox_env.get("JIUWENBOX_RUNNER_PYTHON") or "<未注入>",
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -387,6 +438,7 @@ class AgentWebSocketServer:
                 port=port,
                 startup_mode="internal",
                 policy_path=policy_path,
+                extra_env=sandbox_env or None,
                 # Windows 沙箱首次起 box-server 时, lifespan 的 ensure_windows_setup
                 # 同步阻塞等 install 子进程 (UAC 弹窗 + 用户安装几十秒). 旧默认 30s
                 # 会在 install 未完成时把 box-server 判为不健康而杀掉 (实测日志:
