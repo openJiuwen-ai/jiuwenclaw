@@ -408,6 +408,22 @@ async def _get_persistent_checkpointer_lock() -> asyncio.Lock:
 # ``JiuWenSwarmDeepAdapter._tool_owner_id``.
 _AGENT_CARD_ID = "jiuwenswarm"
 
+# Holder count per registered SysOperation id, keyed process-wide because
+# ``Runner.resource_mgr`` is a process-global singleton. A local sys operation is
+# owned by exactly one adapter (its card id is a fresh uuid), but a sandbox one is
+# shared by every adapter resolving the same isolation key, so a single adapter's
+# cleanup must not drop a registration a live sibling still uses. The count is a
+# multiset of acquisitions: an adapter that rebuilds its agent onto the same id
+# retains before it releases, so the entry never dips to zero in between.
+#
+# Scope: only adapters count here. Code that registers a SysOperation directly on
+# ``Runner.resource_mgr`` (``auto_memory.extraction_runner``) stays outside this
+# table, which is safe today because those ids are private to their creator and
+# never resolve through ``_resolve_sys_operation``'s isolation-key reuse. Any new
+# registrar that could share an id with an adapter must take a reference here too.
+_SYS_OPERATION_REFCOUNTS: dict[str, int] = {}
+_SYS_OPERATION_REFCOUNT_LOCK = threading.Lock()
+
 _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
     {
         "read_file",
@@ -850,6 +866,11 @@ class JiuWenSwarmDeepAdapter:
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
         self._sys_operation = None
         self._sys_operation_card: SysOperationCard | None = None
+        # Ids of the sys operations this adapter currently holds a reference on,
+        # in acquisition order. ``cleanup`` releases them so a disposed adapter
+        # stops pinning its SysOperation (and the ~16 tools derived from it) in
+        # the process-global resource manager.
+        self._retained_sys_operation_ids: list[str] = []
         self._vision_model_config: VisionModelConfig | None = None
         self._audio_model_config: AudioModelConfig | None = None
         self._video_model_config: bool = False
@@ -3279,6 +3300,103 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     def _create_sys_operation(self) -> SysOperation | None:
+        """Resolve this adapter's sys operation and take a reference on it.
+
+        Wraps :meth:`_resolve_sys_operation` with the bookkeeping that keeps
+        ``Runner.resource_mgr`` from growing without bound: the resolved id is
+        retained here and released in :meth:`cleanup`. The new reference is taken
+        *before* the previous one is dropped, so rebuilding the agent (a skill or
+        plugin install re-runs ``create_instance``) onto the same sandbox id never
+        lets the refcount hit zero and unregister a resource still in use.
+
+        Returns:
+            The resolved SysOperation, or None when registration failed.
+        """
+        previously_retained = list(self._retained_sys_operation_ids)
+        sys_operation = self._resolve_sys_operation()
+        if sys_operation is not None:
+            self._retain_sys_operation(str(sys_operation.id))
+        self._release_sys_operations(previously_retained)
+        return sys_operation
+
+    def _retain_sys_operation(self, sys_operation_id: str) -> None:
+        """Record one adapter-held reference on a registered sys operation.
+
+        Args:
+            sys_operation_id: Id of the sys operation this adapter now depends on.
+        """
+        self._retained_sys_operation_ids.append(sys_operation_id)
+        with _SYS_OPERATION_REFCOUNT_LOCK:
+            _SYS_OPERATION_REFCOUNTS[sys_operation_id] = (
+                _SYS_OPERATION_REFCOUNTS.get(sys_operation_id, 0) + 1
+            )
+
+    def _release_sys_operations(self, sys_operation_ids: list[str] | None = None) -> None:
+        """Drop adapter-held references and unregister the ones left unused.
+
+        Removing a sys operation also removes the ~16 fs/shell/code tools derived
+        from it (``ResourceMgr.remove_sys_operation``), which is exactly the state
+        that used to survive every evicted session adapter. Failures are logged
+        and swallowed: this runs on the cleanup path and must not stop it.
+
+        Args:
+            sys_operation_ids: Subset of this adapter's retained ids to release.
+                Defaults to every id it still holds, which is what ``cleanup``
+                wants.
+        """
+        if sys_operation_ids is None:
+            ids_to_release = list(self._retained_sys_operation_ids)
+        else:
+            ids_to_release = list(sys_operation_ids)
+        if not ids_to_release:
+            return
+
+        unused_ids: list[str] = []
+        unheld_ids: list[str] = []
+        with _SYS_OPERATION_REFCOUNT_LOCK:
+            for sys_operation_id in ids_to_release:
+                if sys_operation_id in self._retained_sys_operation_ids:
+                    self._retained_sys_operation_ids.remove(sys_operation_id)
+                held = _SYS_OPERATION_REFCOUNTS.get(sys_operation_id, 0)
+                if held <= 0:
+                    # Releasing a reference this adapter never took. Removing the
+                    # resource here could pull it out from under a live holder,
+                    # so leave it registered and surface the bookkeeping bug.
+                    unheld_ids.append(sys_operation_id)
+                    continue
+                remaining = held - 1
+                if remaining > 0:
+                    _SYS_OPERATION_REFCOUNTS[sys_operation_id] = remaining
+                    continue
+                _SYS_OPERATION_REFCOUNTS.pop(sys_operation_id, None)
+                unused_ids.append(sys_operation_id)
+
+        for sys_operation_id in unheld_ids:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] sys_operation release skipped, no reference held: %s",
+                sys_operation_id,
+            )
+
+        for sys_operation_id in unused_ids:
+            try:
+                # Quiet idempotence: only remove what is still registered, so a
+                # second cleanup (or one after Runner.stop cleared everything) is
+                # a no-op rather than an error.
+                if Runner.resource_mgr.get_sys_operation(sys_operation_id) is None:
+                    continue
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id)
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] sys_operation released: %s",
+                    sys_operation_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] sys_operation release failed: id=%s error=%s",
+                    sys_operation_id,
+                    exc,
+                )
+
+    def _resolve_sys_operation(self) -> SysOperation | None:
         """Create a sys operation.
 
         是否走沙箱由 ``config.yaml::sandbox.enabled`` 决定（同时要求
@@ -5928,12 +6046,35 @@ class JiuWenSwarmDeepAdapter:
                     self._parent_session_id,
                     exc,
                 )
+        self._teardown_agent_owned_tools()
+        self._release_sys_operations()
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
         # 去触发 manager.sync（此时 rail/manager 可能已失效）。
         if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
             self._memory_reindex_task.cancel()
         self._memory_reindex_task = None
         await self._close_a2x_client()
+
+    def _teardown_agent_owned_tools(self) -> None:
+        """Drop this agent's stateful tool registrations from the global resource manager.
+
+        ``Runner.resource_mgr`` is process-global, so without this a disposed
+        adapter leaves its per-agent tool instances behind: the next adapter
+        re-registers over the stale ids (one refresh warning per tool) and the
+        residual instances keep holding a stale SysOperation reference. Shared
+        singletons and externally-scoped ids are left alone.
+        """
+        if self._instance is None:
+            return
+        ability_manager = getattr(self._instance, "ability_manager", None)
+        if ability_manager is None:
+            return
+        try:
+            ability_manager.teardown_tools()
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] agent tool teardown failed: %s", exc
+            )
 
     def _collect_registered_ability_names(self) -> set[str]:
         ability_names: set[str] = set()
@@ -10806,8 +10947,15 @@ def _agent_def_to_subagent_config(
     if agent_def.disallowed_tools and tools != ["*"]:
         tools = [t for t in tools if t not in agent_def.disallowed_tools]
 
+    # A stable id keeps ``create_deep_agent`` on its get-or-create path for this
+    # sub-agent's SysOperation: the id is derived from the card, and the default
+    # ``AgentCard.id`` is a fresh uuid, so leaving it unset made every Agent-tool
+    # invocation register another SysOperation plus its ~16 derived tools in the
+    # process-global resource manager, never to be reclaimed. Same-named
+    # definitions carry the same permissions, so sharing one instance is safe.
     card = AgentCard(
         name=agent_def.name,
+        id=f"subagent_{agent_def.name}",
         description=agent_def.description,
     )
 
