@@ -157,6 +157,241 @@ def _dump_yaml_round_trip(config_path: Path, data: Any) -> None:
     clear_config_cache()
 
 
+def _require_dict(value: Any, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object")
+    return value
+
+
+def _require_non_empty_string(value: Any, field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_name} must be non-empty")
+    return text
+
+
+def _transform_relay_team_model_config(model_raw: dict[str, Any]) -> dict[str, Any]:
+    model_client_config: dict[str, Any] = {}
+    model_request_config: dict[str, Any] = {}
+
+    model_value = model_raw.get("model")
+    if model_value and isinstance(model_value, str) and "#" in model_value:
+        model_name_part, _, index_part = model_value.rpartition("#")
+        try:
+            target_index = int(index_part)
+        except ValueError:
+            target_index = None
+        if target_index is not None:
+            defaults = get_config_raw().get("models", {}).get("defaults")
+            if isinstance(defaults, list) and 0 <= target_index < len(defaults):
+                entry = defaults[target_index]
+                if isinstance(entry, dict):
+                    client_config = entry.get("model_client_config")
+                    if isinstance(client_config, dict):
+                        model_client_config.update(
+                            {
+                                key: value
+                                for key, value in client_config.items()
+                                if key != "model_name" and value is not None
+                            }
+                        )
+                        model_request_config["model"] = resolve_env_vars(
+                            str(client_config.get("model_name", model_name_part))
+                        )
+                    request_config = entry.get("model_config_obj")
+                    if isinstance(request_config, dict):
+                        model_request_config.update(request_config)
+
+    if model_raw.get("provider") is not None:
+        model_client_config["client_provider"] = model_raw["provider"]
+    if model_raw.get("api_base") is not None:
+        model_client_config["api_base"] = model_raw["api_base"]
+    if model_raw.get("api_key") is not None:
+        model_client_config["api_key"] = model_raw["api_key"]
+    if model_raw.get("model") is not None:
+        raw_model = model_raw["model"]
+        model_request_config["model"] = (
+            raw_model.rpartition("#")[0]
+            if isinstance(raw_model, str) and "#" in raw_model
+            else raw_model
+        )
+
+    transformed: dict[str, Any] = {}
+    if model_client_config:
+        model_client_config.setdefault("timeout", 1800)
+        model_client_config.setdefault("verify_ssl", False)
+        model_client_config.setdefault("custom_headers", {})
+        transformed["model_client_config"] = model_client_config
+    if model_request_config:
+        transformed["model_request_config"] = model_request_config
+    return transformed
+
+
+def _transform_relay_team_agent_spec(agent_key: str, agent_raw: Any) -> dict[str, Any]:
+    agent_config = _require_dict(agent_raw, f"agents.{agent_key}")
+    transformed: dict[str, Any] = {}
+    if "model" in agent_config:
+        model_raw = _require_dict(agent_config.get("model"), f"agents.{agent_key}.model")
+        transformed_model = _transform_relay_team_model_config(model_raw)
+        if transformed_model:
+            transformed["model"] = transformed_model
+    for field_name in ("skills", "workspace", "max_iterations", "completion_timeout"):
+        if field_name in agent_config:
+            transformed[field_name] = copy.deepcopy(agent_config[field_name])
+    return transformed
+
+
+def _resolve_relay_team_agent_spec(
+    agents_raw: dict[str, Any],
+    agent_key: Any,
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    resolved_key = _require_non_empty_string(agent_key, field_name)
+    if resolved_key not in agents_raw:
+        raise ValueError(f"{field_name} references unknown agent_key: {resolved_key}")
+    return _transform_relay_team_agent_spec(resolved_key, agents_raw[resolved_key])
+
+
+def _build_relay_modes_team_mapping(teams_payload: dict[str, Any]) -> dict[str, Any]:
+    agents_raw = _require_dict(teams_payload.get("agents"), "agents")
+    teams_raw = teams_payload.get("team")
+    if not isinstance(teams_raw, list):
+        raise ValueError("team must be an array")
+
+    team_mapping: dict[str, Any] = {}
+    for team_index, team_item in enumerate(teams_raw):
+        team_raw = _require_dict(team_item, f"team[{team_index}]")
+        team_name = _require_non_empty_string(
+            team_raw.get("team_name"),
+            f"team[{team_index}].team_name",
+        )
+        if team_name in team_mapping:
+            raise ValueError(f"duplicate team_name: {team_name}")
+
+        transformed_team = {
+            key: copy.deepcopy(value)
+            for key, value in team_raw.items()
+            if key not in {"leader", "teammate", "predefined_members"}
+        }
+        transformed_team["team_name"] = team_name
+
+        leader_raw = _require_dict(team_raw.get("leader"), f"team[{team_index}].leader")
+        transformed_team["leader"] = {
+            key: copy.deepcopy(leader_raw[key])
+            for key in ("member_name", "display_name", "persona")
+            if key in leader_raw
+        }
+        transformed_team["leader"]["agent_key"] = leader_raw.get("agent_key", "")
+        leader_agent_spec = _resolve_relay_team_agent_spec(
+            agents_raw,
+            leader_raw.get("agent_key"),
+            field_name=f"team[{team_index}].leader.agent_key",
+        )
+
+        teammate_raw = team_raw.get("teammate")
+        teammate_agent_spec: dict[str, Any] | None = None
+        if teammate_raw is not None:
+            teammate_raw = _require_dict(teammate_raw, f"team[{team_index}].teammate")
+            teammate_agent_spec = _resolve_relay_team_agent_spec(
+                agents_raw,
+                teammate_raw.get("agent_key"),
+                field_name=f"team[{team_index}].teammate.agent_key",
+            )
+            transformed_team["teammate"] = {"agent_key": teammate_raw.get("agent_key", "")}
+
+        members_raw = team_raw.get("predefined_members", [])
+        if members_raw is None:
+            members_raw = []
+        if not isinstance(members_raw, list):
+            raise ValueError(f"team[{team_index}].predefined_members must be an array")
+
+        transformed_members: list[dict[str, Any]] = []
+        transformed_agents: dict[str, Any] = {"leader": leader_agent_spec}
+        seen_member_names: set[str] = set()
+        for member_index, member_item in enumerate(members_raw):
+            member = _require_dict(
+                member_item,
+                f"team[{team_index}].predefined_members[{member_index}]",
+            )
+            member_name = _require_non_empty_string(
+                member.get("member_name"),
+                f"team[{team_index}].predefined_members[{member_index}].member_name",
+            )
+            if member_name in seen_member_names:
+                raise ValueError(f"duplicate member_name in team[{team_index}]: {member_name}")
+            seen_member_names.add(member_name)
+            transformed_member = {
+                key: copy.deepcopy(member[key])
+                for key in (
+                    "member_name",
+                    "display_name",
+                    "role_type",
+                    "persona",
+                    "prompt_hint",
+                    "agent_key",
+                )
+                if key in member
+            }
+            transformed_member["member_name"] = member_name
+            transformed_members.append(transformed_member)
+            transformed_agents[member_name] = _resolve_relay_team_agent_spec(
+                agents_raw,
+                member.get("agent_key"),
+                field_name=(
+                    f"team[{team_index}].predefined_members[{member_index}].agent_key"
+                ),
+            )
+
+        if transformed_members:
+            transformed_team["predefined_members"] = transformed_members
+        if teammate_agent_spec is not None:
+            transformed_agents["teammate"] = copy.deepcopy(teammate_agent_spec)
+        transformed_team["agents"] = transformed_agents
+        team_mapping[team_name] = transformed_team
+
+    return team_mapping
+
+
+def sync_agents_configs_in_config(teams_payload: dict[str, Any]) -> dict[str, list[str]]:
+    """Persist relay-claw agent-team configuration into ``modes.team`` only."""
+    if not isinstance(teams_payload, dict):
+        raise ValueError("teams must be an object")
+
+    agents_raw = _require_dict(teams_payload.get("agents"), "agents")
+    teams_raw = teams_payload.get("team")
+    if not isinstance(teams_raw, list):
+        raise ValueError("team must be an array")
+
+    # Validate the complete replacement before opening the config for writing.
+    team_mapping = _build_relay_modes_team_mapping(teams_payload)
+    config_path = _current_config_yaml_path()
+    data = _load_yaml_round_trip(config_path)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError("config root must be an object")
+
+    if teams_raw:
+        modes = data.get("modes")
+        if modes is None:
+            modes = {}
+            data["modes"] = modes
+        elif not isinstance(modes, dict):
+            raise ValueError("modes config must be an object")
+        modes["team"] = team_mapping
+    else:
+        modes = data.get("modes")
+        if isinstance(modes, dict):
+            modes.pop("team", None)
+
+    _dump_yaml_round_trip(config_path, data)
+    return {
+        "team_names": list(team_mapping),
+        "agent_names": [str(name) for name in agents_raw],
+    }
+
+
 def update_heartbeat_in_config(payload: dict[str, Any]) -> None:
     """只更新 heartbeat 段并写回。"""
     data = _load_yaml_round_trip(_current_config_yaml_path())

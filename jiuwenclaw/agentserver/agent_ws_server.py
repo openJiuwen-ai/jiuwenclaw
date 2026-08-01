@@ -1615,23 +1615,12 @@ class AgentWebSocketServer:
                 if not isinstance(teams_payload, dict):
                     raise ValueError("teams must be an object")
 
-                from jiuwenclaw.config import replace_teams_in_config
+                from jiuwenclaw.config import sync_agents_configs_in_config
 
-                replace_teams_in_config(teams_payload)
+                sync_result = sync_agents_configs_in_config(teams_payload)
                 teams_applied = True
-
-                raw_agents = teams_payload.get("agents")
-                if isinstance(raw_agents, dict):
-                    agent_names = [str(name) for name in raw_agents]
-
-                raw_teams = teams_payload.get("team")
-                if isinstance(raw_teams, list):
-                    team_names = [
-                        str(item.get("team_name"))
-                        for item in raw_teams
-                        if isinstance(item, dict)
-                        and str(item.get("team_name") or "").strip()
-                    ]
+                team_names = sync_result["team_names"]
+                agent_names = sync_result["agent_names"]
 
             resp = AgentResponse(
                 request_id=request.request_id,
