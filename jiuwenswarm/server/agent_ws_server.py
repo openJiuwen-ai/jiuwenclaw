@@ -1337,8 +1337,9 @@ class AgentWebSocketServer:
                 request = e2a_to_agent_request(env)
 
         logger.info(
-            "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
+            "[AgentWebSocketServer] 收到请求: request_id=%s request_method=%s channel_id=%s is_stream=%s",
             request.request_id,
+            request.req_method,
             request.channel_id,
             request.is_stream,
         )
@@ -7025,6 +7026,9 @@ class AgentWebSocketServer:
         managed team configuration, in which case an existing hand-written
         ``modes.team`` section must remain untouched.
         """
+        from dataclasses import asdict as dataclass_asdict
+        import json as _json
+
         params = request.params if isinstance(request.params, dict) else {}
         revision = str(params.get("revision") or "").strip()
         service_id = str(params.get("service_id") or "").strip()
