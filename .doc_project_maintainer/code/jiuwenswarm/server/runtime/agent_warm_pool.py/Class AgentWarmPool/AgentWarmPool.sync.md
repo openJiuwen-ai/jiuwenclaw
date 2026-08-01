@@ -11,4 +11,4 @@ audit:
 
 ## Actual Role
 
-Builds desired keys from enabled channels and visible/default projects, advances the config fingerprint revision, stales old slots/tasks, schedules missing targets, and returns non-blocking pool statistics.
+Filters ineligible channels, discovers visible/default projects off the AgentServer event loop, advances the config fingerprint revision, and reconciles an immutable target snapshot. Missing targets remain pending while only the bounded next background batch is started; the method returns statistics without waiting for initialization.

@@ -543,7 +543,11 @@ def _harness_error_code(exc: BaseException) -> str:
     return "BAD_REQUEST"
 
 
-def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
+def resolve_agent_request_mode(
+    raw_mode: Any,
+    *,
+    work_mode: Any = None,
+) -> tuple[str, str | None, str]:
     """Resolve request params.mode into manager mode, sub_mode, and canonical value.
 
     plan / fast 已合并为单一 ``agent`` 模式：任何 ``agent`` / ``agent.plan`` /
@@ -555,14 +559,21 @@ def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
     mode_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
     if not mode_text:
         mode_text = "agent"
+    normalized_work_mode = (
+        work_mode.strip().lower() if isinstance(work_mode, str) else ""
+    )
 
     if mode_text in ("plan", "fast"):
+        if normalized_work_mode == "code":
+            return "code", "normal", "code.normal"
         return "agent", None, "agent"
 
     parts = mode_text.split(".")
     mode = parts[0] or "agent"
     if mode == "agent":
         # 合并模式：忽略历史子模式（plan / fast），统一 canonical "agent"。
+        if normalized_work_mode == "code":
+            return "code", "normal", "code.normal"
         return "agent", None, "agent"
     if mode == "team":
         sub_mode = parts[1] if len(parts) > 1 and parts[1] else None
@@ -580,12 +591,22 @@ def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
     if mode == "code" and sub_mode not in {"plan", "normal", "team"}:
         sub_mode = default_sub_modes.get(mode, "normal")
     canonical_mode = f"{mode}.{sub_mode}" if sub_mode else mode
+    if canonical_mode in {"agent", "code", "code.normal"}:
+        if normalized_work_mode == "code":
+            return "code", "normal", "code.normal"
+        if normalized_work_mode == "work":
+            return "agent", None, "agent"
     return mode, sub_mode, canonical_mode
 
 
-def _apply_resolved_mode_to_request(request: AgentRequest) -> tuple[str, str | None]:
+def _apply_resolved_mode_to_request(
+    request: AgentRequest,
+    *,
+    work_mode: Any = None,
+) -> tuple[str, str | None]:
     mode, sub_mode, canonical_mode = resolve_agent_request_mode(
-        request.params.get("mode", "agent")
+        request.params.get("mode", "agent"),
+        work_mode=work_mode,
     )
     request.params["mode"] = canonical_mode
     return mode, sub_mode
@@ -2050,7 +2071,41 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         _raw_mode = params.get("mode")
         explicit_mode_provided = isinstance(_raw_mode, str) and bool(_raw_mode.strip())
-        mode, sub_mode = _apply_resolved_mode_to_request(request)
+        runtime_work_mode = None
+        sid = str(request.session_id or "").strip()
+        if sid:
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            session_metadata = get_session_metadata(
+                sid,
+                cache_bust=True,
+                enable_writeback=False,
+            )
+            stored_work_mode = (
+                session_metadata.get("work_mode")
+                if isinstance(session_metadata, dict)
+                else None
+            )
+            if isinstance(stored_work_mode, str) and stored_work_mode.strip().lower() in {
+                "code",
+                "work",
+            }:
+                runtime_work_mode = stored_work_mode.strip().lower()
+        if runtime_work_mode is None:
+            request_work_mode = params.get("work_mode")
+            if isinstance(request_work_mode, str) and request_work_mode.strip().lower() in {
+                "code",
+                "work",
+            }:
+                runtime_work_mode = request_work_mode.strip().lower()
+        if runtime_work_mode is not None:
+            params["work_mode"] = runtime_work_mode
+        mode, sub_mode = _apply_resolved_mode_to_request(
+            request,
+            work_mode=runtime_work_mode,
+        )
         agent_mode = "agent" if mode == "auto_harness" else mode
         requested_project_dir = resolve_request_project_dir(request)
         # [改动] 写盘用 canonical mode（request.params["mode"]，已被规范化为
@@ -2211,7 +2266,27 @@ class AgentWebSocketServer:
 
         return restored_after_approval
 
-    async def _handle_unary(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+    async def _handle_unary(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        manager = getattr(self, "_agent_manager", None)
+        foreground = (
+            request.req_method in _CODE_MODE_SYNC_METHODS
+            and manager is not None
+            and hasattr(manager, "begin_foreground_chat")
+            and hasattr(manager, "end_foreground_chat")
+        )
+        if foreground:
+            await manager.begin_foreground_chat()
+        try:
+            await self._handle_unary_impl(ws, request, send_lock)
+        finally:
+            if foreground:
+                await manager.end_foreground_chat()
+
+    async def _handle_unary_impl(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
         """非流式处理：调用 process_message，返回一条 E2AResponse 线 JSON。"""
         # 兜底确保 checkpointer 就绪: start() 里改为后台预热后, 首条请求可能赶在
         # 预热完成前到达。ensure_persistent_checkpointer 内部 lock+ready 幂等, 预热
@@ -2290,7 +2365,27 @@ class AgentWebSocketServer:
         )
 
 
-    async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+    async def _handle_stream(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        manager = getattr(self, "_agent_manager", None)
+        foreground = (
+            request.req_method in _CODE_MODE_SYNC_METHODS
+            and manager is not None
+            and hasattr(manager, "begin_foreground_chat")
+            and hasattr(manager, "end_foreground_chat")
+        )
+        if foreground:
+            await manager.begin_foreground_chat()
+        try:
+            await self._handle_stream_impl(ws, request, send_lock)
+        finally:
+            if foreground:
+                await manager.end_foreground_chat()
+
+    async def _handle_stream_impl(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
         # 兜底确保 checkpointer 就绪 (见 _handle_unary 同名注释)。
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
@@ -7523,6 +7618,12 @@ class AgentWebSocketServer:
                 "team.plan",
                 "code.team",
             }
+            if not is_swarm:
+                mode, _, canonical_mode = resolve_agent_request_mode(
+                    canonical_mode,
+                    work_mode=final_work_mode,
+                )
+                params["mode"] = canonical_mode
             prewarm_eligible = (
                 not is_swarm
                 and canonical_mode in {"agent", "code", "code.normal"}

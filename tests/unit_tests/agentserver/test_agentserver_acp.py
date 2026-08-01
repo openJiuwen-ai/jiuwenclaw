@@ -731,8 +731,6 @@ async def test_handle_initialize_uses_agent_manager_capabilities(monkeypatch):
             "ok": True,
         }
     ]
-
-
 @pytest.mark.asyncio
 async def test_handle_initialize_falls_back_to_default_capabilities(monkeypatch):
     server = AgentWebSocketServerHarness()
@@ -921,6 +919,12 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
             "ok": True,
         }
     ]
+    assert request.params["mode"] == "code.normal"
+    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+
+    metadata = get_session_metadata("sess_code_project", cache_bust=True)
+    assert metadata["mode"] == "code.normal"
+    assert metadata["work_mode"] == "code"
 
 
 @pytest.mark.asyncio

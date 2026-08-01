@@ -1,5 +1,5 @@
 ---
-last_updated: 2026-07-31
+last_updated: 2026-08-01
 sync_status: partial
 coverage_status: partial
 flow_coverage_status: partial
@@ -14,8 +14,7 @@ code_symbol_coverage_status: partial
 - Latest expiration check: the 2026-07-15 normalized-AST scan at `10afedf2` found 0 expired audits among the 128 existing `AgentWebSocketServer` method reviews. No method card or audit signature required refresh, and no previously unaudited symbol was promoted.
 - Flow delivery: eight AgentServer flows are documented, including MCP, sandbox, plan exit, scheduled Auto-Harness, and history streaming.
 - Project status remains partial: most modules, directories, source symbol entry docs, cross-layer flows, and default-health audits are still pending.
-- The 2026-07-31 scoped feature sync added `session-prewarm-allocation`, ADR-0001, and CHG-20260731-001 without widening repository coverage or claiming a health audit.
-- Actionable repository queues remain 298 coverage slices and 167 default-health audit slices.
+- The 2026-07-31/2026-08-01 scoped prewarm follow-ups are synced without widening coverage or claiming a health audit. They record the global slot cap, foreground promotion/cancellation, registry serialization, sync coalescing, MemoryRail singleflight, and canonical code cache identity; affected symbols remain unaudited or audit-expired.
 - Every stable source file inventoried: yes, by the 2026-07-15 `inventory_symbols.py --verify-docs` scan.
 - Every required symbol documented or out of scope: no.
 - Every requested-scope audit symbol closure eligible or out of scope: no; 0 AgentWebSocketServer method audits are source-expired, while 69 records currently have entry-document hash mismatches and broader repository audits remain pending.
@@ -41,6 +40,7 @@ code_symbol_coverage_status: partial
 - 2026-07-14: `agentserver-rebase-expiration-reaudit` - re-reviewed exactly the 64 existing AgentWebSocketServer methods expired by the rebase at `39feee89`; all 64 are trusted, with no new unaudited symbol added or promoted.
 - 2026-07-15: `agentserver-expiration-scan` - scanned `10afedf2`; all 128 existing AgentWebSocketServer method audits remain source-current, 0 expired, and 6 newly observed unaudited server methods were left outside the frozen queue.
 - 2026-07-31: AgentServer-owned session allocation and one-slot DeepAgent prewarming across enabled channels/projects; Web, TUI, IM, ACP, A2A, SSH, fork, and single-Agent Cron creation paths were aligned.
+- 2026-08-01: Prewarm priority/cache correction: one slot, foreground priority, canonical code identity, lightweight Adapter guard, CodeCheck cleanup, and 167 final tests.
 
 ## Completed AgentServer Flow Slices
 
@@ -56,7 +56,7 @@ code_symbol_coverage_status: partial
 - `jiuwenswarm/agents/harness/team`: distributed team lifecycle and remote member bootstrap.
 - `jiuwenswarm/channels/web`, `jiuwenswarm/channels/tui`, and `jiuwenbox`: UI state, command consumers, and sandbox service boundaries.
 - `tests/unit_tests/agentserver`: repository-coverage-only test symbols remain largely undocumented.
-- Session prewarming: new `AgentWarmPool` symbols, `AgentManager` pool methods, `JiuWenSwarmDeepAdapter.prepare_session` and runtime split methods, Gateway/Channel allocators, and Cron allocation remain unaudited. `AgentWebSocketServer._handle_session_create` changed after its prior audit and must be treated as `audit_expired`; `_handle_agent_prewarm_sync` is unaudited.
+- Session prewarming remains unaudited. Modified stream/unary wrappers are `audit_expired`; new pool, adapter, Gateway filter, and implementation-helper symbols are pending audit.
 
 ## Highest-Risk Findings To Carry Forward
 

@@ -67,7 +67,7 @@ issues:
 
 ## Actual Role
 
-Validates project/work-mode binding, rejects explicit new IDs, claims an AgentServer-owned warm or warming session, writes metadata, and returns prewarm status. The linked audit details describe the previous implementation and remain historical until re-audited.
+Validates project/work-mode binding, rejects explicit new IDs, canonicalizes eligible single-Agent runtime mode from final `work_mode`, claims an AgentServer-owned warm or warming session, writes metadata, and returns prewarm status. Code sessions persist `code.normal` even when a legacy Channel sent `mode=agent`. The linked audit details describe the previous implementation and remain historical until re-audited.
 
 ## Audit Details
 

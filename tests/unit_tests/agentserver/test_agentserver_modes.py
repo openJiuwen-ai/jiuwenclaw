@@ -61,6 +61,26 @@ def test_resolve_agent_request_mode_accepts_primary_and_dotted_modes(raw_mode, e
     assert agent_ws_server_module.resolve_agent_request_mode(raw_mode) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw_mode", "work_mode", "expected"),
+    [
+        ("agent", "code", ("code", "normal", "code.normal")),
+        ("code.normal", "work", ("agent", None, "agent")),
+        ("code.plan", "code", ("code", "plan", "code.plan")),
+        ("team", "code", ("team", None, "team")),
+    ],
+)
+def test_resolve_agent_request_mode_aligns_single_agent_with_work_mode(
+    raw_mode,
+    work_mode,
+    expected,
+):
+    assert agent_ws_server_module.resolve_agent_request_mode(
+        raw_mode,
+        work_mode=work_mode,
+    ) == expected
+
+
 def test_team_plan_params_are_team_mode():
     from jiuwenswarm.server.utils.utils import is_team_params
 

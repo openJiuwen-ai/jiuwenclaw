@@ -307,10 +307,20 @@ flows:
   - AgentWarmPool
   - AgentWarmPool.sync
   - AgentWarmPool.claim
+  - AgentWarmPool.begin_foreground
+  - AgentWarmPool.end_foreground
   - AgentWebSocketServer._handle_session_create
+  - AgentWebSocketServer._handle_stream
+  - AgentWebSocketServer._handle_unary
+  - resolve_agent_request_mode
   - JiuWenSwarmDeepAdapter.prepare_session
   - JiuWenSwarmDeepAdapter.configure_session_runtime
+  - JiuWenSwarmDeepAdapter._schedule_runtime_state_write
 code_symbols:
+- symbol: resolve_agent_request_mode
+  kind: function
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/resolve_agent_request_mode.md
 - symbol: _run
   kind: function
   source: jiuwenswarm/server/app_agentserver.py
@@ -351,6 +361,14 @@ code_symbols:
   kind: method
   source: jiuwenswarm/server/runtime/agent_warm_pool.py
   doc: code/jiuwenswarm/server/runtime/agent_warm_pool.py/Class AgentWarmPool/AgentWarmPool.claim.md
+- symbol: AgentWarmPool.begin_foreground
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_warm_pool.py
+  doc: code/jiuwenswarm/server/runtime/agent_warm_pool.py/Class AgentWarmPool/AgentWarmPool.begin_foreground.md
+- symbol: AgentWarmPool.end_foreground
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_warm_pool.py
+  doc: code/jiuwenswarm/server/runtime/agent_warm_pool.py/Class AgentWarmPool/AgentWarmPool.end_foreground.md
 - symbol: JiuWenSwarmDeepAdapter.prepare_session
   kind: method
   source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
@@ -359,6 +377,34 @@ code_symbols:
   kind: method
   source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
   doc: code/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py/JiuWenSwarmDeepAdapter.configure_session_runtime.md
+- symbol: JiuWenSwarmDeepAdapter._schedule_runtime_state_write
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
+  doc: code/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py/JiuWenSwarmDeepAdapter._schedule_runtime_state_write.md
+- symbol: JiuWenSwarmDeepAdapter._schedule_memory_reindex
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
+  doc: code/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py/JiuWenSwarmDeepAdapter._schedule_memory_reindex.md
+- symbol: JiuWenSwarmDeepAdapter._handle_memory_rail_by_config
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
+  doc: code/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py/JiuWenSwarmDeepAdapter._handle_memory_rail_by_config.md
+- symbol: AgentWebSocketServer._handle_stream_impl
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_stream_impl.md
+- symbol: AgentWebSocketServer._handle_unary_impl
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_unary_impl.md
+- symbol: AgentWebSocketServer._handle_stream
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_stream.md
+- symbol: AgentWebSocketServer._handle_unary
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_unary.md
 decisions:
 - id: ADR-0001
   title: AgentServer Owns Prewarmed Session Identity
@@ -367,6 +413,9 @@ changes:
 - id: CHG-20260731-001
   title: Add AgentServer-owned session allocation and DeepAgent prewarming
   doc: changes/records/CHG-20260731-001-session-prewarm-allocation.md
+- id: CHG-20260801-001
+  title: Prioritize foreground chat over background prewarming
+  doc: changes/records/CHG-20260801-001-prewarm-foreground-priority.md
 code_symbol_inventory:
   generated_by: scripts/inventory_symbols.py
   source_symbol_inventory: project/source-symbol-inventory.json

@@ -16,7 +16,7 @@ audit:
 
 ## Actual Role
 
-Builds the adapter's internal runtime-config bundle from stable session identity, channel, mode, and project inputs, then applies it without binding request-scoped capabilities.
+Builds the adapter's internal runtime-config bundle from stable session identity, channel, mode, and project inputs, then applies it without binding request-scoped capabilities. Diagnostic runtime-state persistence is scheduled and coalesced rather than synchronously probing Git on the AgentServer loop.
 
 ## Key Signals
 

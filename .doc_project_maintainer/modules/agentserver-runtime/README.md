@@ -38,6 +38,10 @@ Hosts the standalone AgentServer process and the WebSocket RPC surface used by G
 - `agentserver-history-stream`: persisted history paging, sanitization, streamed events, and frontend reconstruction.
 - `session-prewarm-allocation`: Gateway channel sync, pool reconciliation, AgentServer allocation, and first-chat readiness.
 
+Foreground `chat.send`, `chat.resume`, and `chat.user_answer` open a priority window around unary/stream dispatch. The pool globally caps speculative READY/warming work at one slot. A matching warming task is promoted; other speculative tasks are cancelled, and process-global OpenJiuwen registry initialization is serialized before foreground preparation proceeds. Remaining targets stay as lightweight pending keys.
+
+Eligible single-Agent runtime identity follows final `work_mode`: work selects `agent` with no sub-mode, while code selects `code.normal`. Session creation persists that canonical identity and chat selection restores it from locked metadata, so Channel-provided stale mode values cannot bypass a claimed READY child.
+
 ## Related Code Symbols
 
 - `_run`: startup lifecycle for the standalone process.
@@ -55,7 +59,9 @@ Hosts the standalone AgentServer process and the WebSocket RPC surface used by G
 - `tests/unit_tests/agentserver/test_agentserver_cli_commands.py` covers slash-command handlers.
 - `tests/unit_tests/agentserver/test_agent_ws_connection_close.py` covers disconnect cleanup behavior.
 - `tests/unit_tests/agentserver/test_agent_warm_pool.py` covers READY targets, concurrent claims, replenishment, revision replacement, and failure isolation.
+- The priority regression cases cover ACP/A2A exclusion, foreground semaphore bypass, chat-time background pause, lazy one-slot dispatch, and post-chat replenishment.
 - The focused session-allocation contract run passed 139 tests across AgentServer, Web, project binding, and TUI ownership surfaces on 2026-08-01.
+- The priority follow-up passed 139 focused AgentServer/runtime tests; a restarted local stack completed a real ham-snake Web session in about 7.5 seconds from allocated ID to final history record, without the previous 30–40 second outlier.
 
 ## Known Gaps
 

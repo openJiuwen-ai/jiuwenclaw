@@ -1551,7 +1551,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 if real_client is None:
                     return
                 cm = _resolve(channel_manager)
-                enabled_channels = list(getattr(cm, "enabled_channels", []) or [])
+                enabled_channels = [
+                    channel
+                    for channel in list(getattr(cm, "enabled_channels", []) or [])
+                    if str(channel).lower() not in {"acp", "a2a"}
+                ]
                 env = e2a_from_agent_fields(
                     request_id=f"agent-prewarm-project-{uuid.uuid4().hex[:8]}",
                     channel_id="web",

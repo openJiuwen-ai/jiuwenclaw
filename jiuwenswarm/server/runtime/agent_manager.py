@@ -659,6 +659,12 @@ class AgentManager:
         if session_id:
             await self.warm_pool.wait_for_session(session_id)
 
+    async def begin_foreground_chat(self) -> None:
+        await self.warm_pool.begin_foreground()
+
+    async def end_foreground_chat(self) -> None:
+        await self.warm_pool.end_foreground()
+
     def activate_session_prewarm(self, session_id: str | None) -> None:
         """Mark a claimed prewarm workspace as a normal persisted session."""
         if session_id:

@@ -22,7 +22,8 @@ Accepts user/channel/front-end input, normalizes it into E2A or legacy-compatibl
 - `jiuwenswarm/gateway/routing/agent_client.py` receives AgentServer frames, routes normal responses by request ID, and treats server-push frames as out-of-band events.
 - `docs/en/E2A-protocol.md` describes Gateway -> AgentServer E2A field contracts.
 - Tests outside the AgentServer directory cover AgentServer client queueing, reconnect/close behavior, stream tail grace, and timeout policy.
-- Gateway reports live channel IDs through `agent.prewarm.sync`. Web/TUI local session creation now proxies AgentServer, IM first contact and `/new_session` allocate before forwarding, and ACP/A2A/SSH retain external IDs only as aliases.
+- Gateway reports only prewarm-eligible live channel IDs through `agent.prewarm.sync`; ACP and A2A are excluded at both Gateway and AgentServer boundaries. Web/TUI local session creation proxies AgentServer, IM first contact and `/new_session` allocate before forwarding, and ACP/A2A/SSH retain external IDs only as aliases without creating warm targets.
+- Startup, channel-change, and configuration-reload prewarm sync triggers are debounced and coalesced; pending delayed sync is cancelled during Gateway shutdown.
 - Web session creation derives `user_id` from the authenticated connection and overwrites any request-body value before forwarding to AgentServer.
 
 ## Related Flows

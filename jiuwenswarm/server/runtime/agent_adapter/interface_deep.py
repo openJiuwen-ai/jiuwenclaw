@@ -754,6 +754,7 @@ class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
     SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC = 30.0
+    _RUNTIME_STATE_WRITE_LIMIT = threading.BoundedSemaphore(2)
 
     """Deep SDK 适配器，实现 AgentAdapter 协议.
 
@@ -895,6 +896,59 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
+        self._runtime_state_write_task: asyncio.Task[None] | None = None
+
+    def _schedule_runtime_state_write(
+        self,
+        *,
+        mode: str,
+        language: str,
+        channel: str,
+        session_id: str | None,
+        project_dir: str | None,
+    ) -> None:
+        """Persist diagnostic Git/runtime state without delaying chat handling."""
+        # Some lightweight adapters are restored or constructed without the
+        # full initializer (including focused rail tests). Treat the missing
+        # diagnostic-task slot as idle; runtime-state persistence must never
+        # break request configuration.
+        current = getattr(self, "_runtime_state_write_task", None)
+        if current is not None and not current.done():
+            return
+
+        async def _write() -> None:
+            def _write_bounded() -> None:
+                with self._RUNTIME_STATE_WRITE_LIMIT:
+                    self._write_runtime_state(
+                        mode=mode,
+                        language=language,
+                        channel=channel,
+                        session_id=session_id,
+                        project_dir=project_dir,
+                    )
+
+            await asyncio.to_thread(_write_bounded)
+
+        task = asyncio.create_task(
+            _write(),
+            name=f"runtime-state-{session_id or 'default'}",
+        )
+        self._runtime_state_write_task = task
+
+        def _clear(done: asyncio.Task[None]) -> None:
+            if self._runtime_state_write_task is done:
+                self._runtime_state_write_task = None
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] async runtime_state write failed",
+                    exc_info=True,
+                )
+
+        task.add_done_callback(_clear)
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
@@ -3776,6 +3830,8 @@ class JiuWenSwarmDeepAdapter:
     # 重索引延时（秒）：embedding 配置变更后，延后这段时间再跑一次全量重索引。
     # 配合 _schedule_memory_reindex 的 debounce，连续改多次只在最后一次后跑一次。
     _MEMORY_REINDEX_DELAY_SECONDS: float = 5.0
+    _MEMORY_REINDEX_KEYS: set[tuple[str, str]] = set()
+    _MEMORY_REINDEX_KEYS_LOCK = threading.Lock()
 
     @staticmethod
     def _embedding_config_fingerprint(config: dict | None) -> str:
@@ -3806,11 +3862,23 @@ class JiuWenSwarmDeepAdapter:
         且 openjiuwen lite 的 INDEX_CACHE 已清（aclose_memory_manager_cache）。
         这样延时到期时 init_memory_manager_async 会用新配置建新 manager + 新 provider。
         """
+        workspace = os.path.normcase(os.path.abspath(self._workspace_dir or ""))
+        reindex_key = (workspace, self._memory_embedding_fingerprint)
+        with self._MEMORY_REINDEX_KEYS_LOCK:
+            if reindex_key in self._MEMORY_REINDEX_KEYS:
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] memory reindex coalesced: workspace=%s",
+                    workspace,
+                )
+                return
+            self._MEMORY_REINDEX_KEYS.add(reindex_key)
         if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
             self._memory_reindex_task.cancel()
-        self._memory_reindex_task = asyncio.create_task(self._do_memory_reindex())
+        self._memory_reindex_task = asyncio.create_task(
+            self._do_memory_reindex(reindex_key)
+        )
 
-    async def _do_memory_reindex(self) -> None:
+    async def _do_memory_reindex(self, reindex_key: tuple[str, str]) -> None:
         try:
             await asyncio.sleep(self._MEMORY_REINDEX_DELAY_SECONDS)
             rail = self._memory_rail
@@ -3830,6 +3898,9 @@ class JiuWenSwarmDeepAdapter:
             pass
         except Exception as e:
             logger.warning("[JiuWenSwarmDeepAdapter] memory reindex failed: %s", e)
+        finally:
+            with self._MEMORY_REINDEX_KEYS_LOCK:
+                self._MEMORY_REINDEX_KEYS.discard(reindex_key)
 
     async def _get_current_memory_manager(self):
         """获取当前 MemoryRail 对应的 memory manager（必要时按新配置重建）。
@@ -4574,6 +4645,7 @@ class JiuWenSwarmDeepAdapter:
         self._session_instance_sub_mode = sub_mode
 
         await self.set_checkpoint()
+        await asyncio.sleep(0)
 
         self._dreaming_mode = mode if mode and mode.startswith("agent") else "agent"
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
@@ -4600,6 +4672,7 @@ class JiuWenSwarmDeepAdapter:
 
         tool_cards = await self._get_tool_cards(agent_card.id)
         self._tool_cards = tool_cards
+        await asyncio.sleep(0)
 
         # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
         # 无需初始化 jiuwenswarm 内置 PermissionEngine（已弃用）。
@@ -4649,11 +4722,15 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
+        await asyncio.sleep(0)
         await self._instance.ensure_initialized()
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
-        self._ensure_project_gitignore_agent_history(initial_runtime_workspace)
+        await asyncio.to_thread(
+            self._ensure_project_gitignore_agent_history,
+            initial_runtime_workspace,
+        )
         self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
         setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
@@ -4667,6 +4744,7 @@ class JiuWenSwarmDeepAdapter:
 
         # 加载已激活的 packages（skills, rails, tools）
         await self._load_active_packages()
+        await asyncio.sleep(0)
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
@@ -5451,7 +5529,7 @@ class JiuWenSwarmDeepAdapter:
         circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
         if circuit_breaker_rail is not None:
             circuit_breaker_rail.set_language(resolved_language)
-        self._write_runtime_state(
+        self._schedule_runtime_state_write(
             mode=runtime_config.mode,
             language=resolved_language,
             channel=resolved_channel,
@@ -9310,6 +9388,7 @@ class JiuWenSwarmDeepAdapter:
             if builtin_on:
                 # 开启记忆
                 new_embed_fp = self._embedding_config_fingerprint(config)
+                previous_embed_fp = self._memory_embedding_fingerprint
                 if self._memory_rail is not None:
                     cur_memory_type = is_proactive_memory(mode, config)
                     if self._is_proactive_memory != cur_memory_type:
@@ -9347,7 +9426,8 @@ class JiuWenSwarmDeepAdapter:
                     else:
                         logger.info(f"[JiuWenSwarmDeepAdapter] MemoryRail registered for {mode} mode")
                         # 重建后触发延时重索引（debounce），使新 embedding 配置对历史记忆文件生效
-                        self._schedule_memory_reindex()
+                        if previous_embed_fp and previous_embed_fp != new_embed_fp:
+                            self._schedule_memory_reindex()
             elif not builtin_on and self._memory_rail is not None:
                 await self._instance.unregister_rail(self._memory_rail)
                 self._memory_rail = None

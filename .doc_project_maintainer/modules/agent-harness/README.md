@@ -23,6 +23,10 @@ AgentServer calls this module family through `AgentManager`, adapter methods suc
 
 `JiuWenSwarmDeepAdapter.prepare_session` now creates the session-scoped child, starts the real OpenJiuwen interaction, and calls the child's public `configure_session_runtime` boundary without attaching output or sending input. Request-scoped permissions, paths, ACP capabilities, output attachment, and input remain on the real chat path.
 
+Runtime-state Git probes and `.agent_history` Git-ignore checks no longer run synchronously on the AgentServer loop. Runtime-state writes are coalesced per adapter and limited to two worker threads, so diagnostic repository inspection cannot hold up `chat.send` dispatch.
+
+OpenJiuwen tool/resource registration is process-global, so foreground and speculative preparation share one initialization lock. MemoryRail avoids a full reindex on first registration and singleflights reindex by normalized workspace plus embedding fingerprint when configuration actually changes.
+
 ## Related Flows
 
 - `agentserver-command-mcp`: adapter MCP reconciliation after persisted config changes.

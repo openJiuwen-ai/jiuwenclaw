@@ -72,6 +72,43 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_chat_normalizes_agent_request_for_code_workspace() -> None:
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = _chat_request(
+        "sess_code_workspace",
+        mode="agent",
+        extra_params={"work_mode": "code", "project_dir": "/tmp/code-project"},
+    )
+
+    with patch(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        return_value={},
+    ), patch.object(
+        agent_ws_server_module,
+        "_sync_chat_request_metadata",
+        return_value="/tmp/code-project",
+    ):
+        mode, sub_mode, resolved_agent = await server._prepare_code_mode_chat_turn(
+            request,
+            "web",
+        )
+
+    assert (mode, sub_mode, resolved_agent) == ("code", "normal", agent)
+    assert request.params["mode"] == "code.normal"
+    manager.get_agent.assert_awaited_once_with(
+        channel_id="web",
+        mode="code",
+        project_dir="/tmp/code-project",
+        sub_mode="normal",
+    )
+
+
+@pytest.mark.asyncio
 async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     """The session-locked project dir reaches TeamSpec request metadata.
 

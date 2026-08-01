@@ -3,7 +3,7 @@ id: gateway-agentserver-e2a-chat
 name: Gateway AgentServer E2A Chat
 status: partial
 confidence: confirmed
-last_updated: 2026-07-31
+last_updated: 2026-08-01
 user_visible_surface: "Channel, TUI, CLI, ACP, and web responses produced from AgentServer output."
 source_of_truth: []
 modules:
@@ -32,9 +32,9 @@ Gateway can send a normalized E2A or legacy-compatible request to AgentServer an
 
 Gateway `WebSocketAgentServerClient` connects to AgentServer, waits for `connection.ack`, sends `E2AEnvelope.to_dict()` JSON, and receives E2A response wire frames. AgentServer `_connection_handler` creates a task per inbound frame. `_handle_message` decodes JSON, prefers `E2AEnvelope.from_dict`, falls back to legacy payload parsing when needed, injects ACP capability metadata for ACP requests, triggers before-chat hooks for chat-like methods, then dispatches by `ReqMethod`.
 
-Requests with special methods go to local handlers. Other requests go to `_handle_stream` or `_handle_unary`, which resolve mode and agent state through `AgentManager`, call `process_message_stream` or `process_message`, encode responses through E2A wire helpers, and send them under the connection send lock.
+Requests with special methods go to local handlers. Other requests go to `_handle_stream` or `_handle_unary`. Chat-like methods first increment the warm-pool foreground guard, then their implementation helpers resolve mode and agent state through `AgentManager`, call `process_message_stream` or `process_message`, encode responses through E2A wire helpers, and send them under the connection send lock. A `finally` block releases the guard so lazy background warming resumes after the final active chat.
 
-For newly allocated single-Agent sessions, adapter resolution first awaits the warm-pool preparation Future. A READY claim has already completed DeepAgent creation and interaction startup; a miss shares the background initialization task with the first chat.
+For newly allocated single-Agent sessions, adapter resolution first awaits the warm-pool preparation Future. A READY claim has already completed DeepAgent creation and interaction startup; a miss shares its foreground initialization task with the first chat and bypasses the background semaphore.
 
 ## State Classification
 

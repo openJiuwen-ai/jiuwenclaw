@@ -79,6 +79,7 @@ logger = logging.getLogger("jiuwenswarm.gateway")
 
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
+_AGENT_PREWARM_EXCLUDED_CHANNELS = frozenset({"acp", "a2a"})
 
 # IM 平台官方 API 域名（仅作为 config.yaml 缺字段时的加载兜底，不在 Config 类里硬编码）
 _FEISHU_DEFAULT_API_BASE = "https://open.feishu.cn"
@@ -1596,15 +1597,21 @@ async def _run(
     # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
     message_handler.set_channel_manager(channel_manager)
     updater_service = UpdaterService()
+    prewarm_sync_debounce_task: asyncio.Task[None] | None = None
 
     async def _sync_agent_prewarm_channels() -> None:
         try:
+            prewarm_channels = {
+                channel
+                for channel in channel_manager.enabled_channels
+                if channel.lower() not in _AGENT_PREWARM_EXCLUDED_CHANNELS
+            }
             env = e2a_from_agent_fields(
                 request_id=f"agent-prewarm-sync-{uuid_module.uuid4().hex[:8]}",
                 channel_id="",
                 req_method=ReqMethod.AGENT_PREWARM_SYNC,
                 params={
-                    "enabled_channels": sorted(set(channel_manager.enabled_channels)),
+                    "enabled_channels": sorted(prewarm_channels),
                 },
             )
             resp = await client.send_request(env)
@@ -1619,6 +1626,26 @@ async def _run(
         while True:
             await asyncio.sleep(60)
             await _sync_agent_prewarm_channels()
+
+    def _schedule_agent_prewarm_sync(
+        name: str, *, delay_seconds: float = 1.0
+    ) -> None:
+        """Coalesce startup/config/channel churn into one settled sync."""
+        nonlocal prewarm_sync_debounce_task
+        previous = prewarm_sync_debounce_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+
+        async def _delayed_sync() -> None:
+            try:
+                await asyncio.sleep(max(0.0, delay_seconds))
+                await _sync_agent_prewarm_channels()
+            except asyncio.CancelledError:
+                return
+
+        prewarm_sync_debounce_task = asyncio.create_task(
+            _delayed_sync(), name=name
+        )
 
     async def _on_config_saved(
             updated_env_keys: set[str] | None = None,
@@ -1678,9 +1705,9 @@ async def _run(
                     return False
                 raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
 
-            asyncio.create_task(
-                _sync_agent_prewarm_channels(),
-                name="agent-prewarm-sync-after-config",
+            _schedule_agent_prewarm_sync(
+                "agent-prewarm-sync-after-config",
+                delay_seconds=3.0,
             )
 
             if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
@@ -2510,16 +2537,16 @@ async def _run(
             else:
                 logger.info("[App] channels.ssh missing or invalid, SshChannel disabled")
 
-        asyncio.create_task(
-            _sync_agent_prewarm_channels(),
-            name="agent-prewarm-sync-after-channel-change",
+        _schedule_agent_prewarm_sync(
+            "agent-prewarm-sync-after-channel-change",
+            delay_seconds=1.0,
         )
 
     channel_manager.set_config_callback(_apply_channel_config)
     await channel_manager.set_config(initial_channels_conf)
-    asyncio.create_task(
-        _sync_agent_prewarm_channels(),
-        name="agent-prewarm-sync-after-startup",
+    _schedule_agent_prewarm_sync(
+        "agent-prewarm-sync-after-startup",
+        delay_seconds=3.0,
     )
     prewarm_sync_task = asyncio.create_task(
         _periodic_agent_prewarm_sync(),
@@ -2569,6 +2596,12 @@ async def _run(
     except asyncio.CancelledError:
         pass
     finally:
+        if prewarm_sync_debounce_task is not None:
+            prewarm_sync_debounce_task.cancel()
+            try:
+                await prewarm_sync_debounce_task
+            except asyncio.CancelledError:
+                pass
         prewarm_sync_task.cancel()
         try:
             await prewarm_sync_task
