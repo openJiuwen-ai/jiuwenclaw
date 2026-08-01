@@ -439,14 +439,10 @@ def _build_runner_command(
     # runner 首帧校验 header["token"] == control_token, 不匹配拒绝连接.
     if control_token:
         parts += ["--control-token", control_token]
-    # Windows 命令行需要引号包裹含空格的参数.
-    quoted = []
-    for p in parts:
-        if " " in p or "\t" in p:
-            quoted.append(f'"{p}"')
-        else:
-            quoted.append(p)
-    return " ".join(quoted)
+    # P2-18: 用 subprocess.list2cmdline 正确转义命令行 (修复旧版只加外层引号不
+    # 转义内部双引号的 bug). runner 参数一般不含双引号, 但防御性统一处理.
+    import subprocess as _sp
+    return _sp.list2cmdline(parts)
 
 
 def two_hop_spawn(
@@ -530,10 +526,13 @@ def two_hop_spawn(
         env_block_ptr = ctypes.cast(env_block_buf, ctypes.c_void_p)
         creation_flags |= const.CREATE_UNICODE_ENVIRONMENT
 
+    # cmd (list2cmdline str) 需可变 buffer: CreateProcessWithLogonW 的
+    # lpCommandLine Windows 原地修改, 不能传 c_wchar_p 只读 str.
+    cmd_buf = ctypes.create_unicode_buffer(cmd)
     ok = advapi32.CreateProcessWithLogonW(
         sandbox_user, None, sandbox_password,
         LOGON_WITH_PROFILE,
-        None, cmd,
+        None, cmd_buf,
         creation_flags,
         env_block_ptr,  # env 块; NULL 则用调用方环境
         None, ctypes.byref(startup), ctypes.byref(pi),
@@ -867,9 +866,17 @@ def _create_process_as_user(
     Returns: (child_pid, child_process_handle).
     """
     advapi32 = _get_advapi32()
-    cmd_line = " ".join(
-        f'"{c}"' if " " in c or "\t" in c else c for c in command
-    )
+    # P2-18: 用 subprocess.list2cmdline 正确转义命令行 (修复 bash 引号吞掉 bug).
+    # 旧版 " ".join(f'"{c}"' if " " in c ...) 只对含空格参数加外层双引号, 不转义
+    # 参数内部的双引号. 当 command 形如 ['bash','-lc','python -c "print("ok")"']
+    # 时, bash 收到的脚本里双引号被 Windows CRT 当字符串边界 → argv 错位 →
+    # python -c 拿到的脚本 print(ok (双引号被吞) → SyntaxError. list2cmdline
+    # 按 MSVCRT argv 规则把内部 " 转义为 \", 正确还原 argv.
+    import subprocess as _sp
+    cmd_line = _sp.list2cmdline(command)
+    # CreateProcessAsUserW 的 lpCommandLine 需可变 buffer (Windows 原地修改),
+    # 不能直接传 str (ctypes 转 c_wchar_p 只读, 修改触发段错误).
+    cmd_line_buf = ctypes.create_unicode_buffer(cmd_line)
     # 始终构造 env block 并传 (env=None 回退 os.environ).
     # env=None 时不能传 NULL 给 CreateProcessAsUserW (那给子进程空环境块,
     # 无 PATH → 可执行名解析失败 → WinError 2). 回退到 runner 自身环境
@@ -1009,7 +1016,7 @@ def _create_process_as_user(
     ok = advapi32.CreateProcessAsUserW(
         wintypes.HANDLE(restricted_token),
         None,
-        cmd_line,
+        cmd_line_buf,
         None, None,
         True,  # inherit handles
         creation_flags,
