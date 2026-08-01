@@ -968,17 +968,21 @@ def install(
             ]
         else:
             paths_to_preinstall = []
-        # 对 ~/.office-claw 整个数据根递归授 Read+Write ACL (一劳永逸):
+        # 对 ~/.office-claw 整个数据根递归授 Read ACL (一劳永逸):
         # 沙箱 workspace / isolation_venv / 浏览器目录 (.ms-playwright) / 业务产物
-        # 都在 ~/.office-claw 子树下, 受限 token (jbx-sandbox) 需读写这些路径.
-        # 之前分目录授权 (ms-playwright / 数据根 traverse) 因 install 子进程 env
-        # 缺 JIUWENCLAW_DATA_DIR 导致 workspace.py 算错路径 (算成 ~/.jiuwenclaw 而非
-        # ~/.office-claw/.jiuwenclaw), 授到错误路径 → 运行时 EPERM. 直接对
-        # ~/.office-claw 整树递归 grant (Read+Write+Execute+Delete), 不依赖任何
-        # env/常量解析, 用 Path.home()/.office-claw (与 relay-claw 同算法).
-        # 注意: ~/.office-claw 含所有沙箱 workspace, 递归授权会让各沙箱能互相读
-        # workspace 内容 — 但本产品是单用户本地部署, 跨沙箱隔离非安全目标,
-        # 数据根本就是当前用户的, 一劳永逸授权可接受.
+        # 都在 ~/.office-claw 子树下, jbx-sandbox 需读这些路径. 之前分目录授权
+        # (ms-playwright / 数据根 traverse) 因 install 子进程 env 缺 JIUWENCLAW_DATA_DIR
+        # 导致 workspace.py 算错路径 (算成 ~/.jiuwenclaw 而非 ~/.office-claw/.jiuwenclaw),
+        # 授到错误路径 → 运行时 EPERM. 直接对 ~/.office-claw 整树递归 grant Read,
+        # 不依赖任何 env/常量解析, 用 Path.home()/.office-claw (与 relay-claw 同算法).
+        #
+        # 只 grant Read, 不 grant Write (P0-3 收窄): Write 由 agent 业务子树
+        # (sysop_builder 注入 read_write) + isolation_venv (JIUWENBOX_VENV_DIR env)
+        # + 沙箱 workspace (allow_write[0]) 运行时单独精确授权. 整树 Write 是
+        # 跨沙箱互写 + deny_write 失效 + 副本可篡改 的根因, 去掉它.
+        # 注意: ~/.office-claw 含所有沙箱 workspace, 递归 Read 授权会让各沙箱能
+        # 互相读 workspace 内容 — 但本产品是单用户本地部署, 跨沙箱读可接受,
+        # 数据根本就是当前用户的. 跨沙箱写靠精确 grant 隔离.
         try:
             from jiuwenbox.supervisor import win_acl as _wa, win_constants as _wc
             _office_claw_root = str(Path.home() / ".office-claw")
@@ -988,12 +992,7 @@ def install(
                 _office_claw_root, sid,
                 rights=_wc.FILE_GENERIC_READ, mode="ALLOW", recursive=True,
             )
-            # 递归 grant Write+Execute+Delete.
-            _wa.grant_ace(
-                _office_claw_root, sid,
-                rights=_wc.ALLOW_WRITE_RIGHTS, mode="ALLOW", recursive=True,
-            )
-            logger.info("预装数据根递归 Read+Write ACL: %s", _office_claw_root)
+            logger.info("预装数据根递归 Read ACL: %s (Write 由运行时子树单独授权)", _office_claw_root)
         except Exception as exc:  # noqa: BLE001
             logger.warning("预装数据根 ACL 失败 (非致命): %s", exc)
         preinstall_thread = _preinstall_read_acl_async(paths_to_preinstall, sid)

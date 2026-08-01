@@ -307,19 +307,24 @@ def create_sandbox_sysop_card(
         )
 
     try:
-        # Windows: 文件/网络配置由 agent-server 渲染进运行时 policy 副本 (root policy),
-        # box-server 在沙箱创建时经 _resolve_effective_policy (policy_data=None → deep-copy
-        # root) 自动继承, 无需 per-sandbox policy patch. 这里不传 policy (走 None → root 继承).
-        # Linux: 走 build_filesystem_policy 组 bind_mounts (R5: Linux 路径不动).
-        import sys as _sys
-        if _sys.platform == "win32":
-            policy: dict[str, Any] = {}
-            upload_list: list[dict[str, str]] = []
-        else:
-            policy, upload_list = build_filesystem_policy(
-                files_runtime,
-                shared_dir=shared_dir,
-            )
+        # Windows/Linux 共用 build_filesystem_policy: 把 agent_root (shared_dir) 注入
+        # filesystem_policy.read_write + bind_mounts(rw), files_runtime.allow/deny 同样
+        # 注入. box-server process.py:_create_windows 从 read_write + bind_mounts.sandbox_path
+        # 提取路径加进 allow_write_paths, apply_sandbox_acl 精确 grant Write.
+        #
+        # 历史: Windows 曾空 policy, agent 业务目录 (agent_root/jiuwenclaw_workspace 含
+        # AGENT.md/memory/skills/output_dir) 不进 read_write, 全靠 win_acl 对 ~/.office-claw
+        # 整树递归 grant Write 兜底 → 跨沙箱互写 + deny_write 失效 + 副本可篡改. 现补注入,
+        # 配合 win_acl 整树 grant 收窄为只 Read (P0-3).
+        #
+        # Windows 不用 bind mount (直接路径), 但 process.py 从 bind_mounts.sandbox_path +
+        # read_write 两处提取, 都能消费. build_filesystem_policy 内 _resolve_shared_dir 会
+        # mkdir(exist_ok=True) + _relax_workspace_perms(chmod), Windows 上 chmod 无实际作用
+        # 但无害 (OSError 容错). agent_root 已由 agent-server 创建, mkdir 幂等.
+        policy, upload_list = build_filesystem_policy(
+            files_runtime,
+            shared_dir=shared_dir,
+        )
         extra_params: dict[str, Any] = {
             "policy": policy,
             "policy_mode": "append",

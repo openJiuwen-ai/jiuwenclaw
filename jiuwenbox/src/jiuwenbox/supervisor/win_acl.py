@@ -342,6 +342,17 @@ def apply_sandbox_acl(
             mode="DENY",
             recursive=recursive,
         )
+        # child 用 jbx-sandbox 真实 SID、token 未受限 (受限 token 弃用, 见
+        # _get_runner_primary_token 注释: 0xC0000142), 合成 SID 的 Deny 对 child
+        # 不生效. 必须给真实 SID 也加 Deny, 否则 deny_write (.git/.env) 被 child
+        # 绕过 (P0-3). Deny ACE 残留无害 (NTFS Deny 优先, 且幂等施加).
+        if sandbox_user_sid:
+            grant_ace(
+                expanded, sandbox_user_sid,
+                rights=const.FILE_GENERIC_WRITE,
+                mode="DENY",
+                recursive=recursive,
+            )
         applied.append(expanded)
 
     # --- 读控制: deny_read (先施加 Deny Read) ---
@@ -427,21 +438,23 @@ def apply_sandbox_acl(
             [str(r) for r in _traverse_roots],
         )
 
-    # 对 ~/.office-claw 整个数据根递归补授 Read+Write ACL (一劳永逸, 与
-    # install 阶段同路径同语义): install force=False 幂等跳过时, 这里每次建
-    # 沙箱补授, 让受限 token 能读写整个数据根 (workspace / isolation_venv /
-    # .ms-playwright / 业务产物). 用 Path.home()/.office-claw (与 relay-claw
+    # 对 ~/.office-claw 整个数据根递归补授 Read ACL (一劳永逸, 与 install 阶段
+    # 同路径同语义): install force=False 幂等跳过时, 这里每次建沙箱补授, 让
+    # jbx-sandbox 能读整个数据根 (workspace / isolation_venv / .ms-playwright /
+    # 业务产物 / AGENT.md / memory 等). 用 Path.home()/.office-claw (与 relay-claw
     # 同算法), 不依赖 JIUWENCLAW_DATA_DIR env (避免 install 子进程 env 缺失算错).
-    # 递归 grant, 合成 SID 固定 → 幂等, 不进 applied 清单 (避免 revoke 跨沙箱
-    # 误删). 真实 SID 同步授一份. 单用户本地部署, 跨沙箱读 workspace 可接受.
+    #
+    # 只 grant Read, 不 grant Write (P0-3 收窄): Write 由 agent 业务子树
+    # (sysop_builder 注入 read_write) + isolation_venv (JIUWENBOX_VENV_DIR env)
+    # + 沙箱 workspace (allow_write[0]) 单独精确授权. 整树 Write 是跨沙箱互写 +
+    # deny_write 对真实 SID 失效 + 副本可篡改 的根因, 去掉它. 跨沙箱读 workspace
+    # 可接受 (单用户本地部署), Write 才是问题.
+    #
+    # 递归 grant, 合成 SID 固定 → 幂等, 不进 applied 清单 (避免 revoke 跨沙箱误删).
+    # 真实 SID 同步授一份.
     import pathlib as _pl
     _office_claw_root = str(_pl.Path.home() / ".office-claw")
     if os.path.isdir(_office_claw_root):
-        grant_ace(
-            _office_claw_root, sid,
-            rights=const.ALLOW_WRITE_RIGHTS,
-            mode="ALLOW", recursive=True,
-        )
         grant_ace(
             _office_claw_root, sid,
             rights=const.FILE_GENERIC_READ,
@@ -450,16 +463,11 @@ def apply_sandbox_acl(
         if sandbox_user_sid:
             grant_ace(
                 _office_claw_root, sandbox_user_sid,
-                rights=const.ALLOW_WRITE_RIGHTS,
-                mode="ALLOW", recursive=True,
-            )
-            grant_ace(
-                _office_claw_root, sandbox_user_sid,
                 rights=const.FILE_GENERIC_READ,
                 mode="ALLOW", recursive=True,
             )
         logger.info(
-            "施加数据根递归 Read+Write ACL: root=%s (不进 revoke 清单)",
+            "施加数据根递归 Read ACL: root=%s (不进 revoke 清单, Write 由子树单独授权)",
             _office_claw_root,
         )
 
