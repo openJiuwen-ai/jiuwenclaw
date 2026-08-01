@@ -92,13 +92,14 @@ _P43_COMMON_RULES = """大纲格式要求（必须严格遵守）：
 3. `## 页面规划` 下每页一个 `### P{N}:` 块，字段齐全：
    - **类型**：cover/ending/agenda/section/chapter/transition/conclusion/trend/data/case/comparison/technology 等
    - **研究需求**：cover/ending/agenda/section/chapter/transition/conclusion 标 ❌，其余标 ✅
-   - **标题**：结论性完整句（Action + Result）
+   - **标题**：结论性完整句（Action + Result）；结构性页面（cover/ending/agenda/section/chapter）可使用描述性标题
    - **内容概要**：具体有信息量
    - **研究查询**：✅ 页 2-4 个精准查询；❌ 页填 `-`
    - **数据需求**：✅ 页写具体数据类型和维度，数据需求必须具体化；❌ 页填 `-`
 4. 内容页数（研究需求：✅）必须等于 page_count。封面（cover）、结束页（ending）及用户明确要求的结构页（section/agenda/transition/conclusion 等）标 ❌，其余页必须标 ✅。
    禁止自行添加 section/transition/agenda 等结构页；仅当用户明确要求时才添加，且为额外页（总页数 = page_count + 2 + 结构页数），不得占用内容页额度。
    **页面顺序**：cover 必须是 P1（首页），ending 必须是末页（P{总页数}）。
+   **agenda 页内容**：内容概要只列内容页（✅）章节标题与导航，不得列入 cover/ending/agenda 等结构页本身。
 5. 基于给定素材与搜索结果，不编造不存在的趋势或数据。
 6. 只输出 Markdown 正文，不要 JSON，不要代码围栏。"""
 
@@ -770,6 +771,21 @@ def _validate_outline_markdown_basic(text: str, *, topic: str, page_count: Any) 
             raise ContentPlanError(
                 f"P4.3 outline 内容页数（✅）应为 {expected_content_pages}，"
                 f"实际 {content_count}"
+            )
+
+    # 遵从 pptx-craft outline-planner Stage 3 产物验证：
+    # 首页类型为 cover，末页类型为 ending（conclusion/transition 为别名）
+    _struct_pages = _split_outline_pages(stripped)
+    if _struct_pages:
+        _first_type = _extract_outline_field(_struct_pages[0][1], "类型").strip().lower()
+        if _first_type and _first_type not in ("cover", "intro"):
+            raise ContentPlanError(
+                f"P4.3 outline 首页类型应为 cover，实际为 {_first_type}"
+            )
+        _last_type = _extract_outline_field(_struct_pages[-1][1], "类型").strip().lower()
+        if _last_type and _last_type not in ("ending", "conclusion", "transition"):
+            raise ContentPlanError(
+                f"P4.3 outline 末页类型应为 ending，实际为 {_last_type}"
             )
 
     required_fields = ("**类型**", "**研究需求**", "**标题**", "**内容概要**", "**研究查询**", "**数据需求**")

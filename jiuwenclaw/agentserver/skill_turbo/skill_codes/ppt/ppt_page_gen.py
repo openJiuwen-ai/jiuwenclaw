@@ -117,6 +117,12 @@ _EDITABLE_LAYERING_RULES = (
     "内容层”。遮罩只能覆盖背景图片，禁止放在 main、header、footer、图表、表格、卡片、"
     "文字等语义内容上方，禁止给语义内容的父容器设置 `opacity`，也禁止把全页透明元素作为"
     "内容容器或选择代理层。\n"
+    "- 全页栅格化遮罩禁令（所有页型）：禁止用 `position:absolute;inset:0`（或 "
+    "`width:100%`+`height:100%`）的全页装饰元素承载 `repeating-linear-gradient`、"
+    "`mix-blend-mode`、`radial-gradient`、`conic-gradient`；这些不在 html-to-pptx 支持范围"
+    "内，转换器会将其栅格化为覆盖整页的图片，落在内容之上即成为挡住下层编辑的“透明罩”。"
+    "背景装饰 `z-index` 必须 ≤0（低于内容层）；扫描线/故障条请用多个独立的小尺寸 "
+    "solid-color `<div>` 实现，禁止用全页渐变罩。\n"
     "- 图表可编辑性约束：ECharts 必须使用 SVG renderer；禁止在 `areaStyle.color`、"
     "`itemStyle.color`、`lineStyle.color`、`visualMap.inRange.color` 等配置中使用 "
     "`colorStops`、渐变 `type: 'linear'/'radial'` 或 "
@@ -338,6 +344,10 @@ _DESIGN_RULES_DIGEST = (
     "8.1 禁止使用 CSS Grid：html-to-pptx 转换器不支持 `display:grid`（Grid 仅检测不转换，视为非文本容器），"
     "所有布局必须用 Flexbox（`flex`、`flex-col`、`flex-[N]`）替代 `grid grid-cols-*`；"
     "左右分栏用 `flex` + `flex-[3]` / `flex-[2]` 比例分配，不用 `grid grid-cols-[3fr_2fr]`\n"
+    "8.2 `flex-[N]` 是 Tailwind 类名，必须写在 `class` 属性中（如 `class=\"flex-[3]\"`）；"
+    "禁止在 `style` 属性中使用 `flex:[N]`（如 `style=\"flex:[3]\"`）——"
+    "方括号是 Tailwind 语法而非有效 CSS 值，浏览器无法解析会导致 flex 比例失效、布局塌缩和内容重叠；"
+    "如必须在 inline style 中设置 flex，使用 `style=\"flex: 3;\"`\n"
     "9. 需要填满父容器剩余空间的主内容区、图表区可使用 `flex-1 min-h-0 min-w-0`（水平布局）"
     "或 `flex-1 min-h-0`（垂直布局）；内容较少的纯文字卡片不强制使用 `flex-1`；"
     "禁止使用 `overflow-hidden` 隐藏核心内容\n"
@@ -378,7 +388,11 @@ _DESIGN_RULES_DIGEST = (
     "**字体强制声明**：风格规范文件 frontmatter 中的 `font-family` 字段声明了字体栈（如 `Noto Sans SC, WenYuan Sans SC, sans-serif`），"
     "每个页面的 `<style>` 块中必须在 `body` 选择器或 `.ppt-slide` 选择器上声明该完整字体栈，例如："
     "`body { font-family: 'Noto Sans SC', 'WenYuan Sans SC', sans-serif; }`；"
-    "禁止仅在 CSS 中声明而漏掉 HTML 元素上的字体继承——所有文本元素必须继承 `body` 的 `font-family`，不得单独使用其他字体\n"
+    "禁止仅在 CSS 中声明而漏掉 HTML 元素上的字体继承——所有文本元素必须继承 `body` 的 `font-family`，不得单独使用其他字体；"
+    "**风格 CSS 类强制声明**：页面 `<style>` 块中必须声明本页使用的所有风格自定义 CSS 类"
+    "（如 `.brandRed`、`.bg-brandRed`、`.bg-brandRedBg`、`.border-brandRed`、`.text-gray1`、"
+    "`.text-grayDeep`、`.border-gray3`、`.bg-gray4` 等），色值从风格规范文件中取；"
+    "缺少这些类定义会导致品牌色和灰度色全部失效，页面退化为白底黑字\n"
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚；"
     "禁止在页脚追加任何运行页码；页数只用于任务定位和文件完整性校验\n"
     "13. 布局实现：仅 main、图表或图片等需要承接剩余空间的区域使用 `flex-1 min-h-0`；"
@@ -460,6 +474,10 @@ _STRUCTURAL_DESIGN_RULES = (
     "**字体强制声明**：风格规范文件 frontmatter 中的 `font-family` 字段声明了字体栈，"
     "每个页面的 `<style>` 块中必须在 `body` 或 `.ppt-slide` 选择器上声明该完整字体栈，例如："
     "`body { font-family: 'Noto Sans SC', 'WenYuan Sans SC', sans-serif; }`\n"
+    "5.1 **风格 CSS 类强制声明**：结构页 `<style>` 块中必须声明本页使用的所有风格自定义 CSS 类"
+    "（如 `.brandRed`、`.bg-brandRed`、`.bg-brandRedBg`、`.border-brandRed`、`.text-gray1`、"
+    "`.text-grayDeep`、`.border-gray3`、`.bg-gray4` 等），色值从风格规范文件中取；"
+    "缺少这些类定义会导致品牌色和灰度色全部失效，页面退化为白底黑字\n"
     "6. 布局：居中排列（`flex flex-col items-center justify-center`），"
     "不强制 grid-cols-2 双栏\n"
     "7. 留白：允许较高留白，**禁止堆砌数据卡片**：封面页最多保留 3 个数据卡，结束页最多保留 4 个数据回响卡；"
@@ -473,6 +491,11 @@ _STRUCTURAL_HTML_SKELETON = (
     "<style>\n"
     "body { font-family: 'Noto Sans SC', 'WenYuan Sans SC', sans-serif; margin: 0; }\n"
     ".ppt-slide { width: 1280px; height: 720px; overflow: hidden; box-sizing: border-box; }\n"
+    "/* 必须从 style.md 取色值，声明本页使用的所有风格自定义 CSS 类，例如：\n"
+    ".brandRed { color: #D33941; }  .bg-brandRed { background-color: #D33941; }\n"
+    ".bg-brandRedBg { background-color: #FFF1EF; }  .border-brandRed { border-color: #D33941; }\n"
+    ".text-gray1 { color: #898989; }  .text-grayDeep { color: #555757; }\n"
+    ".border-gray3 { border-color: #DDDDDD; }  .bg-gray4 { background-color: #F5F5F5; } */\n"
     "</style>\n"
     '<div class="ppt-slide">\n'
     '  <div class="content-safe flex flex-col items-center justify-center">\n'
@@ -588,6 +611,25 @@ _PAGE_LAYOUT_TEMPLATES = {
         '</div>\n'
         "```\n"
         "- 低密度页面，允许较高留白，不要求双栏、数据卡片或图表\n"
+    ),
+    "agenda": (
+        "### 推荐布局（agenda 类型，目录页）\n"
+        "```html\n"
+        '<div class="content-safe flex flex-col">\n'
+        '  <div class="flex-shrink-0">\n'
+        '    <h1 class="text-[44px] font-bold">目录</h1>\n'
+        '    <p class="text-[16px] mt-2">演示内容导览</p>\n'
+        '  </div>\n'
+        '  <div class="flex-1 min-h-0 flex flex-col justify-center gap-3 mt-6">\n'
+        '    <div class="flex items-center gap-6 py-3">\n'
+        '      <span class="text-[36px] font-bold w-[60px] flex-shrink-0">01</span>\n'
+        '      <p class="text-[24px] flex-1">内容章节标题</p>\n'
+        '    </div>\n'
+        '  </div>\n'
+        '</div>\n'
+        "```\n"
+        "- 只列内容页（✅）章节标题，不得列入封面/目录/结束页等结构页本身\n"
+        "- 低密度页面，允许较高留白，布局可按风格调整\n"
     ),
 }
 
@@ -1258,6 +1300,90 @@ def _has_off_canvas_decoration(html: str) -> bool:
         if _has_negative_edge_in_css(html, decoration_classes):
             return True
     return False
+
+
+# --- 全页栅格化装饰遮罩（“透明罩”）修复 ---
+# html-to-pptx 转换器对 `inset:0` + 渐变背景的元素会栅格化为 PNG 图片
+# （见 css-whitelist.md `inset` 条目“仅用于渐变背景检测”）。而
+# repeating-linear-gradient / mix-blend-mode / radial-gradient / conic-gradient
+# 不在 css-whitelist 支持范围内，配合全页 inset:0 会生成覆盖整页的不可编辑图片，
+# 落在内容层之上即挡住下层元素的编辑（“透明罩”）。
+_UNSUPPORTED_RASTER_BG_RE = re.compile(
+    r"repeating-linear-gradient|mix-blend-mode|radial-gradient|conic-gradient",
+    re.IGNORECASE,
+)
+_EMPTY_DIV_RE = re.compile(r"<div\b[^>]*>\s*</div\s*>", re.IGNORECASE)
+_OPEN_DIV_TAG_RE = re.compile(r"<div\b[^>]*>", re.IGNORECASE)
+
+
+def _is_fullpage_overlay_style(style_text: str) -> bool:
+    """判断一段 CSS 文本是否表示全页覆盖定位。
+
+    `inset:0` 是全页覆盖的最简表达；`position:absolute` + 100% 宽高为等价写法。
+    """
+    if re.search(r"inset\s*:\s*0\b", style_text, re.IGNORECASE):
+        return True
+    return (
+        bool(re.search(r"position\s*:\s*absolute", style_text, re.IGNORECASE))
+        and bool(re.search(r"width\s*:\s*100%", style_text, re.IGNORECASE))
+        and bool(re.search(r"height\s*:\s*100%", style_text, re.IGNORECASE))
+    )
+
+
+def _strip_unsupported_fullpage_overlays(html: str) -> str:
+    """移除使用 css-whitelist 不支持栅格化背景的全页空装饰遮罩。
+
+    只删除同时满足以下三条件的 `<div>`：
+    1. 全页覆盖（`inset:0` 或绝对定位 + 100% 宽高）；
+    2. 背景使用 `repeating-linear-gradient`/`mix-blend-mode`/`radial-gradient`/
+       `conic-gradient`（不在 css-whitelist 支持范围，会被栅格化为图片）；
+    3. 无内容子节点（空 div，如 `<div class="scanlines"></div>`）。
+    不影响独立小尺寸 scanline 条（非全页）、图表、卡片或内容容器；CSS 规则保留不动
+    （移除元素后即为无害死规则）。
+    """
+    if not html or not _UNSUPPORTED_RASTER_BG_RE.search(html):
+        return html
+
+    overlay_classes: set[str] = set()
+    for style_match in _STYLE_BLOCK_RE.finditer(html):
+        css = style_match.group("css")
+        for rule_match in _CSS_RULE_RE.finditer(css):
+            body = rule_match.group("body")
+            if _UNSUPPORTED_RASTER_BG_RE.search(body) and _is_fullpage_overlay_style(
+                body
+            ):
+                overlay_classes.update(
+                    re.findall(r"\.([A-Za-z_][\w-]*)", rule_match.group("selectors"))
+                )
+
+    def _is_overlay_open_tag(open_tag: str) -> bool:
+        if overlay_classes and (
+            _classes_from_tag_attrs(open_tag) & overlay_classes
+        ):
+            return True
+        style_match = _HTML_STYLE_RE.search(open_tag)
+        if style_match:
+            style_val = style_match.group("style")
+            if _UNSUPPORTED_RASTER_BG_RE.search(
+                style_val
+            ) and _is_fullpage_overlay_style(style_val):
+                return True
+        return False
+
+    removed = 0
+
+    def _maybe_strip(match: re.Match) -> str:
+        nonlocal removed
+        open_tag = _OPEN_DIV_TAG_RE.match(match.group(0))
+        if open_tag and _is_overlay_open_tag(open_tag.group(0)):
+            removed += 1
+            return ""
+        return match.group(0)
+
+    result = _EMPTY_DIV_RE.sub(_maybe_strip, html)
+    if removed:
+        logger.info("[P8.1] 移除全页栅格化装饰遮罩 %d 个（透明罩修复）", removed)
+    return result
 
 
 _JS_DELIMITER_PAIRS = {"(": ")", "[": "]", "{": "}"}
@@ -2134,7 +2260,7 @@ def _build_page_prompt(
     # 注入新版 skill designer 规范；图表候选页从同一 designer.md 追加图表章节。
     # 文件内容由 PrepareNode 通过 read_file 工具读取后传入
     designer_section = ""
-    if not is_structural and designer_md_text:
+    if designer_md_text:
         designer_md = _extract_designer_section(
             designer_md_text,
             include_charts=page_type in _CHART_CANDIDATE_TYPES,
@@ -2615,6 +2741,7 @@ class PageWorkerNode(PlanNode):
             style_id=ctx.style_id,
         )
         html = _fix_echarts_svg_renderer(html)
+        html = _strip_unsupported_fullpage_overlays(html)
         return html
 
     async def _write_file(self, path: str, content: str) -> bool:
