@@ -135,12 +135,64 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
             _ch_conf["send_file_allowed"] = True
 
 
+# Parsed YAML per file path, keyed on the file's identity so an edit — by this
+# process or any other — invalidates it. Only the parse is cached: reading and
+# parsing config.yaml costs ~11 ms while everything downstream of it (env
+# resolution, normalization) costs ~0.3 ms, and ``get_config`` sits on every
+# request path. Deliberately not caching past the parse keeps env var changes
+# (``load_dotenv_runtime`` runs with override=True before some reads) taking
+# effect immediately, so this needs no explicit invalidation hook.
+_YAML_PARSE_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
+_YAML_PARSE_CACHE_LOCK = threading.Lock()
+
+
+def _yaml_file_stamp(filepath: Path) -> tuple[int, int] | None:
+    """Return the identity a cached parse of this file is keyed on.
+
+    Args:
+        filepath: YAML file to stamp.
+
+    Returns:
+        ``(mtime_ns, size)``, or None when the file cannot be stat'd — in which
+        case the caller must not use or populate the cache.
+    """
+    try:
+        stat_result = filepath.stat()
+    except OSError:
+        return None
+    return stat_result.st_mtime_ns, stat_result.st_size
+
+
 def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
-    """读取 YAML，遇解析错误重试（应对跨进程写竞态）。"""
+    """读取 YAML，遇解析错误重试（应对跨进程写竞态）。
+
+    解析结果按文件身份（mtime + size）缓存；调用方会就地修改返回值
+    （``_normalize_config`` 即是），故命中与写入缓存时都做深拷贝，
+    保证各调用方拿到互不影响的副本。
+
+    Args:
+        filepath: 待读取的 YAML 文件路径。
+        max_attempts: 解析失败时的最大尝试次数。
+
+    Returns:
+        解析后的字典；文件为空时返回空字典。
+    """
+    stamp = _yaml_file_stamp(filepath)
+    cache_key = str(filepath)
+    if stamp is not None:
+        with _YAML_PARSE_CACHE_LOCK:
+            cached = _YAML_PARSE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == stamp:
+            return deepcopy(cached[1])
+
     for attempt in range(max_attempts):
         try:
             with open(filepath, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+                parsed = yaml.safe_load(f) or {}
+            if stamp is not None:
+                with _YAML_PARSE_CACHE_LOCK:
+                    _YAML_PARSE_CACHE[cache_key] = (stamp, deepcopy(parsed))
+            return parsed
         except yaml.YAMLError:
             if attempt < max_attempts - 1:
                 time.sleep(0.05 * (attempt + 1))
