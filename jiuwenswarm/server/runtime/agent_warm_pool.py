@@ -29,6 +29,29 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Background prewarming is opt-in. When it stays off, sessions are allocated an id
+# immediately and initialize lazily on their first request.
+_PREWARM_ENABLED_ENV_KEY = "JIUWENSWARM_AGENT_PREWARM"
+
+
+def _prewarm_enabled_by_env() -> bool:
+    """Return whether background session prewarming is switched on.
+
+    Returns:
+        True only when the environment explicitly opts in.
+    """
+    raw = str(os.environ.get(_PREWARM_ENABLED_ENV_KEY, "") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _zero_stats() -> dict[str, int]:
+    """Return the pool statistics reported when nothing is being warmed.
+
+    Returns:
+        A statistics mapping with every counter set to zero.
+    """
+    return {"target": 0, "ready": 0, "warming": 0, "failed": 0, "stale": 0}
+
 
 def _normalize_project_dir(value: str | None) -> str:
     raw = str(value or "").strip()
@@ -90,8 +113,10 @@ class AgentWarmPool:
         max_ready_slots: int = 1,
         max_foreground_concurrency: int = 8,
         background_cooldown_seconds: float = 0.25,
+        enabled: bool | None = None,
     ) -> None:
         self._manager = manager
+        self._enabled = _prewarm_enabled_by_env() if enabled is None else bool(enabled)
         self._boot_id = uuid.uuid4().hex
         self._sequence = 0
         self._revision = WarmRevision(self._boot_id, "", 0)
@@ -264,6 +289,8 @@ class AgentWarmPool:
         config: Any,
         env: Any = None,
     ) -> dict[str, int]:
+        if not self._enabled:
+            return _zero_stats()
         channels: set[str] = set()
         for channel in enabled_channels:
             normalized_channel = str(channel).strip().lower()
@@ -276,13 +303,7 @@ class AgentWarmPool:
         desired = await asyncio.to_thread(self._desired_keys, channels)
         async with self._lock:
             if self._closed:
-                return {
-                    "target": 0,
-                    "ready": 0,
-                    "warming": 0,
-                    "failed": 0,
-                    "stale": 0,
-                }
+                return _zero_stats()
             if revision.sequence < self._revision.sequence:
                 warming_tasks = set(self._tasks.values()) | set(
                     self._session_tasks.values()
@@ -594,7 +615,7 @@ class AgentWarmPool:
                 await self.end_foreground()
 
     async def claim(self, key: WarmKey) -> WarmClaim:
-        if key.is_swarm:
+        if not self._enabled or key.is_swarm:
             return WarmClaim(self._new_session_id(key.channel_id), False, "bypassed")
         async with self._lock:
             if self._closed:

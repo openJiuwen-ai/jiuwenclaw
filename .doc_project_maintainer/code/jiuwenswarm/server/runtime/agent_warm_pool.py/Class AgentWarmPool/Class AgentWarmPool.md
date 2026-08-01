@@ -19,6 +19,7 @@ Maintains at most one speculative READY or warming session globally across eligi
 
 ## Key Contracts
 
+- The pool is inert unless `enabled` (default: the `JIUWENSWARM_AGENT_PREWARM` environment variable) opts in.
 - Only single-Agent keys enter READY.
 - Code keys acquire AgentManager roots with `mode=code, sub_mode=normal`; work keys use `mode=agent, sub_mode=None`.
 - A claim is atomic; matching warming work retains its Session ID, and the claimed key is prioritized for replenishment after foreground chat.

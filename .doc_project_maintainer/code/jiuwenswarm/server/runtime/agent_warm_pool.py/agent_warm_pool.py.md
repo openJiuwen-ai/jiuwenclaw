@@ -11,7 +11,7 @@ last_updated: 2026-08-01
 
 ## Actual Role
 
-Owns process-local reconciliation and atomic claiming of session-bound READY DeepAgents. It defines immutable warm identity/revision records, guarded marker cleanup, bounded background initialization, stale revision disposal, claimed-session waiting, and root-agent pinning.
+Owns process-local reconciliation and atomic claiming of session-bound READY DeepAgents. It defines immutable warm identity/revision records, guarded marker cleanup, bounded background initialization, stale revision disposal, claimed-session waiting, and root-agent pinning. All of that stays dormant behind the `JIUWENSWARM_AGENT_PREWARM` opt-in switch, which is off by default.
 
 ## Symbol Inventory
 

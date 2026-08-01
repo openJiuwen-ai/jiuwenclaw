@@ -292,7 +292,7 @@ flows:
   - AgentWebSocketServer._handle_history_get_stream
 - id: session-prewarm-allocation
   name: Session Prewarm And Allocation
-  summary: Gateway syncs live channels; AgentServer prepares, claims, and replenishes session-bound single-Agent runtimes.
+  summary: Gateway syncs live channels; AgentServer prepares, claims, and replenishes session-bound single-Agent runtimes. Prewarming itself is off unless JIUWENSWARM_AGENT_PREWARM opts in.
   confidence: confirmed
   doc: project/flows/session-prewarm-allocation.md
   modules:
@@ -416,6 +416,9 @@ changes:
 - id: CHG-20260801-001
   title: Prioritize foreground chat over background prewarming
   doc: changes/records/CHG-20260801-001-prewarm-foreground-priority.md
+- id: CHG-20260801-005
+  title: Switch background session prewarming off by default
+  doc: changes/records/CHG-20260801-005-disable-session-prewarm.md
 code_symbol_inventory:
   generated_by: scripts/inventory_symbols.py
   source_symbol_inventory: project/source-symbol-inventory.json

@@ -82,9 +82,42 @@ def isolated_pool(monkeypatch, tmp_path: Path):
     )
 
     def factory(agent: _FakeRootAgent) -> AgentWarmPool:
-        return AgentWarmPool(_FakeManager(agent), max_concurrency=4)
+        # Prewarming is off by default; these cases exercise the opted-in pool.
+        return AgentWarmPool(_FakeManager(agent), max_concurrency=4, enabled=True)
 
     yield factory
+
+
+@pytest.mark.asyncio
+async def test_disabled_pool_never_warms_and_always_bypasses(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_warm_pool.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.delenv("JIUWENSWARM_AGENT_PREWARM", raising=False)
+    agent = _FakeRootAgent()
+    pool = AgentWarmPool(_FakeManager(agent))
+
+    stats = await pool.sync(["web"], config={"model": "a"})
+    assert stats == {"target": 0, "ready": 0, "warming": 0, "failed": 0, "stale": 0}
+
+    key = pool.make_key(
+        channel_id="web",
+        project_id="default",
+        project_dir="",
+        work_mode="work",
+    )
+    claim = await pool.claim(key)
+    assert claim.prewarm_hit is False
+    assert claim.prewarm_status == "bypassed"
+    assert claim.session_id.startswith("web_")
+    assert not pool._slots
+    assert not pool._tasks
+    assert agent.prepared == []
+    await pool.wait_for_session(claim.session_id)
+    await pool.close()
 
 
 def test_warm_key_normalizes_project_directory(tmp_path: Path) -> None:
@@ -174,7 +207,7 @@ async def test_foreground_bypasses_background_and_pauses_lazy_dispatch(
         lambda **_kwargs: [],
     )
     agent = _ControlledRootAgent()
-    pool = AgentWarmPool(_FakeManager(agent), max_concurrency=1)
+    pool = AgentWarmPool(_FakeManager(agent), max_concurrency=1, enabled=True)
     await pool.sync(["web"], config={"model": "a"})
     await _wait_until(lambda: len(agent.started) == 1)
     assert len(pool._tasks) == 1
@@ -219,7 +252,7 @@ async def test_claim_promotes_matching_background_task_without_duplicate_prepare
         lambda **_kwargs: [],
     )
     agent = _ControlledRootAgent()
-    pool = AgentWarmPool(_FakeManager(agent), max_concurrency=1)
+    pool = AgentWarmPool(_FakeManager(agent), max_concurrency=1, enabled=True)
     await pool.sync(["web"], config={"model": "a"})
     await _wait_until(lambda: len(agent.started) == 1)
     background_id = agent.started[0]

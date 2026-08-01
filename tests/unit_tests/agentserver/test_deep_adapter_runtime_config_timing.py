@@ -37,7 +37,7 @@ def _make_adapter(stages: list[str]) -> JiuWenSwarmDeepAdapter:
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = object()
 
-    async def _stages(runtime_config, stage_timer) -> None:
+    async def _stages(runtime_config, stage_timer, *, bind_request) -> None:
         for stage in stages:
             stage_timer.mark(stage)
 
@@ -115,7 +115,7 @@ async def test_failing_stage_still_reports_how_far_it_got(loggers) -> None:
     server_log, module_log = loggers
     adapter = _make_adapter([])
 
-    async def _stages(runtime_config, stage_timer) -> None:
+    async def _stages(runtime_config, stage_timer, *, bind_request) -> None:
         stage_timer.mark("cwd_seed")
         stage_timer.mark("rail_setters")
         raise ValueError("boom")

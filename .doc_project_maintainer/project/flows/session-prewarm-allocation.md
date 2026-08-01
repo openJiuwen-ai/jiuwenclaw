@@ -40,7 +40,9 @@ entrypoints:
 
 ## Outcome
 
-AgentServer keeps at most one speculative, unclaimed READY or warming DeepAgent across all eligible single-Agent work/code keys. Single-Agent identity is canonical: work uses `agent:<empty>:<project>` and code uses `code:normal:<project>` in prewarm, metadata, and chat selection. ACP and A2A never enter the target set. A warm hit avoids `create_instance` and `start_interaction` on the first `chat.send`.
+Prewarming is off unless `JIUWENSWARM_AGENT_PREWARM` is set to `1`/`true`/`yes`/`on`. While off, `sync` reports zero statistics and never schedules preparation, and every claim returns a freshly allocated ID with `prewarm_status="bypassed"`; the session initializes lazily on its first request. Allocation, `create_token` idempotency, and `session.create` validation stay in force, so the rest of this flow is unchanged and only its warm path is dormant.
+
+When opted in, AgentServer keeps at most one speculative, unclaimed READY or warming DeepAgent across all eligible single-Agent work/code keys. Single-Agent identity is canonical: work uses `agent:<empty>:<project>` and code uses `code:normal:<project>` in prewarm, metadata, and chat selection. ACP and A2A never enter the target set. A warm hit avoids `create_instance` and `start_interaction` on the first `chat.send`.
 
 Team, `code.team`, and Swarm creation bypass the warm pool.
 
@@ -81,7 +83,7 @@ On startup, old-boot markers and unclaimed metadata-less directories are removed
 
 ## Verification
 
-- WarmPool/mode tests cover global capacity, promotion/cancellation, code `sub_mode=normal`, work-mode canonicalization, and identical prewarm/chat cache identity.
+- `tests/unit_tests/agentserver/test_agent_warm_pool.py` covers the default-off switch alongside global capacity, promotion/cancellation, code `sub_mode=normal`, work-mode canonicalization, and identical prewarm/chat cache identity.
 - Adapter tests cover off-loop/coalesced runtime probes and per-workspace/config MemoryRail reindex singleflight.
 - AgentServer send/reload/ACP/plan-mode and Gateway ACP suites cover foreground guards and allocation boundaries.
 - The latest contention/cache-identity follow-up passed 179 focused tests. Earlier channel-contract runs passed 139 tests, and the full Windows unit run recorded 3,791 passed, 4 skipped, with 14 unrelated failures.

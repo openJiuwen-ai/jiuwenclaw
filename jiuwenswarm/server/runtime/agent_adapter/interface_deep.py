@@ -4887,7 +4887,8 @@ class JiuWenSwarmDeepAdapter:
         mark_stateless([tool])
         register_tool(tool, None)
 
-    def _register_agent_owned_tool(self, tool: Any, owner_id: str) -> None:
+    @staticmethod
+    def _register_agent_owned_tool(tool: Any, owner_id: str) -> None:
         """Register a tool instance owned exclusively by this adapter's agent.
 
         ``_get_tool_cards`` runs before ``create_deep_agent``, so there is no

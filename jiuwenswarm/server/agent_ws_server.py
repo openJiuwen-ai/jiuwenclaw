@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Optional
 from weakref import WeakValueDictionary
 
+from openjiuwen.core.common.logging import server_logger
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, reset_harness_packages_state
@@ -113,7 +114,6 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.log_preview import preview_text
-from openjiuwen.core.common.logging import server_logger
 
 logger = logging.getLogger(__name__)
 
