@@ -1243,10 +1243,20 @@ def _coerce_optional_positive_int(
 
 
 def _normalize_sandbox_startup_mode(value: Any) -> str:
-    """归一化 ``sandbox.startup_mode``; 非法或空值回落到默认 ``internal``."""
+    """归一化 ``sandbox.startup_mode``.
+
+    P1-16: 读取路径与写入路径校验一致. 旧版对非空非法值 (如 ``iternal`` 拼错)
+    静默回落默认, 用户无反馈. 现改为: None/空 → 默认; 非空但非法 → 抛 ValueError
+    (与 update_sandbox_startup_mode 写入路径一致), 启动时报错定位.
+    """
     text = str(value or "").strip().lower()
-    if text not in _VALID_SANDBOX_STARTUP_MODES:
+    if not text:
         return _DEFAULT_SANDBOX_STARTUP_MODE
+    if text not in _VALID_SANDBOX_STARTUP_MODES:
+        raise ValueError(
+            f"invalid sandbox.startup_mode: {value!r}; "
+            f"must be one of {_VALID_SANDBOX_STARTUP_MODES}"
+        )
     return text
 
 

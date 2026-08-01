@@ -2617,11 +2617,24 @@ class JiuWenClawDeepAdapter:
                 # 只有"进入沙箱执行后"失败 (sysop 已建好, 执行命令时失败) 才抛错,
                 # 那是执行阶段, 不在此处.
                 if sandbox_enabled and sandbox_url and sandbox_type:
-                    logger.warning(
-                        "[JiuWenClawDeepAdapter] sandbox sysop_card is None "
-                        "(create_sandbox_sysop_card failed); fallback to LOCAL mode"
-                    )
-                    sysop_card = create_local_sysop_card(work_dir=work_dir)
+                    # P1-15: fallback_on_failure 开关控制是否降级到 local (在宿主机
+                    # 直接跑, 隔离失效). 默认 False = 不降级, 让任务失败而非静默绕过隔离.
+                    # 用户显式设 sandbox.fallback_on_failure=true 才允许降级 (兼容旧行为).
+                    _allow_fallback = bool(runtime.get("fallback_on_failure"))
+                    if _allow_fallback:
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] sandbox sysop_card is None "
+                            "(create_sandbox_sysop_card failed); fallback to LOCAL mode "
+                            "(隔离失效, 在宿主机直接执行; sandbox.fallback_on_failure=true 已启用)"
+                        )
+                        sysop_card = create_local_sysop_card(work_dir=work_dir)
+                    else:
+                        logger.error(
+                            "[JiuWenClawDeepAdapter] sandbox sysop_card is None "
+                            "(create_sandbox_sysop_card failed); fallback to LOCAL 已禁用 "
+                            "(sandbox.fallback_on_failure 未启用). 任务失败而非静默绕过隔离"
+                        )
+                        return None
                 if sysop_card is None:
                     logger.warning(
                         "[JiuWenClawDeepAdapter] local fallback sysop_card also None"
@@ -2664,9 +2677,17 @@ class JiuWenClawDeepAdapter:
                     and sandbox_type
                 )
                 if is_sandbox_card:
+                    _allow_fallback = bool(runtime.get("fallback_on_failure"))
+                    if not _allow_fallback:
+                        logger.error(
+                            "[JiuWenClawDeepAdapter] sandbox add_sys_operation failed (%s); "
+                            "fallback to LOCAL 已禁用 (sandbox.fallback_on_failure 未启用). "
+                            "任务失败而非静默绕过隔离", result.msg(),
+                        )
+                        return None
                     logger.warning(
                         "[JiuWenClawDeepAdapter] sandbox add_sys_operation failed (%s); "
-                        "fallback to LOCAL mode and retry",
+                        "fallback to LOCAL mode and retry (隔离失效, sandbox.fallback_on_failure=true)",
                         result.msg(),
                     )
                     local_card = create_local_sysop_card(work_dir=work_dir)
@@ -2683,9 +2704,17 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:  # noqa: BLE001
             # 整个 _create_sys_operation 异常 (非 add 阶段): 若原本要走沙箱, 回退 local.
             if sandbox_enabled and sandbox_url and sandbox_type:
+                _allow_fallback = bool(runtime.get("fallback_on_failure"))
+                if not _allow_fallback:
+                    logger.error(
+                        "[JiuWenClawDeepAdapter] _create_sys_operation raised (%s); "
+                        "fallback to LOCAL 已禁用 (sandbox.fallback_on_failure 未启用). "
+                        "任务失败而非静默绕过隔离", exc,
+                    )
+                    return None
                 logger.warning(
                     "[JiuWenClawDeepAdapter] _create_sys_operation raised (%s); "
-                    "fallback to LOCAL mode", exc,
+                    "fallback to LOCAL mode (隔离失效, sandbox.fallback_on_failure=true)", exc,
                 )
                 try:
                     local_card = create_local_sysop_card(work_dir=work_dir)

@@ -974,10 +974,31 @@ def _create_process_as_user(
                 f"JIUWENBOX_INJECT_ENV 解析失败, 已忽略: {_e} raw_len={len(_inject_raw)}",
             )
         if _injected:
+            # P1-17: 注入键黑名单. 防止 agent-core/调用方经 JIUWENBOX_INJECT_ENV
+            # 注入代码注入类键 (LD_PRELOAD/PYTHONPATH/NODE_OPTIONS/PATH 等), 这些
+            # 键可让 child 进程加载任意代码绕过沙箱隔离. agent-core 可信但 header
+            # 传输链路可构造, 黑名单是纵深防御.
+            _FORBIDDEN_INJECT_KEYS = frozenset({
+                "LD_PRELOAD", "LD_LIBRARY_PATH",
+                "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONSAFEPATH",
+                "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS",
+                "PATH",  # 覆盖 PATH 可劫持可执行解析
+                "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+            })
             _injected_keys = []
+            _blocked_keys = []
             for _k, _v in _injected.items():
-                env.setdefault(str(_k), str(_v))
-                _injected_keys.append(str(_k))
+                _ks = str(_k)
+                if _ks.upper() in _FORBIDDEN_INJECT_KEYS:
+                    _blocked_keys.append(_ks)
+                    continue
+                env.setdefault(_ks, str(_v))
+                _injected_keys.append(_ks)
+            if _blocked_keys:
+                _push_log(
+                    "WARNING",
+                    f"JIUWENBOX_INJECT_ENV 拒绝注入黑名单键: {_blocked_keys}",
+                )
             _push_log(
                 "INFO",
                 f"injected env from JIUWENBOX_INJECT_ENV: keys={_injected_keys}",

@@ -596,25 +596,35 @@ def _load_policy_preinstall_paths(policy_path: str) -> list[str]:
     预装路径列表 (含 git_dir 的 usr/bin, bin 子目录 + bash_path 父目录).
 
     install 时调: 用户改 tool_paths 后 --force 重装, 把工具目录的读 ACL
-    预装上 (运行时普通用户无权改这些目录 DACL). 纯数据读取, 不依赖 pydantic.
+    预装上 (运行时普通用户无权改这些目录 DACL).
+
+    P1-11: 复用 PolicyReader.load_policy() 走 _resolve_tool_paths 探测填充
+    (基底 tool_paths 四字段为空串时, load_policy 用 sys.executable/PATH 自动
+    填充 python_dir/node_dir/git_dir/bash_path). 旧版直接 yaml.safe_load 读
+    原始值, --force --policy-path 重装时 tool_paths 全空 → 预装集丢失工具目录
+    → 重装后受限 token 读不了 tools/python. 现保证 install 与 runtime 读同一份
+    填充后 tool_paths.
     """
-    import yaml
-    with open(policy_path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    win_fs = (data.get("windows") or {}).get("filesystem") or {}
+    from pathlib import Path as _Path
+    from jiuwenbox.server.policy_reader import PolicyReader
+    # PolicyReader(policy_path=...) 加载指定文件; 若该路径等于基底则不合并副本
+    # (policy_reader.py:182-185), 即只读该文件本身, 符合 install 提权场景.
+    reader = PolicyReader(policy_path=_Path(policy_path))
+    policy = reader.load_policy()
+    win_fs = policy.windows.filesystem
     paths: list[str] = []
-    for p in win_fs.get("read_acl_preinstall") or []:
+    for p in win_fs.read_acl_preinstall or []:
         if isinstance(p, str) and p:
             paths.append(p)
-    tp = win_fs.get("tool_paths") or {}
+    tp = win_fs.tool_paths
     for key in ("git_dir", "node_dir", "python_dir"):
-        v = tp.get(key)
+        v = getattr(tp, key, None)
         if isinstance(v, str) and v:
             paths.append(v)
             if key == "git_dir":
                 paths.append(v.rstrip("\\/").replace("/", "\\") + "\\usr\\bin")
                 paths.append(v.rstrip("\\/").replace("/", "\\") + "\\bin")
-    bash_p = tp.get("bash_path")
+    bash_p = getattr(tp, "bash_path", None)
     if isinstance(bash_p, str) and bash_p:
         paths.append(os.path.dirname(bash_p))
     # 去重保序.
@@ -735,31 +745,45 @@ def _elevate_and_run_install(
             f"管理员身份手动运行 'python -m jiuwenbox.supervisor.win_setup --install'"
         )
 
-    # 子进程已被提权拉起. 阻塞等待 install 跑完 SetEvent (INFINITE=0xFFFFFFFF).
+    # 子进程已被提权拉起. 阻塞等待 install 跑完 SetEvent.
     # Event 是自动复位: SetEvent 后变信号态, WaitForSingleObject 立即返回.
-    INFINITE = 0xFFFFFFFF
+    # P1-10: 超时兜底. 旧版 INFINITE (0xFFFFFFFF), install 子进程在 SetEvent 前
+    # 崩溃 (非 raise 路径, 如段错误/强杀) 则 Event 永不 set → 主进程永久阻塞.
+    # 改 120s 超时 (install 含 UAC + 用户确认 + 用户/组/WFP/预装, 120s 足够;
+    # 正常 install 5-30s 完成). 超时不 raise — install 可能仍在跑 (慢机器/
+    # 用户离开 UAC), 降级 warning 让上层按 installed 标记判断 (旧异步行为).
     WAIT_OBJECT_0 = 0
+    WAIT_TIMEOUT = 0x00000102
     WAIT_FAILED = 0xFFFFFFFF
-    logger.info("已通过 UAC 提权运行 install 子进程 (force=%s), 阻塞等待完成...", force)
+    INSTALL_WAIT_TIMEOUT_MS = 120_000
+    logger.info("已通过 UAC 提权运行 install 子进程 (force=%s), 阻塞等待完成 (超时 %ds)...", force, INSTALL_WAIT_TIMEOUT_MS // 1000)
     try:
         wait_result = kernel32.WaitForSingleObject(
-            wintypes.HANDLE(h_event), INFINITE,
+            wintypes.HANDLE(h_event), INSTALL_WAIT_TIMEOUT_MS,
         )
         if wait_result == WAIT_FAILED:
             err = ctypes.get_last_error()
             raise RuntimeError(
                 f"等待 install 子进程完成失败 (WaitForSingleObject WinError {err})"
             )
-        if wait_result != WAIT_OBJECT_0:
+        if wait_result == WAIT_TIMEOUT:
+            # install 子进程未在 120s 内 SetEvent. 不 raise — 可能仍在跑 (用户
+            # 离开 UAC/慢机器), 也可能已崩溃. 降级 warning, 上层按 installed
+            # 标记判断 (若未 set, 后续 CreateProcessWithLogonW 会 1326 报错定位).
+            logger.warning(
+                "install 提权子进程 %ds 未完成 SetEvent (超时降级). install 可能仍在"
+                "运行或已崩溃; 后续将按 installed 标记判断, 若失败请重试",
+                INSTALL_WAIT_TIMEOUT_MS // 1000,
+            )
+        elif wait_result != WAIT_OBJECT_0:
             raise RuntimeError(
                 f"等待 install 子进程返回意外值 {wait_result:#x}"
             )
+        else:
+            logger.info("install 提权子进程已 SetEvent, 视为完成")
         # 注意: SetEvent 只表示子进程执行流到了 install() 末尾, 不代表退出码.
         # install() 内部致命步骤失败会 raise (走 except 回滚, 不会 SetEvent),
-        # 此时本 wait 会一直阻塞到 install 子进程退出 (Event 随句柄关闭失效).
-        # 极端: install 中途崩溃, Event 永不 set → 本进程永久阻塞. 加超时兜底
-        # 避免死等, 超时后降级为 warning (旧异步行为), 让上层自行判断 installed 标记.
-        logger.info("install 提权子进程已 SetEvent, 视为完成")
+        # 此时本 wait 靠超时兜底 (旧版 INFINITE 会永久阻塞).
     finally:
         kernel32.CloseHandle(wintypes.HANDLE(h_event))
     return 0

@@ -40,6 +40,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,11 @@ import yaml
 logger = logging.getLogger(__name__)
 
 _RUNTIME_COPY_NAME = "windows-policy.runtime.yaml"
+
+# P1-13: 同进程串行化副本读写 (防 lost-update). WS handler 虽串行, 但
+# sandbox.files.set + sandbox.network.set 可能并发触发 (officeAce 前端同时改文件
+# 和网络). 跨进程锁 (多 agent-server 实例) 收益低场景少, 暂不加 msvcrt/fcntl.
+_copy_lock = threading.Lock()
 
 
 def _config_dir() -> Path:
@@ -109,12 +115,13 @@ def _ensure_copy_exists() -> Path:
 
 def _load_copy() -> dict[str, Any]:
     """读副本 (不存在则建空骨架并返回)."""
-    p = _ensure_copy_exists()
-    try:
-        data = yaml.safe_load(p.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        logger.warning("读副本 %s 失败: %s", p, exc)
-        return copy.deepcopy(_empty_skeleton())
+    with _copy_lock:  # P1-13: 串行化, 防与 _save_copy 并发 lost-update
+        p = _ensure_copy_exists()
+        try:
+            data = yaml.safe_load(p.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            logger.warning("读副本 %s 失败: %s", p, exc)
+            return copy.deepcopy(_empty_skeleton())
     if not isinstance(data, dict):
         return copy.deepcopy(_empty_skeleton())
     # 补齐结构 (兼容旧副本缺字段)
@@ -133,13 +140,24 @@ def _load_copy() -> dict[str, Any]:
 
 def _save_copy(data: dict[str, Any]) -> None:
     p = _runtime_copy_path()
-    try:
-        p.write_text(
-            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        logger.warning("写副本 %s 失败: %s", p, exc)
+    with _copy_lock:  # P1-13: 串行化, 防并发写覆盖
+        try:
+            # 原子写: 先写 tmp 再 rename. 旧版直接 write_text 覆盖, 写中途崩溃
+            # 留半截 YAML → box-server load_policy 解析失败回落基底 (default:allow,
+            # 隔离形同虚设). tmp+rename 保证副本要么完整旧值要么完整新值.
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(
+                yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, p)  # 原子 rename (同文件系统内)
+        except OSError as exc:
+            logger.warning("写副本 %s 失败: %s", p, exc)
+            # tmp 残留清理 (best-effort).
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _norm_str_list(values: list[Any]) -> list[str]:

@@ -783,10 +783,15 @@ class SandboxManager:
                 request.env,
                 tool_paths=self.policy.windows.filesystem.tool_paths,
             )
+            # P2-19: 日志不含完整 command (可能含 prompt/API key/敏感路径) 和完整 PATH.
+            # 仅打 command[0] (可执行名) + 参数数量, 便于定位又不泄露. PATH 含工具目录
+            # 路径且极长, 不打. 旧版 INFO 全量打 request.command 且 debug 上调 info, 凭据
+            # 泄露面恶化.
+            _cmd0 = request.command[0] if request.command else "<empty>"
+            _cmd_len = len(request.command)
             logger.info(
-                "[SandboxWin] exec sandbox=%s cmd=%s workdir=%s PATH=%s",
-                sandbox_id, request.command, request.workdir,
-                exec_env.get("PATH", ""),
+                "[SandboxWin] exec sandbox=%s cmd0=%s argc=%d workdir=%s",
+                sandbox_id, _cmd0, _cmd_len, request.workdir,
             )
         runtime_request = RuntimeExecRequest(
             command=request.command,

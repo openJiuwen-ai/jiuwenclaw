@@ -476,12 +476,14 @@ async def serve_windows_proxy(
     if stop_event is None:
         stop_event = asyncio.Event()
     egress_filter = EgressFilter(egress, ingress, disable_all=disable_all)
+    # 只绑 port_range_start (60080) 一个端口, 而不是整个范围.
+    # HTTP_PROXY 始终指向 port_range_start, 其他端口绑了也没用.
+    # 60081-60089 释放给沙箱内 render server 等本地服务用.
     tasks = [
         asyncio.create_task(
-            _serve_port(port, egress_filter, stop_event),
-            name=f"win-proxy-port-{port}",
-        )
-        for port in range(port_range_start, port_range_end + 1)
+            _serve_port(port_range_start, egress_filter, stop_event),
+            name=f"win-proxy-port-{port_range_start}",
+        ),
     ]
 
     async def _supervisor():

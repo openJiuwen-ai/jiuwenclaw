@@ -104,7 +104,10 @@ def _cleanup_stale_win_proxy_ports(
             proc_name = name_result.stdout.decode("utf-8", errors="replace").strip()
         except Exception:  # noqa: BLE001
             proc_name = ""
-        if proc_name.lower() != "python":
+        # P2-20: 旧版严格 == "python" 漏杀 python3.13/pythonw (uv venv 的 python 名).
+        # 改 startswith("python") 覆盖 python/python3/python3.13/pythonw 等. 端口范围
+        # 已限定 (win_proxy 60080-60089), 误杀系统 python 风险极低 (该端口范围专属).
+        if not proc_name.lower().startswith("python"):
             logger.warning(
                 "[JiuwenBoxRunner] 端口 %s 被非 python 进程 PID=%d (%s) 占用, 跳过清理",
                 ports, pid, proc_name or "<unknown>",
@@ -500,6 +503,12 @@ class JiuwenBoxRunner:
                 # Linux: 父进程退出时让子进程收到 SIGTERM (PR_SET_PDEATHSIG)
                 if sys.platform.startswith("linux"):
                     spawn_kwargs["preexec_fn"] = _try_set_pdeathsig
+                # P1-14: Windows 加 CREATE_NEW_PROCESS_GROUP, 让 stop() 时能发
+                # CTRL_BREAK_EVENT 触发 uvicorn FastAPI lifespan shutdown (清活沙箱),
+                # 而非 TerminateProcess 即时强杀 (活沙箱成孤儿).
+                if sys.platform == "win32":
+                    CREATE_NEW_PROCESS_GROUP = 0x00000200
+                    spawn_kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP
                 self._process = await asyncio.create_subprocess_exec(
                     *cmd,
                     **spawn_kwargs,
@@ -690,13 +699,39 @@ class JiuwenBoxRunner:
             self._spawned_policy_fingerprint = None
             return
         logger.info("[JiuwenBoxRunner] stopping subprocess pid=%s", proc.pid)
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            self._process = None
-            self._spawned_policy_path = None
-            self._spawned_policy_fingerprint = None
-            return
+        # P1-14: Windows 上 proc.terminate()=TerminateProcess 即时强杀, 不给
+        # uvicorn lifespan shutdown 机会 → shutdown_all_sandboxes 跑不到, 活沙箱
+        # 成孤儿. 改用 CTRL_BREAK_EVENT (spawn 时已加 CREATE_NEW_PROCESS_GROUP):
+        # uvicorn 收到 Ctrl+Break 跑 lifespan shutdown (清活沙箱) 后退出. 失败回退 terminate.
+        if sys.platform == "win32":
+            _sent_ctrl = False
+            try:
+                import ctypes as _ct
+                kernel32 = _ct.WinDLL("kernel32", use_last_error=True)
+                CTRL_BREAK_EVENT = 1
+                # GenerateConsoleCtrlEvent 给同 process group 的进程发 Ctrl+Break.
+                if kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, proc.pid):
+                    _sent_ctrl = True
+                    logger.info("[JiuwenBoxRunner] sent CTRL_BREAK to pid=%s (graceful uvicorn shutdown)", proc.pid)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[JiuwenBoxRunner] CTRL_BREAK failed: %s", exc)
+            if not _sent_ctrl:
+                # 没发成功 (如无 console / CreateNewProcessGroup 没生效), 回退 terminate.
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    self._process = None
+                    self._spawned_policy_path = None
+                    self._spawned_policy_fingerprint = None
+                    return
+        else:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                self._process = None
+                self._spawned_policy_path = None
+                self._spawned_policy_fingerprint = None
+                return
         # uvicorn 收到 SIGTERM 后会跑 FastAPI lifespan shutdown, 期间会调
         # ``SandboxManager.shutdown_all_sandboxes`` 给每个活的 sandbox 做
         # SIGTERM -> wait -> SIGKILL 三段式 teardown (每个最坏要 ~15s,
