@@ -18,13 +18,14 @@ def _skillnet_item(name: str, rank_marker: str) -> dict:
     }
 
 
-def _clawhub_item(name: str, rank_marker: str) -> dict:
+def _clawhub_item(name: str, rank_marker: str, owner_handle: str = "") -> dict:
     return {
         "slug": name,
         "display_name": name,
         "summary": f"ClawHub {rank_marker}",
         "version": "1.0.0",
         "updated_at": 1_750_000_000_000,
+        "owner_handle": owner_handle,
     }
 
 
@@ -162,6 +163,39 @@ def test_online_search_native_score_preserves_zero_and_falls_back_for_none():
 
     assert zero_score["native_score"] == 0
     assert missing_score["native_score"] == 12
+
+
+def test_online_search_preserves_clawhub_owner_handle():
+    item = SkillManager._normalize_online_search_item(
+        "clawhub",
+        _clawhub_item("weather", "first", owner_handle="openclaw"),
+        1,
+    )
+
+    assert item["identifier"] == "weather"
+    assert item["owner_handle"] == "openclaw"
+    assert item["author"] == "openclaw"
+    assert item["matched_sources"][0]["owner_handle"] == "openclaw"
+
+
+def test_online_search_keeps_ambiguous_clawhub_slugs_distinct():
+    items = SkillManager._aggregate_online_search_results(
+        "weather",
+        {
+            "skillnet": [],
+            "clawhub": [
+                _clawhub_item("weather", "first", owner_handle="owner-a"),
+                _clawhub_item("weather", "second", owner_handle="owner-b"),
+            ],
+        },
+        10,
+    )
+
+    assert len(items) == 2
+    assert {(item["identifier"], item["owner_handle"]) for item in items} == {
+        ("weather", "owner-a"),
+        ("weather", "owner-b"),
+    }
 
 
 def test_online_search_merges_identical_normalized_urls():

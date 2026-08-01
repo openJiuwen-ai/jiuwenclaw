@@ -2,7 +2,7 @@
 id: agentserver-runtime
 name: AgentServer Runtime
 confidence: confirmed
-last_updated: 2026-07-15
+last_updated: 2026-08-01
 read_when: "Working on AgentServer startup, Gateway WebSocket handling, sessions, commands, server push, ACP, scheduler, sandbox, or runtime services."
 ---
 
@@ -23,6 +23,7 @@ Hosts the standalone AgentServer process and the WebSocket RPC surface used by G
 - `jiuwenswarm/server/agent_ws_server.py`: WebSocket server, E2A/legacy request parsing, method dispatch, session/command handlers, stream/cancel logic, server push.
 - `jiuwenswarm/server/gateway_push/wire.py`: converts server-originated push messages into E2A response wire frames.
 - `jiuwenswarm/server/runtime/agent_manager.py`: creates, initializes, reloads, and retrieves agent instances.
+- `jiuwenswarm/server/runtime/agent_warm_pool.py`: reconciles and atomically claims session-bound READY DeepAgents.
 - `jiuwenswarm/server/runtime/proactive_adapter.py`: attaches proactive recommendation engine to the AgentServer instance.
 
 ## Related Flows
@@ -35,6 +36,7 @@ Hosts the standalone AgentServer process and the WebSocket RPC surface used by G
 - `agentserver-plan-mode-exit`: approval, checkpoint restoration, stale re-entry protection, and client notification.
 - `agentserver-schedule-auto-harness`: scheduler startup, durable tasks, autonomous execution identity, and logs.
 - `agentserver-history-stream`: persisted history paging, sanitization, streamed events, and frontend reconstruction.
+- `session-prewarm-allocation`: Gateway channel sync, pool reconciliation, AgentServer allocation, and first-chat readiness.
 
 ## Related Code Symbols
 
@@ -49,9 +51,11 @@ Hosts the standalone AgentServer process and the WebSocket RPC surface used by G
 
 - `tests/unit_tests/test_app_agentserver.py` checks startup/shutdown does not delete agent team directories.
 - `tests/unit_tests/agentserver/test_agentserver_modes.py` covers mode resolution, project directory resolution, and stream/mode behavior.
-- `tests/unit_tests/agentserver/test_agentserver_acp.py` covers ACP initialization, sessions, team delete, capabilities, and tool response paths.
+- `tests/unit_tests/agentserver/test_agentserver_acp.py` covers ACP initialization, AgentServer-owned session allocation, explicit-ID rejection, team delete, capabilities, and tool response paths.
 - `tests/unit_tests/agentserver/test_agentserver_cli_commands.py` covers slash-command handlers.
 - `tests/unit_tests/agentserver/test_agent_ws_connection_close.py` covers disconnect cleanup behavior.
+- `tests/unit_tests/agentserver/test_agent_warm_pool.py` covers READY targets, concurrent claims, replenishment, revision replacement, and failure isolation.
+- The focused session-allocation contract run passed 139 tests across AgentServer, Web, project binding, and TUI ownership surfaces on 2026-08-01.
 
 ## Known Gaps
 

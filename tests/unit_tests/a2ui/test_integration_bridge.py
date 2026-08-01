@@ -210,12 +210,100 @@ def test_split_a2ui_stream_content_handles_partial_marker():
     assert split == ("现在为你展示结果。\n\n", "beg")
 
 
+def test_split_a2ui_stream_content_suppresses_two_character_tag_prefix():
+    """A tokenizer chunk containing only '<a' must not leak into visible text."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import _split_a2ui_stream_content
+
+    split = _split_a2ui_stream_content("", "现在为你展示结果。\n\n<a")
+
+    assert split == ("现在为你展示结果。\n\n", "<a")
+
+
 def test_a2ui_pending_render_delta_stays_open():
     """The Web renderer shows its pending state only for an open A2UI block."""
     from jiuwenswarm.server.runtime.agent_adapter.interface import _A2UI_PENDING_RENDER_DELTA
 
     assert _A2UI_PENDING_RENDER_DELTA.startswith("<a2ui-json>")
     assert "</a2ui-json>" not in _A2UI_PENDING_RENDER_DELTA
+
+
+def test_a2ui_repaired_final_chunk_keeps_session_binding():
+    """The repaired final must replace the pending A2UI bubble in its session."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import _make_a2ui_final_chunk
+
+    chunk = _make_a2ui_final_chunk(
+        request_id="req-a2ui",
+        channel_id="web",
+        session_id="sess-a2ui",
+        content="<a2ui-json>[]</a2ui-json>",
+    )
+
+    assert chunk.payload == {
+        "event_type": "chat.final",
+        "session_id": "sess-a2ui",
+        "content": "<a2ui-json>[]</a2ui-json>",
+    }
+
+
+def test_a2ui_processing_false_waits_for_repaired_final():
+    """A2UI finalization must finish before the frontend closes its stream."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import (
+        _should_defer_a2ui_processing_status,
+    )
+
+    payload = {
+        "event_type": "chat.processing_status",
+        "is_processing": False,
+    }
+
+    assert _should_defer_a2ui_processing_status(
+        suppress_a2ui_stream=True,
+        event_type="chat.processing_status",
+        payload=payload,
+    ) is True
+    assert _should_defer_a2ui_processing_status(
+        suppress_a2ui_stream=False,
+        event_type="chat.processing_status",
+        payload=payload,
+    ) is False
+
+
+def test_nested_stream_completion_waits_for_facade_post_processing():
+    """The adapter terminal must not close the wire before A2UI finalization."""
+    from jiuwenswarm.common.schema.agent import AgentResponseChunk
+    from jiuwenswarm.server.runtime.agent_adapter.interface import (
+        _normalize_nested_stream_chunk,
+    )
+
+    terminal = AgentResponseChunk(
+        request_id="req-a2ui",
+        channel_id="web",
+        payload=None,
+        is_complete=True,
+    )
+
+    assert _normalize_nested_stream_chunk(terminal) is None
+
+
+def test_nested_terminal_event_remains_visible_without_closing_stream():
+    """A meaningful terminal event is retained while the facade owns completion."""
+    from jiuwenswarm.common.schema.agent import AgentResponseChunk
+    from jiuwenswarm.server.runtime.agent_adapter.interface import (
+        _normalize_nested_stream_chunk,
+    )
+
+    terminal_error = AgentResponseChunk(
+        request_id="req-error",
+        channel_id="web",
+        payload={"event_type": "chat.error", "error": "failed"},
+        is_complete=True,
+    )
+
+    normalized = _normalize_nested_stream_chunk(terminal_error)
+
+    assert normalized is not None
+    assert normalized.payload == terminal_error.payload
+    assert normalized.is_complete is False
 
 
 def test_agent_prompt_builder_accepts_a2ui_client_event_dict(monkeypatch):

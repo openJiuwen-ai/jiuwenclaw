@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
 
 import yaml
-from dotenv import load_dotenv
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
@@ -43,6 +42,7 @@ from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.sys_operation import (
     SysOperation,
     SysOperationCard,
@@ -266,6 +266,7 @@ from jiuwenswarm.common.config import (
     get_evolution_review_trigger_enabled,
     get_evolution_auto_save_enabled,
     get_evolution_signal_trigger_enabled,
+    get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_skill_create_enabled,
@@ -298,8 +299,9 @@ from jiuwenswarm.common.utils import (
     get_runtime_state_path,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 TodoModifyTool = CompatibleTodoModifyTool
 install_todo_modify_compat_patch()
@@ -801,6 +803,10 @@ class JiuWenSwarmDeepAdapter:
         # (e.g., supplement while previous task still winding down) don't
         # prematurely remove the entry when the first task finishes.
         self._active_session_ids: Counter[str] = Counter()
+        # Provenance of assistant text currently forwarded on the shared
+        # interaction stream. A late user-round chat.final must not be demoted
+        # just because a goal round already became active.
+        self._stream_content_run_kind: str | None = None
         # In-flight asyncio tasks per session (stream/non-stream agent runs).
         self._session_agent_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._task_planning_rail: TaskPlanningRail | None = None
@@ -1261,6 +1267,76 @@ class JiuWenSwarmDeepAdapter:
         if not loop_sid or loop_sid == "default":
             return None
         return self._resolve_interrupt_session_id(loop_sid)
+
+    async def _clear_pending_ask_user_interrupt_for_supplement(
+        self,
+        session_id: str | None,
+    ) -> bool:
+        """Drop a superseded pure ask_user round without leaving an open tool call."""
+        instance = getattr(self, "_instance", None)
+        loop_session = getattr(instance, "_loop_session", None)
+        loop_sid = self._deep_agent_loop_session_id()
+        target_sid = self._resolve_interrupt_session_id(session_id)
+        if loop_session is None or loop_sid != target_sid:
+            return False
+
+        try:
+            state = loop_session.get_state(INTERRUPTION_KEY)
+            interrupted_tools = getattr(state, "interrupted_tools", None)
+            if not isinstance(interrupted_tools, dict) or not interrupted_tools:
+                return False
+            if any(
+                getattr(getattr(entry, "tool_call", None), "name", None) != "ask_user"
+                for entry in interrupted_tools.values()
+            ):
+                return False
+
+            ai_message = getattr(state, "ai_message", None)
+            pending_calls = list(getattr(ai_message, "tool_calls", None) or [])
+            if not pending_calls or any(
+                getattr(tool_call, "name", None) != "ask_user"
+                for tool_call in pending_calls
+            ):
+                return False
+
+            react_agent = getattr(instance, "react_agent", None)
+            context_engine = getattr(react_agent, "context_engine", None)
+            context = (
+                context_engine.get_context(session_id=target_sid)
+                if context_engine is not None
+                else None
+            )
+            messages = list(context.get_messages() or []) if context is not None else []
+            last_calls = list(getattr(messages[-1], "tool_calls", None) or []) if messages else []
+            pending_signature = [
+                (getattr(tool_call, "id", None), getattr(tool_call, "name", None))
+                for tool_call in pending_calls
+            ]
+            last_signature = [
+                (getattr(tool_call, "id", None), getattr(tool_call, "name", None))
+                for tool_call in last_calls
+            ]
+            if last_signature != pending_signature:
+                return False
+
+            context.pop_messages(1, with_history=True)
+            loop_session.update_state({INTERRUPTION_KEY: None})
+            await context_engine.save_contexts(loop_session)
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] interrupt(supplement): failed to inspect "
+                "pending ask_user state session=%s",
+                target_sid,
+                exc_info=True,
+            )
+            return False
+
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] interrupt(supplement): cleared pending "
+            "ask_user state session=%s",
+            target_sid,
+        )
+        return True
 
     def _is_deep_agent_executing_for_session(self, session_id: str) -> bool:
         """True when the shared DeepAgent still runs stream/task-loop work for *session_id*."""
@@ -1847,7 +1923,8 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _build_mcp_server_config(entry: dict[str, Any]) -> McpServerConfig | None:
-        return build_mcp_server_config(entry)
+        # 传入 server_id_scope 生成稳定的 server_id，避免 reload 时重复注册导致进程泄漏
+        return build_mcp_server_config(entry, server_id_scope="jiuwenswarm")
 
     @staticmethod
     def _extract_enabled_mcp_server_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3105,16 +3182,16 @@ class JiuWenSwarmDeepAdapter:
         分别写入 ``launcher_config.extra_params`` 与 ``launcher_config`` 上
         的同名字段。
 
-        注意: 每次都从 ``get_config()`` 读最新 sandbox.url/type, 因为
-        ``/sandbox enable`` 会动态写入这两个字段。
+        注意: 每次都从 ``get_sandbox_endpoint()`` 读最新 sandbox.url/type, 因为
+        ``/sandbox enable`` 会动态写入这两个字段; yuanrong 也会填默认占位 url。
 
         副作用: 在 ``self._sys_operation_card`` 保存生成或复用的 SysOperationCard，
         供 ``apply_sandbox_runtime_patch`` 等运行时热更使用。
         """
         try:
-            sandbox_cfg = (get_config() or {}).get("sandbox") or {}
-            sandbox_url = sandbox_cfg.get("url", None)
-            sandbox_type = sandbox_cfg.get("type", None)
+            endpoint = get_sandbox_endpoint()
+            sandbox_url = endpoint.get("url") or None
+            sandbox_type = endpoint.get("type") or None
             runtime = get_sandbox_runtime()
             sysop_card: SysOperationCard | None
             if runtime.get("enabled") and sandbox_url and sandbox_type:
@@ -3175,9 +3252,9 @@ class JiuWenSwarmDeepAdapter:
 
         - 通过 mutate 已构建 SysOperationCard 的 ``launcher_config.extra_params``
           字典让 provider 下次 exec 时读到新值（provider 持 dict 引用）。
-        - ``files_changed=True`` 时额外调用 ``force_recreate_jiuwenbox_sandbox``，
-          清除共享 sandbox_id 缓存并立即在 jiuwenbox 服务端新建 sandbox 实例，
-          把新 ID 写回 ``extra_params["sandbox_id"]``。
+        - ``files_changed=True`` 时:
+          - jiuwenbox: 调用 ``force_recreate_jiuwenbox_sandbox``
+          - yuanrong: 调用 ``delete_yuanrong_sandbox``，下次 op 懒创建新实例
 
         Args:
             runtime: ``get_sandbox_runtime()`` 当前完整 runtime。
@@ -3196,6 +3273,56 @@ class JiuWenSwarmDeepAdapter:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] apply_sandbox_runtime_patch: missing launcher_config"
             )
+            return
+
+        sandbox_type = str(getattr(launcher, "sandbox_type", "") or "").strip().lower()
+        if sandbox_type == "yuanrong":
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] yuanrong runtime patch "
+                "(files_changed=%s; policy/exclude ignored)",
+                files_changed,
+            )
+            if files_changed:
+                try:
+                    from openjiuwen.extensions.sys_operation.sandbox.providers.yuanrong import (
+                        build_yuanrong_shared_scope_key,
+                        delete_yuanrong_sandbox,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] delete_yuanrong_sandbox import "
+                        "failed: %s",
+                        exc,
+                    )
+                    return
+                try:
+                    isolation_key = self._sys_operation_isolation_key(card)
+                    shared_key = (
+                        build_yuanrong_shared_scope_key(
+                            str(launcher.base_url), str(isolation_key)
+                        )
+                        if isolation_key
+                        else None
+                    )
+                    deleted = await delete_yuanrong_sandbox(
+                        shared_key=shared_key,
+                        base_url=(
+                            str(launcher.base_url)
+                            if launcher.base_url and not shared_key
+                            else None
+                        ),
+                        reason="files_changed",
+                    )
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] yuanrong sandbox deleted for "
+                        "recreate: %s",
+                        deleted,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] delete_yuanrong_sandbox failed: %s",
+                        exc,
+                    )
             return
 
         extra = launcher.extra_params or {}
@@ -4450,7 +4577,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._dreaming_mode = mode if mode and mode.startswith("agent") else "agent"
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
-        load_dotenv(dotenv_path=get_env_file(), override=True)
+        load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
         config_base = get_config()
         self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
@@ -4894,6 +5021,34 @@ class JiuWenSwarmDeepAdapter:
         self._last_mode = mode
         await self._update_agent_rails()
 
+    @staticmethod
+    def _user_interaction_rail_attribute() -> str:
+        return "_ask_user_rail"
+
+    async def _set_user_interaction_enabled(self, enabled: bool) -> None:
+        """Expose ``ask_user`` only when the requesting client can answer it."""
+        attr_name = self._user_interaction_rail_attribute()
+        rail = getattr(self, attr_name, None)
+        if enabled:
+            if rail is None:
+                rail = self._build_structured_ask_user_rail()
+                if rail is not None:
+                    await self._instance.register_rail(rail)
+                    setattr(self, attr_name, rail)
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] StructuredAskUserRail enabled "
+                        "for interactive request"
+                    )
+            return
+
+        if rail is not None:
+            await self._instance.unregister_rail(rail)
+            setattr(self, attr_name, None)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] StructuredAskUserRail disabled "
+                "for non-interactive request"
+            )
+
     async def _update_agent_rails(self) -> None:
         """agent 模式：注册 agent 专属 rails（原 plan 档能力并集）。"""
         if self._task_planning_rail is None:
@@ -5210,9 +5365,42 @@ class JiuWenSwarmDeepAdapter:
         cwd: str | None = None
         workspace: str | None = None
         project_dir: str | None = None
+        supports_user_interaction: bool = True
+
+    async def configure_session_runtime(
+        self,
+        *,
+        session_id: str,
+        channel_id: str,
+        mode: str,
+        project_dir: str | None = None,
+    ) -> None:
+        """Apply session-stable runtime state without request-bound capabilities."""
+        await self._apply_runtime_config(
+            self._RuntimeConfig(
+                session_id=session_id,
+                mode=mode,
+                request_id=None,
+                channel_id=channel_id,
+                request_metadata=None,
+                project_dir=project_dir,
+                cwd=project_dir,
+                workspace=project_dir,
+                supports_user_interaction=True,
+            ),
+            bind_request=False,
+        )
 
     async def _update_runtime_config(self, runtime_config: "_RuntimeConfig") -> None:
-        """Register per-request tools for current agent execution."""
+        """Bind request-scoped runtime state immediately before real input."""
+        await self._apply_runtime_config(runtime_config, bind_request=True)
+
+    async def _apply_runtime_config(
+        self,
+        runtime_config: "_RuntimeConfig",
+        *,
+        bind_request: bool,
+    ) -> None:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
@@ -5236,7 +5424,9 @@ class JiuWenSwarmDeepAdapter:
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
             self._runtime_prompt_rail.set_channel(resolved_channel)
-            self._runtime_prompt_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+            self._runtime_prompt_rail.set_trusted_dirs(
+                runtime_config.trusted_dirs if bind_request else None
+            )
             self._runtime_prompt_rail.set_runtime_paths(
                 cwd=task_cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
@@ -5250,7 +5440,7 @@ class JiuWenSwarmDeepAdapter:
         # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
         permission_rail = getattr(self, "_permission_rail", None)
-        if permission_rail is not None:
+        if permission_rail is not None and bind_request:
             try:
                 permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
             except Exception:
@@ -5273,6 +5463,7 @@ class JiuWenSwarmDeepAdapter:
         )
 
         await self._update_rails_for_mode(runtime_config.mode)
+        await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
         await self._update_tools_for_mode(
             runtime_config.mode, runtime_config.session_id, runtime_config.request_id
         )
@@ -5281,18 +5472,19 @@ class JiuWenSwarmDeepAdapter:
             runtime_config.request_id,
             channel_id=runtime_config.channel_id,
         )
-        self._refresh_acp_runtime_tools(
-            runtime_config.session_id,
-            runtime_config.request_id,
-            runtime_config.channel_id,
-            runtime_config.request_metadata,
-        )
+        if bind_request:
+            self._refresh_acp_runtime_tools(
+                runtime_config.session_id,
+                runtime_config.request_id,
+                runtime_config.channel_id,
+                runtime_config.request_metadata,
+            )
         self._update_prompt_for_mode(runtime_config.mode, resolved_language)
 
         # 处理两种场景的记忆工具移除：
         # 1. 群聊数字分身模式（group_digital_avatar=True + avatar_mode=True）：移除写入工具，但保留读取工具
         # 2. 记忆完全禁用（enable_memory=False + group_digital_avatar=True + avatar_mode=True）：移除所有记忆工具（读取和写入）
-        perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+        perm_ctx = TOOL_PERMISSION_CONTEXT.get() if bind_request else None
         if perm_ctx is not None:
             # 判断是否为群聊数字分身模式
             is_group_digital_avatar = perm_ctx.group_digital_avatar and perm_ctx.avatar_mode
@@ -5359,31 +5551,43 @@ class JiuWenSwarmDeepAdapter:
     async def start_interaction(self, session_id: str) -> None:
         """Bind a product Session and start this adapter's DeepAgent interaction loop.
 
-        Public entry for the facade/session-pool path. No-op when
-        ``create_instance`` has not produced an underlying agent yet. Failures
-        are logged and swallowed — same contract as the former inline start.
+        Public entry for the facade/session-pool path. A missing instance or
+        failed readiness check propagates so the warm pool cannot publish a
+        partially initialized slot.
         """
         if self._instance is None:
-            return
-        try:
-            from openjiuwen.core.session.agent import create_agent_session
+            raise RuntimeError("DeepAgent instance is not initialized")
+        from openjiuwen.core.session.agent import create_agent_session
 
-            session = create_agent_session(
-                session_id=session_id,
-                card=getattr(self._instance, "card", None),
-            )
-            await session.pre_run(inputs={})
-            await self._instance.start(session=session)
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] start completed: session_id=%s",
-                session_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] start failed: session_id=%s error=%s",
-                session_id,
-                exc,
-            )
+        session = create_agent_session(
+            session_id=session_id,
+            card=getattr(self._instance, "card", None),
+        )
+        await session.pre_run(inputs={})
+        await self._instance.start(session=session)
+        if getattr(self._instance, "_interaction_started", True) is not True:
+            raise RuntimeError(f"DeepAgent interaction did not become ready: {session_id}")
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] start completed: session_id=%s",
+            session_id,
+        )
+
+    async def prepare_session(
+        self,
+        *,
+        session_id: str,
+        channel_id: str,
+        mode: str,
+        project_dir: str | None = None,
+    ) -> None:
+        """Create a session child and apply stable runtime state without input."""
+        adapter = await self._get_or_create_session_adapter(session_id)
+        await adapter.configure_session_runtime(
+            session_id=session_id,
+            channel_id=channel_id,
+            mode=mode,
+            project_dir=project_dir,
+        )
 
     async def stop_interaction(self) -> None:
         """Stop this adapter's DeepAgent interaction loop if it was started."""
@@ -5414,6 +5618,18 @@ class JiuWenSwarmDeepAdapter:
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] stop failed during cleanup: %s",
+                    exc,
+                )
+            try:
+                from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
+                    clear_sent_files_for_session,
+                )
+
+                clear_sent_files_for_session(self._parent_session_id)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] send_file dedup cleanup failed: session_id=%s error=%s",
+                    self._parent_session_id,
                     exc,
                 )
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
@@ -5599,21 +5815,102 @@ class JiuWenSwarmDeepAdapter:
             return True
         return self._goal_record_is_active()
 
+    def _should_demote_goal_intermediate_final(self) -> bool:
+        """Whether an attempt-boundary ``chat.final`` must become intermediate.
+
+        Demote only when GoalRecord is still ACTIVE **and** the text being
+        closed belonged to a **goal** round.
+
+        Prefer ``_stream_content_run_kind`` (stamped while forwarding deltas)
+        over the live ``active_round``: a user-round final can still be in the
+        queue after the scheduler has already started the next goal round.
+        Falling back to ``_has_active_goal_round()`` covers goal attempts that
+        emit a final with no prior delta on this consumer.
+        """
+        if not self._goal_record_is_active():
+            return False
+        content_kind = self._stream_content_run_kind
+        if content_kind is not None:
+            return content_kind == "goal"
+        return self._has_active_goal_round()
+
+    def _current_interaction_run_kind(self) -> str | None:
+        if self._instance is None or not self._instance_interaction_started():
+            return None
+        active = self._instance.active_round
+        if active is None:
+            return None
+        kind = getattr(active, "run_kind", None)
+        if kind is None:
+            return None
+        return str(getattr(kind, "value", kind))
+
+    def _begin_visible_chat_content(
+        self, stream_is_user_originated: bool = False
+    ) -> dict[str, Any] | None:
+        """Stamp content provenance; inject a bubble-split final on user→goal.
+
+        When the shared stream switches from user-round text to goal-round text
+        without a terminal ``chat.final`` in between, emit an empty final so the
+        frontend can ``stopStreaming`` and open a new bubble.
+
+        ``stream_is_user_originated`` marks a *plain user chat* consumer stream
+        (i.e. not a ``command.goal`` / attach-goal stream). Such a stream can be
+        hijacked by a goal round **before** the user round emits its first
+        visible token (slow first token + an early goal insert). In that timing
+        ``prev`` is still ``None`` yet a boundary final is still required, so the
+        goal answer opens its own bubble instead of merging into the (empty) user
+        bubble. Non-user-originated streams keep the strict ``prev == "user"``
+        rule so a pure goal stream never gets a spurious final at its head.
+        """
+        kind = self._current_interaction_run_kind()
+        prev = self._stream_content_run_kind
+        boundary: dict[str, Any] | None = None
+        switched_from_user = prev == "user" and kind == "goal"
+        hijacked_before_user_token = (
+            stream_is_user_originated and kind == "goal" and prev is None
+        )
+        if switched_from_user or hijacked_before_user_token:
+            boundary = {"event_type": "chat.final", "content": ""}
+            self._stream_content_run_kind = None
+        if kind is not None:
+            self._stream_content_run_kind = kind
+        return boundary
+
     def _adapt_goal_intermediate_final(self, parsed: dict | None) -> dict | None:
         if not isinstance(parsed, dict):
             return parsed
         if parsed.get("event_type") != "chat.final":
             return parsed
-        # Demote only while the GoalRecord remains ACTIVE.  Do not key off an
-        # in-flight goal round: user cancel pauses the record first, then
-        # aborts the round — finals during unwind must stay terminal so the
-        # frontend can close the dialog.
-        if not self._goal_record_is_active():
+        if not self._should_demote_goal_intermediate_final():
             return parsed
         adapted = dict(parsed)
         adapted["event_type"] = "chat.delta"
         adapted["goal_intermediate"] = True
         return adapted
+
+    def _should_emit_stream_end_chat_final(
+        self,
+        *,
+        had_assistant_output: bool,
+        emitted_terminal_chat_final: bool,
+    ) -> bool:
+        """Whether the host must synthesize a terminal ``chat.final``.
+
+        pause→clear (and similar) cancels the in-flight goal round so the
+        interaction iterator ends normally, but often without a model
+        ``chat.final``. Gateway Goal streams also skip
+        ``processing_status=false``.
+
+        Emit even when no assistant tokens were forwarded yet: the frontend
+        may already be ``isProcessing`` from goal.set before the first
+        delta/reasoning arrives; without a final the stop control stays stuck.
+        ``had_assistant_output`` is retained for call-site/tests but ignored.
+        """
+        del had_assistant_output  # intentionally unused; see docstring
+        if emitted_terminal_chat_final:
+            return False
+        return not self._goal_record_is_active()
 
     @staticmethod
     def _resolve_input_dispatch_mode(params: Any) -> InputDispatchMode | None:
@@ -6052,6 +6349,8 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction cancel failed",
                 intent,
             )
+        if intent == "supplement" and isinstance(new_input, str) and new_input.strip():
+            await self._clear_pending_ask_user_interrupt_for_supplement(request.session_id)
         message = "任务已切换" if intent == "supplement" else "任务已取消"
 
         payload: dict[str, Any] = {
@@ -6832,6 +7131,7 @@ class JiuWenSwarmDeepAdapter:
         if not objective:
             return
         params = request.params if isinstance(request.params, dict) else {}
+        goal_id = str(goal_payload.get("goal_id") or "").strip() or None
         append_history_record(
             session_id=request.session_id or "default",
             request_id=request.request_id,
@@ -6841,6 +7141,79 @@ class JiuWenSwarmDeepAdapter:
             timestamp=time.time(),
             channel_metadata=request.metadata,
             mode=params.get("mode", "unknown"),
+            extra={
+                "goal_id": goal_id,
+                "is_goal_objective_message": True,
+            },
+        )
+
+    @staticmethod
+    def _goal_completed_history_exists(session_id: str, goal_id: str) -> bool:
+        """Return True when this session already persisted a completion card for goal_id."""
+        message_id = f"goal-completed-{goal_id}"
+        try:
+            for rec in load_history_records(session_id):
+                if not isinstance(rec, dict):
+                    continue
+                if str(rec.get("id") or "") == message_id:
+                    return True
+                if rec.get("is_goal_completed_message") and str(rec.get("goal_id") or "") == goal_id:
+                    return True
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] goal completed history lookup failed: session_id=%s goal_id=%s",
+                session_id,
+                goal_id,
+                exc_info=True,
+            )
+        return False
+
+    @staticmethod
+    def _record_goal_completed_history_if_needed(
+        *,
+        session_id: str,
+        channel_id: str,
+        channel_metadata: dict[str, Any] | None,
+        mode: str | None,
+        goal_payload: dict[str, Any] | None,
+    ) -> None:
+        """Persist a goal-completed card once when status first becomes completed."""
+        if not isinstance(goal_payload, dict):
+            return
+        status = goal_payload.get("status")
+        status_value = getattr(status, "value", status)
+        if str(status_value or "").strip().lower() != "completed":
+            return
+        goal_id = str(goal_payload.get("goal_id") or "").strip()
+        if not goal_id:
+            return
+        sid = (session_id or "default").strip() or "default"
+        if JiuWenSwarmDeepAdapter._goal_completed_history_exists(sid, goal_id):
+            return
+
+        evidence = ""
+        last_assessment = goal_payload.get("last_assessment")
+        if isinstance(last_assessment, dict):
+            evidence = str(last_assessment.get("evidence") or "").strip()
+        # Keep the existing frontend GoalCompletedCard wire format so history
+        # restore / localStorage merge keep working without a content-parser fork.
+        content = "goal.completed:" + json.dumps({"evidence": evidence}, ensure_ascii=False)
+        message_id = f"goal-completed-{goal_id}"
+        append_history_record(
+            session_id=sid,
+            request_id=message_id,
+            channel_id=channel_id,
+            role="assistant",
+            content=content,
+            timestamp=time.time(),
+            channel_metadata=channel_metadata,
+            mode=mode,
+            extra={
+                "id": message_id,
+                "goal_id": goal_id,
+                "is_goal_completed_message": True,
+                "evidence": evidence,
+            },
         )
 
     @staticmethod
@@ -7291,6 +7664,7 @@ class JiuWenSwarmDeepAdapter:
         image_files_token = None
         _run_span: Any = None
         collected_content: list[str] = []
+        error_text: str | None = None
         interaction_stream = None
         interaction_stream_abort = True
         try:
@@ -7305,6 +7679,9 @@ class JiuWenSwarmDeepAdapter:
                     cwd=inputs.get("cwd"),
                     workspace=inputs.get("workspace_dir"),
                     project_dir=inputs.get("project_dir"),
+                    supports_user_interaction=inputs.get(
+                        "supports_user_interaction", True
+                    ),
                 )
             )
             inputs = dict(inputs)
@@ -7393,6 +7770,15 @@ class JiuWenSwarmDeepAdapter:
                         )
                         if text:
                             collected_content.append(text)
+                    else:
+                        # check for error in other typed chunks (e.g. controller_output.task_failed)
+                        parsed = self._parse_stream_chunk(chunk)
+                        if parsed is not None:
+                            event_type = str(parsed.get("event_type") or "").strip()
+                            if event_type in ("chat.error", "error"):
+                                err = parsed.get("error") or parsed.get("message") or ""
+                                if err:
+                                    error_text = str(err)
                 else:
                     parsed = self._parse_stream_chunk(chunk)
                     if parsed is not None:
@@ -7411,7 +7797,7 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
-            close_agent_run_span(_run_span)
+            close_agent_run_span(_run_span, session_id=session_id)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,
@@ -7432,6 +7818,15 @@ class JiuWenSwarmDeepAdapter:
             self._unmark_session_active(session_id)
 
         content = "".join(collected_content) if collected_content else ""
+
+        if not content and error_text:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": error_text},
+                metadata=request.metadata,
+            )
 
         return AgentResponse(
             request_id=request.request_id,
@@ -7536,6 +7931,9 @@ class JiuWenSwarmDeepAdapter:
                     trusted_dirs=inputs.get("trusted_dirs"),
                     cwd=inputs.get("cwd"),
                     project_dir=inputs.get("project_dir"),
+                    supports_user_interaction=inputs.get(
+                        "supports_user_interaction", True
+                    ),
                 )
             )
 
@@ -7679,6 +8077,8 @@ class JiuWenSwarmDeepAdapter:
         has_streamed_content = False
         accumulated_text = ""
         accumulated_reasoning = ""
+        had_assistant_output = False
+        emitted_terminal_chat_final = False
         usage_accumulator = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -7701,6 +8101,27 @@ class JiuWenSwarmDeepAdapter:
                 return True
             emitted_ask_user_request_ids.add(request_id)
             return False
+
+        def note_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal had_assistant_output, emitted_terminal_chat_final
+            event_type = payload.get("event_type")
+            if event_type in ("chat.delta", "chat.reasoning", "chat.final"):
+                had_assistant_output = True
+            if event_type == "chat.final":
+                emitted_terminal_chat_final = True
+            # Persist goal-completed cards at the stream yield choke point so
+            # every goal.updated path (typed chunk / dict chunk) is covered once
+            # without touching the pure payload parser.
+            if event_type == GOAL_UPDATED_EVENT_TYPE:
+                goal_obj = payload.get("goal")
+                self._record_goal_completed_history_if_needed(
+                    session_id=session_id,
+                    channel_id=cid,
+                    channel_metadata=request.metadata if isinstance(request.metadata, dict) else None,
+                    mode=mode,
+                    goal_payload=goal_obj if isinstance(goal_obj, dict) else None,
+                )
+            return payload
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -7737,6 +8158,9 @@ class JiuWenSwarmDeepAdapter:
                     cwd=inputs.get("cwd"),
                     workspace=inputs.get("workspace_dir"),
                     project_dir=inputs.get("project_dir"),
+                    supports_user_interaction=inputs.get(
+                        "supports_user_interaction", True
+                    ),
                 )
             )
             if self._stream_event_rail is not None:
@@ -7803,6 +8227,7 @@ class JiuWenSwarmDeepAdapter:
                     pass
             try:
                 from jiuwenswarm.server.runtime.debug_trace.context import (
+                    register_debug_trace_logger,
                     set_debug_trace_logger,
                 )
                 from jiuwenswarm.server.runtime.debug_trace.paths import debug_trace_file
@@ -7827,6 +8252,12 @@ class JiuWenSwarmDeepAdapter:
                     # streams into this same dump. asyncio.create_task copies the
                     # current ContextVar, so background subagents inherit it too.
                     _debug_trace_token = set_debug_trace_logger(_debug_logger)
+                    # Also register by session_id: TaskTool.invoke runs in the
+                    # DeepAgent's supervisor task (created at session setup, before
+                    # any /debug request), so the per-request ContextVar above
+                    # can't reach it. Dispatch sites fall back to this registry
+                    # via get_debug_trace_logger_for_session.
+                    register_debug_trace_logger(session_id, _debug_logger)
             except Exception as _dbg_exc:
                 logger.warning("[JiuWenSwarmDeepAdapter] debug trace init failed: %s", _dbg_exc)
                 _debug_logger = None
@@ -7984,11 +8415,40 @@ class JiuWenSwarmDeepAdapter:
                         mode=self._resolve_input_dispatch_mode(request.params),
                     )
                 )
+            run_failure: tuple[str, str] | None = None
+            # A plain user-chat consumer stream (not a command.goal / attach-goal
+            # stream). Only these may be hijacked by a goal round before the user
+            # round produces its first visible token; used to allow a bubble
+            # split even when ``prev`` is still None. Pure goal streams keep the
+            # strict prev=="user" rule inside ``_begin_visible_chat_content``.
+            stream_is_user_originated = (
+                pending_goal_op is None
+                and not attach_goal_request
+                and not goal_stream_request
+            )
             async for chunk in interaction_stream:
                 if _debug_logger is not None:
                     _debug_logger.feed(chunk)
+                    # Surface run-level terminal failures (model/task_failed,
+                    # error answer) on the /debug run-end status instead of a
+                    # blanket "ok"; recoverable tool_result errors stay "ok".
+                    if run_failure is None:
+                        run_failure = self._run_failure(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
+                    # Only stamp provenance / inject split on new visible deltas.
+                    # A late user-round chat.final must keep the prior content kind.
+                    if isinstance(parsed, dict) and parsed.get("event_type") == "chat.delta":
+                        boundary = self._begin_visible_chat_content(stream_is_user_originated)
+                        if boundary is not None:
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=cid,
+                                payload=note_chat_payload(boundary),
+                                is_complete=False,
+                            )
+                            # Boundary closes the user bubble only; goal segment follows.
+                            emitted_terminal_chat_final = False
                     parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
@@ -7997,7 +8457,7 @@ class JiuWenSwarmDeepAdapter:
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=cid,
-                                payload={"event_type": "chat.delta", "content": accumulated_text},
+                                payload=note_chat_payload({"event_type": "chat.delta", "content": accumulated_text}),
                                 is_complete=False,
                             )
                             accumulated_text = ""
@@ -8005,17 +8465,19 @@ class JiuWenSwarmDeepAdapter:
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=cid,
-                                payload={
+                                payload=note_chat_payload({
                                     "event_type": "chat.reasoning",
                                     "content": accumulated_reasoning,
-                                },
+                                }),
                                 is_complete=False,
                             )
                             accumulated_reasoning = ""
+                        if parsed.get("event_type") == "chat.final":
+                            self._stream_content_run_kind = None
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload=parsed,
+                            payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
                     continue
@@ -8057,10 +8519,19 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if reasoning_payload is None:
                         continue
+                    boundary = self._begin_visible_chat_content(stream_is_user_originated)
+                    if boundary is not None:
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload=note_chat_payload(boundary),
+                            is_complete=False,
+                        )
+                        emitted_terminal_chat_final = False
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload=reasoning_payload,
+                        payload=note_chat_payload(reasoning_payload),
                         is_complete=False,
                     )
                     continue
@@ -8079,17 +8550,26 @@ class JiuWenSwarmDeepAdapter:
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={
+                            payload=note_chat_payload({
                                 "event_type": "chat.reasoning",
                                 "content": accumulated_reasoning,
-                            },
+                            }),
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
+                    boundary = self._begin_visible_chat_content(stream_is_user_originated)
+                    if boundary is not None:
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload=note_chat_payload(boundary),
+                            is_complete=False,
+                        )
+                        emitted_terminal_chat_final = False
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload=delta_payload,
+                        payload=note_chat_payload(delta_payload),
                         is_complete=False,
                     )
                     continue
@@ -8099,7 +8579,7 @@ class JiuWenSwarmDeepAdapter:
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={"event_type": "chat.delta", "content": accumulated_text},
+                            payload=note_chat_payload({"event_type": "chat.delta", "content": accumulated_text}),
                             is_complete=False,
                         )
                         accumulated_text = ""
@@ -8107,10 +8587,10 @@ class JiuWenSwarmDeepAdapter:
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={
+                            payload=note_chat_payload({
                                 "event_type": "chat.reasoning",
                                 "content": accumulated_reasoning,
-                            },
+                            }),
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
@@ -8120,10 +8600,12 @@ class JiuWenSwarmDeepAdapter:
                         if parsed is not None:
                             if should_skip_duplicate_ask_user(parsed):
                                 continue
+                            if parsed.get("event_type") == "chat.final":
+                                self._stream_content_run_kind = None
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=cid,
-                                payload=parsed,
+                                payload=note_chat_payload(parsed),
                                 is_complete=False,
                             )
                         continue
@@ -8132,10 +8614,12 @@ class JiuWenSwarmDeepAdapter:
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
                             continue
+                        if parsed.get("event_type") == "chat.final":
+                            self._stream_content_run_kind = None
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload=parsed,
+                            payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
                     continue
@@ -8144,7 +8628,7 @@ class JiuWenSwarmDeepAdapter:
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.delta", "content": accumulated_text},
+                        payload=note_chat_payload({"event_type": "chat.delta", "content": accumulated_text}),
                         is_complete=False,
                     )
                     accumulated_text = ""
@@ -8152,7 +8636,7 @@ class JiuWenSwarmDeepAdapter:
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
+                        payload=note_chat_payload({"event_type": "chat.reasoning", "content": accumulated_reasoning}),
                         is_complete=False,
                     )
                     accumulated_reasoning = ""
@@ -8161,32 +8645,59 @@ class JiuWenSwarmDeepAdapter:
                 if parsed is not None:
                     if should_skip_duplicate_ask_user(parsed):
                         continue
+                    if parsed.get("event_type") == "chat.final":
+                        self._stream_content_run_kind = None
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload=parsed,
+                        payload=note_chat_payload(parsed),
                         is_complete=False,
                     )
 
             if accumulated_text:
-                # Same rule as _adapt_goal_intermediate_final: only keep the
-                # host flush as delta while GoalRecord is still ACTIVE.
-                final_event_type = (
-                    "chat.delta"
-                    if self._goal_record_is_active()
-                    else "chat.final"
-                )
+                # Same rule as _adapt_goal_intermediate_final: demote host
+                # flush only when the flushed text belonged to a goal round.
+                if self._should_demote_goal_intermediate_final():
+                    flush_payload: dict[str, Any] = {
+                        "event_type": "chat.delta",
+                        "content": accumulated_text,
+                        "goal_intermediate": True,
+                    }
+                else:
+                    flush_payload = {
+                        "event_type": "chat.final",
+                        "content": accumulated_text,
+                    }
+                    self._stream_content_run_kind = None
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
-                    payload={"event_type": final_event_type, "content": accumulated_text},
+                    payload=note_chat_payload(flush_payload),
                     is_complete=False,
                 )
             if accumulated_reasoning:
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
-                    payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
+                    payload=note_chat_payload({"event_type": "chat.reasoning", "content": accumulated_reasoning}),
+                    is_complete=False,
+                )
+
+            # pause→clear (and similar): round cancelled, iterator ends without
+            # a model chat.final. Synthesize a real final so the frontend can
+            # stopStreaming; do not demote.
+            if self._should_emit_stream_end_chat_final(
+                had_assistant_output=had_assistant_output,
+                emitted_terminal_chat_final=emitted_terminal_chat_final,
+            ):
+                self._stream_content_run_kind = None
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=note_chat_payload({
+                        "event_type": "chat.final",
+                        "content": "",
+                    }),
                     is_complete=False,
                 )
 
@@ -8197,7 +8708,14 @@ class JiuWenSwarmDeepAdapter:
                 task.add_done_callback(self._on_evolution_watcher_done)
                 self._evolution_watcher_tasks.add(task)
             if _debug_logger is not None:
-                _debug_logger.end_run(status="ok")
+                if run_failure is not None:
+                    _debug_logger.end_run(
+                        status="error",
+                        error_type=run_failure[0],
+                        error_message=run_failure[1],
+                    )
+                else:
+                    _debug_logger.end_run(status="ok")
             interaction_stream_abort = False
         except asyncio.CancelledError:
             stream_consumer_cancelled = True
@@ -8230,14 +8748,16 @@ class JiuWenSwarmDeepAdapter:
                 is_complete=False,
             )
         finally:
-            close_agent_run_span(_run_span)
+            close_agent_run_span(_run_span, session_id=session_id)
             if _debug_logger is not None:
                 _debug_logger.flush()
             if _debug_trace_token is not None:
                 from jiuwenswarm.server.runtime.debug_trace.context import (
                     reset_debug_trace_logger,
+                    unregister_debug_trace_logger,
                 )
                 reset_debug_trace_logger(_debug_trace_token)
+                unregister_debug_trace_logger(session_id)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,
@@ -8349,6 +8869,55 @@ class JiuWenSwarmDeepAdapter:
         if content is None or content == "":
             return None
         return {"event_type": event_type, "content": content}
+
+    @staticmethod
+    def _run_failure(chunk) -> tuple[str, str] | None:
+        """Return ``(error_type, message)`` if *chunk* is a run-level terminal failure.
+
+        These are failures that end the round and are surfaced to the user as a
+        ``chat.error`` by :meth:`_parse_stream_chunk` — a
+        ``controller_output``/``task_failed`` (e.g. model call failed) or an
+        ``answer`` whose ``result_type`` is ``"error"``. Recoverable
+        ``tool_result`` errors are intentionally excluded: the agent loop may
+        still retry them, so they must not flip the run status.
+
+        Used only to give the /debug ``run end`` ``status`` triage value; the
+        chunk still flows through ``_parse_stream_chunk`` unchanged.
+        """
+        ctype = getattr(chunk, "type", None)
+        payload = getattr(chunk, "payload", None)
+
+        def _get(key, default=None):
+            if isinstance(payload, dict):
+                return payload.get(key, default)
+            return getattr(payload, key, default)
+
+        if ctype == "controller_output" and payload is not None:
+            inner_t = getattr(payload, "type", None)
+            inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
+            if inner_val == "task_failed":
+                data = getattr(payload, "data", None) or []
+                msg = next(
+                    (
+                        getattr(item, "text", None)
+                        for item in data
+                        if hasattr(item, "text")
+                    ),
+                    None,
+                )
+                return "task_failed", (msg or "task failed")
+            return None
+
+        if ctype == "answer" and _get("result_type") == "error":
+            out = _get("output")
+            if isinstance(out, dict):
+                out = out.get("output")
+            return "answer_error", (str(out) if out else "task failed")
+
+        if isinstance(chunk, dict) and chunk.get("result_type") == "error":
+            return "answer_error", str(chunk.get("output") or "task failed")
+
+        return None
 
     @staticmethod
     def _parse_stream_chunk(
@@ -9160,6 +9729,10 @@ class JiuWenSwarmDeepAdapter:
                 if role == "user":
                     recapworthy.append(SimpleNamespace(role="user", content=content))
                 elif role == "assistant":
+                    # Goal-completed cards are UI-only history facts; never feed them
+                    # back into model recap context.
+                    if rec.get("is_goal_completed_message"):
+                        continue
                     event_type = rec.get("event_type")
                     # 只包含 assistant 的最终回复和 compact summary
                     if event_type in ("chat.final", "context.compact_summary") or not event_type:
@@ -9537,6 +10110,8 @@ class JiuWenSwarmDeepAdapter:
                 if cleaned:
                     messages.append(UserMessage(content=cleaned))
             elif role == "assistant":
+                if rec.get("is_goal_completed_message"):
+                    continue
                 if event_type in ("chat.final", "context.compact_summary", "context.rewind_summary") or not event_type:
                     if event_type in ("context.compact_boundary",):
                         continue

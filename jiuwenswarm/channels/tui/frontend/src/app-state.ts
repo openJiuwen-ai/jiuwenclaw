@@ -20,7 +20,6 @@ import {
   mergeHistoryMessagesForRestore,
   parseHistoryFrame,
 } from "./core/history-parser.js";
-import { generateSessionId } from "./core/session-state.js";
 import { getToolGroupIds } from "./core/transcript-timeline.js";
 import {
   handleIncomingFrame,
@@ -173,6 +172,8 @@ export interface AppSnapshot {
   btwOverlayTotal: number;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），Esc 优先消费 */
   btwActive: boolean;
+  /** /btw 正在回答的问题；非空时显示加载动画。 */
+  btwPendingQuestion: string | null;
 }
 
 function formatElapsed(ms: number): string {
@@ -412,6 +413,8 @@ export class CliPiAppState {
   private btwOverlayIndex = -1;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   private _btwActive = false;
+  /** /btw 正在回答的问题；与回答 overlay 的可见状态分离。 */
+  private btwPendingQuestion: string | null = null;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
   private interruptRequested = false;
   /** 是否有一个 cancel interrupt 在途（已发送但未收到 interrupt_result 确认）。
@@ -633,7 +636,7 @@ export class CliPiAppState {
       uiLifecycle?: UiLifecyclePort | null;
     },
   ) {
-    this.sessionId = cliSession || generateSessionId();
+    this.sessionId = cliSession || "new";
     this.bootSessionId = cliSession ? cliSession : null;
     const config = loadTuiConfig();
     if (config.theme) {
@@ -1099,6 +1102,7 @@ export class CliPiAppState {
       btwOverlayIndex: this.btwOverlayIndex,
       btwOverlayTotal: this.btwHistory.length,
       btwActive: this._btwActive,
+      btwPendingQuestion: this.btwPendingQuestion,
     };
   }
 
@@ -1165,6 +1169,7 @@ export class CliPiAppState {
       setBtwOverlay: this.setBtwOverlay,
       clearBtwOverlay: this.clearBtwOverlay,
       setBtwActive: this.setBtwActive,
+      setBtwPendingQuestion: this.setBtwPendingQuestion,
       clearEntries: this.clearEntries,
       restoreHistory: this.restoreHistory,
       exitApp: () => {
@@ -1657,6 +1662,7 @@ export class CliPiAppState {
     this.btwHistory = [];
     this.btwOverlayIndex = -1;
     this._btwActive = false;
+    this.btwPendingQuestion = null;
     this.pendingPlanEntrySource = null;
     if (this.accentColor !== "default") {
       this.accentColor = "default";
@@ -1694,11 +1700,16 @@ export class CliPiAppState {
     if (item.kind === "user") {
       this.autoRecapState = "idle";
       // 用户发送新消息时自动清除 /btw overlay（含历史）
-      if (this.btwOverlay !== null || this.btwHistory.length > 0) {
+      if (
+        this.btwOverlay !== null ||
+        this.btwHistory.length > 0 ||
+        this.btwPendingQuestion !== null
+      ) {
         this.btwOverlay = null;
         this.btwHistory = [];
         this.btwOverlayIndex = -1;
         this._btwActive = false;
+        this.btwPendingQuestion = null;
       }
     }
     this.emitChange();
@@ -1706,6 +1717,7 @@ export class CliPiAppState {
 
   /** 设置 /btw 侧问题覆盖层（独立于 transcript 渲染，不受滚动影响） */
   readonly setBtwOverlay = (question: string, answer: string): void => {
+    this.btwPendingQuestion = null;
     this.btwOverlay = { question, answer };
     this.btwHistory.push({ question, answer });
     this.btwOverlayIndex = this.btwHistory.length - 1;
@@ -1714,19 +1726,35 @@ export class CliPiAppState {
 
   /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   readonly setBtwActive = (active: boolean): void => {
-    if (this._btwActive !== active) {
+    const pendingChanged = !active && this.btwPendingQuestion !== null;
+    if (this._btwActive !== active || pendingChanged) {
       this._btwActive = active;
+      if (!active) {
+        this.btwPendingQuestion = null;
+      }
+      this.emitChange();
+    }
+  };
+
+  readonly setBtwPendingQuestion = (question: string | null): void => {
+    if (this.btwPendingQuestion !== question) {
+      this.btwPendingQuestion = question;
       this.emitChange();
     }
   };
 
   /** 清除 /btw 侧问题覆盖层（同时清空历史，Esc 视为放弃这批侧问） */
   readonly clearBtwOverlay = (): void => {
-    if (this.btwOverlay !== null || this.btwHistory.length > 0) {
+    if (
+      this.btwOverlay !== null ||
+      this.btwHistory.length > 0 ||
+      this.btwPendingQuestion !== null
+    ) {
       this.btwOverlay = null;
       this.btwHistory = [];
       this.btwOverlayIndex = -1;
       this._btwActive = false;
+      this.btwPendingQuestion = null;
       this.emitChange();
     }
   };
@@ -1751,6 +1779,7 @@ export class CliPiAppState {
       this.btwOverlay = null;
       this.btwOverlayIndex = -1;
       this._btwActive = false;
+      this.btwPendingQuestion = null;
     } else {
       this.btwOverlayIndex = Math.min(this.btwOverlayIndex, len - 1);
       this.btwOverlay = this.btwHistory[this.btwOverlayIndex];
@@ -1803,6 +1832,7 @@ export class CliPiAppState {
     this.btwHistory = [];
     this.btwOverlayIndex = -1;
     this._btwActive = false;
+    this.btwPendingQuestion = null;
     this.setStreamingStateInternal(StreamingState.Idle);
     this.collapsedToolGroupIds.clear();
     this.activeSubtasks.clear();
@@ -3301,7 +3331,7 @@ export class CliPiAppState {
     const previousMode = this.mode;
     void (async () => {
       try {
-        await this.request("session.create", {
+        await this.request("session.switch", {
           session_id: target,
           previous_session_id: "",
           previous_mode: previousMode,
@@ -3335,7 +3365,7 @@ export class CliPiAppState {
           }
         } else {
           // 非已存在错误：降级仅拉历史，不阻断
-          this.lastError = `session.create failed: ${message}`;
+          this.lastError = `session.switch failed: ${message}`;
           this.emitChange();
         }
       } finally {

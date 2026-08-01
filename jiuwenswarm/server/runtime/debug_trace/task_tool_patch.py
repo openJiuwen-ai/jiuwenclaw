@@ -66,9 +66,25 @@ def apply_task_tool_debug_patch() -> None:
             get_debug_trace_logger,
             invoke_subagent_with_trace,
         )
+        from jiuwenswarm.server.runtime.debug_trace.context import (
+            get_debug_trace_logger_for_session,
+        )
 
         # Not capturing -> pristine original SDK path, unchanged.
         dbg = get_debug_trace_logger()
+        if dbg is None:
+            # TaskTool.invoke runs in the DeepAgent's supervisor task (created at
+            # session setup, before any /debug request publishes the ContextVar),
+            # so the per-request binding above doesn't reach it. Fall back to the
+            # session-keyed registry — we hold the parent Session in kwargs.
+            parent_session = kwargs.get("session", None)
+            if isinstance(parent_session, Session):
+                dbg = get_debug_trace_logger_for_session(parent_session.get_session_id())
+                if dbg is not None:
+                    logger.info(
+                        "[TaskTool] (debug) recovered trace logger via session "
+                        "registry: %s", parent_session.get_session_id(),
+                    )
         if dbg is None or not dbg.captures_subagent_flow():
             return await _orig_invoke(self, inputs, **kwargs)
 

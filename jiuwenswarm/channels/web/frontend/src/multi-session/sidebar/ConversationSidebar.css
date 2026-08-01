@@ -1014,3 +1014,59 @@
   background: var(--color-feedback-warning-subtle);
   color: var(--color-feedback-warning);
 }
+
+.project-path-tooltip {
+  z-index: 80;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: 360px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--color-surface-popover);
+  border: 1px solid var(--color-border-default);
+  box-shadow: var(--effect-shadow-lg);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  line-height: 16px;
+  pointer-events: none;
+  transition: opacity 0.08s ease-out;
+}
+
+.project-path-tooltip__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.project-path-tooltip__icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--color-text-tertiary);
+}
+
+.project-path-tooltip__name {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-weight: 600;
+}
+
+.project-path-tooltip__divider {
+  height: 1px;
+  margin: 6px 0;
+  background: var(--color-border-default);
+}
+
+.project-path-tooltip__row--muted {
+  color: var(--color-text-secondary);
+}
+
+.project-path-tooltip__icon--muted {
+  color: var(--color-text-secondary);
+}
+
+.project-path-tooltip__path {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}

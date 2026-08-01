@@ -236,8 +236,6 @@ def _extract_legacy_params(
     if "schedule" in data or "payload" in data or "delivery" in data:
         schedule = data.get("schedule") if isinstance(data.get("schedule"), dict) else {}
         kind = str(schedule.get("kind") or "cron").strip().lower()
-        if kind and kind != "cron":
-            raise ValueError("Only cron schedule is supported by the current gateway bridge")
 
         cron_expr = str(
             schedule.get("expr")
@@ -252,12 +250,41 @@ def _extract_legacy_params(
             or "Asia/Shanghai"
         ).strip() or "Asia/Shanghai"
 
+        if kind == "at":
+            at_raw = str(schedule.get("at") or "").strip()
+            if at_raw:
+                try:
+                    from jiuwenswarm.gateway.cron.cron_expr import iso_to_seven_field_cron
+                    cron_expr = iso_to_seven_field_cron(at_raw, timezone=timezone)
+                    logger.info(
+                        "[CronRuntimeBridge] _extract_legacy_params: converted kind=at '%s' to cron_expr='%s'",
+                        at_raw, cron_expr,
+                    )
+                except Exception as conv_exc:
+                    raise ValueError(
+                        f"Cannot convert schedule.at='{at_raw}' to cron expression: {conv_exc}"
+                    ) from conv_exc
+            else:
+                raise ValueError("schedule.kind='at' requires schedule.at field with ISO datetime")
+        elif kind and kind != "cron":
+            raise ValueError(
+                f"Unsupported schedule.kind='{kind}'. Only 'cron' and 'at' are supported by the gateway bridge"
+            )
+
         payload_block = data.get("payload") if isinstance(data.get("payload"), dict) else {}
         payload_kind = str(payload_block.get("kind") or "agentTurn").strip()
-        if payload_kind and payload_kind != "agentTurn":
-            raise ValueError("Only agentTurn cron jobs are supported by the current gateway bridge")
+        if payload_kind == "systemEvent":
+            logger.info(
+                "[CronRuntimeBridge] _extract_legacy_params: converting payload.kind=systemEvent to agentTurn"
+            )
+            payload_kind = "agentTurn"
+        elif payload_kind and payload_kind != "agentTurn":
+            raise ValueError(
+                f"Unsupported payload.kind='{payload_kind}'. Only 'agentTurn' and 'systemEvent' are supported"
+            )
         description = str(
             payload_block.get("message")
+            or payload_block.get("text")
             or data.get("description")
             or ""
         )

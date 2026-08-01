@@ -24,6 +24,7 @@ from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE
+from jiuwenswarm.server.runtime.session.session_history import append_history_record
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +122,8 @@ def _extract_text_from_stream_payload(payload: dict | None) -> str | None:
             return content
     if event_type == "chat.error":
         error = payload.get("error")
-        if error is not None:
-            return f"[cron] 任务执行失败: {error}"
+        if isinstance(error, str) and error.strip():
+            return error
     workflow_text = _extract_workflow_result_text(payload)
     if workflow_text:
         return workflow_text
@@ -181,6 +182,11 @@ def _resolve_cron_team_timeout_result(
 def _extract_text_from_agent_payload(payload: dict | None) -> str:
     if not isinstance(payload, dict):
         return ""
+    # AgentServer unary error responses use ok=False, payload={"error": "..."}
+    # Pass through raw error text, same as normal chat behavior
+    error = payload.get("error")
+    if isinstance(error, str) and error.strip():
+        return error
     # Common: {"content": {"output": "...", "result_type": "answer"}}
     content = payload.get("content")
     if isinstance(content, dict):
@@ -295,19 +301,36 @@ class CronSchedulerService:
     def is_running(self) -> bool:
         return self._running
 
-    async def _cancel_agent_session(self, state: CronRunState) -> None:
+    async def _cancel_agent_session(
+        self,
+        state: CronRunState,
+        *,
+        reason: str = "ghost",
+    ) -> None:
         """Fire-and-forget: 向 AgentServer 发送 CHAT_CANCEL 中断请求。
 
-        当 cron_jobs.json 被删除或 job 被移除后，gateway 的 asyncio Task
-        被 task.cancel() 取消，但这只终止了 gateway 端等待响应的协程。
-        AgentServer 不知道请求已被取消，会继续执行 LLM 调用。此方法
-        主动发送中断请求，让后端也停止处理，彻底消灭"幽灵任务"。
+        触发场景:
+        - ``reason="ghost"``: cron_jobs.json 被删除或 job 被移除后，gateway
+          的 asyncio Task 被 task.cancel() 取消，但这只终止了 gateway 端
+          等待响应的协程。AgentServer 不知道请求已被取消，会继续执行 LLM
+          调用。此方法主动发送中断请求，让后端也停止处理，彻底消灭"幽灵任务"。
+        - ``reason="timeout"``: unary 超时分支（_run_unary_cron_job）在
+          ``asyncio.wait_for`` 超时后仅取消了 gateway 端等待协程，若不
+          主动 cancel，AgentServer 端的 task 会继续跑到完成——飞书等渠道
+          会先收到"超时"文案，但任务实际仍在后台正常完成，结果到达 gateway
+          时已无人接收而被丢弃（用户反馈"超时但结果正常完成"的矛盾现象）。
+
+        session_id 必须用真实执行会话 ``state.exec_session_id``（格式
+        ``cron_{ts}_{job.id}``）。AgentServer 的 ``_stop_session_interrupt_work``
+        按 ``request.session_id`` 定位 in-flight task；若用旧占位
+        ``cron_{job_id}`` 与真实会话不匹配，cancel 请求落不到点上。
         """
+        target_session_id = (state.exec_session_id or "").strip() or f"cron_{state.job_id}"
         try:
             interrupt_env = e2a_from_agent_fields(
                 request_id=f"cron-cancel-{state.run_id}",
                 channel_id="__cron__",
-                session_id=f"cron_{state.job_id}",
+                session_id=target_session_id,
                 req_method=ReqMethod.CHAT_CANCEL,
                 params={"cron": {"job_id": state.job_id, "run_id": state.run_id}},
                 is_stream=False,
@@ -315,19 +338,23 @@ class CronSchedulerService:
             )
             await self._agent_client.send_request(interrupt_env)
             logger.info(
-                "[Cron] AgentServer interrupt sent for ghost task: "
-                "job_id=%s run_id=%s",
+                "[Cron] AgentServer interrupt sent (%s): "
+                "job_id=%s run_id=%s session_id=%s",
+                reason,
                 state.job_id,
                 state.run_id,
+                target_session_id,
             )
         except (OSError, RuntimeError) as exc:
             # Fire-and-forget: 网络断开、连接超时或 AgentServer 不可达
             # 都不影响主流程，只是最佳努力的中断
             logger.warning(
-                "[Cron] AgentServer interrupt failed for ghost task "
-                "(non-critical): job_id=%s run_id=%s error=%s",
+                "[Cron] AgentServer interrupt failed (%s, non-critical): "
+                "job_id=%s run_id=%s session_id=%s error=%s",
+                reason,
                 state.job_id,
                 state.run_id,
+                target_session_id,
                 exc,
             )
 
@@ -463,9 +490,28 @@ class CronSchedulerService:
                 run_id in self._run_tasks
                 and not self._run_tasks[run_id].done()
             )
-            if not already_active:
+            # 崩溃恢复保护：gateway 重启后 _runs/_run_tasks 清空，already_active
+            # 失效。若 wake_dt 已在过去（本应在崩溃前触发的 wake），重排 wake 会
+            # 立即触发 _on_wake 创建新 agent task（新 session_id），而 AgentServer
+            # 上原 task 可能还在跑 → 重复执行。此时跳过 wake 重排，宁可丢结果也
+            # 不重复触发。push 事件也不排（崩溃后 _runs 无 state，_on_push 会重建
+            # state 并推占位——但此时根本没有执行，推占位会误导用户）。
+            # 仅当内存无该 run 记录时启用此保护（existing is None 即崩溃重启特征）。
+            wake_already_passed = wake_dt.timestamp() <= now
+            crash_recovery_skip = existing is None and wake_already_passed
+            if not already_active and not crash_recovery_skip:
                 self._schedule_event(wake_dt, "wake", job.id, run_id)
-            self._schedule_event(push_dt, "push", job.id, run_id)
+            # push 事件：已 active 时仍需排入——_on_push 内部有 pushed_final 兜底，
+            # 若 agent 还没完成到达 push 时间会推"正在执行中"占位，完成后 push_update
+            # 仍可补发最终结果。崩溃恢复分支除外（无 state、无执行，推占位会误导）。
+            if not crash_recovery_skip:
+                self._schedule_event(push_dt, "push", job.id, run_id)
+            if crash_recovery_skip:
+                logger.info(
+                    "[Cron] reload skip wake+push (crash recovery, wake_dt in past) "
+                    "job=%s run_id=%s wake_dt=%s",
+                    job.id, run_id, wake_dt.isoformat(),
+                )
 
         self._sync_store_mtime()
         self._reload_event.set()
@@ -513,6 +559,42 @@ class CronSchedulerService:
             )
         return "__cron__", f"cron_{ts}_{job.id}"
 
+    async def _allocate_single_agent_session(
+        self,
+        job: CronJob,
+        *,
+        mode: str,
+        project_dir: str,
+        run_id: str,
+    ) -> str:
+        env = e2a_from_agent_fields(
+            request_id=f"cron-session-create-{run_id}",
+            channel_id="__cron__",
+            req_method=ReqMethod.SESSION_CREATE,
+            params={
+                "create_token": f"cron:{run_id}",
+                "mode": mode,
+                "is_swarm": False,
+                "project_id": job.project_id or "",
+                "project_dir": project_dir,
+                "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
+                "model_name": job.model_name or None,
+                "cron_id": job.id,
+            },
+            is_stream=False,
+            timestamp=self._now_fn(),
+        )
+        response = await self._agent_client.send_request(env)
+        payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
+        if not response.ok:
+            raise RuntimeError(str(payload.get("error") or "cron session.create failed"))
+        session_id = str(
+            payload.get("session_id") or payload.get("sessionId") or ""
+        ).strip()
+        if not session_id:
+            raise RuntimeError("cron session.create returned empty session_id")
+        return session_id
+
     def _schedule_event(self, at_dt: datetime, kind: str, job_id: str, run_id: str) -> None:
         at_ts = float(at_dt.timestamp())
         self._seq += 1
@@ -522,10 +604,36 @@ class CronSchedulerService:
         if at_ts <= self._now_fn() + 1.0:
             self._reload_event.set()
 
+    _MISSED_TRIGGER_WINDOW_SECONDS = 10.0
+
     def _compute_next_run(self, job: CronJob, *, now_ts: float) -> tuple[datetime, datetime, str]:
         tz = ZoneInfo(job.timezone)
         base = datetime.fromtimestamp(now_ts, tz=tz)
-        push_dt = _cron_next_push_dt(job.cron_expr, base)
+        try:
+            push_dt = _cron_next_push_dt(job.cron_expr, base)
+        except Exception as original_exc:
+            if not self._is_croniter_no_next_date(original_exc):
+                raise original_exc
+            from croniter import croniter
+            field_count = len(job.cron_expr.strip().split())
+            second_at_beginning = field_count == 7
+            it = croniter(job.cron_expr, base, second_at_beginning=second_at_beginning)
+            prev_dt = it.get_prev(datetime)
+            if prev_dt is not None and isinstance(prev_dt, datetime):
+                if prev_dt.tzinfo is None:
+                    prev_dt = prev_dt.replace(tzinfo=tz)
+                elapsed = (base.timestamp() - prev_dt.timestamp())
+                if elapsed <= self._MISSED_TRIGGER_WINDOW_SECONDS:
+                    logger.info(
+                        "[Cron] one-shot job=%s missed trigger by %.1fs (within %ss window), "
+                        "scheduling immediate execution instead of marking expired",
+                        job.id, elapsed, self._MISSED_TRIGGER_WINDOW_SECONDS,
+                    )
+                    push_dt = prev_dt
+                else:
+                    raise original_exc
+            else:
+                raise original_exc
         # proactive.tick 无视 wake_offset——到点就执行，不提前 wake。
         # 否则 wake_dt = push_dt - offset 可能在过去，导致 reschedule 后立刻
         # 触发 → 每 6 秒循环（实测 14:26-14:28 反复 triggering 同一 run_id）。
@@ -647,6 +755,15 @@ class CronSchedulerService:
             # （实测：19:56 tick 完，20:00 整点不触发，因为没 reload）。
             try:
                 push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
+                if push_dt.timestamp() <= self._now_fn():
+                    logger.info(
+                        "[Cron] one-shot job=%s push_dt is in the past (%s), "
+                        "marking expired instead of rescheduling",
+                        job.id, push_dt.isoformat(),
+                    )
+                    job.expired = True
+                    await self._store.update_job(job.id, {"expired": True})
+                    return
                 self._schedule_event(wake_dt, "wake", job.id, next_run_id)
                 self._schedule_event(push_dt, "push", job.id, next_run_id)
             except Exception as exc:  # 兜底：reschedule 失败不阻断本次 tick 结果（下个 reload 会重排）
@@ -744,6 +861,16 @@ class CronSchedulerService:
                 return
             try:
                 push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
+                if push_dt.timestamp() <= self._now_fn():
+                    logger.info(
+                        "[Cron] one-shot job=%s push_dt is in the past (%s), "
+                        "marking expired instead of rescheduling",
+                        job.id, push_dt.isoformat(),
+                    )
+                    job.enabled = False
+                    job.expired = True
+                    await self._store.update_job(job.id, {"enabled": False, "expired": True})
+                    return
                 self._schedule_event(wake_dt, "wake", job.id, next_run_id)
                 self._schedule_event(push_dt, "push", job.id, next_run_id)
             except Exception as exc:  # noqa: BLE001
@@ -808,6 +935,11 @@ class CronSchedulerService:
         async def _run_agent() -> None:
             state.status = "running"
             state.started_at = self._now_fn()
+            ok = False
+            mode = CRON_JOB_DEFAULT_MODE
+            channel_id = ""
+            exec_session_id = ""
+            envelope = None
             try:
                 mode = str(job.mode or CRON_JOB_DEFAULT_MODE).strip() or CRON_JOB_DEFAULT_MODE
                 if state.exec_channel_id and state.exec_session_id:
@@ -826,12 +958,22 @@ class CronSchedulerService:
                         "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
                     )
                     exec_project_dir = ""
+                if not is_team_cron_mode(mode):
+                    exec_session_id = await self._allocate_single_agent_session(
+                        job,
+                        mode=mode,
+                        project_dir=exec_project_dir,
+                        run_id=run_id,
+                    )
+                    state.exec_channel_id = "__cron__"
+                    state.exec_session_id = exec_session_id
                 cron_meta = {
                     "job_id": job.id,
                     "job_name": job.name,
                     "run_id": run_id,
                     "push_at": state.push_at_iso,
                     "wake_at": state.wake_at_iso,
+                    "current_time": datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone)).isoformat(),
                 }
                 params: dict[str, Any] = {
                     "content": job.description,
@@ -869,10 +1011,9 @@ class CronSchedulerService:
                     text, ok = await self._run_unary_cron_job(
                         envelope=envelope,
                         timeout_seconds=timeout_seconds,
+                        state=state,
                     )
                 await self._mark_last_session_ready(job, exec_session_id)
-                if not text:
-                    text = "[cron] 任务完成，但未返回可展示文本"
                 state.result_text = text
                 state.status = "succeeded" if ok else "failed"
             except asyncio.CancelledError:
@@ -896,6 +1037,17 @@ class CronSchedulerService:
                 # a job the user has removed.
                 if not state.result_text and state.error and not is_cancelled_ghost:
                     state.result_text = f"[cron] 任务执行失败: {state.error}"
+                if state.result_text and not ok and not is_cancelled_ghost:
+                    append_history_record(
+                        session_id=exec_session_id,
+                        request_id=getattr(envelope, "request_id", ""),
+                        channel_id=job.targets or channel_id,
+                        role="assistant",
+                        event_type="chat.final",
+                        content=state.result_text,
+                        timestamp=self._now_fn(),
+                        mode=mode,
+                    )
                 if not state.pushed_final and state.result_text and not is_cancelled_ghost:
                     logger.info(
                         "[Cron] scheduling push_update after agent finished "
@@ -986,13 +1138,33 @@ class CronSchedulerService:
         *,
         envelope: Any,
         timeout_seconds: float,
+        state: CronRunState,
     ) -> tuple[str, bool]:
         try:
             resp = await asyncio.wait_for(
                 self._agent_client.send_request(envelope),
                 timeout=timeout_seconds,
             )
-            return _extract_text_from_agent_payload(resp.payload), bool(resp.ok)
+            text = _extract_text_from_agent_payload(resp.payload)
+            ok = bool(resp.ok)
+            # 成功但 result_text 为空：响应格式与 _extract_text_from_agent_payload
+            # 的识别字段不匹配（如 E2A result 非 dict、或字段名不在 error/content/
+            # heartbeat/text 之内）。若放任空字符串进入 state.result_text，会触发
+            # _on_push_update 的 "empty result_text" 跳过 → 真实结果永不补发、
+            # 占位永久留在界面。这里降级为失败并生成可见文案，触发 error 兜底通道。
+            if ok and not text:
+                payload_keys = (
+                    list(resp.payload.keys())
+                    if isinstance(resp.payload, dict)
+                    else type(resp.payload).__name__
+                )
+                logger.warning(
+                    "[Cron] unary succeeded but result_text empty request_id=%s payload_keys=%s",
+                    getattr(envelope, "request_id", ""),
+                    payload_keys,
+                )
+                return "[cron] 任务执行完成但未返回结果内容", False
+            return text, ok
         except asyncio.TimeoutError:
             timeout_min = max(1, int(timeout_seconds // 60))
             logger.warning(
@@ -1000,6 +1172,12 @@ class CronSchedulerService:
                 timeout_seconds,
                 getattr(envelope, "request_id", ""),
             )
+            # asyncio.wait_for 超时仅取消 gateway 端等待协程，AgentServer 端
+            # 的 task 不受影响会继续跑到完成——飞书等渠道会先收到"超时"文案，
+            # 但任务实际仍在后台正常完成，结果回到 gateway 时已无人接收而被
+            # 丢弃（用户反馈"超时但结果正常完成"的矛盾现象）。对齐 team 流式
+            # 超时分支（_run_team_stream_job）主动发 CHAT_CANCEL，让后端真正停止。
+            await self._cancel_agent_session(state, reason="timeout")
             return f"[cron] 任务执行超时（>{timeout_min}min）", False
 
     async def _run_team_stream_job(
@@ -1154,6 +1332,14 @@ class CronSchedulerService:
             return
 
         # Not ready: send placeholder
+        # 幂等保护：reload 或 push reschedule 可能对同一 run_id 重复排入 push 事件，
+        # 若 result_text 仍为空会反复推占位。已推过就不再推。
+        if state.placeholder_sent:
+            logger.info(
+                "[Cron] _on_push skipped placeholder: already sent run_id=%s job=%s",
+                run_id, job.id,
+            )
+            return
         placeholder = f"{job.name} 正在执行中，结果稍后补发（push_at={state.push_at_iso}）"
         await self._push_to_targets(job, state, text=placeholder, is_placeholder=True)
         state.placeholder_sent = True
@@ -1210,6 +1396,13 @@ class CronSchedulerService:
         }
         channel_id = (job.targets or "").strip()
         if not channel_id:
+            # targets 为空：占位/真实结果/push_update 补发均会在此静默丢失。
+            # 不 raise 以免中断事件循环，但必须留日志让问题可见（历史 bug：
+            # agent 跑完用户却看不到任何消息）。
+            logger.warning(
+                "[Cron] push skipped: empty targets job=%s run_id=%s is_placeholder=%s status=%s",
+                job.id, state.run_id, bool(is_placeholder), state.status,
+            )
             return
 
         # 企业飞书：优先用作业里绑定的 SessionMap session_id（feishu::chat_id::bot_id::...），

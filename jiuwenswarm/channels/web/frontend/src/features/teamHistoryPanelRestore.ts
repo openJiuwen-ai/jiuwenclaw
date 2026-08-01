@@ -8,6 +8,10 @@ import type {
 } from '../stores/sessionStore';
 import { normalizeFinalContent } from '../utils/finalContent';
 import {
+  findOverlappingFileExecutionEvent,
+  mergeFileDownloadItems,
+} from '../utils/fileDownloadDedup';
+import {
   createTaskProgressBaseline,
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
@@ -605,18 +609,25 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
                 size: typeof file.size === 'number' ? file.size : undefined,
                 mime_type: pickString(file, ['mime_type']) || undefined,
                 download_url: pickString(file, ['download_url']) || undefined,
+                path: pickString(file, ['path']) || undefined,
               }))
             : [];
           if (files.length > 0) {
-            const id = eventId('hist-file', record.id, memberId, timestamp, files.map((file) => file.name).join(','));
+            const existing = findOverlappingFileExecutionEvent(
+              Array.from(executionEvents.values()),
+              files,
+              (event) => event.member_id === memberId && event.kind === 'file'
+            );
+            const mergedFiles = mergeFileDownloadItems(existing?.files, files);
+            const id = existing?.id || eventId('hist-file', record.id, memberId, timestamp, files.map((file) => file.name).join(','));
             executionEvents.set(id, {
               id,
               member_id: memberId,
               kind: 'file',
               timestamp,
               title: '发送文件',
-              content: files.map((file) => file.name).join('\n'),
-              files,
+              content: mergedFiles.map((file) => file.name).join('\n'),
+              files: mergedFiles,
             });
           }
         }

@@ -64,6 +64,8 @@ export interface CommandContext {
   clearBtwOverlay?: () => void;
   /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   setBtwActive?: (active: boolean) => void;
+  /** 设置 /btw 正在回答的问题；null 表示加载已结束。 */
+  setBtwPendingQuestion?: (question: string | null) => void;
   clearEntries: () => void;
   restoreHistory: (sessionId: string) => Promise<void>;
   exitApp: () => void;
@@ -110,7 +112,14 @@ export interface CommandContext {
     mode?: "edit" | "reset",
   ) => void;
   enterStatusView?: (tab?: StatusViewTab) => void;
-  openInEditor?: (filePath: string) => void;
+  /**
+   * Open a file in the user's external editor. Blocks (synchronously) until
+   * the editor window closes — the TUI is frozen (non-operable) for the
+   * duration, mirroring Claude Code's editFileInEditor. When the editor
+   * exits, onDone is called so the caller can emit the "Opened memory file
+   * at <path>" line exactly once, after the user is done editing.
+   */
+  openInEditor?: (filePath: string, onDone?: () => void) => void;
   /** Open a folder in system file explorer (Windows: explorer, macOS: open -R, Linux: xdg-open).
    * Returns true if an explorer was launched; false if no GUI explorer is
    * available (e.g. headless Linux server), so the caller can fall back to
