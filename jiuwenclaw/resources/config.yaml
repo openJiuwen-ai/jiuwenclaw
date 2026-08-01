@@ -1135,7 +1135,9 @@ modes:
     team:
   code:
     # code 模式
+    # 控制项目记忆与编码记忆；关闭时不影响文件、LSP 和 plan rails。
     memory:
+      enabled: true
     rails:
     tools:
 

@@ -143,6 +143,10 @@ from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
 from jiuwenclaw.runtime.shell_pip_patch import set_skill_credential_provider
 from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
+from jiuwenclaw.agentserver.deep_agent.code_rails_builder import (
+    _code_memory_enabled,
+    build_code_mode_extra_rails,
+)
 from jiuwenclaw.agentserver.deep_agent.skill_evolution_rail import JiuClawSkillEvolutionRail
 from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ASK_REQUEST_PREFIX,
@@ -1339,6 +1343,11 @@ class JiuWenClawDeepAdapter:
         self._external_memory_rail_registered: bool = False
         self._external_memory_fingerprint: str | None = None
         self._lsp_rail: LspRail | None = None
+        self._coding_memory_rail: CodingMemoryRail | None = None
+        self._project_memory_rail: Any | None = None
+        self._code_mode_rails: list[Any] = []
+        self._code_mode_rails_active = False
+        self._code_mode_workspace: str | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: JiuClawSkillEvolutionRail | None = None
         # Retain fire-and-forget follow-up tasks so they are not GC'd mid-run.
@@ -1643,6 +1652,36 @@ class JiuWenClawDeepAdapter:
         """Treat only explicit `enabled: true` as enabled."""
         return isinstance(subagent_cfg, dict) and bool(subagent_cfg.get("enabled", False))
 
+    def _get_reusable_coding_memory_rail(
+        self,
+        config_base: dict[str, Any] | None,
+    ) -> CodingMemoryRail | None:
+        """Return CodingMemoryRail only when its mode/config/workspace still match."""
+        rail = self._coding_memory_rail
+        if (
+            rail is None
+            or not getattr(self, "_code_mode_rails_active", False)
+            or not _code_memory_enabled(config_base or {})
+        ):
+            return None
+        try:
+            current_workspace = str(Path(self._workspace_dir or "./").resolve())
+            bound_workspace = getattr(self, "_code_mode_workspace", None) or current_workspace
+            coding_dir = getattr(rail, "_coding_memory_dir", None)
+            if str(Path(bound_workspace).resolve()) != current_workspace:
+                return None
+            if coding_dir is not None:
+                expected_dir = Path(current_workspace) / "coding_memory"
+                if Path(coding_dir).resolve() != expected_dir:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] discard CodingMemoryRail from "
+                        "different workspace"
+                    )
+                    return None
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+        return rail
+
     def _build_configured_subagents(
             self,
             model: Model,
@@ -1661,7 +1700,16 @@ class JiuWenClawDeepAdapter:
             code_agent_cfg = subagents_cfg.get("code_agent")
             if self._is_subagent_enabled(code_agent_cfg):
                 code_agent_rails = None
-                if get_memory_mode(get_config()) == "local":
+                reusable_memory_rail = self._get_reusable_coding_memory_rail(config_base)
+                if reusable_memory_rail is not None:
+                    # Code mode builds the main rail before subagents and
+                    # reuses it to avoid duplicate indexes and directories.
+                    code_agent_rails = [FileSystemRail(), reusable_memory_rail]
+                elif (
+                    self._code_mode_rails_active
+                    and _code_memory_enabled(config_base or {})
+                    and get_memory_mode(get_config()) == "local"
+                ):
                     coding_memory_rail = self._build_coding_memory_rail()
                     if coding_memory_rail is not None:
                         # FileSystemRail 是 create_code_agent 的默认 rail，传 rails 会覆盖默认值，需显式带上
@@ -2991,12 +3039,41 @@ class JiuWenClawDeepAdapter:
             memory_rail = None
         return memory_rail
 
+    @staticmethod
+    def _coding_memory_matches_workspace(
+        rail: CodingMemoryRail | None,
+        workspace_dir: str,
+    ) -> bool:
+        """Check whether a CodingMemoryRail belongs to the requested workspace."""
+        if rail is None:
+            return False
+        cached_dir = getattr(rail, "_coding_memory_dir", None)
+        if cached_dir is None:
+            return True
+        try:
+            expected_dir = Path(workspace_dir or "./").resolve() / "coding_memory"
+            return Path(cached_dir).resolve() == expected_dir
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False
+
     def _build_coding_memory_rail(self) -> CodingMemoryRail | None:
         """构建 CodingMemoryRail.
 
         Returns:
             CodingMemoryRail 实例，失败返回 None
         """
+        cached_rail = self._coding_memory_rail
+        cache_matches_workspace = self._coding_memory_matches_workspace(
+            cached_rail,
+            getattr(self, "_workspace_dir", "./"),
+        )
+        if cached_rail is not None and cache_matches_workspace:
+            logger.info("[JiuWenClawDeepAdapter] Reusing cached CodingMemoryRail")
+            return cached_rail
+        if cached_rail is not None:
+            logger.info(
+                "[JiuWenClawDeepAdapter] Building CodingMemoryRail for new workspace"
+            )
         try:
             from jiuwenclaw.agentserver.memory.config import get_embed_config
             config = get_config()
@@ -3013,7 +3090,8 @@ class JiuWenClawDeepAdapter:
 
             # 获取语言和 workspace 目录
             language = config.get("preferred_language", "zh")
-            coding_memory_dir = os.path.join(self._workspace_dir, "coding_memory")
+            workspace_dir = getattr(self, "_workspace_dir", "./")
+            coding_memory_dir = os.path.join(workspace_dir, "coding_memory")
 
             # 确保目录存在
             os.makedirs(coding_memory_dir, exist_ok=True)
@@ -3028,6 +3106,11 @@ class JiuWenClawDeepAdapter:
                 ),
                 language="cn" if language == "zh" else "en",
             )
+            # A stale rail can still be registered while a workspace switch is
+            # being reconciled.  Keep it out of the adapter cache until reload
+            # has atomically registered this new object.
+            if cached_rail is None or not getattr(self, "_code_mode_rails_active", False):
+                self._coding_memory_rail = coding_memory_rail
             logger.info("[JiuWenClawDeepAdapter] CodingMemoryRail create success",
                        extra={'user_visible': 'progress'})
             return coding_memory_rail
@@ -3333,8 +3416,41 @@ class JiuWenClawDeepAdapter:
         # MemoryRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
 
         # LspRail 仅在 code 模式下挂载
+        code_mode_rails: list[Any] = []
         if mode == "code":
+            if not _code_memory_enabled(config_base):
+                logger.info(
+                    "[JiuWenClawDeepAdapter] Clearing cached code memory rails: "
+                    "memory disabled"
+                )
+                self._project_memory_rail = None
+                self._coding_memory_rail = None
+            elif (
+                getattr(self, "_code_mode_rails_active", False)
+                and self._coding_memory_rail is not None
+                and not self._coding_memory_matches_workspace(
+                    self._coding_memory_rail,
+                    self._workspace_dir,
+                )
+            ):
+                # A full code-agent rebuild will replace the registered rail
+                # set; do not let the old object be reused by subagents.
+                self._coding_memory_rail = None
             rail_infos.append(_RailBuildInfo("_lsp_rail", self._build_lsp_rail))
+            code_mode_rails = build_code_mode_extra_rails(
+                self,
+                config_base,
+                project_dir=self._instance_overrides.get("project_dir"),
+                workspace_dir=self._workspace_dir,
+                language=self._resolve_runtime_language(),
+            )
+        else:
+            self._code_mode_rails = []
+            self._code_mode_rails_active = False
+            self._code_mode_workspace = None
+            self._project_memory_rail = None
+            self._coding_memory_rail = None
+            self._lsp_rail = None
 
         # Skill 合规相关 rail 仅在 plan 模式下挂载；agent 模式不注入，避免改变既有行为。
         # team 模式由 build_member_rails 自行挂载，不在这里处理。
@@ -3386,6 +3502,22 @@ class JiuWenClawDeepAdapter:
                             info.attr_name)
             else:
                 logger.warning("[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name)
+
+        if mode == "code":
+            self._code_mode_rails = code_mode_rails
+            self._code_mode_rails_active = True
+            self._code_mode_workspace = str(Path(self._workspace_dir or "./").resolve())
+            for rail in code_mode_rails:
+                rail_name = type(rail).__name__
+                if rail_name == "ProjectMemoryRail":
+                    self._project_memory_rail = rail
+                elif rail_name == "CodingMemoryRail":
+                    self._coding_memory_rail = rail
+                rails_list.append(rail)
+                logger.info(
+                    "[JiuWenClawDeepAdapter] Code-mode rail %s added",
+                    rail_name,
+                )
         logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list),
                     [type(r).__name__ for r in rails_list])
 
@@ -4469,6 +4601,8 @@ class JiuWenClawDeepAdapter:
             )
 
             self._instance.configure(deep_cfg)
+            if self._last_runtime_mode == "code":
+                await self._reload_code_mode_memory_rails(config_base)
             rail_cache_attrs = (
                 "_progressive_tool_rail",
                 "_skill_evolution_rail",
@@ -4599,12 +4733,215 @@ class JiuWenClawDeepAdapter:
         # 重置 DeepResearch 路由上下文
         reset_deepresearch_route(dr_token)
 
+    async def _register_code_mode_rails(self) -> None:
+        """Register Code-only rails when an existing agent switches to code."""
+        if self._instance is None or self._code_mode_rails_active:
+            return
+
+        config_base = getattr(self, "_latest_config_base", None) or get_config()
+        new_rails: list[Any] = []
+        lsp_rail = self._build_lsp_rail()
+        if lsp_rail is not None:
+            new_rails.append(lsp_rail)
+        new_rails.extend(
+            build_code_mode_extra_rails(
+                self,
+                config_base,
+                project_dir=self._instance_overrides.get("project_dir"),
+                workspace_dir=self._workspace_dir,
+                language=self._resolve_runtime_language(),
+            )
+        )
+
+        registered: list[Any] = []
+        for rail in new_rails:
+            try:
+                await self._instance.register_rail(rail)
+            except Exception as exc:  # noqa: BLE001 - rail isolation boundary
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] Code-mode rail %s register failed: %s",
+                    type(rail).__name__,
+                    exc,
+                )
+                continue
+            registered.append(rail)
+
+        self._code_mode_rails = [
+            rail for rail in registered if type(rail).__name__ != "LspRail"
+        ]
+        self._lsp_rail = next(
+            (rail for rail in registered if type(rail).__name__ == "LspRail"),
+            None,
+        )
+        self._project_memory_rail = next(
+            (rail for rail in registered if type(rail).__name__ == "ProjectMemoryRail"),
+            None,
+        )
+        self._coding_memory_rail = next(
+            (rail for rail in registered if type(rail).__name__ == "CodingMemoryRail"),
+            None,
+        )
+        self._code_mode_rails_active = bool(registered)
+        if registered:
+            self._code_mode_workspace = str(Path(self._workspace_dir or "./").resolve())
+        logger.info(
+            "[JiuWenClawDeepAdapter] Code-mode rails registered on mode switch: %s",
+            [type(rail).__name__ for rail in registered],
+        )
+
+    async def _unregister_code_mode_rails(self) -> None:
+        """Unload Code-only rails before leaving code mode."""
+        if self._instance is None:
+            return
+
+        current = list(self._code_mode_rails)
+        if self._lsp_rail is not None:
+            current.append(self._lsp_rail)
+        remaining: list[Any] = []
+        for rail in current:
+            try:
+                await self._instance.unregister_rail(rail)
+            except Exception as exc:  # noqa: BLE001 - retain failed rail
+                remaining.append(rail)
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] Code-mode rail %s unregister failed: %s",
+                    type(rail).__name__,
+                    exc,
+                )
+
+        self._code_mode_rails = [
+            rail for rail in remaining if type(rail).__name__ != "LspRail"
+        ]
+        self._lsp_rail = next(
+            (rail for rail in remaining if type(rail).__name__ == "LspRail"),
+            None,
+        )
+        self._project_memory_rail = next(
+            (rail for rail in remaining if type(rail).__name__ == "ProjectMemoryRail"),
+            None,
+        )
+        self._coding_memory_rail = next(
+            (rail for rail in remaining if type(rail).__name__ == "CodingMemoryRail"),
+            None,
+        )
+        self._code_mode_rails_active = bool(remaining)
+        if not remaining:
+            self._code_mode_workspace = None
+
+    async def _reload_code_mode_memory_rails(
+        self,
+        config_base: dict[str, Any],
+    ) -> None:
+        """Replace Code memory rails with transactional registration semantics."""
+        if self._instance is None or not self._code_mode_rails_active:
+            return
+
+        current_memory = [
+            rail
+            for rail in (self._project_memory_rail, self._coding_memory_rail)
+            if rail is not None
+        ]
+        current_coding_memory = self._coding_memory_rail
+
+        # Build the replacement without allowing the factory to overwrite the
+        # reference to a rail that is still registered in the live instance.
+        workspace_changed = (
+            current_coding_memory is not None
+            and not self._coding_memory_matches_workspace(
+                current_coding_memory,
+                self._workspace_dir,
+            )
+        )
+        if workspace_changed:
+            self._coding_memory_rail = None
+        try:
+            desired = build_code_mode_extra_rails(
+                self,
+                config_base,
+                project_dir=self._instance_overrides.get("project_dir"),
+                workspace_dir=self._workspace_dir,
+                language=self._resolve_runtime_language(),
+            )
+        finally:
+            self._coding_memory_rail = current_coding_memory
+
+        desired_memory = [
+            rail
+            for rail in desired
+            if type(rail).__name__ in {"ProjectMemoryRail", "CodingMemoryRail"}
+        ]
+
+        to_remove = [rail for rail in current_memory if rail not in desired_memory]
+        to_add = [rail for rail in desired_memory if rail not in current_memory]
+        removed: list[Any] = []
+        added: list[Any] = []
+
+        async def rollback() -> None:
+            for rail in reversed(added):
+                try:
+                    await self._instance.unregister_rail(rail)
+                except Exception as exc:  # noqa: BLE001 - preserve original failure
+                    logger.error(
+                        "[JiuWenClawDeepAdapter] rollback unregister %s failed: %s",
+                        type(rail).__name__,
+                        exc,
+                    )
+            for rail in removed:
+                try:
+                    await self._instance.register_rail(rail)
+                except Exception as exc:  # noqa: BLE001 - preserve original failure
+                    logger.error(
+                        "[JiuWenClawDeepAdapter] rollback register %s failed: %s",
+                        type(rail).__name__,
+                        exc,
+                    )
+
+        try:
+            for rail in to_remove:
+                await self._instance.unregister_rail(rail)
+                removed.append(rail)
+            for rail in to_add:
+                await self._instance.register_rail(rail)
+                added.append(rail)
+        except Exception as exc:  # noqa: BLE001 - transactional rail boundary
+            await rollback()
+            logger.error(
+                "[JiuWenClawDeepAdapter] Code memory reload aborted; "
+                "old rail references retained: %s",
+                exc,
+            )
+            return
+
+        self._project_memory_rail = next(
+            (rail for rail in desired_memory if type(rail).__name__ == "ProjectMemoryRail"),
+            None,
+        )
+        self._coding_memory_rail = next(
+            (rail for rail in desired_memory if type(rail).__name__ == "CodingMemoryRail"),
+            None,
+        )
+        non_memory = [
+            rail
+            for rail in self._code_mode_rails
+            if type(rail).__name__ not in {"ProjectMemoryRail", "CodingMemoryRail"}
+        ]
+        self._code_mode_rails = non_memory + desired_memory
+        self._code_mode_workspace = str(Path(self._workspace_dir or "./").resolve())
+        logger.info(
+            "[JiuWenClawDeepAdapter] Code memory rails reloaded: %s",
+            [type(rail).__name__ for rail in desired_memory],
+        )
+
     async def _update_rails_for_mode(self, mode: str) -> None:
         """按 mode 注册或卸载 rails。"""
-        if mode == "agent.plan":
-            await self._update_plan_mode_rails()
+        if mode == "code":
+            await self._register_code_mode_rails()
         else:
-            await self._update_agent_mode_rails()
+            await self._unregister_code_mode_rails()
+            if mode == "agent.plan":
+                await self._update_plan_mode_rails()
+            else:
+                await self._update_agent_mode_rails()
 
     async def _update_plan_mode_rails(self) -> None:
         """plan 模式：注册 plan 专属 rails，卸载 agent 专属资源。"""
