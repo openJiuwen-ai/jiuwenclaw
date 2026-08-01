@@ -41,14 +41,25 @@ def _make_outline_markdown(
     p2_missing_research_query: bool = False,
 ) -> str:
     pages = []
+    # P1: cover — 遵从 pptx-craft outline-planner 要求首页为 cover
+    pages.append(
+        """### P1: 封面
+- **类型**：cover
+- **研究需求**：❌
+- **标题**：2025 AI 趋势
+- **内容概要**：封面页
+- **研究查询**：-
+- **数据需求**：-"""
+    )
     for index in range(1, page_count + 1):
+        page_num = index + 1
         page_type = "trend"
         research = "✅"
         queries = "-" if p2_missing_research_query else '"AI agent market 2026", "智能体市场规模"'
         data_need = "全球市场规模、CAGR"
         title = "AI Agent 市场规模持续扩大"
         pages.append(
-            f"""### P{index}: 页面{index}
+            f"""### P{page_num}: 页面{page_num}
 - **类型**：{page_type}
 - **研究需求**：{research}
 - **标题**：{title}
@@ -56,6 +67,17 @@ def _make_outline_markdown(
 - **研究查询**：{queries}
 - **数据需求**：{data_need}"""
         )
+    # 末页: ending — 遵从 pptx-craft outline-planner 要求末页为 ending
+    ending_num = page_count + 2
+    pages.append(
+        f"""### P{ending_num}: 结束页
+- **类型**：ending
+- **研究需求**：❌
+- **标题**：感谢聆听
+- **内容概要**：结束页
+- **研究查询**：-
+- **数据需求**：-"""
+    )
     body = "\n\n".join(pages)
     searched_sources = ""
     if include_searched_sources:
@@ -69,7 +91,7 @@ def _make_outline_markdown(
     return f"""# 大纲：{topic}
 
 **受众**：企业高管
-**总页数**：{page_count}
+**总页数**：{page_count + 2}
 **叙事主线**：从概览到趋势
 **输入类型**：topic
 **搜索模式**：auto

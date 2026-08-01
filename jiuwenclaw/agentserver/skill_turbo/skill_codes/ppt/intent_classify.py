@@ -50,12 +50,12 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
 - 只提取用户**明确提到**的信息，不要推断或补充
 - 未提及的字段留空字符串或 null
 - page_count 必须是正整数（内容页数，不含封面/结束页；总页数 = page_count + 2）。
-  判断规则：①用户表达总页数或上限（"总页数N页"/"N页以内"/"不超过N页"等）→ page_count = N - 2；
-  ②用户仅说页数（"N页"/"做N页PPT"）→ page_count = N；
-  ③用户明确说内容页/正文（"内容页N页"/"正文N页"）→ page_count = N。
-  示例："10页以内"→8, "总页数8页"→6, "8页"→8
+  判断规则：①用户说"生成N页PPT"/"做N页汇报"/"PPT共N页"/"总页数N页"/"总共N页"/"一共N页"/"N页"/"做N页PPT"/"N页以内"/"不超过N页"/"最多N页"等未特指内容页的表达 → N 表示总页数 → page_count = max(N - 2, 1)；
+  ②用户明确说"N个内容页"/"N页正文"，或正在回答"需要多少页内容页"时 → page_count = N。
+  示例："10页以内"→8, "总页数8页"→6, "8页"→6, "做8页PPT"→6
 - style_id 可选值：business-classic / tech-minimal / elegant-narrative / industrial-tech / custom / 其他风格名
   用户要求“自由发挥”时填写 custom
+  “华为风格/华为/华为红/华为风/华为商务”统一填写 business-classic，不得填 custom
 - audience 可选值：公司高管 / 技术团队 / 投资人 / 普通受众 / 其他
 - presentation_purpose 可选值：工作汇报 / 产品展示 / 教学分享 / auto / 其他
 - pack_dir: 用户提供的模板包目录绝对路径（字符串；未知则 ""）。
