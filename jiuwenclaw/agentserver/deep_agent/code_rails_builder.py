@@ -173,7 +173,7 @@ def build_code_mode_extra_rails(
 
     if _code_memory_enabled(config_base):
         try:
-            coding_memory = adapter._build_coding_memory_rail()
+            coding_memory = adapter.build_coding_memory_rail()
         except Exception as exc:  # noqa: BLE001 - optional rail boundary
             logger.warning("[CodeRails] CodingMemoryRail build failed: %s", exc)
             coding_memory = None

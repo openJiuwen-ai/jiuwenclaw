@@ -438,7 +438,7 @@ def _build_trusted_include_roots(
     additional_directories: tuple[str, ...],
 ) -> tuple[str, ...]:
     """Build canonical roots allowed for ``@include`` expansion."""
-    roots = { _safe_resolve(workspace), *additional_directories }
+    roots = {_safe_resolve(workspace), *additional_directories}
     for raw in (*USER_MEMORY_FILES, *USER_MEMORY_GLOBS, *MANAGED_MEMORY_FILES, *MANAGED_MEMORY_GLOBS):
         expanded = os.path.expanduser(raw)
         roots.add(_safe_resolve(Path(expanded).parent))

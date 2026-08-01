@@ -3056,6 +3056,10 @@ class JiuWenClawDeepAdapter:
         except (OSError, RuntimeError, TypeError, ValueError):
             return False
 
+    def build_coding_memory_rail(self) -> CodingMemoryRail | None:
+        """Build the CodingMemoryRail through the public adapter contract."""
+        return self._build_coding_memory_rail()
+
     def _build_coding_memory_rail(self) -> CodingMemoryRail | None:
         """构建 CodingMemoryRail.
 

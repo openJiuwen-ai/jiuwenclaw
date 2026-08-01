@@ -10,12 +10,12 @@ from jiuwenclaw.agentserver.deep_agent.code_rails_builder import (
 
 
 class _Adapter:
-    def _build_coding_memory_rail(self):
+    def build_coding_memory_rail(self):
         return None
 
 
 class _MemoryAdapter:
-    def _build_coding_memory_rail(self):
+    def build_coding_memory_rail(self):
         return type("CodingMemoryRail", (), {})()
 
 
@@ -53,7 +53,7 @@ def test_memory_disabled_keeps_plan_rails() -> None:
 
 def test_coding_memory_failure_does_not_block_plan_rails() -> None:
     class FailingAdapter:
-        def _build_coding_memory_rail(self):
+        def build_coding_memory_rail(self):
             raise RuntimeError("embedding unavailable")
 
     rails = build_code_mode_extra_rails(
