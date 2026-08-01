@@ -1106,6 +1106,7 @@ const MODEL_PROVIDER_OPTIONS = [
   "DashScope",
   "SiliconFlow",
   "InferenceAffinity",
+  "MiniMax",
   "DeepSeek",
 ] as const;
 const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;

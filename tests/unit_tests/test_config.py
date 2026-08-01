@@ -295,6 +295,62 @@ class TestConfigFunctions:
         assert len(actual_keys & expected_keys) > 0, "Config should have at least some expected keys"
 
     @staticmethod
+    def test_resource_config_includes_minimax_text_presets():
+        resource_config = Path(__file__).parents[2] / "jiuwenswarm" / "resources" / "config.yaml"
+        config = yaml.safe_load(resource_config.read_text(encoding="utf-8"))
+        defaults = config["models"]["defaults"]
+        entries = {
+            entry["model_client_config"]["model_name"]: entry
+            for entry in defaults
+            if entry.get("model_client_config", {}).get("client_provider") == "MiniMax"
+        }
+
+        assert set(entries) == {"MiniMax-M3", "MiniMax-M2.7"}
+        m3 = entries["MiniMax-M3"]
+        m27 = entries["MiniMax-M2.7"]
+
+        assert m3["model_client_config"]["api_base"] == "https://api.minimax.io/v1"
+        assert m27["model_client_config"]["api_base"] == "https://api.minimax.io/v1"
+        assert m3["model_client_config"]["api_key"] == "${MINIMAX_API_KEY}"
+        assert m27["model_client_config"]["api_key"] == "${MINIMAX_API_KEY}"
+
+        assert m3["provider_metadata"]["context_window"] == 1000000
+        assert m27["provider_metadata"]["context_window"] == 204800
+        assert m3["provider_metadata"]["pricing_usd_per_million_tokens"] == {
+            "input": 0.6,
+            "output": 2.4,
+            "cache_read": 0.12,
+            "cache_write": None,
+        }
+        assert m27["provider_metadata"]["pricing_usd_per_million_tokens"] == {
+            "input": 0.3,
+            "output": 1.2,
+            "cache_read": 0.06,
+            "cache_write": 0.375,
+        }
+        assert m3["provider_metadata"]["input_modalities"] == ["text", "image", "video"]
+        assert m27["provider_metadata"]["input_modalities"] == ["text"]
+        assert m3["provider_metadata"]["thinking"] == ["adaptive", "disabled"]
+        assert m27["provider_metadata"]["thinking"] == ["always_on"]
+
+        endpoints = m3["provider_metadata"]["regional_endpoints"]
+        assert endpoints == [
+            {
+                "region": "global_en",
+                "openai_base_url": "https://api.minimax.io/v1",
+                "anthropic_base_url": "https://api.minimax.io/anthropic",
+                "docs_root": "https://platform.minimax.io/docs",
+            },
+            {
+                "region": "cn_zh",
+                "openai_base_url": "https://api.minimaxi.com/v1",
+                "anthropic_base_url": "https://api.minimaxi.com/anthropic",
+                "docs_root": "https://platform.minimaxi.com/docs",
+            },
+        ]
+        assert m27["provider_metadata"]["regional_endpoints"] == endpoints
+
+    @staticmethod
     def test_migrate_config_from_template_deep_merges_symphony(
         tmp_path: Path,
     ):
