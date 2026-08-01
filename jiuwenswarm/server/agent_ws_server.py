@@ -1572,6 +1572,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.AGENTS_TOOLS_LIST:
                 await self._handle_agents_tools_list(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.AGENTS_SYNC_CONFIGS:
+                await self._handle_agents_sync_configs(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.CHAT_CANCEL:
                 # 中断请求：根据 intent 决定是否取消流式任务
                 sid = request.session_id or "default"
@@ -2860,6 +2863,71 @@ class AgentWebSocketServer:
             return None
 
         existing_team_name = str(metadata.get("team_name") or "").strip()
+        requested_team_name = str(params.get("team_name") or "").strip()
+        if requested_team_name:
+            from jiuwenswarm.agents.harness.team import (
+                list_team_template_summaries,
+                stop_team_session_runtime_across_managers,
+            )
+
+            template_id = ""
+            for template in list_team_template_summaries(get_config()):
+                candidate_id = str(template.get("template_id") or "").strip()
+                candidate_name = str(template.get("team_name") or "").strip()
+                if requested_team_name in {candidate_id, candidate_name}:
+                    template_id = candidate_id
+                    break
+            if not template_id:
+                raise ValueError(
+                    f"TEAM_NAME_UNKNOWN: configured team not found: {requested_team_name}"
+                )
+
+            if existing_team_name and existing_team_name != requested_team_name:
+                await stop_team_session_runtime_across_managers(
+                    session_id,
+                    reason="chat team selection changed: ",
+                )
+                try:
+                    from jiuwenswarm.server.runtime.team_binding_store import (
+                        get_team_binding_store,
+                    )
+
+                    get_team_binding_store().unbind_session(
+                        team_name=existing_team_name,
+                        session_id=session_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentWebSocketServer] failed to unbind previous team while "
+                        "switching selection: session_id=%s team_name=%s error=%s",
+                        session_id,
+                        existing_team_name,
+                        exc,
+                    )
+
+            update_session_metadata(
+                session_id=session_id,
+                channel_id=request.channel_id or None,
+                mode=canonical_mode,
+                team_name=requested_team_name,
+                team_template_id=template_id,
+                touch_last_message_at=False,
+                sync_write=True,
+            )
+            params["team_name"] = requested_team_name
+            params["team_template_id"] = template_id
+            request.metadata = dict(request.metadata or {})
+            request.metadata["team_name"] = requested_team_name
+            request.metadata["team_template_id"] = template_id
+            logger.info(
+                "[AgentWebSocketServer] selected configured team for chat: "
+                "session_id=%s team_name=%s template_id=%s",
+                session_id,
+                requested_team_name,
+                template_id,
+            )
+            return requested_team_name
+
         if existing_team_name:
             params.setdefault("team_name", existing_team_name)
             template_id = str(metadata.get("team_template_id") or "").strip()
@@ -6939,6 +7007,77 @@ class AgentWebSocketServer:
                 channel_id=request.channel_id,
                 ok=False,
                 payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_agents_sync_configs(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Apply the agent-team catalog sent by relay-claw.
+
+        ``teams`` is optional: relay-claw omits it when the catalog has no
+        managed team configuration, in which case an existing hand-written
+        ``modes.team`` section must remain untouched.
+        """
+        params = request.params if isinstance(request.params, dict) else {}
+        revision = str(params.get("revision") or "").strip()
+        service_id = str(params.get("service_id") or "").strip()
+        teams_applied = False
+        team_names: list[str] = []
+        agent_names: list[str] = []
+        try:
+            if "teams" in params:
+                teams_payload = params.get("teams")
+                if not isinstance(teams_payload, dict):
+                    raise ValueError("teams must be an object")
+
+                from jiuwenswarm.common.config import replace_teams_in_config
+
+                replace_teams_in_config(teams_payload)
+                teams_applied = True
+                raw_agents = teams_payload.get("agents")
+                if isinstance(raw_agents, dict):
+                    agent_names = [str(name) for name in raw_agents]
+                raw_teams = teams_payload.get("team")
+                if isinstance(raw_teams, list):
+                    team_names = [
+                        str(item.get("team_name"))
+                        for item in raw_teams
+                        if isinstance(item, dict) and str(item.get("team_name") or "").strip()
+                    ]
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "revision": revision,
+                    "service_id": service_id,
+                    "team_names": team_names,
+                    "agent_names": agent_names,
+                    "teams_applied": teams_applied,
+                },
+                metadata=request.metadata,
+            )
+        except (OSError, ValueError) as exc:
+            logger.exception("[AgentWebSocketServer] sync_agents_configs failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "revision": revision,
+                    "service_id": service_id,
+                    "teams_applied": False,
+                    "error": str(exc),
+                },
+                metadata=request.metadata,
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
