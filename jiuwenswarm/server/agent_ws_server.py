@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """AgentWebSocketServer - Gateway 与 AgentServer 之间的 WebSocket 服务端."""
 
@@ -112,6 +112,8 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_MODE_EXITED_EVENT_TYPE,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.common.log_preview import preview_text
+from openjiuwen.core.common.logging import server_logger
 
 logger = logging.getLogger(__name__)
 
@@ -1363,6 +1365,17 @@ class AgentWebSocketServer:
             request.channel_id,
             request.is_stream,
         )
+
+        # First touch point of frontend chat input inside AgentServer: record it through the
+        # agent-core logging system so it lands in the unified agent log stream.
+        if request.req_method == ReqMethod.CHAT_SEND:
+            server_logger.info(
+                "[AgentServer] chat input received: request_id=%s session_id=%s channel_id=%s query=%s",
+                request.request_id,
+                request.session_id,
+                request.channel_id,
+                preview_text(_request_query_text(request)),
+            )
 
         try:
             if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:

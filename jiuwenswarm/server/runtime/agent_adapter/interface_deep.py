@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """JiuWenSwarm Deep Adapter - 基于 openjiuwen DeepAgent 的适配器实现.
 
@@ -37,6 +37,7 @@ from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
+from openjiuwen.core.common.logging import server_logger
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
@@ -151,6 +152,7 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
 )
 from jiuwenswarm.common.config import get_model_names
 from jiuwenswarm.common.hooks_config import load_hooks_config
+from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
@@ -1187,13 +1189,16 @@ class JiuWenSwarmDeepAdapter:
                 if isinstance(self._session_instance_config, dict)
                 else None
             )
+            create_started_at = time.monotonic()
             await adapter.create_instance(
                 config,
                 mode=self._session_instance_mode,
                 sub_mode=self._session_instance_sub_mode,
             )
+            instance_ready_at = time.monotonic()
 
             await adapter.start_interaction(session_id=sid)
+            interaction_ready_at = time.monotonic()
 
             self._session_adapters[sid] = adapter
             # A brand-new session adapter is created from ``_session_instance_config``
@@ -1204,7 +1209,16 @@ class JiuWenSwarmDeepAdapter:
             # (including the no-pending case, where it silently catches up).
             await self._reload_session_adapter_if_stale(sid, adapter)
             self._touch_session_adapter(sid)
-            logger.info("[JiuWenSwarmDeepAdapter] session scoped DeepAgent created: session_id=%s", sid)
+            # Cold-start cost of a session's first turn, split so a slow one can
+            # be attributed to agent assembly vs. interaction startup.
+            server_logger.info(
+                "[AgentServer] session adapter created: session_id=%s create_instance_ms=%.1f"
+                " start_interaction_ms=%.1f total_ms=%.1f",
+                sid,
+                (instance_ready_at - create_started_at) * 1000,
+                (interaction_ready_at - instance_ready_at) * 1000,
+                (time.monotonic() - create_started_at) * 1000,
+            )
             return adapter
 
     @staticmethod
@@ -7926,6 +7940,9 @@ class JiuWenSwarmDeepAdapter:
         Yields:
             AgentResponseChunk 流式响应块
         """
+        # Start of this adapter's own share of the turn; reported on the
+        # "entering runner streaming" line so the pre-dispatch work is visible.
+        stream_impl_started_at = time.monotonic()
         if not self._is_session_scoped_adapter:
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
             try:
@@ -8467,6 +8484,17 @@ class JiuWenSwarmDeepAdapter:
                 # Interrupt resumes (permission/confirm/ask-user) must send_input
                 # even when Goal already holds the output lease.
                 interaction_stream = await self._instance.attach_output()
+                # Last stop before the message is injected into the running
+                # single-agent interaction (interrupt / HITL resume).
+                server_logger.info(
+                    "[AgentServer] message entering runner interaction inject: session_id=%s"
+                    " request_id=%s channel_id=%s mode=%s query=%s",
+                    session_id,
+                    rid,
+                    cid,
+                    mode,
+                    preview_text(inputs.get("query", "")),
+                )
                 await self._instance.send_input(
                     SendInputRequest(
                         request_id=rid,
@@ -8486,6 +8514,19 @@ class JiuWenSwarmDeepAdapter:
                         yield chunk
                     interaction_stream_abort = False
                     return
+                # Last stop before the message enters the single-agent runner
+                # streaming path. ``prepare_ms`` covers everything this adapter
+                # did with the turn before handing it over.
+                server_logger.info(
+                    "[AgentServer] message entering runner streaming: session_id=%s request_id=%s"
+                    " channel_id=%s mode=%s prepare_ms=%.1f query=%s",
+                    session_id,
+                    rid,
+                    cid,
+                    mode,
+                    (time.monotonic() - stream_impl_started_at) * 1000,
+                    preview_text(inputs.get("query", "")),
+                )
                 await self._instance.send_input(
                     SendInputRequest(
                         request_id=rid,
@@ -8494,6 +8535,10 @@ class JiuWenSwarmDeepAdapter:
                     )
                 )
             run_failure: tuple[str, str] | None = None
+            # Start of the wait for the runner's first chunk; every branch above
+            # has either handed the message over or attached to a running round.
+            runner_stream_started_at = time.monotonic()
+            first_chunk_seen = False
             # A plain user-chat consumer stream (not a command.goal / attach-goal
             # stream). Only these may be hijacked by a goal round before the user
             # round produces its first visible token; used to allow a bubble
@@ -8505,6 +8550,20 @@ class JiuWenSwarmDeepAdapter:
                 and not goal_stream_request
             )
             async for chunk in interaction_stream:
+                # First chunk handed back by the runner: records the time to
+                # first token for this round.
+                if not first_chunk_seen:
+                    first_chunk_seen = True
+                    server_logger.info(
+                        "[AgentServer] runner streaming first chunk: session_id=%s request_id=%s"
+                        " channel_id=%s mode=%s elapsed_ms=%.1f chunk_type=%s",
+                        session_id,
+                        rid,
+                        cid,
+                        mode,
+                        (time.monotonic() - runner_stream_started_at) * 1000,
+                        getattr(chunk, "type", None) or type(chunk).__name__,
+                    )
                 if _debug_logger is not None:
                     _debug_logger.feed(chunk)
                     # Surface run-level terminal failures (model/task_failed,
