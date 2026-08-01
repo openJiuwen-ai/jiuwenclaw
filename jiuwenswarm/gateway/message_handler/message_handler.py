@@ -476,6 +476,8 @@ class MessageHandler(ABC):
             payload = {"content": text_or_payload, "is_complete": True}
 
         metadata = dict(user_infos.get("meta_data") or {})
+        # Gateway-local notices have no later processing-status frame.
+        metadata["terminal_notice"] = True
         if mode:
             metadata["mode"] = mode
         if reset_team_session:
