@@ -593,6 +593,7 @@ class XiaoyiChannel(BaseChannel):
         metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
         mode = str(metadata.get("mode") or "").strip().lower()
         reset_team_session = bool(metadata.get("reset_team_session"))
+        terminal_notice = bool(metadata.get("terminal_notice"))
         session_id, task_id = self._extract_platform_receive_info(msg)
         is_team_mode = mode in {"team", "team.plan", "code.team"}
         is_team_event = not reset_team_session and (
@@ -1058,7 +1059,8 @@ class XiaoyiChannel(BaseChannel):
             elif is_chat_final:
                 append = False
                 last_chunk = True
-                final = True
+                # Agent streams finish via processing_status; local notices do not.
+                final = terminal_notice
             else:
                 append = True
                 last_chunk = is_final

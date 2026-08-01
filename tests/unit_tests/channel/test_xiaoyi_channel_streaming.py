@@ -14,6 +14,7 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.format
     build_status_update_response,
     should_send_as_status_update,
 )
+from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 
 
 def _build_channel(*, enable_streaming: bool = True) -> tuple[XiaoyiChannel, list[dict[str, Any]]]:
@@ -66,7 +67,7 @@ def test_processing_status_is_a_status_update() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streaming_final_text_is_sent_as_terminal_artifact() -> None:
+async def test_streaming_final_and_gateway_notice_use_expected_terminal_frames() -> None:
     channel, sent = _build_channel()
     summary = "抖音已经帮你打开了"
     channel._mark_session_active("xiaoyi-session-1")
@@ -88,13 +89,55 @@ async def test_streaming_final_text_is_sent_as_terminal_artifact() -> None:
         )
     )
 
-    assert len(sent) == 1
+    assert len(sent) == 2
     artifact = _result(sent[0])
     assert artifact["kind"] == "artifact-update"
     assert artifact["append"] is False
     assert artifact["lastChunk"] is True
-    assert artifact["final"] is True
+    assert artifact["final"] is False
     assert artifact["artifact"]["parts"] == [{"kind": "text", "text": summary}]
+
+    status = _result(sent[1])
+    assert status["taskId"] == artifact["taskId"]
+    assert status["kind"] == "status-update"
+    assert status["status"]["state"] == "completed"
+    assert status["status"]["message"]["parts"] == [
+        {"kind": "text", "text": "任务处理已完成~"}
+    ]
+    assert status["final"] is True
+
+    notices: list[Message] = []
+    handler = object.__new__(MessageHandler)
+
+    async def capture_notice(msg: Message) -> None:
+        notices.append(msg)
+
+    handler.publish_robot_messages = capture_notice
+    await handler._send_channel_notice(
+        {
+            "id": "request-1",
+            "meta_data": {
+                "xiaoyi_session_id": "xiaoyi-session-1",
+                "xiaoyi_task_id": "xiaoyi-task-2",
+            },
+        },
+        "xiaoyi",
+        "jiuwen-session-1",
+        "mode 已变更为 team",
+        mode="team",
+        reset_team_session=True,
+    )
+
+    assert notices[0].metadata["terminal_notice"] is True
+    sent.clear()
+    await channel.send(notices[0])
+
+    assert len(sent) == 1
+    notice = _result(sent[0])
+    assert notice["kind"] == "artifact-update"
+    assert notice["append"] is False
+    assert notice["lastChunk"] is True
+    assert notice["final"] is True
 
 
 @pytest.mark.asyncio
