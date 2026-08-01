@@ -355,6 +355,7 @@ class AgentWebSocketServer:
                 bundled_python = resolve_base_python()
                 os.environ["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
                 if not (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
+                    logger.info("[AgentWebSocketServer][sandbox] JIUWENBOX_RUNNER_PYTHON 未注入探测候选路径...")
                     for _cand in (
                         r"D:\Files\python313\python.exe",  # dev 实测机
                         r"C:\Python313\python.exe",

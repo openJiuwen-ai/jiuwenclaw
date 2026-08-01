@@ -168,7 +168,10 @@ class PolicyReader:
         try:
             with open(base_path, encoding="utf-8") as f:
                 base_data = yaml.safe_load(f) or {}
-        except OSError as exc:
+        except (OSError, yaml.YAMLError) as exc:
+            # OSError = 文件不可读/不存在; yaml.YAMLError = 语法错误 (如双引号内
+            # 非法 \U 转义). 基底随 wheel 打包一般不坏, 但兜底回落 SecurityPolicy
+            # 默认值, 不阻断启动 (与 is_proxy_only 的 except 范式一致).
             logger.warning(
                 "Base policy %s unreadable (%s); falling back to SecurityPolicy defaults",
                 base_path, exc,
@@ -188,9 +191,18 @@ class PolicyReader:
         try:
             with open(self.policy_path, encoding="utf-8") as f:
                 override_data = yaml.safe_load(f) or {}
-        except OSError as exc:
+        except (OSError, yaml.YAMLError) as exc:
+            # OSError = 副本文件不可读; yaml.YAMLError = 副本语法错误 (如手改副本时
+            # 双引号内写了 Windows 路径 C:\Users\..., YAML 把 \U 当转义序列报
+            # ScannerError). 副本是用户可写文件, 易被手改坏. 这里回落基底而非抛
+            # 异常, 否则会抛到 app.py 外层兜底导致 win_proxy 不启动 + 沙箱创建
+            # 用空 policy (review 7fe80192 P1-14). 明确 warning 指出坏副本路径,
+            # 便于运维定位. 走 sandbox.files.set WS 接口写的副本经 safe_dump 不会
+            # 触发此问题 (safe_dump 用 plain scalar 不解析 \U 转义).
             logger.warning(
-                "User policy copy %s unreadable (%s); using base only",
+                "User policy copy %s unreadable (%s); using base only "
+                "(若手改过副本, 检查 YAML 语法: 双引号内 Windows 路径反斜杠需用 "
+                "单引号或正斜杠, 如 'C:\\Users\\...' 或 C:/Users/...)",
                 self.policy_path, exc,
             )
             return _resolve_tool_paths(base_policy)

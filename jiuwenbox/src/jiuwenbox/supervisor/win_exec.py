@@ -1298,8 +1298,12 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
     try:
         workdir = header.get("workdir")
         env = header.get("env")
-        # 方案1: 不用受限 token (它让 child 启动即 0xC0000142), 改用 runner 自身
-        # primary token (未受限). 见 _get_runner_primary_token 注释.
+        # 用受限 token 起 child 会让 child 启动即 0xC0000142 (STATUS_DLL_INIT_FAILED),
+        # 实跑复现 (2026-08-02): bash/python/cmd 全挂, exit=3221225794 stdout=0
+        # killed=False, 根因是受限 token 的 desktop/全局对象机制 (非 ACL/env,
+        # env 已补齐 SystemRoot/profile 仍挂). 故 exec 用 runner 自身未受限 primary
+        # token 起 child. 代价: 失去 Write-Restricted 双重写检查, 写控制只剩合成 SID
+        # 的 ACL (allow-only 仍挡越权写). 见 _get_runner_primary_token 注释.
         _self_token = _get_runner_primary_token()
         try:
             pid, proc_handle = _create_process_as_user(

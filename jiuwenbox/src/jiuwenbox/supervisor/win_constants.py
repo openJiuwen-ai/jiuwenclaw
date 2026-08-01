@@ -72,7 +72,12 @@ WRITE_RESTRICTED = 0x8
 
 # CreateRestrictedToken 组合: 文档 6.5 要求的受限 SID 列表 =
 # [Everyone, 当前 LogonSession, JHXSandboxWrite].
-RESTRICTED_TOKEN_FLAGS = DISABLE_MAX_PRIVILEGE | SANDBOX_INERT  # 临时去掉 WRITE_RESTRICTED(0x8) 定位 0xC0000142
+# 受限 token 实跑验证失败 (2026-08-02): WRITE_RESTRICTED 下 bash/python 启动即
+# 0xC0000142 (STATUS_DLL_INIT_FAILED), 故 exec 不用受限 token (改用 runner 未受限
+# primary token). _create_restricted_token 仍被 runner_main 构造但 exec 不消费
+# (dead code). WRITE_RESTRICTED 暂不 OR 进 flags, 待受限 token 0xC0000142 根因
+# (desktop/全局对象机制) 解决后再恢复.
+RESTRICTED_TOKEN_FLAGS = DISABLE_MAX_PRIVILEGE | SANDBOX_INERT  # 去掉 WRITE_RESTRICTED(0x8)
 
 # ---------------------------------------------------------------------------
 # WellKnownSid 类型 (CreateWellKnownSid 的枚举值).
