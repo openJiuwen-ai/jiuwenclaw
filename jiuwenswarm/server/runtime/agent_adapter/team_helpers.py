@@ -251,7 +251,7 @@ def _build_logical_targets(event: dict) -> list[dict]:
 def _is_followup_delivery_boundary_reason(reason: str | None) -> bool:
     """Return whether follow-up delivery likely hit a runtime boundary."""
     normalized = str(reason or "")
-    if normalized in {"gate_closed", "not_active"}:
+    if normalized in {"agent_unavailable", "gate_closed", "not_active"}:
         return True
     return normalized.startswith("deliver_to_leader_failed:")
 
