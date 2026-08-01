@@ -153,6 +153,7 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
 from jiuwenswarm.common.config import get_model_names
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
+from jiuwenswarm.common.stage_timer import StageTimer
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool, unregister_tool
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
@@ -440,6 +441,11 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
         "skill_branch_peek",
     }
 )
+# Total ``_update_runtime_config`` cost above which its per-stage breakdown is
+# worth an INFO line. It runs once per turn ahead of the model call, so anything
+# at this scale is directly visible in time-to-first-token.
+_SLOW_RUNTIME_CONFIG_MS = 50.0
+
 _CRON_TOOL_NAMES = frozenset(
     {
         "cron",
@@ -4366,7 +4372,7 @@ class JiuWenSwarmDeepAdapter:
             logger.info(
                 "[JiuWenSwarmDeepAdapter] Building rail: %s with params: %s",
                 info.attr_name,
-                info.params,
+                sorted(info.params),
             )
             rail_instance = info.build_func(**info.params)
             if rail_instance is not None:
@@ -5850,7 +5856,18 @@ class JiuWenSwarmDeepAdapter:
         )
 
     async def _update_runtime_config(self, runtime_config: "_RuntimeConfig") -> None:
-        """Bind request-scoped runtime state immediately before real input."""
+        """Register per-request tools for current agent execution.
+
+        Runs on every turn and is the bulk of the ``prepare_ms`` reported when
+        the message enters the runner, so each step is timed separately: the
+        aggregate alone never says which one is slow. The breakdown is logged at
+        INFO once the total crosses :data:`_SLOW_RUNTIME_CONFIG_MS`, at DEBUG
+        otherwise, and in ``finally`` so a failing turn still reports how far it
+        got.
+
+        Args:
+            runtime_config: Per-request runtime parameters for this turn.
+        """
         await self._apply_runtime_config(runtime_config, bind_request=True)
 
     async def _apply_runtime_config(
@@ -5862,6 +5879,40 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
+        stage_timer = StageTimer()
+        try:
+            await self._apply_runtime_config_stages(runtime_config, stage_timer, bind_request)
+        finally:
+            total_ms = stage_timer.total_ms()
+            log_runtime_config_stages = (
+                server_logger.info
+                if total_ms >= _SLOW_RUNTIME_CONFIG_MS
+                else logger.debug
+            )
+            log_runtime_config_stages(
+                "[AgentServer] runtime config applied: session_id=%s mode=%s total_ms=%.1f %s",
+                runtime_config.session_id,
+                runtime_config.mode,
+                total_ms,
+                stage_timer.render(),
+            )
+
+    async def _apply_runtime_config_stages(
+        self,
+        runtime_config: "_RuntimeConfig",
+        stage_timer: StageTimer,
+        *,
+        bind_request: bool,
+    ) -> None:
+        """Run the per-request runtime setup, marking each stage as it completes.
+
+        Split out of :meth:`_update_runtime_config` so the timing wrapper stays
+        readable; the stage sequence itself is unchanged.
+
+        Args:
+            runtime_config: Per-request runtime parameters for this turn.
+            stage_timer: Timer marked at each stage boundary.
+        """
         task_workspace = (
             runtime_config.workspace
             or runtime_config.project_dir
@@ -5879,6 +5930,8 @@ class JiuWenSwarmDeepAdapter:
             ).strip()
             or "web"
         )
+        stage_timer.mark("cwd_seed")
+
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
             self._runtime_prompt_rail.set_channel(resolved_channel)
@@ -5909,6 +5962,8 @@ class JiuWenSwarmDeepAdapter:
         circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
         if circuit_breaker_rail is not None:
             circuit_breaker_rail.set_language(resolved_language)
+        stage_timer.mark("rail_setters")
+
         self._schedule_runtime_state_write(
             mode=runtime_config.mode,
             language=resolved_language,
@@ -5919,17 +5974,26 @@ class JiuWenSwarmDeepAdapter:
             or self._project_dir
             or str(get_default_project_session_workspace_dir(runtime_config.session_id)),
         )
+        stage_timer.mark("runtime_state")
 
         await self._update_rails_for_mode(runtime_config.mode)
+        stage_timer.mark("rails_for_mode")
+
         await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
+        stage_timer.mark("user_interaction")
+
         await self._update_tools_for_mode(
             runtime_config.mode, runtime_config.session_id, runtime_config.request_id
         )
+        stage_timer.mark("tools_for_mode")
+
         await self._update_session_tools(
             runtime_config.session_id,
             runtime_config.request_id,
             channel_id=runtime_config.channel_id,
         )
+        stage_timer.mark("session_tools")
+
         if bind_request:
             self._refresh_acp_runtime_tools(
                 runtime_config.session_id,
@@ -5937,7 +6001,11 @@ class JiuWenSwarmDeepAdapter:
                 runtime_config.channel_id,
                 runtime_config.request_metadata,
             )
+
+        stage_timer.mark("acp_tools")
+
         self._update_prompt_for_mode(runtime_config.mode, resolved_language)
+        stage_timer.mark("prompt_for_mode")
 
         # 处理两种场景的记忆工具移除：
         # 1. 群聊数字分身模式（group_digital_avatar=True + avatar_mode=True）：移除写入工具，但保留读取工具
@@ -5992,6 +6060,7 @@ class JiuWenSwarmDeepAdapter:
                             self._instance.ability_manager.add(tool.card)
                 except ImportError:
                     pass
+        stage_timer.mark("memory_tools")
 
     @staticmethod
     def _should_register_acp_runtime_tools(
