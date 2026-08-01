@@ -1509,6 +1509,59 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def sync_agents_configs_in_config(teams_payload: dict[str, Any]) -> dict[str, list[str]]:
+    """Persist relay-claw agent-team configuration into ``modes.team``.
+
+    This is the dedicated persistence entry point for the
+    ``sync_agents_configs`` RPC. It intentionally does not call the web config
+    panel's :func:`replace_teams_in_config` API and only mutates
+    ``modes.team``. All unrelated config sections, comments, ordering, and
+    scalar styles are preserved by the round-trip YAML helpers.
+
+    Args:
+        teams_payload: Relay ``teams`` payload containing an ``agents``
+            template mapping and a ``team`` array.
+
+    Returns:
+        Names of the synchronized teams and agent templates.
+    """
+    if not isinstance(teams_payload, dict):
+        raise ValueError("teams must be an object")
+
+    agents_raw = _require_dict(teams_payload.get("agents"), "agents")
+    teams_raw = teams_payload.get("team")
+    if not isinstance(teams_raw, list):
+        raise ValueError("team must be an array")
+
+    # Build and validate the complete replacement before opening the config
+    # for writing, so malformed relay input never causes a partial update.
+    team_mapping = _build_modes_team_mapping(teams_payload)
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError("config root must be an object")
+
+    if teams_raw:
+        modes = data.get("modes")
+        if modes is None:
+            modes = {}
+            data["modes"] = modes
+        elif not isinstance(modes, dict):
+            raise ValueError("modes config must be an object")
+        modes["team"] = team_mapping
+    else:
+        modes = data.get("modes")
+        if isinstance(modes, dict):
+            modes.pop("team", None)
+
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    return {
+        "team_names": list(team_mapping),
+        "agent_names": [str(name) for name in agents_raw],
+    }
+
+
 def _ensure_config_object(parent: dict[str, Any], key: str, path: str) -> dict[str, Any]:
     value = parent.get(key)
     if value is None:

@@ -72,7 +72,14 @@ async def test_handle_agents_sync_configs_applies_relay_team_payload(
     applied = []
     monkeypatch.setattr(
         "jiuwenswarm.common.config.replace_teams_in_config",
-        lambda payload: applied.append(payload),
+        lambda _payload: pytest.fail("relay sync must not use replace_teams_in_config"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.sync_agents_configs_in_config",
+        lambda payload: applied.append(payload) or {
+            "team_names": ["debate_A", "debate_B"],
+            "agent_names": ["leader_tpl"],
+        },
     )
     teams = {
         "agents": {"leader_tpl": {"skills": ["team-management"]}},
@@ -124,7 +131,7 @@ async def test_handle_agents_sync_configs_keeps_config_when_teams_omitted(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "jiuwenswarm.common.config.replace_teams_in_config",
+        "jiuwenswarm.common.config.sync_agents_configs_in_config",
         lambda _payload: pytest.fail("omitted teams must not replace config"),
     )
     request = AgentRequest(
