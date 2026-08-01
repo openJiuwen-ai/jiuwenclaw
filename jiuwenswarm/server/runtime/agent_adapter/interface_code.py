@@ -48,6 +48,7 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
     _AGENT_CARD_ID,
     _CRON_TOOL_CHANNEL_ID,
+    _RailBuildInfo,
     _agent_def_to_subagent_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
@@ -216,17 +217,6 @@ _TOOL_BUILD_NAMES: dict[str, str] = {
     "skill_retrieval": "_build_skill_retrieval_toolkit",
     "acp_chat": "_build_acp_chat_tool",
 }
-
-
-@dataclass
-class _RailBuildInfo:
-    """Rail 构建信息 — 统一固定和动态 Rails 的构建流程."""
-    attr_name: str
-    build_func: Callable
-    params: dict = None
-
-    def __post_init__(self):
-        self.params = self.params or {}
 
 
 def _resolve_coding_memory_dir(
@@ -656,57 +646,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 rail_name,
             )
 
-        # 统一构建并注册
-        rails_list = []
-        for info in rail_infos:
-            logger.info(
-                "[JiuwenSwarmCodeAdapter] Building rail: %s with params: %s",
-                info.attr_name, info.params,
-            )
-            rail_instance = info.build_func(**info.params)
-            if rail_instance is not None:
-                setattr(self, info.attr_name, rail_instance)
-                rails_list.append(rail_instance)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] Rail %s built successfully",
-                    info.attr_name,
-                )
-            else:
-                logger.warning(
-                    "[JiuwenSwarmCodeAdapter] Rail %s build returned None",
-                    info.attr_name,
-                )
-        logger.info(
-            "[JiuwenSwarmCodeAdapter] Total rails built: %d, rail names: %s",
-            len(rails_list),
-            [type(r).__name__ for r in rails_list],
-        )
-        # 用户配置的 hooks（UserHookRail）
-        try:
-            hooks_config = load_hooks_config(config_base)
-            if hooks_config.events:
-                user_hook_rail = UserHookRail(hooks_config)
-                rails_list.append(user_hook_rail)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] UserHookRail loaded with %d event types",
-                    len(hooks_config.events),
-                )
-        except Exception as e:
-            logger.warning("[JiuwenSwarmCodeAdapter] Failed to load UserHookRail: %s", e)
-        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
-        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
-        # run span per iteration/round. It is the only thing that creates the
-        # task_iteration / invoke spans that llm.call + tool.* nest under. It
-        # self-disables (before_* returns early when get_team_span() is None), so
-        # attaching it unconditionally is safe and also adapts to runtime
-        # enable/disable of agent_observability without rebuilding the agent.
-        try:
-            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
-            rails_list.append(ObservabilityRail())
-            logger.info("[JiuwenSwarmCodeAdapter] ObservabilityRail attached")
-        except Exception as e:
-            logger.warning("[JiuwenSwarmCodeAdapter] Failed to attach ObservabilityRail: %s", e)
-        return rails_list
+        return self._instantiate_rails(rail_infos, config_base)
 
     # ─── Code 专属 Rail 构建 ────────────────
 

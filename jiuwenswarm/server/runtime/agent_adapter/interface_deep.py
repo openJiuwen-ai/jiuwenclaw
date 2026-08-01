@@ -446,6 +446,31 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
 # at this scale is directly visible in time-to-first-token.
 _SLOW_RUNTIME_CONFIG_MS = 50.0
 
+# Total rail-construction cost above which the per-rail breakdown is worth an
+# INFO line. Rails are built once per agent, so the bar sits higher than the
+# per-turn one: this is cold-start budget, not time-to-first-token.
+_SLOW_RAIL_BUILD_MS = 100.0
+
+
+@dataclass
+class _RailBuildInfo:
+    """One rail's construction recipe, shared by the agent and code rail sets.
+
+    Attributes:
+        attr_name: Adapter attribute the built rail is assigned to. Also names
+            the rail in the build-timing breakdown, minus its leading underscore.
+        build_func: Callable returning the rail instance, or None to skip it.
+        params: Keyword arguments for ``build_func``; empty when omitted.
+    """
+
+    attr_name: str
+    build_func: Callable
+    params: dict = None
+
+    def __post_init__(self):
+        """Normalize the optional params mapping to an empty dict."""
+        self.params = self.params or {}
+
 _CRON_TOOL_NAMES = frozenset(
     {
         "cron",
@@ -4281,20 +4306,85 @@ class JiuWenSwarmDeepAdapter:
             )
             return None
 
+    def _instantiate_rails(
+        self,
+        rail_infos: list["_RailBuildInfo"],
+        config_base: dict[str, Any],
+    ) -> list[Any]:
+        """Build each declared rail in order, then attach the two standing ones.
+
+        Shared by the agent and code rail sets, which differ only in what they
+        declare. Rail construction is the bulk of ``create_instance``, so each
+        one is timed separately and the breakdown is logged slowest-first once
+        the total crosses :data:`_SLOW_RAIL_BUILD_MS` — an aggregate over a
+        dozen-plus rails says nothing about which to look at.
+
+        Args:
+            rail_infos: Rails to build, in the order they should be attached.
+            config_base: Full config snapshot, used for the user hook rail.
+
+        Returns:
+            The successfully built rails. A rail whose builder returns None is
+            skipped with a warning rather than failing the whole set.
+        """
+        log_prefix = f"[{type(self).__name__}]"
+        stage_timer = StageTimer()
+        rails_list = []
+        for info in rail_infos:
+            rail_instance = info.build_func(**info.params)
+            stage_timer.mark(info.attr_name.lstrip("_"))
+            if rail_instance is not None:
+                setattr(self, info.attr_name, rail_instance)
+                rails_list.append(rail_instance)
+            else:
+                logger.warning("%s Rail %s build returned None", log_prefix, info.attr_name)
+
+        # 用户配置的 hooks（UserHookRail）
+        try:
+            hooks_config = load_hooks_config(config_base)
+            if hooks_config.events:
+                rails_list.append(UserHookRail(hooks_config))
+                logger.info(
+                    "%s UserHookRail loaded with %d event types",
+                    log_prefix,
+                    len(hooks_config.events),
+                )
+        except Exception as exc:
+            logger.warning("%s Failed to load UserHookRail: %s", log_prefix, exc)
+        stage_timer.mark("user_hook_rail")
+
+        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
+        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
+        # run span per iteration/round. It is the only thing that creates the
+        # task_iteration / invoke spans that llm.call + tool.* nest under. It
+        # self-disables (before_* returns early when get_team_span() is None), so
+        # attaching it unconditionally is safe and also adapts to runtime
+        # enable/disable of agent_observability without rebuilding the agent.
+        try:
+            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+
+            rails_list.append(ObservabilityRail())
+        except Exception as exc:
+            logger.warning("%s Failed to attach ObservabilityRail: %s", log_prefix, exc)
+        stage_timer.mark("observability_rail")
+
+        total_ms = stage_timer.total_ms()
+        log_rail_build = (
+            server_logger.info if total_ms >= _SLOW_RAIL_BUILD_MS else logger.debug
+        )
+        log_rail_build(
+            "[AgentServer] agent rails built: adapter=%s count=%d total_ms=%.1f %s",
+            type(self).__name__,
+            len(rails_list),
+            total_ms,
+            stage_timer.render(slowest_first=True),
+        )
+        return rails_list
+
     def _build_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any], *, mode: str = "agent"
     ) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
-
-        @dataclass
-        class _RailBuildInfo:
-            attr_name: str
-            build_func: callable
-            params: dict = None
-
-            def __post_init__(self):
-                self.params = self.params or {}
-
         rail_infos = [
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
@@ -4367,56 +4457,7 @@ class JiuWenSwarmDeepAdapter:
         if isinstance(mode, str) and mode.startswith("agent"):
             rail_infos.append(_RailBuildInfo("_ask_user_rail", self._build_structured_ask_user_rail))
 
-        rails_list = []
-        for info in rail_infos:
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] Building rail: %s with params: %s",
-                info.attr_name,
-                sorted(info.params),
-            )
-            rail_instance = info.build_func(**info.params)
-            if rail_instance is not None:
-                setattr(self, info.attr_name, rail_instance)
-                rails_list.append(rail_instance)
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] Rail %s built successfully and added to rails_list",
-                    info.attr_name,
-                )
-            else:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] Rail %s build returned None", info.attr_name
-                )
-        logger.info(
-            "[JiuWenSwarmDeepAdapter] Total rails built: %d, rail names: %s",
-            len(rails_list),
-            [type(r).__name__ for r in rails_list],
-        )
-        # 用户配置的 hooks（UserHookRail）
-        try:
-            hooks_config = load_hooks_config(config_base)
-            if hooks_config.events:
-                user_hook_rail = UserHookRail(hooks_config)
-                rails_list.append(user_hook_rail)
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] UserHookRail loaded with %d event types",
-                    len(hooks_config.events),
-                )
-        except Exception as e:
-            logger.warning("[JiuWenSwarmDeepAdapter] Failed to load UserHookRail: %s", e)
-        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
-        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
-        # run span per iteration/round. It is the only thing that creates the
-        # task_iteration / invoke spans that llm.call + tool.* nest under. It
-        # self-disables (before_* returns early when get_team_span() is None), so
-        # attaching it unconditionally is safe and also adapts to runtime
-        # enable/disable of agent_observability without rebuilding the agent.
-        try:
-            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
-            rails_list.append(ObservabilityRail())
-            logger.info("[JiuWenSwarmDeepAdapter] ObservabilityRail attached")
-        except Exception as e:
-            logger.warning("[JiuWenSwarmDeepAdapter] Failed to attach ObservabilityRail: %s", e)
-        return rails_list
+        return self._instantiate_rails(rail_infos, config_base)
 
     @staticmethod
     def _resolve_enable_task_loop(
