@@ -56,6 +56,7 @@ class ReqMethod(Enum):
     TEAM_BINDING_CREATE = "team.binding.create"
     TEAM_BINDING_GENERATE = "team.binding.generate"
     TEAM_SESSION_BIND = "team.session.bind"
+    TEAM_SWITCH = "team.switch"
     TEAM_DELETE = "team.delete"
 
     PATH_GET = "path.get"
@@ -85,6 +86,7 @@ class ReqMethod(Enum):
     AGENTS_TOOLS_LIST = "agents.tools_list"
     AGENT_SWITCH = "3rdagent.switch"
     AGENT_LIST = "3rdagent.list"
+    SYNC_AGENTS_CONFIGS = "sync_agents_configs"
 
     SKILLS_MARKETPLACE_LIST = "skills.marketplace.list"
     SKILLS_LIST = "skills.list"

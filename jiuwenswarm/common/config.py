@@ -1372,6 +1372,7 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             transformed_team[key] = value
         transformed_team["team_name"] = team_name
+        transformed_team.setdefault("enable_swarmflow", False)
 
         leader_raw = _require_dict(team_raw.get("leader"), f"team[{team_index}].leader")
         transformed_team["leader"] = {
@@ -1380,6 +1381,11 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
             if key in leader_raw
         }
         transformed_team["leader"]["agent_key"] = leader_raw.get("agent_key", "")
+        leader_name = _require_non_empty_string(
+            leader_raw.get("member_name"),
+            f"team[{team_index}].leader.member_name",
+        )
+        transformed_team["leader"]["member_name"] = leader_name
         leader_agent_spec = _resolve_front_team_agent_spec(
             agents_raw,
             leader_raw.get("agent_key"),
@@ -1405,7 +1411,7 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
 
         transformed_members: list[dict[str, Any]] = []
         transformed_agents: dict[str, Any] = {"leader": leader_agent_spec}
-        seen_member_names: set[str] = set()
+        seen_member_names: set[str] = {leader_name}
 
         for member_index, member_item in enumerate(predefined_members_raw):
             member = _require_dict(

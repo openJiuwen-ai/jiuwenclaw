@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 
@@ -265,26 +265,25 @@ class AgentConfigService:
                 return a
         return None
 
+    def get_agent_file_path(self, name: str, location: AgentSource = "user") -> Path:
+        """Return the persisted markdown path for a custom Agent definition."""
+        normalized_name = validate_agent_name(name)
+        return self._resolve_location_dir(location) / f"{normalized_name}.md"
+
     def create_agent(self, params: CreateAgentParams) -> AgentDefinition:
         """创建新的自定义 agent，写入 markdown 文件。
 
         Raises:
             ValueError: 同名内置 agent 已存在时，或名称格式不符合要求
         """
-        import re
-        name = params.name.strip()
-        if not re.match(r'^[a-zA-Z0-9_-]{3,50}$', name):
-            raise ValueError(
-                f"Agent 名称格式无效: '{name}'。要求 3-50 字符，仅允许字母、数字、连字符、下划线"
-            )
+        validate_agent_name(params.name)
 
         existing = self.get_agent(params.name)
         if existing is not None and existing.source == "builtin":
             raise ValueError(f"不能覆盖内置 agent: {params.name}")
 
-        target_dir = self._resolve_location_dir(params.location)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        file_path = target_dir / f"{params.name}.md"
+        file_path = self.get_agent_file_path(params.name, params.location)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
 
         content = _format_agent_file(params)
         file_path.write_text(content, encoding="utf-8")
@@ -431,6 +430,114 @@ class AgentConfigService:
 # ---------------------------------------------------------------------------
 # 文件解析 / 生成
 # ---------------------------------------------------------------------------
+
+
+def validate_agent_name(name: str) -> str:
+    """Validate and normalize a custom Agent filename/name."""
+    import re
+
+    normalized = str(name or "").strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{3,50}", normalized):
+        raise ValueError(
+            f"Agent 名称格式无效: '{normalized}'。要求 3-50 字符，仅允许字母、数字、连字符、下划线"
+        )
+    return normalized
+
+
+def _team_member_prompt(member: dict[str, Any]) -> str:
+    parts = [
+        str(member.get(field_name) or "").strip()
+        for field_name in ("persona", "prompt_hint")
+    ]
+    return "\n\n".join(part for part in parts if part)
+
+
+def _team_member_model_name(agent_template: dict[str, Any], field_name: str) -> str | None:
+    model_raw = agent_template.get("model")
+    if model_raw is None:
+        return None
+    if not isinstance(model_raw, dict):
+        raise ValueError(f"{field_name}.model must be an object")
+    model_name = model_raw.get("model")
+    if model_name is None:
+        return None
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError(f"{field_name}.model.model must be a non-empty string")
+    return model_name.strip()
+
+
+def build_team_member_agent_params(
+    front_payload: dict[str, Any],
+    *,
+    location: AgentSource = "user",
+) -> list[CreateAgentParams]:
+    """Build the DeepAgent half of Relay's Team/Deep dual-write payload."""
+    if not isinstance(front_payload, dict):
+        raise ValueError("teams must be an object")
+    agents_raw = front_payload.get("agents")
+    if not isinstance(agents_raw, dict):
+        raise ValueError("agents must be an object")
+    teams_raw = front_payload.get("team")
+    if teams_raw is None:
+        return []
+    if not isinstance(teams_raw, list):
+        raise ValueError("team must be an array")
+
+    by_name: dict[str, CreateAgentParams] = {}
+    for team_index, team_item in enumerate(teams_raw):
+        if not isinstance(team_item, dict):
+            raise ValueError(f"team[{team_index}] must be an object")
+        members: list[tuple[str, Any]] = [
+            (f"team[{team_index}].leader", team_item.get("leader")),
+        ]
+        predefined_members = team_item.get("predefined_members", [])
+        if predefined_members is None:
+            predefined_members = []
+        if not isinstance(predefined_members, list):
+            raise ValueError(f"team[{team_index}].predefined_members must be an array")
+        members.extend(
+            (f"team[{team_index}].predefined_members[{member_index}]", member)
+            for member_index, member in enumerate(predefined_members)
+        )
+
+        for field_name, member_raw in members:
+            if not isinstance(member_raw, dict):
+                raise ValueError(f"{field_name} must be an object")
+            member_name = validate_agent_name(member_raw.get("member_name", ""))
+            agent_key = str(member_raw.get("agent_key") or "").strip()
+            if not agent_key or agent_key not in agents_raw:
+                raise ValueError(f"{field_name}.agent_key references unknown agent_key: {agent_key}")
+            agent_template = agents_raw[agent_key]
+            if not isinstance(agent_template, dict):
+                raise ValueError(f"agents.{agent_key} must be an object")
+
+            skills = agent_template.get("skills")
+            if skills is not None and not isinstance(skills, list):
+                raise ValueError(f"agents.{agent_key}.skills must be an array")
+            max_iterations = agent_template.get("max_iterations")
+            if max_iterations is not None and not isinstance(max_iterations, int):
+                raise ValueError(f"agents.{agent_key}.max_iterations must be an integer")
+
+            description_parts = [
+                str(member_raw.get("display_name") or member_name).strip(),
+                str(agent_template.get("summary") or "").strip(),
+            ]
+
+            params = CreateAgentParams(
+                name=member_name,
+                description=" - ".join(part for part in description_parts if part),
+                prompt=_team_member_prompt(member_raw),
+                location=location,
+                model=_team_member_model_name(agent_template, f"agents.{agent_key}"),
+                max_iterations=max_iterations,
+                skills=list(skills) if skills is not None else None,
+            )
+            previous = by_name.get(member_name)
+            if previous is not None and previous != params:
+                raise ValueError(f"conflicting member_name across teams: {member_name}")
+            by_name[member_name] = params
+
+    return list(by_name.values())
 
 
 def _parse_agent_file(file_path: Path, source: AgentSource) -> AgentDefinition | None:

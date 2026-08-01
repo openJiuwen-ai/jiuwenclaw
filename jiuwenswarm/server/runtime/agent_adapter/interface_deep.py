@@ -860,6 +860,7 @@ class JiuWenSwarmDeepAdapter:
         self._session_instance_config: dict[str, Any] | None = None
         self._session_instance_mode: str = "agent"
         self._session_instance_sub_mode: str | None = None
+        self._target_agent_instances: dict[tuple[str, str], DeepAgent] = {}
         self._xiaoyi_phone_tools_registered: bool = False
         self._paid_search_registered: bool = False
         self._paid_search_tool: WebPaidSearchTool | None = None
@@ -1829,6 +1830,51 @@ class JiuWenSwarmDeepAdapter:
         if not isinstance(subagent_cfg, dict):
             return True  # no config → default enabled
         return subagent_cfg.get("enabled", True) is not False
+
+    def _get_target_agent_instance(
+        self,
+        target_agent: str,
+        session_id: str,
+    ) -> DeepAgent:
+        """Resolve one Relay single-mention target to its configured DeepAgent."""
+        target = str(target_agent or "").strip()
+        cache_key = (session_id, target)
+        cached = self._target_agent_instances.get(cache_key)
+        if cached is not None:
+            return cached
+
+        from jiuwenswarm.server.runtime.agent_config_service import AgentConfigService
+
+        definition = AgentConfigService(self._workspace_dir).get_agent(target)
+        if definition is None or definition.source == "builtin" or not definition.file_path:
+            raise ValueError(f"TARGET_AGENT_NOT_FOUND: {target}")
+        if self._instance is None:
+            raise RuntimeError("DeepAgent is not initialized")
+        try:
+            target_instance = self._instance.create_subagent(
+                target,
+                f"{session_id}__target__{target}",
+            )
+        except Exception as exc:
+            raise ValueError(f"TARGET_AGENT_NOT_AVAILABLE: {target}") from exc
+        self._target_agent_instances[cache_key] = target_instance
+        return target_instance
+
+    @staticmethod
+    async def _close_target_agent_stream(
+        interaction_stream: Any,
+        target_agent_instance: DeepAgent,
+        *,
+        abort_active_round: bool,
+    ) -> None:
+        """Close a target-agent stream and abort its active round when required."""
+        try:
+            if abort_active_round:
+                await target_agent_instance.cancel_round(
+                    reason="target-agent-stream-aborted",
+                )
+        finally:
+            await interaction_stream.aclose()
 
     def _build_configured_subagents(
         self,
@@ -4901,6 +4947,7 @@ class JiuWenSwarmDeepAdapter:
             self._instance.configure(deep_cfg)
         finally:
             self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
+        self._target_agent_instances.clear()
         self._commit_reload_fingerprints(reload_fingerprints)
         self._sync_active_evolution_review_agent_after_reload()
 
@@ -5585,6 +5632,7 @@ class JiuWenSwarmDeepAdapter:
                     self._parent_session_id,
                     exc,
                 )
+        self._target_agent_instances.clear()
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
         # 去触发 manager.sync（此时 rail/manager 可能已失效）。
         if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
@@ -7515,6 +7563,40 @@ class JiuWenSwarmDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent")
 
+        target_agent_name = (
+            str(request.params.get("target_agent") or "").strip()
+            if isinstance(request.params, dict)
+            else ""
+        )
+        target_agent_instance: DeepAgent | None = None
+        target_agent_session_id = session_id
+        if target_agent_name:
+            if mode not in ("agent", "agent.plan", "plan"):
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={
+                        "event_type": "chat.error",
+                        "error": "TARGET_AGENT_MODE_INVALID: target_agent requires agent.plan",
+                    },
+                    metadata=request.metadata,
+                )
+            try:
+                target_agent_instance = self._get_target_agent_instance(
+                    target_agent_name,
+                    session_id,
+                )
+            except Exception as exc:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"event_type": "chat.error", "error": str(exc)},
+                    metadata=request.metadata,
+                )
+            target_agent_session_id = f"{session_id}__target__{target_agent_name}"
+
         slash_result = await self._handle_slash_command(
             query,
             session_id,
@@ -7609,7 +7691,8 @@ class JiuWenSwarmDeepAdapter:
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
+        if target_agent_instance is None:
+            self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         if self._stream_event_rail is not None:
@@ -7619,6 +7702,7 @@ class JiuWenSwarmDeepAdapter:
         collected_content: list[str] = []
         error_text: str | None = None
         interaction_stream = None
+        target_agent_streaming = False
         interaction_stream_abort = True
         try:
             await self._update_runtime_config(
@@ -7671,7 +7755,14 @@ class JiuWenSwarmDeepAdapter:
             _run_span = open_agent_run_span(session_id=session_id, mode=mode)
             attach_goal = self._wants_attach_goal(request.params)
             dispatch_mode = self._resolve_input_dispatch_mode(request.params)
-            if attach_goal:
+            if target_agent_instance is not None:
+                interaction_stream = Runner.run_agent_streaming(
+                    agent=target_agent_instance,
+                    inputs=inputs,
+                    session=target_agent_session_id,
+                )
+                target_agent_streaming = True
+            elif attach_goal:
                 gm = self._get_goal_manager()
                 peek = getattr(gm, "peek", None) if gm is not None else None
                 record = peek() if callable(peek) else None
@@ -7759,9 +7850,16 @@ class JiuWenSwarmDeepAdapter:
                 reset_current_multimodal_image_files(image_files_token)
             if interaction_stream is not None:
                 try:
-                    await interaction_stream.close(
-                        abort_active_round=interaction_stream_abort,
-                    )
+                    if target_agent_streaming and target_agent_instance is not None:
+                        await self._close_target_agent_stream(
+                            interaction_stream,
+                            target_agent_instance,
+                            abort_active_round=interaction_stream_abort,
+                        )
+                    else:
+                        await interaction_stream.close(
+                            abort_active_round=interaction_stream_abort,
+                        )
                 except Exception:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
@@ -7829,8 +7927,25 @@ class JiuWenSwarmDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent")
 
+        target_agent_name = (
+            str(request.params.get("target_agent") or "").strip()
+            if isinstance(request.params, dict)
+            else ""
+        )
+        if target_agent_name and mode in ("team", "agent.team", "team.plan", "code.team"):
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "chat.error",
+                    "error": "TARGET_AGENT_MODE_INVALID: target_agent requires agent.plan",
+                },
+                is_complete=True,
+            )
+            return
+
         # Team 模式处理
-        if mode in ("team", "team.plan", "code.team"):
+        if mode in ("team", "agent.team", "team.plan", "code.team"):
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
 
             resolved_model = self._resolve_model_for_request(request)
@@ -7917,6 +8032,35 @@ class JiuWenSwarmDeepAdapter:
             ):
                 yield chunk
             return
+
+        target_agent_instance: DeepAgent | None = None
+        target_agent_session_id = session_id
+        if target_agent_name:
+            if mode not in ("agent", "agent.plan", "plan"):
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "chat.error",
+                        "error": "TARGET_AGENT_MODE_INVALID: target_agent requires agent.plan",
+                    },
+                    is_complete=True,
+                )
+                return
+            try:
+                target_agent_instance = self._get_target_agent_instance(
+                    target_agent_name,
+                    session_id,
+                )
+            except Exception as exc:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.error", "error": str(exc)},
+                    is_complete=True,
+                )
+                return
+            target_agent_session_id = f"{session_id}__target__{target_agent_name}"
 
         # 拦截斜杠命令 / 结构化 command.goal
         goal_stream_request = False
@@ -8089,7 +8233,8 @@ class JiuWenSwarmDeepAdapter:
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
+        if target_agent_instance is None:
+            self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False
@@ -8098,6 +8243,7 @@ class JiuWenSwarmDeepAdapter:
         _debug_logger = None
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
+        target_agent_streaming = False
         interaction_stream_abort = True
         try:
             await self._update_runtime_config(
@@ -8229,7 +8375,14 @@ class JiuWenSwarmDeepAdapter:
                     is_complete=True,
                 )
 
-            if pending_goal_op is not None:
+            if target_agent_instance is not None:
+                interaction_stream = Runner.run_agent_streaming(
+                    agent=target_agent_instance,
+                    inputs=inputs,
+                    session=target_agent_session_id,
+                )
+                target_agent_streaming = True
+            elif pending_goal_op is not None:
                 interaction_stream = await self._instance.attach_output()
                 control = await self._dispatch_goal_control(
                     action=str(pending_goal_op.get("action") or "get"),
@@ -8719,9 +8872,16 @@ class JiuWenSwarmDeepAdapter:
                 reset_current_multimodal_image_files(image_files_token)
             if interaction_stream is not None:
                 try:
-                    await interaction_stream.close(
-                        abort_active_round=interaction_stream_abort,
-                    )
+                    if target_agent_streaming and target_agent_instance is not None:
+                        await self._close_target_agent_stream(
+                            interaction_stream,
+                            target_agent_instance,
+                            abort_active_round=interaction_stream_abort,
+                        )
+                    else:
+                        await interaction_stream.close(
+                            abort_active_round=interaction_stream_abort,
+                        )
                 except Exception:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
@@ -8761,8 +8921,11 @@ class JiuWenSwarmDeepAdapter:
         context_usage_percent: float | None = None
         context_window_tokens: int | None = None
         try:
-            if self._instance is not None:
-                da_usage = self._instance.get_context_usage(session_id=session_id)
+            usage_instance = target_agent_instance or self._instance
+            if usage_instance is not None:
+                da_usage = usage_instance.get_context_usage(
+                    session_id=target_agent_session_id,
+                )
                 if isinstance(da_usage, dict):
                     raw_pct = da_usage.get("usage_percent", None)
                     if raw_pct is not None:

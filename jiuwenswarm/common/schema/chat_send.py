@@ -40,7 +40,13 @@ class ChatSendParams(TypedDict, total=False):
     """
 
     mode: NotRequired[str]
-    """运行模式。如 agent.plan / agent.fast / code.normal / code.team / team。"""
+    """运行模式。如 agent.plan / agent.fast / code.normal / code.team / team / agent.team。"""
+
+    team_name: NotRequired[str]
+    """Team 模式首次请求绑定的配置名；同一 session 后续不可切换。"""
+
+    target_agent: NotRequired[str]
+    """单 @ 场景的 DeepAgent 名称，必须与 agents/{name}.md 的 name 一致。"""
 
     attachments: NotRequired[list[dict]]
     """附件列表（@file 等）。结构待统一定义。"""
