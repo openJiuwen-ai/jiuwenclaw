@@ -453,6 +453,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         self._dreaming_mode = "code"
 
+        if self._skip_own_instance_build():
+            return
+
         model = self._create_model(config_base)
         agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
 

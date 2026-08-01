@@ -852,6 +852,11 @@ class JiuWenSwarmDeepAdapter:
         self._instance_overrides: dict[str, Any] = {}
         self._is_session_scoped_adapter: bool = False
         self._parent_session_id: str | None = None
+        # Root-adapter-only: its own DeepAgent is built on demand (see
+        # ``ensure_instance``), so the chat path does not pay for an instance it
+        # never runs on.
+        self._root_instance_requested: bool = False
+        self._root_instance_lock: asyncio.Lock | None = None
         self._session_adapters: dict[str, JiuWenSwarmDeepAdapter] = {}
         self._session_adapter_locks: dict[str, asyncio.Lock] = {}
         self._session_adapter_last_used: dict[str, float] = {}
@@ -4641,6 +4646,54 @@ class JiuWenSwarmDeepAdapter:
         """Backward-compatible no-op hook for tests and legacy call sites."""
         return None
 
+    def _skip_own_instance_build(self) -> bool:
+        """Return whether ``create_instance`` should stop before building a DeepAgent.
+
+        On the chat path the root (non session-scoped) adapter is only a router
+        and a template holder: every turn runs on a per-session child adapter
+        that owns the live DeepAgent. Building one for the root as well doubles
+        tool registration, rail setup, ``ensure_initialized`` and MCP server
+        registration on the critical path. The root instance is therefore built
+        lazily by :meth:`ensure_instance`, which the non-chat RPCs that need a
+        DeepAgent handle call first.
+
+        Returns:
+            True when the caller should return after the cheap config-cache
+            section, leaving ``self._instance`` unset.
+        """
+        return not self._is_session_scoped_adapter and not self._root_instance_requested
+
+    async def ensure_instance(self) -> Any:
+        """Return this adapter's own DeepAgent, building it on first use.
+
+        Session-scoped adapters always have one already; the root adapter builds
+        it here so callers that need a DeepAgent handle outside the chat path
+        (harness packages, rail toggles, session fork, code plan state, ...) keep
+        working without putting that cost on every chat turn.
+
+        Returns:
+            The DeepAgent instance, or None when it could not be built.
+        """
+        if self._instance is not None:
+            return self._instance
+        if self._root_instance_lock is None:
+            self._root_instance_lock = asyncio.Lock()
+        async with self._root_instance_lock:
+            if self._instance is not None:
+                return self._instance
+            self._root_instance_requested = True
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] building root DeepAgent on demand: mode=%s sub_mode=%s",
+                self._session_instance_mode,
+                self._session_instance_sub_mode,
+            )
+            await self.create_instance(
+                self._session_instance_config,
+                mode=self._session_instance_mode or "agent",
+                sub_mode=self._session_instance_sub_mode,
+            )
+            return self._instance
+
     async def create_instance(
         self, config: dict[str, Any] | None = None, *, mode: str = "agent", sub_mode: str = None
     ) -> None:
@@ -4678,6 +4731,9 @@ class JiuWenSwarmDeepAdapter:
         self._workspace_dir = config.get("workspace_dir", str(get_agent_workspace_dir()))
         self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
         self._prompt_attachment_loader.ensure_layout()
+
+        if self._skip_own_instance_build():
+            return
 
         model = self._create_model(config_base)
         if self._is_session_scoped_adapter:
@@ -4892,34 +4948,21 @@ class JiuWenSwarmDeepAdapter:
         except Exception as e:
             logger.error("[JiuWenSwarmDeepAdapter] 加载用户 Rail 扩展时发生错误: %s", e)
 
-    async def reload_agent_config(
+    async def _apply_reload_config_snapshot(
         self,
-        config_base: dict[str, Any] | None = None,
-        env_overrides: dict[str, Any] | None = None,
-        target_session_id: str | None = None,
-    ) -> None:
-        """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
-
-        DeepAgent.configure() 现在自动处理 rail 生命周期：保留旧已注册 rails 的注销上下文，
-        并在下次 _ensure_initialized() 时先卸载旧回调，再注册新的 rails。
+        config_base: dict[str, Any] | None,
+        env_overrides: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Refresh the cached config snapshot shared by every reload path.
 
         Args:
-            config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
-            env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
-            target_session_id: 可选的目标 session id；传入时仅级联热更新该 session adapter。
+            config_base: Optional full config snapshot; read from disk when None.
+            env_overrides: Optional environment variable delta applied first; a
+                None value removes the variable.
+
+        Returns:
+            The normalized config snapshot that was cached on this adapter.
         """
-        target_sid = str(target_session_id or "").strip() or None
-        if self._is_session_scoped_adapter and target_sid:
-            own_sid = self._session_adapter_key(self._parent_session_id)
-            if own_sid != self._session_adapter_key(target_sid):
-                logger.debug(
-                    "[JiuWenSwarmDeepAdapter] skip scoped reload for unrelated session: target=%s self=%s",
-                    target_sid,
-                    own_sid,
-                )
-                return
-        if self._instance is None:
-            raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
         # 清 MemoryRail 实际使用的 openjiuwen lite INDEX_CACHE（而非仓内并行实现的那份），
         # 并 close 旧实例（db 连接 / watchdog observer / 定时任务），使下次
@@ -4951,8 +4994,89 @@ class JiuWenSwarmDeepAdapter:
 
         self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
-        config = config_base.get("react", {}).copy()
-        self._config_cache = config.copy()
+        self._config_cache = config_base.get("react", {}).copy()
+        return config_base
+
+    async def _fan_out_reload_to_session_adapters(
+        self,
+        config_base: dict[str, Any],
+        env_overrides: dict[str, Any] | None,
+        target_sid: str | None,
+    ) -> None:
+        """Cascade a config reload to the live per-session adapters.
+
+        No-op on a session-scoped adapter, which owns no children.
+
+        Args:
+            config_base: Normalized config snapshot to hand to the children.
+            env_overrides: Environment variable delta passed through unchanged.
+            target_sid: When set, only that session is reloaded eagerly; when
+                None, every session adapter is marked stale for lazy reload.
+        """
+        if self._is_session_scoped_adapter:
+            return
+        if not target_sid:
+            self._mark_session_adapters_stale_for_reload(config_base, env_overrides)
+            return
+        for session_id, adapter in self._iter_session_adapters_for_reload(target_sid):
+            try:
+                await adapter.reload_agent_config(
+                    config_base,
+                    env_overrides,
+                    target_session_id=target_sid,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] session adapter reload failed: session_id=%s error=%s",
+                    session_id,
+                    exc,
+                )
+            else:
+                self._session_adapter_versions[session_id] = self._session_adapter_config_version
+                self._session_adapter_reload_failures.pop(session_id, None)
+
+    async def reload_agent_config(
+        self,
+        config_base: dict[str, Any] | None = None,
+        env_overrides: dict[str, Any] | None = None,
+        target_session_id: str | None = None,
+    ) -> None:
+        """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
+
+        DeepAgent.configure() 现在自动处理 rail 生命周期：保留旧已注册 rails 的注销上下文，
+        并在下次 _ensure_initialized() 时先卸载旧回调，再注册新的 rails。
+
+        Args:
+            config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
+            env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
+            target_session_id: 可选的目标 session id；传入时仅级联热更新该 session adapter。
+        """
+        target_sid = str(target_session_id or "").strip() or None
+        if self._is_session_scoped_adapter and target_sid:
+            own_sid = self._session_adapter_key(self._parent_session_id)
+            if own_sid != self._session_adapter_key(target_sid):
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] skip scoped reload for unrelated session: target=%s self=%s",
+                    target_sid,
+                    own_sid,
+                )
+                return
+        if self._instance is None:
+            if self._is_session_scoped_adapter:
+                raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
+            # Root adapter whose lazily-built DeepAgent nobody has needed yet:
+            # it has nothing of its own to reconfigure, but the cached config
+            # snapshot still has to move forward and the live session adapters
+            # still have to be reloaded.
+            config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
+            await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] 配置已热更新（root 实例未构建，仅刷新缓存并级联 session adapter）"
+            )
+            return
+
+        config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
+        config = self._config_cache.copy()
 
         model = self._create_model(config_base)
         if self._is_session_scoped_adapter:
@@ -4998,26 +5122,7 @@ class JiuWenSwarmDeepAdapter:
 
         await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
 
-        if not self._is_session_scoped_adapter:
-            if target_sid:
-                for session_id, adapter in self._iter_session_adapters_for_reload(target_sid):
-                    try:
-                        await adapter.reload_agent_config(
-                            config_base,
-                            env_overrides,
-                            target_session_id=target_sid,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "[JiuWenSwarmDeepAdapter] session adapter reload failed: session_id=%s error=%s",
-                            session_id,
-                            exc,
-                        )
-                    else:
-                        self._session_adapter_versions[session_id] = self._session_adapter_config_version
-                        self._session_adapter_reload_failures.pop(session_id, None)
-            else:
-                self._mark_session_adapters_stale_for_reload(config_base, env_overrides)
+        await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
 
         # 主动刷新 memory rail（不等下次请求的 _update_rails_for_mode）：
         # 让 embedding 配置变更立即走指纹检测 + 重建 rail + 延时重索引。

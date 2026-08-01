@@ -1995,12 +1995,13 @@ class AgentWebSocketServer:
             return
 
         from openjiuwen.core.single_agent import create_agent_session
+        deep_agent = await agent.ensure_instance()
         session = create_agent_session(
             session_id=session_id,
-            card=agent.get_instance().card,
+            card=deep_agent.card,
         )
         await session.pre_run(inputs=None)
-        state = agent.get_instance().load_state(session)
+        state = deep_agent.load_state(session)
         if state.plan_mode.mode == "normal":
             _plan_exited_sessions.add(session_id)
             await self._push_plan_mode_exited(request)
@@ -2209,11 +2210,12 @@ class AgentWebSocketServer:
         restored_after_approval = False
         async with self._session_mode_sync_lock(session_id):
             from openjiuwen.core.single_agent import create_agent_session
+            deep_agent = await agent.ensure_instance()
             session = create_agent_session(
-                session_id=request.session_id, card=agent.get_instance().card
+                session_id=request.session_id, card=deep_agent.card
             )
             await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
-            state = agent.get_instance().load_state(session)
+            state = deep_agent.load_state(session)
             # 仅在目标模式与当前模式不同时执行模式切换
             mode_changed_to_plan = False
             if state.plan_mode.mode != sub_mode:
@@ -2239,7 +2241,7 @@ class AgentWebSocketServer:
                         # Fallback: plan was completed, checkpoint is authoritative.
                         # Clear slug so this guard is one-shot.
                         state.plan_mode.plan_slug = None
-                        agent.get_instance().save_state(session, state)
+                        deep_agent.save_state(session, state)
                         await session.post_run()
                         blocked = True
                         logger.info(
@@ -2252,7 +2254,7 @@ class AgentWebSocketServer:
                             request.params["mode"] = "code.normal"
                         await self._push_plan_mode_exited(request)
                         return False
-                agent.get_instance().switch_mode(session=session, mode=sub_mode)
+                deep_agent.switch_mode(session=session, mode=sub_mode)
                 if state.plan_mode.mode == "plan" and sub_mode == "normal":
                     restored_after_approval = True
                     logger.info(
@@ -2263,10 +2265,10 @@ class AgentWebSocketServer:
                     mode_changed_to_plan = True
                     # Clear stale plan_slug from previous plan session so
                     # enter_plan_mode creates a fresh plan file.
-                    state = agent.get_instance().load_state(session)
+                    state = deep_agent.load_state(session)
                     if state.plan_mode.plan_slug:
                         state.plan_mode.plan_slug = None
-                        agent.get_instance().save_state(session, state)
+                        deep_agent.save_state(session, state)
                 # switch_mode 内部已通过 save_state 写入 "deepagent" key，
                 # 只需 post_run 持久化到 checkpointer
                 await session.post_run()
@@ -3633,7 +3635,7 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    def _resolve_rewind_agent(
+    async def _resolve_rewind_agent(
         self,
         channel_id: str,
         session_id: str | None = None,
@@ -3675,8 +3677,9 @@ class AgentWebSocketServer:
 
         if deep_agent is None:
             # Fallback: no live session adapter yet (e.g. rewind before any chat
-            # on this process). Checkpointer-only rebuild still helps cold start.
-            deep_agent = agent.get_instance()
+            # on this process). Checkpointer-only rebuild still helps cold start,
+            # so build the root DeepAgent here if it has not been needed yet.
+            deep_agent = await agent.ensure_instance()
             if deep_agent is not None and sid:
                 logger.info(
                     "[AgentWS] rewind: no session-scoped DeepAgent for %s; "
@@ -3776,7 +3779,7 @@ class AgentWebSocketServer:
             # converts ALL records to context messages, so it naturally produces the
             # correct result for both "from" and "up_to" directions.
             context_ok = False
-            pair = self._resolve_rewind_agent(
+            pair = await self._resolve_rewind_agent(
                 request.channel_id or "default",
                 session_id=target_sid,
             )
@@ -3950,7 +3953,7 @@ class AgentWebSocketServer:
                 await send_wire_payload(ws, wire)
             return
 
-        pair = self._resolve_rewind_agent(
+        pair = await self._resolve_rewind_agent(
             request.channel_id or "default",
             session_id=target_sid,
         )
@@ -7285,7 +7288,7 @@ class AgentWebSocketServer:
             # 1. 确保 agent 实例已设置（用于热更新）
             agent = self._agent_manager.get_agent_nowait()
             if agent is not None:
-                agent_instance = agent.get_instance()
+                agent_instance = await agent.ensure_instance()
                 if agent_instance is not None:
                     manager.set_agent_instance(agent_instance)
 
@@ -7820,7 +7823,7 @@ class AgentWebSocketServer:
             agent = self._agent_manager.get_agent_nowait(channel_id)
             deep_agent = None
             if agent is not None:
-                deep_agent = agent.get_instance()
+                deep_agent = await agent.ensure_instance()
                 await copy_session_context(deep_agent, source, target)
             else:
                 logger.warning(
@@ -8023,7 +8026,7 @@ class AgentWebSocketServer:
             )
             agent_instance = None
             if agent is not None:
-                agent_instance = agent.get_instance()
+                agent_instance = await agent.ensure_instance()
                 logger.info(
                     "[AgentServer] harness.packages.activate: agent_instance type=%s, has_load_harness_config=%s",
                     type(agent_instance).__name__ if agent_instance else None,
@@ -8095,7 +8098,7 @@ class AgentWebSocketServer:
             )
             agent_instance = None
             if agent is not None:
-                agent_instance = agent.get_instance()
+                agent_instance = await agent.ensure_instance()
 
             service = AutoHarnessService(
                 rail=None,
@@ -8172,7 +8175,7 @@ class AgentWebSocketServer:
             )
             agent_instance = None
             if agent is not None:
-                agent_instance = agent.get_instance()
+                agent_instance = await agent.ensure_instance()
 
             service = AutoHarnessService(
                 rail=None,
@@ -8309,7 +8312,7 @@ class AgentWebSocketServer:
                 if agent is None:
                     raise ValueError("Failed to get agent for schedule request")
                 # Set agent on service (service will use it for execution)
-                self._scheduler_service.update_agent_instance(agent)
+                await self._scheduler_service.update_agent_instance(agent)
                 self._set_scheduler_agent(agent)
                 logger.info("[AgentServer] Set agent for schedule action %s: %s", action, agent is not None)
 

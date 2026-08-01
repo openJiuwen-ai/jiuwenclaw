@@ -2783,6 +2783,22 @@ class JiuWenSwarm:
     def get_instance(self):
         return self._adapter._instance
 
+    async def ensure_instance(self):
+        """Return the adapter's DeepAgent, building the root one on first use.
+
+        ``get_instance`` stays a plain accessor and may return None before the
+        root DeepAgent has been built; callers that need a live handle outside
+        the chat path should await this instead.
+
+        Returns:
+            The DeepAgent instance, or None when there is no adapter yet (the
+            stateless-RPC fallback wrapper never calls ``create_instance``) or
+            the adapter cannot build one.
+        """
+        if self._adapter is None:
+            return None
+        return await self._adapter.ensure_instance()
+
     async def apply_package_change_to_session_adapters(
         self,
         operation: str,

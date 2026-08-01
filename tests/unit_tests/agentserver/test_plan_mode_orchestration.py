@@ -160,6 +160,9 @@ async def test_ensure_code_mode_state_syncs_plan_to_normal() -> None:
     plan_agent = MagicMock()
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
+    # Non-chat callers now await ensure_instance(), which builds the root
+    # DeepAgent on demand instead of relying on eager construction.
+    plan_agent.ensure_instance = AsyncMock(return_value=plan_instance)
     plan_instance.card = SimpleNamespace(id="code-agent")
     plan_state = SimpleNamespace(mode="plan", plan_slug="test")
     plan_instance.load_state.return_value = SimpleNamespace(plan_mode=plan_state)
@@ -194,6 +197,9 @@ async def test_ensure_code_mode_state_skips_if_mode_already_matches() -> None:
     plan_agent = MagicMock()
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
+    # Non-chat callers now await ensure_instance(), which builds the root
+    # DeepAgent on demand instead of relying on eager construction.
+    plan_agent.ensure_instance = AsyncMock(return_value=plan_instance)
     plan_instance.card = SimpleNamespace(id="code-agent")
     plan_state = SimpleNamespace(mode="plan", plan_slug="test")
     plan_instance.load_state.return_value = SimpleNamespace(plan_mode=plan_state)
@@ -226,6 +232,9 @@ async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit() 
     plan_agent = MagicMock()
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
+    # Non-chat callers now await ensure_instance(), which builds the root
+    # DeepAgent on demand instead of relying on eager construction.
+    plan_agent.ensure_instance = AsyncMock(return_value=plan_instance)
     plan_instance.card = SimpleNamespace(id="code-agent")
     plan_state = SimpleNamespace(mode="normal", plan_slug="old-plan")
     plan_instance.load_state.return_value = SimpleNamespace(plan_mode=plan_state)
@@ -277,6 +286,9 @@ async def test_disconnect_cleanup_then_stale_plan_reentry_blocked_by_slug() -> N
     plan_agent = MagicMock()
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
+    # Non-chat callers now await ensure_instance(), which builds the root
+    # DeepAgent on demand instead of relying on eager construction.
+    plan_agent.ensure_instance = AsyncMock(return_value=plan_instance)
     plan_instance.card = SimpleNamespace(id="code-agent")
     # Plan was completed: mode is normal but a plan_slug is still on checkpoint.
     plan_state = SimpleNamespace(mode="normal", plan_slug="leftover-slug")

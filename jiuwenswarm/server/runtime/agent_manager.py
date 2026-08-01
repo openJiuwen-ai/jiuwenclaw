@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """AgentManager - 管理 Agent 实例."""
 
@@ -806,7 +806,7 @@ class AgentManager:
                 if mode not in target_modes:
                     continue  # Skip team and other modes
 
-                instance = agent.get_instance()
+                instance = await agent.ensure_instance()
                 if instance is None:
                     continue
 
