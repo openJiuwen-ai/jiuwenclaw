@@ -11,6 +11,19 @@ from jiuwenclaw.schema.message import ReqMethod
 class _PermissionAdapter:
     def __init__(self) -> None:
         self.runtime_calls: list[str] = []
+        self.preparation_calls: list[str] = []
+
+    async def prepare_plan_pause_for_request(self, _request):
+        self.preparation_calls.append("plan_pause")
+
+    async def prepare_interrupt_resume_for_request(self, _request):
+        self.preparation_calls.append("interrupt_resume")
+
+    async def prepare_interrupt_artifacts_for_request(self, _request):
+        self.preparation_calls.append("interrupt_artifacts")
+
+    async def prepare_stale_todo_cleanup_for_new_request(self, _request):
+        self.preparation_calls.append("stale_todo_cleanup")
 
     async def handle_heartbeat(self, _request):
         return None
@@ -43,6 +56,21 @@ def _permission_request(continuation_id: str, *, request_id: str) -> AgentReques
             "query": "",
             "request_id": continuation_id,
             "answers": [{"selected_options": ["approve"]}],
+            "mode": "agent.plan",
+        },
+    )
+
+
+def _regular_request(*, request_id: str) -> AgentRequest:
+    return AgentRequest(
+        request_id=request_id,
+        channel_id="web",
+        session_id="session-1",
+        agent_id="agent-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "query": "hello",
+            "request_id": "regular-message",
             "mode": "agent.plan",
         },
     )
@@ -95,6 +123,53 @@ def test_web_unary_duplicate_permission_runs_runtime_once(
             response.payload.get("code") == "duplicate_permission_response"
             for response in responses
         ) == 2
+        await claw.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_web_unary_permission_skips_new_message_preparation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        adapter = _PermissionAdapter()
+        claw = _build_claw(tmp_path, adapter, monkeypatch)
+        monkeypatch.setattr(
+            "jiuwenclaw.agentserver.interface.append_history_record",
+            lambda **_kwargs: None,
+        )
+
+        await claw.process_message(
+            _permission_request("permission-1", request_id="web-1")
+        )
+
+        assert adapter.preparation_calls == []
+        await claw.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_web_unary_regular_message_runs_new_message_preparation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        adapter = _PermissionAdapter()
+        claw = _build_claw(tmp_path, adapter, monkeypatch)
+        monkeypatch.setattr(
+            "jiuwenclaw.agentserver.interface.append_history_record",
+            lambda **_kwargs: None,
+        )
+
+        await claw.process_message(_regular_request(request_id="web-1"))
+
+        assert adapter.preparation_calls == [
+            "plan_pause",
+            "interrupt_resume",
+            "interrupt_artifacts",
+            "stale_todo_cleanup",
+        ]
         await claw.cleanup()
 
     asyncio.run(scenario())
@@ -187,6 +262,32 @@ def test_stream_duplicate_permission_runs_runtime_once(
             chunks[-1].payload.get("code") == "duplicate_permission_response"
             for chunks in results
         ) == 2
+        await claw.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_stream_permission_skips_new_message_preparation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        adapter = _PermissionAdapter()
+        claw = _build_claw(tmp_path, adapter, monkeypatch)
+        monkeypatch.setattr(
+            "jiuwenclaw.agentserver.interface.append_history_record",
+            lambda **_kwargs: None,
+        )
+
+        chunks = [
+            chunk
+            async for chunk in claw.process_message_stream(
+                _permission_request("permission-1", request_id="stream-1")
+            )
+        ]
+
+        assert chunks
+        assert adapter.preparation_calls == []
         await claw.cleanup()
 
     asyncio.run(scenario())

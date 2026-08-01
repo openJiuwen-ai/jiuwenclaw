@@ -1324,26 +1324,31 @@ class JiuWenClaw:
             extra={'user_visible': 'progress'}
         )
 
-        prepare_plan_pause = getattr(adapter, "prepare_plan_pause_for_request", None)
+        permission_key = _permission_response_key(request)
         tenant_tokens, mem_token = self._bind_tenant_request_context()
         try:
-            if callable(prepare_plan_pause):
-                await prepare_plan_pause(request)
+            # 权限 continuation 只应恢复已有工具中断，不应执行普通用户请求的 preparation。
+            # 这些 hooks 中部分会在 SessionManager 串行边界外读写 checkpoint，
+            # 并发 continuation 可能因此用旧快照覆盖较新的 checkpoint 状态。
+            if permission_key is None:
+                prepare_plan_pause = getattr(adapter, "prepare_plan_pause_for_request", None)
+                if callable(prepare_plan_pause):
+                    await prepare_plan_pause(request)
 
-            prepare_interrupt_resume = getattr(adapter, "prepare_interrupt_resume_for_request", None)
-            if callable(prepare_interrupt_resume):
-                await prepare_interrupt_resume(request)
+                prepare_interrupt_resume = getattr(adapter, "prepare_interrupt_resume_for_request", None)
+                if callable(prepare_interrupt_resume):
+                    await prepare_interrupt_resume(request)
 
-            # 兜底：plan_pause 和 interrupt_resume 都没触发时，注入中断产物摘要
-            prepare_interrupt_artifacts = getattr(adapter, "prepare_interrupt_artifacts_for_request", None)
-            if callable(prepare_interrupt_artifacts):
-                await prepare_interrupt_artifacts(request)
+                # 兜底：plan_pause 和 interrupt_resume 都没触发时，注入中断产物摘要
+                prepare_interrupt_artifacts = getattr(adapter, "prepare_interrupt_artifacts_for_request", None)
+                if callable(prepare_interrupt_artifacts):
+                    await prepare_interrupt_artifacts(request)
 
-            prepare_stale_todo_cleanup = getattr(
-                adapter, "prepare_stale_todo_cleanup_for_new_request", None
-            )
-            if callable(prepare_stale_todo_cleanup):
-                await prepare_stale_todo_cleanup(request)
+                prepare_stale_todo_cleanup = getattr(
+                    adapter, "prepare_stale_todo_cleanup_for_new_request", None
+                )
+                if callable(prepare_stale_todo_cleanup):
+                    await prepare_stale_todo_cleanup(request)
 
             inputs, memory_mode, raw_query = self._build_inputs(request)
             self._apply_effective_project_dir_to_request(request, session_id, inputs)
@@ -1385,7 +1390,6 @@ class JiuWenClaw:
                         )
                 return await adapter.process_message_impl(request, inputs)
 
-            permission_key = _permission_response_key(request)
             if permission_key is not None:
                 accepted, result = await self._session_manager.submit_and_wait_once(
                     session_id,
@@ -1539,26 +1543,31 @@ class JiuWenClaw:
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
 
-        prepare_plan_pause = getattr(adapter, "prepare_plan_pause_for_request", None)
+        permission_key = _permission_response_key(request)
         tenant_tokens, mem_token = self._bind_tenant_request_context()
         try:
-            if callable(prepare_plan_pause):
-                await prepare_plan_pause(request)
+            # 权限 continuation 只应恢复已有工具中断，不应执行普通用户请求的 preparation。
+            # 这些 hooks 中部分会在 SessionManager 串行边界外读写 checkpoint，
+            # 并发 continuation 可能因此用旧快照覆盖较新的 checkpoint 状态。
+            if permission_key is None:
+                prepare_plan_pause = getattr(adapter, "prepare_plan_pause_for_request", None)
+                if callable(prepare_plan_pause):
+                    await prepare_plan_pause(request)
 
-            prepare_interrupt_resume = getattr(adapter, "prepare_interrupt_resume_for_request", None)
-            if callable(prepare_interrupt_resume):
-                await prepare_interrupt_resume(request)
+                prepare_interrupt_resume = getattr(adapter, "prepare_interrupt_resume_for_request", None)
+                if callable(prepare_interrupt_resume):
+                    await prepare_interrupt_resume(request)
 
-            # 兜底：plan_pause 和 interrupt_resume 都没触发时，注入中断产物摘要
-            prepare_interrupt_artifacts = getattr(adapter, "prepare_interrupt_artifacts_for_request", None)
-            if callable(prepare_interrupt_artifacts):
-                await prepare_interrupt_artifacts(request)
+                # 兜底：plan_pause 和 interrupt_resume 都没触发时，注入中断产物摘要
+                prepare_interrupt_artifacts = getattr(adapter, "prepare_interrupt_artifacts_for_request", None)
+                if callable(prepare_interrupt_artifacts):
+                    await prepare_interrupt_artifacts(request)
 
-            prepare_stale_todo_cleanup = getattr(
-                adapter, "prepare_stale_todo_cleanup_for_new_request", None
-            )
-            if callable(prepare_stale_todo_cleanup):
-                await prepare_stale_todo_cleanup(request)
+                prepare_stale_todo_cleanup = getattr(
+                    adapter, "prepare_stale_todo_cleanup_for_new_request", None
+                )
+                if callable(prepare_stale_todo_cleanup):
+                    await prepare_stale_todo_cleanup(request)
 
             inputs, memory_mode, raw_query = self._build_inputs(request)
             logger.info(
@@ -1672,7 +1681,6 @@ class JiuWenClaw:
                     # Team模式后续请求：直接异步执行，不排队。Team 模式支持并发，不需要排队。
                     asyncio.create_task(run_stream_task())
                 else:
-                    permission_key = _permission_response_key(request)
                     if permission_key is not None:
                         accepted = await self._session_manager.submit_task_once(
                             session_id,
