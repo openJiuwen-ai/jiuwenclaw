@@ -6757,14 +6757,55 @@ class JiuWenClawDeepAdapter:
             )
         return result
 
+    @staticmethod
+    def _format_allowed_skill_dirs(skill_dirs: list[Path], *, limit: int = 5) -> str:
+        """Format registered skill dirs for error messages (truncate when long)."""
+        rendered = [str(d) for d in skill_dirs]
+        if len(rendered) <= limit:
+            return " | ".join(rendered)
+        head = " | ".join(rendered[:limit])
+        return f"{head} | ...(+{len(rendered) - limit})"
+
+    @staticmethod
+    def _infer_skill_project_hint_dir(resolved: Path) -> Path | None:
+        """Infer the project root the user should switch to for rebuild allowlist.
+
+        Prefers ``<project>/.office-claw/skills/...`` → ``<project>``, then
+        ``<project>/office-claw-skills/...`` → ``<project>``. Falls back to the
+        parent of the skill directory (``SKILL.md``'s grandparent).
+        """
+        for parent in resolved.parents:
+            if parent.name == "skills" and parent.parent.name == ".office-claw":
+                return parent.parent.parent
+            if parent.name == "office-claw-skills":
+                return parent.parent
+        if resolved.name == "SKILL.md" and resolved.parent.parent != resolved.parent:
+            return resolved.parent.parent
+        if resolved.parent != resolved:
+            return resolved.parent
+        return None
+
     def _validate_rebuild_skill_path(self, skill_path: str) -> str:
         """Ensure RPC skill_path resolves under a registered skills directory."""
         resolved = Path(skill_path).expanduser().resolve()
         skill_dirs = [Path(d).expanduser().resolve() for d in self._registered_skill_dirs_for_rail()]
         if not skill_dirs:
-            raise ValueError(f"skill_path not in allowed directories: {skill_path}")
+            raise ValueError(
+                "技能路径不在允许目录内（未注册任何技能目录）。"
+                "请先在技能所在工程的会话中与 agent 对话一轮后再采纳。"
+                f"skill_path={skill_path}"
+            )
         if not any(resolved == d or resolved.is_relative_to(d) for d in skill_dirs):
-            raise ValueError(f"skill_path not in allowed directories: {skill_path}")
+            hint_dir = self._infer_skill_project_hint_dir(resolved)
+            if hint_dir is not None:
+                tip = f"请切换到工程目录「{hint_dir}」下的会话，与 agent 对话一轮后再采纳。"
+            else:
+                tip = "请切换到包含该技能路径的工程会话后再采纳。"
+            allowed = self._format_allowed_skill_dirs(skill_dirs)
+            raise ValueError(
+                f"技能路径不在允许目录内。{tip}"
+                f"skill_path={skill_path}；allowed={allowed}"
+            )
         return str(resolved)
 
     async def handle_skills_evolution_rebuild(self, params: dict) -> dict[str, Any]:
