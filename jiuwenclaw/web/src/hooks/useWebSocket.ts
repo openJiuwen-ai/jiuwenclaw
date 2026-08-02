@@ -362,6 +362,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const params: Record<string, unknown> = {
           session_id: sessionId,
           intent,
+          // Must match the cancelled chat.send mode bucket in AgentManager.
+          mode: useSessionStore.getState().mode,
         };
         if (intent === 'supplement') {
           params.new_input = newInput ?? '';
@@ -605,7 +607,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentMode = useSessionStore.getState().mode;
         const content = normalizeFinalContent(event.payload);
         
-        // team 模式下，将 chat.final 作为 team_leader 消息处理
+        // In team mode, handle chat.final as a team_leader message.
         if (currentMode === 'team' && content) {
           setThinking(false);
           
@@ -1031,6 +1033,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           setProcessing(false);
           setThinking(false);
           activeRequestIdRef.current = null;
+          // Pause aborts member LLM streams promptly, but pending tool rows
+          // never receive chat.tool_result — clear their spinners here.
+          useChatStore.getState().markInterruptedExecutions();
+          for (const member of useSessionStore.getState().teamMembers) {
+            const status = `${member.status || ''}`.toLowerCase();
+            if (
+              status.includes('running') ||
+              status.includes('busy') ||
+              status.includes('working') ||
+              status.includes('execut')
+            ) {
+              useSessionStore.getState().updateTeamMemberStatus(member.member_id, 'paused');
+            }
+          }
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             setPaused(false);
@@ -1040,6 +1056,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           setProcessing(false);
           setThinking(false);
           activeRequestIdRef.current = null;
+          useChatStore.getState().markInterruptedExecutions();
         } else if (resultPayload.intent === 'supplement') {
           setPaused(false);
         }

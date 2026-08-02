@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Any, Optional
 from ruamel.yaml import YAML
@@ -475,10 +476,86 @@ def normalize_permissions_tool_level(raw: Any) -> str | None:
     return None
 
 
+def _resolve_ui_language() -> str:
+    """Resolve the translator language from jiuwenclaw's global config.
+
+    ``preferred_language`` is stored as ``zh``/``en`` (this branch's convention),
+    while the upstream ``openjiuwen`` translator expects ``cn``/``en``. Map
+    ``zh``-family values to ``cn`` and default to ``cn``, mirroring the existing
+    mapping in ``agentserver/swarm/config_specs.py``.
+    """
+    cfg = get_config() or {}
+    lang = str(cfg.get("preferred_language", "zh") or "zh").strip().lower()
+    if lang in ("en", "english"):
+        return "en"
+    return "cn"
+
+
+@cache
+def _get_team_tool_translator(lang: str | None = None) -> Any:
+    """Lazily build the agent-team tool description translator (cached).
+
+    Config-only agent-team tools (``build_team``, ``spawn_teammate``, ...) are
+    registered to ``ability_manager`` only after ``build_team`` completes, so
+    they are absent from the runtime catalog until then. Their descriptions
+    are sourced from the upstream ``openjiuwen.agent_teams.tools.locales``
+    translator so they stay in sync with upstream changes without a
+    hand-maintained static mapping. Returns ``None`` when the upstream package
+    is unavailable (e.g. a jiuwenclaw runtime without agent-team support).
+
+    ``lang`` is the translator language (``cn``/``en``); when omitted it is
+    resolved from the global ``preferred_language`` config so the tool list
+    stays consistent with the runtime's language. A future request-level
+    language can be threaded through by passing ``lang`` explicitly.
+    """
+    try:
+        from openjiuwen.agent_teams.tools.locales import make_translator
+
+        return make_translator(lang or _resolve_ui_language())
+    except Exception:
+        return None
+
+
+def _resolve_config_only_tool_description(tool_name: str) -> str:
+    """Resolve description for a config-only tool absent from the runtime catalog.
+
+    Agent-team tools resolve via the upstream translator; tools whose
+    descriptions live elsewhere (e.g. ``office_claw_*`` MCP tools described by
+    the relay-claw MCP server) return an empty string so the UI can show a
+    placeholder.
+    """
+    translator = _get_team_tool_translator(_resolve_ui_language())
+    if translator is None:
+        return ""
+    try:
+        return str(translator(tool_name)) or ""
+    except (FileNotFoundError, KeyError):
+        return ""
+    except Exception:
+        return ""
+
+
 def build_permissions_tools_list_view(
     catalog_by_name: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Build permissions UI list: runtime catalog tools with explicit/default levels."""
+    """Build permissions UI list merging runtime catalog and config-only tools.
+
+    Tools are drawn from two sources, merged by name:
+
+    1. ``catalog_by_name`` — tools currently registered in the runtime
+       ``ability_manager`` (``registered=True``).
+    2. ``permissions.tools`` config keys absent from the runtime catalog
+       (``registered=False``). These are tools configured in advance but not
+       yet registered — e.g. agent-team tools only registered after
+       ``build_team`` completes. Surfacing them lets users pre-configure
+       approval levels before the tool is ever invoked; the level takes effect
+       once the tool registers and is called, because ``PermissionEngine``
+       reads ``config.tools[name]`` independent of registration state.
+
+    Descriptions for config-only agent-team tools are resolved via the
+    ``openjiuwen.agent_teams.tools.locales`` translator so they stay in sync
+    with upstream tool definitions without a hand-maintained mapping.
+    """
     from jiuwenclaw.agentserver.tool_catalog import ui_list_short_description
 
     catalog = dict(catalog_by_name or {})
@@ -487,8 +564,12 @@ def build_permissions_tools_list_view(
         explicit = {}
     default_level = get_permissions_defaults_level()
 
+    seen: set[str] = set()
     tools_out: list[dict[str, Any]] = []
+
+    # 1. 已注册工具（runtime catalog）：registered=True
     for name in sorted(catalog.keys()):
+        seen.add(name)
         entry = catalog.get(name, {})
         raw_explicit = explicit.get(name)
         if raw_explicit is not None:
@@ -510,6 +591,33 @@ def build_permissions_tools_list_view(
                 "short_description": short,
                 "level": level,
                 "configured": configured,
+                "registered": True,
+            }
+        )
+
+    # 2. config 独有键（permissions.tools 里配过、但不在 runtime catalog）：
+    #    典型场景是 agent-team 工具——只在 build_team 成功后才注册到
+    #    ability_manager。提前暴露它们让用户可预配审批档位；档位在该工具
+    #    注册并被调用时即生效（PermissionEngine 读 config.tools[name]，
+    #    与注册状态无关）。
+    for name in sorted(explicit.keys()):
+        if name in seen:
+            continue
+        raw_explicit = explicit.get(name)
+        level = normalize_permissions_tool_level(raw_explicit) or default_level
+        description = _resolve_config_only_tool_description(name)
+        short = ui_list_short_description(
+            name,
+            description=description,
+            short_description="",
+        )
+        tools_out.append(
+            {
+                "name": name,
+                "short_description": short,
+                "level": level,
+                "configured": True,
+                "registered": False,
             }
         )
 
@@ -1519,3 +1627,441 @@ def _sandbox_yaml_to_env_overlay(sandbox: Any) -> dict[str, str]:
             if text:
                 out[env_key] = text
     return out
+
+
+# ---- Relay / front team config sync helpers ----
+def _require_dict(value: Any, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object")
+    return value
+
+
+def _require_non_empty_string(value: Any, field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_name} must be non-empty")
+    return text
+
+
+def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, Any]:
+    model_client_config: dict[str, Any] = {}
+    model_request_config: dict[str, Any] = {}
+
+    # 从 models.defaults 列表中按 #index 查找完整配置
+    model_value = model_raw.get("model")
+    if model_value and isinstance(model_value, str) and "#" in model_value:
+        sep = model_value.rfind("#")
+        model_name_part = model_value[:sep]
+        index_part = model_value[sep + 1:]
+        try:
+            target_index = int(index_part)
+        except ValueError:
+            target_index = None
+        if target_index is not None:
+            defaults_list = get_config_raw().get("models", {}).get("defaults")
+            if isinstance(defaults_list, list) and 0 <= target_index < len(defaults_list):
+                entry = defaults_list[target_index]
+                if isinstance(entry, dict):
+                    mcc = entry.get("model_client_config")
+                    if isinstance(mcc, dict):
+                        model_client_config.update({
+                            k: v for k, v in mcc.items()
+                            if k not in ("model_name",) and v is not None
+                        })
+                        model_request_config["model"] = resolve_env_vars(str(mcc.get("model_name", model_name_part)))
+                    mco = entry.get("model_config_obj")
+                    if isinstance(mco, dict):
+                        model_request_config.update(mco)
+
+    # 前端字段覆盖（优先级高于 #index 解析）
+    if "provider" in model_raw and model_raw["provider"] is not None:
+        model_client_config["client_provider"] = model_raw["provider"]
+    if "api_base" in model_raw and model_raw["api_base"] is not None:
+        model_client_config["api_base"] = model_raw["api_base"]
+    if "api_key" in model_raw and model_raw["api_key"] is not None:
+        model_client_config["api_key"] = model_raw["api_key"]
+    if "model" in model_raw and model_raw["model"] is not None:
+        # 若包含 #index，提取纯 model_name
+        raw_model = model_raw["model"]
+        if isinstance(raw_model, str) and "#" in raw_model:
+            model_request_config["model"] = raw_model[:raw_model.rfind("#")]
+        else:
+            model_request_config["model"] = raw_model
+
+    transformed: dict[str, Any] = {}
+    if model_client_config:
+        model_client_config.setdefault("timeout", 1800)
+        model_client_config.setdefault("verify_ssl", False)
+        model_client_config.setdefault("custom_headers", {})
+        transformed["model_client_config"] = model_client_config
+    if model_request_config:
+        transformed["model_request_config"] = model_request_config
+    return transformed
+
+
+def _transform_front_team_agent_spec(agent_key: str, agent_raw: Any) -> dict[str, Any]:
+    agent_config = _require_dict(agent_raw, f"agents.{agent_key}")
+    transformed: dict[str, Any] = {}
+
+    if "model" in agent_config:
+        model_raw = _require_dict(agent_config.get("model"), f"agents.{agent_key}.model")
+        transformed_model = _transform_front_team_model_config(model_raw)
+        if transformed_model:
+            transformed["model"] = transformed_model
+
+    for field_name in ("skills", "workspace", "max_iterations", "completion_timeout"):
+        if field_name in agent_config:
+            transformed[field_name] = copy.deepcopy(agent_config[field_name])
+
+    return transformed
+
+
+def _resolve_front_team_agent_spec(
+    agents_raw: dict[str, Any],
+    agent_key: Any,
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    resolved_key = _require_non_empty_string(agent_key, field_name)
+    if resolved_key not in agents_raw:
+        raise ValueError(f"{field_name} references unknown agent_key: {resolved_key}")
+    return _transform_front_team_agent_spec(resolved_key, agents_raw[resolved_key])
+
+
+def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
+    agents_raw = _require_dict(front_payload.get("agents"), "agents")
+    teams_raw = front_payload.get("team")
+    if teams_raw is None:
+        return {}
+    if not isinstance(teams_raw, list):
+        raise ValueError("team must be an array")
+
+    team_mapping: dict[str, Any] = {}
+    seen_team_names: set[str] = set()
+
+    for team_index, team_item in enumerate(teams_raw):
+        team_raw = _require_dict(team_item, f"team[{team_index}]")
+        team_name = _require_non_empty_string(team_raw.get("team_name"), f"team[{team_index}].team_name")
+        if team_name in seen_team_names:
+            raise ValueError(f"duplicate team_name: {team_name}")
+        seen_team_names.add(team_name)
+
+        transformed_team: dict[str, Any] = {}
+        for key, value in team_raw.items():
+            if key in {"leader", "teammate", "predefined_members"}:
+                continue
+            transformed_team[key] = value
+        transformed_team["team_name"] = team_name
+        transformed_team.setdefault("enable_swarmflow", False)
+
+        leader_raw = _require_dict(team_raw.get("leader"), f"team[{team_index}].leader")
+        transformed_team["leader"] = {
+            key: leader_raw[key]
+            for key in ("member_name", "display_name", "persona")
+            if key in leader_raw
+        }
+        transformed_team["leader"]["agent_key"] = leader_raw.get("agent_key", "")
+        leader_name = _require_non_empty_string(
+            leader_raw.get("member_name"),
+            f"team[{team_index}].leader.member_name",
+        )
+        transformed_team["leader"]["member_name"] = leader_name
+        leader_agent_spec = _resolve_front_team_agent_spec(
+            agents_raw,
+            leader_raw.get("agent_key"),
+            field_name=f"team[{team_index}].leader.agent_key",
+        )
+
+        teammate_raw = team_raw.get("teammate")
+        teammate_agent_spec: dict[str, Any] | None = None
+        if teammate_raw is not None:
+            teammate_raw = _require_dict(teammate_raw, f"team[{team_index}].teammate")
+            teammate_agent_spec = _resolve_front_team_agent_spec(
+                agents_raw,
+                teammate_raw.get("agent_key"),
+                field_name=f"team[{team_index}].teammate.agent_key",
+            )
+            transformed_team["teammate"] = {"agent_key": teammate_raw.get("agent_key", "")}
+
+        predefined_members_raw = team_raw.get("predefined_members", [])
+        if predefined_members_raw is None:
+            predefined_members_raw = []
+        if not isinstance(predefined_members_raw, list):
+            raise ValueError(f"team[{team_index}].predefined_members must be an array")
+
+        transformed_members: list[dict[str, Any]] = []
+        transformed_agents: dict[str, Any] = {"leader": leader_agent_spec}
+        seen_member_names: set[str] = {leader_name}
+
+        for member_index, member_item in enumerate(predefined_members_raw):
+            member = _require_dict(
+                member_item,
+                f"team[{team_index}].predefined_members[{member_index}]",
+            )
+            member_name = _require_non_empty_string(
+                member.get("member_name"),
+                f"team[{team_index}].predefined_members[{member_index}].member_name",
+            )
+            if member_name in seen_member_names:
+                raise ValueError(
+                    f"duplicate member_name in team[{team_index}]: {member_name}"
+                )
+            seen_member_names.add(member_name)
+            transformed_member = {
+                key: member[key]
+                for key in ("member_name", "display_name", "role_type", "persona", "prompt_hint", "agent_key")
+                if key in member
+            }
+            transformed_member["member_name"] = member_name
+            transformed_members.append(transformed_member)
+
+            member_agent_spec = _resolve_front_team_agent_spec(
+                agents_raw,
+                member.get("agent_key"),
+                field_name=f"team[{team_index}].predefined_members[{member_index}].agent_key",
+            )
+            transformed_agents[member_name] = member_agent_spec
+
+        if transformed_members:
+            transformed_team["predefined_members"] = transformed_members
+
+        if teammate_agent_spec is not None:
+            transformed_agents["teammate"] = copy.deepcopy(teammate_agent_spec)
+
+        transformed_team["agents"] = transformed_agents
+        team_mapping[team_name] = transformed_team
+
+    return team_mapping
+
+
+def _build_front_agent_registry(front_payload: dict[str, Any]) -> dict[str, Any]:
+    agents_raw = _require_dict(front_payload.get("agents"), "agents")
+    registry: dict[str, Any] = {}
+    for agent_key, agent_raw in agents_raw.items():
+        resolved_key = _require_non_empty_string(agent_key, f"agents.{agent_key}")
+        registry[resolved_key] = _transform_front_team_agent_spec(resolved_key, agent_raw)
+    return registry
+
+
+def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
+    """Replace ``modes.team`` using the frontend team-editor payload.
+
+    If team array is empty, delete ``modes.team`` from config.
+    """
+    if not isinstance(front_payload, dict):
+        raise ValueError("payload must be an object")
+
+    teams_raw = front_payload.get("team")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+
+    panel_cfg_modified = False
+    agent_registry = None
+    if "agents" in front_payload:
+        agent_registry = _build_front_agent_registry(front_payload)
+        panel_cfg = data.get("web_config_panel")
+        if not isinstance(panel_cfg, dict):
+            panel_cfg = {}
+            data["web_config_panel"] = panel_cfg
+        if agent_registry:
+            panel_cfg["agent_team_agents"] = agent_registry
+        else:
+            panel_cfg.pop("agent_team_agents", None)
+        panel_cfg_modified = True
+
+    # 空数组：删除 modes.team 配置项
+    if isinstance(teams_raw, list) and not teams_raw:
+        if "modes" in data and isinstance(data["modes"], dict) and "team" in data["modes"]:
+            del data["modes"]["team"]
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
+        return
+
+    # 非空数组：正常构建并保存
+    team_mapping = _build_modes_team_mapping(front_payload)
+
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    # Merge web_config_panel back into reloaded data (it was written earlier in this function)
+    if panel_cfg_modified:
+        if "web_config_panel" not in data or not isinstance(data.get("web_config_panel"), dict):
+            data["web_config_panel"] = {}
+        if agent_registry:
+            data["web_config_panel"]["agent_team_agents"] = agent_registry
+        else:
+            data.get("web_config_panel", {}).pop("agent_team_agents", None)
+    if "modes" not in data or not isinstance(data["modes"], dict):
+        data["modes"] = {}
+    data["modes"]["team"] = team_mapping
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+
+
+def _ensure_config_object(parent: dict[str, Any], key: str, path: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if value is None:
+        value = {}
+        parent[key] = value
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} config must be an object")
+    return value
+
+
+def update_swarmflow_enabled_in_config(enabled: bool) -> None:
+    """Update ``modes.team.jiuwen_team.enable_swarmflow`` in config.yaml."""
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    current = data
+    path_so_far: list[str] = []
+    for segment in SWARMFLOW_ENABLED_CONFIG_PATH[:-1]:
+        path_so_far.append(segment)
+        current = _ensure_config_object(current, segment, ".".join(path_so_far))
+    current[SWARMFLOW_ENABLED_CONFIG_PATH[-1]] = bool(enabled)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+
+
+def get_mcp_servers() -> list[dict[str, Any]]:
+    """读取 config.yaml 中的 mcp.servers（原始结构，不解析环境变量）。"""
+    data = get_config_raw()
+    mcp_cfg = data.get("mcp", {})
+    if not isinstance(mcp_cfg, dict):
+        return []
+    servers = mcp_cfg.get("servers", [])
+    if not isinstance(servers, list):
+        return []
+    return [item for item in servers if isinstance(item, dict)]
+
+
+def upsert_mcp_server_in_config(server: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """新增或更新 mcp.servers 条目，返回（条目, 是否创建）。"""
+    name = str(server.get("name", "")).strip()
+    if not name:
+        raise ValueError("MCP server name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "mcp" not in data or not isinstance(data["mcp"], dict):
+        data["mcp"] = {}
+    mcp_cfg = data["mcp"]
+    servers = mcp_cfg.get("servers")
+    if not isinstance(servers, list):
+        servers = []
+        mcp_cfg["servers"] = servers
+
+    created = True
+    for idx, item in enumerate(servers):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name", "")).strip() != name:
+            continue
+        servers[idx] = server
+        created = False
+        break
+    else:
+        servers.append(server)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+    return server, created
+
+
+def set_mcp_server_enabled_in_config(name: str, enabled: bool) -> dict[str, Any]:
+    """切换 mcp.servers 指定 name 的 enabled 状态并返回更新后的条目。"""
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "mcp" not in data or not isinstance(data["mcp"], dict):
+        raise KeyError(f"MCP server '{target}' not found")
+    servers = data["mcp"].get("servers", [])
+    if not isinstance(servers, list):
+        raise KeyError(f"MCP server '{target}' not found")
+    for item in servers:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name", "")).strip() != target:
+            continue
+        item["enabled"] = bool(enabled)
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
+        return dict(item)
+    raise KeyError(f"MCP server '{target}' not found")
+
+
+def get_mcp_server_config(name: str) -> dict[str, Any] | None:
+    """按名称读取单个 mcp server 配置（原始结构）。"""
+    target = str(name or "").strip()
+    if not target:
+        return None
+    for item in get_mcp_servers():
+        if str(item.get("name", "")).strip() == target:
+            return item
+    return None
+
+
+def remove_mcp_server_in_config(name: str) -> dict[str, Any]:
+    """删除指定 mcp server 配置并返回被删除的条目。"""
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    mcp_cfg = data.get("mcp")
+    if not isinstance(mcp_cfg, dict):
+        raise KeyError(f"MCP server '{target}' not found")
+    servers = mcp_cfg.get("servers", [])
+    if not isinstance(servers, list):
+        raise KeyError(f"MCP server '{target}' not found")
+    for idx, item in enumerate(servers):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name", "")).strip() != target:
+            continue
+        removed = dict(item)
+        del servers[idx]
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
+        return removed
+    raise KeyError(f"MCP server '{target}' not found")
+
+
+# ---------------------------------------------------------------------------
+# react.subagents 段操作
+# ---------------------------------------------------------------------------
+
+
+def upsert_subagent_in_config(name: str, enabled: bool = True) -> None:
+    """在 react.subagents.<name> 中添加或更新 agent 启用状态。
+
+    自动创建不存在的 react / subagents 段。
+    保留已有的其他 subagent 配置键（如 max_iterations 等）。
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("subagent name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "react" not in data or not isinstance(data["react"], dict):
+        data["react"] = {}
+    react = data["react"]
+    if "subagents" not in react or not isinstance(react["subagents"], dict):
+        react["subagents"] = {}
+    subagents = react["subagents"]
+    if target not in subagents or not isinstance(subagents[target], dict):
+        subagents[target] = {}
+    subagents[target]["enabled"] = bool(enabled)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+
+
+def remove_subagent_from_config(name: str) -> bool:
+    """从 react.subagents.<name> 中删除 agent 条目。
+
+    Returns:
+        True: 找到并删除
+        False: 条目不存在
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("subagent name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    react = data.get("react")
+    if not isinstance(react, dict):
+        return False
+    subagents = react.get("subagents")
+    if not isinstance(subagents, dict):
+        return False
+    if target not in subagents:
+        return False
+    del subagents[target]
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+    return True
+
+
+

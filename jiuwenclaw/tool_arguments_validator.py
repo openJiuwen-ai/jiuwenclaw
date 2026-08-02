@@ -110,13 +110,15 @@ def validate_tool_arguments(
 
     text = arguments.strip()
     if not text:
+        # Models often emit empty tool arguments for no-required-arg tools
+        # (e.g. view_task → list board). Treat "" / whitespace as {}.
         return ToolArgumentsValidation(
-            ok=False,
+            ok=True,
             normalized="{}",
-            reason="为空字符串，不是可执行的 JSON object",
-            kind="invalid_json",
+            reason="空参数，按空 JSON object 执行",
+            kind="empty_object",
             finish_reason=normalized_finish_reason,
-            length=len(arguments),
+            length=len(arguments) if isinstance(arguments, str) else 0,
         )
 
     try:

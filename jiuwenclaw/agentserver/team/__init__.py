@@ -13,6 +13,7 @@ from __future__ import annotations
 from jiuwenclaw.agentserver.team.config_loader import load_team_spec_dict
 from jiuwenclaw.agentserver.team.team_manager import (
     cancel_all_team_stream_tasks_across_managers,
+    pause_all_team_session_runtimes_across_managers,
     TeamManager,
     find_team_skill_rail_across_managers,
     get_all_team_managers,
@@ -28,6 +29,7 @@ __all__ = [
     "load_team_spec_dict",
     "TeamManager",
     "cancel_all_team_stream_tasks_across_managers",
+    "pause_all_team_session_runtimes_across_managers",
     "find_team_skill_rail_across_managers",
     "get_all_team_managers",
     "get_team_manager",

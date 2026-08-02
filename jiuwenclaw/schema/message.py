@@ -45,6 +45,8 @@ class ReqMethod(Enum):
     AGENT_RELOAD_CONFIG = "agent.reload_config"
     SYNC_AGENTS_CONFIGS = "sync_agents_configs"
 
+    TEAM_CATALOG_LIST = "team.catalog.list"
+
     MEMORY_COMPUTE = "memory.compute"
 
     FILES_LIST = "files.list"

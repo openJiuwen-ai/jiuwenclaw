@@ -39,7 +39,9 @@ def _derive_teammate_endpoint(config_base: dict[str, Any], explicit_endpoint: An
     if endpoint:
         return endpoint
 
-    team_cfg = config_base.get("team", {}) if isinstance(config_base, dict) else {}
+    from jiuwenclaw.agentserver.team.config_loader import resolve_team_section
+
+    team_cfg = resolve_team_section(config_base) if isinstance(config_base, dict) else {}
     if not isinstance(team_cfg, dict):
         return None
     transport_cfg = team_cfg.get("transport", {}) if isinstance(team_cfg.get("transport"), dict) else {}
@@ -98,7 +100,9 @@ def build_teammate_agent_card(member_name: str) -> dict[str, Any]:
 
 def resolve_a2x_config(config_base: dict[str, Any]) -> dict[str, Any]:
     """Resolve ``react.a2x_registry`` with safe defaults."""
-    team_cfg = config_base.get("team", {}) if isinstance(config_base, dict) else {}
+    from jiuwenclaw.agentserver.team.config_loader import resolve_team_section
+
+    team_cfg = resolve_team_section(config_base) if isinstance(config_base, dict) else {}
     runtime_cfg = team_cfg.get("runtime", {}) if isinstance(team_cfg.get("runtime"), dict) else {}
     runtime_mode = str(runtime_cfg.get("mode", "")).strip().lower()
     react_cfg = config_base.get("react", {}) if isinstance(config_base, dict) else {}

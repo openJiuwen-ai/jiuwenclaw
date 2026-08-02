@@ -77,7 +77,9 @@ def remote_member_names(config_base: dict[str, Any] | None = None) -> set[str]:
         from jiuwenswarm.common.config import get_config as _get_config
 
         config_base = _get_config()
-    team = config_base.get("team") if isinstance(config_base.get("team"), dict) else {}
+    from jiuwenclaw.agentserver.team.config_loader import resolve_team_section
+
+    team = resolve_team_section(config_base)
     meta = team.get("metadata") if isinstance(team.get("metadata"), dict) else {}
     raw = meta.get(_METADATA_REMOTE_NAMES_KEY)
     if raw is None:
@@ -95,7 +97,9 @@ def remote_all_spawn_members(config_base: dict[str, Any] | None = None) -> bool:
         from jiuwenswarm.common.config import get_config as _get_config
 
         config_base = _get_config()
-    team = config_base.get("team") if isinstance(config_base.get("team"), dict) else {}
+    from jiuwenclaw.agentserver.team.config_loader import resolve_team_section
+
+    team = resolve_team_section(config_base)
     runtime = team.get("runtime") if isinstance(team.get("runtime"), dict) else {}
     runtime_mode = str(runtime.get("mode", "")).strip().lower()
     if runtime_mode == "distributed":
@@ -108,7 +112,9 @@ def remote_all_spawn_members(config_base: dict[str, Any] | None = None) -> bool:
 
 
 def _is_distributed_leader_runtime(config_base: dict[str, Any]) -> bool:
-    team = config_base.get("team") if isinstance(config_base.get("team"), dict) else {}
+    from jiuwenclaw.agentserver.team.config_loader import resolve_team_section
+
+    team = resolve_team_section(config_base)
     runtime = team.get("runtime") if isinstance(team.get("runtime"), dict) else {}
     mode = str(runtime.get("mode", "")).strip().lower()
     role = str(runtime.get("role", "")).strip().lower()
@@ -200,7 +206,9 @@ def _transport_params_from_config(config_base: dict[str, Any] | None = None) -> 
         from jiuwenswarm.common.config import get_config as _get_config
 
         config_base = _get_config()
-    team = config_base.get("team") if isinstance(config_base.get("team"), dict) else {}
+    from jiuwenclaw.agentserver.team.config_loader import resolve_team_section
+
+    team = resolve_team_section(config_base)
     transport = team.get("transport") if isinstance(team.get("transport"), dict) else {}
     params = transport.get("params") if isinstance(transport.get("params"), dict) else {}
     return params if isinstance(params, dict) else {}
@@ -2081,7 +2089,9 @@ def attach_remote_bootstrap_ack_listener(
 
 
 def _is_distributed_teammate_runtime(config_base: dict[str, Any]) -> bool:
-    team = config_base.get("team") if isinstance(config_base.get("team"), dict) else {}
+    from jiuwenclaw.agentserver.team.config_loader import resolve_team_section
+
+    team = resolve_team_section(config_base)
     runtime = team.get("runtime") if isinstance(team.get("runtime"), dict) else {}
     mode = str(runtime.get("mode", "")).strip().lower()
     role = str(runtime.get("role", "")).strip().lower()
@@ -2185,9 +2195,9 @@ def _cleanup_auxiliary_leader_workspace(team_name: str, leader_member_name: str)
     if not team or not leader:
         return
     try:
-        from openjiuwen.agent_teams.paths import team_home
+        from openjiuwen.agent_teams.workspace_layout import team_member_workspace_path
 
-        helper_workspace = team_home(team) / "workspaces" / f"{leader}_workspace"
+        helper_workspace = team_member_workspace_path(team, leader)
         if not helper_workspace.exists():
             return
         shutil.rmtree(helper_workspace)
@@ -2878,7 +2888,9 @@ async def run_teammate_bootstrap_daemon(*, stop_event: asyncio.Event, poll_inter
     config = _get_config()
     if not _is_distributed_teammate_runtime(config):
         return
-    team_cfg = config.get("team") if isinstance(config.get("team"), dict) else {}
+    from jiuwenclaw.agentserver.team.config_loader import resolve_team_section
+
+    team_cfg = resolve_team_section(config)
     transport_cfg = team_cfg.get("transport") if isinstance(team_cfg.get("transport"), dict) else {}
     transport_params = transport_cfg.get("params") if isinstance(transport_cfg.get("params"), dict) else {}
 

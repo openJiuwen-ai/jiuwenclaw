@@ -21,6 +21,7 @@ from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
     TeamWorkspaceInfo,
     build_member_rails,
     build_team_permission_rails,
+    get_default_model_name,
 )
 from jiuwenclaw.config import get_config
 
@@ -53,10 +54,17 @@ def _build_platform_member_rails(
     messager = get_messager(context)
     permissions_override = get_permissions_override(context)
 
-    member_info = MemberInfo(agent_name=member_name, role=role)
+    member_info = MemberInfo(
+        agent_name=member_name,
+        role=role,
+        model_name=get_default_model_name(config),
+    )
     runtime = RuntimeInfo(channel=channel, language=language)
     team_workspace = TeamWorkspaceInfo(
         root_dir=context.team_ws_root,
+        skills_dir=context.team_skills_dir,
+        leader_skills_dir=context.leader_skills_dir,
+        global_skills_dir=context.global_skills_dir,
         team_id=context.team_id or None,
         config=config,
     )

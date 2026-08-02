@@ -1409,9 +1409,6 @@ class JiuWenClawDeepAdapter:
         self._context_engine_config_fp: str | None = None
         self._working_checker: Callable[[], bool] | None = None
         self._last_runtime_mode: str = "agent.plan"
-        self._chat_env_overlay_token: Token | None = None
-        self._chat_env_ns_token: Token | None = None
-        self._chat_browser_runtime_pin: Any | None = None
         set_skill_credential_provider(
             lambda: (
                 self._skill_credential_injection_rail.get_skill_envs()
@@ -1608,15 +1605,12 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     def _browser_runtime_enabled() -> bool:
-        """Whether browser runtime support is enabled for DeepAgent subagent wiring."""
-        # value = str(
-        #     os.getenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED")
-        #     or os.getenv("BROWSER_RUNTIME_MCP_ENABLED")
-        #     or ""
-        # ).strip().lower()
-        # return value in {"1", "true", "yes", "on"}
+        """Whether browser runtime support is enabled for DeepAgent subagent wiring.
 
-        # close browser subagent
+        Always False — plan/chat keep browser subagent closed. Team mode manages
+        browser runtime independently via swarm subagent config.
+        """
+        # close browser subagent for plan/chat (pre-team behavior)
         return False
 
     @staticmethod
@@ -4336,7 +4330,17 @@ class JiuWenClawDeepAdapter:
                     )
             return result
 
-    async def _on_chat_request_start(self) -> tuple[Token | None, Token | None, Token | None]:
+    async def _on_chat_request_start(
+        self,
+    ) -> tuple[Token | None, Token | None, Token | None, Token | None, Any | None]:
+        """Bind request-scoped ContextVars and return tokens for paired reset.
+
+        Returns:
+            ``(overlay_token, fp_token, skill_dirs_token, ns_token, browser_pin)``.
+            All tokens/pins must be passed back to ``_on_chat_request_end`` on the
+            same request — never stored on the shared adapter instance (team
+            follow-ups use ``asyncio.create_task`` with a copied Context).
+        """
         await self._maybe_apply_pending_reload()
         if not self._registered_skill_dirs:
             self._sync_registered_skill_dirs_snapshot()
@@ -4353,52 +4357,47 @@ class JiuWenClawDeepAdapter:
         fp_token: Token | None = None
         if self._memory_cache_fingerprint:
             fp_token = bind_memory_cache_fingerprint(self._memory_cache_fingerprint)
-        # Pack ns_token into env_token path via attribute? Return 4-tuple would break callers.
-        # Store ns token on instance for end().
-        self._chat_env_ns_token = ns_token
         # Pin browser runtime generation after tip/ns bind so this request keeps
         # the credential generation captured at start across mid-request reloads.
+        browser_pin: Any | None = None
         try:
             from jiuwenclaw.agentserver.tools.browser_tools import (
                 pin_browser_runtime_generation,
             )
 
-            self._chat_browser_runtime_pin = pin_browser_runtime_generation(
+            browser_pin = pin_browser_runtime_generation(
                 service_id=sid,
                 agent_id=aid,
             )
         except Exception:
-            self._chat_browser_runtime_pin = None
             logger.exception(
                 "[JiuWenClawDeepAdapter] pin browser runtime generation failed"
             )
-        return env_token, fp_token, skill_dirs_token
+        return env_token, fp_token, skill_dirs_token, ns_token, browser_pin
 
     async def _on_chat_request_end(
             self,
             overlay_token: Token | None,
             fp_token: Token | None = None,
             skill_dirs_token: Token | None = None,
+            ns_token: Token | None = None,
+            browser_pin: Any | None = None,
     ) -> None:
         if overlay_token is not None:
             reset_task_env_overlay(overlay_token)
-        ns_token = getattr(self, "_chat_env_ns_token", None)
         if ns_token is not None:
             reset_agent_env_ns(ns_token)
-            self._chat_env_ns_token = None
-        pin = getattr(self, "_chat_browser_runtime_pin", None)
-        if pin is not None:
+        if browser_pin is not None:
             try:
                 from jiuwenclaw.agentserver.tools.browser_tools import (
                     reset_browser_runtime_generation,
                 )
 
-                reset_browser_runtime_generation(pin)
+                reset_browser_runtime_generation(browser_pin)
             except Exception:
                 logger.exception(
                     "[JiuWenClawDeepAdapter] reset browser runtime generation failed"
                 )
-            self._chat_browser_runtime_pin = None
         if fp_token is not None:
             reset_memory_cache_fingerprint(fp_token)
         if skill_dirs_token is not None:
@@ -8480,7 +8479,13 @@ class JiuWenClawDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
         self._last_runtime_mode = mode
-        chat_env_token, chat_fp_token, chat_skill_dirs_token = await self._on_chat_request_start()
+        (
+            chat_env_token,
+            chat_fp_token,
+            chat_skill_dirs_token,
+            chat_ns_token,
+            chat_browser_pin,
+        ) = await self._on_chat_request_start()
 
         if self._plain_chat_should_clear_stale_interrupt(request):
             await self._clear_session_persisted_interrupt_state(
@@ -8512,6 +8517,13 @@ class JiuWenClawDeepAdapter:
                     payload = {"content": content}
                 reset_request_id(token_request_id)
                 _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+                await self._on_chat_request_end(
+                    chat_env_token,
+                    chat_fp_token,
+                    chat_skill_dirs_token,
+                    chat_ns_token,
+                    chat_browser_pin,
+                )
                 return AgentResponse(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -8612,7 +8624,13 @@ class JiuWenClawDeepAdapter:
             if request.request_id:
                 self._untrack_session_toolkit(request.request_id)
             self._cleanup_circuit_breaker_session(session_id)
-            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
+            await self._on_chat_request_end(
+                chat_env_token,
+                chat_fp_token,
+                chat_skill_dirs_token,
+                chat_ns_token,
+                chat_browser_pin,
+            )
             finalize_perf_summary_request(request.request_id, status=perf_summary_status)
             clear_perf_summary_context()
 
@@ -8670,7 +8688,13 @@ class JiuWenClawDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
         self._last_runtime_mode = mode
-        chat_env_token, chat_fp_token, chat_skill_dirs_token = await self._on_chat_request_start()
+        (
+            chat_env_token,
+            chat_fp_token,
+            chat_skill_dirs_token,
+            chat_ns_token,
+            chat_browser_pin,
+        ) = await self._on_chat_request_start()
         raw_interactive = request.params.get("interactive_ask", request.params.get("interactiveAsk"))
         interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
@@ -8681,8 +8705,12 @@ class JiuWenClawDeepAdapter:
             getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
         )
 
-        # Team mode handling (current: mode=team only; team.plan / code.team not supported)
-        if mode == "team":
+        # Team mode entry (canonicalize agent.team -> team).
+        mode_norm = str(mode or "").strip().lower()
+        if mode_norm in {"team", "agent.team", "team.plan", "code.team"}:
+            if mode_norm == "agent.team" and isinstance(request.params, dict):
+                request.params["mode"] = "team"
+                mode = "team"
             from jiuwenclaw.agentserver.deep_agent.team_helpers import process_team_message_stream
 
             resolved_model = self._resolve_model_for_request(request)
@@ -8703,8 +8731,16 @@ class JiuWenClawDeepAdapter:
                     yield chunk
             finally:
                 reset_request_id(token_request_id)
-                _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
-                await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
+                _reset_llm_trace_tokens(
+                    token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model
+                )
+                await self._on_chat_request_end(
+                    chat_env_token,
+                    chat_fp_token,
+                    chat_skill_dirs_token,
+                    chat_ns_token,
+                    chat_browser_pin,
+                )
             return
 
         # 拦截斜杠命令
@@ -8747,6 +8783,13 @@ class JiuWenClawDeepAdapter:
                     )
                 reset_request_id(token_request_id)
                 _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+                await self._on_chat_request_end(
+                    chat_env_token,
+                    chat_fp_token,
+                    chat_skill_dirs_token,
+                    chat_ns_token,
+                    chat_browser_pin,
+                )
                 return
 
         if self._plain_chat_should_clear_stale_interrupt(request):
@@ -9378,7 +9421,13 @@ class JiuWenClawDeepAdapter:
             if rid:
                 self._untrack_session_toolkit(rid)
             self._cleanup_circuit_breaker_session(session_id)
-            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
+            await self._on_chat_request_end(
+                chat_env_token,
+                chat_fp_token,
+                chat_skill_dirs_token,
+                chat_ns_token,
+                chat_browser_pin,
+            )
             finalize_perf_summary_request(request.request_id, status=perf_summary_status)
             clear_perf_summary_context()
 

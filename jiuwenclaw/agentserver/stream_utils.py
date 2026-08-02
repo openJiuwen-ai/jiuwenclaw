@@ -13,6 +13,13 @@ logger = logging.getLogger(__name__)
 
 STREAM_SOURCE_ID_FIELD = "stream_source_id"
 
+# Team-member attribution fields propagated alongside stream_source_id so
+# downstream wire frames (chat.delta / chat.reasoning / chat.tool_*) carry the
+# producing member identity for relay routing to the member card. ``member_name``
+# is the roster key relay resolves via resolveTeamMemberExpertId; ``role`` is
+# leader/teammate.
+_TEAM_ATTR_KEYS = ("role", "member_name")
+
 
 def tool_calls_payload_to_json_list(raw: Any) -> list[Any]:
     """将流式 payload 中的 tool_calls 规范为 list（OpenJiuwen 已产出 dict，此处只做形状收敛）。"""
@@ -44,13 +51,57 @@ def _extract_stream_source_id(src_payload: Any) -> Any:
     return None
 
 
+def _extract_team_attr(src_payload: Any, key: str) -> Any:
+    """Read a team attribution field (role / member_name) from a chunk.
+
+    ``TeamOutputSchema`` exposes ``role`` / ``source_member`` as attributes
+    (source_member is the member_name). Web-adapter ``AgentResponseChunk``
+    chunks may also carry these once ``_tag_chunk`` stamps them. The parsed
+    payload itself may already carry member_name/from_member.
+    """
+    if isinstance(src_payload, dict):
+        if key in src_payload:
+            return src_payload.get(key)
+        nested = src_payload.get("payload")
+        if isinstance(nested, dict) and key in nested:
+            return nested.get(key)
+        return None
+    if key == "member_name":
+        for cand in ("member_name", "source_member"):
+            val = getattr(src_payload, cand, None)
+            if val:
+                return val
+        nested = getattr(src_payload, "payload", None)
+        if isinstance(nested, dict):
+            return nested.get("member_name") or nested.get("from_member") or nested.get("source_member")
+        return None
+    val = getattr(src_payload, key, None)
+    if val is not None:
+        return val
+    nested = getattr(src_payload, "payload", None)
+    if isinstance(nested, dict):
+        return nested.get(key)
+    return None
+
+
 def propagate_stream_source_id(src_payload: Any, result: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Preserve a source id already attached to an upstream stream payload."""
+    """Preserve a source id + team attribution already attached to an upstream stream payload.
+
+    ``stream_source_id`` is always propagated when present. ``role`` and
+    ``member_name`` (resolved from ``source_member`` on TeamOutputSchema, or
+    stamped on AgentResponseChunk by the team stream controller) are propagated
+    too so chat.delta / chat.reasoning / chat.tool_* wire frames carry the
+    producing member identity for relay routing to the member card.
+    """
     if result is None or not isinstance(result, dict):
         return result
     source_id = _extract_stream_source_id(src_payload)
     if source_id is not None:
         result.setdefault(STREAM_SOURCE_ID_FIELD, source_id)
+    for key in _TEAM_ATTR_KEYS:
+        val = _extract_team_attr(src_payload, key)
+        if val is not None and str(val).strip():
+            result.setdefault(key, val)
     return result
 
 
@@ -418,6 +469,9 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             **(payload if isinstance(payload, dict) else {}),
         }
 
+    if chunk_type == "llm_usage":
+        return None
+
     if chunk_type == "__interaction__":
         return _parse_interaction_payload(payload)
 
@@ -522,3 +576,17 @@ def _parse_response_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, 
         "event_type": "chat.delta",
         "content": str(payload) if payload else "",
     }
+
+
+def _parse_interaction_payload(payload: Any) -> dict[str, Any] | None:
+    """Convert a Core ``__interaction__`` payload into chat.ask_user_question.
+
+    Shared by team stream parsing and any caller of ``parse_stream_chunk``.
+    AskUser / StructuredAskUser interrupts become ``source=ask_user_interrupt``;
+    permission-style interrupts keep ``permission_interrupt``.
+    """
+    from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
+        convert_interactions_to_ask_user_question,
+    )
+
+    return convert_interactions_to_ask_user_question([payload])

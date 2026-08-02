@@ -19,16 +19,6 @@ try:
     from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 except ImportError:  # pragma: no cover
     HeartbeatRail = None  # type: ignore[misc, assignment]
-try:
-    from openjiuwen.harness.rails import SysOperationRail
-except ImportError:  # pragma: no cover
-    SysOperationRail = None  # type: ignore[misc, assignment]
-try:
-    from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
-except ImportError:  # pragma: no cover
-    ContextProcessorRail = None  # type: ignore[misc, assignment]
-
-from jiuwenclaw.agentserver.deep_agent.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenclaw.agentserver.deep_agent.rails.avatar_rail import AvatarPromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimePromptRail
@@ -76,6 +66,8 @@ class TeamWorkspaceInfo:
     """Team 共享 workspace 信息."""
     root_dir: str | None = None
     skills_dir: str | None = None
+    leader_skills_dir: str | None = None
+    global_skills_dir: str | None = None
     team_id: str | None = None
     config: dict[str, Any] | None = None
     trajectory_registry: Any | None = None
@@ -83,17 +75,25 @@ class TeamWorkspaceInfo:
 
 RAIL_WHITELIST = frozenset({
     "RuntimePromptRail",
+    "SkillUseRail",
     "ResponsePromptRail",
     "JiuSwarmStreamEventRail",
     "TaskPlanningRail",
     "SecurityRail",
     "HeartbeatRail",
     "AvatarPromptRail",
-    "StructuredAskUserRail",
     "FileSystemRail",
-    "SysOperationRail",
+    "AskUserQuestionToolRail",
     "TeamWorkspaceReportPathRail",
-    "ContextProcessorRail",
+    "JiuClawContextEngineeringRail",
+    "ContextOverflowRecoveryRail",
+    "JiuClawQABlockFreezeRail",
+    "JiuClawQABlockAssemblyRail",
+    "JiuClawQAArtifactRail",
+    "MemberSkillToolkitRail",
+    "TeamSkillStoragePolicyRail",
+    "TeamSharedSkillLinkRefreshRail",
+    "DisabledToolsRail",
 })
 
 TOOL_WHITELIST = frozenset({
@@ -142,6 +142,7 @@ TOOL_WHITELIST = frozenset({
     "web_paid_search",
     "skill_toolkit",
     "acp_chat",
+    "ask_user_question",
 })
 
 
@@ -170,82 +171,73 @@ def build_member_rails(
     team_ws_root = team_workspace.root_dir
     team_id = team_workspace.team_id
     config = team_workspace.config
+    model_name = member_info.model_name or get_default_model_name(config)
+    registered_skills_dir = (
+        team_workspace.leader_skills_dir
+        if role == "leader" and team_workspace.leader_skills_dir
+        else team_workspace.skills_dir
+    )
 
     rails_list = []
 
-    try:
-        rail = RuntimePromptRail(
-            language=language,
-            channel=channel,
-        )
-        rails_list.append(rail)
-        logger.info("[TeamRuntime] RuntimePromptRail created: channel=%s", channel)
-    except Exception as exc:
-        logger.warning("[TeamRuntime] RuntimePromptRail failed: %s", exc)
+    # Inject team skill dirs into the adapter's RuntimePromptRail.
+    if registered_skills_dir or team_workspace.global_skills_dir:
+        try:
+            from jiuwenclaw.utils import get_agent_skills_dir
 
-    try:
-        rail = ResponsePromptRail()
-        rail.set_channel(channel)
-        rails_list.append(rail)
-        logger.info("[TeamRuntime] ResponsePromptRail created: channel=%s", channel)
-    except Exception as exc:
-        logger.warning("[TeamRuntime] ResponsePromptRail failed: %s", exc)
+            for r in rails_list:
+                if hasattr(r, "set_registered_skill_dirs"):
+                    skill_dirs: list[str] = []
+                    global_skills = str(
+                        team_workspace.global_skills_dir or get_agent_skills_dir()
+                    ).strip()
+                    if global_skills:
+                        skill_dirs.append(global_skills)
+                    team_skills = str(registered_skills_dir or "").strip()
+                    if team_skills and team_skills not in skill_dirs:
+                        skill_dirs.append(team_skills)
+                    if skill_dirs:
+                        r.set_registered_skill_dirs(skill_dirs)
+                    break
+            logger.info("[TeamRuntime] skill dirs injected to RuntimePromptRail")
+        except Exception as exc:
+            logger.warning("[TeamRuntime] skill dirs injection failed: %s", exc)
 
-    try:
-        if SysOperationRail is not None:
-            rail = SysOperationRail()
-            rails_list.append(rail)
-            logger.info("[TeamRuntime] FileSystemRail created")
-    except Exception as exc:
-        logger.warning("[TeamRuntime] FileSystemRail failed: %s", exc)
+    if role == "leader" and registered_skills_dir:
+        try:
+            from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 
-    try:
-        rail = JiuSwarmStreamEventRail(
-            member_name=member_info.agent_name,
-            role=member_info.role,
-        )
-        rails_list.append(rail)
-        logger.info("[TeamRuntime] JiuSwarmStreamEventRail created")
-    except Exception as exc:
-        logger.warning("[TeamRuntime] JiuSwarmStreamEventRail failed: %s", exc)
+            rails_list.append(
+                SkillUseRail(
+                    skills_dir=[registered_skills_dir],
+                    skill_mode=SkillUseRail.SKILL_MODE_ALL,
+                    include_tools=False,
+                    include_skill_body_tools=True,
+                )
+            )
+            logger.info(
+                "[TeamRuntime] Leader SkillUseRail created: skills_dir=%s",
+                registered_skills_dir,
+            )
+        except Exception as exc:
+            logger.warning("[TeamRuntime] Leader SkillUseRail failed: %s", exc)
 
+    # SysOperationRail is mounted declaratively via agent_configurator
+    # (core.sys_operation). Imperative mount here would double-register tools.
+
+    # Leader-only structured ask tool.
     if role == "leader":
         try:
-            rail = StructuredAskUserRail(language=language)
-            rails_list.append(rail)
-            logger.info("[TeamRuntime] StructuredAskUserRail created for leader")
+            from jiuwenclaw.agentserver.team.rails.ask_user_question_tool_rail import (
+                AskUserQuestionToolRail,
+            )
+
+            rails_list.append(AskUserQuestionToolRail())
+            logger.info("[TeamRuntime] AskUserQuestionToolRail created for leader")
         except Exception as exc:
-            logger.warning("[TeamRuntime] StructuredAskUserRail failed: %s", exc)
+            logger.warning("[TeamRuntime] AskUserQuestionToolRail failed: %s", exc)
 
-    try:
-        if role != "leader":
-            rail = TaskPlanningRail()
-            rails_list.append(rail)
-            logger.info("[TeamRuntime] TaskPlanningRail created")
-    except Exception as exc:
-        logger.warning("[TeamRuntime] TaskPlanningRail failed: %s", exc)
-
-    try:
-        rail = SecurityRail()
-        rails_list.append(rail)
-        logger.info("[TeamRuntime] SecurityRail created")
-    except Exception as exc:
-        logger.warning("[TeamRuntime] SecurityRail failed: %s", exc)
-
-    try:
-        if HeartbeatRail is not None:
-            rail = HeartbeatRail()
-            rails_list.append(rail)
-            logger.info("[TeamRuntime] HeartbeatRail created")
-    except Exception as exc:
-        logger.warning("[TeamRuntime] HeartbeatRail failed: %s", exc)
-
-    try:
-        rail = AvatarPromptRail()
-        rails_list.append(rail)
-        logger.info("[TeamRuntime] AvatarPromptRail created")
-    except Exception as exc:
-        logger.warning("[TeamRuntime] AvatarPromptRail failed: %s", exc)
+    # Team-specific rails (not provided by plan adapter).
 
     if team_ws_root:
         try:
@@ -253,31 +245,223 @@ def build_member_rails(
                 root_dir=team_ws_root,
                 team_id=team_id,
                 language=language,
+                enable_send_file_guidance=(role == "leader"),
             )
             rails_list.append(rail)
             logger.info(
-                "[TeamRuntime] TeamWorkspaceReportPathRail created: root_dir=%s",
+                "[TeamRuntime] TeamWorkspaceReportPathRail created: root_dir=%s "
+                "send_file_guidance=%s",
                 team_ws_root,
+                role == "leader",
             )
         except Exception as exc:
             logger.warning("[TeamRuntime] TeamWorkspaceReportPathRail failed: %s", exc)
 
-    # Context compression rail for all members (leader + teammates).
-    # ``config`` here is the full config.yaml mapping (hot-reload path passes
-    # ``get_config()``); strip the ``react`` outer key so the rail builder sees
-    # the same ``{"context_engine_config": ...}`` shape the swarm provider path
-    # passes (see member_rails._build_context_processor).
+    # Team skill management (ENT SkillToolkit install/uninstall + team storage/link)
+    # plus skill *loading* via JiuWenSkillUseRail → skill_tool (same roots as plan).
+    rails_list.extend(_build_team_skill_rails(team_workspace))
+
+    # Same react.disabled_tools gate as plan; only touch this member's ability_manager.
+    disabled_rail = _build_team_disabled_tools_rail(config)
+    if disabled_rail is not None:
+        rails_list.append(disabled_rail)
+
+    # Context compression for all members (leader + teammates): same engine as
+    # ENT agent.plan (JiuClawContextEngineeringRail + chain A/B).
+    # Leader also mounts plan-style QA block/artifact; teammates keep QA off.
     if get_context_engine_enabled(config):
-        react = config.get("react", {}) if isinstance(config, dict) else {}
-        react = react if isinstance(react, dict) else {}
-        rail = _build_context_processor_rail(
-            {"context_engine_config": react.get("context_engine_config", {})}
-        )
-        if rail is not None:
-            rails_list.append(rail)
+        enable_qa = role == "leader"
+        ce_rail = _build_team_context_engineering_rail(config, enable_qa=enable_qa)
+        if ce_rail is not None:
+            rails_list.append(ce_rail)
+        overflow_rail = _build_team_context_overflow_recovery_rail()
+        if overflow_rail is not None:
+            rails_list.append(overflow_rail)
+        if enable_qa:
+            rails_list.extend(_build_team_leader_qa_rails(config))
 
     logger.info("[TeamRuntime] Total rails built: %d", len(rails_list))
     return rails_list
+
+
+def _build_team_disabled_tools_rail(config: dict[str, Any] | None) -> Any | None:
+    """Mirror plan's DisabledToolsRail for team members.
+
+    Config: ``react.disabled_tools`` (yaml list or ``${DISABLED_TOOLS:-}``).
+    Empty list → skip (nothing to disable). Uses ``touch_shared_resource_mgr=False``
+    so in-process multi-member teams do not evict shared Runner tools.
+    """
+    try:
+        from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import (
+            DisabledToolsRail,
+        )
+        from jiuwenclaw.agentserver.skill_manager import resolve_string_or_list_config
+
+        react = (config or {}).get("react") if isinstance(config, dict) else {}
+        react = react if isinstance(react, dict) else {}
+        # Same field plan uses: react.disabled_tools (list or DISABLED_TOOLS env).
+        disabled_list = resolve_string_or_list_config(react.get("disabled_tools"))
+        if not disabled_list:
+            return None
+        rail = DisabledToolsRail(
+            disabled_tools=disabled_list,
+            touch_shared_resource_mgr=False,
+        )
+        logger.info(
+            "[TeamRuntime] DisabledToolsRail created: disabled_tools=%s",
+            disabled_list,
+        )
+        return rail
+    except Exception as exc:
+        logger.warning(
+            "[TeamRuntime] DisabledToolsRail creation failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
+def _build_team_skill_rails(team_workspace: TeamWorkspaceInfo) -> list[Any]:
+    """Mount team skill loading + management rails.
+
+    Who: every team member (leader + teammate).
+    What:
+      - ``JiuWenSkillUseRail`` so ``skill_tool`` sees ENT global skills (+ team
+        shared ``team-workspace/skills`` links), same roots plan uses — not the
+        factory default which only scans the empty member-workspace ``skills/``.
+      - SkillToolkit install/uninstall + where-to-write prompt + refresh shared links.
+    """
+    from pathlib import Path
+
+    from jiuwenclaw.utils import get_agent_skills_dir, get_agent_workspace_dir
+
+    rails: list[Any] = []
+    global_skills = str(
+        team_workspace.global_skills_dir or get_agent_skills_dir()
+    ).strip()
+    if not global_skills:
+        logger.info("[TeamRuntime] Skill rails skipped: no global_skills_dir")
+        return rails
+
+    team_ws_root = team_workspace.root_dir
+    team_skills = str(team_workspace.skills_dir or "").strip() or None
+    # SkillManager expects agent workspace root (parent of ``skills/``).
+    agent_workspace_root = str(Path(global_skills).parent)
+    if not Path(agent_workspace_root).exists():
+        agent_workspace_root = str(get_agent_workspace_dir())
+
+    # skill_tool catalog: global workspace skills (+ team shared view when present).
+    skill_scan_dirs: list[str] = [global_skills]
+    if team_skills and team_skills not in skill_scan_dirs:
+        skill_scan_dirs.append(team_skills)
+    try:
+        from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_skill_use_rail import (
+            JiuWenSkillUseRail,
+        )
+        from jiuwenclaw.agentserver.skill_manager import (
+            enabled_skills_from_environ,
+            resolve_string_or_list_config,
+        )
+        from jiuwenclaw.config import get_config as _get_config
+
+        config = team_workspace.config if isinstance(team_workspace.config, dict) else _get_config()
+        config = config if isinstance(config, dict) else {}
+        react_cec = (config.get("react") or {}).get("context_engine_config")
+        max_bodies = 1
+        if isinstance(react_cec, dict) and react_cec.get("max_active_skill_bodies") is not None:
+            try:
+                max_bodies = int(react_cec["max_active_skill_bodies"])
+            except (TypeError, ValueError):
+                max_bodies = 1
+
+        # File tools come from team SysOperation; only register skill_tool / skill_complete.
+        skill_rail = JiuWenSkillUseRail(
+            skills_dir=skill_scan_dirs,
+            skill_mode="all",
+            include_tools=False,
+            include_skill_body_tools=True,
+            max_active_skill_bodies=max_bodies,
+            enabled_skills=enabled_skills_from_environ(),
+            disabled_skills=resolve_string_or_list_config(config.get("disabled_skills")),
+        )
+        rails.append(skill_rail)
+        logger.info(
+            "[TeamRuntime] JiuWenSkillUseRail created: skills_dir=%s",
+            skill_scan_dirs,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[TeamRuntime] JiuWenSkillUseRail failed: %s",
+            exc,
+            exc_info=True,
+        )
+
+    def _refresh_links(_result: dict[str, object] | None = None) -> None:
+        try:
+            from jiuwenclaw.agentserver.team.team_manager import (
+                refresh_team_shared_skill_links_across_managers,
+            )
+
+            refresh_team_shared_skill_links_across_managers()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[TeamRuntime] refresh team skill links failed: %s", exc)
+
+    try:
+        from jiuwenclaw.agentserver.team.rails.team_member_skill_toolkit_rail import (
+            MemberSkillToolkitRail,
+        )
+
+        rails.append(
+            MemberSkillToolkitRail(
+                workspace_dir=agent_workspace_root,
+                refresh_links=_refresh_links,
+            )
+        )
+        logger.info(
+            "[TeamRuntime] MemberSkillToolkitRail created: workspace=%s",
+            agent_workspace_root,
+        )
+    except Exception as exc:
+        logger.warning("[TeamRuntime] MemberSkillToolkitRail failed: %s", exc, exc_info=True)
+
+    try:
+        from jiuwenclaw.agentserver.team.rails.team_skill_storage_policy_rail import (
+            TeamSkillStoragePolicyRail,
+        )
+
+        rails.append(
+            TeamSkillStoragePolicyRail(
+                global_skills_dir=global_skills,
+                team_workspace_root=team_ws_root,
+                team_skills_dir=team_skills,
+            )
+        )
+        logger.info("[TeamRuntime] TeamSkillStoragePolicyRail created")
+    except Exception as exc:
+        logger.warning(
+            "[TeamRuntime] TeamSkillStoragePolicyRail failed: %s", exc, exc_info=True
+        )
+
+    try:
+        from jiuwenclaw.agentserver.team.rails.team_shared_skill_link_refresh_rail import (
+            TeamSharedSkillLinkRefreshRail,
+        )
+
+        rails.append(
+            TeamSharedSkillLinkRefreshRail(
+                global_skills_dir=Path(global_skills),
+                refresh_links=lambda: _refresh_links(None),
+            )
+        )
+        logger.info("[TeamRuntime] TeamSharedSkillLinkRefreshRail created")
+    except Exception as exc:
+        logger.warning(
+            "[TeamRuntime] TeamSharedSkillLinkRefreshRail failed: %s",
+            exc,
+            exc_info=True,
+        )
+
+    return rails
 
 
 def filter_inheritable_ability_cards(main_agent: Any) -> list[ToolCard]:
@@ -351,73 +535,133 @@ def get_context_engine_enabled(config: dict[str, Any] | None) -> bool:
     return True
 
 
-def _build_context_processor_rail(config: dict[str, Any] | None) -> Any | None:
-    """Build a preset ContextProcessorRail for team members with user config thresholds.
+def _react_section_for_team_context(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize full config.yaml or a react-shaped dict for the CE rail builder."""
+    if not isinstance(config, dict):
+        return {}
+    react = config.get("react")
+    if isinstance(react, dict):
+        return react
+    # Already react-shaped (or stripped ``{"context_engine_config": ...}``).
+    if "context_engine_config" in config:
+        return config
+    return {}
 
-    Expects a pre-extracted mapping of shape ``{"context_engine_config": {...}}`` —
-    the ``react`` outer key must already be stripped by the caller. Both call sites
-    pass this shape:
 
-    * ``build_member_rails`` (hot-reload path, full config source) extracts
-      ``react.context_engine_config`` before calling;
-    * ``member_rails._build_context_processor`` (swarm provider) bakes the
-      section into ``ContextProcessorInput`` at spec-build time.
+def _build_team_context_engineering_rail(
+    config: dict[str, Any] | None,
+    *,
+    enable_qa: bool = False,
+) -> Any | None:
+    """Build plan-aligned context compression rail for team members.
 
-    Mirrors :func:`interface_deep._build_context_processor_rail`, which takes the
-    same shape (the ``react`` section itself).
+    Reuses :func:`interface_deep._build_context_engineering_rail` with
+    ``mode="agent.plan"``. Teammates pass ``enable_qa=False`` (strip QA via
+    :func:`react_config_for_subagent`); leader keeps yaml QA so FullCompact
+    can attach the qa_artifact safety net.
     """
-    if ContextProcessorRail is None:
-        logger.info("[TeamRuntime] ContextProcessorRail skipped (provider not available)")
-        return None
     try:
-        from typing import List, Tuple
-
-        from openjiuwen.harness.prompts import resolve_language
-
-        user_processors: List[Tuple[str, dict]] = []
-        ctx_cfg: dict[str, Any] = {}
-        if isinstance(config, dict):
-            raw = config.get("context_engine_config", {})
-            ctx_cfg = raw if isinstance(raw, dict) else {}
-
-        offloader_cfg = ctx_cfg.get("message_summary_offloader_config", {})
-        if isinstance(offloader_cfg, dict) and offloader_cfg:
-            user_processors.append(("MessageSummaryOffloader", offloader_cfg))
-
-        compressor_cfg = ctx_cfg.get("dialogue_compressor_config", {})
-        if isinstance(compressor_cfg, dict) and compressor_cfg:
-            user_processors.append(("DialogueCompressor", compressor_cfg))
-
-        current_round_cfg = ctx_cfg.get("current_round_compressor_config", {})
-        if isinstance(current_round_cfg, dict) and current_round_cfg:
-            user_processors.append(("CurrentRoundCompressor", current_round_cfg))
-
-        round_level_cfg = ctx_cfg.get("round_level_compressor_config", {})
-        if isinstance(round_level_cfg, dict) and round_level_cfg:
-            user_processors.append(("RoundLevelCompressor", round_level_cfg))
-
-        reasoning_loop_cfg = ctx_cfg.get("reasoning_tool_loop_compact_config", {})
-        if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
-            reasoning_loop_cfg = {
-                **reasoning_loop_cfg,
-                "language": resolve_language(
-                    str(get_config().get("preferred_language", "zh")).strip().lower()
-                ),
-            }
-            user_processors.append(("ReasoningToolLoopCompactProcessor", reasoning_loop_cfg))
-
-        rail = ContextProcessorRail(
-            processors=user_processors if user_processors else None,
-            preset=True,
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+            _build_context_engineering_rail,
+            react_config_for_subagent,
         )
-        logger.info(
-            "[TeamRuntime] ContextProcessorRail created (preset=True), "
-            "user_processors=%s",
-            [p[0] for p in user_processors] if user_processors else "none",
+
+        react_raw = _react_section_for_team_context(config)
+        react_config = (
+            react_raw if enable_qa else react_config_for_subagent(react_raw)
         )
+        ctx_cfg = react_config.get("context_engine_config", {}) or {}
+        if isinstance(ctx_cfg, dict) and ctx_cfg.get("enabled") is False:
+            logger.info("[TeamRuntime] ContextEngineeringRail skipped (enabled=false)")
+            return None
+
+        rail = _build_context_engineering_rail(
+            react_config,
+            mode="agent.plan",
+            minimal=False,
+        )
+        if rail is not None:
+            logger.info(
+                "[TeamRuntime] JiuClawContextEngineeringRail created "
+                "(plan-aligned, enable_qa=%s)",
+                enable_qa,
+            )
         return rail
     except Exception as exc:
-        logger.warning("[TeamRuntime] ContextProcessorRail creation failed: %s", exc, exc_info=True)
+        logger.warning(
+            "[TeamRuntime] JiuClawContextEngineeringRail creation failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
+def _build_team_leader_qa_rails(config: dict[str, Any] | None) -> list[Any]:
+    """Mount plan-equivalent QA freeze/assembly/artifact rails for the team leader."""
+    try:
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+            JiuWenClawDeepAdapter,
+            _resolve_qa_block_config,
+            _resolve_session_memory_for_context_rail,
+        )
+
+        react_cfg = _react_section_for_team_context(config)
+        if _resolve_qa_block_config(react_cfg) is None:
+            logger.info("[TeamRuntime] Leader QA rails skipped (qa_block disabled)")
+            return []
+
+        context_engine_cfg = react_cfg.get("context_engine_config", {})
+        if not isinstance(context_engine_cfg, dict):
+            context_engine_cfg = {}
+        session_memory = _resolve_session_memory_for_context_rail(context_engine_cfg)
+
+        freeze_rail = JiuWenClawDeepAdapter._build_qa_block_freeze_rail(react_cfg)  # pylint: disable=protected-access
+        assembly_rail = JiuWenClawDeepAdapter._build_qa_block_assembly_rail(react_cfg)  # pylint: disable=protected-access
+        artifact_rail = JiuWenClawDeepAdapter._build_qa_artifact_rail(  # pylint: disable=protected-access
+            react_cfg, session_memory
+        )
+
+        if freeze_rail is not None:
+            mgr = (
+                artifact_rail.qa_artifact_manager
+                if artifact_rail is not None
+                else None
+            )
+            freeze_rail.attach_qa_artifact(mgr)
+            if assembly_rail is not None:
+                assembly_rail.attach_freeze_rail(freeze_rail)
+
+        rails = [r for r in (freeze_rail, assembly_rail, artifact_rail) if r is not None]
+        logger.info(
+            "[TeamRuntime] Leader QA rails created: %s",
+            [type(r).__name__ for r in rails],
+        )
+        return rails
+    except Exception as exc:
+        logger.warning(
+            "[TeamRuntime] Leader QA rails creation failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return []
+
+
+def _build_team_context_overflow_recovery_rail() -> Any | None:
+    """Mount plan's overflow recovery rail so 413 can force SessionMemory/compact."""
+    try:
+        from jiuwenclaw.agentserver.deep_agent.rails.context_overflow_recovery_rail import (
+            ContextOverflowRecoveryRail,
+        )
+
+        rail = ContextOverflowRecoveryRail(max_recovery_attempts=3)
+        logger.info("[TeamRuntime] ContextOverflowRecoveryRail created")
+        return rail
+    except Exception as exc:
+        logger.warning(
+            "[TeamRuntime] ContextOverflowRecoveryRail creation failed: %s",
+            exc,
+            exc_info=True,
+        )
         return None
 
 
@@ -447,7 +691,16 @@ def build_team_permission_rails(
     leader_member_name: str,
     permissions_override: dict[str, str] | None = None,
 ) -> list[Any]:
-    """Mount TeamPermissionPolicyRail (leader) and TeamPermissionRail (teammate)."""
+    """Mount plan-aligned permission rails for team members.
+
+    When ``permissions.enabled`` is on:
+    - **leader**: ``TeamPermissionPolicyRail`` (spawn narrowing prompt) **plus**
+      the same ``PermissionInterruptRail`` as plan mode so leader tool calls
+      ASK/ALLOW/DENY against the detailed tools list and surface user HITL.
+    - **teammate**: ``TeamPermissionRail`` + jiuwenclaw engine (via adapter)
+      so ``tools.X=allow`` matches plan; ASK → leader ``approve_tool`` (host),
+      never user-facing permission HITL.
+    """
     if not permissions_config.get("enabled"):
         return []
 
@@ -469,6 +722,30 @@ def build_team_permission_rails(
             logger.info("[TeamRuntime] TeamPermissionPolicyRail created for leader")
         except Exception as exc:
             logger.warning("[TeamRuntime] TeamPermissionPolicyRail failed: %s", exc)
+
+        # Intercept leader tools with the same rail and tools list.
+        # Without this, enabling the approval guardrail has no effect on leader
+        # calls (deepresearch_*, bash, ask_user_question gate, …).
+        try:
+            from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
+                build_permission_rail,
+            )
+
+            leader_perm = build_permission_rail(
+                config={"permissions": permissions_config},
+            )
+            if leader_perm is not None:
+                rails.append(leader_perm)
+                logger.info(
+                    "[TeamRuntime] PermissionInterruptRail created for leader "
+                    "(plan-aligned guardrail)"
+                )
+        except Exception as exc:
+            logger.warning(
+                "[TeamRuntime] leader PermissionInterruptRail failed: %s",
+                exc,
+                exc_info=True,
+            )
         return rails
 
     if role != "teammate" or team_backend is None or messager is None:
@@ -482,7 +759,10 @@ def build_team_permission_rails(
         from openjiuwen.agent_teams.security.narrowing import narrow_permissions
         from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
         from openjiuwen.harness.security.host import ToolPermissionHost
-        from jiuwenclaw.agentserver.permissions.core import get_permission_engine
+        from jiuwenclaw.agentserver.permissions.core import PermissionEngine as JiuwenclawPermissionEngine
+        from jiuwenclaw.agentserver.team.rails.permission_engine_adapter import (
+            JiuwenclawPermissionEngineAdapter,
+        )
 
         cfg = permissions_config
         if permissions_override:
@@ -506,14 +786,17 @@ def build_team_permission_rails(
             get_permissions_snapshot=_snapshot,
             request_permission_confirmation=orchestrator.handle_approval_request,
         )
-        engine = get_permission_engine()
+        # Evaluate with jiuwenclaw engine (allow/ask/deny + file_guard),
+        # adapt levels for harness TeamPermissionRail; ASK still goes to leader via host.
+        engine = JiuwenclawPermissionEngineAdapter(JiuwenclawPermissionEngine(config=cfg))
         try:
             rail = TeamPermissionRail(config=cfg, engine=engine, host=host)
         except TypeError:
             rail = TeamPermissionRail(config=cfg, host=host)
         rails.append(rail)
         logger.info(
-            "[TeamRuntime] TeamPermissionRail created for teammate member=%s",
+            "[TeamRuntime] TeamPermissionRail created for teammate member=%s "
+            "(jiuwenclaw engine via adapter → leader host)",
             member_name,
         )
     except Exception as exc:

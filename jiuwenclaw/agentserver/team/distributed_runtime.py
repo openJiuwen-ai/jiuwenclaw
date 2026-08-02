@@ -17,8 +17,15 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 
+def _team_cfg(config_base: dict[str, Any]) -> dict[str, Any]:
+    """Active team section from ``modes.team`` (no top-level ``config.team``)."""
+    from jiuwenclaw.agentserver.team.config_loader import resolve_team_section
+
+    return resolve_team_section(config_base)
+
+
 def is_distributed_mode(config_base: dict[str, Any]) -> bool:
-    team_cfg = config_base.get("team", {}) if isinstance(config_base.get("team"), dict) else {}
+    team_cfg = _team_cfg(config_base)
     runtime_cfg = team_cfg.get("runtime", {}) if isinstance(team_cfg.get("runtime"), dict) else {}
     runtime_mode = str(runtime_cfg.get("mode", "")).strip().lower()
     if runtime_mode == "distributed":
@@ -29,7 +36,7 @@ def is_distributed_mode(config_base: dict[str, Any]) -> bool:
 
 
 def runtime_role(config_base: dict[str, Any]) -> str:
-    team_cfg = config_base.get("team", {}) if isinstance(config_base.get("team"), dict) else {}
+    team_cfg = _team_cfg(config_base)
     runtime_cfg = team_cfg.get("runtime", {}) if isinstance(team_cfg.get("runtime"), dict) else {}
     role = str(runtime_cfg.get("role", "leader")).strip().lower()
     return role if role in ("leader", "teammate") else "leader"
@@ -166,7 +173,7 @@ def missing_distributed_dependencies(config_base: dict[str, Any]) -> list[str]:
     if importlib.util.find_spec("zmq") is None:
         missing.append("pyzmq")
 
-    team_cfg = config_base.get("team", {}) if isinstance(config_base.get("team"), dict) else {}
+    team_cfg = _team_cfg(config_base)
     if is_postgresql_storage(team_cfg) and importlib.util.find_spec("asyncpg") is None:
         missing.append("asyncpg")
     return missing
@@ -176,28 +183,6 @@ def fallback_distributed_to_local(config_base: dict[str, Any]) -> dict[str, Any]
     """Create an in-memory local fallback config from distributed config."""
     normalized = copy.deepcopy(config_base)
 
-    team_cfg = normalized.get("team", {})
-    if isinstance(team_cfg, dict):
-        runtime_cfg = team_cfg.get("runtime", {})
-        if not isinstance(runtime_cfg, dict):
-            runtime_cfg = {}
-        runtime_cfg["mode"] = "local"
-        runtime_cfg["role"] = "leader"
-        team_cfg["runtime"] = runtime_cfg
-
-        transport_cfg = team_cfg.get("transport", {})
-        if not isinstance(transport_cfg, dict):
-            transport_cfg = {}
-        transport_cfg["type"] = "inprocess"
-        transport_cfg.pop("params", None)
-        team_cfg["transport"] = transport_cfg
-
-        if is_postgresql_storage(team_cfg):
-            team_cfg["storage"] = {
-                "type": "sqlite",
-                "params": {"connection_string": "team.db"},
-            }
-
     modes_cfg = normalized.get("modes", {})
     if isinstance(modes_cfg, dict):
         mode_team = modes_cfg.get("team", {})
@@ -205,6 +190,12 @@ def fallback_distributed_to_local(config_base: dict[str, Any]) -> dict[str, Any]
             for _, candidate in mode_team.items():
                 if not isinstance(candidate, dict):
                     continue
+                runtime_cfg = candidate.get("runtime", {})
+                if not isinstance(runtime_cfg, dict):
+                    runtime_cfg = {}
+                runtime_cfg["mode"] = "local"
+                runtime_cfg["role"] = "leader"
+                candidate["runtime"] = runtime_cfg
                 transport_cfg = candidate.get("transport", {})
                 if not isinstance(transport_cfg, dict):
                     transport_cfg = {}
@@ -328,11 +319,7 @@ async def ensure_postgresql_for_leader(
 ) -> None:
     if runtime_role(config_base) != "leader":
         return
-    team_cfg = (
-        config_base.get("team", {})
-        if isinstance(config_base.get("team"), dict)
-        else {}
-    )
+    team_cfg = _team_cfg(config_base)
     if not is_postgresql_storage(team_cfg):
         return
 

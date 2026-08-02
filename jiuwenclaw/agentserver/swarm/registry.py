@@ -11,10 +11,19 @@ from openjiuwen.agent_teams.schema.build_context import register_build_context_f
 from openjiuwen.harness.manifest import register_from_catalog
 
 from jiuwenclaw.agentserver.swarm.context import SwarmBuildContext
+from jiuwenclaw.agentserver.swarm.providers import browser_subagent as _browser_subagent
+from jiuwenclaw.agentserver.swarm.providers import catalog_tools as _catalog_tools
 from jiuwenclaw.agentserver.swarm.providers import member_rails as _member_rails
 from jiuwenclaw.config import get_config
 
 PLATFORM_MEMBER_RAILS = _member_rails.PLATFORM_MEMBER_RAILS
+SWARM_BROWSER_AGENT = _browser_subagent.SWARM_BROWSER_AGENT
+PLATFORM_CATALOG_TOOLS = _catalog_tools.PLATFORM_CATALOG_TOOLS
+CORE_WEB_SEARCH = _catalog_tools.CORE_WEB_SEARCH
+CORE_WEB_FETCH = _catalog_tools.CORE_WEB_FETCH
+CORE_WEB_PAID_SEARCH = _catalog_tools.CORE_WEB_PAID_SEARCH
+CORE_VISION = _catalog_tools.CORE_VISION
+CORE_AUDIO = _catalog_tools.CORE_AUDIO
 
 _REGISTERED = False
 
@@ -39,6 +48,7 @@ def register_swarm_providers() -> None:
     if _REGISTERED:
         return
     ensure_harness_elements_registered()
+    # Side-effect imports above populate the catalog; sync into registries.
     register_from_catalog()
     register_build_context_factory(_build_swarm_context_from_seed)
     _REGISTERED = True
@@ -47,4 +57,11 @@ def register_swarm_providers() -> None:
 __all__ = [
     "register_swarm_providers",
     "PLATFORM_MEMBER_RAILS",
+    "SWARM_BROWSER_AGENT",
+    "PLATFORM_CATALOG_TOOLS",
+    "CORE_WEB_SEARCH",
+    "CORE_WEB_FETCH",
+    "CORE_WEB_PAID_SEARCH",
+    "CORE_VISION",
+    "CORE_AUDIO",
 ]

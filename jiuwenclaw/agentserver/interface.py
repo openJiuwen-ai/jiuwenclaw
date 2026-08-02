@@ -1231,14 +1231,123 @@ class JiuWenClaw:
             metadata=request.metadata,
         )
 
+    @staticmethod
+    def _request_is_team_mode(request: AgentRequest) -> bool:
+        """True when interrupt/send params indicate team mode."""
+        if not isinstance(request.params, dict):
+            return False
+        team_flag = bool(request.params.get("team", False))
+        mode = request.params.get("mode", "")
+        mode_norm = mode.strip().lower() if isinstance(mode, str) else ""
+        return team_flag or mode_norm in {
+            "team",
+            "agent.team",
+            "team.plan",
+            "code.team",
+        }
+
+    @staticmethod
+    def _session_has_team_runtime(
+        session_id: str,
+        *,
+        channel_id: str | None,
+    ) -> bool:
+        """True when TeamManager already owns runtime/stream for this session."""
+        try:
+            from jiuwenclaw.agentserver.team import get_team_manager
+
+            team_manager = get_team_manager(channel_id)
+        except Exception:
+            return False
+        return bool(
+            team_manager.has_stream_task(session_id)
+            or team_manager.is_runtime_active(session_id)
+            or team_manager.is_runtime_pending(session_id)
+            or team_manager.is_session_initialized(session_id)
+            or getattr(team_manager, "is_pause_in_progress", lambda _sid: False)(session_id)
+        )
+
+    def _is_team_interrupt_target(
+        self,
+        request: AgentRequest,
+        session_id: str,
+    ) -> bool:
+        """Team stop/park path when mode says team or session already has team runtime."""
+        return self._request_is_team_mode(request) or self._session_has_team_runtime(
+            session_id,
+            channel_id=request.channel_id,
+        )
+
+    @staticmethod
+    def _team_interrupt_ack(
+        request: AgentRequest,
+        *,
+        intent: str,
+        paused: bool,
+    ) -> AgentResponse:
+        """Ack for protocol-level team stop-work/keep-team (no dissolve Q&A)."""
+        if intent == "pause" or intent == "cancel":
+            message = "团队任务已暂停" if paused else "团队任务暂停未生效"
+        elif intent == "supplement":
+            message = "团队任务已切换" if paused else "团队任务切换未生效"
+        else:
+            message = f"team interrupt:{intent}"
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload={
+                "event_type": "chat.interrupt_result",
+                "intent": intent,
+                "success": True,
+                "message": message,
+                "team_paused": bool(paused),
+            },
+            metadata=request.metadata,
+        )
+
+    async def _apply_team_runtime_interrupt(
+        self,
+        *,
+        session_id: str,
+        channel_id: str | None,
+        intent: str,
+        reason: str,
+    ) -> bool:
+        """Protocol-level team stop-work / keep-team.
+
+        Maps pause / cancel / supplement to ``pause_session_runtime`` so members
+        stop outputting while the team stays in the pool for ``RESUME_FROM_PAUSE``.
+        Does not call ``clean_team`` — dissolve stays lifecycle-owned.
+
+        No TeamManager runtime → no-op.
+        """
+        try:
+            from jiuwenclaw.agentserver.team import get_team_manager
+
+            team_manager = get_team_manager(channel_id)
+            # Interrupt stops work via pause, not pool remove (cancel_session_runtime).
+            return await team_manager.pause_session_runtime(session_id, reason=reason)
+        except Exception:
+            logger.exception(
+                "[JiuWenClaw] team runtime interrupt failed: session_id=%s intent=%s",
+                session_id,
+                intent,
+            )
+            return False
+
     async def _process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
 
-        根据 intent 分流：
-        - pause: 暂停 ReAct 循环（不取消任务）
-        - resume: 恢复已暂停的 ReAct 循环
-        - cancel: 取消所有运行中的任务
-        - supplement: 取消当前任务但保留 todo
+        Team（协议级停工保队）——有 team mode / runtime 时优先走这条：
+        - pause / cancel / supplement → ``pause_session_runtime``（停成员、保队可续）
+        - **不**走 DeepAgent abort / plan_pause / todo cancel（避免污染续跑）
+        - **不**问是否解散；解散仅由 lifecycle（temporary 自然收尾）决定
+        - cancel 仍清理 session 非流式任务，但不移出 Runner pool
+
+        Plan / agent 主流程：
+        - pause / resume / cancel / supplement 走 ``adapter.process_interrupt``
+        - 若同 session 另有 team runtime，再增量 pause（兼容无 mode 的旧客户端）
 
         Args:
             request: AgentRequest，params 中可包含：
@@ -1248,27 +1357,70 @@ class JiuWenClaw:
         Returns:
             AgentResponse 包含 interrupt_result 事件数据
         """
-        adapter = await self._ensure_adapter()
-        # 调用 adapter 的 process_interrupt 处理 SDK 特定逻辑（如 pause/resume、todo 标记等）
-        response = await adapter.process_interrupt(request)
-        intent = request.params.get("intent", "cancel")
+        intent = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
+        session_id = self._session_manager.get_session_id(request.session_id)
+        reason = f"interrupt(intent={intent}): "
 
+        # Team first: protocol stop-work/keep-team without plan abort side effects.
+        if intent != "resume" and self._is_team_interrupt_target(request, session_id):
+            paused = False
+            if intent in {"pause", "cancel", "supplement"}:
+                paused = await self._apply_team_runtime_interrupt(
+                    session_id=session_id,
+                    channel_id=request.channel_id,
+                    intent=intent,
+                    reason=reason,
+                )
+            if intent == "supplement":
+                await self._session_manager.cancel_session_task(
+                    session_id, "interrupt(supplement): "
+                )
+            elif intent == "cancel":
+                await self._session_manager.cancel_all_session_tasks(reason)
+            logger.info(
+                "[JiuWenClaw] team interrupt via pause (stop-work keep-team): "
+                "session_id=%s intent=%s paused=%s",
+                session_id,
+                intent,
+                paused,
+            )
+            return self._team_interrupt_ack(request, intent=intent, paused=paused)
+
+        adapter = await self._ensure_adapter()
+        # Plan / agent 主路径：rail / DeepAgent / toolkit / QA / todo …
+        response = await adapter.process_interrupt(request)
+
+        # Team 增量（无 mode 但已有 runtime 的兜底已在上方处理；此处仅非 team 主路径）
         if intent == "pause":
-            # 暂停：不取消任务，只暂停 ReAct 循环
+            await self._apply_team_runtime_interrupt(
+                session_id=session_id,
+                channel_id=request.channel_id,
+                intent=intent,
+                reason=reason,
+            )
             return response
 
         if intent == "resume":
-            # 恢复：恢复 ReAct 循环
             return response
 
         if intent == "supplement":
-            # 取消当前 session 的任务
-            session_id = self._session_manager.get_session_id(request.session_id)
+            await self._apply_team_runtime_interrupt(
+                session_id=session_id,
+                channel_id=request.channel_id,
+                intent=intent,
+                reason=reason,
+            )
             await self._session_manager.cancel_session_task(session_id, "interrupt(supplement): ")
             return response
 
-        # cancel: 取消所有 session 的任务
-        await self._session_manager.cancel_all_session_tasks(f"interrupt(intent={intent}): ")
+        # cancel（默认）— 若仍有 team runtime（极少见），再 pause 保队
+        await self._apply_team_runtime_interrupt(
+            session_id=session_id,
+            channel_id=request.channel_id,
+            intent=intent,
+            reason=reason,
+        )
+        await self._session_manager.cancel_all_session_tasks(reason)
         return response
 
     async def process_message(self, request: AgentRequest) -> AgentResponse:
@@ -1526,7 +1678,16 @@ class JiuWenClaw:
 
         mode = request.params.get("mode", "") if isinstance(request.params, dict) else ""
         team_flag = request.params.get("team", False) if isinstance(request.params, dict) else False
-        is_team_mode = team_flag or (isinstance(mode, str) and mode.strip().lower() == "team")
+        mode_norm = mode.strip().lower() if isinstance(mode, str) else ""
+        # Treat agent.team / team.plan / code.team as team mode.
+        is_team_mode = team_flag or mode_norm in {
+            "team",
+            "agent.team",
+            "team.plan",
+            "code.team",
+        }
+        if is_team_mode and isinstance(request.params, dict) and mode_norm == "agent.team":
+            request.params["mode"] = "team"
 
         append_history_record(
             session_id=session_id,
