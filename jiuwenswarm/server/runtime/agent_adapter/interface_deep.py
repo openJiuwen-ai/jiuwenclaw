@@ -631,6 +631,14 @@ class JiuWenSwarmDeepAdapter:
         self._filesystem_rail: SysOperationRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
+        # Rewind-rebuilt session objects handed to the next stream invoke so its
+        # create_context loads the rebuilt history instead of the stale
+        # checkpointer state left by the aborted prior invoke. Core Session.pre_run
+        # short-circuits on _pre_run_done, so a pre-populated session is not
+        # reloaded by Runner._prepare_agent (rewind persist via a throwaway session
+        # is not visible to the freshly-created invoke session — same root cause as
+        # the cancel-context-loss bug).
+        self._rewind_session: dict[str, Any] = {}
         # Track session IDs currently executing on this adapter instance.
         # Used by process_interrupt to avoid aborting sessions that are not
         # the target of the interrupt request (cross-session contamination).
@@ -4902,6 +4910,66 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] interrupt(cancel): 已设置 abort 并解除 pause 阻塞"
             )
 
+            # abort 会把 context_engine 内存回滚到本轮开始前。下一轮 invoke 走
+            # Runner.run_agent_streaming(self._instance, inputs) 不传 session，core 会新建
+            # 另一个 session 对象 pre_run reload checkpointer，读到的是旧 invoke finally
+            # commit 的 stale state (停在步骤3) -> 丢步骤4。这里把 disk 上已 persist 的
+            # user + assistant finals 重建 (load_history_records + _build_messages_for_model)，
+            # 用 create_context(history) + save_contexts 写进一个预置 session 的 state，
+            # _pre_run_done=True 防止 _prepare_agent 再 reload 覆盖。process_message_stream_impl
+            # 取出传 run_agent_streaming(session=预置session)，core 复用该 session，create_context
+            # load 预置的 52 而非 stale 18。代价是 tool_call/tool_result 语义被扁平化。
+            try:
+                if self._instance is not None and getattr(self._instance, "react_agent", None) is not None:
+                    ctx_eng = self._instance.react_agent.context_engine
+                    records = load_history_records(request.session_id)
+                    rebuilt = self._build_messages_for_model(records)
+                    if rebuilt:
+                        try:
+                            from openjiuwen.core.single_agent import create_agent_session
+                            from openjiuwen.harness.schema.state import _SESSION_STATE_KEY
+                            _presess = create_agent_session(
+                                session_id=request.session_id, card=self._instance.card
+                            )
+                            await _presess.pre_run(inputs=None)
+                            try:
+                                _presess.update_state({"context": None})
+                                _presess.update_state({_SESSION_STATE_KEY: None})
+                            except Exception:
+                                pass
+                            await ctx_eng.create_context(
+                                session=_presess, history_messages=rebuilt,
+                            )
+                            await ctx_eng.save_contexts(_presess)
+                            try:
+                                self._instance.save_state(_presess)
+                            except Exception:
+                                pass
+                            _presess._pre_run_done = True
+                            _rewind_key = self._resolve_interrupt_session_id(request.session_id)
+                            self._rewind_session[_rewind_key] = _presess
+                            logger.info(
+                                "[JiuWenSwarmDeepAdapter] interrupt(cancel): 预置 rewind session for next invoke "
+                                "session=%s key=%s history=%d",
+                                request.session_id, _rewind_key, len(rebuilt),
+                            )
+                        except Exception as _pre_err:
+                            logger.warning(
+                                "[JiuWenSwarmDeepAdapter] interrupt(cancel): 构造预置 rewind session 失败 session=%s: %s",
+                                request.session_id, _pre_err,
+                            )
+                    else:
+                        logger.info(
+                            "[JiuWenSwarmDeepAdapter] interrupt(cancel): no recapworthy records on disk, "
+                            "skip reload session=%s disk_records=%d",
+                            request.session_id, len(records),
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] interrupt(cancel): 预置 rewind session 构造失败: %s",
+                    exc,
+                )
+
             updated_todos = None
             if request.session_id:
                 try:
@@ -6029,7 +6097,20 @@ class JiuWenSwarmDeepAdapter:
                 self._stream_event_rail.reset_abort(session_id)
             inputs = dict(inputs)
             await self._sync_prompt_attachments_for_request(session_id)
-            async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+            # 取 cancel 分支预置的 rewind session 传给 run_agent_streaming，让 core 复用该
+            # session (其 state 已预置 rewind 重建的 history 52)，create_context load 读到
+            # rewind 52 而非 stale checkpointer 18。None 时 core 新建 session (现状不变)。
+            _runner_session = self._rewind_session.pop(
+                self._resolve_interrupt_session_id(session_id), None
+            )
+            if _runner_session is not None:
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] DIAG deep_invoke_use_rewind_session session=%s",
+                    session_id,
+                )
+            async for chunk in Runner.run_agent_streaming(
+                self._instance, inputs, session=_runner_session
+            ):
                 if is_xiaoyi_request:
                     logger.info(
                         "[GUI_AGENT_DIAG] phase=RUNNER_RAW_EVENT request_id=%s "
