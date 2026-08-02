@@ -43,7 +43,7 @@ You can also use `/switch` to change sub-modes within the same category:
 /switch team         # Under Code → code.team
 ```
 
-> The TUI source contains a `/switch` implementation, but the default TUI command registry does not currently register it. In TUI, prefer `/mode ...` for direct switching or `/plan` to enter Agent plan mode.
+> The examples above describe the Gateway-controlled command used by IM channels. TUI has a different command with the same name only when launched under `agentos-tui` supervision (`AGENTOS_TUI_SUPERVISED=1`): `/switch claude` hands off to the Claude TUI and `/switch list` shows handoff targets. A standalone TUI does not register that command; use `/mode ...` or `/plan` for mode switching in TUI.
 
 ---
 

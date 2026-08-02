@@ -392,7 +392,7 @@ The TUI **does not** provide this gateway command. To start a new blank session 
 
 **What happens in the TUI for `/clear`**
 
-- If no task is running: generate a new `session_id`, attempt `session.create`, switch the active session, **clear the on-screen message list for this session**, fetch history for the new session, and show `Started a fresh conversation in <session_id>`.
+- If no task is running: call `session.create` with a `create_token` and let AgentServer allocate the new `session_id`; after a successful response, switch the active session, **clear the on-screen message list**, fetch the new session's empty history, and show `Started a fresh conversation in <session_id>`. If creation fails, TUI stays on the original session.
 
 **workspace/session/ example (written on demand)**
 
@@ -521,11 +521,11 @@ List all currently available skills.
 
 ---
 
-#### `/workspace_dir` — Set Workspace Path (TUI Only)
+#### `/workspace` — Manage Project Scope and Trusted Directories (TUI Only)
 
 **Purpose**
 
-Set the workspace path for terminal UI outbound requests. This command is only available in TUI.
+Manage the TUI project scope and the trusted directories available for file operations. This command is only available in TUI.
 
 **Channel scope**
 
@@ -534,14 +534,20 @@ Only available in the TUI (terminal) client; not available on other channels.
 **Usage**
 
 ```
-/workspace_dir get              # View current path
-/workspace_dir set C:\Projects  # Set path
-/workspace_dir clear            # Clear path
+/workspace get                  # View workspace, project scope, and trusted directories
+/workspace add C:\Shared         # Add a trusted directory to the current project
+/workspace set C:\Projects       # Switch project scope and trust that directory
+/workspace remove C:\Shared      # Remove a trusted directory
+/workspace clear                # Clear trusted directories for the current project
 ```
+
+Aliases: `/workspace_dir`, `/workspace-dir`.
 
 **Persistence**
 
-Stored in `~/.jiuwenswarm/tui-workspace-dir`.
+Trusted directories are stored per project in `~/.jiuwenswarm-tui/config.json`. A project-scope override selected with `/workspace set` lasts only for the current TUI process; after restart, the launch directory becomes the project scope again.
+
+TUI sends `trusted_dirs`, `project_dir`, and `cwd` with subsequent requests so Gateway and AgentServer can apply project context and file-access policy.
 
 📢 For a more detailed command reference, see [Slash Commands Reference](SlashCommands.md).
 
