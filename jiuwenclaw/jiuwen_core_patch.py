@@ -33,6 +33,49 @@ _stream_tool_header_seen: ContextVar[FrozenSet[int]] = ContextVar(
 
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
 
+
+def _format_messages_by_role(messages: Any) -> str:
+    """把 LLM 输入 messages 按 role 逐条格式化
+
+    每条一行: [idx] role (len=N[, name=...][, tool_calls=M]): content
+    兼容 List[BaseMessage] / List[dict] / str 三种入参形态
+    """
+    if isinstance(messages, str):
+        return f"[raw str] (len={len(messages)}): {messages}"
+    if not isinstance(messages, (list, tuple)):
+        return str(messages)
+
+    lines = [f"total={len(messages)}"]
+    for idx, msg in enumerate(messages):
+        if isinstance(msg, dict):
+            role = msg.get("role", "?")
+            content = msg.get("content")
+            name = msg.get("name")
+            tool_calls = msg.get("tool_calls")
+        else:
+            role = getattr(msg, "role", "?")
+            content = getattr(msg, "content", None)
+            name = getattr(msg, "name", None)
+            tool_calls = getattr(msg, "tool_calls", None)
+
+        if content is None:
+            content_str, content_len = "", 0
+        elif isinstance(content, str):
+            content_str, content_len = content, len(content)
+        else:
+            # 多模态 list 等非字符串 content
+            content_str = str(content)
+            content_len = len(content_str)
+
+        meta = f"len={content_len}"
+        if name:
+            meta += f", name={name}"
+        if tool_calls:
+            meta += f", tool_calls={len(tool_calls)}"
+        lines.append(f"  [{idx}] {role} ({meta}): {content_str}")
+    return "\n".join(lines)
+
+
 # ============================================================
 # LLM Retry Mechanism
 # ============================================================
@@ -651,11 +694,13 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             **kwargs,
     ):
         session_id = self.model_client_config.model_extra.get("session", "default")
-        llm_logger.debug(
-            "[session=%s] [LLM] Input messages: %s",
-            session_id,
-            str(messages)
-        )
+
+        if llm_logger.isEnabledFor(logging.DEBUG):
+            llm_logger.debug(
+                "[session=%s] [LLM] Input messages:\n%s",
+                session_id,
+                _format_messages_by_role(messages),
+            )
         min_segment_size = self._MIN_SEGMENT_SIZE
         resp = await self._invoke_with_retry(
             _orig_invoke,
@@ -672,29 +717,37 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             **kwargs,
         )
 
-        # 分段打印 invoke 的输出
+        # 分段打印 invoke 的输出（思考 / 正文分别分段）
         _content = getattr(resp, "content", None) or ""
-        if _content:
-            content_len = len(_content)
-            if content_len > 0:
-                # 分段打印
-                segment_num = 0
-                for i in range(0, content_len, min_segment_size):
-                    segment_num += 1
-                    segment = _content[i:i + min_segment_size]
-                    is_last = (i + min_segment_size) >= content_len
-                    llm_logger.info(
-                        "[session=%s] [LLM] Output segment #%d%s: %s",
-                        session_id,
-                        segment_num,
-                        " (final)" if is_last else "",
-                        segment,
-                    )
+        _reasoning = getattr(resp, "reasoning_content", None) or ""
+
+        def _print_segments(text: str, kind: str) -> int:
+            if not text:
+                return 0
+            text_len = len(text)
+            segment_num = 0
+            for i in range(0, text_len, min_segment_size):
+                segment_num += 1
+                segment = text[i:i + min_segment_size]
+                is_last = (i + min_segment_size) >= text_len
+                llm_logger.info(
+                    "[session=%s] [LLM] %s segment #%d%s: %s",
+                    session_id,
+                    kind,
+                    segment_num,
+                    " (final)" if is_last else "",
+                    segment,
+                )
+            return segment_num
+
+        reasoning_segments = _print_segments(_reasoning, "Reasoning")
+        content_segments = _print_segments(_content, "Output")
 
         llm_logger.info(
-            "[session=%s] [LLM] Generation completed. Total segments: %d",
+            "[session=%s] [LLM] Generation completed. reasoning segments: %d, output segments: %d",
             session_id,
-            (len(_content) + min_segment_size - 1) // min_segment_size if _content else 0,
+            reasoning_segments,
+            content_segments,
         )
         return resp
 
@@ -713,19 +766,38 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             **kwargs,
     ):
         session_id = self.model_client_config.model_extra.get("session", "default")
-        llm_logger.debug(
-            "[session=%s] [LLM] Input messages: %s",
-            session_id,
-            str(messages)
-        )
+
+        if llm_logger.isEnabledFor(logging.DEBUG):
+            llm_logger.debug(
+                "[session=%s] [LLM] Input messages:\n%s",
+                session_id,
+                _format_messages_by_role(messages),
+            )
         chunk_counter = 0
         token = _stream_tool_header_seen.set(frozenset())
-        try:
-            segment_parts = []  # 分段打印缓冲区
-            segment_counter = 0  # 已打印段数
-            segment_accum_len = 0  # 累积字符数
-            min_segment_size = self._MIN_SEGMENT_SIZE
 
+        # 思考 / 正文两条独立分段缓冲
+        reasoning_parts: list = []  # 思考分段打印缓冲区
+        content_parts: list = []  # 正文分段打印缓冲区
+        reasoning_seg_counter = 0  # 思考已打印段数
+        content_seg_counter = 0  # 正文已打印段数
+        reasoning_accum = 0  # 思考累积字符数
+        content_accum = 0  # 正文累积字符数
+        min_segment_size = self._MIN_SEGMENT_SIZE
+
+        def _flush_segment(parts: list, seg_no: int, kind: str, tail: bool = False) -> None:
+            full_segment = "".join(parts)
+            llm_logger.info(
+                "[session=%s] [LLM] %s segment #%d (%s, len=%d): %s",
+                session_id,
+                kind,
+                seg_no,
+                "final" if tail else "live",
+                len(full_segment),
+                full_segment,
+            )
+
+        try:
             async for chunk in self._stream_with_retry(
                     _orig_stream,
                     self,
@@ -741,51 +813,53 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
                     **kwargs,
             ):
                 chunk_counter += 1
-                if chunk_counter % 10 == 1:
-                    llm_logger.debug(
-                        "[session=%s] [LLM] Output chunk #%d: %s...",
-                        session_id,
-                        chunk_counter,
-                        str(chunk)[:200]
-                    )
-                _content = getattr(chunk, "content")
-                if _content:
-                    segment_parts.append(_content)
-                    segment_accum_len += len(_content)
+                _reasoning = getattr(chunk, "reasoning_content", None)
+                _content = getattr(chunk, "content", None)
 
-                    if segment_accum_len >= min_segment_size:
-                        segment_counter += 1
-                        full_segment = "".join(segment_parts)
-                        llm_logger.info(
-                            "[session=%s] [LLM] Output segment #%d (live, len=%d): %s",
-                            session_id,
-                            segment_counter,
-                            len(full_segment),
-                            full_segment,
-                        )
-                        segment_parts = []
-                        segment_accum_len = 0
+                if _reasoning:
+                    reasoning_parts.append(_reasoning)
+                    reasoning_accum += len(_reasoning)
+
+                    if reasoning_accum >= min_segment_size:
+                        reasoning_seg_counter += 1
+                        _flush_segment(reasoning_parts, reasoning_seg_counter, "Reasoning")
+                        reasoning_parts = []
+                        reasoning_accum = 0
+
+                if _content:
+                    # 思考 → 正文切换：先把思考缓冲尾巴冲刷掉，保证分段不跨界
+                    if reasoning_parts:
+                        reasoning_seg_counter += 1
+                        _flush_segment(reasoning_parts, reasoning_seg_counter, "Reasoning", tail=True)
+                        reasoning_parts = []
+                        reasoning_accum = 0
+                    content_parts.append(_content)
+                    content_accum += len(_content)
+
+                    if content_accum >= min_segment_size:
+                        content_seg_counter += 1
+                        _flush_segment(content_parts, content_seg_counter, "Output")
+                        content_parts = []
+                        content_accum = 0
                 yield chunk
         finally:
             _stream_tool_header_seen.reset(token)
 
-        # 处理最后剩余的缓冲区内容
-        if segment_parts:
-            segment_counter += 1
-            final_content = "".join(segment_parts)
-            llm_logger.info(
-                "[session=%s] [LLM] Output segment #%d (final, len=%d): %s",
-                session_id,
-                segment_counter,
-                len(final_content),
-                final_content,
-            )
+        # 处理最后剩余的缓冲区内容（两条缓冲分别冲刷）
+        if reasoning_parts:
+            reasoning_seg_counter += 1
+            _flush_segment(reasoning_parts, reasoning_seg_counter, "Reasoning", tail=True)
+        if content_parts:
+            content_seg_counter += 1
+            _flush_segment(content_parts, content_seg_counter, "Output", tail=True)
 
         llm_logger.info(
-            "[session=%s] [LLM] Generation completed. Total chunks: %d, total segments: %d",
+            "[session=%s] [LLM] Generation completed. Total chunks: %d, "
+            "reasoning segments: %d, output segments: %d",
             session_id,
             chunk_counter,
-            segment_counter,
+            reasoning_seg_counter,
+            content_seg_counter,
         )
 
 
