@@ -244,6 +244,21 @@ async def test_list_jobs_filtered_by_session(ctrl: HeartbeatController) -> None:
     assert result["jobs"][0]["session_id"] == "s1"
 
 
+async def test_list_jobs_has_stable_created_at_order(
+    ctrl: HeartbeatController,
+) -> None:
+    late = await ctrl._store.create_job(
+        name="late", channel_id="web", session_id="s1", prompt="p",
+        schedule=_interval_schedule(), source="web_rpc", now=20.0,
+    )
+    early = await ctrl._store.create_job(
+        name="early", channel_id="web", session_id="s1", prompt="p",
+        schedule=_interval_schedule(), source="web_rpc", now=10.0,
+    )
+    result = await ctrl.list_jobs({"session_id": "s1"})
+    assert [job["id"] for job in result["jobs"]] == [early.id, late.id]
+
+
 async def test_default_scope_and_mutations_enforce_session_ownership(
     ctrl: HeartbeatController,
 ) -> None:
@@ -333,6 +348,31 @@ async def test_get_meta(ctrl: HeartbeatController) -> None:
     assert "scheduled" in meta["statuses"]
     assert "interval" in meta["schedule_types"]
     assert "skip" in meta["concurrency_policies"]
+    assert meta["run_count_semantics"].startswith("increments for succeeded")
+    assert "delete_after_run" in meta["deprecated_fields"]
+
+
+def test_limits_are_normalized_for_meta(ctrl: HeartbeatController) -> None:
+    ctrl.set_limits(
+        {
+            "min_interval_seconds": "120",
+            "max_active_jobs_per_session": "3",
+            "max_active_jobs_global": "9",
+            "default_max_runs": "null",
+        }
+    )
+    limits = ctrl.get_meta()["limits"]
+    assert limits["min_interval_seconds"] == 120
+    assert limits["max_active_jobs_per_session"] == 3
+    assert limits["max_active_jobs_global"] == 9
+    assert limits["default_max_runs"] is None
+
+
+def test_limits_cannot_advertise_interval_below_model_floor(
+    ctrl: HeartbeatController,
+) -> None:
+    with pytest.raises(ValueError, match="min_interval_seconds must be at least 60"):
+        ctrl.set_limits({"min_interval_seconds": 30})
 
 
 # ---------------------------------------------------------------------------

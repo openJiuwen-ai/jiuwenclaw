@@ -33,14 +33,14 @@ if TYPE_CHECKING:
     from jiuwenswarm.gateway.message_handler import MessageHandler
 
 # 探活请求使用的默认标识,AgentServer 可据此识别探活请求。
-HEALTH_CHECK_CHANNEL_ID = "__heartbeat__"
+HEALTH_CHECK_CHANNEL_ID = "__health_check__"
 
-HEALTH_CHECK_OK = "HEARTBEAT_OK"
+HEALTH_CHECK_OK = "HEALTH_CHECK_OK"
 
 # 探活请求发送的 content,AgentServer 可识别为探活。
 HEALTH_CHECK_PROMPT = (
     "如果你的workspace目录存在HEARTBEAT.md文件, 读取文件内容并且根据文件内容执行任务. "
-    "如果没有HEARTBEAT.md文件, 仅回复HEARTBEAT_OK"
+    "如果没有HEARTBEAT.md文件, 仅回复HEALTH_CHECK_OK"
 )
 
 
@@ -189,18 +189,16 @@ class GatewayHealthCheckService(IHealthCheck):
 
         ts = format(int(time.time() * 1000), "x")
         suffix = secrets.token_hex(3)
-        # 外部 API 已迁移到 health_check.*，内部 Agent 协议暂时保持旧 token/
-        # session 前缀，避免 Agent rail、history、metadata 和 oneshot 清理只迁移一半。
         request_id = f"healthcheck-{ts}_{suffix}"
-        session_id = f"heartbeat_{ts}_{suffix}"
+        session_id = f"health_check_{ts}_{suffix}"
         envelope = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=self._config.channel_id,
             session_id=session_id,
             params={
-                "heartbeat": HEALTH_CHECK_PROMPT,
+                "health_check": HEALTH_CHECK_PROMPT,
                 "run": {
-                    "kind": "heartbeat",
+                    "kind": "health_check",
                     "context": {
                         "reason": "interval",
                         "session_id": session_id,
@@ -219,7 +217,9 @@ class GatewayHealthCheckService(IHealthCheck):
             self._last_tick_at = time.time()
             self._last_tick_ok = True
             payload = resp.payload if isinstance(resp.payload, dict) else {}
-            heartbeat_raw = payload.get("heartbeat")
+            # New producers write ``health_check``.  Reading the legacy field
+            # keeps rolling upgrades compatible with older AgentServer builds.
+            heartbeat_raw = payload.get("health_check", payload.get("heartbeat"))
             heartbeat_content = heartbeat_raw if isinstance(heartbeat_raw, str) else ""
             if not heartbeat_content:
                 content = payload.get("content")
@@ -259,7 +259,7 @@ class GatewayHealthCheckService(IHealthCheck):
                     params={},
                     timestamp=time.time(),
                     ok=True,
-                    payload={"heartbeat": heartbeat_content},
+                    payload={"health_check": heartbeat_content},
                     event_type=EventType.HEALTH_CHECK_RELAY,
                 )
                 await self._message_handler.publish_robot_messages(relay_msg)

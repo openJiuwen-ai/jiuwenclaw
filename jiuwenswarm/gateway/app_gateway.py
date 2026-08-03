@@ -1459,7 +1459,10 @@ async def _run(
         SlackChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
-    from jiuwenswarm.common.config import get_config
+    from jiuwenswarm.common.config import (
+        get_config,
+        migrate_legacy_heartbeat_probe_config,
+    )
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
@@ -1579,6 +1582,10 @@ async def _run(
     health_check_cfg: dict | None = None
     channels_cfg: dict | None = None
     try:
+        if migrate_legacy_heartbeat_probe_config():
+            logger.info(
+                "[App] migrated legacy heartbeat probe config to health_check"
+            )
         full_cfg = get_config()
         # 旧探活配置已从 heartbeat 段迁移到 health_check 段(方案 §2.3)。
         health_check_cfg = _resolve_health_check_config(full_cfg)
@@ -1611,12 +1618,20 @@ async def _run(
         cfg_active_hours = None
 
     heartbeat_interval = float(
-        os.getenv("HEARTBEAT_INTERVAL")
+        os.getenv("HEALTH_CHECK_INTERVAL")
+        or os.getenv("HEARTBEAT_INTERVAL")
         or (str(cfg_every) if cfg_every is not None else "60")
     )
-    heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT", "30")) if os.getenv("HEARTBEAT_TIMEOUT") else None
-    heartbeat_relay_channel = os.getenv("HEARTBEAT_RELAY_CHANNEL_ID") or (
-        str(cfg_target) if cfg_target is not None else "web"
+    health_check_timeout_raw = os.getenv("HEALTH_CHECK_TIMEOUT") or os.getenv(
+        "HEARTBEAT_TIMEOUT"
+    )
+    heartbeat_timeout = (
+        float(health_check_timeout_raw) if health_check_timeout_raw else None
+    )
+    heartbeat_relay_channel = (
+        os.getenv("HEALTH_CHECK_RELAY_CHANNEL_ID")
+        or os.getenv("HEARTBEAT_RELAY_CHANNEL_ID")
+        or (str(cfg_target) if cfg_target is not None else "web")
     )
 
     heartbeat_config = HealthCheckConfig(

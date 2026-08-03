@@ -358,17 +358,46 @@ def update_health_check_in_config(payload: dict[str, Any]) -> None:
     旧 ``update_heartbeat_in_config`` 的迁移目标(方案 §2.3):探活配置
     every/target/active_hours 已从 heartbeat 段迁移到 health_check 段。
     """
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "health_check" not in data:
-        data["health_check"] = {}
-    hc = data["health_check"]
-    if "every" in payload:
-        hc["every"] = payload["every"]
-    if "target" in payload:
-        hc["target"] = payload["target"]
-    if "active_hours" in payload:
-        hc["active_hours"] = payload["active_hours"]
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    def _mutate(data: dict[str, Any]) -> dict[str, Any]:
+        current = data.get("health_check")
+        if not isinstance(current, dict):
+            current = {}
+            data["health_check"] = current
+        for key in ("every", "target", "active_hours"):
+            if key in payload:
+                current[key] = payload[key]
+        return data
+
+    update_config(_mutate)
+
+
+def migrate_legacy_heartbeat_probe_config() -> bool:
+    """Move legacy probe keys to health_check without touching heartbeat.jobs."""
+    changed = False
+    probe_keys = ("every", "target", "active_hours")
+
+    def _mutate(data: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal changed
+        legacy = data.get("heartbeat")
+        if not isinstance(legacy, dict):
+            return None
+        present = [key for key in probe_keys if key in legacy]
+        if not present:
+            return None
+        current = data.get("health_check")
+        if not isinstance(current, dict):
+            current = {}
+            data["health_check"] = current
+        for key in present:
+            current.setdefault(key, legacy[key])
+            legacy.pop(key, None)
+        if not legacy:
+            data.pop("heartbeat", None)
+        changed = True
+        return data
+
+    update_config(_mutate)
+    return changed
 
 
 # 兼容别名:旧调用方仍可 import update_heartbeat_in_config(指向 health_check 段)。

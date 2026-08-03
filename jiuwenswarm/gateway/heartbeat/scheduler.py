@@ -152,22 +152,24 @@ class HeartbeatSchedulerService:
                 "[HeartbeatScheduler] cleared ghost run: run_id=%s (job no longer in store)",
                 rid,
             )
-        # 进程崩溃后内存 run 丢失，持久化 running 不应永久阻塞调度。
-        now = self._now_fn()
-        lease_timeout = 24 * 60 * 60
+        # A persisted run is live only when this Gateway still tracks its exact
+        # stream.  After a cold restart no completion callback can arrive, so
+        # waiting on an arbitrary 24h lease would leave a ghost run all day.
+        stream_tasks = getattr(self._message_handler, "_stream_tasks", {})
         for job in all_jobs:
             rid = job.run_state.current_run_id
             started = job.run_state.current_run_started_at
             if not rid or started is None or rid in self._active_runs:
                 continue
-            if now - started < lease_timeout:
+            stream_task = stream_tasks.get(rid) if isinstance(stream_tasks, dict) else None
+            if stream_task is not None and not stream_task.done():
                 self._active_runs[rid] = (job.id, started)
                 continue
             await self.on_run_finished(
                 job.id,
                 rid,
                 outcome="failed",
-                error="run lease expired during scheduler recovery",
+                error="orphan run recovered after scheduler restart",
             )
         self._sync_store_mtime()
         self._reload_event.set()
@@ -228,11 +230,23 @@ class HeartbeatSchedulerService:
                 "[HeartbeatScheduler] skip job %s: session active-job limit exceeded",
                 job.id,
             )
+            await self._store.skip_and_reschedule(
+                job.id,
+                now=now,
+                reason="session_active_job_limit_exceeded",
+                next_run_at=self._compute_next_run(job, now),
+            )
             return
         if await self._store.count_active_jobs_global() > max_global:
             logger.warning(
                 "[HeartbeatScheduler] skip job %s: global active-job limit exceeded",
                 job.id,
+            )
+            await self._store.skip_and_reschedule(
+                job.id,
+                now=now,
+                reason="global_active_job_limit_exceeded",
+                next_run_at=self._compute_next_run(job, now),
             )
             return
         await self._handle_due_job(job, now)
@@ -393,7 +407,15 @@ class HeartbeatSchedulerService:
                 ),
             )
             self._active_runs.pop(replaced_run_id, None)
-            await self._send_cancel_to_session(job, replaced_run_id)
+            cancel_status, cancel_error = await self._send_cancel_to_session(
+                job, replaced_run_id
+            )
+            await self._store.record_cancel_result(
+                job.id,
+                status=cancel_status,
+                error=cancel_error,
+                now=self._now_fn(),
+            )
             decision = "run"
         if decision == "run":
             await self._dispatch_claimed_job(claimed, run_id, now)
@@ -455,13 +477,21 @@ class HeartbeatSchedulerService:
             "failed": "failed",
             "cancelled": "cancelled",
         }.get(outcome, "failed")
-        next_count = int(job.run_count) + (1 if normalized in {"succeeded", "failed"} else 0)
-        terminal = (
+        completed_attempt = normalized in {"succeeded", "failed"}
+        next_count = int(job.run_count) + (1 if completed_attempt else 0)
+        terminal = completed_attempt and (
             bool(job.delete_after_run)
             or job.schedule.type == SCHEDULE_ONCE
             or (job.max_runs is not None and next_count >= int(job.max_runs))
         )
-        next_run_at = self._compute_next_run(job, now)
+        # Scheduler claims already advanced next_run_at from the trigger time.
+        # Finishing must not move interval jobs again by their execution time.
+        if job.run_state.current_trigger == "scheduler":
+            next_run_at = job.next_run_at
+        elif job.run_state.current_reschedule:
+            next_run_at = self._compute_next_run(job, now)
+        else:
+            next_run_at = job.next_run_at
         matched, finished = await self._store.finish_run(
             job.id,
             run_id,
@@ -503,6 +533,7 @@ class HeartbeatSchedulerService:
         run_id = job.run_state.current_run_id
         now = self._now_fn()
         cancelled_run_id: str | None = None
+        cancel_status = "idle"
         if run_id:
             matched = await self.on_run_finished(
                 job.id,
@@ -513,7 +544,13 @@ class HeartbeatSchedulerService:
             )
             # Persist cancellation before stopping the stream.  Its finally
             # callback is then stale and cannot race the requested pause state.
-            await self._send_cancel_to_session(job, run_id)
+            cancel_status, cancel_error = await self._send_cancel_to_session(job, run_id)
+            await self._store.record_cancel_result(
+                job.id,
+                status=cancel_status,
+                error=cancel_error,
+                now=self._now_fn(),
+            )
             if matched and not pause_schedule:
                 await self._consume_queued_run(job.id)
             cancelled_run_id = run_id
@@ -522,16 +559,22 @@ class HeartbeatSchedulerService:
         return {
             "job_id": job.id,
             "cancelled_run_id": cancelled_run_id,
+            "cancel_status": cancel_status,
             "paused": bool(pause_schedule),
         }
 
-    async def _send_cancel_to_session(self, job: HeartbeatJob, run_id: str) -> None:
+    async def _send_cancel_to_session(
+        self, job: HeartbeatJob, run_id: str
+    ) -> tuple[str, str | None]:
         """Cancel only the gateway stream whose request id equals this heartbeat run."""
         try:
             cancel_exact = getattr(self._message_handler, "cancel_request", None)
             if callable(cancel_exact):
-                await cancel_exact(run_id)
-                return
+                accepted = bool(await cancel_exact(run_id))
+                return ("cancelled", None) if accepted else (
+                    "not_found",
+                    "exact gateway stream was not found",
+                )
             from jiuwenswarm.common.schema.message import Message, ReqMethod
 
             now = self._now_fn()
@@ -562,6 +605,7 @@ class HeartbeatSchedulerService:
                 },
             )
             await self._message_handler.publish_user_messages(msg)
+            return "cancelled", None
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[HeartbeatScheduler] send cancel to session failed job=%s run_id=%s: %s",
@@ -569,6 +613,7 @@ class HeartbeatSchedulerService:
                 run_id,
                 exc,
             )
+            return "failed", str(exc)
 
     # ---- trigger_run_now(controller 调用) ----
 

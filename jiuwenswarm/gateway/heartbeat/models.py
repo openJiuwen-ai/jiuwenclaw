@@ -243,6 +243,8 @@ class HeartbeatRunState:
     current_run_started_at: float | None = None
     last_run_status: str | None = None
     last_error: str | None = None
+    last_cancel_status: str | None = None
+    last_cancel_error: str | None = None
     queued_run_id: str | None = None
     queued_trigger: str | None = None
     queued_reschedule: bool = False
@@ -259,6 +261,8 @@ class HeartbeatRunState:
             "current_run_started_at": self.current_run_started_at,
             "last_run_status": self.last_run_status,
             "last_error": self.last_error,
+            "last_cancel_status": self.last_cancel_status,
+            "last_cancel_error": self.last_cancel_error,
             "queued_run_id": self.queued_run_id,
             "queued_trigger": self.queued_trigger,
             "queued_reschedule": bool(self.queued_reschedule),
@@ -288,6 +292,8 @@ class HeartbeatRunState:
                 else None
             ),
             last_error=data.get("last_error") or None,
+            last_cancel_status=data.get("last_cancel_status") or None,
+            last_cancel_error=data.get("last_cancel_error") or None,
             queued_run_id=data.get("queued_run_id") or None,
             queued_trigger=data.get("queued_trigger") or None,
             queued_reschedule=bool(data.get("queued_reschedule", False)),

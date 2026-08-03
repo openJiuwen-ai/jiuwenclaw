@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -56,17 +57,26 @@ class HeartbeatSessionResolver:
 
     @staticmethod
     def _read_session_metadata(session_id: str) -> dict[str, Any] | None:
-        """读取 session metadata;不存在或不可读返回 None。
+        """Read metadata while distinguishing missing from transient corruption.
 
-        使用 cache_bust=True 跨进程强制读磁盘(scheduler 是独立进程/循环)。
+        直接读磁盘以区分目录缺失、写入中和损坏，不经过会吞掉异常的元数据缓存。
         """
         try:
-            from jiuwenswarm.server.runtime.session.session_metadata import (
-                _read_metadata,
-            )
+            from jiuwenswarm.common.utils import get_agent_sessions_dir
 
-            data = _read_metadata(session_id, cache_bust=True)
-            return data if isinstance(data, dict) and data else None
+            session_dir = get_agent_sessions_dir() / session_id
+            if not session_dir.exists():
+                return None
+            metadata_path = session_dir / "metadata.json"
+            if not metadata_path.exists():
+                raise RuntimeError("metadata.json is not available yet")
+            raw = metadata_path.read_text(encoding="utf-8")
+            if not raw.strip():
+                raise RuntimeError("metadata.json is temporarily empty")
+            data = json.loads(raw)
+            if not isinstance(data, dict) or not data:
+                raise RuntimeError("metadata.json must contain a non-empty object")
+            return data
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
                 f"temporary session metadata read failure for {session_id}: {exc}"
@@ -80,7 +90,8 @@ class HeartbeatSessionResolver:
             session_id: 心跳任务绑定的原会话 ID。
 
         Returns:
-            SessionSummary 或 None(不存在/不可读)。
+            SessionSummary 或 None（仅表示确认不存在）。文件存在但不可读时抛出
+            RuntimeError，让 scheduler 本轮重试且不改变 job。
         """
         sid = str(session_id or "").strip()
         cid = str(channel_id or "").strip()

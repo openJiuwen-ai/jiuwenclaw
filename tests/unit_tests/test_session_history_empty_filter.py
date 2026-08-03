@@ -43,6 +43,15 @@ def test_append_history_skips_empty_chat_final_and_heartbeat(tmp_path, monkeypat
         timestamp=3.0,
     )
     session_history.append_history_record(
+        session_id="health_check_abc",
+        request_id="r-health-check",
+        channel_id="__health_check__",
+        role="assistant",
+        event_type="chat.final",
+        content="HEALTH_CHECK_OK",
+        timestamp=3.5,
+    )
+    session_history.append_history_record(
         session_id="s-empty",
         request_id="r4",
         channel_id="web",
@@ -66,3 +75,4 @@ def test_append_history_skips_empty_chat_final_and_heartbeat(tmp_path, monkeypat
     assert [item.get("event_type") for item in data] == ["chat.file", "chat.final"]
     assert data[1]["content"] == "hello"
     assert session_history.load_history_records("heartbeat_abc") == []
+    assert session_history.load_history_records("health_check_abc") == []

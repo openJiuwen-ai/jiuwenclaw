@@ -22,7 +22,8 @@ def list_session_ids() -> list[str]:
     return [
         d.name
         for d in _SESSION_DIR.iterdir()
-        if d.is_dir() and not d.name.startswith("heartbeat_")
+        if d.is_dir()
+        and not d.name.startswith(("health_check_", "heartbeat_"))
     ]
 
 

@@ -92,7 +92,7 @@ class HeartbeatController:
     ) -> None:
         self._store = store
         self._scheduler = scheduler
-        self._limits = {**_DEFAULT_LIMITS, **(limits or {})}
+        self._limits = self._normalize_limits({**_DEFAULT_LIMITS, **(limits or {})})
         self._validate_limits(self._limits)
         self._scheduler.set_limits(self._limits)
 
@@ -118,10 +118,37 @@ class HeartbeatController:
         cls._instance = None
 
     def set_limits(self, limits: dict[str, Any]) -> None:
-        merged = {**self._limits, **(limits or {})}
+        merged = self._normalize_limits({**self._limits, **(limits or {})})
         self._validate_limits(merged)
         self._limits = merged
         self._scheduler.set_limits(merged)
+
+    @staticmethod
+    def _normalize_limits(limits: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(limits)
+        for key in (
+            "min_interval_seconds",
+            "max_active_jobs_per_session",
+            "max_active_jobs_global",
+        ):
+            try:
+                normalized[key] = int(normalized.get(key))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} must be integer") from exc
+        default_max = normalized.get("default_max_runs")
+        if isinstance(default_max, str) and default_max.strip().lower() in {
+            "",
+            "none",
+            "null",
+        }:
+            default_max = None
+        if default_max is not None:
+            try:
+                default_max = int(default_max)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("default_max_runs must be null or integer") from exc
+        normalized["default_max_runs"] = default_max
+        return normalized
 
     @staticmethod
     def _validate_limits(limits: dict[str, Any]) -> None:
@@ -134,8 +161,9 @@ class HeartbeatController:
                 value = int(limits.get(key))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"{key} must be integer") from exc
-            if value < 1:
-                raise ValueError(f"{key} must be at least 1")
+            minimum = MIN_INTERVAL_SECONDS if key == "min_interval_seconds" else 1
+            if value < minimum:
+                raise ValueError(f"{key} must be at least {minimum}")
         default_max = limits.get("default_max_runs")
         if default_max is not None and int(default_max) < 1:
             raise ValueError("default_max_runs must be null or at least 1")
@@ -174,46 +202,6 @@ class HeartbeatController:
             raise ValueError(f"{field} must be boolean")
         return value
 
-    def _check_resource_limits(
-        self, *, session_id: str, schedule: HeartbeatSchedule, exclude_job_id: str | None = None
-    ) -> None:
-        """资源限制校验(接口设计 §4.2)。"""
-        min_iv = int(self._limits.get("min_interval_seconds", MIN_INTERVAL_SECONDS))
-        if schedule.type == "interval":
-            iv = schedule.interval_seconds or 0
-            if iv < min_iv:
-                raise ValueError(
-                    f"interval_seconds must be at least {min_iv}"
-                )
-        max_per_session = int(self._limits.get("max_active_jobs_per_session", 5))
-        cur_session = await_or_zero(self._store.count_active_jobs_for_session(session_id))
-        # 若是更新已有 job,且该 job 仍活跃,不计入新增
-        if exclude_job_id:
-            existing = self._scheduler_sync_get(exclude_job_id)
-            if existing is not None and existing.session_id == session_id and existing.status == "scheduled":
-                cur_session = max(0, cur_session - 1)
-        if cur_session >= max_per_session:
-            raise ValueError(
-                f"max_active_jobs_per_session ({max_per_session}) exceeded for session {session_id}"
-            )
-        max_global = int(self._limits.get("max_active_jobs_global", 100))
-        cur_global = await_or_zero(self._store.count_active_jobs_global())
-        if cur_global >= max_global:
-            raise ValueError(f"max_active_jobs_global ({max_global}) exceeded")
-
-    def _scheduler_sync_get(self, job_id: str) -> HeartbeatJob | None:
-        """同步拿 job(controller 内不便 await,走 store 同步路径;实际用 get_job)。"""
-        import asyncio
-
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 在运行的事件循环里:用 store 的同步读(不经锁,够用于只读校验)
-                return None
-        except RuntimeError:
-            pass
-        return None
-
     # ---- Web/RPC 业务 API ----
 
     async def list_jobs(
@@ -240,7 +228,7 @@ class HeartbeatController:
             else:
                 session_id = access_session_id
         out = []
-        for j in jobs:
+        for j in sorted(jobs, key=lambda item: (item.created_at or 0.0, item.id)):
             if session_id and j.session_id != session_id:
                 continue
             if channel_id and j.channel_id != channel_id:
@@ -549,6 +537,13 @@ class HeartbeatController:
             "session_deleted_policies": list(HEARTBEAT_SESSION_DELETED_POLICIES),
             "statuses": list(HEARTBEAT_STATUSES),
             "sources": list(HEARTBEAT_SOURCES),
+            "run_count_semantics": "increments for succeeded and failed attempts only",
+            "deprecated_fields": {
+                "delete_after_run": (
+                    "retained for compatibility; it completes and preserves the job "
+                    "record after an attempted run"
+                )
+            },
         }
 
     # ---- Agent Tool (方案 §9.2 / 接口设计 §3) ----
@@ -870,14 +865,3 @@ _CREATE_JOB_SCHEMA: dict = {
 }
 
 _CREATE_JOB_DESCRIPTION: str = _CREATE_JOB_SCHEMA["description"]
-
-
-# ---------------------------------------------------------------------------
-# 辅助
-# ---------------------------------------------------------------------------
-
-
-def await_or_zero(coro) -> int:
-    """同步上下文里安全读取 count(返回 0);实际异步路径走 _check_resource_limits_async。"""
-    # controller 的 create_job 是 async,本不应走到这;留作兜底,返回 0 表示无法判定。
-    return 0

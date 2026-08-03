@@ -2050,6 +2050,12 @@ class MessageHandler(ABC):
         if channel_type not in self._control_channel_types:
             return
 
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        automation = metadata.get("automation")
+        is_heartbeat_run = (
+            isinstance(automation, dict) and automation.get("kind") == "heartbeat"
+        )
+
         # V2: 若 resolve_member_by_user 已识别为 team 成员（metadata 含 member_name），
         # 则 session_id 和 mode 已由 handle_message 正确设置，不覆盖。
         if isinstance(msg.metadata, dict) and msg.metadata.get("member_name"):
@@ -2062,20 +2068,44 @@ class MessageHandler(ABC):
 
         state = self.get_or_create_channel_state(msg)
 
-        # 仅 _session_map_channel_types 中的通道族使用 SessionMap；其它受控通道仍按 config/state 与入站 session_id。
-        cid = str(getattr(msg, "channel_id", "") or "")
-        identity_key = self._extract_identity_tuple(msg)
-        if identity_key and self._channel_id_matches_session_map_types(cid):
-            sid = self._session_map.get_session_id(*identity_key)
-            state.session_id = sid
-            msg.session_id = sid
-        elif state.session_id:
-            msg.session_id = state.session_id
+        if not is_heartbeat_run:
+            # 仅 _session_map_channel_types 中的通道族使用 SessionMap；其它受控通道仍按 config/state 与入站 session_id。
+            cid = str(getattr(msg, "channel_id", "") or "")
+            identity_key = self._extract_identity_tuple(msg)
+            if identity_key and self._channel_id_matches_session_map_types(cid):
+                sid = self._session_map.get_session_id(*identity_key)
+                state.session_id = sid
+                msg.session_id = sid
+            elif state.session_id:
+                msg.session_id = state.session_id
 
         # 将 mode 写入 params，后续 E2A / Agent 侧从 params["mode"] 读取
         if msg.params is None:
             msg.params = {}
         if isinstance(msg.params, dict):
+            if is_heartbeat_run and "mode" not in msg.params and msg.session_id:
+                try:
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+
+                    session_metadata = get_session_metadata(
+                        str(msg.session_id),
+                        cache_bust=True,
+                        enable_writeback=False,
+                    )
+                    session_mode = str(
+                        (session_metadata or {}).get("mode") or ""
+                    ).strip()
+                    if session_mode and session_mode != "unknown":
+                        msg.params["mode"] = session_mode
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[HeartbeatScheduler] failed to restore session mode "
+                        "session=%s: %s",
+                        msg.session_id,
+                        exc,
+                    )
             msg.params.setdefault("mode", state.mode.value)
 
     # ---------- user_messages ----------
@@ -2830,6 +2860,7 @@ class MessageHandler(ABC):
     ) -> None:
         sid = str(session_id or "").strip()
         action = str(payload.get("action") or "").strip()
+        operation_id = str(payload.get("operation_id") or "").strip()
         params = payload.get("data") or {}
         if not isinstance(params, dict):
             params = {}
@@ -2845,6 +2876,17 @@ class MessageHandler(ABC):
 
         controller = self._heartbeat_controller
         if controller is None:
+            if operation_id:
+                await self._reply_heartbeat_tool_operation(
+                    operation_id=operation_id,
+                    channel_id=channel_id,
+                    session_id=sid,
+                    data={
+                        "error": "heartbeat controller not available",
+                        "code": "SERVICE_UNAVAILABLE",
+                    },
+                    metadata=metadata,
+                )
             return
         try:
             if action == "list":
@@ -2853,6 +2895,8 @@ class MessageHandler(ABC):
                 data = await controller.get_job(
                     str(params.get("job_id") or ""), access_session_id=sid
                 )
+                if data is None:
+                    raise KeyError("heartbeat job not found")
             elif action == "create":
                 data = await controller.create_job_for_session(
                     params, channel_id=channel_id, session_id=sid
@@ -2911,6 +2955,16 @@ class MessageHandler(ABC):
         except Exception as exc:  # noqa: BLE001
             data = {"error": str(exc), "code": "INTERNAL_ERROR"}
 
+        if operation_id:
+            await self._reply_heartbeat_tool_operation(
+                operation_id=operation_id,
+                channel_id=channel_id,
+                session_id=sid,
+                data=data,
+                metadata=metadata,
+            )
+            return
+
         from jiuwenswarm.common.schema.message import EventType, Message
 
         await self.publish_robot_messages(
@@ -2932,6 +2986,40 @@ class MessageHandler(ABC):
                 enable_streaming=False,
             )
         )
+
+    async def _reply_heartbeat_tool_operation(
+        self,
+        *,
+        operation_id: str,
+        channel_id: str,
+        session_id: str,
+        data: dict[str, Any],
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """Return a Gateway heartbeat result to the waiting Agent tool call."""
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        failed = "error" in data
+        result = {
+            "ok": not failed,
+            "data": None if failed else data,
+            "error": data.get("error") if failed else None,
+            "code": data.get("code") if failed else None,
+        }
+        envelope = e2a_from_agent_fields(
+            request_id=f"heartbeat-tool-response-{operation_id}",
+            channel_id=channel_id,
+            session_id=session_id or None,
+            req_method=ReqMethod.HEARTBEAT_TOOL_RESPONSE,
+            params={"operation_id": operation_id, "result": result},
+            metadata=metadata,
+        )
+        response = await self.agent_client.send_request(envelope)
+        if not response.ok:
+            raise RuntimeError(
+                f"AgentServer rejected heartbeat tool response {operation_id}"
+            )
 
     @staticmethod
     def _chunk_to_message(

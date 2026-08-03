@@ -1382,7 +1382,7 @@ class WechatChannel(BaseChannel):
 
         if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             payload = msg.payload if isinstance(msg.payload, dict) else {}
-            hb = payload.get("heartbeat")
+            hb = payload.get("health_check", payload.get("heartbeat"))
             return str(hb or "").strip()
 
         params = msg.params if isinstance(msg.params, dict) else {}

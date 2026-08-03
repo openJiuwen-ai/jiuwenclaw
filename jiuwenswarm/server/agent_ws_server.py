@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import secrets
 import shutil
 import sys
 from pathlib import Path
@@ -795,6 +796,7 @@ class AgentWebSocketServer:
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
+        self._gateway_push_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
@@ -1245,8 +1247,19 @@ class AgentWebSocketServer:
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
         finally:
-            self._current_ws = None
-            self._current_send_lock = None
+            # A newer Gateway may already have replaced this connection.  An
+            # old connection's teardown must not clear the replacement or fail
+            # operations issued through it.
+            if self._current_ws is ws:
+                self._current_ws = None
+                self._current_send_lock = None
+                for waiter in list(self._gateway_push_waiters.values()):
+                    if not waiter.done():
+                        waiter.set_exception(
+                            ConnectionError(
+                                "Gateway disconnected during heartbeat operation"
+                            )
+                        )
             self._clear_ws_acp_client_capabilities(ws)
             connection_tasks = list(tasks)
             for task in connection_tasks:
@@ -1346,6 +1359,10 @@ class AgentWebSocketServer:
                     ws_caps or self._agent_manager.get_client_capabilities("acp"),
                 )
                 request.metadata = metadata
+
+            if request.req_method == ReqMethod.HEARTBEAT_TOOL_RESPONSE:
+                await self._handle_heartbeat_tool_response(ws, request, send_lock)
+                return
 
             await self._trigger_before_chat_request_hook(request)
 
@@ -6526,6 +6543,52 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def request_gateway_push(
+        self, msg: dict[str, Any], *, timeout_seconds: float = 15.0
+    ) -> dict[str, Any]:
+        """Send a correlated Gateway operation and await its authoritative result."""
+        if self._current_ws is None or self._current_send_lock is None:
+            raise RuntimeError("Gateway is not connected")
+        operation_id = f"hbop_{secrets.token_hex(12)}"
+        outbound = dict(msg or {})
+        body = dict(outbound.get("body") or {})
+        body["operation_id"] = operation_id
+        outbound["body"] = body
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._gateway_push_waiters[operation_id] = future
+        try:
+            await self.send_push(outbound)
+            return await asyncio.wait_for(future, timeout=float(timeout_seconds))
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"Gateway heartbeat operation timed out: {operation_id}"
+            ) from exc
+        finally:
+            self._gateway_push_waiters.pop(operation_id, None)
+
+    async def _handle_heartbeat_tool_response(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Resolve one pending Agent heartbeat tool call, then acknowledge Gateway."""
+        params = request.params if isinstance(request.params, dict) else {}
+        operation_id = str(params.get("operation_id") or "").strip()
+        result = params.get("result")
+        waiter = self._gateway_push_waiters.get(operation_id)
+        accepted = waiter is not None and not waiter.done()
+        if accepted:
+            waiter.set_result(dict(result) if isinstance(result, dict) else {})
+        response = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=accepted,
+            payload={"accepted": accepted, "operation_id": operation_id},
+            metadata=request.metadata,
+        )
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
 

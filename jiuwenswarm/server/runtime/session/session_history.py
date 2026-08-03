@@ -21,12 +21,12 @@ _WORKER_LOCK = threading.Lock()
 _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
-_HEARTBEAT_OK = "HEARTBEAT_OK"
+_PROBE_OK_TOKENS = {"HEALTH_CHECK_OK", "HEARTBEAT_OK"}
 
 
 def _is_ephemeral_heartbeat_session(session_id: str) -> bool:
     """Heartbeat sessions are one-shot and should not pollute history.json(l)."""
-    return (session_id or "").startswith("heartbeat")
+    return (session_id or "").startswith(("health_check_", "heartbeat_"))
 
 
 def _has_persistable_assistant_payload(
@@ -37,7 +37,7 @@ def _has_persistable_assistant_payload(
 ) -> bool:
     """Return False for blank assistant shells that would show as empty history rows."""
     content = (content_text or "").strip()
-    if content.upper() == _HEARTBEAT_OK:
+    if content.upper() in _PROBE_OK_TOKENS:
         return False
 
     et = str(event_type or "").strip()

@@ -585,8 +585,31 @@ async def test_cancel_run_pause_schedule(setup) -> None:
     result = await sched.cancel_run(job.id, pause_schedule=True)
     assert result["paused"] is True
     assert result["cancelled_run_id"] == started["run_id"]
+    assert result["cancel_status"] == "cancelled"
     j = await store.get_job(job.id)
     assert j.status == STATUS_DISABLED
+    assert j.run_state.last_cancel_status == "cancelled"
+
+
+async def test_cancel_run_reports_exact_stream_not_found(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool",
+    )
+    await sched.trigger_run_now(job.id)
+
+    async def not_found(request_id: str) -> bool:
+        mh.cancelled_request_ids.append(request_id)
+        return False
+
+    mh.cancel_request = not_found
+    result = await sched.cancel_run(job.id)
+    current = await store.get_job(job.id)
+    assert result["cancel_status"] == "not_found"
+    assert current.run_state.last_cancel_status == "not_found"
+    assert current.run_state.last_cancel_error == "exact gateway stream was not found"
 
 
 async def test_cancel_pause_survives_stream_finally_callback(setup) -> None:
@@ -642,7 +665,64 @@ async def test_run_now_disabled_job_preserves_disabled_schedule(setup) -> None:
     assert restored.next_run_at is None
 
 
-async def test_reload_recovers_expired_run_lease(tmp_path: Path) -> None:
+async def test_disable_during_running_job_survives_completion(setup) -> None:
+    store, _, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool",
+    )
+    started = await sched.trigger_run_now(job.id)
+    await store.update_job(job.id, {"enabled": False})
+    await sched.on_run_finished(job.id, started["run_id"], outcome="succeeded")
+    current = await store.get_job(job.id)
+    assert current.status == STATUS_DISABLED
+    assert current.enabled is False
+    assert current.next_run_at is None
+
+
+async def test_scheduler_interval_keeps_claim_time_anchor(tmp_path: Path) -> None:
+    now = [100.0]
+    store = HeartbeatJobStore(path=tmp_path / "anchor.json")
+    mh = _FakeMH()
+    sched = HeartbeatSchedulerService(
+        store=store, message_handler=mh, now_fn=lambda: now[0]
+    )
+    sched._session_resolver = _FakeResolver()
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", next_run_at=1.0, now=1.0,
+    )
+    await sched._tick_once()
+    running = await store.get_job(job.id)
+    assert running.next_run_at == 220.0
+    now[0] = 175.0
+    await sched.on_run_finished(
+        job.id, running.run_state.current_run_id, outcome="succeeded"
+    )
+    assert (await store.get_job(job.id)).next_run_at == 220.0
+
+
+async def test_run_now_reschedule_anchors_from_completion(tmp_path: Path) -> None:
+    now = [100.0]
+    store = HeartbeatJobStore(path=tmp_path / "run-now-anchor.json")
+    sched = HeartbeatSchedulerService(
+        store=store, message_handler=_FakeMH(), now_fn=lambda: now[0]
+    )
+    sched._session_resolver = _FakeResolver()
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", now=1.0,
+    )
+    started = await sched.trigger_run_now(job.id, reschedule=True)
+    now[0] = 175.0
+    await sched.on_run_finished(job.id, started["run_id"], outcome="succeeded")
+    assert (await store.get_job(job.id)).next_run_at == 295.0
+
+
+async def test_reload_recovers_orphan_run_immediately(tmp_path: Path) -> None:
     store = HeartbeatJobStore(path=tmp_path / "lease.json")
     mh = _FakeMH()
     now = 100_000.0
@@ -668,3 +748,61 @@ async def test_reload_recovers_expired_run_lease(tmp_path: Path) -> None:
     assert recovered.status == STATUS_SCHEDULED
     assert recovered.run_state.current_run_id is None
     assert recovered.run_state.last_run_status == "failed"
+
+
+async def test_reload_reattaches_exact_live_stream(tmp_path: Path) -> None:
+    store = HeartbeatJobStore(path=tmp_path / "live.json")
+    mh = _FakeMH()
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", now=1.0,
+    )
+    await store.claim_run(
+        job.id,
+        "live-run",
+        2.0,
+        trigger="scheduler",
+        reschedule=True,
+        next_run_at_after_claim=122.0,
+    )
+    live_task = __import__("asyncio").create_task(__import__("asyncio").sleep(3600))
+    mh._stream_tasks = {"live-run": live_task}
+    sched = HeartbeatSchedulerService(store=store, message_handler=mh)
+    sched._session_resolver = _FakeResolver()
+    try:
+        await sched.reload()
+        assert sched._active_runs["live-run"][0] == job.id
+        assert (await store.get_job(job.id)).run_state.current_run_id == "live-run"
+    finally:
+        live_task.cancel()
+        await __import__("asyncio").gather(live_task, return_exceptions=True)
+
+
+async def test_resource_limit_skip_advances_due_time(tmp_path: Path) -> None:
+    store = HeartbeatJobStore(path=tmp_path / "limit.json")
+    mh = _FakeMH()
+    sched = HeartbeatSchedulerService(
+        store=store, message_handler=mh, now_fn=lambda: 100.0
+    )
+    sched._session_resolver = _FakeResolver()
+    jobs = []
+    for name in ("a", "b"):
+        jobs.append(
+            await store.create_job(
+                name=name, channel_id="web", session_id="s1", prompt="p",
+                schedule=HeartbeatSchedule.from_dict(
+                    {"type": "interval", "interval_seconds": 120}
+                ),
+                source="agent_tool", next_run_at=1.0, now=1.0,
+            )
+        )
+    sched.set_limits(
+        {"max_active_jobs_per_session": 1, "max_active_jobs_global": 100}
+    )
+    await sched._tick_once()
+    assert mh.messages == []
+    for job in jobs:
+        current = await store.get_job(job.id)
+        assert current.next_run_at == 220.0
+        assert current.run_state.last_run_status == "skipped"

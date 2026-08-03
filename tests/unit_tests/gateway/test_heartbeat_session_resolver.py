@@ -94,6 +94,30 @@ def test_resolve_returns_none_when_metadata_unreadable(monkeypatch) -> None:
     assert r.resolve("web", "broken-session") is None
 
 
+def test_existing_session_without_metadata_is_transient(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "s1").mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: tmp_path
+    )
+    with pytest.raises(RuntimeError, match="metadata.json is not available yet"):
+        HeartbeatSessionResolver().resolve("web", "s1")
+
+
+def test_corrupt_session_metadata_is_transient(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_dir = tmp_path / "s1"
+    session_dir.mkdir()
+    (session_dir / "metadata.json").write_text("{broken", encoding="utf-8")
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: tmp_path
+    )
+    with pytest.raises(RuntimeError, match="temporary session metadata read failure"):
+        HeartbeatSessionResolver().resolve("web", "s1")
+
+
 async def test_on_session_deleted_forwards_to_scheduler() -> None:
     sched = _FakeScheduler()
     r = HeartbeatSessionResolver(scheduler=sched)

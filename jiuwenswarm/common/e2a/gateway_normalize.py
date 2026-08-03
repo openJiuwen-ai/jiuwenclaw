@@ -593,6 +593,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             channel_id=ch,
             payload={
                 "event_type": "heartbeat.response",
+                "operation_id": body.get("operation_id"),
                 "action": body.get("action"),
                 "status": body.get("status"),
                 "data": body.get("data"),

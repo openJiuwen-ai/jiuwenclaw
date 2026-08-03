@@ -1155,9 +1155,14 @@ class WecomChannel(BaseChannel):
             logger.info("[WecomChannel] 心跳/系统事件处理: chatid=%s, msg.id=%s", chatid, msg.id)
             if chatid:
                 payload = getattr(msg, "payload", None) or {}
-                if isinstance(payload, dict) and payload.get("heartbeat"):
+                health_check = (
+                    payload.get("health_check", payload.get("heartbeat"))
+                    if isinstance(payload, dict)
+                    else None
+                )
+                if health_check:
                     try:
-                        body = {"msgtype": "markdown", "markdown": {"content": str(payload.get("heartbeat"))}}
+                        body = {"msgtype": "markdown", "markdown": {"content": str(health_check)}}
                         await self._ws_client.send_message(chatid, body)
                         logger.info("[WecomChannel] 心跳已发送至 chatid=%s", chatid)
                     except Exception as e:

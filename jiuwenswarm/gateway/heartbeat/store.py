@@ -387,6 +387,24 @@ class HeartbeatJobStore:
                     ),
                     updated_at=float(now),
                 )
+            # A user may disable the schedule while this run is active.  That
+            # newer intent outranks both terminal rules and the start snapshot.
+            if not job.enabled or job.status == STATUS_DISABLED:
+                return replace(
+                    job,
+                    status=STATUS_DISABLED,
+                    enabled=False,
+                    next_run_at=None,
+                    last_run_at=float(now),
+                    run_count=run_count,
+                    run_state=replace(
+                        new_rs,
+                        queued_run_id=None,
+                        queued_trigger=None,
+                        queued_reschedule=False,
+                    ),
+                    updated_at=float(now),
+                )
             if terminal:
                 return replace(
                     job,
@@ -433,8 +451,12 @@ class HeartbeatJobStore:
             return replace(
                 job,
                 status=resume_status,
-                enabled=bool(resume_enabled),
-                next_run_at=resume_next,
+                enabled=bool(job.enabled if job.status == STATUS_RUNNING else resume_enabled),
+                next_run_at=(
+                    job.next_run_at
+                    if job.status == STATUS_RUNNING
+                    else resume_next
+                ),
                 last_run_at=float(now),
                 run_count=run_count,
                 run_state=new_rs,
@@ -472,6 +494,66 @@ class HeartbeatJobStore:
 
         await self._mutate_job(job_id, _pop)
         return queued
+
+    async def record_cancel_result(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        error: str | None,
+        now: float,
+    ) -> HeartbeatJob:
+        """Persist the delivery result of the most recent exact cancellation."""
+
+        def _record(job: HeartbeatJob) -> HeartbeatJob:
+            return replace(
+                job,
+                run_state=replace(
+                    job.run_state,
+                    last_cancel_status=str(status),
+                    last_cancel_error=(str(error)[:1000] if error else None),
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _record)
+
+    async def skip_and_reschedule(
+        self,
+        job_id: str,
+        *,
+        now: float,
+        reason: str,
+        next_run_at: float | None,
+    ) -> HeartbeatJob:
+        """Atomically record a defensive skip and advance the due time."""
+
+        def _skip(job: HeartbeatJob) -> HeartbeatJob:
+            run_state = replace(
+                job.run_state,
+                last_run_status=RUN_SKIPPED,
+                last_error=str(reason)[:1000],
+                skipped_count=int(job.run_state.skipped_count) + 1,
+            )
+            if next_run_at is None and not job.run_state.current_run_id:
+                return replace(
+                    job,
+                    enabled=False,
+                    status=STATUS_EXPIRED,
+                    next_run_at=None,
+                    last_run_at=float(now),
+                    run_state=run_state,
+                    updated_at=float(now),
+                )
+            return replace(
+                job,
+                next_run_at=next_run_at,
+                last_run_at=float(now),
+                run_state=run_state,
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _skip)
 
     async def create_job(
         self,

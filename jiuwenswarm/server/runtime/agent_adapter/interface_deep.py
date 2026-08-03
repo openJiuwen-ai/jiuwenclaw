@@ -6516,7 +6516,7 @@ class JiuWenSwarmDeepAdapter:
         into the system prompt is handled by HeartbeatRail in before_model_call.
         """
         sid = str(request.session_id or "")
-        if not sid.startswith("heartbeat"):
+        if not sid.startswith(("health_check_", "heartbeat_")):
             return None
         if not self._is_session_scoped_adapter:
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
@@ -6542,11 +6542,12 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] heartbeat failed to prepare HEARTBEAT.md content: %s", exc)
 
+        health_check_task = content or "未配置 HEARTBEAT.md，仅回复 HEALTH_CHECK_OK。"
         request.params["query"] = (
-            "这是一次心跳请求任务，请根据 <heartbeat_user_task> 标签中的内容进行回复。\n"
-            "<heartbeat_user_task>\n"
-            f"{content}\n"
-            "</heartbeat_user_task>"
+            "这是一次探活请求，请根据 <health_check_user_task> 标签中的内容回复。\n"
+            "<health_check_user_task>\n"
+            f"{health_check_task}\n"
+            "</health_check_user_task>"
         )
         logger.info(
             "[JiuWenSwarmDeepAdapter] heartbeat query injected:" " request_id=%s session_id=%s",

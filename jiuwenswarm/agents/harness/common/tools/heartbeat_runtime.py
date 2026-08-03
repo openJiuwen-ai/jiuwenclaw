@@ -42,25 +42,37 @@ class HeartbeatRuntimeBridge:
         session_id = str(context.session_id or "").strip()
         if not request_id or not session_id:
             raise ValueError("heartbeat tools require an active session context")
-        await self._gateway_push.send_push(
-            {
-                "request_id": request_id,
-                "channel_id": channel_id,
-                "session_id": session_id,
-                "response_kind": E2A_RESPONSE_KIND_HEARTBEAT,
-                "body": {
-                    "action": action,
-                    "status": "ok",
-                    "data": dict(data or {}),
-                    "message": "",
-                },
-            }
-        )
-        return {
-            "action": action,
-            "status": "forwarded",
-            "message": "heartbeat request forwarded to gateway",
+        message = {
+            "request_id": request_id,
+            "channel_id": channel_id,
+            "session_id": session_id,
+            "response_kind": E2A_RESPONSE_KIND_HEARTBEAT,
+            "body": {
+                "action": action,
+                "status": "ok",
+                "data": dict(data or {}),
+                "message": "",
+            },
         }
+        request = getattr(self._gateway_push, "request", None)
+        if not callable(request):
+            # Compatibility for custom transports implementing the old one-way
+            # protocol. Production WebSocket transport always uses request().
+            await self._gateway_push.send_push(message)
+            return {
+                "action": action,
+                "status": "forwarded",
+                "message": "heartbeat request forwarded to gateway",
+            }
+        response = await request(message, timeout_seconds=15.0)
+        if not isinstance(response, dict):
+            raise RuntimeError("invalid heartbeat response from gateway")
+        if response.get("ok") is not True:
+            code = str(response.get("code") or "INTERNAL_ERROR")
+            error = str(response.get("error") or "heartbeat operation failed")
+            raise RuntimeError(f"{code}: {error}")
+        data_out = response.get("data")
+        return dict(data_out) if isinstance(data_out, dict) else {"result": data_out}
 
     def build_tools(self, *, context: Any) -> list[Tool]:
         def tool(name: str, description: str, schema: dict[str, Any], func: Any) -> Tool:
