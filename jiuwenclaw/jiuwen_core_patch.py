@@ -4,8 +4,10 @@ import os
 import asyncio
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Optional
+from functools import lru_cache
+from typing import Any, AsyncIterator, Callable, Optional
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from weakref import WeakKeyDictionary
@@ -41,6 +43,7 @@ _ORIGINAL_BUILD_REQUEST_PARAMS = None
 _OPENJIUWEN_LOG_HANDLER_PATCHED = False
 _SKIP_TOOL_TOOL_MESSAGE_PATCHED = False
 _STREAMING_TOOL_WAIT_TIMEOUT_PATCHED = False
+_SANDBOX_FS_PATCHED = False
 
 # Default active-execution budget for StreamingToolExecutor.wait_all().
 # HITL/interrupt waits should call pause_streaming_tool_wait_timeout() so they
@@ -1136,6 +1139,112 @@ def apply_siliconflow_model_client_patch() -> None:
             setattr(SiliconFlowModelClient, _attr, getattr(RetryMixin, _attr))
 
 
+@lru_cache(maxsize=1)
+def _get_sandbox_fs_executor() -> ThreadPoolExecutor:
+    # Default to_thread pool is min(32, cpu+4). Stay under the same cap, but
+    # scale a bit more generously on small CPUs (floor 8) without cpu*8 stampede.
+    workers = min(32, max(8, (os.cpu_count() or 1) * 2 + 4))
+    llm_logger.info(
+        "Sandbox FS dedicated thread pool ready (workers=%d)",
+        workers,
+    )
+    return ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="jiuwenclaw-sandbox-fs",
+    )
+
+
+def _shutdown_sandbox_fs_executor() -> None:
+    """Shut down the cached FS pool if present (tests / process teardown)."""
+    if _get_sandbox_fs_executor.cache_info().currsize == 0:
+        return
+    executor = _get_sandbox_fs_executor()
+    _get_sandbox_fs_executor.cache_clear()
+    executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def _run_in_sandbox_fs_executor(fn: Callable[[], Any]) -> Any:
+    """Run sync sandbox FS op on the dedicated FS thread pool."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_get_sandbox_fs_executor(), fn)
+
+
+def _patch_sandbox_fs() -> None:
+    """Route jiuwenbox sandbox sync FS ops through a dedicated thread pool.
+
+    Upstream ``_execute_with_sandbox_retry`` uses ``asyncio.to_thread`` (default
+    pool ≈6 on 2C). Under multi-session load that queues and can exceed the
+    StreamingToolExecutor 180s budget. Same retry/recreate contract as upstream;
+    only sync dispatch uses the dedicated pool.
+    """
+    global _SANDBOX_FS_PATCHED
+    if _SANDBOX_FS_PATCHED:
+        return
+    try:
+        from openjiuwen.extensions.sys_operation.sandbox.providers import jiuwenbox as jb
+    except ImportError:
+        return
+
+    # Monkey-patch must reuse upstream protected helpers; bind once here.
+    mixin = jb._JiuwenBoxProviderMixin  # pylint: disable=protected-access
+    resolve_recreate_retries = jb._resolve_recreate_retries  # pylint: disable=protected-access
+    recreate_retry_sleep = jb._SANDBOX_RECREATE_RETRY_SLEEP_SECONDS  # pylint: disable=protected-access
+    is_sandbox_not_found_error = jb._is_sandbox_not_found_error  # pylint: disable=protected-access
+
+    async def _patched_execute_with_sandbox_retry(self, op):
+        max_retries = resolve_recreate_retries()
+        last_exc: Optional[httpx.HTTPStatusError] = None
+        # getattr: avoid G.CLS.11 protected-access; preserve instance-method lookup.
+        stale_sandbox_id = getattr(self, "_get_sandbox_id")()
+        for attempt in range(max_retries + 1):
+            if attempt == 0:
+                sandbox_id = stale_sandbox_id
+            else:
+                await asyncio.sleep(recreate_retry_sleep)
+                llm_logger.info(
+                    "[jiuwenbox] sandbox-not-found auto-recreate attempt %d/%d (stale=%s)",
+                    attempt,
+                    max_retries,
+                    stale_sandbox_id,
+                )
+                try:
+                    sandbox_id = await getattr(self, "_recreate_sandbox_after_loss")(
+                        stale_sandbox_id=stale_sandbox_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    llm_logger.warning(
+                        "[jiuwenbox] sandbox recreate failed (attempt %d/%d): %s",
+                        attempt,
+                        max_retries,
+                        exc,
+                    )
+                    continue
+            try:
+                # Upstream: await asyncio.to_thread(op, sandbox_id)
+                return await _run_in_sandbox_fs_executor(lambda sid=sandbox_id: op(sid))
+            except httpx.HTTPStatusError as exc:
+                if not is_sandbox_not_found_error(exc):
+                    raise
+                last_exc = exc
+                stale_sandbox_id = sandbox_id
+                llm_logger.warning(
+                    "[jiuwenbox] sandbox %s not found (attempt %d/%d)",
+                    sandbox_id,
+                    attempt,
+                    max_retries,
+                )
+        # Loop only exits without return after a sandbox-not-found path set last_exc.
+        assert last_exc is not None
+        raise last_exc
+
+    mixin._execute_with_sandbox_retry = _patched_execute_with_sandbox_retry  # pylint: disable=protected-access
+    _SANDBOX_FS_PATCHED = True
+    llm_logger.info(
+        "Sandbox FS dedicated-pool patch applied "
+        "(workers=min(32, max(8, cpu*2+4)))"
+    )
+
+
 def apply_openai_model_client_patch() -> None:
     """Monkey-patch upstream OpenAIModelClient with JiuwenClaw SSL/headers/stream behavior."""
     global _ORIGINAL_BUILD_REQUEST_PARAMS
@@ -1152,6 +1261,7 @@ def apply_openai_model_client_patch() -> None:
     _patch_skip_tool_tool_message()
     _patch_railed_model_call_session()
     _patch_streaming_tool_wait_timeout()
+    _patch_sandbox_fs()
     _static_attrs = ('_extract_error_details', '_extract_retry_after', '_raise_mock_error')
     _instance_attrs = (
         '_stream_with_retry', '_invoke_with_retry',
