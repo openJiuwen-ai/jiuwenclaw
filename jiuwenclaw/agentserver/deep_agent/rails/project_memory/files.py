@@ -676,11 +676,8 @@ def _extract_include_spec(line: str) -> str | None:
     stripped = line.strip()
     if not stripped:
         return None
-    if stripped.startswith("@include "):
-        return stripped[len("@include "):].strip()
-    if stripped.startswith("@") and not stripped.startswith("@@"):
-        return stripped[1:].strip()
-    return None
+    match = re.match(r"^@(include|import)\s+(.+)$", stripped)
+    return match.group(2).strip() if match else None
 
 
 def _resolve_include_path(spec: str, *, current_path: Path) -> Path | None:

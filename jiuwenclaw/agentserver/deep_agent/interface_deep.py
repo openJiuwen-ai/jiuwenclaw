@@ -147,6 +147,9 @@ from jiuwenclaw.agentserver.deep_agent.code_rails_builder import (
     _code_memory_enabled,
     build_code_mode_extra_rails,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.project_memory_rail import (
+    ProjectMemoryRail,
+)
 from jiuwenclaw.agentserver.deep_agent.skill_evolution_rail import JiuClawSkillEvolutionRail
 from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ASK_REQUEST_PREFIX,
@@ -3513,9 +3516,9 @@ class JiuWenClawDeepAdapter:
             self._code_mode_workspace = str(Path(self._workspace_dir or "./").resolve())
             for rail in code_mode_rails:
                 rail_name = type(rail).__name__
-                if rail_name == "ProjectMemoryRail":
+                if isinstance(rail, ProjectMemoryRail):
                     self._project_memory_rail = rail
-                elif rail_name == "CodingMemoryRail":
+                elif isinstance(rail, CodingMemoryRail):
                     self._coding_memory_rail = rail
                 rails_list.append(rail)
                 logger.info(
@@ -4771,18 +4774,18 @@ class JiuWenClawDeepAdapter:
             registered.append(rail)
 
         self._code_mode_rails = [
-            rail for rail in registered if type(rail).__name__ != "LspRail"
+            rail for rail in registered if not isinstance(rail, LspRail)
         ]
         self._lsp_rail = next(
-            (rail for rail in registered if type(rail).__name__ == "LspRail"),
+            (rail for rail in registered if isinstance(rail, LspRail)),
             None,
         )
         self._project_memory_rail = next(
-            (rail for rail in registered if type(rail).__name__ == "ProjectMemoryRail"),
+            (rail for rail in registered if isinstance(rail, ProjectMemoryRail)),
             None,
         )
         self._coding_memory_rail = next(
-            (rail for rail in registered if type(rail).__name__ == "CodingMemoryRail"),
+            (rail for rail in registered if isinstance(rail, CodingMemoryRail)),
             None,
         )
         self._code_mode_rails_active = bool(registered)
@@ -4814,18 +4817,18 @@ class JiuWenClawDeepAdapter:
                 )
 
         self._code_mode_rails = [
-            rail for rail in remaining if type(rail).__name__ != "LspRail"
+            rail for rail in remaining if not isinstance(rail, LspRail)
         ]
         self._lsp_rail = next(
-            (rail for rail in remaining if type(rail).__name__ == "LspRail"),
+            (rail for rail in remaining if isinstance(rail, LspRail)),
             None,
         )
         self._project_memory_rail = next(
-            (rail for rail in remaining if type(rail).__name__ == "ProjectMemoryRail"),
+            (rail for rail in remaining if isinstance(rail, ProjectMemoryRail)),
             None,
         )
         self._coding_memory_rail = next(
-            (rail for rail in remaining if type(rail).__name__ == "CodingMemoryRail"),
+            (rail for rail in remaining if isinstance(rail, CodingMemoryRail)),
             None,
         )
         self._code_mode_rails_active = bool(remaining)
@@ -4872,7 +4875,7 @@ class JiuWenClawDeepAdapter:
         desired_memory = [
             rail
             for rail in desired
-            if type(rail).__name__ in {"ProjectMemoryRail", "CodingMemoryRail"}
+            if isinstance(rail, (ProjectMemoryRail, CodingMemoryRail))
         ]
 
         to_remove = [rail for rail in current_memory if rail not in desired_memory]
@@ -4917,17 +4920,17 @@ class JiuWenClawDeepAdapter:
             return
 
         self._project_memory_rail = next(
-            (rail for rail in desired_memory if type(rail).__name__ == "ProjectMemoryRail"),
+            (rail for rail in desired_memory if isinstance(rail, ProjectMemoryRail)),
             None,
         )
         self._coding_memory_rail = next(
-            (rail for rail in desired_memory if type(rail).__name__ == "CodingMemoryRail"),
+            (rail for rail in desired_memory if isinstance(rail, CodingMemoryRail)),
             None,
         )
         non_memory = [
             rail
             for rail in self._code_mode_rails
-            if type(rail).__name__ not in {"ProjectMemoryRail", "CodingMemoryRail"}
+            if not isinstance(rail, (ProjectMemoryRail, CodingMemoryRail))
         ]
         self._code_mode_rails = non_memory + desired_memory
         self._code_mode_workspace = str(Path(self._workspace_dir or "./").resolve())

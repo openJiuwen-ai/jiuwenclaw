@@ -7,13 +7,29 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.harness.rails.coding_memory_rail import CodingMemoryRail
+from openjiuwen.harness.rails.lsp_rail import LspRail
+
 from jiuwenclaw.agentserver.deep_agent.interface_deep import (
     JiuWenClawDeepAdapter,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.project_memory_rail import (
+    ProjectMemoryRail,
+)
 
 
-def _rail(name: str):
-    return type(name, (), {})()
+_RAIL_BASES = {
+    "CodingMemoryRail": CodingMemoryRail,
+    "LspRail": LspRail,
+    "ProjectMemoryRail": ProjectMemoryRail,
+}
+
+
+def _rail(name: str, base_name: str | None = None):
+    base = _RAIL_BASES.get(base_name or name)
+    if base is None:
+        return type(name, (), {})()
+    return object.__new__(type(name, (base,), {}))
 
 
 def _adapter() -> JiuWenClawDeepAdapter:
@@ -50,6 +66,27 @@ async def test_switching_to_code_registers_code_rails(monkeypatch) -> None:
     assert adapter._project_memory_rail is project
     assert adapter._coding_memory_rail is coding
     assert adapter._instance.register_rail.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_rail_identification_supports_renamed_subclasses(monkeypatch) -> None:
+    adapter = _adapter()
+    project = _rail("RenamedProjectMemoryRail", "ProjectMemoryRail")
+    coding = _rail("RenamedCodingMemoryRail", "CodingMemoryRail")
+    lsp = _rail("RenamedLspRail", "LspRail")
+    mode = _rail("CodeAgentModeRail")
+    adapter._build_lsp_rail = MagicMock(return_value=lsp)
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.build_code_mode_extra_rails",
+        MagicMock(return_value=[project, coding, mode]),
+    )
+
+    await adapter._register_code_mode_rails()
+
+    assert adapter._project_memory_rail is project
+    assert adapter._coding_memory_rail is coding
+    assert adapter._lsp_rail is lsp
+    assert adapter._code_mode_rails == [project, coding, mode]
 
 
 @pytest.mark.asyncio

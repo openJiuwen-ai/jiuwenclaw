@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenclaw.agentserver.deep_agent.rails.project_memory.files import (
+    _extract_include_spec,
     clear_project_memory_cache,
     discover_and_load_memory_files,
     merge_memory_content,
@@ -85,3 +86,21 @@ def test_include_cannot_escape_workspace_or_follow_external_symlink(
     assert "SAFE-INCLUDE" in "\n".join(item.content for item in files)
     assert "TOP-SECRET" not in "\n".join(item.content for item in files)
     clear_project_memory_cache()
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("@include shared.md", "shared.md"),
+        ("@import shared.md", "shared.md"),
+        ("@property", None),
+        ("@author Jane Doe", None),
+        ("@see https://example.com", None),
+        ("@@include shared.md", None),
+    ],
+)
+def test_extract_include_spec_only_accepts_include_directives(
+    line: str,
+    expected: str | None,
+) -> None:
+    assert _extract_include_spec(line) == expected

@@ -22,9 +22,14 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
 _NON_GIT_WRITE_RE = re.compile(
-    r"\b(mkdir|touch|mv|cp|chmod|chown|dd|tee|wget|curl\s+.*\s*-[a-zA-Z]*O)\b"
+    r"\b(mkdir|touch|mv|cp|chmod|chown|dd|tee|wget|install|truncate|"
+    r"curl\s+.*\s*-[a-zA-Z]*O)\b"
     r"|\brm\s+(-[a-zA-Z]*[rf]|/|[~.])"
     r"|\b(7z|tar|zip|unzip|gzip|gunzip)\s+"
+    r"|\bsed\s+[^;&|]*(?<!\S)(?:-[^\s;&|]*i|--in-place)(?:[^\w-]|$)"
+    r"|\bpython(?:\d+(?:\.\d+)*)?\s+[^;&|]*(?<!\S)-c(?:\s|$)"
+    r"|\b(?:perl|ruby)\s+[^;&|]*(?<!\S)-e(?:\s|$)"
+    r"|\bfind\s+[^;&|]*(?<!\S)-delete(?:\s|$)"
     r"|>\s*\S"
     r"|>>"
 )

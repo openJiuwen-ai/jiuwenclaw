@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -89,6 +90,46 @@ async def test_code_mode_blocks_bash_writes_but_allows_reads() -> None:
     with patch.object(CodeAgentModeRail.__bases__[0], "before_tool_call", parent):
         await rail.before_tool_call(read_ctx)
     assert "_skip_tool" not in read_ctx.extra
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i 's/old/new/' file.py",
+        "python -c \"open('file.py', 'w').write('x')\"",
+        "perl -e 'print 1'",
+        "ruby -e 'puts 1'",
+        "find . -name '*.tmp' -delete",
+        "install source destination",
+        "truncate -s 0 file.py",
+    ],
+)
+async def test_code_mode_blocks_common_bash_write_commands(command: str) -> None:
+    rail = CodeAgentModeRail()
+    agent = MagicMock()
+    agent.system_prompt_builder = SimpleNamespace(language="en")
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    rail._agent = agent
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(
+            tool_name="bash",
+            tool_call=SimpleNamespace(
+                id="call-write",
+                arguments=json.dumps({"command": command}),
+            ),
+            tool_args={"command": command},
+        ),
+        extra={},
+    )
+    parent = AsyncMock()
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_tool_call", parent):
+        await rail.before_tool_call(ctx)
+
+    assert ctx.extra["_skip_tool"] is True
 
 
 @pytest.mark.asyncio
