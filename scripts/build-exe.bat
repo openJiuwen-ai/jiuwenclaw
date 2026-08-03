@@ -21,8 +21,13 @@ if errorlevel 1 (cd ..\.. & exit /b 1)
 cd ..\..
 
 echo.
-echo [3/3] 执行 PyInstaller 打包...
-call uv run pyinstaller scripts\jiuwenswarm.spec
+echo [3/3] Running PyInstaller...
+call uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
+if errorlevel 1 exit /b 1
+
+echo.
+echo Verifying frozen A2UI v0.8 bundle...
+start "" /wait "%cd%\dist\jiuwenswarm\jiuwenswarm.exe" "%cd%\scripts\verify_a2ui_bundle.py"
 if errorlevel 1 exit /b 1
 
 echo.

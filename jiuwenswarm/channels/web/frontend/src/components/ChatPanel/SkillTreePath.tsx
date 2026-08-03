@@ -14,6 +14,7 @@ import type {
   SkillTreePath as SkillTreePathData,
 } from '../../types/skillTree';
 import './SkillTreePath.css';
+import { useProcessTreeCollapse } from './useProcessTreeCollapse';
 
 interface SkillTreePathProps {
   tree?: SkillTreePathData;
@@ -448,7 +449,10 @@ export function SkillTreePath({
     () => buildViewedSkillKeySet(accumulatedViewedSkillIds),
     [accumulatedViewedSkillIds]
   );
-  const [collapsed, setCollapsed] = useState(autoCollapse);
+  const [collapsed, setCollapsed] = useProcessTreeCollapse(
+    autoCollapse,
+    graph.queryLabel
+  );
   const [expandedNodeIds, setExpandedNodeIds] = useState<Set<string>>(() => new Set());
   const [newNodeIds, setNewNodeIds] = useState<Set<string>>(() => new Set());
   const previousNodeIdsRef = useRef<Set<string> | null>(null);
@@ -462,12 +466,6 @@ export function SkillTreePath({
       return next.length === current.length ? current : next;
     });
   }, [viewedSkillIds]);
-
-  useEffect(() => {
-    if (autoCollapse) {
-      setCollapsed(true);
-    }
-  }, [autoCollapse, graph.queryLabel]);
 
   useEffect(() => {
     const nextNodeIds = new Set(graph.nodes.keys());

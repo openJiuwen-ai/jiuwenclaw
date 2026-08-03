@@ -66,6 +66,32 @@ export interface UserAnswer {
   custom_input?: string;
 }
 
+/**
+ * A pending swarmflow human-session turn awaiting the person's reply.
+ * Not the leader HITL channel (PendingQuestion) — this is a workflow human
+ * node (human_session / human) paused on a real person's input.
+ *
+ * Composite map key is `${workflow_run_id}:${correlation_id}` so concurrent
+ * runs with the same correlation id don't clobber each other's pending entry.
+ */
+export interface PendingHumanPrompt {
+  workflow_run_id: string;
+  workflow_id: string;
+  workflow_name: string;
+  agent_id: string;
+  correlation_id: string;
+  prompt: string;
+  label: string;
+  /** True when reply/detail chrome should show a turn label (session nodes only). */
+  is_session: boolean;
+  /** Turn index parsed from correlation_id ({phase}:{label}:{turn}); 0 for one-shot. */
+  turn: number;
+  /** Set when the reply has been submitted (entry stays dimmed in the list). */
+  replied?: boolean;
+  /** Short reply summary shown after the entry is replied. */
+  answer?: string;
+}
+
 // Harness extension ready info
 export interface HarnessExtensionReady {
   extensionName: string;
@@ -111,6 +137,7 @@ export interface AppEventDelegate {
   appendTeamTaskEvent(event: TeamTaskEvent): void;
   appendTeamMessageEvent(event: TeamMessageEvent): void;
   applyWorkflowUpdate(workflow: WorkflowRun): void;
+  setPendingHumanPrompts(prompts: Map<string, PendingHumanPrompt> | null): void;
   setEvolutionStatus(status: "idle" | "running"): void;
   setContextCompression(stats: ContextCompressionStats | null): void;
   setContextWindowLimit(n: number | null): void;
@@ -147,6 +174,13 @@ export interface AppEventDelegate {
   pushHistoryEntry(entry: HistoryItem): void;
   scheduleHistoryFlush(): void;
   safeRestoreHistory(sessionId: string): void;
+  /** 是否通过 `--session <id>` 启动（决定 boot resume/create 是否介入）。 */
+  hasBootSession(): boolean;
+  /**
+   * `--session <id>` 启动闭环：已存在→session.switch 恢复，不存在→session.create 新建。
+   * 无 --session 时 no-op，由调用方回退到纯 safeRestoreHistory。
+   */
+  resumeOrCreateBootSession(): void;
   /** 报告 history.get 流返回的分页元数据（本页 page_idx / total_pages）。 */
   reportHistoryPageMeta(meta: { pageIdx?: number; totalPages?: number }): void;
   /** 某一页 history.get 流已结束（收到 `status: done` 帧），由 app-state 决定是否继续拉下一页。 */
@@ -167,6 +201,16 @@ export interface AppEventDelegate {
   getHarnessActivateInteraction(): HarnessActivateInteraction | null;
   /** Auto-activate extension (send activate_response with action="accept") */
   autoActivateExtension(interactionId: string): void;
+  /**
+   * 由 event-handlers 在收到 chat.interrupt_result 时调用；
+   * 通知所有订阅器（等待型取消按 requestId + sessionId 关联）。
+   */
+  notifyInterruptResult(
+    requestId: string,
+    sessionId: string,
+    success: boolean,
+    message?: string,
+  ): void;
 }
 
 function _handleAgentModeToolResult(
@@ -411,12 +455,16 @@ function handleConnectionAck(delegate: AppEventDelegate, frame: EventFrame): boo
   if (frame.event !== "connection.ack") {
     return false;
   }
-  // session_id is determined at construction time; connection.ack is only
-  // used as a signal to restore history once connected.
+  // `--session <id>` 启动：走 resume/create 闭环（已存在→switch 恢复，不存在→create 新建），
+  // 由该方法内部负责 safeRestoreHistory/safeFetchSessionTitle。
+  // 无 --session（hasBootSession=false）：该方法 no-op，回退到下方纯历史拉取。
   const sessionId = delegate.getSessionId();
   if (sessionId && delegate.getConnectionStatus() === "connected") {
-    delegate.safeRestoreHistory(sessionId);
-    delegate.safeFetchSessionTitle(sessionId);
+    delegate.resumeOrCreateBootSession();
+    if (!delegate.hasBootSession()) {
+      delegate.safeRestoreHistory(sessionId);
+      delegate.safeFetchSessionTitle(sessionId);
+    }
   }
   return true;
 }
@@ -1153,14 +1201,24 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
 
     case "chat.interrupt_result": {
       const intent = typeof payload.intent === "string" ? payload.intent : "cancel";
+      const requestId = typeof payload.request_id === "string" ? payload.request_id : "";
+      const eventSessionId =
+        typeof payload.session_id === "string" ? payload.session_id : activeSessionId;
       if (intent === "cancel") {
+        // 先通知等待型 waiter，让其 resolve/reject。
+        // 服务端可能不回显 TUI 的 requestId（使用自己的 interrupt_xxx 格式），
+        // 因此即使 requestId 为空也要通知，由 waiter 按 sessionId 关联。
+        // 迟到事件（waiter 已清除）由 listener 自行过滤。
+        const success = payload.success !== false;
+        const message =
+          typeof payload.message === "string" ? payload.message : undefined;
+        delegate.notifyInterruptResult(requestId, eventSessionId, success, message);
         const suppressed = delegate.getSuppressInterruptResult();
         if (suppressed) {
           delegate.clearSuppressInterruptResult();
           return true;
         }
-        const success = payload.success !== false;
-        const message = formatInterruptResultMessage(delegate.getPreferredLanguage(), intent, success, payload.message);
+        const uiMessage = formatInterruptResultMessage(delegate.getPreferredLanguage(), intent, success, payload.message);
         if (success) {
           delegate.setStreamingState(StreamingState.Interrupted);
           delegate.getActiveSubtasks().clear();
@@ -1171,7 +1229,7 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
             kind: "info",
             id: createId("info"),
             sessionId: activeSessionId,
-            content: message,
+            content: uiMessage,
             icon: "i",
             at: new Date().toISOString(),
           });
@@ -1184,10 +1242,10 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
             kind: "error",
             id: createId("error"),
             sessionId: activeSessionId,
-            content: message,
+            content: uiMessage,
             at: new Date().toISOString(),
           });
-          delegate.setLastError(message);
+          delegate.setLastError(uiMessage);
           // 失败也视为本次 interrupt 请求已结束，清本地标志 + 解除 esc 去抖窗口，
           // 否则去抖窗口内后续 esc 会被一直抑制，无法重新发起取消。
           delegate.clearInterruptRequested();

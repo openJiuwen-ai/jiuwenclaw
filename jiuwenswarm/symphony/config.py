@@ -21,14 +21,17 @@ DEFAULT_FINGERPRINT_NORMALIZATION_MAX_VOCAB_SIZE = None
 
 DEFAULT_BUILD_WORKERS = 1
 DEFAULT_BUILD_MATCHER_BATCH_SIZE = 12
+DEFAULT_BUILD_MAX_CANDIDATES_PER_SKILL_RELATION = 32
 DEFAULT_BUILD_REQUIRE_CONSENSUS = False
-DEFAULT_BUILD_MIN_EDGE_CONFIDENCE = 0.7
+DEFAULT_BUILD_MIN_EDGE_CONFIDENCE = 0.5
 
 DEFAULT_SYMPHONY_ENABLED = False
+DEFAULT_EVOLUTION_ENABLED = False
 
 DEFAULT_ORCHESTRATION_MODE = "fast"
+DEFAULT_ORCHESTRATION_TOP_K = 3
 DEFAULT_ORCHESTRATION_MAX_DEPTH = 4
-DEFAULT_ORCHESTRATION_MIN_EDGE_CONFIDENCE = 0.7
+DEFAULT_ORCHESTRATION_MIN_EDGE_CONFIDENCE = 0.5
 
 
 @dataclass(frozen=True)
@@ -70,13 +73,22 @@ class SymphonyFingerprintConfig:
 class SymphonyBuildConfig:
     workers: int = DEFAULT_BUILD_WORKERS
     batch_size: int = DEFAULT_BUILD_MATCHER_BATCH_SIZE
+    max_candidates_per_skill_relation: int = (
+        DEFAULT_BUILD_MAX_CANDIDATES_PER_SKILL_RELATION
+    )
     require_consensus: bool = DEFAULT_BUILD_REQUIRE_CONSENSUS
     min_edge_confidence: float = DEFAULT_BUILD_MIN_EDGE_CONFIDENCE
 
 
 @dataclass(frozen=True)
+class SymphonyEvolutionConfig:
+    enabled: bool = DEFAULT_EVOLUTION_ENABLED
+
+
+@dataclass(frozen=True)
 class SymphonyOrchestrationConfig:
     mode: str = DEFAULT_ORCHESTRATION_MODE
+    top_k: int = DEFAULT_ORCHESTRATION_TOP_K
     max_depth: int = DEFAULT_ORCHESTRATION_MAX_DEPTH
     min_edge_confidence: float = DEFAULT_ORCHESTRATION_MIN_EDGE_CONFIDENCE
 
@@ -87,6 +99,7 @@ class SymphonyConfig:
     paths: SymphonyPathsConfig
     fingerprint: SymphonyFingerprintConfig
     build: SymphonyBuildConfig
+    evolution: SymphonyEvolutionConfig
     orchestration: SymphonyOrchestrationConfig
 
 
@@ -123,6 +136,9 @@ def symphony_config_from_dict(raw: dict[str, Any] | None) -> SymphonyConfig:
         else {}
     )
     build = data.get("build") if isinstance(data.get("build"), dict) else {}
+    evolution = (
+        data.get("evolution") if isinstance(data.get("evolution"), dict) else {}
+    )
     orchestration = (
         data.get("orchestration") if isinstance(data.get("orchestration"), dict) else {}
     )
@@ -185,6 +201,10 @@ def symphony_config_from_dict(raw: dict[str, Any] | None) -> SymphonyConfig:
                 build.get("batch_size"),
                 DEFAULT_BUILD_MATCHER_BATCH_SIZE,
             ),
+            max_candidates_per_skill_relation=_positive_int(
+                build.get("max_candidates_per_skill_relation"),
+                DEFAULT_BUILD_MAX_CANDIDATES_PER_SKILL_RELATION,
+            ),
             require_consensus=_bool(
                 build.get("require_consensus"),
                 DEFAULT_BUILD_REQUIRE_CONSENSUS,
@@ -194,10 +214,20 @@ def symphony_config_from_dict(raw: dict[str, Any] | None) -> SymphonyConfig:
                 DEFAULT_BUILD_MIN_EDGE_CONFIDENCE,
             ),
         ),
+        evolution=SymphonyEvolutionConfig(
+            enabled=_bool(
+                evolution.get("enabled"),
+                DEFAULT_EVOLUTION_ENABLED,
+            ),
+        ),
         orchestration=SymphonyOrchestrationConfig(
             mode=_orchestration_mode(
                 orchestration.get("mode"),
                 DEFAULT_ORCHESTRATION_MODE,
+            ),
+            top_k=_positive_int(
+                orchestration.get("top_k"),
+                DEFAULT_ORCHESTRATION_TOP_K,
             ),
             max_depth=_positive_int(
                 orchestration.get("max_depth"),
@@ -277,6 +307,6 @@ def _orchestration_mode(value: Any, default: str) -> str:
     text = str(value or "").strip().lower()
     if not text:
         return default
-    if text == "fast":
-        return "fast"
+    if text in {"fast", "beam"}:
+        return text
     raise ValueError(f"Unsupported Symphony orchestration mode: {value}")

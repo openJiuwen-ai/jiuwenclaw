@@ -3,7 +3,7 @@ import { AlertCircle, Check, ChevronDown, GitBranch, LoaderCircle, Plus, Search,
 import type { ProjectInfo, WebError } from '../../types';
 import { useWorkspaceStore } from '../../stores';
 import { gitClient } from './gitClient';
-import type { GitRepoStatus } from './types';
+import type { GitDiffRepoInfo, GitRepoStatus } from './types';
 import './CodeMode.css';
 
 interface CodeBranchSelectorProps {
@@ -11,6 +11,7 @@ interface CodeBranchSelectorProps {
   compact?: boolean;
   disabled?: boolean;
   variant?: 'default' | 'environment';
+  liveRepo?: GitDiffRepoInfo | null;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -31,7 +32,7 @@ function getErrorMessage(error: unknown): string {
   }
 }
 
-export function CodeBranchSelector({ project, compact = false, disabled = false, variant = 'default' }: CodeBranchSelectorProps) {
+export function CodeBranchSelector({ project, compact = false, disabled = false, variant = 'default', liveRepo = null }: CodeBranchSelectorProps) {
   const [status, setStatus] = useState<GitRepoStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [operating, setOperating] = useState(false);
@@ -44,6 +45,11 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
   const rootRef = useRef<HTMLDivElement>(null);
   const unbornHintId = useId();
   const loadProjects = useWorkspaceStore(state => state.loadProjects);
+
+  const closeMenu = useCallback(() => {
+    setOpen(false);
+    setError(null);
+  }, []);
 
   const loadStatus = useCallback(async () => {
     if (!project || project.work_mode !== 'code' || project.is_default) {
@@ -75,12 +81,35 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
   }, [loadStatus]);
 
   useEffect(() => {
+    if (!liveRepo || !project || project.work_mode !== 'code' || project.is_default) return;
+    setNotGit(!liveRepo.is_git);
+    setStatus(previous => {
+      if (!previous) return previous;
+      return {
+        ...previous,
+        repo: {
+          ...previous.repo,
+          is_git: liveRepo.is_git,
+          repo_root: liveRepo.repo_root,
+          branch: liveRepo.branch,
+          head: liveRepo.head,
+          transient: liveRepo.transient,
+        },
+        branches: {
+          ...previous.branches,
+          current: liveRepo.branch,
+        },
+      };
+    });
+  }, [liveRepo, project]);
+
+  useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) closeMenu();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape') closeMenu();
     };
     document.addEventListener('mousedown', close);
     document.addEventListener('keydown', closeOnEscape);
@@ -88,7 +117,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
       document.removeEventListener('mousedown', close);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [open]);
+  }, [closeMenu, open]);
 
   const branches = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -96,9 +125,14 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
   }, [search, status]);
 
   const isNotGit = notGit || status?.repo.is_git === false || Boolean(!loading && !status && project?.git.status === 'not_git');
-  const currentBranch = status?.branches.current || project?.git.branch || '';
+  const currentBranch = liveRepo?.branch || status?.branches.current || project?.git.branch || '';
   const branchWritesBlocked = Boolean(status?.repo.transient || status?.repo.detached);
   const isUnbornHead = Boolean(status?.repo.is_git && currentBranch && !status.repo.head);
+
+  const openMenu = () => {
+    setOpen(true);
+    void loadStatus();
+  };
 
   const initializeGit = async () => {
     if (!project) return;
@@ -119,7 +153,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
 
   const switchBranch = async (branch: string) => {
     if (!project || branch === currentBranch) {
-      setOpen(false);
+      closeMenu();
       return;
     }
     setOperating(true);
@@ -127,7 +161,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
     try {
       const result = await gitClient.switchBranch(project.project_id, branch);
       setStatus(result.status);
-      setOpen(false);
+      closeMenu();
       await loadProjects();
     } catch (nextError) {
       setError(getErrorMessage(nextError));
@@ -145,7 +179,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
       setStatus(result.status);
       setBranchDraft('');
       setCreateOpen(false);
-      setOpen(false);
+      closeMenu();
       await loadProjects();
     } catch (nextError) {
       setError(getErrorMessage(nextError));
@@ -173,7 +207,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
         <button
           type='button'
           className='code-branch__trigger'
-          onClick={() => setOpen(value => !value)}
+          onClick={() => (open ? closeMenu() : openMenu())}
           disabled={disabled || loading || operating || !status}
           aria-haspopup='menu'
           aria-expanded={open}

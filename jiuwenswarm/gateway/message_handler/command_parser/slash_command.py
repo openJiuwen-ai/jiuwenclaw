@@ -79,6 +79,9 @@ CONTROL_MESSAGE_TEXTS: frozenset[str] = frozenset(
     }
 )
 
+# /join、/exit 的 session_ref 格式：team_<name>_session_<id>
+_SESSION_REF_RE: re.Pattern[str] = re.compile(r'^team_[\w-]+_session_[\w-]+$')
+
 
 class ParsedControlAction(str, Enum):
     """parse_channel_control_text 的判定结果。"""
@@ -256,9 +259,7 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
         ):
             session_ref = parts[1]
             member_name = parts[3]
-            # 接受完整格式 team_*_session_* 或简化格式（任意 session_id）
-            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref) or \
-               re.match(r'^[A-Za-z0-9_-]+$', session_ref):
+            if _SESSION_REF_RE.match(session_ref):
                 return ParsedChannelControl(
                     ParsedControlAction.JOIN_OK,
                     session_ref=session_ref,
@@ -277,8 +278,7 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
             return ParsedChannelControl(ParsedControlAction.EXIT_OK)
         if len(parts) == 2 and parts[0] == GatewaySlashCommand.EXIT.value:
             session_ref = parts[1]
-            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref) or \
-               re.match(r'^[A-Za-z0-9_-]+$', session_ref):
+            if _SESSION_REF_RE.match(session_ref):
                 return ParsedChannelControl(
                     ParsedControlAction.EXIT_OK,
                     session_ref=session_ref,

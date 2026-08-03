@@ -37,6 +37,7 @@ export const DEFAULT_BINDINGS: KeybindingBlock[] = [
     context: "FileViewer",
     bindings: {
       escape: "fileViewer:exit",
+      left: "fileViewer:exit",
       q: "fileViewer:exit",
       up: "fileViewer:lineUp",
       k: "fileViewer:lineUp",
@@ -72,7 +73,6 @@ export const DEFAULT_BINDINGS: KeybindingBlock[] = [
       escape: "swarm:back",
       left: "swarm:left",
       right: "swarm:nextFocus",
-      tab: "swarm:nextFocus",
       l: "swarm:logs",
       p: "swarm:viewPrompt",
       o: "swarm:viewOutcome",

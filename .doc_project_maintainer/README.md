@@ -1,7 +1,7 @@
 # Project Maintainer Docs
 
 Status: partial
-Last updated: 2026-07-15
+Last updated: 2026-08-01
 Sync status: partial
 
 ## Project Brief

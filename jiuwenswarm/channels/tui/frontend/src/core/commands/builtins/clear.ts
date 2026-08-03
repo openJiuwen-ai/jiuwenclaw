@@ -1,4 +1,4 @@
-import { generateSessionId } from "../../session-state.js";
+import { generateCreateToken } from "../../session-state.js";
 import { addCommandEcho, addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
@@ -18,12 +18,17 @@ export function createClearCommand(): SlashCommand {
         return;
       }
 
-      const nextId = generateSessionId();
-      try {
-        await ctx.request("session.create", { session_id: nextId });
-      } catch {
-        // Some backends may create the session lazily on first message.
-      }
+      const created = await ctx.request<{ session_id?: string; sessionId?: string }>(
+        "session.create",
+        {
+          create_token: generateCreateToken(),
+          previous_session_id: ctx.sessionId,
+          previous_mode: ctx.mode,
+          mode: ctx.mode,
+        },
+      );
+      const nextId = created.session_id ?? created.sessionId;
+      if (!nextId) throw new Error("session.create did not return a session id");
 
       ctx.updateSession(nextId);
       ctx.setSessionTitle("");

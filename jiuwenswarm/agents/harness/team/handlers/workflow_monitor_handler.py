@@ -97,13 +97,15 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
         logger.info(
             "[WF_DBG WorkflowMonitorHandler] received progress: "
             "session_id=%s kind=%s run_id=%s workflow_name=%s "
-            "phase=%s label=%s",
+            "phase=%s label=%s agent_id=%s outcome_len=%s",
             self._session_id,
             progress.kind,
             progress.run_id,
             progress.workflow_name,
             progress.phase,
             progress.label,
+            progress.agent_id,
+            len(progress.outcome) if isinstance(progress.outcome, str) else 0,
         )
 
         run_state = self._get_or_create_run(progress)
@@ -227,6 +229,10 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
                 outcome=getattr(payload, "outcome", None),
                 text=getattr(payload, "text", None),
                 phases=getattr(payload, "phases", None),
+                correlation_id=getattr(payload, "correlation_id", None),
+                node_type=getattr(payload, "node_type", None),
+                agent_id=getattr(payload, "agent_id", None),
+                answer=getattr(payload, "answer", None),
             )
         except Exception:
             logger.warning("[WorkflowMonitorHandler] Failed to extract progress from event")

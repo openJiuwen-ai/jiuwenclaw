@@ -105,7 +105,6 @@ class SandboxBackgroundExecRequest:
     workdir: str | None = None
     env: dict[str, str] | None = None
     stdin_data: bytes | None = None
-    capture_output: bool = True
 
 
 @dataclass(frozen=True)
@@ -779,7 +778,6 @@ class SandboxManager:
                     workdir=request.workdir,
                     env=request.env,
                     stdin_data=request.stdin_data,
-                    capture_output=request.capture_output,
                 ),
             )
         except Exception as exc:

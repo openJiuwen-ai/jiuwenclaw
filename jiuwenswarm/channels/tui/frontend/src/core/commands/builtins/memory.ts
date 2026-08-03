@@ -1,10 +1,15 @@
-import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import { getEditorInfo } from "../../utils/editor.js";
-import { getDisplayPath, findGitRoot, isAncestorOrSelfDir } from "./memory-path-utils.js";
+import {
+  findGitRoot,
+  formatMemoryPathForDisplay,
+  getDisplayPath,
+  isAncestorOrSelfDir,
+} from "./memory-path-utils.js";
 
 export interface MemoryFile {
   path: string;
@@ -467,24 +472,27 @@ async function editMemoryByPath(
 
     if (isAncestorMemFile) {
       const displayPath = getDisplayPath(path, projectDir);
-      // 文件不存在则先创建(与后端 handle_memory_edit 的 touch 行为对齐)
       if (!existsSync(path)) {
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, "");
+        ctx.addItem(addError(ctx.sessionId, `Cannot edit: ${path} — memory file does not exist.`));
+        return;
       }
       if (ctx.openInEditor) {
-        ctx.openInEditor(path);
         const { source, value } = getEditorInfo();
         const editorHint = source !== "default"
           ? `(${source}="${value}")`
           : "(default: vi)";
-        ctx.addItem(
-          addInfo(
-            ctx.sessionId,
-            `Opened memory file at ${displayPath} ${editorHint}`,
-            "m",
-          ),
-        );
+        // openInEditor blocks until the editor window closes (TUI frozen in
+        // the meantime). Emit the "Opened…" line in onDone, i.e. AFTER the
+        // editor exits — matches CC's editFileInEditor → onDone("Opened…").
+        ctx.openInEditor(path, () => {
+          ctx.addItem(
+            addInfo(
+              ctx.sessionId,
+              `Opened memory file at ${displayPath} ${editorHint}`,
+              "m",
+            ),
+          );
+        });
       } else {
         ctx.addItem(
           addInfo(
@@ -510,8 +518,6 @@ async function editMemoryByPath(
     }
 
     if (ctx.openInEditor) {
-      ctx.openInEditor(payload.path);
-
       const projectDir = ctx.getCurrentProjectDir();
       const displayPath = getDisplayPath(payload.path, projectDir);
       const { source, value } = getEditorInfo();
@@ -519,13 +525,18 @@ async function editMemoryByPath(
         ? `(${source}="${value}")`
         : "(default: vi)";
 
-      ctx.addItem(
-        addInfo(
-          ctx.sessionId,
-          `Opened memory file at ${displayPath} ${editorHint}`,
-          "m",
-        ),
-      );
+      // openInEditor blocks until the editor window closes (TUI frozen in
+      // the meantime). Emit the "Opened…" line in onDone, AFTER the editor
+      // exits — matches CC's editFileInEditor → onDone("Opened…").
+      ctx.openInEditor(payload.path, () => {
+        ctx.addItem(
+          addInfo(
+            ctx.sessionId,
+            `Opened memory file at ${displayPath} ${editorHint}`,
+            "m",
+          ),
+        );
+      });
     } else {
       const projectDir = ctx.getCurrentProjectDir();
       const displayPath = getDisplayPath(payload.path, projectDir);
@@ -604,7 +615,7 @@ async function showMemoryStatus(
       if (payload.project_memory.project_dir) {
         items.push({
           label: "Project Dir",
-          value: payload.project_memory.project_dir,
+          value: formatMemoryPathForDisplay(payload.project_memory.project_dir),
         });
       }
     }
@@ -622,7 +633,7 @@ async function showMemoryStatus(
       if (payload.coding_memory.dir) {
         items.push({
           label: "Coding Memory Dir",
-          value: payload.coding_memory.dir,
+          value: formatMemoryPathForDisplay(payload.coding_memory.dir),
         });
       }
     }
@@ -640,7 +651,7 @@ async function showMemoryStatus(
       if (payload.auto_memory.dir) {
         items.push({
           label: "Auto Memory Dir",
-          value: payload.auto_memory.dir,
+          value: formatMemoryPathForDisplay(payload.auto_memory.dir),
         });
       }
     }
@@ -841,7 +852,10 @@ async function openMemoryDir(
           {
             header: "Memory open",
             question: "Select a directory to open:",
-            options: options.map((o) => ({ label: o.label, description: o.value })),
+            options: options.map((o) => ({
+              label: o.label,
+              description: formatMemoryPathForDisplay(o.value),
+            })),
           },
         ],
         "local_command_memory_open",
@@ -861,23 +875,24 @@ async function openMemoryDir(
 
     // 优先调系统文件管理器打开；不支持时(无 GUI 或未注入回调)显示可复制路径提示
     const opened = ctx.openFolder?.(selectedValue);
+    const displayValue = formatMemoryPathForDisplay(selectedValue);
     if (opened) {
-      ctx.addItem(addInfo(ctx.sessionId, `Opened memory folder: ${selectedValue}`, "m"));
+      ctx.addItem(addInfo(ctx.sessionId, `Opened memory folder: ${displayValue}`, "m"));
     } else {
       // 无 GUI explorer(如无头 Linux 服务器)或未注入 openFolder 回调:
       // 显示可复制路径 + 平台命令,避免误导用户以为文件夹已打开。
       let cmd: string;
       if (process.platform === "win32") {
-        cmd = `explorer "${selectedValue}"`;
+        cmd = `explorer "${displayValue}"`;
       } else if (process.platform === "darwin") {
-        cmd = `open "${selectedValue}"`;
+        cmd = `open "${displayValue}"`;
       } else {
-        cmd = `xdg-open "${selectedValue}"`;
+        cmd = `xdg-open "${displayValue}"`;
       }
       ctx.addItem(
         addInfo(
           ctx.sessionId,
-          `No GUI explorer detected. Path: ${selectedValue}\nOpen with:  ${cmd}`,
+          `No GUI explorer detected. Path: ${displayValue}\nOpen with:  ${cmd}`,
           "i",
         ),
       );
@@ -898,9 +913,15 @@ export function createMemoryCommand(): SlashCommand {
     example: "/memory",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
-    action: async (ctx) => {
+    action: async (ctx, args) => {
       // 无参 → 弹出页签选择器（edit/status/toggle/open）；
       // 子命令 /memory <sub> 由各自 subCommand 直达对应页签。
+      // 若跟了不存在的子命令（如已废弃的 list），参考 CC 报错而非触发页签选择器。
+      const firstArg = args.trim().split(/\s+/)[0];
+      if (firstArg && !(MEMORY_TABS as readonly string[]).includes(firstArg)) {
+        ctx.addItem(addError(ctx.sessionId, `Unknown memory subcommand: ${firstArg}`));
+        return;
+      }
       await showMemoryConsole(ctx);
     },
     completion: async () => {

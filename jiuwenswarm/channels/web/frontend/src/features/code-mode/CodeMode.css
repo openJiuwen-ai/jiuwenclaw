@@ -137,6 +137,12 @@
   overflow-y: auto;
 }
 
+/* The branch selector below the welcome-page composer has less vertical room.
+ * Keep the popover within the main content shell and scroll only its branch list. */
+.code-branch--compact:not(.code-branch--environment) .code-branch__list {
+  max-height: 144px;
+}
+
 .code-branch__option,
 .code-branch__create {
   display: flex;
@@ -218,15 +224,16 @@
 }
 
 .code-branch--environment .code-branch__create-hint {
-  right: calc(100% + 8px);
+  right: 0;
   left: auto;
-  transform: translateX(4px);
+  bottom: calc(100% + 6px);
+  transform: translateY(4px);
 }
 
 .code-branch--environment .code-branch__create-wrap.is-disabled:hover .code-branch__create-hint,
 .code-branch--environment .code-branch__create-wrap.is-disabled:focus .code-branch__create-hint,
 .code-branch--environment .code-branch__create-wrap.is-disabled:focus-within .code-branch__create-hint {
-  transform: translateX(0);
+  transform: translateY(0);
 }
 
 .code-branch__empty {
@@ -404,6 +411,10 @@
   box-shadow: var(--effect-shadow-sm);
 }
 
+.code-changes-card.is-discarded {
+  opacity: 0.72;
+}
+
 .code-changes-card__header {
   display: flex;
   align-items: center;
@@ -441,8 +452,17 @@
 
 .code-changes-card__heading span {
   display: flex;
+  align-items: center;
   gap: 7px;
   font-size: 12px;
+}
+
+.code-changes-card__status {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+  font-weight: 500;
 }
 
 .code-changes-card__refresh,
@@ -626,6 +646,15 @@ button.code-environment__row:hover {
   text-align: center;
 }
 
+.code-review__notice {
+  flex: none;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--color-feedback-warning);
+  background: var(--color-feedback-warning-subtle);
+  color: var(--color-feedback-warning);
+  font-size: 12px;
+}
+
 .code-review__header,
 .code-review__toolbar {
   display: flex;
@@ -646,11 +675,35 @@ button.code-environment__row:hover {
 
 .code-review__summary {
   display: flex;
-  flex: 1;
+  flex: none;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   color: var(--color-text-secondary);
   font-size: 13px;
+  white-space: nowrap;
+}
+
+.code-review__summary-label {
+  margin-right: 3px;
+}
+
+.code-review__stat {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 3px;
+  line-height: 18px;
+}
+
+.code-review__stat--added {
+  background: var(--color-feedback-success-subtle);
+  color: var(--color-feedback-success);
+}
+
+.code-review__stat--removed {
+  background: var(--color-feedback-danger-subtle);
+  color: var(--color-feedback-danger);
 }
 
 .code-review__icon-button {
@@ -677,12 +730,63 @@ button.code-environment__row:hover {
   padding-inline: 14px;
 }
 
-.code-review__branch {
-  display: flex;
+.code-review__source {
+  position: relative;
+  flex: none;
+}
+
+.code-review__source-trigger {
+  display: inline-flex;
+  min-height: 28px;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  padding: 3px 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.code-review__source-trigger:hover,
+.code-review__source-trigger[aria-expanded='true'] {
+  background: var(--color-surface-hover);
+}
+
+.code-review__source-menu {
+  position: absolute;
+  z-index: 12;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  width: 150px;
+  padding: 6px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  background: var(--color-surface-panel);
+  box-shadow: var(--effect-shadow-lg);
+}
+
+.code-review__source-menu button {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: var(--color-text-primary);
   font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.code-review__source-menu button:hover {
+  background: var(--color-surface-hover);
 }
 
 .code-review__toolbar-spacer {
@@ -837,8 +941,17 @@ button.code-environment__row:hover {
   flex: none;
 }
 
-.code-review__file-header > span:nth-child(2) {
-  flex: 1;
+.code-review__file-name {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-review__file-header > .code-stat-added,
+.code-review__file-header > .code-stat-removed {
+  flex: none;
 }
 
 .code-review__empty {

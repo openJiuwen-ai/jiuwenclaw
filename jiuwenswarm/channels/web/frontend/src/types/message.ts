@@ -3,6 +3,7 @@
  */
 
 import type { SkillTreePath } from './skillTree';
+import type { BeamSearchProgress } from './beamSearch';
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
@@ -34,6 +35,8 @@ export interface FileDownloadItem {
   mime_type: string;
   download_url: string;
   download_token: string;
+  /** 工作区绝对/相对路径；用于去重身份（优先于 downloadUrl 中的 exp token） */
+  path?: string;
 }
 
 export interface ContextCompressionRuntime {
@@ -78,6 +81,15 @@ export interface Message {
   // 主动推荐消息标记
   isProactiveRecommendation?: boolean;
   proactiveType?: 'skill_recommend' | 'task_reminder' | 'need_exploration';
+  /**
+   * 这条用户消息是否曾经用于设置/修改持续目标（"设为目标"徽章）。发送那一刻本地回显消息
+   * 直接置 true；历史消息刷新后重新加载时，优先读后端 history 字段
+   * `is_goal_objective_message`，没有时再靠 goalStore 持久化的 objective 文本列表按
+   * content 回填（见 useWebSocket.ts stampGoalObjectiveMessages）——不能靠实时比对
+   * "当前 Goal 的 objective"，目标被清除/替换后旧消息也该继续保留这个标记，这是消息自身的
+   * 历史事实，不是当前 Goal 状态的派生值。
+   */
+  isGoalObjectiveMessage?: boolean;
 }
 
 export interface ToolCall {
@@ -86,6 +98,7 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
   description?: string;  // 操作描述，如 "创建 3 个任务"
   formatted_args?: string;  // 格式化参数摘要
+  display_name?: string;  // 后端下发的可读展示名，前端优先直接展示
   memberName?: string;
 }
 
@@ -97,6 +110,7 @@ export interface ToolResult {
   summary?: string;  // 结果摘要
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
   skillTree?: SkillTreePath;
+  beamSearch?: BeamSearchProgress;
 }
 
 export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error';

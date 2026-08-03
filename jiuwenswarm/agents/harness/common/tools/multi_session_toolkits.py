@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Session Toolkit
 生命周期：Agent创建新session开始，到所有session协程结束
@@ -272,7 +272,7 @@ class MultiSessionToolkit:
             if agent_wrapper is None:
                 agent_wrapper = server.get_agent()
             agent_instance = (
-                agent_wrapper.get_instance() if agent_wrapper is not None else None
+                await agent_wrapper.ensure_instance() if agent_wrapper is not None else None
             )
 
             final_output: str | None = None
