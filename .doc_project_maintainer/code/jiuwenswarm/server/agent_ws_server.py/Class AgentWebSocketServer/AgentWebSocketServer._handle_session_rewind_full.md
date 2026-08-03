@@ -24,11 +24,12 @@ health:
   observability: partial
   performance_risk: medium
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:38:08Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:6a61a4ef47db6bc26e642d3e39841e22bd2779496bbf567e61c3171f7b9df2ca
   confidence: confirmed
   expired_reason: null
 issues:
@@ -36,55 +37,53 @@ issues:
     dimension: implementation_soundness
     severity: high
     status: open
-    summary: "Compact-from rebuilds context before summary records."
-    evidence: "The handler calls rewind_session_context before appending compact_boundary, rewind_summary, and compact_summary."
-    suggested_action: "Append compact records before context rebuild, or rebuild after compact_partial_session."
+    summary: "Compact-from rebuild omits the new summary records."
+    evidence: "See AgentWebSocketServer._handle_session_rewind_full/risks.md#issue-001 for full evidence."
+    suggested_action: "Append compact records before rebuilding context."
   - id: ISSUE-002
     dimension: output_contract
     severity: high
     status: open
-    summary: "Context failure can still return success."
-    evidence: "Missing active agent leaves context_ok false; context exceptions are swallowed; response remains ok=True."
-    suggested_action: "Reject before mutation, or return explicit partial/error status."
+    summary: "Context convergence failure still returns success."
+    evidence: "See AgentWebSocketServer._handle_session_rewind_full/risks.md#issue-002 for full evidence."
+    suggested_action: "Return failure or explicit partial status unless durability is confirmed."
   - id: ISSUE-003
-    dimension: boundary_safety
-    severity: medium
+    dimension: implementation_soundness
+    severity: high
     status: open
-    summary: "restore_files mutates files before rewind completion."
-    evidence: "restore_session_files runs before history truncation and context rebuild, and writes or unlinks files directly."
-    suggested_action: "Prevalidate rewind/context first, then restore files, or add rollback."
+    summary: "Cross-store rewind is non-transactional."
+    evidence: "See AgentWebSocketServer._handle_session_rewind_full/risks.md#issue-003 for full evidence."
+    suggested_action: "Add prevalidation and atomic commit/rollback."
   - id: ISSUE-004
     dimension: input_contract
-    severity: medium
+    severity: high
     status: open
-    summary: "Compact-only inputs are weakly validated."
-    evidence: "direction is unconstrained, and summarized_count is cast before handler-local try/except."
-    suggested_action: "Validate compact fields inside the BAD_REQUEST path before side effects."
+    summary: "Invalid compact inputs bypass the intended BAD_REQUEST contract."
+    evidence: "See AgentWebSocketServer._handle_session_rewind_full/risks.md#issue-004 for full evidence."
+    suggested_action: "Validate compact fields before mutation in the BAD_REQUEST path."
   - id: ISSUE-005
+    dimension: boundary_safety
+    severity: high
+    status: open
+    summary: "session_id is an unchecked path component."
+    evidence: "See AgentWebSocketServer._handle_session_rewind_full/risks.md#issue-005 for full evidence."
+    suggested_action: "Validate the ID and enforce containment under sessions root."
+  - id: ISSUE-006
     dimension: test_coverage
     severity: medium
     status: open
     summary: "No direct tests cover the three rewind modes."
-    evidence: "Service tests cover helpers, but no _handle_session_rewind_full or SESSION_REWIND* handler tests were found."
-    suggested_action: "Add handler tests for plain, restore, compact, no-agent, failure, and bad direction."
-confidence: confirmed
-details: {}
+    evidence: "See AgentWebSocketServer._handle_session_rewind_full/risks.md#issue-006 for full evidence."
+    suggested_action: "Test all modes, invalid inputs, missing agents, and failures."
 ---
 
-# `AgentWebSocketServer._handle_session_rewind_full`
+# AgentWebSocketServer._handle_session_rewind_full
 
 ## Actual Role
 
-Handles AgentServer `session.rewind`, `session.rewind_and_restore`, and `session.rewind_compact`. It validates session/turn input, optionally restores files, truncates history, rebuilds active context/checkpointer state, appends compact records, and sends one E2A response.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `params.session_id`, `turn_index`, optional compact fields.
-- Output: One encoded AgentResponse, usually `ok: true` with rewind/restore/context payload.
-- Main side effects: Rewrites history, updates metadata/diff state, may write/delete files, rebuilds context/checkpointer state, and appends compact records.
-- Main risk: Partial success can leave history, files, context, and checkpointer out of sync.
-- Related tests: Service-level compact/context tests exist; direct handler tests were not found.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_session_rewind_full/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_session_rewind_full/risks.md)

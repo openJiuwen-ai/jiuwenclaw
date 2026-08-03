@@ -94,7 +94,7 @@ sudo modprobe sch_netem
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
-| JIUWENBOX_SERVER | http://localhost:8080 | 沙箱服务地址 |
+| JIUWENBOX_SERVER | https://localhost:8080 | 沙箱服务地址 |
 | TEST_TIMEOUT | 120 | 测试默认超时（秒） |
 | SANDBOX_READY_TIMEOUT | 30 | 沙箱就绪超时（秒） |
 | EXEC_TIMEOUT | 60 | 命令执行超时（秒） |
@@ -121,7 +121,7 @@ sudo modprobe sch_netem
 ### 4.2 配置示例
 
 ```bash
-export JIUWENBOX_SERVER=http://192.168.1.100:8080
+export JIUWENBOX_SERVER=https://192.168.1.100:8080
 export QPS_SINGLE_THRESHOLD=150
 export QPS_MULTI_THRESHOLD=500
 export LATENCY_COMMAND_THRESHOLD=0.05
@@ -354,7 +354,7 @@ jobs:
           sleep 10
       - name: Run system tests
         run: |
-          export JIUWENBOX_SERVER=http://localhost:8080
+          export JIUWENBOX_SERVER=https://localhost:8080
           python -m pytest tests/system_tests/ -v --junitxml=test_results.xml
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -377,7 +377,7 @@ system_tests:
     - python -m jiuwenbox.server --host 0.0.0.0 --port 8080 &
     - sleep 10
   script:
-    - export JIUWENBOX_SERVER=http://localhost:8080
+    - export JIUWENBOX_SERVER=https://localhost:8080
     - python -m pytest tests/system_tests/ -v --junitxml=test_results.xml
   artifacts:
     reports:

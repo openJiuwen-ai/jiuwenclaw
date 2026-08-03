@@ -8,6 +8,10 @@ from typing import Any, Optional
 from openjiuwen.harness.tools.cron import CronToolBackend, CronToolContext, create_cron_tools
 
 from jiuwenswarm.gateway.cron import CronTargetChannel
+from jiuwenswarm.gateway.cron.dingtalk_routing import (
+    build_dingtalk_cron_session_id_from_context,
+    dingtalk_chat_type_from_metadata,
+)
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
     coerce_cron_job_mode,
@@ -40,12 +44,30 @@ class _CronToolsCronBackend(CronToolBackend):
             else None
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
+        # 钉钉入站用 conversation_type(1/2)，需映射到 cron 的 group/p2p，供推送路由使用。
+        # create_job 以 route.session_id 落盘，这里必须写入 delivery binding，
+        # 不能把 Gateway 内部 dingtalk_… 会话 ID 当成钉钉 staffId。
+        if channel_id == "dingtalk" or channel_id.startswith("dingtalk:"):
+            if not chat_type:
+                chat_type = dingtalk_chat_type_from_metadata(metadata)
+            bound_sid = build_dingtalk_cron_session_id_from_context(
+                session_id=session_id,
+                metadata=metadata,
+            )
+            if bound_sid:
+                session_id = bound_sid
+        project_dir = str(metadata.get("project_dir") or "").strip()
+        project_id = str(metadata.get("project_id") or "").strip()
+        work_mode = str(metadata.get("work_mode") or "").strip()
         app_id = str(metadata.get("app_id") or "").strip()
         return CronToolRoute(
             request_id=request_id,
             channel_id=channel_id,
             session_id=session_id,
             chat_type=chat_type,
+            project_dir=project_dir,
+            project_id=project_id,
+            work_mode=work_mode,
             app_id=app_id,
         )
 
@@ -230,8 +252,6 @@ def _extract_legacy_params(
     if "schedule" in data or "payload" in data or "delivery" in data:
         schedule = data.get("schedule") if isinstance(data.get("schedule"), dict) else {}
         kind = str(schedule.get("kind") or "cron").strip().lower()
-        if kind and kind != "cron":
-            raise ValueError("Only cron schedule is supported by the current gateway bridge")
 
         cron_expr = str(
             schedule.get("expr")
@@ -246,12 +266,41 @@ def _extract_legacy_params(
             or "Asia/Shanghai"
         ).strip() or "Asia/Shanghai"
 
+        if kind == "at":
+            at_raw = str(schedule.get("at") or "").strip()
+            if at_raw:
+                try:
+                    from jiuwenswarm.gateway.cron.cron_expr import iso_to_seven_field_cron
+                    cron_expr = iso_to_seven_field_cron(at_raw, timezone=timezone)
+                    logger.info(
+                        "[CronRuntimeBridge] _extract_legacy_params: converted kind=at '%s' to cron_expr='%s'",
+                        at_raw, cron_expr,
+                    )
+                except Exception as conv_exc:
+                    raise ValueError(
+                        f"Cannot convert schedule.at='{at_raw}' to cron expression: {conv_exc}"
+                    ) from conv_exc
+            else:
+                raise ValueError("schedule.kind='at' requires schedule.at field with ISO datetime")
+        elif kind and kind != "cron":
+            raise ValueError(
+                f"Unsupported schedule.kind='{kind}'. Only 'cron' and 'at' are supported by the gateway bridge"
+            )
+
         payload_block = data.get("payload") if isinstance(data.get("payload"), dict) else {}
         payload_kind = str(payload_block.get("kind") or "agentTurn").strip()
-        if payload_kind and payload_kind != "agentTurn":
-            raise ValueError("Only agentTurn cron jobs are supported by the current gateway bridge")
+        if payload_kind == "systemEvent":
+            logger.info(
+                "[CronRuntimeBridge] _extract_legacy_params: converting payload.kind=systemEvent to agentTurn"
+            )
+            payload_kind = "agentTurn"
+        elif payload_kind and payload_kind != "agentTurn":
+            raise ValueError(
+                f"Unsupported payload.kind='{payload_kind}'. Only 'agentTurn' and 'systemEvent' are supported"
+            )
         description = str(
             payload_block.get("message")
+            or payload_block.get("text")
             or data.get("description")
             or ""
         )
@@ -314,7 +363,26 @@ def _extract_legacy_params(
             out["delete_after_run"] = bool(data.get("deleteAfterRun"))
 
         context_session_id = getattr(context, "session_id", None)
-        if isinstance(context_session_id, str) and context_session_id.strip():
+        context_metadata = getattr(context, "metadata", None) or {}
+        if not isinstance(context_metadata, dict):
+            context_metadata = {}
+
+        # 钉钉：把发起会话编码进 session_id，避免推送时误用全局 last_*（Issue #2449）。
+        target_channel = str(out.get("targets") or getattr(context, "channel_id", None) or "").strip()
+        if target_channel == "dingtalk" or target_channel.startswith("dingtalk:"):
+            bound_sid = build_dingtalk_cron_session_id_from_context(
+                session_id=context_session_id if isinstance(context_session_id, str) else None,
+                metadata=context_metadata,
+            )
+            if bound_sid:
+                out["session_id"] = bound_sid
+                logger.info(
+                    "[CronRuntimeBridge] _extract_legacy_params: bound dingtalk session_id=%s",
+                    out["session_id"],
+                )
+            elif isinstance(context_session_id, str) and context_session_id.strip():
+                out["session_id"] = context_session_id.strip()
+        elif isinstance(context_session_id, str) and context_session_id.strip():
             out["session_id"] = context_session_id.strip()
             logger.info(
                 "[CronRuntimeBridge] _extract_legacy_params: added session_id=%s from context",
@@ -322,8 +390,7 @@ def _extract_legacy_params(
             )
 
         # 飞书多应用：传递 app_id，用于调度器定位正确的 app 配置
-        context_metadata = getattr(context, "metadata", None) or {}
-        context_app_id = str(context_metadata.get("app_id") or "").strip() if isinstance(context_metadata, dict) else ""
+        context_app_id = str(context_metadata.get("app_id") or "").strip()
         if context_app_id:
             out["app_id"] = context_app_id
 

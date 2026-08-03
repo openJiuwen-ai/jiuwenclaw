@@ -1,13 +1,18 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CircleCheck, File, Puzzle, XCircle } from 'lucide-react';
+import { File, Maximize2, Puzzle } from 'lucide-react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import type { TeamTask as SessionTeamTask } from '../../stores/sessionStore';
-import teamProcessIcon from '../../assets/team-process.svg';
+import recentTasksIcon from '../../assets/work-mode/recent-tasks.svg';
+import statusProcessingIcon from '../../assets/work-mode/status-processing.svg';
+import statusSuccessIcon from '../../assets/work-mode/status-success.svg';
+import statusWaitingIcon from '../../assets/work-mode/status-waiting.svg';
+import statusWarningIcon from '../../assets/work-mode/status-warning.svg';
+import ListViewIcon from '../../assets/work-mode/view-list.svg?react';
+import BoardViewIcon from '../../assets/work-mode/view-board.svg?react';
 import {
   BOARD_COLUMNS,
-  ExpandIcon,
   getBoardTaskContent,
   getBoardTaskTitle,
   getMemberDisplayName,
@@ -15,25 +20,49 @@ import {
   type TaskColumnKey,
   type TeamMember,
 } from './shared';
+import { getTotalTaskVisualProgressPercent } from './taskProgress';
 
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
   tasks: SessionTeamTask[];
+  progressTasks?: SessionTeamTask[];
   members: TeamMember[];
   totalTasks: number;
   completedTasks: number;
   onExpand?: () => void;
+  /** 紧凑态下隐藏右上角展开按钮（用于非集群模式复用本面板时） */
+  hideExpandButton?: boolean;
+  /** 紧凑态下隐藏任务行负责人头像（用于非集群模式复用本面板时） */
+  hideAssignee?: boolean;
+  /** 紧凑态下隐藏底部边框（用于非集群模式复用本面板时） */
+  hideBorder?: boolean;
+  /** 自定义标题（不传则默认用 team.taskOverview） */
+  title?: string;
+};
+
+const compactStatusIcons: Record<TaskColumnKey, string> = {
+  completed: statusSuccessIcon,
+  running: statusProcessingIcon,
+  waiting: statusWaitingIcon,
+  cancelled: statusWarningIcon,
 };
 
 export function TaskPlanningPanel({
   variant,
   tasks,
+  progressTasks = tasks,
   members,
   totalTasks,
   completedTasks,
   onExpand,
+  hideExpandButton = false,
+  hideAssignee = false,
+  hideBorder = false,
+  title,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
+  const [now, setNow] = useState(() => Date.now());
+  const [view, setView] = useState<'board' | 'list'>('board');
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskColumnKey, SessionTeamTask[]> = {
       waiting: [],
@@ -49,40 +78,51 @@ export function TaskPlanningPanel({
     return groups;
   }, [tasks]);
 
-  const progressPercent = totalTasks > 0
-    ? Math.round((completedTasks / totalTasks) * 100)
+  // 按后端 todos 数组顺序的全局序号：展开态与收起态共用同一份，保证同一任务在两种状态下序号一致。
+  // 后端在状态变更时保序，仅在显式新增/插入任务时改变顺序，序号稳定。
+  const globalIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    tasks.forEach((task, index) => {
+      map.set(task.task_id, index + 1);
+    });
+    return map;
+  }, [tasks]);
+
+  useEffect(() => {
+    if (variant !== 'expanded') {
+      return undefined;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 3_000);
+    return () => window.clearInterval(timer);
+  }, [variant]);
+
+  const completedProgressTasks = progressTasks.filter((task) => task.status === 'completed').length;
+  const completedProgressPercent = progressTasks.length > 0
+    ? Math.round((completedProgressTasks / progressTasks.length) * 100)
     : 0;
+  const progressPercent = variant === 'expanded'
+    ? getTotalTaskVisualProgressPercent(progressTasks, now)
+    : completedProgressPercent;
 
   if (variant === 'compact') {
-    const allTasks = [...tasks].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-
-    const tabCounts = {
-      completed: groupedTasks.completed.length,
-      running: groupedTasks.running.length,
-      waiting: groupedTasks.waiting.length,
-      cancelled: groupedTasks.cancelled.length,
-    };
-
-    const tabLabels = {
-      completed: t('team.planning.columns.completed'),
-      running: t('team.planning.columns.running'),
-      waiting: t('team.planning.columns.waiting'),
-      cancelled: t('team.planning.columns.failed'),
-    };
+    const allTasks = tasks;
 
     return (
-      <div className="mb-3 flex flex-[2] flex-col overflow-hidden rounded-lg border border-border bg-card min-h-0">
-        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3 border-b border-border">
+      <div className={`flex flex-[2] flex-col overflow-hidden min-h-0 px-3 pb-3${hideBorder ? '' : ' border-b border-border'}`}>
+        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3">
           <div className="flex items-center gap-2">
-            <img src={teamProcessIcon} width={16} height={16} />            <span className="text-sm font-medium text-text">{t('team.taskOverview')}</span>
+            <img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />
+            <span className="text-sm font-medium text-text">{title ?? t('team.taskOverview')}</span>
           </div>
-          <button
-            onClick={onExpand}
-            className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
-            title={t('team.expand')}
-          >
-            <ExpandIcon />
-          </button>
+          {hideExpandButton ? null : (
+            <button
+              onClick={onExpand}
+              className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
+              title={t('team.expand')}
+            >
+              <Maximize2 size={12} aria-hidden="true" />
+            </button>
+          )}
         </div>
         <div className="px-4 py-3 shrink-0">
           {allTasks.length > 0 && (
@@ -95,20 +135,20 @@ export function TaskPlanningPanel({
               </div>
               <div className="h-2 bg-secondary rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-accent rounded-full transition-all duration-300"
+                  className="h-full bg-accent rounded-full  "
                   style={{ width: `${progressPercent}%` }}
                 />
               </div>
             </div>
           )}
           <div className="flex justify-between gap-2">
-            {(['completed', 'running', 'waiting', 'cancelled'] as const).map((key) => (
+            {BOARD_COLUMNS.map((column) => (
               <div
-                key={key}
-                className={`flex-1 flex flex-col items-center justify-center py-2 rounded-md bg-secondary`}
+                key={column.key}
+                className={`flex-1 flex flex-col items-center justify-center py-2 rounded-md`}
               >
-                <span className="text-lg font-bold text-text-strong">{tabCounts[key]}</span>
-                <span className="text-xs mt-1 text-text-muted">{tabLabels[key]}</span>
+                <span className="text-sm font-normal text-text-strong">{groupedTasks[column.key].length}</span>
+                <span className="text-xs mt-1 text-text-muted">{t(column.labelKey)}</span>
               </div>
             ))}
           </div>
@@ -120,44 +160,35 @@ export function TaskPlanningPanel({
             </div>
           ) : (
             <div className="space-y-2">
-              {allTasks.map((task, index) => {
+              {allTasks.map((task) => {
                 const assigneeExists = Boolean(task.assignee && members.some(member => member.member_id === task.assignee));
                 const assigneeName = getMemberDisplayName(task.assignee || '');
                 const title = getBoardTaskTitle(task);
                 const columnKey = getTaskColumnKey(task);
+                const seq = globalIndexMap.get(task.task_id) ?? 0;
                 return (
-                  <div key={task.task_id} className="flex items-center gap-3 px-3 py-2 rounded-md bg-secondary">
-                    <span className="text-sm font-medium text-muted w-6">
-                      {String(index + 1).padStart(2, '0')}
+                  <div key={task.task_id} className="flex items-center gap-3 px-3 py-2 rounded-md">
+                    <span className="inline-flex items-center justify-center w-[20px] h-[20px] text-xs font-medium text-muted rounded-[16px] bg-[var(--color-task-index-surface)]">
+                      {String(seq).padStart(2, '0')}
                     </span>
-                    {assigneeExists ? (
-                      <TeamMemberAvatar
-                        member={task.assignee}
-                        alt={assigneeName}
-                        className="h-4 w-4 rounded-full shrink-0"
-                        imageClassName="rounded-full"
-                      />
-                    ) : (
-                      <UnassignedTeamAvatar className="h-4 w-4 rounded-full shrink-0" />
+                    {!hideAssignee && (
+                      assigneeExists ? (
+                        <TeamMemberAvatar
+                          member={task.assignee}
+                          alt={assigneeName}
+                          className="h-4 w-4 rounded-full shrink-0"
+                          imageClassName="rounded-full"
+                        />
+                      ) : (
+                        <UnassignedTeamAvatar className="h-4 w-4 rounded-full shrink-0" />
+                      )
                     )}
-                    <span className="flex-1 text-sm text-text truncate">{title}</span>
-                    {columnKey === 'completed' && <CircleCheck className="w-4 h-4 text-ok shrink-0" />}
-                    {columnKey === 'running' && (
-                      <svg width="16" height="16" className="w-4 h-4 text-info animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 2v4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 7.8 2.9-2.9" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 12h4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 16.2 2.9 2.9" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18v4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 19.1 2.9-2.9" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2 12h4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 4.9 2.9 2.9" />
-                      </svg>
-                    )}
-                    {columnKey === 'waiting' && (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-clock4-icon lucide-clock-4"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-                    )}
-                    {columnKey === 'cancelled' && <XCircle className="w-4 h-4 text-danger shrink-0" />}
+                    <span className="flex-1 text-xs text-text truncate">{title}</span>
+                    <img
+                      src={compactStatusIcons[columnKey]}
+                      className={`h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}
+                      aria-hidden="true"
+                    />
                   </div>
                 );
               })}
@@ -168,31 +199,134 @@ export function TaskPlanningPanel({
     );
   }
 
+  const viewSwitcher = (
+    <div className="flex items-center gap-1" role="group" aria-label={t('team.planning.progressTitle')}>
+      <button
+        type="button"
+        onClick={() => setView('list')}
+        className={`flex h-8 w-8 items-center justify-center rounded-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-card ${view === 'list' ? 'bg-secondary text-text' : 'text-text-muted hover:bg-secondary/50 hover:text-text'}`}
+        aria-label={t('team.planning.views.list')}
+        title={t('team.planning.views.list')}
+        aria-pressed={view === 'list'}
+      >
+        <ListViewIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        onClick={() => setView('board')}
+        className={`flex h-8 w-8 items-center justify-center rounded-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-card ${view === 'board' ? 'bg-secondary text-text' : 'text-text-muted hover:bg-secondary/50 hover:text-text'}`}
+        aria-label={t('team.planning.views.board')}
+        title={t('team.planning.views.board')}
+        aria-pressed={view === 'board'}
+      >
+        <BoardViewIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
+      </button>
+    </div>
+  );
+
   return (
     <div className="flex-1 overflow-hidden bg-card">
-      <div className="flex h-full flex-col px-6 pb-6">
-        <div className="mb-5 flex items-center gap-4">
-          <h2 className="text-sm font-medium text-text-strong">{t('team.planning.progressTitle')}</h2>
-          <span className="text-sm font-medium text-text-strong">{progressPercent}%</span>
+      {view === 'list' ? (
+        <div className="flex h-full flex-col px-6 pb-6">
+          <div className="flex h-8 items-center gap-3">
+            <h2 className="text-sm font-medium leading-5 text-text-strong">{t('team.planning.progressTitle')}</h2>
+            {viewSwitcher}
+          </div>
+          <ExpandedTaskList
+            tasks={tasks}
+            groupedTasks={groupedTasks}
+            globalIndexMap={globalIndexMap}
+            progressPercent={progressPercent}
+          />
         </div>
+      ) : (
+        <div className="flex h-full flex-col px-6 pb-6">
+          <div className="mb-5 flex h-8 items-center gap-3">
+            <h2 className="text-sm font-medium leading-5 text-text-strong">{t('team.planning.progressTitle')}</h2>
+            {viewSwitcher}
+            <span className="text-sm font-medium text-text-strong">{progressPercent}%</span>
+          </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto rounded-lg bg-secondary p-6">
-          <div
-            className="grid min-w-[920px] gap-5"
-            style={{ gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))' }}
-          >
-            {BOARD_COLUMNS.map((column) => (
-              <BoardColumn
-                key={column.key}
-                column={column}
-                tasks={groupedTasks[column.key]}
-                members={members}
-              />
-            ))}
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-lg bg-secondary p-6">
+            <div
+              className="grid min-w-[920px] gap-5"
+              style={{ gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))' }}
+            >
+              {BOARD_COLUMNS.map((column) => (
+                <BoardColumn
+                  key={column.key}
+                  column={column}
+                  tasks={groupedTasks[column.key]}
+                  members={members}
+                  hideAssignee={hideAssignee}
+                  globalIndexMap={globalIndexMap}
+                />
+              ))}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
+  );
+}
+
+function ExpandedTaskList({
+  tasks,
+  groupedTasks,
+  globalIndexMap,
+  progressPercent,
+}: {
+  tasks: SessionTeamTask[];
+  groupedTasks: Record<TaskColumnKey, SessionTeamTask[]>;
+  globalIndexMap: Map<string, number>;
+  progressPercent: number;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <>
+      <div className="mt-2 flex min-h-7 flex-wrap items-baseline gap-x-8 gap-y-2">
+        <div className="flex shrink-0 items-baseline gap-2">
+          <span className="text-sm leading-5 text-text-muted">{t('team.planning.metrics.progress')}</span>
+          <span className="text-base font-semibold leading-6 text-text">{progressPercent}%</span>
+        </div>
+        {BOARD_COLUMNS.map((column) => (
+          <div key={column.key} className="flex shrink-0 items-baseline gap-2">
+            <span className="text-sm leading-5 text-text-muted">{t(column.labelKey)}</span>
+            <span className="text-base font-semibold leading-6 text-text">{groupedTasks[column.key].length}</span>
+          </div>
+        ))}
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-secondary">
+        <div
+          className={`h-full rounded-full transition-all duration-300 ${tasks.length > 0 && groupedTasks.completed.length === tasks.length ? 'bg-ok' : 'bg-accent'}`}
+          style={{ width: `${progressPercent}%` }}
+        />
+      </div>
+      <div className="mt-3 min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
+        {tasks.length === 0 ? (
+          <div className="py-8 text-center text-sm text-text-muted">{t('team.noTasks')}</div>
+        ) : tasks.map((task) => {
+          const columnKey = getTaskColumnKey(task);
+          const seq = globalIndexMap.get(task.task_id) ?? 0;
+          const title = getBoardTaskTitle(task);
+
+          return (
+            <div key={task.task_id} className="flex h-12 items-center">
+              <span className="mr-4 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-medium leading-4 text-muted">
+                {String(seq).padStart(2, '0')}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-sm font-normal leading-5 text-text" title={title}>{title}</span>
+              <img
+                src={compactStatusIcons[columnKey]}
+                className={`ml-4 h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}
+                aria-hidden="true"
+              />
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 
@@ -200,23 +334,36 @@ function BoardColumn({
   column,
   tasks,
   members,
+  hideAssignee,
+  globalIndexMap,
 }: {
   column: typeof BOARD_COLUMNS[number];
   tasks: SessionTeamTask[];
   members: TeamMember[];
+  hideAssignee: boolean;
+  globalIndexMap: Map<string, number>;
 }) {
   const { t } = useTranslation();
 
   return (
     <section className="min-w-0">
-      <div className={`mb-3 inline-flex h-7 items-center rounded-full px-4 text-sm font-medium shadow-[0_1px_2px_rgba(25,25,25,0.04)] ${column.pillClassName}`}>
+      <div className={`mb-3 inline-flex h-7 items-center rounded-full px-4 text-sm font-medium shadow-[var(--effect-task-column-pill-shadow)] ${column.pillClassName}`}>
         <span className={`mr-2 h-1.5 w-1.5 rounded-full ${column.dotClassName}`} />
         {t(column.labelKey)} {tasks.length}
       </div>
       <div className="space-y-3">
-        {tasks.map((task) => (
-          <BoardTaskCard key={task.task_id} task={task} members={members} />
-        ))}
+        {tasks.map((task) => {
+          const seq = globalIndexMap.get(task.task_id) ?? 0;
+          return (
+            <BoardTaskCard
+              key={task.task_id}
+              task={task}
+              members={members}
+              hideAssignee={hideAssignee}
+              index={seq}
+            />
+          );
+        })}
       </div>
     </section>
   );
@@ -225,9 +372,13 @@ function BoardColumn({
 function BoardTaskCard({
   task,
   members,
+  hideAssignee,
+  index,
 }: {
   task: SessionTeamTask;
   members: TeamMember[];
+  hideAssignee: boolean;
+  index: number;
 }) {
   const assigneeExists = Boolean(task.assignee && members.some(member => member.member_id === task.assignee));
   const assigneeName = getMemberDisplayName(task.assignee || '');
@@ -235,8 +386,8 @@ function BoardTaskCard({
   const content = getBoardTaskContent(task);
 
   return (
-    <article className="rounded-2xl border border-border bg-[#fafafa] p-1 shadow-sm">
-      <div className="rounded-2xl border border-border bg-white px-4 py-4">
+    <article className="rounded-2xl border border-border bg-[var(--color-task-card-surface)] p-1 shadow-sm">
+      <div className="rounded-2xl border border-border bg-card px-4 py-4">
         <h3 className="truncate text-base font-medium leading-[18px] text-text-strong" title={title}>
           {title}
         </h3>
@@ -247,8 +398,12 @@ function BoardTaskCard({
         ) : null}
         <TaskResourcePanel skills={task.skills} files={task.files} />
       </div>
-      <div className="mt-3 flex h-8 items-center bg-[#fafafa] px-1 pb-1">
-        {assigneeExists ? (
+      <div className="mt-3 flex h-8 items-center bg-[var(--color-task-card-surface)] px-1 pb-1">
+        {hideAssignee ? (
+          <span className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[16px] bg-[var(--color-task-index-surface)] text-xs font-medium text-muted">
+            {String(index).padStart(2, '0')}
+          </span>
+        ) : assigneeExists ? (
           <div title={assigneeName}>
             <TeamMemberAvatar
               member={task.assignee}

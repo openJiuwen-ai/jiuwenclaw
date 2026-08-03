@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import {
   parseHistoryJsonFilePreviewMode,
-  parseHistoryJsonFileToPreviewMessages,
+  parseHistoryJsonFileToTimelinePreview,
 } from '../../features/historyRestore';
 import { isHistoryPreviewFile, parseHistoryFileContent } from '../../features/historyFilePreview';
 import { ChatTimelineList } from '../ChatPanel/MessageList';
@@ -115,19 +115,29 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
     }
   }, [isJson, isHistoryJson, content]);
 
-  const historyMessages = useMemo(() => {
+  const historyPreview = useMemo(() => {
     if (!isHistoryJson || !historyChatPreview || !Array.isArray(jsonParseResult.parsed)) {
-      return [] as ReturnType<typeof parseHistoryJsonFileToPreviewMessages>;
+      return null;
     }
-    return parseHistoryJsonFileToPreviewMessages(jsonParseResult.parsed, sessionIdFromAgentPath(filePath));
+    return parseHistoryJsonFileToTimelinePreview(
+      jsonParseResult.parsed,
+      sessionIdFromAgentPath(filePath)
+    );
   }, [isHistoryJson, historyChatPreview, jsonParseResult.parsed, filePath]);
 
+  const historyMessages = historyPreview?.messages ?? [];
+  const historyExecutions = historyPreview?.executions ?? [];
+  const historyReasoningSegments = historyPreview?.reasoningSegments ?? [];
+
   const historyPreviewMode = useMemo(() => {
+    if (historyPreview?.mode) {
+      return historyPreview.mode;
+    }
     if (!isHistoryJson || !Array.isArray(jsonParseResult.parsed)) {
       return null;
     }
     return parseHistoryJsonFilePreviewMode(jsonParseResult.parsed);
-  }, [isHistoryJson, jsonParseResult.parsed]);
+  }, [historyPreview?.mode, isHistoryJson, jsonParseResult.parsed]);
 
   const todoItems = useMemo(() => {
     if (!isTodoJson || !Array.isArray(jsonParseResult.parsed)) {
@@ -321,12 +331,12 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                 role="switch"
                 aria-checked={historyChatPreview}
                 onClick={() => setHistoryChatPreview((v) => !v)}
-                className={`inline-flex h-8 w-12 shrink-0 items-center rounded-full border border-border p-1 transition-colors ${
+                className={`inline-flex h-8 w-12 shrink-0 items-center rounded-full border border-border p-1  ${
                   historyChatPreview ? 'justify-end bg-accent' : 'justify-start bg-secondary'
                 }`}
                 title={t('fileViewer.chatPreview')}
               >
-                <span className="pointer-events-none h-5 w-5 rounded-full bg-card shadow-sm ring-1 ring-black/5 dark:ring-white/10" />
+                <span className="pointer-events-none h-5 w-5 rounded-full bg-[var(--color-control-thumb)] shadow-sm ring-1 ring-control-ring" />
               </button>
             </div>
           ) : null}
@@ -337,7 +347,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
           </div>
         ) : null}
         {fileNotFound ? (
-          <div className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
+          <div className="mt-2 rounded-md border border-warn/30 bg-warn/10 px-2.5 py-1.5 text-xs text-warn">
             {t('fileViewer.fileMissingPrefix')} <span className="mono">{filePath}</span> {t('fileViewer.fileMissingSuffix')}
           </div>
         ) : null}
@@ -416,6 +426,9 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
               <div className="w-full min-h-[280px] rounded-lg border border-border bg-card p-3 chat-content">
                 <ChatTimelineList
                   messages={historyMessages}
+                  executions={historyExecutions}
+                  reasoningSegments={historyReasoningSegments}
+                  staticTimeline
                   mode={historyPreviewMode ?? undefined}
                   disableA2UIInteraction={true}
                 />

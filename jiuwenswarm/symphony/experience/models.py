@@ -48,7 +48,7 @@ class ExperienceItem:
 @dataclass
 class TraceRecord:
     trace_id: str
-    query: str
+    query: str = ""
     skills: list[str] = field(default_factory=list)
     messages: list[dict] = field(default_factory=list)
     result: str = ""
@@ -94,7 +94,6 @@ class ExperienceBankBuildConfig:
     skill_cluster_num: int | None = None
     pattern_merge_threshold: float = 0.9
     query_examples_count: int = 5
-    cluster_max_examples: int | None = None
 
 
 @dataclass

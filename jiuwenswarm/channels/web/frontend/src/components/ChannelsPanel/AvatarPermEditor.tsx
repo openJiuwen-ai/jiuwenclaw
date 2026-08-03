@@ -195,10 +195,10 @@ export function AvatarPermEditor({ channelId, userId }: AvatarPermEditorProps) {
       <div className="flex items-center gap-2">
         <span className="text-[11px] text-text-muted">{t("ownerScopes.quickSet")}:</span>
         <button onClick={() => setAllTools("allow")}
-          className="text-[11px] px-2 py-0.5 rounded border border-emerald-500/30 text-emerald-600 bg-emerald-500/10 hover:bg-emerald-500/20 transition-colors"
+          className="text-[11px] px-2 py-0.5 rounded border border-emerald-500/30 text-emerald-600 bg-emerald-500/10 hover:bg-emerald-500/20 "
         >{t("ownerScopes.allowAll")}</button>
         <button onClick={() => setAllTools("deny")}
-          className="text-[11px] px-2 py-0.5 rounded border border-red-500/30 text-red-600 bg-red-500/10 hover:bg-red-500/20 transition-colors"
+          className="text-[11px] px-2 py-0.5 rounded border border-red-500/30 text-red-600 bg-red-500/10 hover:bg-red-500/20 "
         >{t("ownerScopes.denyAll")}</button>
       </div>
 
@@ -210,10 +210,10 @@ export function AvatarPermEditor({ channelId, userId }: AvatarPermEditorProps) {
         </div>
         <button
           onClick={() => setExtDir(extDir === "allow" ? "deny" : "allow")}
-          className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
+          className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   ${
             extDir === "allow" ? "bg-ok" : "bg-secondary"}`}
         >
-          <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+          <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
             extDir === "allow" ? "translate-x-4" : "translate-x-0"}`} />
         </button>
       </div>
@@ -237,10 +237,10 @@ export function AvatarPermEditor({ channelId, userId }: AvatarPermEditorProps) {
                 </div>
                 <button
                   onClick={() => toggleGroup(group)}
-                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
+                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   ${
                     allowed ? "bg-ok" : "bg-secondary"}`}
                 >
-                  <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                  <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                     allowed ? "translate-x-4" : "translate-x-0"}`} />
                 </button>
               </div>

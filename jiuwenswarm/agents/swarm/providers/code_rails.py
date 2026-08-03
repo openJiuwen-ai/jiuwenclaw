@@ -145,6 +145,10 @@ def build_code_runtime_prompt(params: dict[str, Any], ctx: SwarmBuildContext) ->
     try:
         inp = CodeRuntimePromptInput.resolve(params, ctx)
         rail = RuntimePromptRail(language=inp.language, channel=inp.channel)
+        # Code-team members need the same per-request runtime binding as the
+        # regular team profile; otherwise mode falls back to "unknown".
+        rail.set_mode(ctx.mode)
+        rail.set_session_id(ctx.session_id)
         rail.set_runtime_paths(cwd=inp.project_dir, project_dir=inp.project_dir)
         return rail
     except Exception as exc:
@@ -407,6 +411,8 @@ def build_structured_ask_user(params: dict[str, Any], ctx: SwarmBuildContext) ->
     from jiuwenswarm.agents.harness.common.rails import StructuredAskUserRail
 
     try:
+        if (ctx.request_metadata or {}).get("supports_user_interaction") is False:
+            return None
         inp = StructuredAskUserInput.resolve(params, ctx)
         return StructuredAskUserRail(language=inp.language)
     except Exception as exc:

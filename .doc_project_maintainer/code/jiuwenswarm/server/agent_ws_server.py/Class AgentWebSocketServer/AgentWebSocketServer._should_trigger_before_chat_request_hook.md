@@ -37,14 +37,14 @@ issues:
     severity: low
     status: open
     summary: "Missing direct AgentServer tests for before-chat hook eligibility."
-    evidence: "Searches found no direct AgentServer predicate or hook-gating tests; only a Gateway-side hook stub was found in tests/unit_tests/gateway/test_message_handler_evolution.py."
-    suggested_action: "Add parameterized tests for CHAT_SEND, CHAT_RESUME, CHAT_ANSWER, non-chat methods, and None, plus a hook-gating test through _trigger_before_chat_request_hook."
+    evidence: "No test references either side's predicate. tests/unit_tests/gateway/test_message_handler_evolution.py overrides _trigger_before_chat_request_hook with a no-op, so it does not verify Gateway or AgentServer eligibility."
+    suggested_action: "Add parameterized tests for CHAT_SEND, CHAT_RESUME, CHAT_ANSWER, and representative non-chat methods, plus a hook-gating test through _trigger_before_chat_request_hook."
   - id: ISSUE-002
     dimension: dependency_coupling
     severity: low
     status: open
     summary: "AgentServer and Gateway maintain duplicate before-chat hook eligibility lists."
-    evidence: "AgentWebSocketServer checks CHAT_SEND, CHAT_RESUME, and CHAT_ANSWER, while Gateway MessageHandler has a parallel predicate for the analogous before-chat hook."
+    evidence: "AgentWebSocketServer and Gateway MessageHandler each hard-code the same current tuple: CHAT_SEND, CHAT_RESUME, and CHAT_ANSWER. They emit distinct AgentServerHookEvents and GatewayHookEvents but have no shared eligibility definition or parity test."
     suggested_action: "Centralize the eligible method set or add parity tests so future chat method additions do not drift between Gateway and AgentServer."
 confidence: confirmed
 details: {}
@@ -54,7 +54,7 @@ details: {}
 
 ## Actual Role
 
-Pure static predicate that returns `True` only for AgentServer chat request methods that should run the `before_chat_request` extension hook: `CHAT_SEND`, `CHAT_RESUME`, and `CHAT_ANSWER`. It gates `_trigger_before_chat_request_hook` before the main request dispatch path continues.
+Pure static predicate that reads `AgentRequest.req_method` and returns `True` exactly for `CHAT_SEND`, `CHAT_RESUME`, and `CHAT_ANSWER`. `_trigger_before_chat_request_hook` uses it to gate the AgentServer extension event before dispatch; Gateway independently applies the same three-method rule to its own hook event before forwarding.
 
 ## Key Signals
 
@@ -62,7 +62,7 @@ Pure static predicate that returns `True` only for AgentServer chat request meth
 - Output: Boolean; true only for the three chat-turn request methods.
 - Main side effects: None.
 - Main risk: Low implementation risk, but hook eligibility is duplicated with Gateway and lacks direct AgentServer tests.
-- Related tests: No direct AgentServer predicate or hook-gating tests were found; a Gateway evolution test only stubs the analogous hook.
+- Related tests: No predicate or hook-gating test was found; the Gateway evolution harness overrides its analogous hook with a no-op.
 
 ## Detail Index
 

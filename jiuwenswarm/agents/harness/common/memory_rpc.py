@@ -11,7 +11,11 @@ from jiuwenswarm.agents.harness.common.memory import (
     get_memory_manager,
     is_memory_enabled,
 )
-from jiuwenswarm.agents.harness.common.memory.config import is_auto_memory_enabled, is_proactive_memory
+from jiuwenswarm.agents.harness.common.memory.config import (
+    is_agent_mode,
+    is_auto_memory_enabled,
+    is_proactive_memory,
+)
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import (
     get_memory_engine,
     is_external_memory_allowed,
@@ -230,6 +234,10 @@ def _is_code_mode(mode: str) -> bool:
     return mode.startswith("code")
 
 
+def _is_agent_mode(mode: str) -> bool:
+    return is_agent_mode(mode)
+
+
 async def handle_memory_list(
     workspace: str,
     mode: str,
@@ -295,19 +303,24 @@ async def handle_memory_edit(
     content_preview = ""
     kind = _classify_memory_file(resolved, workspace)
 
-    if exists:
-        try:
-            text = Path(resolved).read_text(encoding="utf-8", errors="replace")
-            lines = text.splitlines()[:20]
-            content_preview = "\n".join(lines)
-            if len(text.splitlines()) > 20:
-                content_preview += "\n... (truncated)"
-        except OSError:
-            pass
-    else:
-        parent = Path(resolved).parent
-        parent.mkdir(parents=True, exist_ok=True)
-        Path(resolved).touch()
+    if not exists:
+        return {
+            "path": resolved,
+            "exists": False,
+            "content_preview": "",
+            "kind": kind,
+            "editable": False,
+            "reason": "memory file does not exist",
+        }
+
+    try:
+        text = Path(resolved).read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()[:20]
+        content_preview = "\n".join(lines)
+        if len(text.splitlines()) > 20:
+            content_preview += "\n... (truncated)"
+    except OSError:
+        pass
 
     return {
         "path": resolved,
@@ -447,6 +460,30 @@ async def handle_memory_toggle(
             "needs_restart": True,
         }
 
+    if key in ("memory_enabled", "memory_proactive") and not (_is_code_mode(mode) or _is_agent_mode(mode)):
+        old = is_memory_enabled(mode, config) if key == "memory_enabled" else is_proactive_memory(mode, config)
+        return {
+            "key": key,
+            "old_value": old,
+            "new_value": old,
+            "mode_affected": mode,
+            "needs_restart": False,
+            "unsupported": True,
+        }
+
+    if key == "memory_proactive" and _is_agent_mode(mode):
+        # agent 模式记忆恒被动（is_proactive_memory 对 agent 恒返回 False），
+        # 该开关对 agent 无效，直接报 unsupported，避免"写入成功但从不生效"。
+        old = is_proactive_memory(mode, config)
+        return {
+            "key": key,
+            "old_value": old,
+            "new_value": old,
+            "mode_affected": mode,
+            "needs_restart": False,
+            "unsupported": True,
+        }
+
     if key == "memory_enabled":
         old = is_memory_enabled(mode, config)
         new = not old
@@ -527,18 +564,21 @@ async def handle_memory_toggle(
 def _update_mode_memory_config(mode: str, field: str, value: bool) -> None:
     from jiuwenswarm.common.config import _load_yaml_round_trip, _dump_yaml_round_trip, _CONFIG_YAML_PATH
 
+    if _is_code_mode(mode):
+        target = "code"
+    elif _is_agent_mode(mode):
+        target = "agent"
+    else:
+        logger.warning(
+            "[memory_rpc] _update_mode_memory_config: mode=%r 没有独立的记忆配置节点，忽略写入 field=%s",
+            mode, field,
+        )
+        return
+
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     modes = data.setdefault("modes", {})
-
-    # code 模式写入 modes.code.memory，其他模式写入 modes.agent.<mode>.memory
-    if _is_code_mode(mode):
-        code_node = modes.setdefault("code", {})
-        memory = code_node.setdefault("memory", {})
-    else:
-        agent = modes.setdefault("agent", {})
-        mode_node = agent.setdefault(mode, {})
-        memory = mode_node.setdefault("memory", {})
-
+    node = modes.setdefault(target, {})
+    memory = node.setdefault("memory", {})
     memory[field] = value
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 

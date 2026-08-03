@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { webRequest } from '../../services/webClient';
 import './ExtensionsPanel.css';
 
@@ -9,6 +10,26 @@ interface RailExtension {
   enabled: boolean;
   description: string;
   priority: number;
+}
+
+// 后端 extensions.import 校验失败时直接抛出中文异常原文（未走 i18n，见
+// rail_manager.py:import_extension / agent_ws_server.py:_handle_extensions_import）。
+// 这里按已知文案模式做前端翻译兜底；匹配不到的未知错误原样展示（可能仍是中文原文）。
+function translateImportError(rawMessage: string, t: TFunction): string {
+  const notFound = rawMessage.match(/^文件夹不存在或不是目录: (.+)$/);
+  if (notFound) return t('extensions.errors.folderNotFound', { path: notFound[1] });
+
+  const invalidName = rawMessage.match(/^文件夹名称 '(.+)' 必须是有效的英文标识符$/);
+  if (invalidName) return t('extensions.errors.invalidFolderName', { name: invalidName[1] });
+
+  const alreadyExists = rawMessage.match(/^扩展 '(.+)' 已存在$/);
+  if (alreadyExists) return t('extensions.errors.alreadyExists', { name: alreadyExists[1] });
+
+  if (rawMessage === '缺少 folder_path 参数') return t('extensions.errors.missingFolderPath');
+  if (rawMessage === '扩展文件夹必须包含 rail.py 文件') return t('extensions.errors.missingRailFile');
+  if (rawMessage === 'rail.py 验证失败') return t('extensions.errors.railValidationFailed');
+
+  return rawMessage;
 }
 
 interface ExtensionsPanelProps {
@@ -71,11 +92,12 @@ export function ExtensionsPanel({ isConnected }: ExtensionsPanelProps) {
         throw new Error(t('extensions.importFailed'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      setError(translateImportError(rawMessage, t));
     } finally {
       setLoading(false);
     }
-  }, [folderPath]);
+  }, [folderPath, t]);
 
   const handleDelete = useCallback(
     async (name: string) => {
@@ -167,7 +189,7 @@ export function ExtensionsPanel({ isConnected }: ExtensionsPanelProps) {
                 flex: 1,
                 padding: '0.5rem',
                 borderRadius: '4px',
-                border: '1px solid #ccc',
+                border: '1px solid var(--color-extension-input-border)',
                 fontSize: '14px',
               }}
             />

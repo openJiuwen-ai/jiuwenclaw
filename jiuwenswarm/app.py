@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Orchestrate AgentServer + Gateway in two processes (split layout, one command).
 
 Runs ``jiuwenswarm.server.app_agentserver`` then ``jiuwenswarm.gateway.app_gateway`` with the same
@@ -13,13 +13,11 @@ import sys
 import time
 import os
 
-from dotenv import load_dotenv
-
-# --- Early --dotenv parsing (before jiuwenswarm imports) ---
-from jiuwenswarm.dotenv_early import parse_dotenv_early, get_parsed_dotenv
+from jiuwenswarm.dotenv_early import parse_dotenv_early, get_parsed_dotenv, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-app")
 
 # --- Now safe to import jiuwenswarm modules ---
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     cleanup_team_files,
     get_env_file,
@@ -44,7 +42,7 @@ cleanup_team_files(_workspace_dir)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
 
@@ -67,6 +65,8 @@ def main() -> None:
         help="Start a named instance from instances.yaml.",
     )
     args = parser.parse_args()
+
+    install_async_dump_handler("app")
 
     # Handle --name: check if bootstrap .env was loaded successfully
     # (parse_dotenv_early() already processed it at module import time)
@@ -102,7 +102,6 @@ def main() -> None:
     agent = subprocess.Popen(agent_cmd, **_popen_kwargs)
     gateway = None
     try:
-        time.sleep(0.4)
         gateway = subprocess.Popen(gateway_cmd, **_popen_kwargs)
     except Exception:
         if agent.poll() is None:

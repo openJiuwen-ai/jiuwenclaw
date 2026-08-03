@@ -14,15 +14,15 @@ health:
   complexity: low
   implementation_soundness: sound
   boundary_safety: partial
-  input_contract: implicit
+  input_contract: clear
   output_contract: clear
   side_effects: explicit
   error_handling: partial
-  state_mutation: shared
+  state_mutation: isolated
   dependency_coupling: medium
   test_coverage: missing
   observability: partial
-  performance_risk: low
+  performance_risk: medium
 audit:
   status: unaudited
   auditor: null
@@ -46,6 +46,13 @@ issues:
     summary: "Extension hook failure policy is implicit."
     evidence: "The method directly awaits ExtensionRegistry.get_instance().trigger(...) with no local handling; _handle_message catches the exception generically and sends an error response."
     suggested_action: "Make the intended policy explicit in tests or code: either confirm hook failures should fail the chat request with clear logging, or isolate optional extension failures so chat dispatch can continue."
+  - id: ISSUE-003
+    dimension: performance_risk
+    severity: medium
+    status: open
+    summary: "A slow or stuck extension blocks chat dispatch without a timeout."
+    evidence: "_handle_message awaits this method before every eligible handler, and this method directly awaits ExtensionRegistry.trigger with no timeout or cancellation policy of its own."
+    suggested_action: "Define a hook latency contract and enforce a timeout or per-extension isolation if hooks must not indefinitely block chat."
 confidence: confirmed
 details: {}
 ---
@@ -54,15 +61,15 @@ details: {}
 
 ## Actual Role
 
-AgentServer-side extension bridge for `chat.send`, `chat.resume`, and `chat.user_answer` requests. It normalizes non-dict `request.params` to `{}`, passes the same mutable params object into `AgentServerChatHookContext`, and awaits the `agent_server:before_chat_request` hook before unary or stream dispatch continues.
+AgentServer-side extension bridge for `chat.send`, `chat.resume`, and `chat.user_answer`. It no-ops for other methods, normalizes non-dict `request.params` to `{}`, builds a context containing request identity and the same mutable params dict, then awaits `agent_server:before_chat_request` before any specialized, unary, or stream handler runs.
 
 ## Key Signals
 
 - Input: `AgentRequest`; only chat send, resume, and answer pass the eligibility gate.
 - Output: None.
-- Main side effects: May replace `request.params`; extensions can mutate the shared params dict before downstream agent handling.
-- Main risk: Hook or registry failures are not handled locally and become generic request failures in `_handle_message`.
-- Related tests: No direct AgentServer hook tests were found; only a Gateway-side analogous hook stub exists.
+- Main side effects: May replace `request.params`; extension callbacks can mutate that per-request dict and downstream handlers observe the changes.
+- Main risk: Registry/callback failures become generic request failures, while an unbounded callback delay blocks dispatch.
+- Related tests: No AgentServer hook-event tests were found; `test_message_handler_evolution.py` overrides the analogous Gateway hook with a no-op rather than exercising registry behavior.
 
 ## Detail Index
 

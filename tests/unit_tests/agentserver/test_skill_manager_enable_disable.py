@@ -183,6 +183,32 @@ def test_builtin_skill_not_auto_registered_as_local(monkeypatch, tmp_path):
     assert all(s.get("name") != "builtin-twin" for s in manager.get_local_skills())
 
 
+def test_installed_builtin_skill_keeps_builtin_source_flag(monkeypatch, tmp_path):
+    """Installed built-in skills are local files but still need a built-in source marker."""
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    _make_skill_dir(skills_dir, "builtin-installed")
+    _make_skill_dir(builtin_dir, "builtin-installed")
+
+    manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
+
+    listed = manager._scan_local_skills()
+    skill = next(s for s in listed if s.get("name") == "builtin-installed")
+    assert skill["is_builtin_source"] is True
+
+
+def test_builtin_scan_uses_directory_name_without_frontmatter(monkeypatch, tmp_path):
+    """Built-in marketplace entries should not appear as the generic SKILL name."""
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    _make_skill_dir(builtin_dir, "builtin-no-frontmatter")
+
+    manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
+
+    listed = manager._scan_builtin_skills()
+    assert [s.get("name") for s in listed] == ["builtin-no-frontmatter"]
+
+
 def test_already_registered_skill_not_duplicated(monkeypatch, tmp_path):
     """A skill present in installed_plugins must not get a second local record."""
     skills_dir = tmp_path / "skills"

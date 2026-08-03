@@ -47,12 +47,12 @@ issues:
     evidence: "The MCP add test monkeypatches _pre_check_mcp_server, so real temporary-client behavior is not exercised."
     suggested_action: "Add focused async tests with fake ToolMgr/client for success, refused, timeout, exception, and disconnect failure."
   - id: ISSUE-003
-    dimension: implementation_soundness
-    severity: low
+    dimension: error_handling
+    severity: medium
     status: open
-    summary: "MCP config construction is duplicated instead of using the shared config builder."
-    evidence: "This method builds McpServerConfig inline while runtime registration uses common.mcp_config.build_mcp_server_config, which also handles timeout_s."
-    suggested_action: "Share the MCP config builder path or factor a single helper for pre-check, fetch, and runtime config conversion."
+    summary: "Client construction escapes the tuple failure contract and duplicates config rules."
+    evidence: "McpServerConfig and ToolMgr._create_client run before try; their errors propagate, while the inline builder also omits shared build_mcp_server_config timeout_s handling."
+    suggested_action: "Use the shared builder and include config/client construction in the normalized failure path."
 confidence: confirmed
 details: {}
 ---
@@ -61,14 +61,14 @@ details: {}
 
 ## Actual Role
 
-Builds a temporary MCP client from a normalized server payload, attempts to connect with a 15 second timeout, disconnects with a 5 second timeout, and returns an `(ok, message)` tuple. It is used by `command.mcp add` to block failed enabled stdio server additions when pre-check is deemed necessary.
+Builds a temporary MCP client from a normalized payload, connects within 15 seconds, and attempts a 5-second disconnect. It normally returns `(ok, message)` for `command.mcp add`, but config/client construction errors escape before its failure guard.
 
 ## Key Signals
 
 - Input: MCP server payload with name/transport and stdio command/args/cwd/env or URL/headers.
 - Output: `(True, message)` for skipped or passed checks; `(False, message)` for refused, timeout, or exception.
 - Main side effects: May launch stdio/network MCP clients, globally disables Python logging during awaited work, and disconnects a temporary client.
-- Main risk: Process-wide logging suppression and real temporary-client behavior are untested.
+- Main risk: Process-wide logging suppression, divergent config construction, and temporary-client lifecycle behavior are untested.
 - Related tests: MCP add tests stub this method; no direct helper tests were found.
 
 ## Detail Index

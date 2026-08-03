@@ -53,14 +53,14 @@ class _FakeRail:
 
 
 class _FakeSkillEvolutionRail:
-    def __init__(self, auto_scan: bool = True) -> None:
-        self.auto_scan = auto_scan
+    def __init__(self, signal_trigger: bool = True) -> None:
+        self.signal_trigger = signal_trigger
 
 
 class _FakeTeamSkillEvolutionRail:
-    def __init__(self, *, auto_scan: bool = True, completion_followup_enabled: bool = True) -> None:
-        self.auto_scan = auto_scan
-        self.completion_followup_enabled = completion_followup_enabled
+    def __init__(self, *, signal_trigger: bool = True, review_trigger: bool = True) -> None:
+        self.signal_trigger = signal_trigger
+        self.review_trigger = review_trigger
         self._pending_approval_snapshots: dict[str, object] = {}
         self._pending_governance: dict[str, object] = {}
 
@@ -117,21 +117,22 @@ def test_get_team_manager_is_singleton() -> None:
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_updates_member_skill_evolution_auto_scan(
+async def test_update_evolution_config_updates_member_skill_evolution_signal_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
-    rail = _FakeSkillEvolutionRail(auto_scan=True)
+    rail = _FakeSkillEvolutionRail(signal_trigger=True)
     manager.register_team_member_skill_evolution_rail("sess-1", rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    await manager.update_evolution_config({"evolution": {"auto_scan": False}})
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+    await manager.update_evolution_config({"evolution": {"signal_trigger": False}})
 
-    assert rail.auto_scan is False
+    assert rail.signal_trigger is False
 
-    await manager.update_evolution_config({"evolution": {"auto_scan": True}})
+    await manager.update_evolution_config({"evolution": {"signal_trigger": True}})
 
-    assert rail.auto_scan is True
+    assert rail.signal_trigger is True
 
 
 @pytest.mark.asyncio
@@ -144,11 +145,12 @@ async def test_update_evolution_config_enabled_false_keeps_team_skill_rail_and_w
     task = asyncio.create_task(asyncio.sleep(3600))
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     manager.register_team_skill_rail("sess-1", rail)
     manager.register_team_live_rail("sess-1", agent, rail)
     manager.register_team_evolution_watcher("sess-1", task)
 
-    await manager.update_evolution_config({"evolution": {"enabled": False, "auto_scan": False}})
+    await manager.update_evolution_config({"evolution": {"enabled": False, "review_trigger": False}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
     assert manager.get_team_evolution_watcher("sess-1") is task
@@ -160,54 +162,61 @@ async def test_update_evolution_config_enabled_false_keeps_team_skill_rail_and_w
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_keeps_team_skill_rail_when_only_auto_scan_disabled(
+async def test_update_evolution_config_keeps_team_skill_rail_when_review_trigger_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
-    rail = _FakeTeamSkillEvolutionRail(auto_scan=True)
+    rail = _FakeTeamSkillEvolutionRail(signal_trigger=True)
     manager.register_team_skill_rail("sess-1", rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    await manager.update_evolution_config({"evolution": {"enabled": True, "auto_scan": False}})
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    await manager.update_evolution_config({"evolution": {"enabled": True, "review_trigger": False}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
-    assert rail.auto_scan is True
-    assert rail.completion_followup_enabled is False
+    assert rail.signal_trigger is True
+    assert rail.review_trigger is False
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_enabled_false_does_not_override_auto_scan(
+async def test_update_evolution_config_enabled_false_does_not_override_signal_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
-    rail = _FakeTeamSkillEvolutionRail(auto_scan=False)
+    rail = _FakeTeamSkillEvolutionRail(signal_trigger=False)
     manager.register_team_skill_rail("sess-1", rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    await manager.update_evolution_config({"evolution": {"enabled": False, "auto_scan": True}})
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    await manager.update_evolution_config({"evolution": {"enabled": False, "review_trigger": True}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
-    assert rail.auto_scan is False
-    assert rail.completion_followup_enabled is True
+    assert rail.signal_trigger is False
+    assert rail.review_trigger is True
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_auto_scan_only_updates_existing_rails(
+async def test_update_evolution_config_only_updates_existing_rails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
-    team_rail = _FakeTeamSkillEvolutionRail(auto_scan=True)
-    member_rail = _FakeSkillEvolutionRail(auto_scan=True)
+    team_rail = _FakeTeamSkillEvolutionRail(
+        signal_trigger=False,
+        review_trigger=False,
+    )
+    member_rail = _FakeSkillEvolutionRail(signal_trigger=False)
     manager.register_team_skill_rail("sess-1", team_rail)
     manager.register_team_member_skill_evolution_rail("sess-1", member_rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.setenv("SKILL_CREATE", "false")
-    await manager.update_evolution_config({"evolution": {"auto_scan": False}})
+    await manager.update_evolution_config({"evolution": {"auto_scan": True}})
 
-    assert team_rail.auto_scan is True
-    assert team_rail.completion_followup_enabled is False
-    assert member_rail.auto_scan is False
+    assert team_rail.signal_trigger is False
+    assert team_rail.review_trigger is True
+    assert member_rail.signal_trigger is True
     assert manager.get_team_skill_rail("sess-1") is team_rail
     assert manager.get_team_skill_create_rail("sess-1") is None
 
@@ -255,7 +264,10 @@ def test_refresh_team_shared_skill_links_across_managers_uses_registered_session
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_disables_team_skill_create_rail() -> None:
+async def test_update_evolution_config_disables_team_skill_create_rail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
     manager = TeamManager()
     rail = _FakeRail()
     agent = _FakeAgent()
@@ -1423,6 +1435,175 @@ def test_resolve_session_team_name_returns_none_when_metadata_missing(
     team_name = manager.resolve_session_team_name_for_test("sess-missing")
 
     assert team_name is None
+
+
+@pytest.mark.asyncio
+async def test_get_swarm_enriched_team_spec_uses_bound_stable_team_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    load_calls: list[dict] = []
+    enrich_calls: list[dict] = []
+
+    class _Spec:
+        team_name = "template_team"
+
+    async def fake_ensure_postgresql(self, config_base: dict) -> None:
+        _ = self, config_base
+
+    def fake_load_team_spec(session_id: str, **kwargs):
+        load_calls.append({"session_id": session_id, **kwargs})
+        return _Spec()
+
+    def fake_enrich(spec, **kwargs) -> None:
+        enrich_calls.append({"team_name": spec.team_name, **kwargs})
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        lambda _session_id, cache_bust=False: {
+            "team_name": "custom_team",
+            "team_template_id": "beta_template",
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: SimpleNamespace(get=lambda _team_name: None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.ensure_team_entity",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(TeamManager, "_ensure_postgresql_for_leader", fake_ensure_postgresql)
+    monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        fake_enrich,
+    )
+
+    spec = await manager.get_swarm_enriched_team_spec(
+        "sess-bound",
+        mode="team",
+        request_metadata={"mode": "team"},
+    )
+
+    assert spec.team_name == "custom_team"
+    assert load_calls == [
+        {
+            "session_id": "sess-bound",
+            "template_id": "beta_template",
+            "strict_template": True,
+        }
+    ]
+    assert enrich_calls[0]["team_name"] == "custom_team"
+
+
+@pytest.mark.asyncio
+async def test_get_swarm_enriched_team_spec_uses_bound_team_entity_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    load_calls: list[dict] = []
+
+    class _Spec:
+        team_name = "template_team"
+
+    async def fake_ensure_postgresql(self, config_base: dict) -> None:
+        _ = self, config_base
+
+    def fake_load_team_spec(session_id: str, **kwargs):
+        load_calls.append({"session_id": session_id, **kwargs})
+        return _Spec()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        lambda _session_id, cache_bust=False: {
+            "team_name": "custom_team",
+            "team_template_id": "deleted_template",
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: SimpleNamespace(get=lambda _team_name: None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.ensure_team_entity",
+        lambda **_kwargs: SimpleNamespace(
+            template_id="deleted_template",
+            template_snapshot={
+                "team_name": "template_team",
+                "leader": {"member_name": "snapshot_leader"},
+            },
+        ),
+    )
+    monkeypatch.setattr(TeamManager, "_ensure_postgresql_for_leader", fake_ensure_postgresql)
+    monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        lambda spec, **kwargs: None,
+    )
+
+    spec = await manager.get_swarm_enriched_team_spec(
+        "sess-bound",
+        mode="team",
+        request_metadata={"mode": "team"},
+    )
+
+    assert spec.team_name == "custom_team"
+    assert load_calls == [
+        {
+            "session_id": "sess-bound",
+            "template_id": "deleted_template",
+            "strict_template": False,
+            "template_snapshot": {
+                "team_name": "template_team",
+                "leader": {"member_name": "snapshot_leader"},
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_swarm_enriched_team_spec_keeps_legacy_session_scoped_team_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+
+    class _Spec:
+        team_name = "template_team"
+
+    async def fake_ensure_postgresql(self, config_base: dict) -> None:
+        _ = self, config_base
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        lambda _session_id, cache_bust=False: {},
+    )
+    monkeypatch.setattr(TeamManager, "_ensure_postgresql_for_leader", fake_ensure_postgresql)
+    monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        lambda spec, **kwargs: None,
+    )
+
+    spec = await manager.get_swarm_enriched_team_spec(
+        "sess-legacy",
+        mode="team",
+        request_metadata={"mode": "team"},
+    )
+
+    assert spec.team_name == "template_team_sess-legacy"
 
 
 def test_register_workflow_handler() -> None:

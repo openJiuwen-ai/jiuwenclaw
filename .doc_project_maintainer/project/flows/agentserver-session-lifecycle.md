@@ -3,7 +3,7 @@ id: agentserver-session-lifecycle
 name: AgentServer Session Lifecycle
 status: partial
 confidence: confirmed
-last_updated: 2026-07-07
+last_updated: 2026-08-03
 user_visible_surface: "Session create, switch, list, fork, rewind, delete, history, and team session operations."
 source_of_truth:
   - "agent session directories"
@@ -27,11 +27,11 @@ entrypoints:
 
 ## Outcome
 
-User and team sessions can be created, switched, listed, renamed, deleted, forked, rewound, compacted, and paged through history from Gateway requests.
+User and team session operations are exposed for create, register, switch, list, rename, delete, fork, rewind, compact, and history. New IDs and fork targets are allocated by AgentServer. Explicit IDs are rejected by normal creation; TUI startup may register a caller-supplied compatible ID through AgentServer and bypass prewarming.
 
 ## Causal Path
 
-`_handle_message` routes session and history `ReqMethod` values to local handlers before generic chat handling. Session create calls `AgentManager.create_session` and, for team mode, prepares team session switching. Fork copies filesystem session state, in-memory context, and DeepAgent state. History handlers read persisted history records, filter restorable records, enforce page/byte limits, and encode sanitized records. Delete and team delete handlers cross both session metadata and active runtime state.
+`_handle_message` routes session and history `ReqMethod` values to local handlers before generic chat handling. Session create validates project binding, claims or initializes a server-owned ID, and writes metadata; single-Agent claims can consume a prepared DeepAgent. TUI normal startup calls this method without `session_id` and waits for the returned ID before releasing queued RPCs. Its TUI-only explicit-ID compatibility branch validates the external ID, serializes creation per ID, treats existing metadata as authoritative, and bypasses prewarming. Fork requests omit the target ID and AgentServer allocates it before copying filesystem and runtime state. History, rewind, delete, and team operations retain their existing stores and behavior.
 
 ## State Classification
 
@@ -41,16 +41,16 @@ User and team sessions can be created, switched, listed, renamed, deleted, forke
 
 ## Replay, Restore, Or Reconstruction
 
-History paging reverses persisted restorable records so latest records appear first. Rewind and rewind-restore paths depend on session operations and active adapter state; full flow detail is pending.
+History paging rereads the full persisted history, filters restorable records, reverses them so latest records appear first, and slices a page. Fork and rewind reconstruct several stores independently; no transaction or recovery journal spans filesystem copies, history, checkpointer state, and active runtime state.
 
 ## Contract
 
-Handlers take `AgentRequest.params` fields such as `session_id`, `source_session_id`, `target_session_id`, `title`, page parameters, and mode hints. Responses are `AgentResponse` payloads encoded as E2A wire.
+`session.create` normally takes project/work/mode identity plus `create_token`; it returns `session_id`, normalized project binding, `prewarm_hit`, and `prewarm_status`. The TUI compatibility form instead accepts a `session_id` of at most 128 characters in the sanitized portable character set, returns `created`, resolved `mode`, and `prewarm_status="bypassed"`, and is idempotent. Other channels still reject explicit IDs, and other handlers that accept existing IDs retain their path-boundary review requirements.
 
 ## Verification
 
-Tests cover ACP/session creation and switching, session/team delete, history payload limits, session operations, and agentserver modes. Direct full rewind/restore flow coverage still needs review.
+Focused warm-pool, AgentServer session, TUI Gateway/frontend, rewind, and fork tests cover allocation and registration mechanics. On 2026-08-03 the selected Python suite passed 114 tests in each prewarm state, and the TUI typecheck/build/full frontend test suite passed. The external `clear.spec.ts` reproduction has not yet been replayed after the startup-ordering fix.
 
 ## Known Gaps
 
-Detailed documentation for `_handle_session_rewind_full`, `_handle_session_rewind_context`, `_handle_team_delete`, and `_handle_session_delete` is pending.
+Existing-session operations can still receive hostile IDs and require containment review. `create_token` idempotency is process-local, and fork can still leave partial state after later copy failure. Detailed downstream audits for metadata, history, checkpointer state, warm-resource limits, and team teardown remain pending.

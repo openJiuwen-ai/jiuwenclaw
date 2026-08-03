@@ -7,14 +7,14 @@ audit_scope: default_health_audit
 class: AgentWebSocketServer
 signature: "port(self) -> int"
 health:
-  overall: watch
+  overall: healthy
   name_behavior_match: good
   responsibility_focus: single
   length: short
   complexity: low
   implementation_soundness: sound
   boundary_safety: safe
-  input_contract: implicit
+  input_contract: clear
   output_contract: clear
   side_effects: none
   error_handling: clear
@@ -29,16 +29,10 @@ audit:
   audited_at: null
   audited_commit: null
   audited_source_hash: null
+  audited_symbol_hash: null
   confidence: confirmed
   expired_reason: null
-issues:
-  - id: ISSUE-001
-    dimension: test_coverage
-    severity: low
-    status: open
-    summary: "No direct test asserts the port accessor returns the constructor-supplied bind port."
-    evidence: "No AgentWebSocketServer.port property test was found; startup uses _port directly and app-level tests mock the server instance."
-    suggested_action: "Add a small constructor/accessor test if external code depends on this property."
+issues: []
 confidence: confirmed
 details: {}
 ---
@@ -47,15 +41,15 @@ details: {}
 
 ## Actual Role
 
-Read-only property that returns the constructor-captured WebSocket bind port from `self._port`. It performs no validation, fallback, mutation, I/O, logging, or synchronization.
+Read-only property that returns the constructor-captured WebSocket bind port from `self._port`. The server startup path consumes the same backing field directly; this accessor performs no validation, fallback, mutation, or I/O.
 
 ## Key Signals
 
 - Input: Initialized `AgentWebSocketServer` instance.
 - Output: Configured port integer.
 - Main side effects: None.
-- Main risk: The accessor is simple but lacks a direct regression test for externally visible configuration.
-- Related tests: No direct `.port` property coverage was found; constructor and startup behavior are covered only indirectly or through fakes.
+- Main risk: Minimal; port range and bind validity are delegated to construction/startup rather than checked here.
+- Related tests: No direct `.port` assertion was found; `start()` passes the same `_port` field to both WebSocket server implementations, while app-level startup tests use a fake server.
 
 ## Detail Index
 

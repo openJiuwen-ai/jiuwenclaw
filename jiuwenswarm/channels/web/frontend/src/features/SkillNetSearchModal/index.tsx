@@ -6,39 +6,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { webRequest } from "../../services/webClient";
 import type { WebError } from "../../types/websocket";
+import { getSkillAvatar } from "../../utils/skillAvatar";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
+
+export { getSkillAvatar } from "../../utils/skillAvatar";
 
 const SKILLNET_UPSTREAM_REPO_URL = "https://github.com/zjunlp/SkillNet";
 /** 同时进行的 SkillNet 安装任务上限（与后端 asyncio 能力匹配，避免前端狂点拖垮） */
 const SKILLNET_MAX_CONCURRENT_INSTALLS = 5;
 /** SkillNet「评估」入口：暂时隐藏；后端 `skills.skillnet.evaluate` 仍可用，改回 true 即恢复按钮 */
 const SKILLNET_EVALUATE_BUTTON_ENABLED = false;
-
-const avatarColors = [
-  "bg-red-500",
-  "bg-orange-500",
-  "bg-amber-500",
-  "bg-yellow-500",
-  "bg-lime-500",
-  "bg-green-500",
-  "bg-emerald-500",
-  "bg-teal-500",
-  "bg-cyan-500",
-  "bg-sky-500",
-  "bg-blue-500",
-  "bg-indigo-500",
-  "bg-violet-500",
-  "bg-purple-500",
-  "bg-fuchsia-500",
-  "bg-pink-500",
-  "bg-rose-500",
-];
-
-const getSkillAvatar = (name: string) => {
-  const firstChar = name.charAt(0).toUpperCase();
-  const colorIndex = name.charCodeAt(0) % avatarColors.length;
-  return { firstChar, color: avatarColors[colorIndex] };
-};
 
 /** 评估结果展示顺序（与 skillnet-ai 五维一致） */
 const EVAL_DIMENSION_KEYS = [
@@ -66,7 +43,7 @@ function levelPillClass(level: string | undefined): string {
     l.includes("优") ||
     l.includes("佳")
   ) {
-    return "border-[color:var(--border-ok)] bg-ok-subtle text-ok";
+    return "border-[color:var(--color-border-success)] bg-ok-subtle text-ok";
   }
   if (
     l.includes("poor") ||
@@ -82,7 +59,7 @@ function levelPillClass(level: string | undefined): string {
     l.includes("moderate") ||
     l.includes("中")
   ) {
-    return "border-amber-500/45 bg-amber-500/15 text-amber-900 dark:text-amber-400";
+    return "border-warn/45 bg-warn/15 text-warn";
   }
   return "border-border bg-secondary text-text-muted";
 }
@@ -603,9 +580,9 @@ export function SkillNetSearchModal({
       <div className="flex flex-col h-full">
         <div className="overflow-auto flex-1 min-h-0">
           {installedSuccess && (
-            <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-black shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "#d5f2dc", width: "564px", height: "40px" }}>
-              <span className="w-4 h-4 rounded-full bg-[#1a991d] flex items-center justify-center flex-shrink-0">
-                <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
+              <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
+                <svg className="w-3 h-3 text-text-inverse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                 </svg>
               </span>
@@ -613,7 +590,7 @@ export function SkillNetSearchModal({
               <button
                 type="button"
                 onClick={clearInstalledSuccess}
-                className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-white/30 rounded-full transition-colors"
+                className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-card/30 rounded-full "
               >
                 <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -671,12 +648,17 @@ export function SkillNetSearchModal({
                       {viewMode === "list" ? (
                         <>
                           <div className="flex items-center gap-3 min-w-0 flex-1">
-                            <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold`}>
+                            <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
                               {avatar.firstChar}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="text-base font-semibold text-text-strong truncate">
-                                {item.skill_name}
+                              <div className="flex min-w-0 items-center gap-2">
+                                <div className="min-w-0 truncate text-base font-semibold text-text-strong">
+                                  {item.skill_name}
+                                </div>
+                                <span className="flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted">
+                                  SkillNet
+                                </span>
                               </div>
                               <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                 {item.skill_description || t("skills.noDescription")}
@@ -713,7 +695,7 @@ export function SkillNetSearchModal({
                             onClick={(e) => e.stopPropagation()}
                           >
                             {isInstalled ? (
-                              <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                              <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--color-border-success)] bg-ok-subtle text-ok">
                                 {t("skills.status.installed")}
                               </span>
                             ) : (
@@ -733,7 +715,7 @@ export function SkillNetSearchModal({
                                       ? t("skills.skillNet.installingInProgress")
                                       : undefined
                                 }
-                                className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  whitespace-nowrap ${
                                   isInstalling || installBlockedByLimit
                                     ? "text-text-muted cursor-not-allowed"
                                     : ""
@@ -752,7 +734,7 @@ export function SkillNetSearchModal({
                                   void handleEvaluate(item);
                                 }}
                                 disabled={evalGloballyBusy}
-                                className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  whitespace-nowrap ${
                                   evalGloballyBusy
                                     ? "text-text-muted cursor-not-allowed"
                                     : ""
@@ -770,7 +752,7 @@ export function SkillNetSearchModal({
                                   prev === item.skill_url ? null : item.skill_url
                                 )
                               }
-                              className="text-xs text-[#0067d1] hover:underline whitespace-nowrap"
+                              className="text-xs text-link hover:underline whitespace-nowrap"
                             >
                               {isExpanded ? t("skills.skillNet.hideDetail") : t("skills.skillNet.showDetail")}
                             </button>
@@ -787,12 +769,17 @@ export function SkillNetSearchModal({
                       ) : (
                         <>
                           <div className="flex items-start gap-3 flex-shrink-0">
-                            <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold text-sm`}>
+                            <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
                               {avatar.firstChar}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="text-sm font-semibold text-text-strong truncate">
-                                {item.skill_name}
+                              <div className="flex min-w-0 items-center gap-2">
+                                <div className="min-w-0 truncate text-sm font-semibold text-text-strong">
+                                  {item.skill_name}
+                                </div>
+                                <span className="flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted">
+                                  SkillNet
+                                </span>
                               </div>
                               <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                 {item.skill_description || t("skills.noDescription")}
@@ -832,14 +819,14 @@ export function SkillNetSearchModal({
                                     prev === item.skill_url ? null : item.skill_url
                                   )
                                 }
-                                className="text-xs text-[#0067d1] hover:underline whitespace-nowrap"
+                                className="text-xs text-link hover:underline whitespace-nowrap"
                               >
                                 {isExpanded ? t("skills.skillNet.hideDetail") : t("skills.skillNet.showDetail")}
                               </button>
                             </div>
                             <div className="flex-shrink-0 ml-auto">
                               {isInstalled ? (
-                                <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                                <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--color-border-success)] bg-ok-subtle text-ok">
                                   {t("skills.status.installed")}
                                 </span>
                               ) : (
@@ -850,7 +837,7 @@ export function SkillNetSearchModal({
                                     void handleInstall(item);
                                   }}
                                   disabled={isInstalling || installBlockedByLimit}
-                                  className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                  className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  whitespace-nowrap ${
                                     isInstalling || installBlockedByLimit
                                       ? "text-text-muted cursor-not-allowed"
                                       : ""
@@ -903,7 +890,7 @@ export function SkillNetSearchModal({
           <button
             type="button"
             onClick={onClose}
-            className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
+            className="w-[76px] h-[28px] rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50 "
           >
             {t("common.close")}
           </button>
@@ -911,9 +898,9 @@ export function SkillNetSearchModal({
 
         <div className="p-5 overflow-auto flex-1 min-h-0">
           {installedSuccess && (
-            <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-black shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "#d5f2dc", width: "564px", height: "40px" }}>
-              <span className="w-4 h-4 rounded-full bg-[#1a991d] flex items-center justify-center flex-shrink-0">
-                <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
+              <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
+                <svg className="w-3 h-3 text-text-inverse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                 </svg>
               </span>
@@ -921,7 +908,7 @@ export function SkillNetSearchModal({
               <button
                 type="button"
                 onClick={clearInstalledSuccess}
-                className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-white/30 rounded-full transition-colors"
+                className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-card/30 rounded-full "
               >
                 <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -974,7 +961,7 @@ export function SkillNetSearchModal({
               type="button"
               onClick={() => void handleSearch()}
               disabled={loadState === "loading" || !query.trim()}
-              className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+              className={`w-[76px] h-[28px] rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  whitespace-nowrap ${
                 loadState === "loading" || !query.trim()
                   ? "text-text-muted cursor-not-allowed"
                   : "text-text"
@@ -1035,12 +1022,17 @@ export function SkillNetSearchModal({
                       className="p-4 rounded-lg border border-border bg-panel flex items-start justify-between gap-4"
                     >
                       <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold`}>
+                        <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
                           {avatar.firstChar}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="text-base font-semibold text-text-strong truncate">
-                            {item.skill_name}
+                          <div className="flex min-w-0 items-center gap-2">
+                            <div className="min-w-0 truncate text-base font-semibold text-text-strong">
+                              {item.skill_name}
+                            </div>
+                            <span className="flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted">
+                              SkillNet
+                            </span>
                           </div>
                           <div className="text-sm text-text-muted mt-1 line-clamp-3">
                             {item.skill_description || t("skills.noDescription")}
@@ -1082,7 +1074,7 @@ export function SkillNetSearchModal({
                         onClick={(e) => e.stopPropagation()}
                       >
                         {isInstalled ? (
-                          <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                          <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--color-border-success)] bg-ok-subtle text-ok">
                             {t("skills.status.installed")}
                           </span>
                         ) : (
@@ -1102,7 +1094,7 @@ export function SkillNetSearchModal({
                                   ? t("skills.skillNet.installingInProgress")
                                   : undefined
                             }
-                            className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                            className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  whitespace-nowrap ${
                               isInstalling || installBlockedByLimit
                                 ? "text-text-muted cursor-not-allowed"
                                 : ""
@@ -1121,7 +1113,7 @@ export function SkillNetSearchModal({
                               void handleEvaluate(item);
                             }}
                             disabled={evalGloballyBusy}
-                            className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                            className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  whitespace-nowrap ${
                               evalGloballyBusy
                                 ? "text-text-muted cursor-not-allowed"
                                 : ""
@@ -1139,7 +1131,7 @@ export function SkillNetSearchModal({
                               prev === item.skill_url ? null : item.skill_url
                             )
                           }
-                          className="text-xs text-[#0067d1] hover:underline whitespace-nowrap"
+                          className="text-xs text-link hover:underline whitespace-nowrap"
                         >
                           {isExpanded ? t("skills.skillNet.hideDetail") : t("skills.skillNet.showDetail")}
                         </button>
@@ -1176,7 +1168,7 @@ export function SkillNetSearchModal({
               role="dialog"
               aria-modal="true"
               aria-labelledby="skillnet-eval-dialog-title"
-              className="relative z-10 mb-2 sm:mb-0 flex w-full max-w-lg max-h-[min(82vh,640px)] flex-col rounded-2xl border border-border/80 bg-card shadow-[0_25px_80px_-16px_rgba(0,0,0,0.55)] overflow-hidden ring-1 ring-black/5 dark:ring-white/10"
+              className="relative z-10 mb-2 sm:mb-0 flex w-full max-w-lg max-h-[min(82vh,640px)] flex-col rounded-2xl border border-border/80 bg-card shadow-[var(--effect-skill-evaluation-dialog-shadow)] overflow-hidden ring-1 ring-[var(--color-skill-evaluation-dialog-ring)]"
               onClick={(e) => e.stopPropagation()}
             >
               {evaluateOverlay.phase === "loading" ? (
@@ -1191,7 +1183,7 @@ export function SkillNetSearchModal({
                     <button
                       type="button"
                       onClick={dismissEvaluateOverlay}
-                      className="flex-shrink-0 px-4 py-2 rounded-2xl text-sm font-medium text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 transition-colors"
+                      className="flex-shrink-0 px-4 py-2 rounded-2xl text-sm font-medium text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 "
                     >
                       {t("skills.skillNet.evaluateCancel")}
                     </button>
@@ -1227,7 +1219,7 @@ export function SkillNetSearchModal({
                       <button
                         type="button"
                         onClick={dismissEvaluateOverlay}
-                        className="flex-shrink-0 px-4 py-2 rounded-2xl text-sm font-medium text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 transition-colors"
+                        className="flex-shrink-0 px-4 py-2 rounded-2xl text-sm font-medium text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 "
                       >
                         {t("skills.skillNet.evaluateModalClose")}
                       </button>
@@ -1269,7 +1261,7 @@ export function SkillNetSearchModal({
                     <button
                       type="button"
                       onClick={dismissEvaluateOverlay}
-                      className="w-full py-2.5 rounded-xl text-sm font-medium text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 transition-colors"
+                      className="w-full py-2.5 rounded-xl text-sm font-medium text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 "
                     >
                       {t("skills.skillNet.evaluateModalClose")}
                     </button>
@@ -1288,7 +1280,7 @@ export function SkillNetSearchModal({
                       <button
                         type="button"
                         onClick={dismissEvaluateOverlay}
-                        className="flex-shrink-0 px-4 py-2 rounded-2xl text-sm font-medium text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 transition-colors"
+                        className="flex-shrink-0 px-4 py-2 rounded-2xl text-sm font-medium text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 "
                       >
                         {t("skills.skillNet.evaluateModalClose")}
                       </button>
@@ -1306,7 +1298,7 @@ export function SkillNetSearchModal({
                     <button
                       type="button"
                       onClick={dismissEvaluateOverlay}
-                      className="w-full py-2.5 rounded-xl text-sm font-medium bg-secondary text-text hover:bg-tertiary border border-border transition-colors"
+                      className="w-full py-2.5 rounded-xl text-sm font-medium bg-secondary text-text hover:bg-bg-hover border border-border "
                     >
                       {t("skills.skillNet.evaluateModalClose")}
                     </button>

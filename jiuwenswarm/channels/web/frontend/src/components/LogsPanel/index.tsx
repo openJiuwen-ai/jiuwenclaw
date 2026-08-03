@@ -160,7 +160,7 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
 
   return (
     <div className="flex-1 min-h-0">
-      <div className="card w-full h-full flex flex-col">
+      <div className="card main-panel-card w-full h-full flex flex-col">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
             <h2 className="text-lg font-semibold">{t('logsPanel.title')}</h2>

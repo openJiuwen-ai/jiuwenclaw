@@ -28,7 +28,7 @@ export function parseTeamEventMessage(message: Message): ParsedTeamEvent | null 
     return null;
   }
 
-  const [, jsonStr] = content.split('team.event:');
+  const jsonStr = content.slice('team.event:'.length);
   try {
     const payload = JSON.parse(jsonStr);
     const event = payload.event || payload.payload?.event;

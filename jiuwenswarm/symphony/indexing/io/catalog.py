@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List
 
 from indexing.catalog.records import CatalogRecord
+from shared.tags import normalize_tags
 
 
 def load_catalog_records(path: Path) -> List[CatalogRecord]:
@@ -16,6 +17,7 @@ def load_catalog_records(path: Path) -> List[CatalogRecord]:
             continue
         payload = json.loads(line)
         worker_id = str(payload.get("worker_id") or payload.get("skill_id") or "")
+        metadata = dict(payload.get("metadata") or {})
         records.append(
             CatalogRecord(
                 worker_id=worker_id,
@@ -26,7 +28,8 @@ def load_catalog_records(path: Path) -> List[CatalogRecord]:
                 branch_path=tuple(str(item) for item in payload.get("branch_path") or ()),
                 category=str(payload.get("category") or ""),
                 retrieval_text=str(payload.get("retrieval_text") or ""),
-                metadata=dict(payload.get("metadata") or {}),
+                metadata=metadata,
+                tags=normalize_tags(payload.get("tags"), metadata.get("tags")),
             )
         )
     return records

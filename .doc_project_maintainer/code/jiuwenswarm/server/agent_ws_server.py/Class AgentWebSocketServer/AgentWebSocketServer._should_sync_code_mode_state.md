@@ -14,7 +14,7 @@ health:
   complexity: low
   implementation_soundness: sound
   boundary_safety: safe
-  input_contract: implicit
+  input_contract: clear
   output_contract: clear
   side_effects: none
   error_handling: clear
@@ -37,7 +37,7 @@ issues:
     severity: low
     status: open
     summary: "Direct tests cover one excluded RPC but not the full allowlist or legacy fallback."
-    evidence: "test_plan_approval.py covers SKILLS_LIST returning False, and plan-mode orchestration tests indirectly use CHAT_SEND; no direct assertions were found for CHAT_RESUME, CHAT_ANSWER, or req_method is None."
+    evidence: "test_plan_approval.py::test_skills_list_does_not_sync_code_mode directly covers one excluded RPC. Plan-mode orchestration reaches the downstream sync path with CHAT_SEND, but no direct gate assertions cover CHAT_SEND, CHAT_RESUME, CHAT_ANSWER, or req_method=None."
     suggested_action: "Add a parameterized unit test covering None, CHAT_SEND, CHAT_RESUME, CHAT_ANSWER, SKILLS_LIST, and a representative command or history RPC."
 confidence: confirmed
 details: {}
@@ -47,15 +47,15 @@ details: {}
 
 ## Actual Role
 
-Pure gate used by `_ensure_code_mode_state` to decide whether a request is eligible to synchronize code-mode plan or normal state. It allows legacy requests with no `req_method`, and otherwise only allows chat-turn RPCs: `chat.send`, `chat.resume`, and `chat.user_answer`.
+Pure gate called near the start of `_ensure_code_mode_state`, before session locking or checkpoint access. It permits legacy requests with no `req_method`, permits the three members of `_CODE_MODE_SYNC_METHODS` (`chat.send`, `chat.resume`, `chat.user_answer`), and rejects every background, command, history, and configuration RPC.
 
 ## Key Signals
 
 - Input: `AgentRequest`; `req_method` may be `None`.
 - Output: Boolean; true only for legacy/no-method requests or `_CODE_MODE_SYNC_METHODS`.
 - Main side effects: None.
-- Main risk: The helper is correct but only partially pinned by direct tests, leaving allowlist drift possible.
-- Related tests: Direct coverage exists for excluding `skills.list`; `_ensure_code_mode_state` tests indirectly exercise `CHAT_SEND`.
+- Main risk: The permissive legacy `None` fallback and full allowlist are not directly pinned, so future method-set drift could reintroduce plan-state races.
+- Related tests: `test_skills_list_does_not_sync_code_mode` directly verifies exclusion; `_ensure_code_mode_state` tests indirectly exercise `CHAT_SEND`, with no direct resume/answer/legacy assertions.
 
 ## Detail Index
 

@@ -14,21 +14,22 @@ health:
   complexity: low
   implementation_soundness: partial
   boundary_safety: partial
-  input_contract: implicit
-  output_contract: implicit
+  input_contract: weak
+  output_contract: weak
   side_effects: explicit
-  error_handling: clear
+  error_handling: partial
   state_mutation: shared
   dependency_coupling: medium
   test_coverage: partial
   observability: clear
   performance_risk: medium
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:38:41Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:9ec6c1dea1a4ca96e83d99d67593e60d29edd30aac92ea5f20e3555faa7a8b5b
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,47 +38,45 @@ issues:
     severity: medium
     status: open
     summary: "Long-running /btw calls have no handler-level timeout or cancellation alignment."
-    evidence: "The handler awaits agent.generate_btw_answer; the TUI requests 120000 ms, but the gateway TUI unary wait is capped at 55 seconds."
-    suggested_action: "Align TUI, gateway, and AgentServer timeout semantics and add cancellation/timeout handling."
+    evidence: "At HEAD 39feee89, the handler awaits generate_btw_answer without a local timeout. Existing boundary. See AgentWebSocketServer._handle_command_btw/risks.md#issue-001."
+    suggested_action: "Align client/Gateway/AgentServer deadlines and propagate cancellation to the BTW model call."
   - id: ISSUE-002
     dimension: output_contract
     severity: low
     status: open
-    summary: "Adapter payload is returned with ok=true without shape or status validation."
-    evidence: "The handler wraps result_data directly, while the frontend expects status values such as ok, no_context, and failed."
-    suggested_action: "Normalize non-dict or unknown-status adapter results into a failed payload before sending."
+    summary: "Unknown adapter statuses are returned as successful transport payloads."
+    evidence: "At HEAD 39feee89, any dict result is returned with ok=true without validating status or answer/error. See AgentWebSocketServer._handle_command_btw/risks.md#issue-002."
+    suggested_action: "Validate the result schema and normalize unknown statuses or fields to a failed response."
   - id: ISSUE-003
     dimension: boundary_safety
     severity: low
     status: open
     summary: "INFO logging includes the first 100 characters of the user question."
-    evidence: "The command.btw received log records question[:100]."
+    evidence: "At HEAD 39feee89, the command.btw received INFO log records question[:100], exposing user-provided. See AgentWebSocketServer._handle_command_btw/risks.md#issue-003."
     suggested_action: "Log metadata or question length instead, or move redacted content to debug logging."
   - id: ISSUE-004
     dimension: test_coverage
     severity: low
     status: open
     summary: "Core paths are tested, but boundary handoffs are not fully covered."
-    evidence: "Missing coverage includes project_dir forwarding, channel fallback, unknown payload normalization, and slow-call timeout behavior."
-    suggested_action: "Add boundary tests for routing, payload normalization, and timeout/cancellation behavior."
-confidence: confirmed
-details: {}
+    evidence: "Direct tests cover empty input, success, missing agent, adapter error, auto-harness mapping, no_context. See AgentWebSocketServer._handle_command_btw/risks.md#issue-004."
+    suggested_action: "Add boundary tests for the remaining routing, schema, privacy-log, and timeout/cancellation behavior."
+  - id: ISSUE-005
+    dimension: input_contract
+    severity: medium
+    status: open
+    summary: "Missing identity is silently redirected to default runtime context."
+    evidence: "At HEAD 39feee89, blank session and channel values become default and an omitted mode becomes agent.plan. See AgentWebSocketServer._handle_command_btw/risks.md#issue-005."
+    suggested_action: "Require canonical session/channel identity for context-bearing queries, validate params/question types, and make mode."
 ---
 
-# `AgentWebSocketServer._handle_command_btw`
+# AgentWebSocketServer._handle_command_btw
 
 ## Actual Role
 
-Handles non-streaming `command.btw` by validating that `params.question` is non-empty, resolving session/channel/mode/project identity, obtaining the scoped agent, and delegating to `agent.generate_btw_answer`. It sends one response with the adapter payload, or a failed status for empty questions and handler exceptions.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `params.question`, optional `params.mode`, session id, channel id, and request project directory.
-- Output: One websocket response containing the adapter BTW answer payload, or `status=failed`.
-- Main side effects: Calls the runtime adapter, logs receipt/result/failures, and sends a websocket frame.
-- Main risk: Timeout semantics differ across TUI/gateway/AgentServer, and the handler trusts adapter payload shape.
-- Related tests: BTW command tests cover many core paths; routing, timeout, and payload-normalization edges remain incomplete.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_command_btw/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_command_btw/risks.md)
