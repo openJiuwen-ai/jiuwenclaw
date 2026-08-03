@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext, AuthResult
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthContext, AuthResult
 from jiuwenswarm.gateway.channel_manager.tui.tui_connect import _handle_connect
 
 

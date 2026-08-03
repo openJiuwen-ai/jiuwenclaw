@@ -15,7 +15,7 @@ jiuwenswarm.gateway.channel_manager.web.web_connect.get_auth_handler = MagicMock
 from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import (
     AgentOSAuthenticator,
 )
-from jiuwenswarm.gateway.auth.credential_authenticator import (
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import (
     AuthContext,
     AuthResult,
     CredentialAuthenticator,

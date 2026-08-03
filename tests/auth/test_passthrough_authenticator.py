@@ -1,12 +1,12 @@
 """测试 passthrough_authenticator.py"""
 import pytest
 
-from jiuwenswarm.gateway.auth.credential_authenticator import (
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import (
     AuthContext,
     AuthResult,
     CredentialAuthenticator,
 )
-from jiuwenswarm.gateway.auth.passthrough_authenticator import (
+from jiuwenswarm.extensions.agentos.auth.passthrough_authenticator import (
     PassthroughAuthenticator,
 )
 
