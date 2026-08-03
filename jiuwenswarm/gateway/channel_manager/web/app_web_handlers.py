@@ -5575,7 +5575,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
             return
         try:
-            result = await hc.list_jobs(params if isinstance(params, dict) else {})
+            result = await hc.list_jobs(
+                params if isinstance(params, dict) else {},
+                access_session_id=session_id,
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
         except ValueError as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
             return
@@ -5600,7 +5606,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        job = await hc.get_job(job_id)
+        try:
+            job = await hc.get_job(job_id, access_session_id=session_id)
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
         if job is None:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -5614,8 +5624,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
-        # Web/RPC 必须显式传 channel_id/session_id;source=web_rpc。
-        params = {**params, "source": params.get("source") or "web_rpc"}
+        # 普通 Web RPC 只能绑定当前 session；跨 session 迁移需独立管理权限入口。
+        params = {**params, "channel_id": "web", "session_id": session_id, "source": "web_rpc"}
         try:
             job = await hc.create_job(params)
         except ValueError as e:
@@ -5643,7 +5653,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
             return
         try:
-            job = await hc.update_job(job_id, patch)
+            job = await hc.update_job(job_id, patch, access_session_id=session_id)
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -5665,7 +5678,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
         try:
-            result = await hc.delete_job(job_id)
+            result = await hc.delete_job(job_id, access_session_id=session_id)
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -5680,12 +5696,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         job_id = str(params.get("id") or "").strip()
-        enabled = bool(params.get("enabled"))
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            await channel.send_response(ws, req_id, ok=False, error="enabled must be boolean", code="BAD_REQUEST")
+            return
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
         try:
-            job = await hc.toggle_job(job_id, enabled)
+            job = await hc.toggle_job(job_id, enabled, access_session_id=session_id)
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -5711,7 +5733,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if isinstance(raw_count, int) and raw_count > 0:
             count = raw_count
         try:
-            result = await hc.preview_job(job_id, count=count)
+            result = await hc.preview_job(job_id, count=count, access_session_id=session_id)
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -5729,9 +5754,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        reschedule = bool(params.get("reschedule", False))
+        reschedule = params.get("reschedule", False)
+        if not isinstance(reschedule, bool):
+            await channel.send_response(ws, req_id, ok=False, error="reschedule must be boolean", code="BAD_REQUEST")
+            return
         try:
-            result = await hc.run_now(job_id, reschedule=reschedule)
+            result = await hc.run_now(
+                job_id, reschedule=reschedule, access_session_id=session_id
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -5749,9 +5782,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        pause_schedule = bool(params.get("pause_schedule", False))
+        pause_schedule = params.get("pause_schedule", False)
+        if not isinstance(pause_schedule, bool):
+            await channel.send_response(ws, req_id, ok=False, error="pause_schedule must be boolean", code="BAD_REQUEST")
+            return
         try:
-            result = await hc.cancel_run(job_id, pause_schedule=pause_schedule)
+            result = await hc.cancel_run(
+                job_id,
+                pause_schedule=pause_schedule,
+                access_session_id=session_id,
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return

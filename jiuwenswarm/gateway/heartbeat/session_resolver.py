@@ -30,6 +30,7 @@ class SessionSummary:
     channel_id: str
     title: str | None = None
     exists: bool = True
+    route_metadata: dict[str, Any] | None = None
 
 
 class _SchedulerCallback(Protocol):
@@ -67,13 +68,9 @@ class HeartbeatSessionResolver:
             data = _read_metadata(session_id, cache_bust=True)
             return data if isinstance(data, dict) and data else None
         except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "[HeartbeatSessionResolver] read session metadata failed "
-                "session_id=%s err=%s",
-                session_id,
-                exc,
-            )
-            return None
+            raise RuntimeError(
+                f"temporary session metadata read failure for {session_id}: {exc}"
+            ) from exc
 
     def resolve(self, channel_id: str, session_id: str) -> SessionSummary | None:
         """第一版最小检查:session 目录存在且 metadata 可读。
@@ -93,10 +90,17 @@ class HeartbeatSessionResolver:
         if data is None:
             return None
         title = data.get("title") or data.get("name")
+        delivery = data.get("delivery_context")
+        if not isinstance(delivery, dict):
+            delivery = {}
+        route_metadata = delivery.get("route_metadata")
         return SessionSummary(
             session_id=sid,
-            channel_id=cid,
+            channel_id=str(delivery.get("channel_id") or cid).strip() or cid,
             title=str(title) if isinstance(title, str) and title.strip() else None,
+            route_metadata=(
+                dict(route_metadata) if isinstance(route_metadata, dict) else None
+            ),
         )
 
     # ---- 会话删除通知 ----

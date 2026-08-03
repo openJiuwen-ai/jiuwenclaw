@@ -39,8 +39,6 @@ from jiuwenswarm.gateway.heartbeat.models import (
     HeartbeatSchedule,
     MIN_INTERVAL_SECONDS,
     SOURCE_AGENT_TOOL,
-    SOURCE_SCHEDULE_RECOVERY,
-    SOURCE_TUI_RPC,
     SOURCE_WEB_RPC,
     validate_metadata_source,
 )
@@ -52,6 +50,21 @@ logger = logging.getLogger(__name__)
 # 禁止传入/修改的运行配置字段(方案铁律)。
 _FORBIDDEN_FIELDS: frozenset[str] = frozenset(
     {"mode", "model", "model_name", "approval", "sandbox", "worktree", "work_mode"}
+)
+
+_CREATE_FIELDS: frozenset[str] = frozenset(
+    {
+        "name", "channel_id", "session_id", "prompt", "schedule", "timezone",
+        "enabled", "concurrency_policy", "session_deleted_policy", "max_runs",
+        "delete_after_run", "source",
+    }
+)
+_UPDATE_FIELDS: frozenset[str] = frozenset(
+    {
+        "name", "prompt", "schedule", "timezone", "enabled",
+        "concurrency_policy", "session_deleted_policy", "max_runs",
+        "delete_after_run",
+    }
 )
 
 # 资源限制默认值(可被 config 覆盖;接口设计 §4.2)。
@@ -80,6 +93,8 @@ class HeartbeatController:
         self._store = store
         self._scheduler = scheduler
         self._limits = {**_DEFAULT_LIMITS, **(limits or {})}
+        self._validate_limits(self._limits)
+        self._scheduler.set_limits(self._limits)
 
     @classmethod
     def get_instance(
@@ -103,7 +118,31 @@ class HeartbeatController:
         cls._instance = None
 
     def set_limits(self, limits: dict[str, Any]) -> None:
-        self._limits = {**self._limits, **(limits or {})}
+        merged = {**self._limits, **(limits or {})}
+        self._validate_limits(merged)
+        self._limits = merged
+        self._scheduler.set_limits(merged)
+
+    @staticmethod
+    def _validate_limits(limits: dict[str, Any]) -> None:
+        for key in (
+            "min_interval_seconds",
+            "max_active_jobs_per_session",
+            "max_active_jobs_global",
+        ):
+            try:
+                value = int(limits.get(key))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} must be integer") from exc
+            if value < 1:
+                raise ValueError(f"{key} must be at least 1")
+        default_max = limits.get("default_max_runs")
+        if default_max is not None and int(default_max) < 1:
+            raise ValueError("default_max_runs must be null or at least 1")
+        if limits.get("default_concurrency_policy") not in HEARTBEAT_CONCURRENCY_POLICIES:
+            raise ValueError("invalid default_concurrency_policy")
+        if limits.get("default_session_deleted_policy") not in HEARTBEAT_SESSION_DELETED_POLICIES:
+            raise ValueError("invalid default_session_deleted_policy")
 
     @property
     def limits(self) -> dict[str, Any]:
@@ -120,6 +159,20 @@ class HeartbeatController:
                 f"{where}: forbidden runtime config fields {bad}; "
                 "heartbeat jobs must not change agent mode/model/approval/sandbox/worktree"
             )
+
+    @staticmethod
+    def _check_known_fields(
+        params: dict[str, Any], *, allowed: frozenset[str], where: str
+    ) -> None:
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise ValueError(f"{where}: unknown fields {unknown}")
+
+    @staticmethod
+    def _strict_bool(value: Any, *, field: str) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"{field} must be boolean")
+        return value
 
     def _check_resource_limits(
         self, *, session_id: str, schedule: HeartbeatSchedule, exclude_job_id: str | None = None
@@ -163,7 +216,13 @@ class HeartbeatController:
 
     # ---- Web/RPC 业务 API ----
 
-    async def list_jobs(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def list_jobs(
+        self,
+        params: dict[str, Any] | None = None,
+        *,
+        access_session_id: str | None = None,
+        allow_all_visible: bool = False,
+    ) -> dict[str, Any]:
         params = dict(params or {})
         self._check_forbidden(params, where="list_jobs")
         jobs = await self._store.list_jobs()
@@ -172,8 +231,14 @@ class HeartbeatController:
         channel_id = str(params.get("channel_id") or "").strip()
         status = str(params.get("status") or "").strip()
         scope = str(params.get("scope") or "current").strip()
-        # Agent Tool 默认 current session;Web/RPC 可传 session_id 过滤。
-        # 若未给 session_id 且 scope=all_visible,返回全部(需上层权限校验)。
+        if scope not in {"current", "all_visible"}:
+            raise ValueError("scope must be current or all_visible")
+        if access_session_id:
+            if scope == "all_visible":
+                if not allow_all_visible:
+                    raise PermissionError("heartbeat.jobs.all permission required")
+            else:
+                session_id = access_session_id
         out = []
         for j in jobs:
             if session_id and j.session_id != session_id:
@@ -185,14 +250,29 @@ class HeartbeatController:
             out.append(j.to_dict())
         return {"jobs": out}
 
-    async def get_job(self, job_id: str) -> dict[str, Any] | None:
+    async def _owned_job(
+        self, job_id: str, access_session_id: str | None
+    ) -> HeartbeatJob | None:
         job = await self._store.get_job(str(job_id or "").strip())
+        if (
+            job is not None
+            and access_session_id
+            and job.session_id != str(access_session_id).strip()
+        ):
+            raise PermissionError("job belongs to another session")
+        return job
+
+    async def get_job(
+        self, job_id: str, *, access_session_id: str | None = None
+    ) -> dict[str, Any] | None:
+        job = await self._owned_job(job_id, access_session_id)
         return job.to_dict() if job is not None else None
 
     async def create_job(self, params: dict[str, Any]) -> dict[str, Any]:
         """Web/RPC create;Agent Tool 经 create_job_for_session 注入 channel_id/session_id。"""
         params = dict(params or {})
         self._check_forbidden(params, where="create_job")
+        self._check_known_fields(params, allowed=_CREATE_FIELDS, where="create_job")
 
         name = str(params.get("name") or "").strip()
         channel_id = str(params.get("channel_id") or "").strip()
@@ -220,7 +300,12 @@ class HeartbeatController:
         source = validate_metadata_source(source)  # controller 强制校验枚举
 
         max_runs_raw = params.get("max_runs", self._limits.get("default_max_runs", DEFAULT_MAX_RUNS))
-        max_runs = None if max_runs_raw is None else int(max_runs_raw)
+        try:
+            max_runs = None if max_runs_raw is None else int(max_runs_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_runs must be int or null") from exc
+        if max_runs is not None and max_runs < 1:
+            raise ValueError("max_runs must be at least 1")
 
         concurrency_policy = str(
             params.get("concurrency_policy")
@@ -230,6 +315,14 @@ class HeartbeatController:
             params.get("session_deleted_policy")
             or self._limits.get("default_session_deleted_policy", DEFAULT_SESSION_DELETED_POLICY)
         )
+        if concurrency_policy not in HEARTBEAT_CONCURRENCY_POLICIES:
+            raise ValueError(f"invalid concurrency_policy {concurrency_policy!r}")
+        if session_deleted_policy not in HEARTBEAT_SESSION_DELETED_POLICIES:
+            raise ValueError(f"invalid session_deleted_policy {session_deleted_policy!r}")
+        enabled = self._strict_bool(params.get("enabled", True), field="enabled")
+        delete_after_run = self._strict_bool(
+            params.get("delete_after_run", False), field="delete_after_run"
+        )
 
         # 资源限制
         self._check_resource_limits_sync(session_id=session_id, schedule=schedule)
@@ -238,19 +331,24 @@ class HeartbeatController:
         )
 
         job = await self._store.create_job(
-            job_id=str(params.get("id") or "").strip() or None,
             name=name,
             channel_id=channel_id,
             session_id=session_id,
             prompt=prompt,
             schedule=schedule,
             timezone=str(params.get("timezone") or DEFAULT_TIMEZONE),
-            enabled=bool(params.get("enabled", True)),
+            enabled=enabled,
             concurrency_policy=concurrency_policy,
             session_deleted_policy=session_deleted_policy,
             max_runs=max_runs,
-            delete_after_run=bool(params.get("delete_after_run", False)),
+            delete_after_run=delete_after_run,
             source=source,
+            max_active_jobs_per_session=int(
+                self._limits.get("max_active_jobs_per_session", 5)
+            ),
+            max_active_jobs_global=int(
+                self._limits.get("max_active_jobs_global", 100)
+            ),
         )
         # 算 next_run_at 并回填
         import time as _time
@@ -275,17 +373,31 @@ class HeartbeatController:
         metadata.source 默认 agent_tool。
         """
         params = dict(params or {})
-        params.setdefault("channel_id", channel_id)
-        params.setdefault("session_id", session_id)
-        params.setdefault("source", SOURCE_AGENT_TOOL)
+        params["channel_id"] = str(channel_id or "").strip()
+        params["session_id"] = str(session_id or "").strip()
+        params["source"] = SOURCE_AGENT_TOOL
         return await self.create_job(params)
 
-    async def update_job(self, job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    async def update_job(
+        self,
+        job_id: str,
+        patch: dict[str, Any],
+        *,
+        access_session_id: str | None = None,
+    ) -> dict[str, Any]:
         patch = dict(patch or {})
         self._check_forbidden(patch, where="update_job")
-        existing = await self._store.get_job(str(job_id or "").strip())
+        self._check_known_fields(patch, allowed=_UPDATE_FIELDS, where="update_job")
+        existing = await self._owned_job(job_id, access_session_id)
         if existing is None:
             raise KeyError("job not found")
+
+        if "enabled" in patch:
+            patch["enabled"] = self._strict_bool(patch["enabled"], field="enabled")
+        if "delete_after_run" in patch:
+            patch["delete_after_run"] = self._strict_bool(
+                patch["delete_after_run"], field="delete_after_run"
+            )
 
         # schedule 变更要校验
         if "schedule" in patch:
@@ -296,10 +408,14 @@ class HeartbeatController:
                 session_id=existing.session_id, schedule=new_sched
             )
 
-        # 若重新激活(enabled=true 且原终态),需重算 next_run_at
+        # 任何影响调度的更新都必须基于当前时间重算，禁止沿用旧 schedule 的 due time。
         now = __import__("time").time()
-        if patch.get("enabled") is True and existing.status in {"completed", "expired", "disabled"}:
-            # 先应用 patch 拿到新 schedule,再算 next_run_at
+        target_enabled = patch.get("enabled", existing.enabled)
+        if target_enabled and (
+            "schedule" in patch
+            or "timezone" in patch
+            or existing.status in {"completed", "expired", "disabled"}
+        ):
             merged_sched = HeartbeatSchedule.from_dict(
                 patch.get("schedule", existing.schedule.to_dict()),
                 default_timezone=str(patch.get("timezone") or existing.timezone),
@@ -307,16 +423,22 @@ class HeartbeatController:
             next_run_at = self._scheduler._compute_next_run(
                 __import__("dataclasses").replace(existing, schedule=merged_sched), now
             )
-            patch.setdefault("next_run_at", next_run_at)
+            if next_run_at is None:
+                raise ValueError("schedule has no future run; update run_at before enabling")
+            patch["next_run_at"] = next_run_at
 
         updated = await self._store.update_job(str(job_id), patch)
         await self._scheduler.reload()
         return updated.to_dict()
 
-    async def delete_job(self, job_id: str) -> dict[str, Any]:
+    async def delete_job(
+        self, job_id: str, *, access_session_id: str | None = None
+    ) -> dict[str, Any]:
         job_id = str(job_id or "").strip()
         # 若有活跃 run,先取消(ghost 清理)
-        existing = await self._store.get_job(job_id)
+        existing = await self._owned_job(job_id, access_session_id)
+        if existing is None:
+            raise KeyError("job not found")
         if existing is not None and existing.run_state.current_run_id:
             try:
                 await self._scheduler.cancel_run(job_id, pause_schedule=False)
@@ -326,23 +448,57 @@ class HeartbeatController:
         await self._scheduler.reload()
         return {"deleted": bool(deleted)}
 
-    async def toggle_job(self, job_id: str, enabled: bool) -> dict[str, Any]:
-        return await self.update_job(job_id, {"enabled": bool(enabled)})
+    async def toggle_job(
+        self,
+        job_id: str,
+        enabled: bool,
+        *,
+        access_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.update_job(
+            job_id,
+            {"enabled": self._strict_bool(enabled, field="enabled")},
+            access_session_id=access_session_id,
+        )
 
-    async def preview_job(self, job_id: str, count: int = 5) -> dict[str, Any]:
-        job = await self._store.get_job(str(job_id or "").strip())
+    async def preview_job(
+        self,
+        job_id: str,
+        count: int = 5,
+        *,
+        access_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        job = await self._owned_job(job_id, access_session_id)
         if job is None:
             raise KeyError("job not found")
         nxt = self._scheduler.preview_next_runs(job, count=count)
         return {"next": nxt}
 
-    async def run_now(self, job_id: str, *, reschedule: bool = False) -> dict[str, Any]:
+    async def run_now(
+        self,
+        job_id: str,
+        *,
+        reschedule: bool = False,
+        access_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        job = await self._owned_job(job_id, access_session_id)
+        if job is None:
+            raise KeyError("job not found")
         result = await self._scheduler.trigger_run_now(
             str(job_id or "").strip(), reschedule=reschedule
         )
         return result
 
-    async def cancel_run(self, job_id: str, *, pause_schedule: bool = False) -> dict[str, Any]:
+    async def cancel_run(
+        self,
+        job_id: str,
+        *,
+        pause_schedule: bool = False,
+        access_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        job = await self._owned_job(job_id, access_session_id)
+        if job is None:
+            raise KeyError("job not found")
         return await self._scheduler.cancel_run(
             str(job_id or "").strip(), pause_schedule=pause_schedule
         )
@@ -597,10 +753,14 @@ class HeartbeatController:
         return dict(cls._session_ctx)
 
     async def _tool_list_jobs(self, **kwargs: Any) -> dict[str, Any]:
-        return await self.list_jobs(kwargs)
+        ctx = self.get_session_ctx()
+        return await self.list_jobs(
+            kwargs, access_session_id=ctx.get("session_id") or None
+        )
 
     async def _tool_get_job(self, job_id: str, **kwargs: Any) -> dict[str, Any]:
-        job = await self.get_job(job_id)
+        ctx = self.get_session_ctx()
+        job = await self.get_job(job_id, access_session_id=ctx.get("session_id") or None)
         return job or {"error": "not found"}
 
     async def _tool_create_job(self, **kwargs: Any) -> dict[str, Any]:
@@ -614,22 +774,44 @@ class HeartbeatController:
         )
 
     async def _tool_update_job(self, job_id: str, patch: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-        return await self.update_job(job_id, patch)
+        ctx = self.get_session_ctx()
+        return await self.update_job(
+            job_id, patch, access_session_id=ctx.get("session_id") or None
+        )
 
     async def _tool_delete_job(self, job_id: str, **kwargs: Any) -> dict[str, Any]:
-        return await self.delete_job(job_id)
+        ctx = self.get_session_ctx()
+        return await self.delete_job(
+            job_id, access_session_id=ctx.get("session_id") or None
+        )
 
     async def _tool_toggle_job(self, job_id: str, enabled: bool, **kwargs: Any) -> dict[str, Any]:
-        return await self.toggle_job(job_id, enabled)
+        ctx = self.get_session_ctx()
+        return await self.toggle_job(
+            job_id, enabled, access_session_id=ctx.get("session_id") or None
+        )
 
     async def _tool_preview_job(self, job_id: str, count: int = 5, **kwargs: Any) -> dict[str, Any]:
-        return await self.preview_job(job_id, count=count)
+        ctx = self.get_session_ctx()
+        return await self.preview_job(
+            job_id, count=count, access_session_id=ctx.get("session_id") or None
+        )
 
     async def _tool_run_now(self, job_id: str, reschedule: bool = False, **kwargs: Any) -> dict[str, Any]:
-        return await self.run_now(job_id, reschedule=reschedule)
+        ctx = self.get_session_ctx()
+        return await self.run_now(
+            job_id,
+            reschedule=reschedule,
+            access_session_id=ctx.get("session_id") or None,
+        )
 
     async def _tool_cancel_run(self, job_id: str, pause_schedule: bool = False, **kwargs: Any) -> dict[str, Any]:
-        return await self.cancel_run(job_id, pause_schedule=pause_schedule)
+        ctx = self.get_session_ctx()
+        return await self.cancel_run(
+            job_id,
+            pause_schedule=pause_schedule,
+            access_session_id=ctx.get("session_id") or None,
+        )
 
 
 # ---------------------------------------------------------------------------

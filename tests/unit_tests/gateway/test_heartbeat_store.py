@@ -17,10 +17,7 @@ import pytest
 
 from jiuwenswarm.gateway.heartbeat.models import (
     HeartbeatSchedule,
-    SCHEDULE_INTERVAL,
-    SCHEDULE_ONCE,
     SOURCE_AGENT_TOOL,
-    SOURCE_SCHEDULE_RECOVERY,
     STATUS_COMPLETED,
     STATUS_DISABLED,
     STATUS_RUNNING,
@@ -378,3 +375,23 @@ async def test_persisted_file_is_valid_json(store: HeartbeatJobStore, tmp_path: 
     assert data["version"] == 1
     assert isinstance(data["jobs"], list)
     assert data["jobs"][0]["id"] == job.id
+
+
+async def test_concurrent_create_enforces_limit_atomically(store: HeartbeatJobStore) -> None:
+    import asyncio
+
+    async def create(name: str):
+        return await store.create_job(
+            name=name,
+            channel_id="web",
+            session_id="same-session",
+            prompt="p",
+            schedule=_interval_schedule(),
+            source="agent_tool",
+            max_active_jobs_per_session=1,
+            max_active_jobs_global=10,
+        )
+
+    results = await asyncio.gather(create("a"), create("b"), return_exceptions=True)
+    assert sum(not isinstance(item, Exception) for item in results) == 1
+    assert sum(isinstance(item, ValueError) for item in results) == 1

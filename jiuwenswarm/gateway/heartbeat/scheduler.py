@@ -36,17 +36,13 @@ from zoneinfo import ZoneInfo
 from jiuwenswarm.gateway.heartbeat.models import (
     HEARTBEAT_TERMINAL_STATUSES,
     HeartbeatJob,
-    RUN_FAILED,
     SOURCE_AGENT_TOOL,
     SOURCE_SCHEDULE_RECOVERY,
     SCHEDULE_CRON,
     SCHEDULE_INTERVAL,
     SCHEDULE_ONCE,
     SESSION_DELETED_COMPLETED,
-    SESSION_DELETED_DISABLE,
-    STATUS_COMPLETED,
     STATUS_SCHEDULED,
-    HeartbeatRunState,
 )
 from jiuwenswarm.gateway.heartbeat.session_resolver import HeartbeatSessionResolver
 
@@ -88,6 +84,10 @@ class HeartbeatSchedulerService:
 
         # 内存中的活跃 run:run_id -> (job_id, started_at)
         self._active_runs: dict[str, tuple[str, float]] = {}
+        self._limits: dict[str, Any] = {}
+
+    def set_limits(self, limits: dict[str, Any] | None) -> None:
+        self._limits = dict(limits or {})
 
     # ---- 生命周期 ----
 
@@ -136,7 +136,7 @@ class HeartbeatSchedulerService:
         return False
 
     async def reload(self) -> None:
-        """重新加载 store;清理已删除 job 的 ghost run(方案 §7 ghost 清理)。"""
+        """重新加载 store;清理 ghost run 并恢复超时的持久化 run。"""
         await self._store.list_jobs()  # 触发读盘 + 缓存刷新
         # 清理 store 中已不存在的 job 的活跃 run
         all_jobs = await self._store.list_jobs()
@@ -151,6 +151,23 @@ class HeartbeatSchedulerService:
             logger.info(
                 "[HeartbeatScheduler] cleared ghost run: run_id=%s (job no longer in store)",
                 rid,
+            )
+        # 进程崩溃后内存 run 丢失，持久化 running 不应永久阻塞调度。
+        now = self._now_fn()
+        lease_timeout = 24 * 60 * 60
+        for job in all_jobs:
+            rid = job.run_state.current_run_id
+            started = job.run_state.current_run_started_at
+            if not rid or started is None or rid in self._active_runs:
+                continue
+            if now - started < lease_timeout:
+                self._active_runs[rid] = (job.id, started)
+                continue
+            await self.on_run_finished(
+                job.id,
+                rid,
+                outcome="failed",
+                error="run lease expired during scheduler recovery",
             )
         self._sync_store_mtime()
         self._reload_event.set()
@@ -194,7 +211,7 @@ class HeartbeatSchedulerService:
         """单 job 的调度判断:可调度性 + due + session + 并发 + dispatch。"""
         if not job.enabled:
             return
-        if job.status != STATUS_SCHEDULED:
+        if job.status not in {STATUS_SCHEDULED, "running"}:
             logger.warning(
                 "[HeartbeatScheduler] skip inconsistent job %s: status=%s enabled=%s",
                 job.id,
@@ -203,6 +220,20 @@ class HeartbeatSchedulerService:
             )
             return
         if job.next_run_at is None or job.next_run_at > now:
+            return
+        max_session = int(self._limits.get("max_active_jobs_per_session", 5))
+        max_global = int(self._limits.get("max_active_jobs_global", 100))
+        if await self._store.count_active_jobs_for_session(job.session_id) > max_session:
+            logger.warning(
+                "[HeartbeatScheduler] skip job %s: session active-job limit exceeded",
+                job.id,
+            )
+            return
+        if await self._store.count_active_jobs_global() > max_global:
+            logger.warning(
+                "[HeartbeatScheduler] skip job %s: global active-job limit exceeded",
+                job.id,
+            )
             return
         await self._handle_due_job(job, now)
 
@@ -214,17 +245,16 @@ class HeartbeatSchedulerService:
             await self._handle_missing_session(job, now)
             return
         run_id = self._new_run_id(job, now)
-        decision = await self._apply_concurrency_policy(job, run_id)
+        decision = await self._start_run(
+            job, run_id, now, trigger="scheduler", reschedule=True
+        )
         if decision == "skip":
-            await self._store.record_skipped(job.id, now, reason="previous_run_active")
             # 跳过本轮,基于 now 重算下次触发(不补跑历史积压)
             await self._store.reschedule(job.id, self._compute_next_run(job, now))
             return
         if decision == "queued":
             await self._store.reschedule(job.id, self._compute_next_run(job, now))
             return
-        # decision == "run"
-        await self._dispatch_job(job, run_id, now)
 
     async def _handle_missing_session(self, job: HeartbeatJob, now: float) -> None:
         """session 删除/归档/不可恢复(方案 §5.2)。"""
@@ -247,28 +277,45 @@ class HeartbeatSchedulerService:
 
     def _build_message(self, job: HeartbeatJob, run_id: str, now: float) -> Any:
         """构造投递回原 session 的 CHAT_SEND Message(方案 §7.6)。"""
-        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import Message, ReqMethod
 
         # metadata.source 审计:scheduler 只消费,缺失/非法记 warning 后兜底。
-        source = job.source
-        if source not in {SOURCE_AGENT_TOOL, "web_rpc", "tui_rpc", SOURCE_SCHEDULE_RECOVERY}:
+        raw_source = str((job.metadata or {}).get("source") or "").strip()
+        source = raw_source
+        if raw_source not in {
+            SOURCE_AGENT_TOOL,
+            "web_rpc",
+            "tui_rpc",
+            SOURCE_SCHEDULE_RECOVERY,
+        }:
             logger.warning(
                 "[HeartbeatScheduler] job %s missing or invalid source=%r, "
                 "falling back to schedule_recovery",
                 job.id,
-                source,
+                raw_source,
             )
             source = SOURCE_SCHEDULE_RECOVERY
 
+        session = self._session_resolver.resolve(job.channel_id, job.session_id)
+        route = dict(session.route_metadata or {}) if session is not None else {}
+        metadata = dict(route)
+        metadata["automation"] = {
+            "kind": "heartbeat",
+            "job_id": job.id,
+            "run_id": run_id,
+            "triggered_at": now,
+            "source": source,
+            "trigger": job.run_state.current_trigger or "scheduler",
+        }
         return Message(
-            id=f"heartbeat-job-{job.id}-{run_id}",
+            id=run_id,
             type="req",
-            channel_id=job.channel_id,
+            channel_id=(session.channel_id if session is not None else job.channel_id),
             session_id=job.session_id,
             req_method=ReqMethod.CHAT_SEND,
             timestamp=now,
             ok=True,
+            is_stream=True,
             params={
                 "query": job.prompt,
                 "content": job.prompt,
@@ -282,28 +329,21 @@ class HeartbeatSchedulerService:
                     },
                 },
             },
-            metadata={
-                "automation": {
-                    "kind": "heartbeat",
-                    "job_id": job.id,
-                    "run_id": run_id,
-                    "triggered_at": now,
-                    "source": source,
-                    "trigger": "scheduler",
-                }
-            },
+            metadata=metadata,
+            provider=str(route.get("provider") or "") or None,
+            chat_id=str(route.get("chat_id") or "") or None,
+            user_id=str(route.get("user_id") or "") or None,
+            bot_id=str(route.get("bot_id") or "") or None,
+            app_id=str(route.get("app_id") or "") or None,
         )
 
-    async def _dispatch_job(self, job: HeartbeatJob, run_id: str, now: float) -> None:
-        """构造 CHAT_SEND 并投递回原 session(方案 §7.6)。
-
-        第一版语义:投递成功即完成(_finish_run)。后续若 AgentServer 有异步 run
-        完成回调,可升级为 run 完成后再完成。
-        """
-        msg = self._build_message(job, run_id, now)
-        await self._store.mark_running(job.id, run_id, now)
+    async def _dispatch_claimed_job(
+        self, job: HeartbeatJob, run_id: str, now: float
+    ) -> None:
+        """Publish a claimed run; completion is reported by MessageHandler."""
         self._active_runs[run_id] = (job.id, now)
         try:
+            msg = self._build_message(job, run_id, now)
             await self._message_handler.publish_user_messages(msg)
         except Exception as exc:
             logger.warning(
@@ -312,12 +352,52 @@ class HeartbeatSchedulerService:
                 run_id,
                 exc,
             )
-            await self._store.mark_failed(job.id, run_id, now, error=str(exc))
-            self._active_runs.pop(run_id, None)
-            # 失败也基于 now 重算下次触发,避免补跑风暴
-            await self._store.reschedule(job.id, self._compute_next_run(job, now))
-            return
-        await self._finish_run(job, run_id, now, {"accepted": True, "finished_at": now})
+            await self.on_run_finished(
+                job.id, run_id, outcome="failed", error=str(exc)
+            )
+
+    async def _start_run(
+        self,
+        job: HeartbeatJob,
+        run_id: str,
+        now: float,
+        *,
+        trigger: str,
+        reschedule: bool,
+    ) -> str:
+        decision, claimed, replaced_run_id = await self._store.claim_run(
+            job.id,
+            run_id,
+            now,
+            trigger=trigger,
+            reschedule=reschedule,
+            next_run_at_after_claim=(
+                self._compute_next_run(job, now) if trigger == "scheduler" else None
+            ),
+        )
+        if decision == "replace" and replaced_run_id:
+            # Install the replacement first.  The cancelled stream reports its
+            # own completion asynchronously; once the new run id is persisted,
+            # that stale callback cannot finish or overwrite the replacement.
+            claimed = await self._store.replace_claimed_run(
+                job.id,
+                expected_run_id=replaced_run_id,
+                new_run_id=run_id,
+                now=now,
+                trigger=trigger,
+                reschedule=reschedule,
+                next_run_at_after_claim=(
+                    self._compute_next_run(job, now)
+                    if trigger == "scheduler"
+                    else None
+                ),
+            )
+            self._active_runs.pop(replaced_run_id, None)
+            await self._send_cancel_to_session(job, replaced_run_id)
+            decision = "run"
+        if decision == "run":
+            await self._dispatch_claimed_job(claimed, run_id, now)
+        return decision
 
     # ---- 下一次触发计算(方案 §7.7) ----
 
@@ -325,7 +405,8 @@ class HeartbeatSchedulerService:
         """interval/cron/once 下一次触发;基于 now 重算,不补跑历史。"""
         stype = job.schedule.type
         if stype == SCHEDULE_ONCE:
-            return None
+            run_at = job.schedule.run_at
+            return float(run_at) if run_at is not None and float(run_at) > base_ts else None
         if stype == SCHEDULE_INTERVAL:
             iv = job.schedule.interval_seconds or 60
             return base_ts + max(60, int(iv))
@@ -352,52 +433,65 @@ class HeartbeatSchedulerService:
             return None
         return nxt.timestamp()
 
-    # ---- 并发控制(方案 §7.8) ----
-
-    async def _apply_concurrency_policy(self, job: HeartbeatJob, run_id: str) -> str:
-        """返回 run/skip/queued。"""
-        active = await self._store.get_active_run(job.id)
-        if active is None:
-            return "run"
-        policy = job.concurrency_policy
-        if policy == "skip":
-            return "skip"
-        if policy == "queue":
-            await self._store.mark_queued(job.id, run_id)
-            return "queued"
-        if policy == "replace":
-            # 第一版:replace 不保证精确取消 Agent run,降级为 skip。
-            # 真正中断需要 _send_cancel_to_session 且能精确取消对应 run。
-            logger.warning(
-                "[HeartbeatScheduler] replace policy not fully supported for job=%s, "
-                "downgrading to skip",
-                job.id,
-            )
-            return "skip"
-        return "skip"
-
     # ---- 完成与停止条件(方案 §7.10) ----
 
-    async def _finish_run(
-        self, job: HeartbeatJob, run_id: str, now: float, result: dict[str, Any]
-    ) -> None:
-        """投递成功后更新状态;达成停止条件则 completed。"""
-        run_count = int(job.run_count) + 1
-        should_stop = (
+    async def on_run_finished(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        outcome: str,
+        error: str | None = None,
+        pause_schedule: bool = False,
+        consume_queue: bool = True,
+    ) -> bool:
+        """Complete the exact heartbeat run reported by MessageHandler."""
+        job = await self._store.get_job(job_id)
+        if job is None or job.run_state.current_run_id != run_id:
+            return False
+        now = self._now_fn()
+        normalized = {
+            "succeeded": "succeeded",
+            "failed": "failed",
+            "cancelled": "cancelled",
+        }.get(outcome, "failed")
+        next_count = int(job.run_count) + (1 if normalized in {"succeeded", "failed"} else 0)
+        terminal = (
             bool(job.delete_after_run)
             or job.schedule.type == SCHEDULE_ONCE
-            or (job.max_runs is not None and run_count >= int(job.max_runs))
+            or (job.max_runs is not None and next_count >= int(job.max_runs))
         )
-        if should_stop:
-            await self._store.mark_completed(
-                job.id, run_id, now, reason="stop_condition_reached"
-            )
-            self._active_runs.pop(run_id, None)
-            return
         next_run_at = self._compute_next_run(job, now)
-        await self._store.mark_succeeded(job.id, run_id, now)
-        await self._store.reschedule(job.id, next_run_at)
+        matched, finished = await self._store.finish_run(
+            job.id,
+            run_id,
+            now,
+            outcome=normalized,
+            error=error,
+            next_run_at=next_run_at,
+            terminal=terminal,
+            pause_schedule=pause_schedule,
+        )
         self._active_runs.pop(run_id, None)
+        if not matched or finished.is_terminal() or not consume_queue:
+            return matched
+        await self._consume_queued_run(job.id)
+        return matched
+
+    async def _consume_queued_run(self, job_id: str) -> None:
+        """Start the single queued run, if the job is still runnable."""
+        queued = await self._store.pop_queued_run(job_id)
+        if queued is not None:
+            queued_id, trigger, queued_reschedule = queued
+            refreshed = await self._store.get_job(job_id)
+            if refreshed is not None:
+                await self._start_run(
+                    refreshed,
+                    queued_id,
+                    self._now_fn(),
+                    trigger=trigger,
+                    reschedule=queued_reschedule,
+                )
 
     # ---- 取消执行(方案 §7.11) ----
 
@@ -410,11 +504,20 @@ class HeartbeatSchedulerService:
         now = self._now_fn()
         cancelled_run_id: str | None = None
         if run_id:
+            matched = await self.on_run_finished(
+                job.id,
+                run_id,
+                outcome="cancelled",
+                pause_schedule=pause_schedule,
+                consume_queue=False,
+            )
+            # Persist cancellation before stopping the stream.  Its finally
+            # callback is then stale and cannot race the requested pause state.
             await self._send_cancel_to_session(job, run_id)
-            await self._store.mark_cancelled(job.id, run_id, now)
-            self._active_runs.pop(run_id, None)
+            if matched and not pause_schedule:
+                await self._consume_queued_run(job.id)
             cancelled_run_id = run_id
-        if pause_schedule:
+        elif pause_schedule:
             await self._store.disable(job.id, now)
         return {
             "job_id": job.id,
@@ -423,9 +526,12 @@ class HeartbeatSchedulerService:
         }
 
     async def _send_cancel_to_session(self, job: HeartbeatJob, run_id: str) -> None:
-        """fire-and-forget 向原 session 投递 CHAT_CANCEL(第一版,不保证精确取消)。"""
+        """Cancel only the gateway stream whose request id equals this heartbeat run."""
         try:
-            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            cancel_exact = getattr(self._message_handler, "cancel_request", None)
+            if callable(cancel_exact):
+                await cancel_exact(run_id)
+                return
             from jiuwenswarm.common.schema.message import Message, ReqMethod
 
             now = self._now_fn()
@@ -438,6 +544,7 @@ class HeartbeatSchedulerService:
                 timestamp=now,
                 ok=True,
                 params={
+                    "request_id": run_id,
                     "heartbeat": {
                         "job_id": job.id,
                         "run_id": run_id,
@@ -484,8 +591,10 @@ class HeartbeatSchedulerService:
             }
         now = self._now_fn()
         run_id = self._new_run_id(job, now)
-        # run_now 受并发策略约束
-        decision = await self._apply_concurrency_policy(job, run_id)
+        # run_now 受并发策略约束，且 reschedule=false 时恢复执行前调度状态。
+        decision = await self._start_run(
+            job, run_id, now, trigger="run_now", reschedule=reschedule
+        )
         if decision == "skip":
             return {
                 "accepted": False,
@@ -493,10 +602,13 @@ class HeartbeatSchedulerService:
                 "session_id": job.session_id,
                 "reason": "previous_run_active",
             }
-        # queue:第一版直接降级为 run(queue 需要补跑队列消费,第一版简化)
-        await self._dispatch_job(job, run_id, now)
-        if reschedule:
-            await self._store.reschedule(job.id, self._compute_next_run(job, now))
+        if decision == "queued":
+            return {
+                "accepted": True,
+                "queued": True,
+                "run_id": run_id,
+                "session_id": job.session_id,
+            }
         return {
             "accepted": True,
             "run_id": run_id,

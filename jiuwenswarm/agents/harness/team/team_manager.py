@@ -2158,16 +2158,42 @@ class TeamManager:
                 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 
                 mh = MessageHandler.get_instance()
+                heartbeat_notified = False
                 if mh is not None and hasattr(mh, "get_heartbeat_scheduler_service"):
                     hb_svc = mh.get_heartbeat_scheduler_service()
                     if hb_svc is not None and hasattr(hb_svc, "on_session_deleted"):
                         await hb_svc.on_session_deleted(session_id)
+                        heartbeat_notified = True
+                if not heartbeat_notified:
+                    raise RuntimeError("gateway heartbeat scheduler is not in this process")
             except Exception as _hb_exc:  # noqa: BLE001
-                logger.debug(
-                    "[TeamManager] heartbeat on_session_deleted hook failed: session_id=%s error=%s",
-                    session_id,
-                    _hb_exc,
-                )
+                # Split-process deployment: notify Gateway over the existing server-push channel.
+                try:
+                    from jiuwenswarm.common.e2a.constants import E2A_RESPONSE_KIND_HEARTBEAT
+                    from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+
+                    await WebSocketGatewayPushTransport().send_push(
+                        {
+                            "request_id": f"heartbeat-session-deleted-{session_id}",
+                            "channel_id": "__heartbeat__",
+                            "session_id": session_id,
+                            "response_kind": E2A_RESPONSE_KIND_HEARTBEAT,
+                            "body": {
+                                "action": "session_deleted",
+                                "status": "ok",
+                                "data": {"session_id": session_id},
+                                "message": "",
+                            },
+                        }
+                    )
+                except Exception as push_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[TeamManager] heartbeat session deletion notification failed: "
+                        "session_id=%s local_error=%s push_error=%s",
+                        session_id,
+                        _hb_exc,
+                        push_exc,
+                    )
             return True
         except Exception as exc:
             logger.warning(

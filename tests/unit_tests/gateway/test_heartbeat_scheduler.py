@@ -21,10 +21,6 @@ import pytest
 from jiuwenswarm.gateway.heartbeat.models import (
     HeartbeatJob,
     HeartbeatSchedule,
-    SCHEDULE_CRON,
-    SCHEDULE_INTERVAL,
-    SCHEDULE_ONCE,
-    SOURCE_AGENT_TOOL,
     SOURCE_SCHEDULE_RECOVERY,
     STATUS_COMPLETED,
     STATUS_DISABLED,
@@ -40,9 +36,14 @@ class _FakeMH:
 
     def __init__(self) -> None:
         self.messages: list = []
+        self.cancelled_request_ids: list[str] = []
 
     async def publish_user_messages(self, msg) -> None:  # noqa: ANN001
         self.messages.append(msg)
+
+    async def cancel_request(self, request_id: str) -> bool:
+        self.cancelled_request_ids.append(request_id)
+        return True
 
 
 class _FakeResolver:
@@ -101,13 +102,13 @@ def test_compute_next_run_interval_based_on_base_ts(setup) -> None:
     asyncio.run(run())
 
 
-def test_compute_next_run_once_returns_none(setup) -> None:
+def test_compute_next_run_once_returns_future_run_at(setup) -> None:
     store, _, sched = setup
     job = HeartbeatJob(
         id="x", name="n", enabled=True, channel_id="web", session_id="s1", prompt="p",
         schedule=HeartbeatSchedule.from_dict({"type": "once", "run_at": 9999.0}),
     )
-    assert sched._compute_next_run(job, 1000.0) is None
+    assert sched._compute_next_run(job, 1000.0) == 9999.0
 
 
 def test_compute_next_run_cron_uses_cron_helper(setup) -> None:
@@ -168,11 +169,43 @@ async def test_dispatch_full_flow_marks_succeeded_and_reschedules(setup) -> None
     await store.update_job(job.id, {"next_run_at": 1.0})  # due
     await sched._tick_once()
     assert len(mh.messages) == 1
+    running = await store.get_job(job.id)
+    assert running.status == "running"
+    await sched.on_run_finished(
+        job.id, running.run_state.current_run_id, outcome="succeeded"
+    )
     j = await store.get_job(job.id)
     assert j.run_count == 1
     assert j.run_state.last_run_status == "succeeded"
     assert j.next_run_at is not None
     assert j.next_run_at > 1.0  # 基于 now 重算
+
+
+async def test_route_hydration_failure_finishes_claimed_run(setup) -> None:
+    """A transient failure while building the message must not leave a ghost run."""
+    store, _, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool",
+    )
+
+    class ResolveOnceThenFail(_FakeResolver):
+        calls = 0
+
+        def resolve(self, channel_id: str, session_id: str):  # noqa: ANN001
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("metadata temporarily unavailable")
+            return super().resolve(channel_id, session_id)
+
+    sched._session_resolver = ResolveOnceThenFail()
+    result = await sched.trigger_run_now(job.id)
+    current = await store.get_job(job.id)
+    assert result["accepted"] is True
+    assert current.status == STATUS_SCHEDULED
+    assert current.run_state.current_run_id is None
+    assert current.run_state.last_run_status == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +226,10 @@ async def test_interval_does_not_backfill(setup) -> None:
     # next_run_at 远早于 now(模拟服务离线很久)
     await store.update_job(job.id, {"next_run_at": now - 100000})
     await sched._tick_once()
+    running = await store.get_job(job.id)
+    await sched.on_run_finished(
+        job.id, running.run_state.current_run_id, outcome="succeeded"
+    )
     j = await store.get_job(job.id)
     # 执行一次后基于 now 重算,不补跑历史
     assert j.run_count == 1
@@ -208,11 +245,15 @@ async def test_once_schedule_marks_completed(setup) -> None:
     store, mh, sched = setup
     job = await store.create_job(
         name="once", channel_id="web", session_id="s1", prompt="p",
-        schedule=HeartbeatSchedule.from_dict({"type": "once", "run_at": 9999.0}),
+        schedule=HeartbeatSchedule.from_dict({"type": "once", "run_at": __import__("time").time() + 3600}),
         source="agent_tool",
     )
     await store.update_job(job.id, {"next_run_at": 1.0})
     await sched._tick_once()
+    running = await store.get_job(job.id)
+    await sched.on_run_finished(
+        job.id, running.run_state.current_run_id, outcome="succeeded"
+    )
     j = await store.get_job(job.id)
     assert j.status == STATUS_COMPLETED
     assert j.next_run_at is None
@@ -236,6 +277,10 @@ async def test_max_runs_reached_marks_completed(setup) -> None:
     for _ in range(2):
         await store.update_job(job.id, {"next_run_at": 1.0})
         await sched._tick_once()
+        running = await store.get_job(job.id)
+        await sched.on_run_finished(
+            job.id, running.run_state.current_run_id, outcome="succeeded"
+        )
     j = await store.get_job(job.id)
     assert j.run_count == 2
     assert j.status == STATUS_COMPLETED
@@ -251,6 +296,10 @@ async def test_delete_after_run_marks_completed(setup) -> None:
     )
     await store.update_job(job.id, {"next_run_at": 1.0})
     await sched._tick_once()
+    running = await store.get_job(job.id)
+    await sched.on_run_finished(
+        job.id, running.run_state.current_run_id, outcome="succeeded"
+    )
     j = await store.get_job(job.id)
     assert j.status == STATUS_COMPLETED
     assert j.run_count == 1
@@ -261,45 +310,79 @@ async def test_delete_after_run_marks_completed(setup) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_concurrency_skip_skips_when_run_active(setup, monkeypatch) -> None:
+async def test_concurrency_skip_skips_when_run_active(setup) -> None:
     store, mh, sched = setup
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
         source="agent_tool", concurrency_policy="skip",
     )
-    await store.update_job(job.id, {"next_run_at": 1.0})  # due
-    # 模拟上一轮运行中:get_active_run 返回活跃 run_id,但保持 status=scheduled。
-    # (不能直接 mark_running,它会把 status 改成 running 导致 _handle_job_tick 跳过。)
-    async def _fake_active_run(_jid: str) -> str | None:
-        return "active_run"
-
-    monkeypatch.setattr(store, "get_active_run", _fake_active_run)
-    await sched._tick_once()
+    first = await sched.trigger_run_now(job.id)
+    second = await sched.trigger_run_now(job.id)
+    assert first["accepted"] is True
+    assert second["accepted"] is False
     # 应 skip:不投递新消息,记录 skipped
     j = await store.get_job(job.id)
     assert j.run_state.skipped_count == 1
     assert j.run_state.last_run_status == "skipped"
-    assert len(mh.messages) == 0
+    assert len(mh.messages) == 1  # only the first run was dispatched
 
 
-async def test_concurrency_replace_downgrades_to_skip(setup, monkeypatch) -> None:
+async def test_concurrency_replace_cancels_exact_run_and_starts_new(setup) -> None:
     store, mh, sched = setup
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
         source="agent_tool", concurrency_policy="replace",
     )
-    await store.update_job(job.id, {"next_run_at": 1.0})
-
-    async def _fake_active_run(_jid: str) -> str | None:
-        return "active_run"
-
-    monkeypatch.setattr(store, "get_active_run", _fake_active_run)
-    await sched._tick_once()
+    first = await sched.trigger_run_now(job.id)
+    second = await sched.trigger_run_now(job.id)
     j = await store.get_job(job.id)
-    # replace 第一版降级为 skip
-    assert j.run_state.skipped_count == 1
+    assert second["accepted"] is True
+    assert mh.cancelled_request_ids == [first["run_id"]]
+    assert j.run_state.current_run_id == second["run_id"]
+
+
+async def test_replace_ignores_cancelled_old_stream_completion(setup) -> None:
+    """The old stream's finally callback must not finish the replacement run."""
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", concurrency_policy="replace",
+    )
+    first = await sched.trigger_run_now(job.id)
+
+    async def cancel_with_callback(request_id: str) -> bool:
+        mh.cancelled_request_ids.append(request_id)
+        await sched.on_run_finished(job.id, request_id, outcome="cancelled")
+        return True
+
+    mh.cancel_request = cancel_with_callback
+    second = await sched.trigger_run_now(job.id)
+    current = await store.get_job(job.id)
+    assert current.run_state.current_run_id == second["run_id"]
+    assert current.status == "running"
+    assert first["run_id"] in mh.cancelled_request_ids
+
+
+async def test_concurrency_queue_keeps_one_pending_and_consumes_it(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", concurrency_policy="queue",
+    )
+    first = await sched.trigger_run_now(job.id)
+    second = await sched.trigger_run_now(job.id)
+    third = await sched.trigger_run_now(job.id)
+    queued = await store.get_job(job.id)
+    assert second["queued"] is True and third["queued"] is True
+    assert queued.run_state.queued_run_id == third["run_id"]
+    await sched.on_run_finished(job.id, first["run_id"], outcome="succeeded")
+    active = await store.get_job(job.id)
+    assert active.run_state.current_run_id == third["run_id"]
+    assert len(mh.messages) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -402,8 +485,15 @@ async def test_on_session_deleted_disables_bound_jobs(setup) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_build_message_source_fallback(setup) -> None:
+async def test_build_message_source_fallback(
+    setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store, _, sched = setup
+    warnings: list[tuple] = []
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.heartbeat.scheduler.logger.warning",
+        lambda *args: warnings.append(args),
+    )
     job = HeartbeatJob(
         id="x", name="n", enabled=True, channel_id="web", session_id="s1", prompt="p",
         schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
@@ -411,6 +501,7 @@ async def test_build_message_source_fallback(setup) -> None:
     )
     msg = sched._build_message(job, "run1", 1.0)
     assert msg.metadata["automation"]["source"] == SOURCE_SCHEDULE_RECOVERY
+    assert warnings and "missing or invalid source" in warnings[0][0]
 
 
 # ---------------------------------------------------------------------------
@@ -490,10 +581,34 @@ async def test_cancel_run_pause_schedule(setup) -> None:
         schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
         source="agent_tool",
     )
+    started = await sched.trigger_run_now(job.id)
     result = await sched.cancel_run(job.id, pause_schedule=True)
     assert result["paused"] is True
+    assert result["cancelled_run_id"] == started["run_id"]
     j = await store.get_job(job.id)
     assert j.status == STATUS_DISABLED
+
+
+async def test_cancel_pause_survives_stream_finally_callback(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool",
+    )
+    started = await sched.trigger_run_now(job.id)
+
+    async def cancel_with_callback(request_id: str) -> bool:
+        await sched.on_run_finished(job.id, request_id, outcome="cancelled")
+        return True
+
+    mh.cancel_request = cancel_with_callback
+    await sched.cancel_run(job.id, pause_schedule=True)
+    current = await store.get_job(job.id)
+    assert current.status == STATUS_DISABLED
+    assert current.enabled is False
+    assert current.run_state.current_run_id is None
+    assert started["run_id"] not in sched._active_runs
 
 
 async def test_trigger_run_now_missing_session_disabled(missing_setup) -> None:
@@ -507,3 +622,49 @@ async def test_trigger_run_now_missing_session_disabled(missing_setup) -> None:
     j = await store.get_job(job.id)
     # session 不存在 → missing → disable
     assert j.status == STATUS_DISABLED
+
+
+async def test_run_now_disabled_job_preserves_disabled_schedule(setup) -> None:
+    store, _, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", enabled=False,
+    )
+    started = await sched.trigger_run_now(job.id, reschedule=False)
+    running = await store.get_job(job.id)
+    assert running.status == "running"
+    assert running.enabled is False
+    await sched.on_run_finished(job.id, started["run_id"], outcome="succeeded")
+    restored = await store.get_job(job.id)
+    assert restored.status == STATUS_DISABLED
+    assert restored.enabled is False
+    assert restored.next_run_at is None
+
+
+async def test_reload_recovers_expired_run_lease(tmp_path: Path) -> None:
+    store = HeartbeatJobStore(path=tmp_path / "lease.json")
+    mh = _FakeMH()
+    now = 100_000.0
+    sched = HeartbeatSchedulerService(
+        store=store, message_handler=mh, now_fn=lambda: now
+    )
+    sched._session_resolver = _FakeResolver()
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", now=1.0,
+    )
+    await store.claim_run(
+        job.id,
+        "stale-run",
+        2.0,
+        trigger="scheduler",
+        reschedule=True,
+        next_run_at_after_claim=122.0,
+    )
+    await sched.reload()
+    recovered = await store.get_job(job.id)
+    assert recovered.status == STATUS_SCHEDULED
+    assert recovered.run_state.current_run_id is None
+    assert recovered.run_state.last_run_status == "failed"

@@ -3383,10 +3383,15 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
             return
         try:
-            result = await hc.list_jobs(params if isinstance(params, dict) else {})
+            result = await hc.list_jobs(
+                params if isinstance(params, dict) else {},
+                access_session_id=session_id,
+            )
             await channel.send_response(ws, req_id, ok=True, payload={"jobs": result.get("jobs", [])})
         except ValueError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
             logger.warning("[heartbeat.job.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -3411,11 +3416,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
         try:
-            job = await hc.get_job(job_id)
+            job = await hc.get_job(job_id, access_session_id=session_id)
             if job is None:
                 await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
                 return
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
             logger.warning("[heartbeat.job.get] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -3431,9 +3438,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         # TUI 自动继承当前 channel_id=tui + session_id;source=tui_rpc。
         create_params = {
             **params,
-            "channel_id": params.get("channel_id") or "tui",
-            "session_id": params.get("session_id") or session_id,
-            "source": params.get("source") or "tui_rpc",
+            "channel_id": "tui",
+            "session_id": session_id,
+            "source": "tui_rpc",
         }
         try:
             job = await hc.create_job(create_params)
@@ -3461,12 +3468,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
             return
         try:
-            job = await hc.update_job(job_id, patch)
+            job = await hc.update_job(job_id, patch, access_session_id=session_id)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
         except ValueError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
             logger.warning("[heartbeat.job.update] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -3484,10 +3493,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
         try:
-            result = await hc.delete_job(job_id)
+            result = await hc.delete_job(job_id, access_session_id=session_id)
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
             logger.warning("[heartbeat.job.delete] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -3504,14 +3515,19 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        enabled = bool(params.get("enabled"))
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            await channel.send_response(ws, req_id, ok=False, error="enabled must be boolean", code="BAD_REQUEST")
+            return
         try:
-            job = await hc.toggle_job(job_id, enabled)
+            job = await hc.toggle_job(job_id, enabled, access_session_id=session_id)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
         except ValueError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
             logger.warning("[heartbeat.job.toggle] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -3533,10 +3549,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if isinstance(raw_count, int) and raw_count > 0:
             count = raw_count
         try:
-            result = await hc.preview_job(job_id, count=count)
+            result = await hc.preview_job(job_id, count=count, access_session_id=session_id)
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
             logger.warning("[heartbeat.job.preview] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -3553,12 +3571,19 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        reschedule = bool(params.get("reschedule", False))
+        reschedule = params.get("reschedule", False)
+        if not isinstance(reschedule, bool):
+            await channel.send_response(ws, req_id, ok=False, error="reschedule must be boolean", code="BAD_REQUEST")
+            return
         try:
-            result = await hc.run_now(job_id, reschedule=reschedule)
+            result = await hc.run_now(
+                job_id, reschedule=reschedule, access_session_id=session_id
+            )
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
             logger.warning("[heartbeat.job.run_now] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -3575,12 +3600,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        pause_schedule = bool(params.get("pause_schedule", False))
+        pause_schedule = params.get("pause_schedule", False)
+        if not isinstance(pause_schedule, bool):
+            await channel.send_response(ws, req_id, ok=False, error="pause_schedule must be boolean", code="BAD_REQUEST")
+            return
         try:
-            result = await hc.cancel_run(job_id, pause_schedule=pause_schedule)
+            result = await hc.cancel_run(
+                job_id,
+                pause_schedule=pause_schedule,
+                access_session_id=session_id,
+            )
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
             logger.warning("[heartbeat.job.cancel] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")

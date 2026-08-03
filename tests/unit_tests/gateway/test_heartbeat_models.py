@@ -14,8 +14,6 @@ from __future__ import annotations
 import pytest
 
 from jiuwenswarm.gateway.heartbeat.models import (
-    DEFAULT_CONCURRENCY_POLICY,
-    DEFAULT_MAX_RUNS,
     DEFAULT_TIMEZONE,
     HEARTBEAT_CONCURRENCY_POLICIES,
     HEARTBEAT_SCHEDULE_TYPES,
@@ -26,7 +24,6 @@ from jiuwenswarm.gateway.heartbeat.models import (
     HeartbeatJob,
     HeartbeatRunState,
     HeartbeatSchedule,
-    MIN_INTERVAL_SECONDS,
     SCHEDULE_CRON,
     SCHEDULE_INTERVAL,
     SCHEDULE_ONCE,
@@ -263,6 +260,13 @@ def test_invariant_disabled_status_requires_enabled_false() -> None:
 def test_invariant_scheduled_requires_enabled_true() -> None:
     job = _make_interval_job(enabled=False, status=STATUS_SCHEDULED)
     with pytest.raises(ValueError, match="status=scheduled requires enabled=true"):
+        job.check_invariants()
+
+
+def test_invariant_scheduled_requires_next_run_at() -> None:
+    job = _make_interval_job(enabled=True, status=STATUS_SCHEDULED)
+    job.next_run_at = None
+    with pytest.raises(ValueError, match="requires next_run_at"):
         job.check_invariants()
 
 

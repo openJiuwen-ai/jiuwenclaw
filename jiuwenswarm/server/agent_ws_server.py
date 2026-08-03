@@ -2017,6 +2017,33 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         _raw_mode = params.get("mode")
         explicit_mode_provided = isinstance(_raw_mode, str) and bool(_raw_mode.strip())
+        # Heartbeat follow-ups deliberately omit mode so the existing session
+        # remains authoritative.  Restore the locked mode before choosing an
+        # agent; merely protecting metadata from overwrite is insufficient,
+        # because resolving an absent mode would otherwise select `agent`.
+        if not explicit_mode_provided:
+            sid = str(request.session_id or "").strip()
+            if sid:
+                try:
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+
+                    locked_metadata = get_session_metadata(
+                        sid, cache_bust=True, enable_writeback=False
+                    )
+                    locked_mode = str(
+                        (locked_metadata or {}).get("mode") or ""
+                    ).strip()
+                    if locked_mode:
+                        params["mode"] = locked_mode
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[_prepare_code_mode_chat_turn] failed to restore implicit "
+                        "session mode: session_id=%s error=%s",
+                        sid,
+                        exc,
+                    )
         mode, sub_mode = _apply_resolved_mode_to_request(request)
         agent_mode = "agent" if mode == "auto_harness" else mode
         requested_project_dir = resolve_request_project_dir(request)

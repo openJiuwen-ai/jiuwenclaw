@@ -86,6 +86,109 @@ class FakeHeartbeatService:
     def get_heartbeat_conf(self):
         return dict(self.config)
 
+    async def set_health_check_conf(self, *, every=None, target=None, active_hours=None):
+        await self.set_heartbeat_conf(
+            every=every, target=target, active_hours=active_hours
+        )
+
+    def get_health_check_conf(self):
+        return self.get_heartbeat_conf()
+
+
+class FakeHeartbeatController:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def get_meta(self):
+        return {"statuses": ["scheduled"]}
+
+    async def list_jobs(self, params, *, access_session_id=None):
+        self.calls.append(("list", dict(params), access_session_id))
+        return {"jobs": []}
+
+    async def create_job(self, params):
+        self.calls.append(("create", dict(params)))
+        return dict(params, id="hb-test")
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_web_methods_use_new_names_and_current_session() -> None:
+    channel = FakeWebChannel()
+    controller = FakeHeartbeatController()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, heartbeat_controller=controller)
+    )
+    assert "health_check.get_conf" in channel.methods
+    assert "health_check.set_conf" in channel.methods
+    assert "heartbeat.get_conf" not in channel.methods
+    assert "heartbeat.set_conf" not in channel.methods
+    expected = {
+        "heartbeat.job.list", "heartbeat.job.meta", "heartbeat.job.get",
+        "heartbeat.job.create", "heartbeat.job.update", "heartbeat.job.delete",
+        "heartbeat.job.toggle", "heartbeat.job.preview", "heartbeat.job.run_now",
+        "heartbeat.job.cancel",
+    }
+    assert expected <= set(channel.methods)
+
+    await channel.methods["heartbeat.job.list"](
+        object(), "list-1", {}, "session-current"
+    )
+    await channel.methods["heartbeat.job.create"](
+        object(),
+        "create-1",
+        {
+            "name": "n",
+            "prompt": "p",
+            "channel_id": "other",
+            "session_id": "other-session",
+            "schedule": {"type": "interval", "interval_seconds": 120},
+        },
+        "session-current",
+    )
+    assert controller.calls[0] == ("list", {}, "session-current")
+    created = controller.calls[1][1]
+    assert created["channel_id"] == "web"
+    assert created["session_id"] == "session-current"
+    assert created["source"] == "web_rpc"
+
+
+@pytest.mark.asyncio
+async def test_session_delete_notifies_heartbeat_scheduler() -> None:
+    class Agent:
+        server_ready = True
+
+        async def send_request(self, _env):
+            return SimpleNamespace(ok=True, payload={"session_id": "deleted"})
+
+    class Scheduler:
+        def __init__(self):
+            self.deleted = []
+
+        async def on_session_deleted(self, session_id):
+            self.deleted.append(session_id)
+
+    class Handler:
+        def __init__(self, scheduler):
+            self.scheduler = scheduler
+
+        def get_heartbeat_scheduler_service(self):
+            return self.scheduler
+
+    channel = FakeWebChannel()
+    scheduler = Scheduler()
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            agent_client=Agent(),
+            message_handler=Handler(scheduler),
+        )
+    )
+    await channel.methods["session.delete"](
+        object(), "delete-1", {"session_id": "session-to-delete"}, "current"
+    )
+    assert scheduler.deleted == ["session-to-delete"]
+    assert channel.responses[-1]["ok"] is True
+
 
 @pytest.mark.asyncio
 async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
@@ -325,7 +428,7 @@ async def test_openai_account_logout_wins_against_inflight_poll(
     [
         ("channel.feishu.set_conf", {"apps": [{"app_id": "app-1"}]}),
         ("channel.dingtalk.set_conf", {"enabled": False, "client_id": "client-1"}),
-        ("heartbeat.set_conf", {"every": 30, "target": "web"}),
+        ("health_check.set_conf", {"every": 30, "target": "web"}),
     ],
 )
 async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeypatch, method, params):
@@ -344,8 +447,8 @@ async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeyp
         lambda channel_id, subsection, conf, keep_keys: persisted.append((channel_id, conf)),
     )
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_heartbeat_in_config",
-        lambda payload: persisted.append(("heartbeat", dict(payload))),
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_health_check_in_config",
+        lambda payload: persisted.append(("health_check", dict(payload))),
     )
 
     _register_web_handlers(

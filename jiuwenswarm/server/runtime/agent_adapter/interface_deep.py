@@ -125,6 +125,10 @@ from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
     resolve_a2x_config,
 )
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
+from jiuwenswarm.agents.harness.common.tools.heartbeat_runtime import (
+    HEARTBEAT_TOOL_NAMES,
+    HeartbeatRuntimeBridge,
+)
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
@@ -874,6 +878,7 @@ class JiuWenSwarmDeepAdapter:
         self._a2x_blank_service_id: str = ""
         self._a2x_blank_dataset: str = ""
         self._cron_runtime = CronRuntimeBridge()
+        self._heartbeat_runtime = HeartbeatRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
         )
@@ -4480,6 +4485,12 @@ class JiuWenSwarmDeepAdapter:
             language=self._resolve_runtime_language(),
         )
 
+    def _build_heartbeat_tools(self) -> list[Any]:
+        """Build session-bound heartbeat tools backed by Gateway RPC pushes."""
+        return self._heartbeat_runtime.build_tools(
+            context=self._runtime_cron_tool_context
+        )
+
     async def _proc_context_compaction(self) -> None:
         """Backward-compatible no-op hook for tests and legacy call sites."""
         return None
@@ -5118,6 +5129,25 @@ class JiuWenSwarmDeepAdapter:
                     logger.info("[JiuWenSwarmDeepAdapter] Cron tools registered successfully")
             except Exception as exc:
                 logger.error("[JiuWenSwarmDeepAdapter] 定时工具注册失败: %s", exc)
+
+            try:
+                heartbeat_tools = self._build_heartbeat_tools()
+                for existing in list(self._instance.ability_manager.list() or []):
+                    if getattr(existing, "name", "") in HEARTBEAT_TOOL_NAMES:
+                        self._instance.ability_manager.remove(existing.name)
+                for heartbeat_tool in heartbeat_tools:
+                    if not Runner.resource_mgr.get_tool(heartbeat_tool.card.id):
+                        Runner.resource_mgr.add_tool(heartbeat_tool)
+                    self._instance.ability_manager.add(heartbeat_tool.card)
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] Heartbeat tools registered: %s",
+                    sorted(HEARTBEAT_TOOL_NAMES),
+                )
+            except Exception as exc:
+                logger.error(
+                    "[JiuWenSwarmDeepAdapter] heartbeat tool registration failed: %s",
+                    exc,
+                )
 
         # send_file 工具：由 channels.<channel>.send_file_allowed 控制，每次请求重新注册
         # channel_id/metadata 由调用前的 _bind_runtime_cron_context 已写入 contextvar

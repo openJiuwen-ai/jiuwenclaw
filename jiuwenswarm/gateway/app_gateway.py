@@ -81,6 +81,24 @@ logger = logging.getLogger("jiuwenswarm.gateway")
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
 
 
+def _resolve_health_check_config(full_cfg: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Prefer health_check and read legacy heartbeat probe keys during migration."""
+    if not isinstance(full_cfg, dict):
+        return None
+    current = full_cfg.get("health_check")
+    if isinstance(current, dict):
+        return current
+    legacy = full_cfg.get("heartbeat")
+    if not isinstance(legacy, dict):
+        return None
+    migrated = {
+        key: legacy[key]
+        for key in ("every", "target", "active_hours")
+        if key in legacy
+    }
+    return migrated or None
+
+
 def _build_event_frame(msg) -> dict[str, Any]:
     event_name = "chat.final"
     if msg.event_type is not None:
@@ -1563,7 +1581,15 @@ async def _run(
     try:
         full_cfg = get_config()
         # 旧探活配置已从 heartbeat 段迁移到 health_check 段(方案 §2.3)。
-        health_check_cfg = full_cfg.get("health_check") if isinstance(full_cfg, dict) else None
+        health_check_cfg = _resolve_health_check_config(full_cfg)
+        if (
+            isinstance(health_check_cfg, dict)
+            and isinstance(full_cfg, dict)
+            and not isinstance(full_cfg.get("health_check"), dict)
+        ):
+            logger.warning(
+                "[App] legacy heartbeat probe config detected; migrate it to health_check"
+            )
         channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
     except Exception as e:  # noqa: BLE001
         logger.warning("[App] failed to read health_check config from config.yaml, using defaults: %s", e)
@@ -1628,6 +1654,17 @@ async def _run(
         ):
             if k in hb_jobs_cfg:
                 hb_limits[k] = hb_jobs_cfg[k]
+    hb_env_limits = {
+        "min_interval_seconds": os.getenv("HEARTBEAT_JOBS_MIN_INTERVAL"),
+        "max_active_jobs_per_session": os.getenv("HEARTBEAT_JOBS_MAX_ACTIVE_PER_SESSION"),
+        "max_active_jobs_global": os.getenv("HEARTBEAT_JOBS_MAX_ACTIVE_GLOBAL"),
+        "default_max_runs": os.getenv("HEARTBEAT_JOBS_DEFAULT_MAX_RUNS"),
+        "default_concurrency_policy": os.getenv("HEARTBEAT_JOBS_DEFAULT_CONCURRENCY_POLICY"),
+        "default_session_deleted_policy": os.getenv("HEARTBEAT_JOBS_DEFAULT_SESSION_DELETED_POLICY"),
+    }
+    for key, value in hb_env_limits.items():
+        if value is not None and value != "":
+            hb_limits[key] = value
     if hb_limits:
         heartbeat_controller.set_limits(hb_limits)
     await heartbeat_scheduler_service.start()

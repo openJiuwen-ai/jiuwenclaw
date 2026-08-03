@@ -70,6 +70,47 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_chat_without_mode_restores_locked_session_mode() -> None:
+    """Heartbeat CHAT_SEND without mode continues in the original session mode."""
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = AgentRequest(
+        request_id="heartbeat-run-1",
+        channel_id="web",
+        session_id="heartbeat-session",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "continue", "run": {"kind": "heartbeat_job"}},
+    )
+
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={"mode": "code.normal"},
+        ),
+        patch.object(
+            agent_ws_server_module,
+            "_sync_chat_request_metadata",
+            return_value=None,
+        ),
+    ):
+        mode, sub_mode, resolved = await server._prepare_code_mode_chat_turn(
+            request, "web"
+        )
+
+    assert (mode, sub_mode, resolved) == ("code", "normal", agent)
+    assert request.params["mode"] == "code.normal"
+    manager.get_agent.assert_awaited_once_with(
+        channel_id="web",
+        mode="code",
+        project_dir=None,
+        sub_mode="normal",
+    )
+
+
+@pytest.mark.asyncio
 async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     """The session-locked project dir reaches TeamSpec request metadata.
 

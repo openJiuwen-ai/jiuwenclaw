@@ -197,6 +197,27 @@ async def test_delete_job(ctrl: HeartbeatController) -> None:
     assert await ctrl.get_job(job["id"]) is None
 
 
+async def test_delete_running_job_cancels_exact_run_before_physical_delete(
+    ctrl: HeartbeatController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = await ctrl.create_job({
+        "name": "x", "channel_id": "web", "session_id": "s1", "prompt": "p",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    })
+    await ctrl._store.mark_running(job["id"], "run-active", 1000.0)
+    calls: list[tuple[str, bool]] = []
+
+    async def cancel_run(job_id: str, *, pause_schedule: bool = False):
+        calls.append((job_id, pause_schedule))
+        return {"job_id": job_id, "cancelled_run_id": "run-active"}
+
+    monkeypatch.setattr(ctrl._scheduler, "cancel_run", cancel_run)
+    result = await ctrl.delete_job(job["id"], access_session_id="s1")
+    assert result == {"deleted": True}
+    assert calls == [(job["id"], False)]
+    assert await ctrl._store.get_job(job["id"]) is None
+
+
 async def test_preview_job(ctrl: HeartbeatController) -> None:
     HeartbeatController.set_session_ctx(channel_id="web", session_id="s1")
     job = await ctrl._tool_create_job(
@@ -223,6 +244,89 @@ async def test_list_jobs_filtered_by_session(ctrl: HeartbeatController) -> None:
     assert result["jobs"][0]["session_id"] == "s1"
 
 
+async def test_default_scope_and_mutations_enforce_session_ownership(
+    ctrl: HeartbeatController,
+) -> None:
+    first = await ctrl.create_job({
+        "name": "a", "channel_id": "web", "session_id": "s1", "prompt": "p",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    })
+    await ctrl.create_job({
+        "name": "b", "channel_id": "web", "session_id": "s2", "prompt": "p",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    })
+    visible = await ctrl.list_jobs({}, access_session_id="s1")
+    assert [job["session_id"] for job in visible["jobs"]] == ["s1"]
+    with pytest.raises(PermissionError):
+        await ctrl.list_jobs(
+            {"scope": "all_visible"}, access_session_id="s1"
+        )
+    with pytest.raises(PermissionError):
+        await ctrl.update_job(
+            first["id"], {"name": "stolen"}, access_session_id="s2"
+        )
+
+
+async def test_once_create_and_schedule_update_recompute_next_run(
+    ctrl: HeartbeatController,
+) -> None:
+    import time
+
+    future = time.time() + 600
+    job = await ctrl.create_job({
+        "name": "once", "channel_id": "web", "session_id": "s1", "prompt": "p",
+        "schedule": {"type": "once", "run_at": future},
+    })
+    assert job["next_run_at"] == pytest.approx(future)
+    updated = await ctrl.update_job(
+        job["id"], {"schedule": {"type": "interval", "interval_seconds": 300}}
+    )
+    assert updated["next_run_at"] > time.time()
+    assert abs(updated["next_run_at"] - future) > 200
+
+
+async def test_toggle_reactivates_disabled_and_expired_jobs(
+    ctrl: HeartbeatController,
+) -> None:
+    import time
+
+    disabled = await ctrl.create_job({
+        "name": "disabled", "channel_id": "web", "session_id": "s1", "prompt": "p",
+        "enabled": False,
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    })
+    assert disabled["status"] == "disabled"
+    reenabled = await ctrl.toggle_job(disabled["id"], True)
+    assert reenabled["status"] == "scheduled"
+    assert reenabled["next_run_at"] is not None
+
+    expired = await ctrl.create_job({
+        "name": "expired", "channel_id": "web", "session_id": "s1", "prompt": "p",
+        "schedule": {"type": "once", "run_at": time.time() - 60},
+    })
+    assert expired["status"] == "expired"
+    future = time.time() + 600
+    reactivated = await ctrl.update_job(
+        expired["id"],
+        {"enabled": True, "schedule": {"type": "once", "run_at": future}},
+    )
+    assert reactivated["status"] == "scheduled"
+    assert reactivated["next_run_at"] == pytest.approx(future)
+
+
+async def test_create_rejects_client_id_unknown_fields_and_string_booleans(
+    ctrl: HeartbeatController,
+) -> None:
+    base = {
+        "name": "x", "channel_id": "web", "session_id": "s", "prompt": "p",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    }
+    with pytest.raises(ValueError, match="unknown fields"):
+        await ctrl.create_job({**base, "id": "client-selected"})
+    with pytest.raises(ValueError, match="enabled must be boolean"):
+        await ctrl.create_job({**base, "enabled": "false"})
+
+
 async def test_get_meta(ctrl: HeartbeatController) -> None:
     meta = ctrl.get_meta()
     assert "limits" in meta
@@ -236,6 +340,7 @@ async def test_get_meta(ctrl: HeartbeatController) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 def test_get_tools_returns_9_tools(ctrl: HeartbeatController) -> None:
     tools = ctrl.get_tools()
     names = {t.card.name for t in tools}
@@ -246,6 +351,8 @@ def test_get_tools_returns_9_tools(ctrl: HeartbeatController) -> None:
     }
     assert names == expected
     assert len(tools) == 9
+    del tools
+    __import__("gc").collect()
 
 
 def test_create_job_description_contains_decision_tree_and_stop_obligation(ctrl: HeartbeatController) -> None:

@@ -244,6 +244,13 @@ class HeartbeatRunState:
     last_run_status: str | None = None
     last_error: str | None = None
     queued_run_id: str | None = None
+    queued_trigger: str | None = None
+    queued_reschedule: bool = False
+    current_trigger: str | None = None
+    current_reschedule: bool = False
+    resume_status: str | None = None
+    resume_enabled: bool | None = None
+    resume_next_run_at: float | None = None
     skipped_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -253,6 +260,13 @@ class HeartbeatRunState:
             "last_run_status": self.last_run_status,
             "last_error": self.last_error,
             "queued_run_id": self.queued_run_id,
+            "queued_trigger": self.queued_trigger,
+            "queued_reschedule": bool(self.queued_reschedule),
+            "current_trigger": self.current_trigger,
+            "current_reschedule": bool(self.current_reschedule),
+            "resume_status": self.resume_status,
+            "resume_enabled": self.resume_enabled,
+            "resume_next_run_at": self.resume_next_run_at,
             "skipped_count": int(self.skipped_count),
         }
         return d
@@ -275,6 +289,21 @@ class HeartbeatRunState:
             ),
             last_error=data.get("last_error") or None,
             queued_run_id=data.get("queued_run_id") or None,
+            queued_trigger=data.get("queued_trigger") or None,
+            queued_reschedule=bool(data.get("queued_reschedule", False)),
+            current_trigger=data.get("current_trigger") or None,
+            current_reschedule=bool(data.get("current_reschedule", False)),
+            resume_status=data.get("resume_status") or None,
+            resume_enabled=(
+                data.get("resume_enabled")
+                if isinstance(data.get("resume_enabled"), bool)
+                else None
+            ),
+            resume_next_run_at=(
+                float(data["resume_next_run_at"])
+                if isinstance(data.get("resume_next_run_at"), (int, float))
+                else None
+            ),
             skipped_count=int(data.get("skipped_count") or 0),
         )
 
@@ -440,9 +469,9 @@ class HeartbeatJob:
 
         metadata_raw = data.get("metadata", None)
         metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
-        # 持久化层不强校 source(scheduler 兜底);但缺省写 agent_tool。
+        # 旧数据缺失 source 时标记为恢复来源，不能伪造为 Agent Tool 创建。
         if "source" not in metadata or not str(metadata.get("source") or "").strip():
-            metadata["source"] = SOURCE_AGENT_TOOL
+            metadata["source"] = SOURCE_SCHEDULE_RECOVERY
 
         run_state = HeartbeatRunState.from_dict(data.get("run_state"))
 
@@ -495,7 +524,11 @@ class HeartbeatJob:
                     f"invariant violated: status=scheduled requires enabled=true "
                     f"(job={self.id})"
                 )
-            # next_run_at 允许短暂为 None(刚创建尚未计算)。
+            if self.next_run_at is None:
+                raise ValueError(
+                    f"invariant violated: status=scheduled requires next_run_at "
+                    f"(job={self.id})"
+                )
 
     # ---- 业务辅助 ----
 

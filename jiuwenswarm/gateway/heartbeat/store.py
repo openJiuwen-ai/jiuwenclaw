@@ -24,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
+from zoneinfo import ZoneInfo
 
 import portalocker
 
@@ -43,12 +44,14 @@ from jiuwenswarm.gateway.heartbeat.models import (
     RUN_SKIPPED,
     RUN_SUCCEEDED,
     SOURCE_AGENT_TOOL,
-    SOURCE_SCHEDULE_RECOVERY,
     STATUS_COMPLETED,
     STATUS_DISABLED,
     STATUS_EXPIRED,
     STATUS_RUNNING,
     STATUS_SCHEDULED,
+    SCHEDULE_CRON,
+    SCHEDULE_INTERVAL,
+    SCHEDULE_ONCE,
     empty_heartbeat_jobs_doc,
     validate_metadata_source,
 )
@@ -178,6 +181,298 @@ class HeartbeatJobStore:
 
         await self._run_locked(_body)
 
+    async def _mutate_job(
+        self,
+        job_id: str,
+        mutator: Callable[[HeartbeatJob], HeartbeatJob],
+    ) -> HeartbeatJob:
+        """Atomically read, mutate and write one job under the same file lock."""
+
+        clean_id = str(job_id or "").strip()
+        if not clean_id:
+            raise ValueError("id is required")
+
+        def _body() -> HeartbeatJob:
+            data = self._read_json_unlocked()
+            jobs_raw = data.get("jobs") or []
+            if not isinstance(jobs_raw, list):
+                jobs_raw = []
+            out: list[dict[str, Any]] = []
+            result: HeartbeatJob | None = None
+            for item in jobs_raw:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("id") or "").strip() != clean_id:
+                    out.append(item)
+                    continue
+                current = HeartbeatJob.from_dict(item)
+                result = mutator(current)
+                result.check_invariants()
+                out.append(result.to_dict())
+            if result is None:
+                raise KeyError("job not found")
+            data["jobs"] = out
+            self._write_json_unlocked(data)
+            return result
+
+        return await self._run_locked(_body)
+
+    async def claim_run(
+        self,
+        job_id: str,
+        run_id: str,
+        now: float,
+        *,
+        trigger: str,
+        reschedule: bool,
+        next_run_at_after_claim: float | None = None,
+    ) -> tuple[str, HeartbeatJob, str | None]:
+        """Atomically apply concurrency policy and claim a run.
+
+        Returns ``(decision, job, replaced_run_id)`` where decision is one of
+        ``run/skip/queued/replace``.
+        """
+
+        decision = "run"
+        replaced_run_id: str | None = None
+
+        def _claim(job: HeartbeatJob) -> HeartbeatJob:
+            nonlocal decision, replaced_run_id
+            active = job.run_state.current_run_id
+            if active:
+                if job.concurrency_policy == "queue":
+                    decision = "queued"
+                    return replace(
+                        job,
+                        run_state=replace(
+                            job.run_state,
+                            queued_run_id=run_id,
+                            queued_trigger=trigger,
+                            queued_reschedule=bool(reschedule),
+                        ),
+                        updated_at=float(now),
+                    )
+                if job.concurrency_policy == "replace":
+                    decision = "replace"
+                    replaced_run_id = active
+                    return job
+                decision = "skip"
+                return replace(
+                    job,
+                    last_run_at=float(now),
+                    run_state=replace(
+                        job.run_state,
+                        last_run_status=RUN_SKIPPED,
+                        last_error="previous_run_active",
+                        skipped_count=int(job.run_state.skipped_count) + 1,
+                    ),
+                    updated_at=float(now),
+                )
+
+            return replace(
+                job,
+                status=STATUS_RUNNING,
+                next_run_at=(
+                    next_run_at_after_claim
+                    if trigger == "scheduler"
+                    else job.next_run_at
+                ),
+                run_state=replace(
+                    job.run_state,
+                    current_run_id=run_id,
+                    current_run_started_at=float(now),
+                    current_trigger=trigger,
+                    current_reschedule=bool(reschedule),
+                    resume_status=job.status,
+                    resume_enabled=job.enabled,
+                    resume_next_run_at=job.next_run_at,
+                ),
+                updated_at=float(now),
+            )
+
+        claimed = await self._mutate_job(job_id, _claim)
+        return decision, claimed, replaced_run_id
+
+    async def replace_claimed_run(
+        self,
+        job_id: str,
+        *,
+        expected_run_id: str,
+        new_run_id: str,
+        now: float,
+        trigger: str,
+        reschedule: bool,
+        next_run_at_after_claim: float | None = None,
+    ) -> HeartbeatJob:
+        """Replace exactly one active run after its targeted cancellation was sent."""
+
+        def _replace(job: HeartbeatJob) -> HeartbeatJob:
+            if job.run_state.current_run_id != expected_run_id:
+                raise RuntimeError("active run changed while replacing")
+            return replace(
+                job,
+                status=STATUS_RUNNING,
+                next_run_at=(
+                    next_run_at_after_claim
+                    if trigger == "scheduler"
+                    else job.next_run_at
+                ),
+                run_state=replace(
+                    job.run_state,
+                    current_run_id=new_run_id,
+                    current_run_started_at=float(now),
+                    current_trigger=trigger,
+                    current_reschedule=bool(reschedule),
+                    last_run_status=RUN_CANCELLED,
+                    last_error="replaced",
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _replace)
+
+    async def finish_run(
+        self,
+        job_id: str,
+        run_id: str,
+        now: float,
+        *,
+        outcome: str,
+        error: str | None,
+        next_run_at: float | None,
+        terminal: bool,
+        pause_schedule: bool = False,
+    ) -> tuple[bool, HeartbeatJob]:
+        """Finish only the matching active run; stale completions are ignored."""
+
+        matched = False
+
+        def _finish(job: HeartbeatJob) -> HeartbeatJob:
+            nonlocal matched
+            rs = job.run_state
+            if rs.current_run_id != run_id:
+                return job
+            matched = True
+            increments = outcome in {RUN_SUCCEEDED, RUN_FAILED}
+            run_count = int(job.run_count) + (1 if increments else 0)
+            resume_status = rs.resume_status or STATUS_SCHEDULED
+            resume_enabled = rs.resume_enabled if rs.resume_enabled is not None else True
+            resume_next = rs.resume_next_run_at
+            last_error = str(error)[:1000] if error else None
+            new_rs = replace(
+                rs,
+                current_run_id=None,
+                current_run_started_at=None,
+                current_trigger=None,
+                current_reschedule=False,
+                resume_status=None,
+                resume_enabled=None,
+                resume_next_run_at=None,
+                last_run_status=outcome,
+                last_error=last_error,
+            )
+            if pause_schedule:
+                return replace(
+                    job,
+                    status=STATUS_DISABLED,
+                    enabled=False,
+                    next_run_at=None,
+                    last_run_at=float(now),
+                    run_count=run_count,
+                    run_state=replace(
+                        new_rs,
+                        queued_run_id=None,
+                        queued_trigger=None,
+                        queued_reschedule=False,
+                    ),
+                    updated_at=float(now),
+                )
+            if terminal:
+                return replace(
+                    job,
+                    status=STATUS_COMPLETED,
+                    enabled=False,
+                    next_run_at=None,
+                    last_run_at=float(now),
+                    run_count=run_count,
+                    run_state=replace(
+                        new_rs,
+                        queued_run_id=None,
+                        queued_trigger=None,
+                        queued_reschedule=False,
+                    ),
+                    updated_at=float(now),
+                )
+            if rs.current_trigger == "scheduler" or rs.current_reschedule:
+                if next_run_at is None:
+                    return replace(
+                        job,
+                        status=STATUS_EXPIRED,
+                        enabled=False,
+                        next_run_at=None,
+                        last_run_at=float(now),
+                        run_count=run_count,
+                        run_state=replace(
+                            new_rs,
+                            queued_run_id=None,
+                            queued_trigger=None,
+                            queued_reschedule=False,
+                        ),
+                        updated_at=float(now),
+                    )
+                return replace(
+                    job,
+                    status=STATUS_SCHEDULED,
+                    enabled=True,
+                    next_run_at=float(next_run_at),
+                    last_run_at=float(now),
+                    run_count=run_count,
+                    run_state=new_rs,
+                    updated_at=float(now),
+                )
+            return replace(
+                job,
+                status=resume_status,
+                enabled=bool(resume_enabled),
+                next_run_at=resume_next,
+                last_run_at=float(now),
+                run_count=run_count,
+                run_state=new_rs,
+                updated_at=float(now),
+            )
+
+        result = await self._mutate_job(job_id, _finish)
+        return matched, result
+
+    async def pop_queued_run(
+        self, job_id: str
+    ) -> tuple[str, str, bool] | None:
+        queued: tuple[str, str, bool] | None = None
+
+        def _pop(job: HeartbeatJob) -> HeartbeatJob:
+            nonlocal queued
+            rs = job.run_state
+            if not rs.queued_run_id:
+                return job
+            queued = (
+                rs.queued_run_id,
+                rs.queued_trigger or "scheduler",
+                bool(rs.queued_reschedule),
+            )
+            return replace(
+                job,
+                run_state=replace(
+                    rs,
+                    queued_run_id=None,
+                    queued_trigger=None,
+                    queued_reschedule=False,
+                ),
+                updated_at=time.time(),
+            )
+
+        await self._mutate_job(job_id, _pop)
+        return queued
+
     async def create_job(
         self,
         *,
@@ -195,6 +490,9 @@ class HeartbeatJobStore:
         delete_after_run: bool = False,
         source: str = SOURCE_AGENT_TOOL,
         metadata: dict[str, Any] | None = None,
+        next_run_at: float | None = None,
+        max_active_jobs_per_session: int | None = None,
+        max_active_jobs_global: int | None = None,
         now: float | None = None,
     ) -> HeartbeatJob:
         """创建心跳任务。
@@ -210,8 +508,30 @@ class HeartbeatJobStore:
 
         job_id_clean = str(job_id or "").strip() or f"{_id_prefix()}{uuid.uuid4().hex}"
 
-        # enabled=false 创建 → 直接 disabled 终态;否则 scheduled。
-        if enabled:
+        resolved_next_run_at = next_run_at
+        if enabled and resolved_next_run_at is None:
+            if schedule.type == SCHEDULE_ONCE:
+                resolved_next_run_at = schedule.run_at
+            elif schedule.type == SCHEDULE_INTERVAL:
+                resolved_next_run_at = ts + int(schedule.interval_seconds or 0)
+            elif schedule.type == SCHEDULE_CRON:
+                from datetime import datetime
+
+                from jiuwenswarm.gateway.cron.scheduler import _cron_next_push_dt
+
+                tz = ZoneInfo(schedule.timezone or timezone or DEFAULT_TIMEZONE)
+                resolved_next_run_at = _cron_next_push_dt(
+                    schedule.cron_expr or "", datetime.fromtimestamp(ts, tz=tz)
+                ).timestamp()
+
+        # 过去的 once 已无可执行时间，直接进入 expired；其余 enabled job 必须有 next。
+        if enabled and schedule.type == SCHEDULE_ONCE and (
+            resolved_next_run_at is None or float(resolved_next_run_at) <= ts
+        ):
+            enabled = False
+            status = STATUS_EXPIRED
+            resolved_next_run_at = None
+        elif enabled:
             status = STATUS_SCHEDULED
         else:
             status = STATUS_DISABLED
@@ -234,17 +554,63 @@ class HeartbeatJobStore:
             delete_after_run=bool(delete_after_run),
             created_at=ts,
             updated_at=ts,
-            next_run_at=None,  # 由 controller/scheduler 调 _compute_next_run 后回填
+            next_run_at=(
+                float(resolved_next_run_at)
+                if enabled and resolved_next_run_at is not None
+                else None
+            ),
             last_run_at=None,
             run_count=0,
             metadata=meta,
             run_state=HeartbeatRunState(),
         )
-        # 不变量:disabled 终态要求 next_run_at=None(已置);scheduled 允许 next_run_at
-        # 暂时为 None(刚创建,尚未算 next run)。create 不在此处计算 next_run_at,
-        # 由 controller 调用 scheduler 的 _compute_next_run 回填,避免 store 依赖调度器。
+        # 调度时间由 controller 在写入前计算，禁止持久化 scheduled + None 的僵尸状态。
         job.check_invariants()
-        await self._upsert_job(job)
+
+        def _create() -> None:
+            data = self._read_json_unlocked()
+            jobs_raw = data.get("jobs") or []
+            if not isinstance(jobs_raw, list):
+                jobs_raw = []
+            parsed: list[HeartbeatJob] = []
+            for item in jobs_raw:
+                if not isinstance(item, dict):
+                    continue
+                existing_id = str(item.get("id") or "").strip()
+                if existing_id == job.id:
+                    raise ValueError(f"job id already exists: {job.id}")
+                try:
+                    parsed.append(HeartbeatJob.from_dict(item))
+                except ValueError:
+                    continue
+            if job.enabled:
+                active = [
+                    item
+                    for item in parsed
+                    if item.enabled and item.status in {STATUS_SCHEDULED, STATUS_RUNNING}
+                ]
+                if (
+                    max_active_jobs_global is not None
+                    and len(active) >= int(max_active_jobs_global)
+                ):
+                    raise ValueError(
+                        f"max_active_jobs_global ({max_active_jobs_global}) exceeded"
+                    )
+                active_session = [
+                    item for item in active if item.session_id == job.session_id
+                ]
+                if (
+                    max_active_jobs_per_session is not None
+                    and len(active_session) >= int(max_active_jobs_per_session)
+                ):
+                    raise ValueError(
+                        "max_active_jobs_per_session "
+                        f"({max_active_jobs_per_session}) exceeded"
+                    )
+            data["jobs"] = [*jobs_raw, job.to_dict()]
+            self._write_json_unlocked(data)
+
+        await self._run_locked(_create)
         return job
 
     async def update_job(self, job_id: str, patch: dict[str, Any]) -> HeartbeatJob:
@@ -260,109 +626,122 @@ class HeartbeatJobStore:
         if not job_id:
             raise ValueError("id is required")
         patch = dict(patch or {})
-        existing = await self.get_job(job_id)
-        if existing is None:
-            raise KeyError("job not found")
+        def _apply(existing: HeartbeatJob) -> HeartbeatJob:
+            updated = existing
+            if "name" in patch:
+                updated = replace(updated, name=str(patch.get("name") or "").strip())
+            if "prompt" in patch:
+                updated = replace(updated, prompt=str(patch.get("prompt") or "").strip())
+            if "channel_id" in patch:
+                updated = replace(updated, channel_id=str(patch.get("channel_id") or "").strip())
+            if "session_id" in patch:
+                updated = replace(updated, session_id=str(patch.get("session_id") or "").strip())
+            if "timezone" in patch:
+                from jiuwenswarm.gateway.heartbeat.models import _validate_timezone
 
-        updated = existing
+                updated = replace(
+                    updated,
+                    timezone=_validate_timezone(str(patch.get("timezone") or "").strip()),
+                )
+            if "concurrency_policy" in patch:
+                from jiuwenswarm.gateway.heartbeat.models import HEARTBEAT_CONCURRENCY_POLICIES
 
-        if "name" in patch:
-            updated = replace(updated, name=str(patch.get("name") or "").strip())
-        if "prompt" in patch:
-            updated = replace(updated, prompt=str(patch.get("prompt") or "").strip())
-        if "channel_id" in patch:
-            updated = replace(
-                updated, channel_id=str(patch.get("channel_id") or "").strip()
-            )
-        if "session_id" in patch:
-            updated = replace(
-                updated, session_id=str(patch.get("session_id") or "").strip()
-            )
-        if "timezone" in patch:
-            # 顶层时区变更:仅做规范化,不影响 schedule 内已存时区
-            from jiuwenswarm.gateway.heartbeat.models import _validate_timezone
+                cp = str(patch.get("concurrency_policy") or DEFAULT_CONCURRENCY_POLICY).strip()
+                if cp not in HEARTBEAT_CONCURRENCY_POLICIES:
+                    raise ValueError(f"invalid concurrency_policy {cp!r}")
+                updated = replace(updated, concurrency_policy=cp)
+            if "session_deleted_policy" in patch:
+                from jiuwenswarm.gateway.heartbeat.models import HEARTBEAT_SESSION_DELETED_POLICIES
 
-            updated = replace(
-                updated,
-                timezone=_validate_timezone(str(patch.get("timezone") or "").strip()),
-            )
-        if "concurrency_policy" in patch:
-            from jiuwenswarm.gateway.heartbeat.models import HEARTBEAT_CONCURRENCY_POLICIES
+                sdp = str(patch.get("session_deleted_policy") or DEFAULT_SESSION_DELETED_POLICY).strip()
+                if sdp not in HEARTBEAT_SESSION_DELETED_POLICIES:
+                    raise ValueError(f"invalid session_deleted_policy {sdp!r}")
+                updated = replace(updated, session_deleted_policy=sdp)
+            if "max_runs" in patch:
+                raw_mr = patch.get("max_runs")
+                if raw_mr is None:
+                    updated = replace(updated, max_runs=None)
+                else:
+                    try:
+                        mr = int(raw_mr)
+                    except Exception as exc:  # noqa: BLE001
+                        raise ValueError("max_runs must be int or null") from exc
+                    if mr < 1:
+                        raise ValueError("max_runs must be at least 1")
+                    updated = replace(updated, max_runs=mr)
+            if "delete_after_run" in patch:
+                value = patch.get("delete_after_run")
+                if not isinstance(value, bool):
+                    raise ValueError("delete_after_run must be boolean")
+                updated = replace(updated, delete_after_run=value)
+            if "schedule" in patch:
+                updated = replace(
+                    updated,
+                    schedule=HeartbeatSchedule.from_dict(
+                        patch.get("schedule") or {},
+                        default_timezone=updated.timezone,
+                    ),
+                )
+            if "metadata" in patch:
+                meta_patch = patch.get("metadata")
+                if isinstance(meta_patch, dict):
+                    merged = dict(updated.metadata or {})
+                    merged.update(meta_patch)
+                    if "source" in merged:
+                        merged["source"] = validate_metadata_source(merged.get("source"))
+                    updated = replace(updated, metadata=merged)
 
-            cp = str(patch.get("concurrency_policy") or DEFAULT_CONCURRENCY_POLICY).strip()
-            if cp not in HEARTBEAT_CONCURRENCY_POLICIES:
-                raise ValueError(f"invalid concurrency_policy {cp!r}")
-            updated = replace(updated, concurrency_policy=cp)
-        if "session_deleted_policy" in patch:
-            from jiuwenswarm.gateway.heartbeat.models import (
-                HEARTBEAT_SESSION_DELETED_POLICIES,
-            )
+            if "enabled" in patch:
+                enabled_val = patch.get("enabled")
+                if not isinstance(enabled_val, bool):
+                    raise ValueError("enabled must be boolean")
+                updated = replace(updated, enabled=enabled_val)
+                if not enabled_val:
+                    updated = replace(updated, status=STATUS_DISABLED, next_run_at=None)
+                elif existing.status in HEARTBEAT_TERMINAL_STATUSES:
+                    next_at = patch.get("next_run_at")
+                    if next_at is None:
+                        base = time.time()
+                        if updated.schedule.type == SCHEDULE_ONCE:
+                            next_at = updated.schedule.run_at
+                            if next_at is None or float(next_at) <= base:
+                                raise ValueError(
+                                    "schedule has no future run; update run_at before enabling"
+                                )
+                        elif updated.schedule.type == SCHEDULE_INTERVAL:
+                            next_at = base + int(updated.schedule.interval_seconds or 0)
+                        else:
+                            from datetime import datetime
 
-            sdp = str(
-                patch.get("session_deleted_policy") or DEFAULT_SESSION_DELETED_POLICY
-            ).strip()
-            if sdp not in HEARTBEAT_SESSION_DELETED_POLICIES:
-                raise ValueError(f"invalid session_deleted_policy {sdp!r}")
-            updated = replace(updated, session_deleted_policy=sdp)
-        if "max_runs" in patch:
-            raw_mr = patch.get("max_runs")
-            if raw_mr is None:
-                updated = replace(updated, max_runs=None)
-            else:
-                try:
-                    mr = int(raw_mr)
-                except Exception as exc:  # noqa: BLE001
-                    raise ValueError("max_runs must be int or null") from exc
-                if mr < 1:
-                    raise ValueError("max_runs must be at least 1")
-                updated = replace(updated, max_runs=mr)
-        if "delete_after_run" in patch:
-            updated = replace(updated, delete_after_run=bool(patch.get("delete_after_run")))
-        if "schedule" in patch:
-            new_schedule = HeartbeatSchedule.from_dict(
-                patch.get("schedule") or {},
-                default_timezone=updated.timezone,
-            )
-            updated = replace(updated, schedule=new_schedule)
-        if "metadata" in patch:
-            meta_patch = patch.get("metadata")
-            if isinstance(meta_patch, dict):
-                merged = dict(updated.metadata or {})
-                merged.update(meta_patch)
-                # 若 patch 含 source,校验枚举
-                if "source" in merged:
-                    merged["source"] = validate_metadata_source(merged.get("source"))
-                updated = replace(updated, metadata=merged)
+                            from jiuwenswarm.gateway.cron.scheduler import _cron_next_push_dt
 
-        # ---- enabled / status / next_run_at 联动 ----
-        if "enabled" in patch:
-            enabled_val = bool(patch.get("enabled"))
-            updated = replace(updated, enabled=enabled_val)
-            if not enabled_val:
-                # 停用 → disabled 终态,next_run_at 清空。
-                updated = replace(updated, status=STATUS_DISABLED, next_run_at=None)
-            else:
-                # 重新激活:原终态 → scheduled;原 scheduled 保持。
-                if existing.status in HEARTBEAT_TERMINAL_STATUSES:
-                    updated = replace(updated, status=STATUS_SCHEDULED)
-                # next_run_at 是否重算由调用方通过单独的 reschedule 注入;
-                # 若 patch 显式带了 next_run_at,尊重它。
-                if "next_run_at" not in patch:
-                    # 重新激活但未给 next_run_at → 暂置 None,scheduler 下个 tick 补算。
-                    updated = replace(updated, next_run_at=None)
+                            tz = ZoneInfo(
+                                updated.schedule.timezone
+                                or updated.timezone
+                                or DEFAULT_TIMEZONE
+                            )
+                            next_at = _cron_next_push_dt(
+                                updated.schedule.cron_expr or "",
+                                datetime.fromtimestamp(base, tz=tz),
+                            ).timestamp()
+                    updated = replace(
+                        updated,
+                        status=STATUS_SCHEDULED,
+                        next_run_at=float(next_at),
+                    )
+            if "next_run_at" in patch:
+                nra_raw = patch.get("next_run_at")
+                updated = replace(
+                    updated,
+                    next_run_at=float(nra_raw) if isinstance(nra_raw, (int, float)) else None,
+                )
+            updated = replace(updated, updated_at=time.time())
+            # Full model validation catches empty strings, invalid enums and max_runs.
+            validated = HeartbeatJob.from_dict(updated.to_dict())
+            validated.check_invariants()
+            return validated
 
-        if "next_run_at" in patch:
-            nra_raw = patch.get("next_run_at")
-            updated = replace(
-                updated,
-                next_run_at=float(nra_raw) if isinstance(nra_raw, (int, float)) else None,
-            )
-
-        updated.updated_at = time.time()
-        # 落库前校验不变量。
-        updated.check_invariants()
-        await self._upsert_job(updated)
-        return updated
+        return await self._mutate_job(job_id, _apply)
 
     async def delete_job(self, job_id: str) -> bool:
         """物理删除 job 记录。与终态的「保留记录」不同:delete 是真删除。"""
@@ -655,14 +1034,16 @@ class HeartbeatJobStore:
         return sum(
             1
             for j in await self.list_jobs()
-            if j.session_id == session_id and j.status == STATUS_SCHEDULED and j.enabled
+            if j.session_id == session_id
+            and j.status in {STATUS_SCHEDULED, STATUS_RUNNING}
+            and j.enabled
         )
 
     async def count_active_jobs_global(self) -> int:
         return sum(
             1
             for j in await self.list_jobs()
-            if j.status == STATUS_SCHEDULED and j.enabled
+            if j.status in {STATUS_SCHEDULED, STATUS_RUNNING} and j.enabled
         )
 
     # ---- 运行状态查询(source 兜底) ----

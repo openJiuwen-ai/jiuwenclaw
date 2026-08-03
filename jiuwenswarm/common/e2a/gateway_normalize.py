@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from jiuwenswarm.common.e2a.constants import (
     E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST,
     E2A_RESPONSE_KIND_CRON,
+    E2A_RESPONSE_KIND_HEARTBEAT,
     E2A_RESPONSE_KIND_PLAN_APPROVAL_REQUIRED,
     E2A_RESPONSE_KIND_E2A_CHUNK,
     E2A_RESPONSE_KIND_E2A_COMPLETE,
@@ -581,6 +582,22 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             request_id=rid,
             channel_id=ch,
             payload=body_payload,
+            is_complete=True,
+        )
+
+    if kind == E2A_RESPONSE_KIND_HEARTBEAT:
+        return AgentResponseChunk(
+            agent_ref=_agent_ref,
+            metadata=_meta,
+            request_id=rid,
+            channel_id=ch,
+            payload={
+                "event_type": "heartbeat.response",
+                "action": body.get("action"),
+                "status": body.get("status"),
+                "data": body.get("data"),
+                "message": body.get("message"),
+            },
             is_complete=True,
         )
 
