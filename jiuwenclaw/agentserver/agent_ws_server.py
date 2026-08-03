@@ -1394,22 +1394,36 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def _handle_command_diff(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        from jiuwenclaw.agentserver.diff_service import get_diff_service
+        from jiuwenclaw.agentserver.diff_service import DiffService, get_diff_service
 
         try:
             session_id = request.session_id or "default"
             agent_id, service_id = TenantAgentPool.extract_ids(request)
+            params = request.params if isinstance(request.params, dict) else {}
+            # params.project_dir 不可信：仅当与 session metadata 绑定路径一致时才采用
+            requested_project_dir = params.get("project_dir")
+            if not isinstance(requested_project_dir, str) or not requested_project_dir.strip():
+                requested_project_dir = None
+            else:
+                requested_project_dir = requested_project_dir.strip()
+            project_dir = DiffService.resolve_trusted_project_dir(
+                session_id,
+                requested_project_dir,
+                sessions_root=_sessions_dir_for_request(request),
+            )
             diff_service = get_diff_service()
             turns = diff_service.get_turn_diffs(
                 session_id,
                 service_id=service_id,
                 agent_id=agent_id,
+                project_dir=project_dir,
             )
 
             logger.info(
-                "[AgentWebSocketServer] command.diff response: session_id=%s turns=%s",
+                "[AgentWebSocketServer] command.diff response: session_id=%s turns=%d files=%s",
                 session_id,
-                turns,
+                len(turns),
+                {t["turnIndex"]: list(t["files"].keys()) for t in turns},
             )
 
             resp = AgentResponse(
