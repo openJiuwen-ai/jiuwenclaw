@@ -472,6 +472,17 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         query = (query or "").strip()
         if not query:
             return []
+        # Name fast-path: when the query already looks like a tool name,
+        # resolve it directly from _cached_all_tool_infos (the full inventory
+        # navigation/hidden-summary read from), bypassing _search_corpus.
+        # A runtime-registered tool (e.g. send_file_to_user) can be absent
+        # from _search_corpus due to ghost-filter timing while still present
+        # in _cached_all_tool_infos — this recovers it so the model never
+        # fails to find a tool by its own name (and skips the embed/min_sim
+        # path entirely for an exact-name hit).
+        name_hits = self._lookup_tool_by_name(query, detail_level=detail_level)
+        if name_hits:
+            return name_hits[:limit]
         if self._embedding_model is None:
             return []
         if not self._cached_tool_embeddings:
@@ -519,6 +530,32 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             min_sim=self._min_sim,
         )
 
+    def _lookup_tool_by_name(self, query, *, detail_level=1):
+        """Resolve a query that already looks like a tool name directly from
+        the full inventory, bypassing ``_search_corpus``.
+
+        A runtime-registered tool (e.g. ``send_file_to_user``) can be missing
+        from ``_search_corpus`` due to ghost-filter timing while still being
+        listed in ``_cached_all_tool_infos`` (which navigation and the hidden
+        summary read from). When the model searches by the tool's own name,
+        this fast-path recovers it instead of returning no match — the exact
+        scenario where dense retrieval consistently failed in practice.
+        """
+        ql = query.strip().lower()
+        # "looks like a tool name": contains '_' and is alphanumeric once
+        # underscores are stripped — same heuristic as the retry guard below.
+        if not ql or "_" not in ql or not ql.replace("_", "").isalnum():
+            return []
+        ql_norm = "_".join(ql.split())
+        hits = []
+        for tool in (self._cached_all_tool_infos or []):
+            name = str(getattr(tool, "name", "") or "").lower()
+            if name and (name == ql or name == ql_norm):
+                hits.append(
+                    tool_retrieval.build_tool_summary(tool, detail_level=detail_level)
+                )
+        return hits
+
     # ------------------------------------------------------------------
     # Embedding + corpus helpers
     # ------------------------------------------------------------------
@@ -539,10 +576,18 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         agent = getattr(ctx, "agent", None)
         am = getattr(agent, "ability_manager", None) if agent else None
         session = getattr(ctx, "session", None)
-        sig = frozenset(str(getattr(t, "name", "") or "") for t in (self._cached_all_tool_infos or []))
-        if sig == self._executable_sig and self._search_corpus:
-            return
-        self._executable_sig = sig
+        # Re-filter every turn (no sig cache): a runtime-registered tool
+        # (e.g. send_file_to_user) can be momentarily misclassified as a
+        # ghost when am.get / resource_mgr.get_tool misses due to registration
+        # timing. Caching the sig would lock that misclassification in —
+        # _search_corpus would stay missing the tool while navigation (which
+        # reads _cached_all_tool_infos directly) still lists it, so search
+        # never recovers it. am.get and resource_mgr probes are local dict
+        # lookups; the embedding cache (_cached_tool_sig in
+        # _precompute_tool_embeddings) is independent and still short-circuits.
+        self._executable_sig = frozenset(
+            str(getattr(t, "name", "") or "") for t in (self._cached_all_tool_infos or [])
+        )
 
         def resolver(name):
             tool_id = name

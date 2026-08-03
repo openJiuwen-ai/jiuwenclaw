@@ -202,3 +202,77 @@ def test_search_tools_runs_dense_off_event_loop(monkeypatch):
     results = asyncio.run(rail._search_tools("memory", 3, 3))
     assert results, "dense search returned no results"
     assert results[0]["name"] == "memory_search"
+
+
+def test_search_tools_name_fast_path_recovers_tool_missing_from_corpus(monkeypatch):
+    """坑2: query 是工具名时，即使 _search_corpus 不含该工具（ghost 过滤
+    误杀 / 注册时序），也能从 _cached_all_tool_infos 兜底返回。复现
+    send_file_to_user 4 次搜索都搜不到的场景：导航能列出但 search 搜不到。"""
+    rail = _make_rail(monkeypatch)
+    tool_info = SimpleNamespace(
+        name="send_file_to_user",
+        description="send file to user",
+        parameters={"type": "object"},
+    )
+    # 导航/隐藏摘要读 _cached_all_tool_infos → 能列出 send_file_to_user
+    rail._cached_all_tool_infos = [tool_info]
+    # 但 _search_corpus 不含它（ghost 过滤误杀 + sig 缓存锁死）
+    rail._search_corpus = []
+    # embedding model 没就绪也能命中（name fast-path 不走 dense）
+    rail._embedding_model = None
+
+    results = asyncio.run(rail._search_tools("send_file_to_user", 3, 3))
+
+    assert len(results) == 1, f"expected send_file_to_user, got {results}"
+    assert results[0]["name"] == "send_file_to_user"
+
+
+def test_search_tools_name_fast_path_ignores_non_name_query(monkeypatch):
+    """坑2: query 不是工具名（语义查询、无下划线）时不触发 name fast-path。"""
+    rail = _make_rail(monkeypatch)
+    rail._cached_all_tool_infos = [
+        SimpleNamespace(name="send_file_to_user", description="", parameters={})
+    ]
+    rail._search_corpus = []
+    # "发送文件" 不含下划线 → 不是工具名 → name fast-path 返回 []
+    rail._embedding_model = None
+
+    results = asyncio.run(rail._search_tools("发送文件", 3, 3))
+
+    assert results == [], "name fast-path should not fire for non-tool-name query"
+
+
+def test_build_executable_corpus_refilters_when_sig_unchanged(monkeypatch):
+    """坑1: sig 缓存已移除——工具名字集合没变（sig 相同）也要重新过滤，
+    让运行时工具被误杀后能自愈，不被锁死。"""
+    from jiuwenswarm.agents.harness.common.rails import search_tool_rail as mod
+
+    rail = _make_rail(monkeypatch)
+    rail._cached_all_tool_infos = [
+        SimpleNamespace(name="read_file", description="", parameters={}),
+        SimpleNamespace(name="send_file_to_user", description="send file", parameters={}),
+    ]
+
+    call_count = {"n": 0}
+
+    def fake_filter(tools_list, resolver):
+        call_count["n"] += 1
+        return list(tools_list)
+
+    monkeypatch.setattr(mod.tool_retrieval, "filter_executable", fake_filter)
+
+    ctx = _DummyCtx(agent=MagicMock(), session=_DummySession(), inputs=_DummyInputs([]))
+
+    rail._build_executable_corpus(ctx)
+    assert call_count["n"] == 1
+    first_corpus = rail._search_corpus
+    assert first_corpus is not None and len(first_corpus) == 2
+
+    # Second call: _cached_all_tool_infos unchanged → sig identical.
+    # Before the fix: sig cache hit → return → filter_executable NOT called
+    #   again (n stays 1) and _search_corpus NOT reassigned.
+    # After the fix: re-filters → filter_executable called again (n=2) and
+    #   _search_corpus reassigned.
+    rail._build_executable_corpus(ctx)
+    assert call_count["n"] == 2, "sig cache skipped re-filter (ghost misclassification locked in)"
+    assert rail._search_corpus is not first_corpus, "corpus not reassigned (cache returned early)"
