@@ -1,6 +1,6 @@
 import httpx
 
-from jiuwenswarm.gateway.auth.credential_authenticator import (
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import (
     CredentialAuthenticator,
     AuthContext,
     AuthResult,

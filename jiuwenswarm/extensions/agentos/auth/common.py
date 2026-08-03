@@ -9,7 +9,7 @@ from http import HTTPStatus
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext, AuthResult
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthContext, AuthResult
 
 _UNAUTHORIZED_BODY = b"Unauthorized\n"
 _HANDSHAKE_AUTH_TTL_S = 60.0
