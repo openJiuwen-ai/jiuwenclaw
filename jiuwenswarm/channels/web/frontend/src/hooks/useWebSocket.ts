@@ -2356,6 +2356,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const streamId = currentStreamId;
         const preferredSegmentId =
           finalAction.type === 'patch_segment' ? finalAction.segmentId : undefined;
+        // 收尾时刻单独记：勿覆盖 message.timestamp（排序/goal 卡），但任务用时必须吃到 final。
+        const completedAtIso = normalizeEventTimestampIso(payload.timestamp);
 
         if (assistantStreamSplit && content) {
           const cronMetaEarly = payload.cron as Record<string, unknown> | undefined;
@@ -2371,7 +2373,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 kind: 'agent',
                 content,
                 finalId,
-                timestampIso: new Date().toISOString(),
+                timestampIso: completedAtIso,
               });
               if (!content.includes('MEDIA:')) {
                 handleTtsPlayback(sessionId, finalId, content);
@@ -2388,6 +2390,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 useChatStore.getState().updateMessage(sessionId, rewriteId, {
                   content,
                   isStreaming: false,
+                  completedAt: completedAtIso,
                 });
                 if (!content.includes('MEDIA:')) {
                   handleTtsPlayback(sessionId, rewriteId, content);
@@ -2398,11 +2401,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
         }
 
-        // 未分段：合并进当前流。勿用 payload.timestamp 覆盖消息时间（会与 goal 完成卡抢序）。
+        // 未分段：合并进当前流。勿用 payload.timestamp 覆盖消息时间（会与 goal 完成卡抢序）；
+        // 另写 completedAt，供「任务用时」与历史 final 落盘时间对齐。
         if (streamId && !assistantStreamSplit) {
           useChatStore.getState().updateMessage(sessionId, streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
+            completedAt: completedAtIso,
             ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
           });
           useChatStore.getState().stopStreaming(sessionId);
@@ -2419,6 +2424,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             useChatStore.getState().updateMessage(sessionId, streamId, {
               content: nextContent,
               isStreaming: false,
+              completedAt: completedAtIso,
               ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
             });
             useChatStore.getState().stopStreaming(sessionId);
@@ -2427,7 +2433,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
             return;
           }
-          useChatStore.getState().updateMessage(sessionId, streamId, { isStreaming: false });
+          useChatStore.getState().updateMessage(sessionId, streamId, {
+            isStreaming: false,
+            completedAt: completedAtIso,
+          });
           useChatStore.getState().stopStreaming(sessionId);
         }
         if (content) {
@@ -2459,7 +2468,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               }
             }
             if (placeholderId) {
-              useChatStore.getState().updateMessage(sessionId, placeholderId, { content, isStreaming: false });
+              useChatStore.getState().updateMessage(sessionId, placeholderId, {
+                content,
+                isStreaming: false,
+                completedAt: completedAtIso,
+              });
               if (!content.includes('MEDIA:')) {
                 handleTtsPlayback(sessionId, placeholderId, content);
               }
@@ -2477,9 +2490,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const existing = messages.find((m) => m.id === messageId);
           if (existing) {
             if (existing.content === content) {
+              useChatStore.getState().updateMessage(sessionId, messageId, {
+                isStreaming: false,
+                completedAt: completedAtIso,
+              });
               return;
             }
-            useChatStore.getState().updateMessage(sessionId, messageId, { content, isStreaming: false });
+            useChatStore.getState().updateMessage(sessionId, messageId, {
+              content,
+              isStreaming: false,
+              completedAt: completedAtIso,
+            });
             if (!content.includes('MEDIA:')) {
               handleTtsPlayback(sessionId, messageId, content);
             }
@@ -2524,6 +2545,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 useChatStore.getState().updateMessage(sessionId, rewriteId, {
                   content,
                   isStreaming: false,
+                  completedAt: completedAtIso,
                 });
                 if (!content.includes('MEDIA:')) {
                   handleTtsPlayback(sessionId, rewriteId, content);
@@ -2536,7 +2558,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               id: finalMsgId,
               role: 'assistant',
               content: remainder,
-              timestamp: new Date().toISOString(),
+              timestamp: completedAtIso,
+              completedAt: completedAtIso,
               isProactiveRecommendation,
               ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
             });
@@ -2555,6 +2578,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             useChatStore.getState().updateMessage(sessionId, rewriteId, {
               content,
               isStreaming: false,
+              completedAt: completedAtIso,
             });
             if (!content.includes('MEDIA:')) {
               handleTtsPlayback(sessionId, rewriteId, content);
@@ -2563,13 +2587,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           const last = messages[messages.length - 1];
           if (last?.role === 'assistant' && last.content === content) {
+            useChatStore.getState().updateMessage(sessionId, last.id, {
+              isStreaming: false,
+              completedAt: completedAtIso,
+            });
             return;
           }
           useChatStore.getState().addMessage(sessionId, {
             id: messageId,
             role: 'assistant',
             content,
-            timestamp: new Date().toISOString(),
+            timestamp: completedAtIso,
+            completedAt: completedAtIso,
             isProactiveRecommendation,
             ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
           });
@@ -2682,7 +2711,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
-        useChatStore.getState().addFileItems(sessionId, files);
+        useChatStore.getState().addFileItems(sessionId, files, {
+          timestampIso: normalizeEventTimestampIso(payload.timestamp),
+        });
       }),
       webClient.on('chat.tool_call', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
@@ -2804,9 +2835,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             activeSessionId
           );
         }
-        useChatStore.getState().addToolResult(sessionId, toolResult, {
-          updatedAt: normalizeEventTimestampIso(payload.timestamp),
-        });
+        useChatStore.getState().addToolResult(
+          sessionId,
+          {
+            toolName: toolResult.toolName,
+            result: toolResult.result,
+            success: toolResult.success,
+            toolCallId: toolResult.toolCallId,
+            summary: toolResult.summary,
+            skillTree: toolResult.skillTree,
+            beamSearch: toolResult.beamSearch,
+            ...(toolResult.timedOut ? { timedOut: true } : {}),
+          },
+          {
+            updatedAt: normalizeEventTimestampIso(payload.timestamp),
+          }
+        );
       }),
       webClient.on('todo.updated', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
@@ -3875,6 +3919,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const markAllRuntimes = () => {
       const runtimes = useChatStore.getState().runtimes;
       for (const sid of Object.keys(runtimes)) {
+        // 历史回放期间不要把旧 tool_call 误标 timeout，等 settleHistorical 先按结果落终态
+        if (runtimes[sid]?.isLoadingHistory) {
+          continue;
+        }
         useChatStore.getState().markTimedOutExecutions(sid);
       }
     };

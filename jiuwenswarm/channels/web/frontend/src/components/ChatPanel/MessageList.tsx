@@ -108,6 +108,7 @@ function CompletedWorkChip({
   variant,
   thinkingCount = 0,
   toolCount = 0,
+  outcomeTone = 'neutral',
   expanded,
   onToggle,
   showAvatar,
@@ -116,6 +117,7 @@ function CompletedWorkChip({
   variant: 'turn' | 'streak';
   thinkingCount?: number;
   toolCount?: number;
+  outcomeTone?: 'success' | 'partial' | 'error' | 'neutral';
   expanded: boolean;
   onToggle: () => void;
   showAvatar: boolean;
@@ -126,7 +128,18 @@ function CompletedWorkChip({
   const label =
     variant === 'turn'
       ? t('chatUi.workCompletedFallback')
-      : formatStreakSummaryLabel(t, thinkingCount, toolCount);
+      : formatStreakSummaryLabel(t, thinkingCount, toolCount, outcomeTone);
+  // 最外层「已完成」始终绿勾；展开后的 streak：全成功绿勾 / 部分失败黄勾+标签 / 全失败红叉。
+  const applyOutcome = variant === 'streak';
+  const showErrorIcon = applyOutcome && outcomeTone === 'error';
+  const showPartialBadge = applyOutcome && outcomeTone === 'partial';
+  const toneClass = !applyOutcome
+    ? 'is-success'
+    : outcomeTone === 'error'
+      ? 'is-error'
+      : outcomeTone === 'partial'
+        ? 'is-partial'
+        : 'is-success';
 
   const chip = (
     <button
@@ -134,18 +147,31 @@ function CompletedWorkChip({
       className={clsx(
         'completed-work-chip',
         variant === 'streak' && 'completed-work-chip--streak',
-        expanded && 'is-expanded'
+        expanded && 'is-expanded',
+        toneClass
       )}
       onClick={onToggle}
       aria-expanded={expanded}
     >
-      <span className="completed-work-chip__icon" aria-hidden="true">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="10" cy="10" r="6.5" />
-          <path d="m7.2 10.1 1.8 1.8 3.8-3.8" />
-        </svg>
+      <span className={clsx('completed-work-chip__icon', toneClass)} aria-hidden="true">
+        {showErrorIcon ? (
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="10" cy="10" r="6.5" />
+            <path d="m7.6 7.6 4.8 4.8M12.4 7.6l-4.8 4.8" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="10" cy="10" r="6.5" />
+            <path d="m7.2 10.1 1.8 1.8 3.8-3.8" />
+          </svg>
+        )}
       </span>
       <span className="completed-work-chip__label">{label}</span>
+      {showPartialBadge ? (
+        <span className="completed-work-chip__badge is-partial">
+          {t('chatUi.workOutcomePartial')}
+        </span>
+      ) : null}
       <span className={clsx('tool-tree-item__disclosure', expanded && 'is-open')} aria-hidden="true">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path strokeLinecap="round" strokeLinejoin="round" d="m8 6 4 4-4 4" />
@@ -438,6 +464,7 @@ export function ChatTimelineList({
                   <CompletedWorkChip
                     key={`completed-work-${item.turnId}`}
                     variant="turn"
+                    outcomeTone={meta.outcomeTone}
                     expanded={turnOpen}
                     onToggle={() => toggleTurn(item.turnId)}
                     showAvatar
@@ -512,6 +539,7 @@ export function ChatTimelineList({
               <CompletedWorkChip
                 key={`completed-work-${item.turnId}`}
                 variant="turn"
+                outcomeTone={meta.outcomeTone}
                 expanded={turnOpen}
                 onToggle={() => toggleTurn(item.turnId)}
                 // 折叠条就是该轮视觉顶部：头像必须挂在这里，不能跟 meta/内容区抢来抢去。
@@ -531,6 +559,7 @@ export function ChatTimelineList({
                 variant="streak"
                 thinkingCount={streak.thinkingCount}
                 toolCount={streak.toolCount}
+                outcomeTone={streak.outcomeTone}
                 expanded={streakOpen}
                 onToggle={() => toggleStreak(streak.id)}
                 // 仅当这条 streak 本身吃到了本轮顶部头像时才画；后续 streak 一律不画
