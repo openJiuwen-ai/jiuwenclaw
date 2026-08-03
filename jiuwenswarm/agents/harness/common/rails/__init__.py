@@ -19,9 +19,11 @@ from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.multimodal_image_rail import MultimodalImageRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
+from jiuwenswarm.agents.harness.common.rails.task_execution_rail import TaskExecutionRail
 
 __all__ = [
     "JiuSwarmStreamEventRail",
+    "TaskExecutionRail",
     "MultimodalImageRail",
     "PermissionInterruptRail",
     "AvatarPromptRail",

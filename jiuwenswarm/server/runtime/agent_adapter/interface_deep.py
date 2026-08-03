@@ -145,6 +145,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     RuntimePromptRail,
     StructuredAskUserRail,
     SymphonyOrchestrationRail,
+    TaskExecutionRail,
 )
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
@@ -1013,6 +1014,7 @@ class JiuWenSwarmDeepAdapter:
         self._filesystem_rail: SysOperationRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
+        self._task_execution_rail: TaskExecutionRail | None = None
         # Track session IDs currently executing on this adapter instance.
         # Used by process_interrupt to avoid aborting sessions that are not
         # the target of the interrupt request (cross-session contamination).
@@ -1915,6 +1917,18 @@ class JiuWenSwarmDeepAdapter:
     def _filesystem_rail_enabled_for_profile(self) -> bool:
         raw = self._instance_overrides.get("enable_filesystem_rail", True)
         return bool(raw)
+
+    def _task_execution_rail_enabled(self) -> bool:
+        """Whether TaskExecutionRail (task.start/complete/update events) is enabled.
+
+        Defaults to False — the jiuwenswarm frontend only consumes todo.updated.
+        Enable for relayclaw frontend which consumes task.start/complete/update
+        lifecycle events. Set in config.yaml:
+
+            react:
+              enable_task_execution_rail: true
+        """
+        return bool(self._config_cache.get("enable_task_execution_rail", False))
 
     def _skill_include_tools_for_profile(self) -> bool:
         if self._is_acp_tool_profile(self._instance_overrides):
@@ -4193,6 +4207,17 @@ class JiuWenSwarmDeepAdapter:
         return stream_event_rail
 
     @staticmethod
+    def _build_task_execution_rail() -> TaskExecutionRail | None:
+        """Build TaskExecutionRail for task.start/complete/update lifecycle events."""
+        try:
+            task_rail = TaskExecutionRail()
+            logger.info("[JiuWenSwarmDeepAdapter] TaskExecutionRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] TaskExecutionRail create failed: %s", exc)
+            task_rail = None
+        return task_rail
+
+    @staticmethod
     def _build_multimodal_image_rail(
         enable_image_multimodal: bool | None = None,
     ) -> MultimodalImageRail | None:
@@ -4671,6 +4696,14 @@ class JiuWenSwarmDeepAdapter:
         )
         if isinstance(mode, str) and mode.startswith("agent"):
             rail_infos.append(_RailBuildInfo("_ask_user_rail", self._build_structured_ask_user_rail))
+        # TaskExecutionRail 仅在冷启动时创建/注册，不参与热重载重建。
+        # 切换 enable_task_execution_rail 需重启实例生效（by design）。
+        if self._task_execution_rail_enabled():
+            rail_infos.append(
+                _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail)
+            )
+        else:
+            self._task_execution_rail = None
 
         return self._instantiate_rails(rail_infos, config_base)
 
