@@ -28,7 +28,7 @@ def headers_to_dict(headers: Any) -> dict[str, str]:
     except Exception:
         return {}
 
-#从 URL query / Authorization header / X-Token header 提取 token
+# 从 URL query / Authorization header / X-Token header 提取 token
 def extract_token_from_path_and_headers(
         path: str,
         headers: Any,
