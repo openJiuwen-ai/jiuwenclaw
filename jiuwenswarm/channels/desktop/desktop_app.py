@@ -1594,7 +1594,7 @@ class DesktopRuntime:
             else:
                 # Linux: 系统通知 + 打开文件夹
                 notify_cmd = [
-                    "notify-send", "--app-name=JiuwenSwarm",
+                    "/usr/bin/notify-send", "--app-name=JiuwenSwarm",
                     "下载完成",
                     f"文件已保存到: {file_path}",
                     "--icon=document-save",
@@ -1606,7 +1606,7 @@ class DesktopRuntime:
                 )
                 # 打开文件所在文件夹（选中文件）
                 subprocess.Popen(
-                    ["xdg-open", str(Path(file_path).parent)],
+                    ["/usr/bin/xdg-open", str(Path(file_path).parent)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
