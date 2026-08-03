@@ -8,7 +8,7 @@ from jiuwenswarm.symphony.fingerprint.models import (
     ExtractedSkillSchema,
     ParameterSpec,
     RawSkillManifest,
-    SkillFingerprint,
+    Fingerprint,
     SkillFolder,
 )
 from jiuwenswarm.symphony.fingerprint.normalize import (
@@ -246,19 +246,14 @@ class _CaptureJSONClient:
         self.calls.append(kwargs)
         return """
         {
-          "skills": [
+          "resolutions": [
             {
-              "skill_ref": "0:text",
-              "resolutions": [
-                {
-                  "token": "text",
-                  "action": "alias_existing",
-                  "target": "content",
-                  "confidence": 0.9,
-                  "reason": "same content role",
-                  "definition": "Text content alias"
-                }
-              ]
+              "id": "i1",
+              "action": "alias_existing",
+              "target": "content",
+              "confidence": 0.9,
+              "reason": "same content role",
+              "definition": "Text content alias"
             }
           ]
         }
@@ -277,7 +272,7 @@ class _CaptureSchemaClient:
                 {
                     "schemas": [
                         {
-                            "skill_ref": item["source"]["relative_path"],
+                            "skill_ref": item["skill_ref"],
                             "description": "Schema",
                             "inputs": [{"name": "input", "type": "text"}],
                             "outputs": [{"name": "result", "type": "text"}],
@@ -324,23 +319,10 @@ class _CaptureMatchClient:
             {
                 "matches": [
                     {
-                        "candidate_id": "source->target",
-                        "source_id": "source",
-                        "target_id": "target",
-                        "relation_type": "can_feed",
+                        "id": "c1",
+                        "direction": "forward",
                         "confidence": 0.95,
-                        "method": "llm_ontology_match",
-                        "reasons": ["result satisfies input"],
-                        "supporting_fields": {
-                            "port_mappings": [
-                                {
-                                    "source_output": "result",
-                                    "target_input": "input",
-                                }
-                            ],
-                            "source_outputs": ["result"],
-                            "target_inputs": ["input"],
-                        },
+                        "reason": "result satisfies input",
                     }
                 ]
             }
@@ -424,12 +406,16 @@ def _raw_manifest(tmp_path, folder_name):
 
 def _expected_thinking_disabled_overrides():
     return {
-        "extra_body": {"thinking": {"type": "disabled"}},
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
     }
 
 
 @pytest.mark.asyncio
-async def test_schema_extractor_uses_low_reasoning_for_single_extract(monkeypatch, tmp_path):
+async def test_schema_extractor_disables_thinking_for_single_extract(monkeypatch, tmp_path):
     client = _CaptureSchemaClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.fingerprint.extract.extractor.create_llm_client",
@@ -450,11 +436,11 @@ async def test_schema_extractor_uses_low_reasoning_for_single_extract(monkeypatc
 
     assert result.outputs[0].name == "result"
     assert client.calls[0]["request_overrides"] == _expected_thinking_disabled_overrides()
-    assert "reasoning text" in client.calls[0]["system_prompt"]
+    assert "Return JSON only" in client.calls[0]["system_prompt"]
 
 
 @pytest.mark.asyncio
-async def test_schema_extractor_uses_low_reasoning_for_many_paths(monkeypatch, tmp_path):
+async def test_schema_extractor_disables_thinking_for_many_paths(monkeypatch, tmp_path):
     client = _CaptureSchemaClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.fingerprint.extract.extractor.create_llm_client",
@@ -483,11 +469,11 @@ async def test_schema_extractor_uses_low_reasoning_for_many_paths(monkeypatch, t
     assert client.calls[0]["request_overrides"] == _expected_thinking_disabled_overrides()
     assert client.calls[1]["method"] == "one"
     assert client.calls[1]["request_overrides"] == _expected_thinking_disabled_overrides()
-    assert "reasoning text" in client.calls[1]["system_prompt"]
+    assert "Return JSON only" in client.calls[1]["system_prompt"]
 
 
 @pytest.mark.asyncio
-async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypatch):
+async def test_graph_matcher_disables_thinking_for_forward_and_reverse(monkeypatch):
     client = _CaptureMatchClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.graph.matcher.openai.create_llm_client",
@@ -507,7 +493,8 @@ async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypa
     )
     registry = SkillRegistry(
         skills={
-            "source": SkillFingerprint(
+            "source": Fingerprint(
+                type="skill",
                 id="source",
                 name="Source",
                 description="Produces result",
@@ -515,7 +502,8 @@ async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypa
                 inputs=[],
                 outputs=[ArtifactSpec(name="result", type="text")],
             ),
-            "target": SkillFingerprint(
+            "target": Fingerprint(
+                type="skill",
                 id="target",
                 name="Target",
                 description="Consumes input",
@@ -558,7 +546,7 @@ async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypa
         _expected_thinking_disabled_overrides(),
         _expected_thinking_disabled_overrides(),
     ]
-    assert all("reasoning text" in call["system_prompt"] for call in client.calls)
+    assert all("Return JSON only" in call["system_prompt"] for call in client.calls)
 
 
 @pytest.mark.asyncio
@@ -620,6 +608,7 @@ async def test_build_score_passes_separate_symphony_stage_configs(tmp_path):
             "build": {
                 "workers": 8,
                 "batch_size": 9,
+                "max_candidates_per_skill_relation": 17,
                 "require_consensus": False,
                 "min_edge_confidence": 0.33,
             },
@@ -667,6 +656,7 @@ async def test_build_score_passes_separate_symphony_stage_configs(tmp_path):
     assert seen["normalization"].max_vocab_size == 7
     assert seen["build"].workers == 8
     assert seen["build"].batch_size == 9
+    assert seen["build"].max_candidates_per_skill_relation == 17
     assert seen["build"].require_consensus is False
     assert seen["build"].min_edge_confidence == 0.33
 
@@ -901,6 +891,55 @@ async def test_build_score_reuses_unchanged_relation_matches(tmp_path):
     assert second.relation_resolved_count == 0
     assert second.relation_reused_count == first.relation_resolved_count
     assert second_matcher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_relation_cache_preserves_matcher_worker_windows(tmp_path):
+    matcher = _CountingAcceptedMatcher()
+    matcher.batch_size = 2
+    matcher.max_workers = 3
+    cached_matcher = CachedOntologyMatcher(
+        matcher,
+        tmp_path / "relation_matches.json",
+        fingerprints=[],
+    )
+    candidates = [
+        RelationCandidate(
+            source_id=f"source-{index}",
+            target_id=f"target-{index}",
+            relation_hints=["can_feed"],
+            candidate_methods=["test"],
+            priority="medium",
+        )
+        for index in range(8)
+    ]
+
+    first = await cached_matcher.match(SkillRegistry(skills={}), candidates)
+    second = await cached_matcher.match(SkillRegistry(skills={}), candidates)
+
+    assert [len(call) for call in matcher.calls] == [6, 2]
+    assert len(first) == 8
+    assert len(second) == 8
+    assert cached_matcher.stats.reused_count == 8
+    assert cached_matcher.stats.resolved_count == 0
+
+
+@pytest.mark.asyncio
+async def test_graph_manifest_records_candidate_generation_limit():
+    result = await GraphBuilder(
+        matcher=_NoopMatcher(),
+        candidate_generator=CandidateGenerator(
+            max_candidates_per_skill_relation=17,
+            max_port_mappings_per_candidate=9,
+            max_exact_io_pair_fanout=33,
+        ),
+    ).build([])
+
+    assert result.manifest.candidate_generation == {
+        "max_candidates_per_skill_relation": 17,
+        "max_port_mappings_per_candidate": 9,
+        "max_exact_io_pair_fanout": 33,
+    }
 
 
 @pytest.mark.asyncio
@@ -1340,7 +1379,8 @@ async def test_normalized_calendar_memo_input_enables_expected_candidates(tmp_pa
     registry = SkillRegistry(
         skills={
             calendar_result.fingerprint.id: calendar_result.fingerprint,
-            "speech-to-text": SkillFingerprint(
+            "speech-to-text": Fingerprint(
+                type="skill",
                 id="speech-to-text",
                 name="speech-to-text",
                 description="Transcribe audio to text.",
@@ -1348,7 +1388,8 @@ async def test_normalized_calendar_memo_input_enables_expected_candidates(tmp_pa
                 inputs=[ParameterSpec(name="audio", type="audio")],
                 outputs=[ArtifactSpec(name="text", type="text")],
             ),
-            "general-writing": SkillFingerprint(
+            "general-writing": Fingerprint(
+                type="skill",
                 id="general-writing",
                 name="general-writing",
                 description="Write markdown content.",
@@ -1538,7 +1579,7 @@ async def test_normalizer_can_exclude_candidate_from_io_name_vocab(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_llm_io_name_resolver_uses_low_reasoning_and_compact_vocab(monkeypatch):
+async def test_llm_io_name_resolver_disables_thinking_and_uses_compact_vocab(monkeypatch):
     client = _CaptureJSONClient()
     monkeypatch.setattr(
         "jiuwenswarm.symphony.fingerprint.normalize.io_name_resolver.create_llm_client",
@@ -1583,20 +1624,18 @@ async def test_llm_io_name_resolver_uses_low_reasoning_and_compact_vocab(monkeyp
 
     assert result["text"].normalized_value == "content"
     call = client.calls[0]
-    assert call["request_overrides"] == {
-        "extra_body": {"thinking": {"type": "disabled"}},
-    }
+    assert call["request_overrides"] == _expected_thinking_disabled_overrides()
     payload = json.loads(call["user_content"])
     assert "rules" not in payload
-    assert payload["vocabulary"]["terms"] == [
+    assert payload["vocabulary"] == [
         {
             "name": "content",
             "definition": "Generated written content",
             "aliases": ["body"],
         }
     ]
-    assert "examples" not in payload["vocabulary"]["terms"][0]
-    assert "count" not in payload["vocabulary"]["terms"][0]
+    assert "examples" not in payload["vocabulary"][0]
+    assert "count" not in payload["vocabulary"][0]
 
 
 @pytest.mark.asyncio
@@ -1732,7 +1771,8 @@ async def test_fingerprint_extractor_extract_from_root_reports_removed_paths_and
 @pytest.mark.asyncio
 async def test_graph_builder_call_emits_progress_and_supports_no_progress():
     fingerprints = [
-        SkillFingerprint(
+        Fingerprint(
+            type="skill",
             id="skill-1",
             name="Skill 1",
             description="Test skill",

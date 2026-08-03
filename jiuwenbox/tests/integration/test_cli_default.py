@@ -407,17 +407,18 @@ def test_cli_sandbox_bg_get_instant_task(server_url, tracking_sandboxes, client)
     assert started.get("started") is True
 
     deadline = time.monotonic() + 10.0
-    stdout_text = ""
+    status: dict = {}
     while time.monotonic() < deadline:
         _, status = _run_cli_json(
             ["sandbox", "bg-get", sandbox_id, "ver-cli"],
             base_url=server_url,
         )
         if not status.get("running"):
-            stdout_text = status.get("stdout") or ""
             break
         time.sleep(0.1)
-    assert "Python" in stdout_text
+    assert status.get("running") is False
+    assert status.get("exit_code") == 0
+    assert (status.get("stdout") or "") == ""
 
 
 def test_cli_sandbox_bg_list_and_kill(server_url, tracking_sandboxes, client):

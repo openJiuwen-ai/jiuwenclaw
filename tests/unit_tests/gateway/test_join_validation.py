@@ -1,92 +1,180 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests for /join mismatch 校验与对外文案（路线 B：文案全在 gateway）.
+"""Tests for /join team↔session 一致性校验与对外文案（路线 B：文案全在 gateway）。
 
-替代被删的 test_team_member_lookup.py。路线 B 下 mismatch 校验上移到 gateway
-本地（join_slash_handler），文案单一真相源在 join_exit_handlers 模块级
-_join_err_*。mismatch 判定复用 TeamManager.build_session_scoped_team_name：
-team_name 已是 scoped 形式 ⟺ 等于拼接结果。
-
-覆盖用户给出的三 case：
-- CASE1/CASE2：team_name 与 session 后缀不一致 → 报"不匹配"
-- CASE3：后缀一致但查不到 member → 报"不存在"
+一致性真伪交由下游 fetch_team_human_members 的 RPC 仲裁：按 team_name 直查 team.db，
+输错 team → 查不到席位 → 走"不存在"文案。文案单一真相源在 _join_err_team_not_exist。
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 import pytest
 
-from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+from jiuwenswarm.common.schema.agent import AgentResponse
+from jiuwenswarm.common.schema.message import Message
+from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
+    ParsedChannelControl,
+    ParsedControlAction,
+)
 from jiuwenswarm.gateway.message_handler.join_exit_handlers import (
-    _join_err_mismatch,
+    JoinExitHandlers,
     _join_err_team_not_exist,
 )
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+from jiuwenswarm.gateway.routing.session_sharing import SessionSharingRegistry
 
 
-def _is_mismatch(team_name: str, session_id: str) -> bool:
-    """复刻 join_slash_handler 的本地 mismatch 判定（路线 B）。"""
-    if not team_name:
-        return True
-    return team_name != TeamManager.build_session_scoped_team_name(team_name, session_id)
-
-
-# ── 文案 helper ──
-
-def test_mismatch_message_contains_team_and_session() -> None:
-    msg = _join_err_mismatch("jiuwen_team_sess_X", "sess_Y")
-    assert "jiuwen_team_sess_X" in msg
-    assert "sess_Y" in msg
-    assert "不匹配" in msg
-    assert "session_ref" in msg
-
+# ── copy helper ──
 
 def test_not_exist_message_contains_team() -> None:
     assert "jiuwen_team_sess_X" in _join_err_team_not_exist("jiuwen_team_sess_X")
 
 
+def test_not_exist_message_contains_keyword() -> None:
+    assert "不存在" in _join_err_team_not_exist("报数游戏小队")
+
+
 def test_not_exist_message_fallback_for_empty_team_name() -> None:
     """team_name 空 → 文案用"未知"兜底，不崩。"""
-    msg = _join_err_team_not_exist("")
-    assert "未知" in msg
+    assert "未知" in _join_err_team_not_exist("")
 
 
-# ── mismatch 判定三 case（用用户给的真实 session_ref）──
+# ── base name reaches register (regression for the removed local check) ──
 
-_REAL_REF = (
-    "team_jiuwen_team_sess_19f608d7a9c_f5ef621_session_sess_19f608d7a9c_f5ef621"
-)
+class _FakeClient:
+    def __init__(self, resp: AgentResponse) -> None:
+        self._resp = resp
 
-
-def _parse(ref: str) -> tuple[str, str]:
-    """从 session_ref 解析 (team_name, session_id)，同 join_slash_handler。"""
-    sid = MessageHandler.extract_session_id_from_ref(ref)
-    team_name = MessageHandler.extract_team_name_from_ref(ref)
-    assert sid is not None
-    return team_name, sid
+    async def send_request(self, _env) -> AgentResponse:
+        return self._resp
 
 
-@pytest.mark.parametrize(
-    "ref,expect_mismatch",
-    [
-        # CASE1: team_name 后缀 X ≠ session Y
-        ("team_jiuwen_team_sess_19f608d7a9c_f5ef621_session_sess_19f608d7a9c_f5ef62", True),
-        # CASE2: 反向 X/Y 互换
-        ("team_jiuwen_team_sess_19f608d7a9c_f5ef62_session_sess_19f608d7a9c_f5ef621", True),
-        # CASE3: 后缀一致 → 不是 mismatch（走"查 member"，查不到才报"不存在"）
-        (_REAL_REF, False),
-    ],
-)
-def test_mismatch_branch(ref: str, expect_mismatch: bool) -> None:
-    team_name, sid = _parse(ref)
-    assert _is_mismatch(team_name, sid) is expect_mismatch
+def _make_msg(*, user_id: str = "ou_user1") -> Message:
+    return Message(
+        id="m1", type="req", channel_id="feishu", session_id="oc_chat_x",
+        params={}, timestamp=0.0, ok=True, chat_id="oc_chat_x", user_id=user_id,
+        metadata={"im_sender_user_id": user_id, "im_sender_name": "tester"},
+    )
 
 
-def test_case3_matched_renders_not_exist_message() -> None:
-    """CASE3 后缀一致：mismatch=False，文案应是"不存在"（不是"不匹配"）。"""
-    team_name, _sid = _parse(_REAL_REF)
-    assert not _is_mismatch(team_name, _sid)
-    # 此时查不到 member → join_slash_handler 拼 _join_err_team_not_exist
-    msg = _join_err_team_not_exist(team_name)
-    assert team_name in msg
-    assert "不存在" in msg
+def _make_handler(resp: AgentResponse, registry: SessionSharingRegistry):
+    client = _FakeClient(resp)
+    notices: list[str] = []
+    published: list = []
+
+    async def _send_channel_notice(_uis, _ch, _sid, text):
+        notices.append(text)
+
+    async def _publish_robot_messages(msg):
+        published.append(msg)
+
+    host = SimpleNamespace(
+        agent_client=client,
+        get_session_sharing_registry=lambda: registry,
+        send_channel_notice=_send_channel_notice,
+        publish_robot_messages=_publish_robot_messages,
+        extract_session_id_from_ref=MessageHandler.extract_session_id_from_ref,
+        extract_team_name_from_ref=MessageHandler.extract_team_name_from_ref,
+        resolve_app_id=lambda _msg: "default",
+    )
+    return JoinExitHandlers(host), notices
+
+
+def _join_parsed(session_ref: str, member_name: str) -> ParsedChannelControl:
+    return ParsedChannelControl(
+        action=ParsedControlAction.JOIN_OK,
+        session_ref=session_ref,
+        member_name=member_name,
+    )
+
+
+@pytest.mark.anyio
+async def test_base_team_name_reaches_register() -> None:
+    """回归：自动建队持久化的 base 名（如"报数游戏小队"）必须能走到 register。
+
+    旧本地预判用 base 名与 scoped 拼接结果比较，恒不等，导致每次 /join 都误判 mismatch。
+    """
+    sid = "sess_19fb0ea563b_0f180a8272f6"
+    resp = AgentResponse(
+        request_id="r", channel_id="feishu", ok=True,
+        payload={"members": [
+            {"member_id": "player-2", "role": "human_agent"},
+            {"member_id": "player-1", "role": "human_agent"},
+        ]},
+    )
+    registry = SessionSharingRegistry()
+    handler, notices = _make_handler(resp, registry)
+
+    await handler.join_slash_handler(
+        {}, "feishu", _make_msg(),
+        _join_parsed(f"team_报数游戏小队_session_{sid}", "player-2"),
+    )
+
+    assert not any("不匹配" in n for n in notices), f"false mismatch: {notices}"
+    assert not any("不存在" in n for n in notices), f"false not-exist: {notices}"
+    subs = registry.lookup_member(sid, "player-2")
+    assert len(subs) == 1
+    assert subs[0].routing_key.session_id == sid
+    assert subs[0].routing_key.agent_ref.id == "报数游戏小队"
+    assert any("已加入 session" in n for n in notices)
+
+
+@pytest.mark.anyio
+async def test_scoped_team_name_still_works() -> None:
+    """向后兼容：scoped 形式 team_name 仍应正常加入。"""
+    sid = "sess_19f608d7a9c_f5ef621"
+    scoped_name = f"jiuwen_team_{sid}"
+    resp = AgentResponse(
+        request_id="r", channel_id="feishu", ok=True,
+        payload={"members": [{"member_id": "player-1", "role": "human_agent"}]},
+    )
+    registry = SessionSharingRegistry()
+    handler, notices = _make_handler(resp, registry)
+
+    await handler.join_slash_handler(
+        {}, "feishu", _make_msg(),
+        _join_parsed(f"team_{scoped_name}_session_{sid}", "player-1"),
+    )
+
+    assert len(registry.lookup_member(sid, "player-1")) == 1
+    assert not any("不匹配" in n for n in notices)
+
+
+@pytest.mark.anyio
+async def test_wrong_team_reports_not_exist() -> None:
+    """输错 team（与 session 无关）→ 查不到席位 → 报"不存在"，不进 register。"""
+    sid = "sess_real"
+    resp = AgentResponse(
+        request_id="r", channel_id="feishu", ok=False, payload={"members": []},
+    )
+    registry = SessionSharingRegistry()
+    handler, notices = _make_handler(resp, registry)
+
+    await handler.join_slash_handler(
+        {}, "feishu", _make_msg(),
+        _join_parsed(f"team_完全不相关的队伍_session_{sid}", "player-1"),
+    )
+
+    assert any("不存在" in n for n in notices)
+    assert registry.lookup_member(sid, "player-1") == []
+
+
+@pytest.mark.anyio
+async def test_member_not_in_team_reports_not_exist() -> None:
+    """team 存在但 member 不在列 → 报"不存在"，不进 register。"""
+    sid = "sess_x"
+    resp = AgentResponse(
+        request_id="r", channel_id="feishu", ok=True,
+        payload={"members": [{"member_id": "player-1", "role": "human_agent"}]},
+    )
+    registry = SessionSharingRegistry()
+    handler, notices = _make_handler(resp, registry)
+
+    await handler.join_slash_handler(
+        {}, "feishu", _make_msg(),
+        _join_parsed(f"team_报数游戏小队_session_{sid}", "player-9"),
+    )
+
+    assert any("不存在" in n for n in notices)
+    assert registry.lookup_member(sid, "player-9") == []

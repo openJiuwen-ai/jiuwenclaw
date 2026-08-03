@@ -1,3 +1,5 @@
 # AgentServer Runtime Changes
 
 - [CHG-20260713-001: Close AgentWebSocketServer method audit delivery](../../changes/records/CHG-20260713-001-agentserver-method-closure.md) records the knowledge-model change that closed 128 method audits, refreshed the session flow, and added five AgentServer flows. It does not describe a product-code change.
+- [CHG-20260731-001: AgentServer-owned session prewarming](../../changes/records/CHG-20260731-001-session-prewarm-allocation.md) adds session allocation, warm-pool reconciliation, and channel ownership changes.
+- [CHG-20260801-005: Prewarming off by default](../../changes/records/CHG-20260801-005-disable-session-prewarm.md) puts warm-pool reconciliation and claiming behind the `JIUWENSWARM_AGENT_PREWARM` opt-in, leaving allocation intact.

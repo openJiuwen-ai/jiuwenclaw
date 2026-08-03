@@ -97,8 +97,6 @@ REQUEST_TYPE_EXEC_BACKGROUND = "exec_background"
 REQUEST_TYPE_BG_STATUS = "bg_status"
 REQUEST_TYPE_BG_KILL = "bg_kill"
 
-SANDBOX_BG_LOG_DIR = "/tmp/.jiuwenbox-bg"
-
 PROTOCOL_VERSION = 1
 MAX_HEADER_BYTES = 1 * 1024 * 1024
 MAX_STDIN_BYTES = 64 * 1024 * 1024
@@ -683,9 +681,6 @@ class _BgJob:
     job_id: str
     command: list[str]
     proc: subprocess.Popen
-    capture_output: bool
-    stdout_path: str | None
-    stderr_path: str | None
 
 
 _bg_jobs: dict[str, _BgJob | object] = {}
@@ -717,19 +712,6 @@ def _sync_bg_job(job: _BgJob) -> None:
         job.proc.poll()
 
 
-def _read_bg_log(path: str | None) -> str:
-    if not path or not os.path.exists(path):
-        return ""
-    try:
-        with open(path, "rb") as fh:
-            data = fh.read(MAX_STDOUT_BYTES + 1)
-        if len(data) > MAX_STDOUT_BYTES:
-            data = data[:MAX_STDOUT_BYTES]
-        return data.decode("utf-8", errors="replace")
-    except OSError:
-        return ""
-
-
 def _bg_job_response(
     *,
     ok: bool,
@@ -754,9 +736,6 @@ def _bg_job_response(
         response["pid"] = job.proc.pid
         response["running"] = job.proc.returncode is None
         response["exit_code"] = job.proc.returncode
-        if job.capture_output:
-            response["stdout"] = _read_bg_log(job.stdout_path)
-            response["stderr"] = _read_bg_log(job.stderr_path)
     return response
 
 
@@ -772,7 +751,6 @@ def _handle_exec_background(conn: socket.socket, header: dict[str, Any]) -> None
             raise ValueError("exec_background request missing 'command'")
         command = _stringify_command(command)
 
-        capture_output = bool(header.get("capture_output", True))
         env_override = _normalize_env(header.get("env"))
         workdir = header.get("workdir")
         if workdir is not None and not isinstance(workdir, str):
@@ -803,26 +781,12 @@ def _handle_exec_background(conn: socket.socket, header: dict[str, Any]) -> None
             if env_override is not None:
                 merged_env.update(env_override)
 
-            stdout_path: str | None = None
-            stderr_path: str | None = None
-            stdout_file = None
-            stderr_file = None
-            if capture_output:
-                os.makedirs(SANDBOX_BG_LOG_DIR, exist_ok=True)
-                stdout_path = f"{SANDBOX_BG_LOG_DIR}/{job_id}.out"
-                stderr_path = f"{SANDBOX_BG_LOG_DIR}/{job_id}.err"
-                stdout_file = open(stdout_path, "wb")
-                stderr_file = open(stderr_path, "wb")
-                stdout_target = stdout_file
-                stderr_target = stderr_file
-            else:
-                stdout_target = subprocess.DEVNULL
-                stderr_target = subprocess.DEVNULL
-
+            # Background jobs discard stdout/stderr; use ``exec`` when output
+            # must be captured.
             proc_kwargs: dict[str, Any] = {
                 "stdin": subprocess.PIPE if stdin_size else subprocess.DEVNULL,
-                "stdout": stdout_target,
-                "stderr": stderr_target,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
                 "env": merged_env,
                 "close_fds": True,
                 "start_new_session": True,
@@ -847,19 +811,11 @@ def _handle_exec_background(conn: socket.socket, header: dict[str, Any]) -> None
                     ),
                 )
                 return
-            finally:
-                if stdout_file is not None:
-                    stdout_file.close()
-                if stderr_file is not None:
-                    stderr_file.close()
 
             job = _BgJob(
                 job_id=job_id,
                 command=command,
                 proc=proc,
-                capture_output=capture_output,
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
             )
             _commit_bg_job(job_id, job)
             reserved = False

@@ -152,8 +152,8 @@ class LegacyReActAgent(BaseAgent):
                 client_provider=self.agent_config.model.model_provider,
                 api_key=self.agent_config.model.model_info.api_key,
                 api_base=self.agent_config.model.model_info.api_base,
-                verify_ssl=False,
-                ssl_cert=None,
+                verify_ssl=getattr(self.agent_config.model.model_info, "verify_ssl", True),
+                ssl_cert=getattr(self.agent_config.model.model_info, "ssl_cert", None),
             )
             model_request_config = ModelRequestConfig(
                 model=self.agent_config.model.model_info.model_name,

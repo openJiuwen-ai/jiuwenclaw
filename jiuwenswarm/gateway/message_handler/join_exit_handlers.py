@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Team seat ownership is implemented only for these IM channels.
+_TEAM_SEAT_SUPPORTED_CHANNELS: frozenset[str] = frozenset({"feishu", "xiaoyi"})
+
 
 # 已 /join 认领 team 席位后仍允许执行的控制指令白名单。
 # 其余会改变 session/mode/分支/对话历史或向 Agent 注入 query 的执行类指令一律拒绝
@@ -55,14 +58,6 @@ _ALLOWED_WHEN_JOINED: frozenset[ParsedControlAction] = frozenset(
         ParsedControlAction.EXIT_BAD,
     }
 )
-
-
-def _join_err_mismatch(team_name: str, session_id: str) -> str:
-    """/join session_ref 里 team_name 与 session_id 不匹配的对外文案。"""
-    return (
-        f"team_name **{team_name}** 与 session **{session_id}** 不匹配，无法加入。"
-        f"请核对 /join 指令中的 session_ref。"
-    )
 
 
 def _join_err_team_not_exist(team_name: str) -> str:
@@ -121,6 +116,16 @@ class JoinExitHandlers:
         parsed: "ParsedChannelControl",
     ) -> None:
         """处理 /join 指令：注册到 SessionSharingRegistry 并发送确认."""
+        # Reject unsupported channels before any lookup or registration can
+        # create partial state.
+        if str(msg.channel_id).lower() not in _TEAM_SEAT_SUPPORTED_CHANNELS:
+            await self._h.send_channel_notice(
+                user_infos,
+                channel_id,
+                msg.session_id,
+                "当前通道暂不支持 /join，仅飞书和小艺支持加入团队。",
+            )
+            return
         sid = self._h.extract_session_id_from_ref(parsed.session_ref)
         if not sid or not parsed.member_name:
             await self._h.send_channel_notice(
@@ -164,19 +169,26 @@ class JoinExitHandlers:
                         f"请先执行 **/exit** 再加入。",
                     )
                     return
-        # ── team/session 一致性校验（mismatch 本地判）+ 成员名校验 ──
-        # team_name 与 session_id 都从同一 session_ref 解析、同源。mismatch 判定是
-        # 纯字符串后缀比对：team_name 须已是 build_session_scoped_team_name 拼出的
-        # scoped 形式（即等于拼接结果）。后缀不匹配即 session_ref 里 team 与 session
-        # 错配，本地直接报错，不走 RPC。文案单一真相源在本模块。
+        # ── team/session 一致性校验 + 成员名校验 ──
+        # team_name 与 session_id 同源于 session_ref，真伪交由下游 fetch_team_human_members 的 RPC 仲裁：
+        # 按 team_name 直查 team.db，输错 team → 查不到席位 → 走"不存在"文案。
         _join_team_name = self._h.extract_team_name_from_ref(parsed.session_ref)
-        from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-        if _join_team_name and _join_team_name != TeamManager.build_session_scoped_team_name(
-            _join_team_name, sid,
-        ):
+        # 检查席位占用状态（V2 §8.1）
+        # 优先内存判断,同时发多条join将"无需重复加入"提示挤到后面
+        joining_user_id = msg.user_id or msg.metadata.get("im_sender_user_id", "")
+        existing_subs = self._h.get_session_sharing_registry().lookup_member(sid, parsed.member_name)
+        for sub in existing_subs:
+            if sub.routing_key.user_id != joining_user_id:
+                await self._h.send_channel_notice(
+                    user_infos, channel_id, msg.session_id,
+                    f"⚠️ 席位 **{parsed.member_name}** 已被其他人认领，无法加入。",
+                )
+                return
+            # 同一个 user_id 已持有此席位 → 幂等，不重复注册
+            # 避免同一用户重复 /join 产生多条 Subscription 导致重复消息
             await self._h.send_channel_notice(
                 user_infos, channel_id, msg.session_id,
-                f"⚠️ {_join_err_mismatch(_join_team_name, sid)}",
+                f"⚠️ 你已是 **{sid}** 的 **{parsed.member_name}**，无需重复加入。",
             )
             return
         human_member_names = await self.fetch_team_human_members(
@@ -192,23 +204,6 @@ class JoinExitHandlers:
             await self._h.send_channel_notice(
                 user_infos, channel_id, msg.session_id,
                 f"⚠️ 成员 **{parsed.member_name}** 不存在。可用席位：{', '.join(human_member_names)}",
-            )
-            return
-        # 检查席位占用状态（V2 §8.1）
-        joining_user_id = msg.user_id or msg.metadata.get("im_sender_user_id", "")
-        existing_subs = self._h.get_session_sharing_registry().lookup_member(sid, parsed.member_name)
-        for sub in existing_subs:
-            if sub.routing_key.user_id != joining_user_id:
-                await self._h.send_channel_notice(
-                    user_infos, channel_id, msg.session_id,
-                    f"⚠️ 席位 **{parsed.member_name}** 已被其他人认领，无法加入。",
-                )
-                return
-            # 同一个 user_id 已持有此席位 → 幂等，不重复注册
-            # 避免同一用户重复 /join 产生多条 Subscription 导致重复消息
-            await self._h.send_channel_notice(
-                user_infos, channel_id, msg.session_id,
-                f"⚠️ 你已是 **{sid}** 的 **{parsed.member_name}**，无需重复加入。",
             )
             return
         try:
@@ -434,10 +429,9 @@ class JoinExitHandlers:
     ) -> list[str] | None:
         """向 AgentServer 查询 team human_agent 成员名列表。
 
-        mismatch 已由 join_slash_handler 本地挡掉，本方法只查 member：查到返回
-        席位名列表，查不到（server ok=False / members 空 / RPC 异常）返回 None，
-        由调用方统一拼"team 不存在"文案。channel_id 不参与业务查询，仅回填
-        E2A envelope 维持响应结构完整性（与其他 unary RPC 响应一致带 channel_id）。
+        team↔session 一致性真伪的唯一仲裁：按 team_name 直查 team.db 取 human_agent 席位。
+        查到返回席位名列表，查不到（server ok=False / members 空 / RPC 异常）返回 None，
+        由调用方统一拼"team 不存在"文案。channel_id 不参与业务查询，仅回填 E2A envelope。
         """
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -551,6 +545,14 @@ class JoinExitHandlers:
         parsed: "ParsedChannelControl",
     ) -> None:
         """处理 /exit 指令：从 SessionSharingRegistry 注销并发送确认."""
+        if str(msg.channel_id).lower() not in _TEAM_SEAT_SUPPORTED_CHANNELS:
+            await self._h.send_channel_notice(
+                user_infos,
+                channel_id,
+                msg.session_id,
+                "当前通道暂不支持 /exit，仅飞书和小艺支持退出团队。",
+            )
+            return
         sid = self._h.extract_session_id_from_ref(parsed.session_ref)
         if not sid:
             # 不带 session_ref：直接用 msg.session_id。handle_message 入队前已对已 /join

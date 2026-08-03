@@ -17,16 +17,21 @@ cd jiuwenswarm\channels\web\frontend
 call npm install
 if errorlevel 1 (cd ..\.. & exit /b 1)
 call npm run build
-if errorlevel 1 (cd ..\.. & exit /b 1)
-cd ..\..
+if errorlevel 1 goto :failed_frontend
+popd
 
 echo.
-echo [3/3] 执行 PyInstaller 打包...
-call uv run pyinstaller scripts\jiuwenswarm.spec
+echo [3/3] Running PyInstaller...
+call uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
 if errorlevel 1 exit /b 1
 
 echo.
-echo === 打包完成 ===
-echo 桌面版目录: %cd%\dist\jiuwenswarm
-echo 主程序: %cd%\dist\jiuwenswarm\jiuwenswarm.exe
+echo Verifying frozen A2UI v0.8 bundle...
+start "" /wait "%cd%\dist\jiuwenswarm\jiuwenswarm.exe" "%cd%\scripts\verify_a2ui_bundle.py"
+if errorlevel 1 exit /b 1
+
+echo.
+echo === Build complete ===
+echo Desktop dir: %cd%\dist\jiuwenswarm
+echo Main exe:    %cd%\dist\jiuwenswarm\jiuwenswarm.exe
 pause

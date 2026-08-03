@@ -70,11 +70,11 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
         // Other：清空 selected_options，把用户输入放进 custom_input，
         // 命中后端 interface.py 的 `elif custom_input` 分支。
         if (sel === OTHER_VALUE) {
-          return { selected_options: [], custom_input: (customInputs.get(idx) || '').trim() };
+          return { question: q.question, selected_options: [], custom_input: (customInputs.get(idx) || '').trim() };
         }
-        if (sel) return { selected_options: [sel] };
+        if (sel) return { question: q.question, selected_options: [sel] };
         const firstOption = q.options[0];
-        return { selected_options: firstOption ? [firstOption.value || firstOption.label] : [] };
+        return { question: q.question, selected_options: firstOption ? [firstOption.value || firstOption.label] : [] };
       });
     },
     [pendingQuestion, customInputs]

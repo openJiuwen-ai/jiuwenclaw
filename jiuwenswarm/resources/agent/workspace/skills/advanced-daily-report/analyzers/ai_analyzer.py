@@ -151,7 +151,8 @@ class AIAnalyzer:
                 client_provider="OpenAI",
                 api_base=self.llm_config["api_base"],
                 api_key=self.llm_config["api_key"],
-                verify_ssl=False,
+                verify_ssl=self.llm_config.get("verify_ssl", True),
+                ssl_cert=self.llm_config.get("ssl_cert", None),
             )
 
             model_config = ModelRequestConfig(

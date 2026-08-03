@@ -43,6 +43,67 @@ logger = logging.getLogger(__name__)
 # toggles (enabled -> disabled or vice-versa) and init / shutdown accordingly
 # on each single-agent request.
 _agent_observability_active: bool = False
+
+# Process-global "current run's root span", set/cleared by open/close_agent_run_span.
+# The per-request _team_span_ctx ContextVar can't reach the round tasks (agent
+# execution runs in a session-setup supervisor task), so OtelCallbackHandler's
+# get_team_span() returns None there and child spans are skipped. The monkeypatch
+# below makes get_team_span fall back to this global so the callback finds a parent
+# regardless of task/context boundary.
+_CURRENT_ROOT_SPAN: Any = None
+
+# get_team_span bindings already wrapped by _install_team_span_global_fallback,
+# keyed on the wrapper itself (it becomes the next lookup's orig) so repeat
+# calls stay idempotent without stamping an attribute on the function object.
+_team_span_patched: set[Any] = set()
+
+
+def _install_team_span_global_fallback() -> None:
+    """Patch get_team_span in EVERY consumer module to fall back to _CURRENT_ROOT_SPAN.
+
+    Each SDK consumer did ``from span_context import get_team_span``, so each has
+    its own binding that must be rebound separately:
+      * callback_handler — creates llm/tool spans (parent lookup).
+      * rail (ObservabilityRail) — creates the agent.<type>.invoke spans; it
+        *returns early* when get_team_span() is None, which is why the agent-tier
+        spans (incl. sub-agent's agent.<type>.invoke) were missing.
+      * monitor_handler — team-only (harmless to patch; team_span is ContextVar-visible
+        there so the fallback never triggers).
+    Team mode is unaffected: its team_span is ContextVar-visible, so the original
+    lookup returns non-None and the fallback never triggers. Single active
+    single-agent run assumed (multi-session concurrency: last-opened wins).
+    Best-effort, idempotent, never raises.
+    """
+    import importlib
+
+    for mod_path in (
+        "openjiuwen.agent_teams.observability.callback_handler",
+        "openjiuwen.agent_teams.observability.rail",
+        "openjiuwen.agent_teams.observability.monitor_handler",
+    ):
+        try:
+            mod = importlib.import_module(mod_path)
+        except Exception as exc:
+            logger.debug(
+                "[AgentObservability] skip team-span fallback patch for %s: %s",
+                mod_path, exc,
+            )
+            continue
+        orig = getattr(mod, "get_team_span", None)
+        if orig is None or orig in _team_span_patched:
+            continue
+
+        def _get_team_span_with_global(team_name=None, _orig=orig):  # type: ignore[no-untyped-def]
+            span = _orig(team_name)
+            if span is None:
+                return _CURRENT_ROOT_SPAN
+            return span
+
+        _team_span_patched.add(_get_team_span_with_global)
+        mod.get_team_span = _get_team_span_with_global
+
+
+_install_team_span_global_fallback()
 # True only when THIS module called ``init_observability()`` and therefore owns
 # the shared global TracerProvider. When the team subsystem (or a prior run)
 # already initialized it, this is False and shutdown must leave it intact.
@@ -219,6 +280,8 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
 
         if not is_initialized():
             return None
+        if not _agent_observability_active:
+            return None
 
         tracer = get_tracer("jiuwenswarm.agent")
         name = _build_run_span_name(mode=mode, session_id=session_id)
@@ -230,6 +293,11 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
         # Register as the team span so OtelCallbackHandler's parent lookup
         # (get_team_span fallback) finds it for LLM/tool span creation.
         set_team_span(span, team_name="single-agent")
+        # Also publish as the process-global current span: the supervisor task
+        # doesn't inherit the ContextVar, so the get_team_span fallback (installed
+        # at import) returns this for OtelCallbackHandler's parent lookup.
+        global _CURRENT_ROOT_SPAN
+        _CURRENT_ROOT_SPAN = span
         logger.info("[AgentObservability] root span opened: name=%s", name)
         return span
     except Exception as exc:
@@ -237,8 +305,11 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
         return None
 
 
-def close_agent_run_span(handle: Any) -> None:
+def close_agent_run_span(handle: Any, *, session_id: str = "") -> None:
     """End the root span opened by :func:`open_agent_run_span` and clear it."""
+    # Clear the global fallback span (harmless if already None).
+    global _CURRENT_ROOT_SPAN
+    _CURRENT_ROOT_SPAN = None
     if handle is None:
         return
     try:

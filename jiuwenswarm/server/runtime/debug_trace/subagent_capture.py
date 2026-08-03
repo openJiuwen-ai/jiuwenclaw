@@ -21,7 +21,10 @@ lifetime, see ``interface_deep.JiuWenSwarmDeepAdapter``.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 
 def _ensure_observability_rail(subagent: Any) -> None:
@@ -57,9 +60,21 @@ def _ensure_observability_rail(subagent: Any) -> None:
             return  # already attached (e.g. build-time succeeded) — don't double-add
         if hasattr(subagent, "add_rail"):
             subagent.add_rail(rail)
-    except Exception:
+    except Exception as exc:
         # Never break the subagent run over tracing instrumentation.
-        pass
+        _logger.debug("[subagent-capture] attach observability rail failed: %s", exc)
+
+    # Newer openjiuwen guards ObservabilityRail.before_invoke with
+    # `if not team_name: return` BEFORE the get_team_span() our _CURRENT_ROOT_SPAN
+    # fallback patches, so a team_name-less harness subagent gets no invoke span.
+    # Mirror the synthetic "single-agent" team from open_agent_run_span so the
+    # guard passes. team_name is a plain attr on DeepAgent (not a property);
+    # skipped when the subagent already has one (real team member).
+    if not getattr(subagent, "team_name", ""):
+        try:
+            subagent.team_name = "single-agent"
+        except Exception as exc:
+            _logger.debug("[subagent-capture] set team_name on subagent failed: %s", exc)
 
 
 async def invoke_subagent_with_trace(
@@ -87,9 +102,19 @@ async def invoke_subagent_with_trace(
     # is built once, often before observability is initialized.
     _ensure_observability_rail(subagent)
 
-    from jiuwenswarm.server.runtime.debug_trace.context import get_debug_trace_logger
+    from jiuwenswarm.server.runtime.debug_trace.context import (
+        get_debug_trace_logger,
+        get_debug_trace_logger_for_session,
+    )
 
     dbg = get_debug_trace_logger()
+    if dbg is None:
+        # Same task-boundary gap as TaskTool: this helper can be reached from the
+        # custom AgentTool path inside the DeepAgent's supervisor task, where the
+        # per-request ContextVar isn't visible. Fall back to a session lookup.
+        sid = session.get_session_id() if hasattr(session, "get_session_id") else None
+        if sid:
+            dbg = get_debug_trace_logger_for_session(sid)
     if dbg is None or not dbg.captures_subagent_flow():
         # No debug run, or capture disabled — original path, unchanged.
         return await subagent.invoke(inputs, session=session)
