@@ -33,6 +33,7 @@ class _SuccessfulAgentClient:
 
     async def send_request(self, request):
         self.requests.append(request)
+        is_external_create = bool(request.params.get("session_id"))
         return SimpleNamespace(
             ok=True,
             payload={
@@ -41,10 +42,96 @@ class _SuccessfulAgentClient:
                 "projectId": "default_code",
                 "projectDir": "",
                 "workMode": "code",
-                "prewarm_hit": True,
-                "prewarm_status": "ready",
+                "prewarm_hit": not is_external_create,
+                "prewarm_status": "bypassed" if is_external_create else "ready",
             },
         )
+
+
+@pytest.mark.asyncio
+async def test_session_create_forwards_external_id_without_prewarm() -> None:
+    channel = _TuiChannel()
+    agent_client = _SuccessfulAgentClient("tui_external_001")
+    register_cli_handlers(
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
+    )
+
+    await channel.local_handlers["/tui"]["session.create"](
+        object(),
+        "register-tui",
+        {
+            "session_id": "tui_external_001",
+            "mode": "code.normal",
+        },
+        "tui_external_001",
+    )
+
+    assert len(agent_client.requests) == 1
+    request = agent_client.requests[0]
+    assert request.method == "session.create"
+    assert request.params["session_id"] == "tui_external_001"
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["prewarm_status"] == "bypassed"
+
+
+@pytest.mark.asyncio
+async def test_tui_session_create_resolves_project_before_agentserver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    project_dir = str(tmp_path / "workspace")
+    agent_client = _SuccessfulAgentClient("tui_project_bound")
+    channel = _TuiChannel()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: SimpleNamespace(
+            project_id="proj_code_tui",
+            project_dir=project_dir,
+            work_mode="code",
+        ),
+    )
+    register_cli_handlers(
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
+    )
+    await channel.local_handlers["/tui"]["session.create"](
+        object(),
+        "allocate-project",
+        {"project_dir": project_dir, "mode": "code.normal"},
+        "previous",
+    )
+
+    request = agent_client.requests[0]
+    assert request.params["project_id"] == "proj_code_tui"
+    assert request.params["project_dir"] == project_dir
+    assert request.params["work_mode"] == "code"
+    assert "session_id" not in request.params
+
+
+@pytest.mark.asyncio
+async def test_tui_explicit_session_create_leaves_project_resolution_to_agentserver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    project_dir = str(tmp_path / "different-workspace")
+    channel = _TuiChannel()
+    agent_client = _SuccessfulAgentClient("tui_existing")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: pytest.fail("Gateway must not own explicit-ID project binding"),
+    )
+    register_cli_handlers(
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
+    )
+
+    await channel.local_handlers["/tui"]["session.create"](
+        object(),
+        "register-existing",
+        {"session_id": "tui_existing", "project_dir": project_dir},
+        "tui_existing",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert agent_client.requests[0].params["session_id"] == "tui_existing"
+    assert agent_client.requests[0].params["project_dir"] == project_dir
+    assert "project_id" not in agent_client.requests[0].params
 
 
 def test_session_switch_is_forwarded_without_a_tui_local_handler() -> None:

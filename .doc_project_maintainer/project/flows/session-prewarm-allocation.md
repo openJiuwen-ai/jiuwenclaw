@@ -3,7 +3,7 @@ id: session-prewarm-allocation
 name: Session Prewarm And Allocation
 status: partial
 confidence: confirmed
-last_updated: 2026-08-01
+last_updated: 2026-08-03
 user_visible_surface: "Low-latency creation of single-Agent work/code sessions across enabled channels."
 source_of_truth:
   - "AgentServer session metadata"
@@ -55,7 +55,7 @@ Team, `code.team`, and Swarm creation bypass the warm pool.
 5. AgentServer writes normal metadata only after claim. The prewarm marker is retained through the claim and removed only after metadata commits, closing the crash gap without exposing blank slots in normal session listings.
 6. Chat selection reads the locked Session `work_mode` (falling back to the request), canonicalizes stale `mode=agent` code requests to `code.normal`, awaits the claimed task, and selects the same AgentManager cache key. Foreground cancellation and the shared registry lock prevent competing initialization.
 7. MemoryRail registration does not schedule a full reindex on first registration. A real embedding-configuration change is singleflight per normalized workspace and fingerprint, preventing parallel new sessions from repeating the same repository-wide indexing work.
-8. Web, TUI, IM, ACP, A2A, SSH, and single-Agent Cron use the returned ID. ACP/A2A/SSH retain protocol IDs as Gateway aliases. Fork IDs are also AgentServer allocated but do not consume blank warm slots.
+8. Web, TUI, IM, ACP, A2A, SSH, and single-Agent Cron use the returned ID. TUI constructs its boot-creation Promise before WebSocket callbacks can issue startup RPCs, releases it on `connection.ack`, and constructs queued frames only after the returned ID is installed; normal startup omits `session_id` and uses a stable `create_token`. ACP/A2A/SSH retain protocol IDs as Gateway aliases. Fork IDs are also AgentServer allocated but do not consume blank warm slots.
 
 ## State And Identity
 
@@ -71,7 +71,7 @@ On startup, old-boot markers and unclaimed metadata-less directories are removed
 ## Failure, Ordering, And Idempotency
 
 - Project validation precedes allocation.
-- Explicit IDs are rejected by `session.create`; existing-session restoration uses `session.switch`.
+- Normal create rejects explicit IDs from other channels. TUI startup alone may pass an explicit ID to `session.create`; AgentServer logs and validates it under a per-ID lock, preserves existing binding, and returns `prewarm_status="bypassed"` without a warm claim.
 - `create_token` is required by adapted frontends and enables response-loss retry.
 - Gateway-owned Web creation overwrites any request-body `user_id` with the authenticated connection identity before forwarding to AgentServer.
 - Initialization exceptions are logged and never publish READY.
@@ -84,11 +84,9 @@ On startup, old-boot markers and unclaimed metadata-less directories are removed
 ## Verification
 
 - `tests/unit_tests/agentserver/test_agent_warm_pool.py` covers the default-on switch and its opt-out alongside global capacity, promotion/cancellation, code `sub_mode=normal`, work-mode canonicalization, and identical prewarm/chat cache identity.
+- Lifecycle tests cover ownership, concurrency, binding, warm bypass, and TUI boot ordering: 114 Python tests passed in each prewarm state on 2026-08-03; TUI build, typecheck, and full tests passed.
 - Adapter tests cover off-loop/coalesced runtime probes and per-workspace/config MemoryRail reindex singleflight.
-- AgentServer send/reload/ACP/plan-mode and Gateway ACP suites cover foreground guards and allocation boundaries.
-- The latest contention/cache-identity follow-up passed 179 focused tests. Earlier channel-contract runs passed 139 tests, and the full Windows unit run recorded 3,791 passed, 4 skipped, with 14 unrelated failures.
-- A restarted ham-snake Web session previously completed in about 7.5 seconds; sustained live-load verification of this contention correction remains pending.
 
 ## Known Gaps
 
-The pool is process-local and does not preserve idempotency tokens across AgentServer restart. Full live multi-channel integration, sustained load/resource limits, cancellation of a background initializer already inside a non-cooperative third-party call, checkpointer cleanup validation, and long-lived unclaimed-claim pin expiry remain pending. The repository-wide symbol audit was not expanded; changed symbols remain unaudited or audit-expired.
+The pool is process-local and does not preserve tokens across restart. External `clear.spec.ts` replay is pending; local coverage asserts pre-ack queuing and allocated first-chat identity. Live load validation, cancellation, cleanup, claim-pin expiry, and symbol audit remain pending.

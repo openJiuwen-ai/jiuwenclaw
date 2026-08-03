@@ -47,14 +47,14 @@
 
 ### `--session`：按 id 恢复或新建会话
 
-`--session <id>` 让 TUI 在启动时**以指定 session id 为身份**连接后端，并在连接建立后按 id 是否已存在走两条路径之一：
+`--session <id>` 让 TUI 在启动时**以指定 session id 为身份**连接后端。连接建立后，TUI 统一向 AgentServer 注册该 id；由于身份来自外部，这条兼容路径明确绕过预热池。
 
 | id 状态 | 启动行为 | 后端 RPC |
 |------|------|------|
-| **已存在** | 恢复该会话：触发 `session.switch` 生命周期（KV cache affinity / Team 状态迁移），前端按后端返回的 `mode` 对齐当前模式，随后拉取历史并回显到界面 | `session.switch` + `history.get` + `session.rename`（取标题） |
-| **不存在** | 新建并落盘该会话：触发 `session.create`（建目录 + 写 `metadata.json` + 生命周期初始化），界面为空会话。**已落盘即可下次恢复** | `session.create` + `history.get`（空）|
+| **已存在** | AgentServer 保留已落盘的项目与模式绑定，执行切换生命周期，随后前端拉取并回显历史 | 显式 ID 的 `session.create` + `history.get` + `session.rename`（取标题） |
+| **不存在** | AgentServer 校验 id，在该 id 的互斥锁内解析 TUI 项目并写入 `metadata.json`，以空历史启动且不领取预热实例 | 显式 ID 的 `session.create` + `history.get`（空）|
 
-判定方式为 **try-create-then-switch**：先尝试 `session.create(<id>)`，返回 `ALREADY_EXISTS` 则转 `session.switch` 恢复。该逻辑在连接收到 `connection.ack` 后由 `app-state.ts` 的 `resumeOrCreateBootSession` 驱动，仅执行一次（重连/重发幂等）。
+显式 ID 的 `session.create` 仅对 TUI 开放且保持幂等，AgentServer 会记录该兼容请求绕过预热。该逻辑在收到 `connection.ack` 后由 `app-state.ts` 的 `initializeBootSession` 放行，重连时只执行一次；普通启动、`/new` 和 `/clear` 不传 `session_id`，仍由 AgentServer 分配新 ID。
 
 **示例**：
 
@@ -67,7 +67,7 @@ jiuwenswarm-tui --session tui_myproj_001
 jiuwenswarm-tui --session tui_myproj_001
 ```
 
-**与运行时 `/resume` 的关系**：`--session` 是**启动时**的恢复/新建入口；`/resume` 是 TUI 已启动后**运行中**切换到另一会话的命令。两者调同一套后端 RPC（`session.switch`/`session.create`），但 `--session` 在握手首帧触发、`/resume` 在用户手动输入时触发。正常时序无冲突。
+**与运行时 `/resume` 的关系**：`--session` 是**启动时**的外部 id 兼容入口，调用显式 ID 的 `session.create`；`/resume` 是 TUI 已启动后切换到已有会话的命令，调用 `session.switch`。
 
 **id 命名约束**（前端在启动前校验，不合规直接报错退出，不进入 TUI）：
 

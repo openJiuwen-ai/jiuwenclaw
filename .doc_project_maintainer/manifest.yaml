@@ -1,6 +1,6 @@
 version: 0.0.1
 artifact_root: .doc_project_maintainer
-last_updated: '2026-07-31'
+last_updated: '2026-08-03'
 sync:
   status: partial
   last_scanned_commit: 10afedf222bcd6db98b24347a28f75e4613b3c87
@@ -317,6 +317,10 @@ flows:
   - JiuWenSwarmDeepAdapter.configure_session_runtime
   - JiuWenSwarmDeepAdapter._schedule_runtime_state_write
 code_symbols:
+- symbol: AgentWebSocketServer._handle_session_create
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_session_create.md
 - symbol: resolve_agent_request_mode
   kind: function
   source: jiuwenswarm/server/agent_ws_server.py
@@ -422,6 +426,9 @@ changes:
 - id: CHG-20260803-001
   title: Switch background session prewarming back on by default
   doc: changes/records/CHG-20260803-001-enable-session-prewarm-by-default.md
+- id: CHG-20260803-002
+  title: Route TUI startup session creation through AgentServer
+  doc: changes/records/CHG-20260803-002-tui-external-session-create.md
 code_symbol_inventory:
   generated_by: scripts/inventory_symbols.py
   source_symbol_inventory: project/source-symbol-inventory.json

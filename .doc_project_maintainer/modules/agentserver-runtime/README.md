@@ -2,7 +2,7 @@
 id: agentserver-runtime
 name: AgentServer Runtime
 confidence: confirmed
-last_updated: 2026-08-01
+last_updated: 2026-08-03
 read_when: "Working on AgentServer startup, Gateway WebSocket handling, sessions, commands, server push, ACP, scheduler, sandbox, or runtime services."
 ---
 
@@ -42,6 +42,8 @@ Foreground `chat.send`, `chat.resume`, and `chat.user_answer` open a priority wi
 
 Eligible single-Agent runtime identity follows final `work_mode`: work selects `agent` with no sub-mode, while code selects `code.normal`. Session creation persists that canonical identity and chat selection restores it from locked metadata, so Channel-provided stale mode values cannot bypass a claimed READY child.
 
+TUI startup compatibility accepts an externally supplied ID on `session.create`. AgentServer logs the compatibility path, keeps durable ownership by validating and serializing the ID, preserves existing project/mode metadata, and returns a bypassed prewarm status; no warm claim is made for these sessions.
+
 ## Related Code Symbols
 
 - `_run`: startup lifecycle for the standalone process.
@@ -56,6 +58,7 @@ Eligible single-Agent runtime identity follows final `work_mode`: work selects `
 - `tests/unit_tests/test_app_agentserver.py` checks startup/shutdown does not delete agent team directories.
 - `tests/unit_tests/agentserver/test_agentserver_modes.py` covers mode resolution, project directory resolution, and stream/mode behavior.
 - `tests/unit_tests/agentserver/test_agentserver_acp.py` covers ACP initialization, AgentServer-owned session allocation, explicit-ID rejection, team delete, capabilities, and tool response paths.
+- The same AgentServer suite now covers TUI explicit-ID creation idempotency, concurrency, stable binding, portable ID validation, and cross-channel ownership rejection in both prewarm states.
 - `tests/unit_tests/agentserver/test_agentserver_cli_commands.py` covers slash-command handlers.
 - `tests/unit_tests/agentserver/test_agent_ws_connection_close.py` covers disconnect cleanup behavior.
 - `tests/unit_tests/agentserver/test_agent_warm_pool.py` covers READY targets, concurrent claims, replenishment, revision replacement, and failure isolation.

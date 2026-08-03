@@ -58,6 +58,7 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
+from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
@@ -7518,20 +7519,20 @@ class AgentWebSocketServer:
     async def _handle_session_create(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        """处理 session.create 方法.
+        """Handle AgentServer-owned creation and TUI external-ID compatibility.
 
-        调用 AgentManager.create_session 创建会话，返回 session_id。
-        同时将 project_dir/project_id 等字段写入会话元数据(metadata.json)并落盘。
-        project_id / project_dir 绑定规则(详见
-        project_store.resolve_session_project_binding):两者皆空→默认项目;
-        仅传 project_id→自动补齐 path;同时传→校验一致性;仅传 path→拒绝。
+        Normal creation validates project identity before claiming a server-owned
+        warm or fresh Session. TUI callers may supply a compatibility ID through
+        this same method; AgentServer validates and serializes it, restores or
+        persists its binding, and always bypasses prewarming.
 
         Args:
             ws: WebSocket 连接
             request: AgentRequest
             send_lock: 发送锁
         """
-        logger.info("[AgentServer] session.create: request_id=%s", request.request_id)
+        operation = "session.create"
+        logger.info("[AgentServer] %s: request_id=%s", operation, request.request_id)
 
         try:
             channel_id = request.channel_id or "default"
@@ -7539,10 +7540,79 @@ class AgentWebSocketServer:
             mode, _, canonical_mode = resolve_agent_request_mode(params.get("mode", "agent"))
             explicit_session_id = params.get("session_id")
             previous_session_id = str(params.get("previous_session_id") or "").strip()
-            if isinstance(explicit_session_id, str) and explicit_session_id.strip():
+            requested_session_id = (
+                explicit_session_id.strip()
+                if isinstance(explicit_session_id, str)
+                else ""
+            )
+            external_tui_session = bool(
+                requested_session_id
+                and request.req_method == ReqMethod.SESSION_CREATE
+                and channel_id.strip().lower() == "tui"
+            )
+            existing_metadata: dict[str, Any] | None = None
+            if requested_session_id and not external_tui_session:
                 raise ValueError(
                     "session.create no longer accepts session_id; use session.switch to restore"
                 )
+            external_id_lock: asyncio.Lock | None = None
+            external_id_lock_acquired = False
+            if external_tui_session:
+                logger.warning(
+                    "[AgentServer] TUI supplied session_id via session.create; "
+                    "bypassing prewarm compatibility path: session_id=%s",
+                    requested_session_id,
+                )
+                from jiuwenswarm.server.runtime.prompt_attachment_loader import (
+                    sanitize_session_id,
+                )
+                if (
+                    sanitize_session_id(requested_session_id) != requested_session_id
+                    or len(requested_session_id) > 128
+                ):
+                    raise ValueError("invalid session_id")
+
+                lock_key = f"external-create:{requested_session_id}"
+                external_id_lock = _session_switch_locks.get(lock_key)
+                if external_id_lock is None:
+                    external_id_lock = asyncio.Lock()
+                    _session_switch_locks[lock_key] = external_id_lock
+                await external_id_lock.acquire()
+                external_id_lock_acquired = True
+
+                # Existing TUI metadata is authoritative. The frontend injects its
+                # current cwd into every RPC, which must not rebind a restored session
+                # when `--session` is launched from another directory.
+                from jiuwenswarm.server.runtime.session.session_metadata import (
+                    get_session_metadata,
+                )
+                existing_metadata = get_session_metadata(requested_session_id)
+                if existing_metadata:
+                    existing_channel = str(
+                        existing_metadata.get("channel_id") or ""
+                    ).strip().lower()
+                    if existing_channel not in {"", "tui"}:
+                        raise ValueError("session_id is already owned by another channel")
+                    for field in ("project_id", "project_dir", "work_mode", "mode"):
+                        value = existing_metadata.get(field)
+                        if isinstance(value, str) and value.strip():
+                            params[field] = value.strip()
+                    mode, _, canonical_mode = resolve_agent_request_mode(
+                        params.get("mode", "agent")
+                    )
+                else:
+                    # Resolve a new external TUI id while holding the per-id lock.
+                    # This keeps concurrent windows from rebinding the same id to
+                    # different projects before metadata becomes visible.
+                    from jiuwenswarm.server.runtime.session.project_store import (
+                        find_or_create_code_project_for_tui_params,
+                    )
+
+                    project = find_or_create_code_project_for_tui_params(params)
+                    if project is not None:
+                        params["project_id"] = project.project_id
+                        params["project_dir"] = project.project_dir
+                        params["work_mode"] = project.work_mode
             # Step 1: 归一化 work_mode / project_id / project_dir 三元组
             # (与 web _session_create 共用同一 helper，保持主路径/fallback 一致)
             from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
@@ -7657,24 +7727,31 @@ class AgentWebSocketServer:
                 and canonical_mode in {"agent", "code", "code.normal"}
             )
             create_token = str(params.get("create_token") or "").strip()
-            if not create_token:
-                raise ValueError("create_token is required")
-            claim = await self._agent_manager.claim_prewarmed_session(
-                channel_id=channel_id,
-                project_id=project_id,
-                project_dir=project_dir,
-                work_mode=final_work_mode,
-                is_swarm=is_swarm,
-                prewarm_eligible=prewarm_eligible,
-                create_token=create_token,
-            )
+            if external_tui_session:
+                claim = WarmClaim(
+                    session_id=requested_session_id,
+                    prewarm_hit=False,
+                    prewarm_status="bypassed",
+                )
+            else:
+                if not create_token:
+                    raise ValueError("create_token is required")
+                claim = await self._agent_manager.claim_prewarmed_session(
+                    channel_id=channel_id,
+                    project_id=project_id,
+                    project_dir=project_dir,
+                    work_mode=final_work_mode,
+                    is_swarm=is_swarm,
+                    prewarm_eligible=prewarm_eligible,
+                    create_token=create_token,
+                )
             session_id = claim.session_id
 
             # 会话目录已存在则拒绝,避免覆盖既有会话元数据(与 web 本地 handler 一致)
             session_dir = get_agent_sessions_dir() / session_id
             if (session_dir / "metadata.json").is_file():
-                self._agent_manager.activate_session_prewarm(session_id)
-                if create_token:
+                if not external_tui_session:
+                    self._agent_manager.activate_session_prewarm(session_id)
                     resp = AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
@@ -7695,36 +7772,41 @@ class AgentWebSocketServer:
                     async with send_lock:
                         await send_wire_payload(ws, wire)
                     return
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": "session already exists", "code": "ALREADY_EXISTS"},
-                )
-                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-                async with send_lock:
-                    await send_wire_payload(ws, wire)
-                return
+                session_created = False
+            else:
+                session_created = True
 
             # 初始化会话元数据(同步写盘),将 project_dir/project_id 等字段落盘
-            from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
-            init_session_metadata(
-                session_id=session_id,
-                channel_id=channel_id,
-                user_id=params.get("user_id", ""),
-                title=params.get("title", ""),
-                mode=canonical_mode,
-                project_dir=project_dir,
-                project_id=project_id,
-                work_mode=final_work_mode,
-                cron_id=str(params.get("cron_id") or "").strip(),
-            )
-            self._agent_manager.activate_session_prewarm(session_id)
+            if session_created:
+                from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+                channel_metadata = None
+                if channel_id.strip().lower() == "tui":
+                    workspace = str(params.get("cwd") or project_dir or "").strip()
+                    if workspace:
+                        channel_metadata = {
+                            "cwd": workspace,
+                            "project_dir": project_dir or workspace,
+                        }
+                init_session_metadata(
+                    session_id=session_id,
+                    channel_id=channel_id,
+                    user_id=params.get("user_id", ""),
+                    title=params.get("title", ""),
+                    mode=canonical_mode,
+                    project_dir=project_dir,
+                    project_id=project_id,
+                    work_mode=final_work_mode,
+                    cron_id=str(params.get("cron_id") or "").strip(),
+                    channel_metadata=channel_metadata,
+                )
+                if not external_tui_session:
+                    self._agent_manager.activate_session_prewarm(session_id)
 
             # team prepare 必须在 ack 前完成，避免首条 chat.send 与分布式切换竞态；
             # 可选 KVC 信号放到回包后异步，避免拖慢 create RPC。
             lifecycle_params = dict(params)
             lifecycle_params["mode"] = canonical_mode
+            lifecycle_reason = "session.create switch: "
             (
                 _target_is_team,
                 _resolved_mode,
@@ -7736,7 +7818,7 @@ class AgentWebSocketServer:
                 target_session_id=session_id,
                 previous_session_id=previous_session_id,
                 params=lifecycle_params,
-                reason="session.create switch: ",
+                reason=lifecycle_reason,
             )
 
             resp = AgentResponse(
@@ -7751,13 +7833,18 @@ class AgentWebSocketServer:
                     "workMode": final_work_mode,
                     "prewarm_hit": claim.prewarm_hit,
                     "prewarm_status": claim.prewarm_status,
+                    **(
+                        {"created": session_created, "mode": canonical_mode}
+                        if external_tui_session
+                        else {}
+                    ),
                 },
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
                 await send_wire_payload(ws, wire)
 
-            logger.info("[AgentServer] session.create completed: session_id=%s", session_id)
+            logger.info("[AgentServer] %s completed: session_id=%s", operation, session_id)
 
             if switch_context is not None and dispatch_signals is not None:
                 kvc_task = asyncio.create_task(
@@ -7765,7 +7852,7 @@ class AgentWebSocketServer:
                         channel_id=channel_id,
                         target_session_id=session_id,
                         previous_session_id=previous_session_id,
-                        reason="session.create switch: ",
+                        reason=lifecycle_reason,
                         context=switch_context,
                         team_manager=team_manager,
                         dispatch_signals=dispatch_signals,
@@ -7777,10 +7864,11 @@ class AgentWebSocketServer:
                 kvc_task.add_done_callback(_log_background_session_kvc_failure)
 
         except Exception as e:
-            logger.exception("[AgentServer] session.create failed: %s", e)
-            await self._agent_manager.release_session_prewarm_claim(
-                locals().get("session_id")
-            )
+            logger.exception("[AgentServer] %s failed: %s", operation, e)
+            if not locals().get("external_tui_session", False):
+                await self._agent_manager.release_session_prewarm_claim(
+                    locals().get("session_id")
+                )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -7790,6 +7878,13 @@ class AgentWebSocketServer:
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
                 await send_wire_payload(ws, wire)
+        finally:
+            external_id_lock = locals().get("external_id_lock")
+            if (
+                external_id_lock is not None
+                and locals().get("external_id_lock_acquired", False)
+            ):
+                external_id_lock.release()
 
     async def _handle_session_fork(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock

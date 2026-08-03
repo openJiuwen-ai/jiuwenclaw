@@ -851,6 +851,309 @@ async def test_handle_session_create_rejects_explicit_session_id(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+async def test_handle_tui_session_create_accepts_explicit_id_without_prewarm(
+    monkeypatch, tmp_path
+):
+    """TUI callers may supply an external ID to session.create without prewarming it."""
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    warning_messages: list[str] = []
+    monkeypatch.setattr(
+        agent_ws_server_module.logger,
+        "warning",
+        lambda message, *args: warning_messages.append(message % args),
+    )
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    project_dir = str(tmp_path / "tui-project")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: types.SimpleNamespace(
+            project_id="proj_tui_external",
+            project_dir=project_dir,
+            work_mode="code",
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.resolve_session_project_binding",
+        lambda project_id, resolved_dir: (project_id, resolved_dir, None, None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.get_project_by_id",
+        lambda project_id, cache_bust=True: types.SimpleNamespace(work_mode="code"),
+    )
+
+    request = AgentRequest(
+        request_id="req-tui-register-explicit",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "session_id": "tui_external_001",
+            "create_token": "legacy-tui-explicit-001",
+            "mode": "code.normal",
+            "cwd": project_dir,
+            "project_dir": project_dir,
+        },
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    metadata = json.loads(
+        (sessions_root / "tui_external_001" / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["session_id"] == "tui_external_001"
+    assert metadata["channel_id"] == "tui"
+    assert metadata["project_id"] == "proj_tui_external"
+    assert metadata["project_dir"] == project_dir
+    assert fake_ws.sent[0]["ok"] is True
+    assert fake_ws.sent[0]["payload"]["session_id"] == "tui_external_001"
+    assert fake_ws.sent[0]["payload"]["prewarm_hit"] is False
+    assert fake_ws.sent[0]["payload"]["prewarm_status"] == "bypassed"
+    assert any(
+        "bypassing prewarm compatibility path" in message
+        for message in warning_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_explicit_session_create_is_idempotent_and_bypasses_prewarm(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+
+    async def register(request_id: str):
+        ws = FakeWebSocket()
+        request = AgentRequest(
+            request_id=request_id,
+            channel_id="tui",
+            req_method=ReqMethod.SESSION_CREATE,
+            params={"session_id": "tui_external_idempotent", "mode": "code.normal"},
+        )
+        await server.handle_session_create_for_test(ws, request, asyncio.Lock())
+        return ws.sent[0]
+
+    first, second = await asyncio.gather(register("register-1"), register("register-2"))
+
+    assert fake_manager.claim_session_calls == []
+    assert {first["payload"]["created"], second["payload"]["created"]} == {True, False}
+    for response in (first, second):
+        assert response["ok"] is True
+        assert response["payload"]["session_id"] == "tui_external_idempotent"
+        assert response["payload"]["prewarm_status"] == "bypassed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tui_explicit_create_waiter_does_not_release_owner_lock(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    server.set_agent_manager_for_test(FakeAgentManager(session_id="must-not-be-used"))
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    owner_entered = asyncio.Event()
+    release_owner = asyncio.Event()
+    prepare_calls = 0
+
+    async def hold_owner(**_kwargs):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        owner_entered.set()
+        await release_owner.wait()
+        return False, "code.normal", None, None, None
+
+    server._prepare_session_switch_owner = hold_owner
+
+    async def register(request_id: str):
+        ws = FakeWebSocket()
+        request = AgentRequest(
+            request_id=request_id,
+            channel_id="tui",
+            req_method=ReqMethod.SESSION_CREATE,
+            params={"session_id": "tui_cancelled_waiter", "mode": "code.normal"},
+        )
+        await server.handle_session_create_for_test(ws, request, asyncio.Lock())
+        return ws.sent
+
+    owner = asyncio.create_task(register("register-owner"))
+    await owner_entered.wait()
+    waiter = asyncio.create_task(register("register-cancelled"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    successor = asyncio.create_task(register("register-successor"))
+    await asyncio.sleep(0)
+    assert prepare_calls == 1
+    assert not successor.done()
+
+    release_owner.set()
+    await owner
+    await successor
+    assert prepare_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_explicit_create_preserves_existing_project_binding(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    original_project_dir = str(tmp_path / "original-project")
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+    init_session_metadata(
+        session_id="tui_binding_stable",
+        channel_id="tui",
+        mode="code.normal",
+        project_id="proj_original",
+        project_dir=original_project_dir,
+        work_mode="code",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: pytest.fail("existing explicit ID must not create or rebind a project"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.resolve_session_project_binding",
+        lambda project_id, project_dir: (project_id, project_dir, None, None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.get_project_by_id",
+        lambda project_id, cache_bust=True: types.SimpleNamespace(work_mode="code"),
+    )
+
+    async def register(request_id: str, project_dir: str):
+        ws = FakeWebSocket()
+        request = AgentRequest(
+            request_id=request_id,
+            channel_id="tui",
+            req_method=ReqMethod.SESSION_CREATE,
+            params={
+                "session_id": "tui_binding_stable",
+                "mode": "code.normal",
+                "project_dir": project_dir,
+                "cwd": project_dir,
+            },
+        )
+        await server.handle_session_create_for_test(ws, request, asyncio.Lock())
+        return ws.sent[0]
+
+    second = await register("binding-second", str(tmp_path / "other-project"))
+
+    assert second["ok"] is True, second
+    assert second["payload"]["created"] is False
+    assert second["payload"]["projectId"] == "proj_original"
+    assert second["payload"]["projectDir"] == original_project_dir
+    metadata = json.loads(
+        (sessions_root / "tui_binding_stable" / "metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata["project_id"] == "proj_original"
+    assert metadata["project_dir"] == original_project_dir
+    assert fake_manager.claim_session_calls == []
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_explicit_create_rejects_id_owned_by_another_channel(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+    init_session_metadata(session_id="web_owned", channel_id="web", mode="agent")
+    fake_ws = FakeWebSocket()
+    request = AgentRequest(
+        request_id="register-owned",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"session_id": "web_owned"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent[0]["ok"] is False
+    assert "owned by another channel" in fake_ws.sent[0]["payload"]["error"]
+    assert fake_manager.claim_session_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel_id", "session_id", "error"),
+    [
+        ("web", "web_external_001", "no longer accepts session_id"),
+        ("tui", "../unsafe", "invalid session_id"),
+        ("tui", "a" * 129, "invalid session_id"),
+    ],
+)
+async def test_handle_explicit_session_create_rejects_unsupported_identity(
+    monkeypatch, tmp_path, channel_id, session_id, error
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    request = AgentRequest(
+        request_id="register-invalid",
+        channel_id=channel_id,
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"session_id": session_id},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    assert fake_ws.sent[0]["ok"] is False
+    assert error in fake_ws.sent[0]["payload"]["error"]
+
+
+@pytest.mark.asyncio
 async def test_handle_session_create_injected_default_work_mode_does_not_mismatch_code_project(
     monkeypatch, tmp_path
 ):
