@@ -224,6 +224,10 @@ class _InactiveTeamRuntimeManagerMixin:
         return None
 
     @staticmethod
+    def get_team_evolution_enabled(session_id: str) -> bool:
+        return True
+
+    @staticmethod
     def get_monitor(session_id: str):
         return None
 
@@ -342,9 +346,10 @@ class _TeamHelpersTestApi:
             channel_id: str | None,
             session_id: str,
             query: str,
-            **kwargs,
+        **kwargs,
     ) -> dict[str, object] | None:
         handler = getattr(team_helpers, "_handle_team_slash_command")
+        kwargs.setdefault("evolution_enabled", True)
         return await handler(channel_id, session_id, query, **kwargs)
 
     @staticmethod
@@ -1220,9 +1225,9 @@ async def test_ensure_team_evolution_watcher_defers_when_rail_missing(monkeypatc
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("review_trigger", "should_start"),
-    [(False, False), (True, True)],
+    [(False, True), (True, True)],
 )
-async def test_ensure_team_evolution_watcher_respects_review_trigger(
+async def test_ensure_team_evolution_watcher_ignores_legacy_review_trigger(
         monkeypatch,
         review_trigger: bool,
         should_start: bool,

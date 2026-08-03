@@ -1253,7 +1253,7 @@ def test_deep_adapter_registers_evolution_interrupt_rail_before_skill_evolution(
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True},
+        "react": {"evolution": {"skill_evolution": True}},
         "context_engineering": {"enabled": False},
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1358,7 +1358,7 @@ def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monk
     adapter._skill_evolution_rail = "skill-evolution-rail"
     adapter._context_assemble_rail = "agent-context-assemble-rail"
     adapter._context_assemble_mode = "agent"
-    adapter._config_cache = {"evolution": {"enabled": True}}
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": True}}}
 
     ask_user_rail = object()
     monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
@@ -1549,7 +1549,7 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True, "auto_scan": False},
+        "react": {"evolution": {"skill_evolution": True}},
         "model_name": "configured-model",
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1581,7 +1581,7 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
         if _is_regular_skill_evolution_rail(rail)
     )
     assert skill_evolution_rail.signal_trigger is False
-    assert skill_evolution_rail.review_trigger is False
+    assert skill_evolution_rail.review_trigger is True
 
 
 def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkeypatch, tmp_path):
@@ -1654,7 +1654,7 @@ def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkey
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True, "auto_scan": False},
+        "react": {"evolution": {"skill_evolution": True}},
         "model_name": "configured-model",
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1701,6 +1701,7 @@ def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monke
     )
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter._is_session_scoped_adapter = True
     request = AgentRequest(
         request_id="req-answer",
         channel_id="tui",
@@ -1738,6 +1739,7 @@ def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch)
             pytest.fail("team simplify approval must not use regular SkillEvolutionRail")
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter._is_session_scoped_adapter = True
     adapter._skill_evolution_rail = FailingRegularRail()
     monkeypatch.setattr(
         JiuWenSwarmDeepAdapter,

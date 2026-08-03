@@ -342,11 +342,13 @@ def _build_team_workspace_report_path_rail(
     inp = TeamWorkspaceReportPathInput.resolve(params, context)
     if not inp.team_ws_root:
         return None
-    return TeamWorkspaceReportPathRail(
+    rail = TeamWorkspaceReportPathRail(
         root_dir=inp.team_ws_root,
         team_id=inp.team_id,
         language=inp.language,
     )
+    rail.bind_swarm_context(context)
+    return rail
 
 
 class ContextProcessorInput(ConstructionInput):

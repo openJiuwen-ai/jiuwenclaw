@@ -1226,68 +1226,58 @@ def test_code_adapter_skill_retrieval_sync_respects_configured_tools(monkeypatch
     )
 
 
-def test_resolve_enable_task_loop_forces_true_when_skill_create_enabled(monkeypatch):
-    monkeypatch.delenv("SKILL_CREATE", raising=False)
+def test_resolve_enable_task_loop_forces_true_when_skill_evolution_enabled():
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
-            {"evolution": {"skill_create": True}},
+            {"react": {"evolution": {"skill_evolution": True}}},
         )
         is True
     )
 
 
-def test_resolve_enable_task_loop_forces_true_when_review_trigger_enabled(monkeypatch):
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+def test_resolve_enable_task_loop_ignores_legacy_review_trigger():
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
-            {"evolution": {"review_trigger": True}},
+            {"react": {"evolution": {"review_trigger": True}}},
         )
-        is True
+        is False
     )
 
 
-def test_resolve_enable_task_loop_forces_true_when_legacy_auto_scan_enabled(monkeypatch):
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+def test_resolve_enable_task_loop_ignores_legacy_auto_scan():
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
-            {"evolution": {"auto_scan": True}},
+            {"react": {"evolution": {"auto_scan": True}}},
         )
-        is True
+        is False
     )
 
 
-def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(monkeypatch):
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
-    monkeypatch.delenv("SKILL_CREATE", raising=False)
+def test_resolve_enable_task_loop_ignores_legacy_evolution_enabled():
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
             {
-                "evolution": {
+                "react": {"evolution": {
                     "enabled": True,
                     "signal_trigger": True,
                     "review_trigger": False,
                     "skill_create": False,
-                }
+                }}
             },
         )
         is False
     )
 
 
-def test_resolve_enable_task_loop_preserves_false_without_enforcers(monkeypatch):
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    monkeypatch.delenv("SKILL_CREATE", raising=False)
+def test_resolve_enable_task_loop_preserves_false_without_enforcers():
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
-            {"evolution": {"enabled": False, "skill_create": False}},
+            {"react": {"evolution": {"skill_evolution": False}}},
         )
         is False
     )

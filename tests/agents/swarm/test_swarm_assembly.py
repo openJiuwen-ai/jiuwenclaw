@@ -172,6 +172,26 @@ def _agentic_retrieval_config(enabled: bool = True) -> dict:
     return {"symphony": {"skill_retrieval": {"enabled": enabled}}}
 
 
+def _skill_evolution_config(*, enabled: bool = True, auto_save: bool = False) -> dict:
+    return {
+        "react": {
+            "evolution": {
+                "skill_evolution": enabled,
+                "auto_save": auto_save,
+            }
+        }
+    }
+
+
+@pytest.fixture(autouse=True)
+def _enable_canonical_skill_evolution_for_assembly_tests(monkeypatch: pytest.MonkeyPatch):
+    """Keep enrichment tests on the explicitly enabled product path."""
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.assembly.get_config",
+        lambda: _skill_evolution_config(),
+    )
+
+
 class _FakeEvolutionInterruptRail:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -427,7 +447,8 @@ def test_build_member_capability_specs_rail_names(
         "agents": {
             "leader": {"skills": ["alpha"]},
             "teammate": {"skills": ["beta"]},
-        }
+        },
+        **_skill_evolution_config(),
     }
 
     rails_specs, _ = build_member_capability_specs(config, "team", role)
@@ -1024,6 +1045,61 @@ def test_team_workspace_report_path_returns_none_without_root() -> None:
     assert member_rails._build_team_workspace_report_path_rail({}, ctx) is None
 
 
+@pytest.mark.parametrize("role", ["leader", "teammate"])
+def test_disabled_team_specs_keep_mount_context_provider_without_evolution_rails(
+    role: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled team still mounts the non-evolution context lifecycle rail."""
+    config = _skill_evolution_config(enabled=False)
+    rails, _ = build_member_capability_specs(config, "team", role)
+    rail_types = {rail.type for rail in rails}
+
+    assert registry.TEAM_WORKSPACE_REPORT_PATH in rail_types
+    assert all("evolution" not in rail_type for rail_type in rail_types)
+
+    context = SwarmBuildContext(
+        config=config,
+        role=role,
+        member_name=f"{role}-member",
+        member_card_id=f"{role}-card",
+        session_id="disabled-session",
+        channel="web",
+        team_id="disabled-team",
+        team_ws_root="/tmp/disabled-team",
+        team_skills_dir="/tmp/disabled-team/skills",
+        trajectory_registry=object(),
+    )
+    rail = member_rails._build_team_workspace_report_path_rail({}, context)
+    assert rail is not None
+
+    captured: dict[str, object] = {}
+
+    class _RecorderTeamManager:
+        def get_team_rail_context(self, session_id):
+            return None
+
+        def register_team_rail_context(self, session_id, mount_context) -> None:
+            captured["leader"] = mount_context
+
+        def register_team_member_rail_context(self, session_id, mount_context) -> None:
+            captured["teammate"] = mount_context
+
+    import jiuwenswarm.agents.harness.team.team_manager as team_manager_module
+
+    monkeypatch.setattr(
+        team_manager_module,
+        "get_team_manager",
+        lambda channel=None: _RecorderTeamManager(),
+    )
+    rail.init(types.SimpleNamespace(card=types.SimpleNamespace(name=f"{role}-member")))
+
+    mount_context = captured[role]
+    assert mount_context.member_info.role == role
+    assert mount_context.team_workspace.team_id == "disabled-team"
+    assert mount_context.team_workspace.config == config
+
+
 # ---------------------------------------------------------------------------
 # Multimodal / xiaoyi tool gating (config-sourced base tools)
 # ---------------------------------------------------------------------------
@@ -1206,13 +1282,12 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         team_ws_root=str(tmp_path),
         team_skills_dir=str(tmp_path / "skills"),
         trajectory_registry=object(),
-        config={},
+        config=_skill_evolution_config(auto_save=auto_save),
     )
 
     built = evolution_rails.build_team_skill_evolution_rail(
         {
             "evolution_model_config": {},
-            "review_trigger": True,
             "auto_save": auto_save,
         },
         ctx,
@@ -1310,22 +1385,20 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         team_id="t",
         team_skills_dir=str(tmp_path / "skills"),
         trajectory_registry=registry_obj,
-        config={},
+        config=_skill_evolution_config(),
     )
 
     built = evolution_rails.build_member_skill_evolution_rail(
-        {"evolution_model_config": {}, "signal_trigger": False},
+        {"evolution_model_config": {}},
         ctx,
     )
 
-    rail = _assert_evolution_approval_stack(
-        built,
-        _FakeMemberSkillEvolutionRail,
-        auto_save=True,
-        language="en",
-    )
+    assert len(built) == 1
+    rail = built[0]
+    assert isinstance(rail, _FakeMemberSkillEvolutionRail)
     assert rail.kwargs["language"] == "en"
-    assert rail.kwargs["signal_trigger"] is False
+    assert rail.kwargs["signal_trigger"] is True
+    assert rail.kwargs["review_trigger"] is False
     assert rail.kwargs["auto_save"] is True
     assert rail.bound_sink == (registry_obj, "t", "teammate")
 
@@ -1369,10 +1442,8 @@ def test_team_skill_create_rail_registers_full_workspace(
     config / trajectory_registry from the build context.
     """
     register_swarm_providers()
-    monkeypatch.setenv("SKILL_CREATE", "true")
-
     registry_obj = object()
-    config = {"react": {"evolution": {"skill_create": True}}}
+    config = _skill_evolution_config()
     ctx = SwarmBuildContext(
         language="cn",
         role="leader",
@@ -1387,7 +1458,7 @@ def test_team_skill_create_rail_registers_full_workspace(
         config=config,
     )
 
-    rail = evolution_rails.build_team_skill_create_rail({"skill_create": True}, ctx)
+    rail = evolution_rails.build_team_skill_create_rail({}, ctx)
     assert rail is not None
 
     captured: dict[str, object] = {}
@@ -1462,7 +1533,9 @@ _EXPECTED_CODE_RAIL_NAMES_TEAMMATE: frozenset[str] = _EXPECTED_CODE_RAIL_NAMES_L
 def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
     """Code modes emit the code rail/tool profile (not the chat-team common rails)."""
     register_swarm_providers()
-    rails_specs, tool_specs = build_member_capability_specs({}, mode, "leader")
+    rails_specs, tool_specs = build_member_capability_specs(
+        _skill_evolution_config(), mode, "leader"
+    )
     rail_names = {spec.type for spec in rails_specs}
     rail_params = {spec.type: spec.params for spec in rails_specs}
     tool_names = {spec.type for spec in tool_specs}

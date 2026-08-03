@@ -30,6 +30,7 @@ from openjiuwen.harness import DeepAgent
 from jiuwenswarm.agents.harness.team import TeamManager, get_team_manager
 from jiuwenswarm.agents.harness.team.team_manager import TEAM_EVENT_QUEUE_MAXSIZE
 from jiuwenswarm.common.log_preview import DEFAULT_PREVIEW_MAX_CHARS, preview_text
+from jiuwenswarm.common.config import get_skill_evolution_enabled
 from jiuwenswarm.common.cron_team_completion import (
     _cron_solo_harness_end_pending,
     _drain_cron_delegation_grace_events,
@@ -1402,16 +1403,6 @@ def ensure_team_evolution_watcher(
             source,
         )
         return
-    if not rail.signal_trigger and not rail.review_trigger:
-        logger.info(
-            "[TeamHelpers] evolution monitor skipped because team evolution is disabled: "
-            "channel_id=%s session_id=%s source=%s",
-            channel_id,
-            session_id,
-            source,
-        )
-        return
-
     logger.info(
         "[TeamHelpers] launching evolution monitor: channel_id=%s session_id=%s source=%s",
         channel_id,
@@ -1436,6 +1427,7 @@ async def _handle_team_slash_command(
     defer_missing_rail: bool = False,
     skills_dir: str | list[str] | None = None,
     language: str = "cn",
+    evolution_enabled: bool | None = None,
 ) -> dict[str, Any] | None:
     """Handle team-only slash commands before entering the team stream."""
     stripped = str(query or "").strip()
@@ -1448,6 +1440,17 @@ async def _handle_team_slash_command(
         or stripped.startswith("/evolve ")
     ):
         return None
+
+    if evolution_enabled is None:
+        evolution_enabled = _resolve_cached_team_evolution_enabled(
+            get_team_manager(channel_id),
+            session_id,
+        )
+    if not evolution_enabled:
+        return {
+            "output": "演进功能未启用。",
+            "result_type": "error",
+        }
 
     if stripped == "/evolve":
         return {
@@ -1482,6 +1485,40 @@ def _resolve_team_slash_skills_dir(session_id: str) -> str | None:
     if not team_name:
         return None
     return str(team_home(team_name) / "team-workspace" / "skills")
+
+
+def _resolve_cached_team_evolution_enabled(
+    team_manager: Any,
+    session_id: str,
+    team_spec: Any | None = None,
+) -> bool:
+    """Resolve the evolution switch from in-memory team/runtime state only."""
+    get_enabled = getattr(team_manager, "get_team_evolution_enabled", None)
+    if callable(get_enabled):
+        cached = get_enabled(session_id)
+        if cached is not None:
+            return bool(cached)
+
+    candidates = [team_spec]
+    get_context = getattr(team_manager, "get_team_rail_context", None)
+    if callable(get_context):
+        candidates.append(get_context(session_id))
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        for owner in (
+            candidate,
+            getattr(candidate, "workspace", None),
+            getattr(candidate, "team_workspace", None),
+            getattr(candidate, "build_context", None),
+            getattr(candidate, "context", None),
+        ):
+            config = getattr(owner, "config", None)
+            if isinstance(config, dict):
+                return get_skill_evolution_enabled(config)
+
+    get_team_rail = getattr(team_manager, "get_team_skill_rail", None)
+    return callable(get_team_rail) and get_team_rail(session_id) is not None
 
 
 def _team_spec_skills_dir(team_spec: Any) -> str:
@@ -1788,6 +1825,11 @@ async def process_team_message_stream(
         session_id,
         query_text,
         skills_dir=team_skills_dir,
+        evolution_enabled=_resolve_cached_team_evolution_enabled(
+            team_manager,
+            session_id,
+            team_spec,
+        ),
     )
     if slash_result is not None:
         approval_chunks = slash_result.get("approval_chunks")
@@ -2969,21 +3011,6 @@ async def _watch_team_evolution_and_push(
             fallback_sec=TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
         )
         while True:
-            if not rail.signal_trigger and not rail.review_trigger:
-                if active_cycle_request_id is not None:
-                    await push_evolution_status(
-                        push_context,
-                        build_evolution_status_update(
-                            request_id=active_cycle_request_id,
-                            status="end",
-                            stage=TEAM_EVOLUTION_HIDDEN_STAGE,
-                            message="",
-                        ),
-                        build_server_push_message,
-                    )
-                await _cleanup_evolution_rail()
-                return
-
             events = await rail.drain_pending_approval_events(wait=False) or []
             if not events:
                 if active_cycle_request_id is not None:

@@ -46,10 +46,7 @@ from jiuwenswarm.common.config import (
     ASCEND_AFFINITY_PROVIDER,
     get_default_model_provider,
     get_evolution_auto_save_enabled,
-    get_evolution_auto_scan_enabled,
-    get_evolution_review_trigger_enabled,
-    get_evolution_signal_trigger_enabled,
-    get_skill_create_enabled,
+    get_skill_evolution_enabled,
 )
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     get_context_engine_enabled,
@@ -334,13 +331,8 @@ def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
 
 def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the leader team skill-evolution rail."""
-    auto_scan = get_evolution_auto_scan_enabled(config)
     return {
         "evolution_model_config": _evolution_model_config(config),
-        "review_trigger": get_evolution_review_trigger_enabled(
-            config,
-            fallback=auto_scan,
-        ),
         "auto_save": get_evolution_auto_save_enabled(config),
     }
 
@@ -349,10 +341,6 @@ def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the member skill-evolution rail."""
     return {
         "evolution_model_config": _evolution_model_config(config),
-        "signal_trigger": get_evolution_signal_trigger_enabled(
-            config,
-            fallback=get_evolution_auto_scan_enabled(config),
-        ),
     }
 
 
@@ -439,6 +427,8 @@ def _code_base_rail_names(role: str) -> tuple[str, ...]:
 
 def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
     """Return the role-specific skill-evolution rails (shared by both profiles)."""
+    if not get_skill_evolution_enabled(config):
+        return []
     if role == "leader":
         return [
             RailSpec(
@@ -447,7 +437,7 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
             ),
             RailSpec(
                 type=registry.TEAM_SKILL_CREATE,
-                params={"skill_create": get_skill_create_enabled(config)},
+                params={},
             ),
         ]
     return [
