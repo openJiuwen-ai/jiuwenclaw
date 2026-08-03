@@ -573,95 +573,20 @@ def _stop_runner(pid: int, process_handle: int, timeout_ms: int = 5000) -> None:
 # ---------------------------------------------------------------------------
 # runner 侧: 第二跳 (运行在 jbx-sandbox 上下文).
 # ---------------------------------------------------------------------------
-def _get_logon_session_sid() -> "ctypes.c_void_p":
-    """从当前进程 token 提取登录会话 SID (TokenGroups 里的 logon session)."""
-    advapi32 = _get_advapi32()
-    kernel32 = _get_kernel32()
-    h_token = wintypes.HANDLE()
-    # TOKEN_QUERY = 0x0008
-    TOKEN_QUERY = 0x0008
-    if not advapi32.OpenProcessToken(
-        kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(h_token),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        # 先 query 长度.
-        ret_len = wintypes.DWORD(0)
-        advapi32.GetTokenInformation(
-            h_token, const.TOKEN_GROUPS, None, 0, ctypes.byref(ret_len),
-        )
-        buf = (ctypes.c_byte * ret_len.value)()
-        if not advapi32.GetTokenInformation(
-            h_token, const.TOKEN_GROUPS, buf, ret_len, ctypes.byref(ret_len),
-        ):
-            raise ctypes.WinError(ctypes.get_last_error())
-        # 解析: TOKEN_GROUPS { GroupCount, SID_AND_ATTRIBUTES[] }
-        # SID_AND_ATTRIBUTES { Sid: PVOID, Attributes: DWORD }
-        groups_struct = ctypes.cast(
-            buf, ctypes.POINTER(_TOKEN_GROUPS),
-        ).contents
-        count = groups_struct.GroupCount
-        # SID_AND_ATTRIBUTES 布局.
-        class _SID_AND_ATTRS(ctypes.Structure):
-            _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
-        arr_t = _SID_AND_ATTRS * count
-        groups = ctypes.cast(
-            ctypes.addressof(groups_struct) + ctypes.sizeof(wintypes.DWORD),
-            ctypes.POINTER(arr_t),
-        ).contents
-        # 找 SE_GROUP_LOGON_ID (Attributes 位 0x40000000) 的 SID.
-        SE_GROUP_LOGON_ID = 0x40000000
-        for g in groups:
-            if g.Attributes & SE_GROUP_LOGON_ID:
-                return g.Sid
-        # 兜底: 返回第一个.
-        return groups[0].Sid if count else None
-    finally:
-        kernel32.CloseHandle(h_token)
-
-
-def _get_everyone_sid() -> "ctypes.c_void_p":
-    """CreateWellKnownSid(WinWorldSid) -> Everyone SID."""
-    advapi32 = _get_advapi32()
-    size = wintypes.DWORD(64)
-    buf = (ctypes.c_byte * 64)()
-    if not advapi32.CreateWellKnownSid(
-        const.WIN_WORLD_SID, None, buf, ctypes.byref(size),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return ctypes.cast(buf, ctypes.c_void_p)
-
-
-def _get_synthetic_write_sid_ptr() -> "ctypes.c_void_p":
-    """构造合成 JHXSandboxWrite SID (AllocateAndInitializeSid).
-
-    生成的 SID 必须与 win_acl.get_synthetic_write_sid() 字符串版完全一致,
-    即 S-1-5-21-<sub0>-<sub1>-<RID>. SID 表示法 S-R-I-S1-S2-... 中 I 是
-    identifier authority, 其后每段是 sub-authority; "21" 是第一个 sub-authority
-    (不是 identifier authority 5 的一部分). 故 AllocateAndInitializeSid 的
-    nSubAuthorityCount = 4, sub list = [21, sub0, sub1, RID].
-    旧版误用 nSubAuthorityCount=3 漏了 21, 产出 S-1-5-... 与 ACL 授权的
-    S-1-5-21-... 不是同一个 SID, 导致受限 token 第二重 ACL 检查永远失败
-    (review CRITICAL #1).
-    """
-    advapi32 = _get_advapi32()
-    # SID_IDENTIFIER_AUTHORITY = 6 字节 (NT Authority = 5).
-    SID_AUTH_NT = (ctypes.c_byte * 6)(0, 0, 0, 0, 0, 5)
-    sid_ptr = ctypes.c_void_p()
-    # AllocateAndInitializeSid(auth, nSubAuthorityCount, *subauths, &sid)
-    # nSubAuthorityCount=4: [21, sub0, sub1, RID] -> S-1-5-21-<sub0>-<sub1>-<RID>.
-    ok = advapi32.AllocateAndInitializeSid(
-        ctypes.byref(SID_AUTH_NT), 4,
-        21,  # sub0 = 21 (使 SID = S-1-5-21-...)
-        const.SYNTHETIC_WRITE_SID_SUBAUTHS[0],
-        const.SYNTHETIC_WRITE_SID_SUBAUTHS[1],
-        const.SYNTHETIC_WRITE_SID_RID,
-        0, 0, 0, 0,  # sub4..sub7 占位 (nSubAuthorityCount=4, 后 4 个忽略)
-        ctypes.byref(sid_ptr),
-    )
-    if not ok:
-        raise ctypes.WinError(ctypes.get_last_error())
-    return sid_ptr
+# 以下三个 SID helper 已被 _create_restricted_token 内联替换, 不再使用:
+#   _get_logon_session_sid / _get_everyone_sid / _get_synthetic_write_sid_ptr
+# 旧版缺陷 (内联版已逐个修):
+#   - _get_everyone_sid / _get_logon_session_sid: 返回指向 Python 管理的
+#     c_byte buffer 的指针, 函数返回后 buffer 被 GC -> 悬垂指针 ->
+#     CreateRestrictedToken 读 freed memory -> WinError 998. 内联版在
+#     _create_restricted_token 内构造 buffer 并持有引用直到调用返回.
+#   - _get_logon_session_sid: 手动 sizeof(DWORD) 跳偏移, 64 位漏 padding
+#     -> 读错位 -> 垃圾 SID. 内联版用 _TOKEN_GROUPS.Groups.offset 让
+#     ctypes 自动算对齐.
+#   - _get_synthetic_write_sid_ptr: nSubAuthorityCount=3 漏了 21, 产出
+#     S-1-5-... 与 ACL 授权的 S-1-5-21-... 不同 SID -> 双重写检查失效.
+#     内联版 nSubAuthorityCount=4 含 21.
+# 2026-08-02 P2-25: 删除死代码 (如需恢复, 从 git 历史 5f841f7a 取回).
 
 
 def _create_restricted_token() -> int:
@@ -1120,20 +1045,27 @@ def runner_main(argv: list[str]) -> int:
     # box-server 端只看到 control_port ECONNREFUSED, 无法定位根因.
     # 这里在最外层包 try/except, 把异常完整落盘 + logger.error + _push_log,
     # 后者经日志长连发回 box-server 由主进程打印.
+    # P0-2 弃用说明: 受限 token (CreateRestrictedToken) 当前未被 exec 消费 —
+    # _handle_exec_request 内用 _get_runner_primary_token() 起 child (受限 token
+    # 会让 child 0xC0000142, 受限 token 的 desktop/全局对象机制硬限制, 见
+    # win_exec.py:1304-1309). 保留 _create_restricted_token 构造是为未来恢复
+    # 双重写检查留底: 届时把 _handle_exec_request 内 _self_token 取值从
+    # _get_runner_primary_token() 改回入参 restricted_token 即可. 这段
+    # dead code 的构造失败不应升级为生产阻断 — 此处降级 best-effort, 失败
+    # 只 warning 不杀 runner (失败后 restricted_token=None, exec 不依赖它).
+    restricted_token: int | None = None
     try:
         restricted_token = _create_restricted_token()
     except Exception:
-        import traceback as _tb
-        tb = _tb.format_exc()
-        logger.exception(
-            "runner _create_restricted_token 失败, runner 退出 (sandbox_id=%s)",
-            args.sandbox_id,
+        logger.warning(
+            "_create_restricted_token 失败, 已弃用故不阻断 runner "
+            "(sandbox_id=%s)", args.sandbox_id, exc_info=True,
         )
-        _push_log("ERROR",
-                  f"runner _create_restricted_token 失败, runner 退出 "
-                  f"(sandbox_id={args.sandbox_id})", exc=tb)
-        return 1
-    _push_log("INFO", f"restricted token 创建成功: handle={restricted_token}")
+        _push_log("WARNING",
+                  f"受限 token 构造失败但已弃用, 不阻断 runner "
+                  f"(sandbox_id={args.sandbox_id})")
+    if restricted_token is not None:
+        _push_log("INFO", f"restricted token 创建成功: handle={restricted_token}")
 
     # TCP loopback 控制端口 (box-server 分配, 命令行参数传入). runner bind + listen,
     # box-server 每次 exec connect 一条新连接, 发一帧请求读一帧响应后 close.
@@ -1244,6 +1176,12 @@ def runner_main(argv: list[str]) -> int:
                   f"runner accept 循环异常 (sandbox_id={args.sandbox_id})", exc=tb)
     finally:
         _push_log("INFO", f"runner 退出 (sandbox_id={args.sandbox_id})")
+        # P2-26: 显式关闭本地落盘日志文件.
+        if _local_log_file is not None:
+            try:
+                _local_log_file.close()
+            except OSError:
+                pass
         kernel32 = _get_kernel32()
         kernel32.CloseHandle(wintypes.HANDLE(restricted_token))
         listener.close()
@@ -1358,8 +1296,9 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         ctypes.byref(child_in_read), ctypes.byref(child_in_write),
         ctypes.byref(sa), 0,
     )
-    # runner 持有的写端关闭继承, 防 child 拿到.
+    # runner 持有的写端/读端关闭继承, 防 child 拿到.
     _clear_inherit(int(child_in_write.value))
+    _clear_inherit(int(child_out_read.value))  # P2-29: 防 child 继承 stdout 读端
     try:
         workdir = header.get("workdir")
         env = header.get("env")
@@ -1508,6 +1447,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             "exit_code": ec,
             "stdout": out_text,
             "stderr": "",
+            "killed": _child_killed,  # P2-28: 回传超时强杀标志
         })
         # 上报 exec 结果 (尤其失败时). exit_code != 0 或输出为空是定位
         # "空 stderr exit=1" 类问题的关键, 把 command 摘要 + exit + 输出前缀
@@ -1553,6 +1493,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         try:
             kernel32.CloseHandle(child_out_write)
             kernel32.CloseHandle(child_out_read)
+            kernel32.CloseHandle(child_in_write)
         except Exception:
             pass
 

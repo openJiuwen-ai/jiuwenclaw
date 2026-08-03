@@ -83,7 +83,6 @@ _WFP_ERROR_NAMES: dict[int, str] = {
     0x80320023: "FWP_E_INVALID_AUTH_VALUE",
     0x80320024: "FWP_E_INVALID_KEY",
     0x80320031: "FWP_E_KEY_NOT_FOUND",
-    0x80320032: "FWP_E_FILTER_NOT_FOUND (delete)",
     0xC0360017: "FWP_E_TRUSTED_PACKAGE_MISMATCH",
 }
 
@@ -568,8 +567,11 @@ def _build_ale_user_condition(sandbox_user_sid: str) -> "tuple[FWPM_FILTER_CONDI
         },
     }
     # SetEntriesInAcl 是 PyACL 方法: 在空 ACL 上添加 entries.
+    # P2-37: 取返回值校验 (pywin32 版本差异下 DACL 可能未生效).
     dacl = win32security.ACL()
-    dacl.SetEntriesInAcl([explicit])
+    _set_ret = dacl.SetEntriesInAcl([explicit])
+    if _set_ret is not None and _set_ret != 0:
+        logger.warning("SetEntriesInAcl 返回非零: %s", _set_ret)
     sd = win32security.SECURITY_DESCRIPTOR()
     # S9 实跑: FwpmFilterAdd0 报 RPC_X_BAD_STUB_DATA(0x6F7)。SDK 示例用
     # BuildSecurityDescriptorW 构造带 owner/group/DACL 的完整 SD。pywin32 的
@@ -641,14 +643,12 @@ def _add_filter(
     action_type: int,
     weight: int,
     display_name: str,
-    keeps_alive: list[object] | None = None,
+    **kwargs: object,
 ) -> None:
     """安装一个 filter.
 
     幂等: 已存在 (FWP_E_ALREADY_EXISTS=0x800700B7) 则忽略, 不删后加
     (旧 docstring 误导为"先删后加", 已修正).
-    keeps_alive: 条件构造返回的 keep-alive 引用 (FWP_V4_ADDR_MASK/
-    FWPM_DISPLAY_DATA/SD blob 等), 必须存活到本函数 FwpmFilterAdd0 返回.
     """
     fwpu = _get_fwpuclnt()
     fkey = _guid_from_str(filter_key)
@@ -750,7 +750,6 @@ def install_wfp_filters(
                     const.FWP_ACTION_BLOCK,
                     const.FWP_WEIGHT_BLOCK,
                     f"JiuwenBox-Block-{fkey}",
-                    keeps_alive=keeps,
                 )
 
             # --- Permit filters (V4 + V6) for loopback + port range ---
@@ -786,7 +785,6 @@ def install_wfp_filters(
                         const.FWP_ACTION_PERMIT,
                         const.FWP_WEIGHT_PERMIT,
                         f"JiuwenBox-Permit-Loopback-{base_key}-{port}",
-                        keeps_alive=keeps,
                     )
 
             fwpu.FwpmTransactionCommit0(engine)

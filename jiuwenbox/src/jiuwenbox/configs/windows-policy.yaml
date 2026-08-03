@@ -105,6 +105,7 @@ windows:
     # 调整; 该目录默认 ACL 已给 Users 组, 预装是 idempotent 保险, 不预装也多
     # 半能读 (Users 组继承).
     read_acl_preinstall:
+      # P2-35: 按实际安装位置调整; 该目录默认 ACL 已给 Users 组, 预装是保险.
       - "C:\\Program Files (x86)\\Qoom\\Chrome"
     # 沙箱可写路径 (合成 SID 授 Allow Write+Execute+Delete). 第一个路径作为
     # 沙箱 workspace 根.
@@ -162,8 +163,9 @@ windows:
       allowed_domains:
         - "pypi.org"
         - "files.pythonhosted.org"
-        - "*.npmmirror.com"
-        - "npmmirror.com"
+        # P2-34: *.npmmirror.com 通配偏宽, 待确认具体子域后收紧.
+        - "registry.npmmirror.com"
+        - "cdn.npmmirror.com"
       blocked_domains:
         - "ip.me"
       allowed_ips:

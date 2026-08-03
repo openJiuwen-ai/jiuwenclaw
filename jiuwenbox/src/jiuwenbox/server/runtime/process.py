@@ -2810,7 +2810,7 @@ class ProcessRuntime(RuntimeAdapter):
 
     @staticmethod
     def _win_workspace_for(policy: SecurityPolicy, sandbox_id: str) -> str:
-        """沙箱 workspace 真实路径 (Windows): ~/.office-claw/.jiuwenclaw/jiuwenbox/<id>.
+        """沙箱 workspace 真实路径 (Windows): ~/.office-claw/.jiuwenclaw/jiuwenbox/workspace/<id>.
 
         与 agent-server 同根 (~/.office-claw/.jiuwenclaw), box-server 进程
         (liubuyu) 天然是该目录 owner → 改 DACL 不会 WinError 5, 子目录继承
@@ -2960,7 +2960,7 @@ class ProcessRuntime(RuntimeAdapter):
             env["PATH"] = f"{extra}{os.pathsep}{existing_path}" if existing_path else extra
             # SystemRoot 也带上 (CreateProcessAsUserW 子进程基本依赖).
             env.setdefault("SystemRoot", os.environ.get("SystemRoot", ""))
-            logger.info(
+            logger.debug(
                 "[SandboxWin] %s windows toolpaths injected: dirs=%s bash_path=%s "
                 "PATH_prefix=%s (read ACL 由 install 预装, 运行时仅拼 PATH)",
                 sandbox_id, win_tool_dirs, _bash_path or "<未配置>", extra,
@@ -2999,7 +2999,7 @@ class ProcessRuntime(RuntimeAdapter):
         env.setdefault("USERPROFILE", _profile_root)
         env.setdefault("LOCALAPPDATA", os.path.join(_profile_root, "AppData", "Local"))
         env.setdefault("APPDATA", os.path.join(_profile_root, "AppData", "Roaming"))
-        logger.info(
+        logger.debug(
             "[SandboxWin] %s sandbox-writable temp injected: TEMP=%s",
             sandbox_id, win_tmp_dir,
         )
@@ -3016,7 +3016,7 @@ class ProcessRuntime(RuntimeAdapter):
             sandbox_user_sid=sandbox_user_sid,
         )
         self._win_acl_paths[sandbox_id] = acl_paths or [workspace]
-        logger.info(
+        logger.debug(
             "[SandboxWin] %s ACL applied: workspace=%s, allow_read=%s, allow_write=%s "
             "(bundled_python=%s, venv=%s)",
             sandbox_id, workspace,

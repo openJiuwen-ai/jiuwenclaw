@@ -166,7 +166,7 @@ SANDBOX_NETWORK_SET        = "sandbox.network.set"
 
 **1a. `sandbox.enabled.get`** — 读取开关
 - params：`{}`（无）
-- 返回：`{"enabled": <bool>}`（取 `config.yaml::sandbox.enabled`，默认 true）
+- 返回：`{"enabled": <bool>}`（取 `config.yaml::sandbox.enabled`，默认 false）
 
 **1b. `sandbox.enabled.set`** — 设置开关
 - params：`{"enabled": <bool>}`（必填布尔；非布尔返回 `enabled must be boolean`，code=BAD_REQUEST）
@@ -229,7 +229,7 @@ SANDBOX_NETWORK_SET        = "sandbox.network.set"
 if request.req_method in get_sandbox_config_req_methods():
     return _handle_sandbox_config(request)
 ```
-`_handle_sandbox_config` 调 `dispatch_sandbox_config_request(request)`（`sandbox_config_rpc.py`），与 `dispatch_permissions_config_request` 同形态。`get_sandbox_config_req_methods()` 返回 6 个方法的 frozenset（对齐 `permissions/config_rpc.py:18-40`）。
+`_handle_sandbox_config` 调 `dispatch_sandbox_config_request(request)`（`sandbox_config_rpc.py`），与 `dispatch_permissions_config_request` 同形态。`get_sandbox_config_req_methods()` 返回 8 个方法的 frozenset（4 组 get/set：`sandbox.{enabled,files,network,startup_mode}`）。
 
 #### 3.3.1 伪代码：`sandbox_policy_render.py`（读写运行时副本，核心模块）
 
@@ -800,7 +800,7 @@ await fetch('/api/config/sandbox', {
 - **重启 box-server 不重建 jbx-sandbox 用户**：jbx-sandbox 用户/密码/预装 ACL/WFP filter 是**安装期一次性产物**（`win_setup.ensure_windows_setup`），box-server 重启时 lifespan 重跑 `ensure_windows_setup` 是**幂等**的（用户已存在则跳过），不重建用户。重启会清掉的只是**活沙箱 runner 进程**——lifespan shutdown 调 `shutdown_all_sandboxes()`（`app.py:428`）自动 SIGTERM/SIGKILL 旧 runner，下次 exec 按需 lazy 建新沙箱。故"网络变更销毁沙箱"由 box-server 重启**自动覆盖**，无需额外 `recreate_all_sandboxes()`（§3.4 网络行修正：重建沙箱动作是重启的副作用，非独立步骤）。
 - **文件白名单饿死沙箱**：§2.3 用户白名单**合并**进基底（不覆盖必需集），避免用户只写几条导致 python/bash 读不了；取消回落基底。
 - **配置一致性**：用户文件/网络配置统一存在运行时副本的 `user_overrides:` 段（不存 config.yaml），`render_runtime_policy()` 统一合并进 `windows` 段，文件与网络同源不分裂。config.yaml 只保留 `sandbox.enabled`（开关，基础配置）+ `sandbox.policy_file`（指向运行时副本）。
-- **范围**：本次只做 jiuwenclaw 后端。relay-claw（officeAce）的 Fastify 路由 + 前端 UI 由 relay-claw 团队负责（另有团队），**不在本方案范围**；jiuwenclaw 侧只需把 6 个 WS 接口（`sandbox.{enabled,files,network}.{get,set}`）+ handler + 生效逻辑做好，供 relay-claw 团队按 `permissions.*` 同款对接（对接模板见 §1.1 的 `/api/config/relayclaw/security`）。本方案的"接口契约"（§3.3）即为交付给 relay-claw 团队的对接说明。
+- **范围**：本次只做 jiuwenclaw 后端。relay-claw（officeAce）的 Fastify 路由 + 前端 UI 由 relay-claw 团队负责（另有团队），**不在本方案范围**；jiuwenclaw 侧只需把 8 个 WS 接口（`sandbox.{enabled,files,network,startup_mode}.{get,set}`）+ handler + 生效逻辑做好，供 relay-claw 团队按 `permissions.*` 同款对接（对接模板见 §1.1 的 `/api/config/relayclaw/security`）。本方案的"接口契约"（§3.3）即为交付给 relay-claw 团队的对接说明。
 
 ## 6. 已确认的决策点（用户答复）
 

@@ -51,7 +51,7 @@ def _resolve_tool_paths(policy: SecurityPolicy) -> SecurityPolicy:
     # python_dir: sys.executable 所在目录 (python.exe 同级).
     if not (tp.python_dir or "").strip():
         try:
-            py_dir = str(Path(sys.executable).parent)
+            py_dir = str(Path(sys.executable).parent.resolve())
             if Path(py_dir, "python.exe").is_file():
                 filled["python_dir"] = py_dir
         except OSError:
@@ -61,7 +61,8 @@ def _resolve_tool_paths(policy: SecurityPolicy) -> SecurityPolicy:
     if not (tp.node_dir or "").strip() and filled.get("python_dir"):
         py_dir = Path(filled["python_dir"])
         # python_dir 形如 <root>/tools/python → node 在 <root>/tools/node.
-        for ancestor in (py_dir.parent, *py_dir.parents):
+        # P2-41: 限定只查 py_dir.parent, 不遍历到根 (OfficeAce 标准结构).
+        for ancestor in (py_dir.parent,):
             cand = ancestor / "node"
             if (cand / "node.exe").is_file():
                 filled["node_dir"] = str(cand)
@@ -73,7 +74,7 @@ def _resolve_tool_paths(policy: SecurityPolicy) -> SecurityPolicy:
         if git_exe:
             # git.exe 多在 <git_root>/cmd 或 <git_root>/bin 或 mingw64/bin;
             # git_dir 期望是安装根 (含 usr/bin/bash.exe).
-            git_path = Path(git_exe)
+            git_path = Path(git_exe).resolve()
             for ancestor in (git_path.parent, *git_path.parents):
                 if (ancestor / "usr" / "bin" / "bash.exe").is_file():
                     filled["git_dir"] = str(ancestor)
@@ -88,7 +89,7 @@ def _resolve_tool_paths(policy: SecurityPolicy) -> SecurityPolicy:
     new_fs = fs.model_copy(update={"tool_paths": new_tp})
     new_windows = policy.windows.model_copy(update={"filesystem": new_fs})
     logger.info(
-        "tool_paths 自动检测填充: %s",
+        "tool_paths 自动检测填充: %s (python_dir=via sys.executable, git_dir=via PATH)",
         ", ".join(f"{k}={v}" for k, v in filled.items()),
     )
     return policy.model_copy(update={"windows": new_windows})

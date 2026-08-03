@@ -280,7 +280,8 @@ def apply_sandbox_acl(
       2. 对 deny_write 路径施加 Deny Write ACE (合成 SID), 在 allow 范围内精细化封锁.
     读控制 (deny-then-allow, 对齐 docs/window沙箱.md 6.7):
       3. 对 deny_read 路径施加 Deny Read ACE (合成 SID).
-      4. 对 allow_read 路径施加 Allow Read ACE (合成 SID), 覆盖 deny.
+      4. 对 allow_read 路径施加 Allow Read ACE (合成 SID), 在 Deny 之后施加
+         (NTFS Deny 优先于 Allow, 注释旧版误写"覆盖 deny"已修正, P2-48).
       5. 若 allow_read 为空, 对 workspace 根施加 Allow Read ACE (合成 SID),
          使独立用户身份的沙箱至少能读自己工作区 (review MAJOR #4: 读控制
          之前完全缺失; Windows 独立用户默认读不了用户 profile, 靠 install
