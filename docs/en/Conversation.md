@@ -174,80 +174,33 @@ You can switch execution modes using the **mode selector** at the bottom of the 
 
 ---
 
-### 2.2 Task Planning Mode
+### 2.2 Agent Mode
 
 #### 2.2.1 Concept Overview
 
-**What is task planning?**
+**What is Agent mode?**
 
-Task planning is one of JiuwenSwarm's core capabilities. It gives the agent **structured task decomposition and dynamic management**. For complex or multi-step requests, the agent automatically parses them into executable subtasks and systematically records/tracks them through built-in todo tools.
+Agent mode is the default working mode of JiuwenSwarm. In this mode, a single agent handles your tasks independently, with the following capabilities:
 
-**Core Value**
-
-| Capability | Description |
-|:---|:---|
-| **Dynamic decomposition** | Automatically splits complex requests into executable subtask sequences |
-| **Real-time tracking** | Updates subtask status as each step completes, making progress visible and controllable |
-| **Flexible intervention** | Supports adding requirements or urgent insertions mid-execution without breaking the overall flow |
-| **Goal preservation** | Reduces goal drift and execution gaps in long-running tasks |
-
-**Applicable Scenarios**
-
-- Tasks with many steps that need phased completion
-- Tasks likely to change during execution
-- Tasks where process transparency is important
-- Tasks requiring confirmation at each stage
-
-![Conversation page after assigning task](../assets/images/conversation/dynamic_insert_task.png)
-
----
-
-### 2.3 Performance Mode
-
-#### 2.3.1 Concept Overview
-
-**What is performance mode?**
-
-Performance Mode (Fast Mode) is optimized for simple and clear tasks. In this mode, the agent will:
-
-- **Respond quickly**: Reduce planning overhead and execute directly
-- **Process in parallel**: Run multiple independent tasks at the same time
-- **Prioritize efficiency**: Complete work as fast as possible
+- **Task planning**: Complex requests are automatically decomposed into executable subtask sequences
+- **Dynamic adjustment**: Supports adding requirements or urgent insertions mid-execution
+- **Tool orchestration**: Automatically selects and combines suitable tools to complete tasks
+- **Real-time tracking**: Each subtask's status updates in real time, making progress visible and controllable
 
 **Applicable scenarios**
 
-- Tasks with clear goals and straightforward steps
-- Tasks where fast results are preferred
-- Tasks that do not require detailed process decomposition
-- Multiple simple tasks that need batch processing
+- Most daily tasks, Q&A, code generation
+- Tasks with many steps that need phased completion
+- Tasks likely to change during execution
+- Tasks where process transparency is important
 
-#### 2.3.2 Practical Example
-
-**Case: Batch document rewriting**
-
-```
-User: Rewrite the following two technical docs so they are easier for beginners:
-1. docs/api.md
-2. docs/architecture.md
-
-Agent: 🔍 Processing docs in parallel...
-
-  Rewriting completed! Both beginner-friendly versions are saved.
-
-  Original file                 Beginner version
-  ContextCompression.md         ContextCompression_Beginner.md
-  Heartbeat.md                  Heartbeat_Beginner.md
-
-  🎉 Both beginner-friendly docs are saved in the same directories as the originals. Want me to refine anything else?
-```
-
-![Performance mode diagram](../assets/images/conversation/performance_mode_demo.png)
+**Performance optimization**: For simple and clear tasks, the agent automatically reduces planning overhead and responds quickly, supporting parallel execution when appropriate. You don't need to manually switch to a separate "fast mode" — the agent adapts to task complexity automatically.
 
 ---
 
-### 2.4 Cluster Mode
+### 2.3 Cluster Mode
 
-#### 2.4.1 Concept Overview
+#### 2.3.1 Concept Overview
 
 **What is cluster mode?**
 
@@ -266,7 +219,7 @@ Cluster Mode (Team Mode) is JiuwenSwarm's multi-agent collaboration mode. Multip
 - Tasks requiring multiple professional skill sets
 - Tasks difficult for a single agent to complete alone
 
-#### 2.4.2 Practical Example
+#### 2.3.2 Practical Example
 
 **Case: Full-stack project development**
 
@@ -291,6 +244,7 @@ The screenshots below are ordered roughly as the conversation unfolds.
    Conversation UI where the Team Leader confirms scope and key details with the user before cluster startup.
 
 ![Cluster mode diagram 1](../assets/images/conversation/chat_cluster_mode_1.png)
+
 
 2. **Pickup and parallel start**  
    Conversation and status UI when specialized agents pick up subtasks and start work in parallel.
@@ -574,8 +528,7 @@ User Input → Intent Understanding → Mode Selection → Task Handling → Res
 1. **Intent understanding**: Parse natural language and identify real requirements
 2. **Mode selection**: Choose an execution strategy based on task traits and current mode
 3. **Task handling**:
-   - **Task planning mode**: Decompose into subtasks and execute by plan
-   - **Performance mode**: Execute quickly, with parallel support
+   - **Agent mode**: Single agent handles tasks, with automatic task planning and dynamic adjustment
    - **Cluster mode**: Delegate to multiple agents for collaboration
 4. **Result feedback**: Present results in a clear and understandable way
 

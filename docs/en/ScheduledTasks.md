@@ -91,7 +91,7 @@ JiuwenSwarm provides two automation mechanisms: **Scheduled Tasks (Cron)** and *
 3. Enter the scheduled tasks page, click **Create** button
 4. Fill in the task configuration form:
 
-![Scheduled Tasks Page](../assets/images/current-ui-en/11-Scheduled-Tasks-Page.png)
+![Scheduled Tasks Page](../assets/images/current-ui-en/10-Scheduled-Tasks.png)
 
 | Field | Description | Example |
 |-------|-------------|---------|
@@ -119,8 +119,6 @@ Scheduled task configurations are saved at:
 ### Create via Chat
 
 When the Agent has the `cron_create_job` tool capability, you can create scheduled tasks directly through natural language conversation.
-
-![Create Scheduled Task via Chat](../assets/images/current-ui-en/12-Create-Scheduled-Task.png)
 
 **Example Conversation:**
 
@@ -163,8 +161,6 @@ When a scheduled task triggers at the fixed time, a running conversation will ap
 ### View Execution Results
 
 The execution results of scheduled tasks can be viewed on the chat page.
-
-![Scheduled Task Execution](../assets/images/current-ui-en/10-Work-Page-Full.png)
 
 ---
 
