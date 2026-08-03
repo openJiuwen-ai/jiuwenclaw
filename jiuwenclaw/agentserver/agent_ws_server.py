@@ -126,6 +126,8 @@ class AgentWebSocketServer:
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
+        # 每连接单调递增的线上发送序号（仅可在 send_lock 内自增），用于定位乱序
+        self._wire_seq_by_ws: dict[int, int] = {}
         self._agent_manager = None  # TenantAgentPool 实例
 
         # OA 模式相关
@@ -160,6 +162,17 @@ class AgentWebSocketServer:
 
     def _clear_ws_acp_client_capabilities(self, ws: Any) -> None:
         self._acp_client_capabilities_by_ws.pop(self._ws_capabilities_key(ws), None)
+
+    def _next_wire_seq(self, ws: Any) -> int:
+        """返回该连接的下一个线上发送序号（仅可在持有 send_lock 时调用）。
+        """
+        key = self._ws_capabilities_key(ws)
+        seq = self._wire_seq_by_ws.get(key, 0) + 1
+        self._wire_seq_by_ws[key] = seq
+        return seq
+
+    def _clear_ws_wire_seq(self, ws: Any) -> None:
+        self._wire_seq_by_ws.pop(self._ws_capabilities_key(ws), None)
 
     @classmethod
     def get_instance(
@@ -230,6 +243,43 @@ class AgentWebSocketServer:
         """
         async with send_lock:
             message = self._wrap_oa_message(payload, msg_type)
+            if logger.isEnabledFor(logging.DEBUG):
+                wire_seq = self._next_wire_seq(ws)
+                body = payload.get("body")
+                event_type = ""
+                content = ""
+                if isinstance(body, dict):
+                    event_type = str(body.get("event_type") or "")
+                    inner_payload = body.get("payload")
+                    if not event_type and isinstance(inner_payload, dict):
+                        event_type = str(inner_payload.get("event_type") or "")
+                    # 提取帧内容：chat.delta → body.delta(文本)；custom 事件 → body.delta(payload dict)；
+                    # 终态 → body.result；错误 → body.message。json.dumps 转义换行，保证一帧一行日志
+                    delta = body.get("delta")
+                    if isinstance(delta, str):
+                        content = delta
+                    elif delta is not None:
+                        content = json.dumps(delta, ensure_ascii=False)
+                    elif body.get("result") is not None:
+                        content = json.dumps(body.get("result"), ensure_ascii=False)
+                    elif body.get("message"):
+                        content = str(body.get("message"))
+                if isinstance(content, str) and "\n" in content:
+                    content = json.dumps(content, ensure_ascii=False)
+                logger.debug(
+                    "[session=%s] [AgentWebSocketServer] wire send to OA: wire_seq=%d msg_type=%s "
+                    "request_id=%s response_id=%s seq=%s kind=%s event=%s final=%s content=%s",
+                    str(payload.get("session_id") or "-").strip() or "-",
+                    wire_seq,
+                    msg_type,
+                    payload.get("request_id"),
+                    payload.get("response_id"),
+                    payload.get("sequence"),
+                    payload.get("response_kind") or "-",
+                    event_type or "-",
+                    payload.get("is_final"),
+                    content,
+                )
             await ws.send(json.dumps(message, ensure_ascii=False))
 
     # ---------- 生命周期 ----------
@@ -447,6 +497,7 @@ class AgentWebSocketServer:
             raise
         finally:
             self._clear_ws_acp_client_capabilities(ws)
+            self._clear_ws_wire_seq(ws)
             if tasks:
                 for t in tasks:
                     if not t.done():
@@ -744,6 +795,7 @@ class AgentWebSocketServer:
             self._current_ws = None
             self._current_send_lock = None
             self._clear_ws_acp_client_capabilities(ws)
+            self._clear_ws_wire_seq(ws)
             # Gateway 进程退出/端口关闭时，必须先取消各 session 内流式生产者（SessionManager）
             # 并中止 DeepAgent 内层循环；否则仅等待 _handle_message 任务结束会一直阻塞到任务自然完成。
             try:
