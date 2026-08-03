@@ -54,7 +54,7 @@ from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
 
 from jiuwenswarm.extensions.registry import ExtensionRegistry
-from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenticator
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import CredentialAuthenticator
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()

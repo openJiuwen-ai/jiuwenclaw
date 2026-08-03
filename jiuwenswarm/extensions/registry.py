@@ -9,10 +9,10 @@ from jiuwenswarm.extensions.sdk.crypto_utility import CryptoUtility
 from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
 from jiuwenswarm.extensions.types import ExtensionConfig
 from jiuwenswarm.common.security.base_crypto import CryptoProvider
-from jiuwenswarm.gateway.auth.credential_authenticator import CredentialAuthenticator
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import CredentialAuthenticator
 from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
 
-from jiuwenswarm.gateway.auth.passthrough_authenticator import PassthroughAuthenticator
+from jiuwenswarm.extensions.agentos.auth.passthrough_authenticator import PassthroughAuthenticator
 
 
 class ExtensionRegistry:
