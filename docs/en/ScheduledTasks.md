@@ -86,11 +86,12 @@ JiuwenSwarm provides two automation mechanisms: **Scheduled Tasks (Cron)** and *
 
 **Steps:**
 
-1. Open JiuwenSwarm Web interface, click **"Scheduled Tasks"** in the left navigation
-2. Enter the scheduled tasks page, click **"Create"** button (highlighted in red box)
-3. Fill in the task configuration form:
+1. Open JiuwenSwarm Web interface, click **Work** in the left navigation
+2. In the sub-panel on the left side of the Work page, click **Scheduled Tasks**
+3. Enter the scheduled tasks page, click **Create** button
+4. Fill in the task configuration form:
 
-![Scheduled Task Creation Interface](../assets/images/cron/create_schedule_task.png)
+![Scheduled Tasks Page](../assets/images/current-ui-en/11-Scheduled-Tasks-Page.png)
 
 | Field | Description | Example |
 |-------|-------------|---------|
@@ -102,7 +103,7 @@ JiuwenSwarm provides two automation mechanisms: **Scheduled Tasks (Cron)** and *
 | **Delivery Channel** | Result delivery channel | `web`, `feishu`, `wechat`, `wecom`, `whatsapp`, `telegram`, etc. |
 | **Project Directory** | Project working directory (absolute path) for task归属 | `/home/user/my-project`; defaults to current session's project |
 
-4. Click **"Create"**, the task will take effect automatically
+5. Click **Create**, the task will take effect automatically
 
 **Project归属:**
 
@@ -119,7 +120,7 @@ Scheduled task configurations are saved at:
 
 When the Agent has the `cron_create_job` tool capability, you can create scheduled tasks directly through natural language conversation.
 
-![Create Scheduled Task via Chat](../assets/images/cron/chat_create_schedule_task.png)
+![Create Scheduled Task via Chat](../assets/images/current-ui-en/12-Create-Scheduled-Task.png)
 
 **Example Conversation:**
 
@@ -163,9 +164,7 @@ When a scheduled task triggers at the fixed time, a running conversation will ap
 
 The execution results of scheduled tasks can be viewed on the chat page.
 
-![Scheduled Task Execution](../assets/images/cron/schedule_task_demo1.png)
-
-![Scheduled Task Execution 2](../assets/images/cron/schedule_task_demo2.png)
+![Scheduled Task Execution](../assets/images/current-ui-en/10-Work-Page-Full.png)
 
 ---
 

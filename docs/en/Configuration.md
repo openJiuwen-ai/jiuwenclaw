@@ -8,22 +8,15 @@ This document details each configuration option in the JiuwenSwarm frontend pane
 
 ## 1. Configuration Entry
 
-Open **Configuration** from the left navigation bar to view and edit settings for models, third-party services, free search, and more. Click **Save** after changes; whether you need to wait for services to become ready depends on your deployment.
+Click **More** → **Configuration** in the left navigation bar to view and edit settings for models, third-party services, free search, and more. Click **Save** after changes; whether you need to wait for services to become ready depends on your deployment.
 
-![Configuration Panel](../assets/images/config.png)
+![Configuration Panel](../assets/images/current-ui-en/07-Configuration-Model-Tab.png)
 
-The configuration panel contains the following main sections:
+The configuration panel is organized into three tabs:
 
-- **Model Configuration**: Default chat model, video/audio/vision models (see [2. Model Configuration](#2-model-configuration))
-- **Embedding Configuration**: Vector embedding service (see [3. Embedding Configuration](#3-embedding-configuration))
-- **Third-Party Services**: Jina, Bocha, Serper, Perplexity, GitHub, etc. (see [4. Third-Party Service Configuration](#4-third-party-service-configuration))
-- **Self-Evolution Configuration**: Automatic skill improvement (see [5. Self-Evolution Configuration](#5-self-evolution-configuration))
-- **Context Compression**: Dialogue history management (see [6. Context Compression](#6-context-compression))
-- **Tool Security Guardrails**: Tool invocation permission checks (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
-- **Memory Sensitive-Info Filtering**: Memory system privacy protection settings (see [8. Memory Sensitive-Info Filtering](#8-memory-sensitive-info-filtering))
-- **Skill Symphony and Skill Retrieval**: Skill-tree retrieval, skill score, and skill orchestration settings (see [9. Skill Symphony and Skill Retrieval Configuration](#9-skill-symphony-and-skill-retrieval-configuration))
-
-The panel also includes **Free Search Engine Configuration**, **Multi-Agent / Team Configuration**, **A2UI**, and **Email Configuration** sections. Configure them as needed.
+- **Model**: Default chat model, video/audio/vision models, Embedding configuration (see [2. Model Configuration](#2-model-configuration))
+- **Security**: Tool security guardrails, sensitive-info filtering (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
+- **Other**: Third-party services, self-evolution, context compression, skill symphony, etc.
 
 > 💡 **Tip**: Model configuration (`api_base`, `api_key`, `model`, `model_provider`) is required; all other configurations are optional.
 
@@ -62,7 +55,7 @@ Each model type supports the following parameters:
 
 > 💡 **Test Function**: The configuration panel provides a **Test button**. After filling in the model configuration, you can click "Test" to verify the API connection. The system will send a simple test request and display "Test Successful" if successful, or show error information otherwise.
 
-![Model Test Configuration Example](../assets/images/config_model_connect_test.png)
+![Model Configuration Tab](../assets/images/current-ui-en/07-Configuration-Model-Tab.png)
 
 #### Configuration Examples
 

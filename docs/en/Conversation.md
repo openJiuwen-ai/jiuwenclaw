@@ -133,7 +133,21 @@ Agent: Task list updated:
 
 ![Conversation page after inserting new task](../assets/images/conversation/dynamic_insert_new_task.png)
 
+### 1.4 Input Area Controls
 
+The input area at the bottom of the conversation page provides several controls to configure how the Agent processes your requests:
+
+![Input Area Controls](../assets/images/current-ui-en/14-Input-Area-Controls.png)
+
+| Control | Description |
+|---------|-------------|
+| **Add Image** | Attach images to your message for visual context |
+| **Mode Selector** | Switch between Agent mode and Cluster mode |
+| **Permission Selector** | Configure permission level for the Agent |
+| **Skills Selector** | Select which skills to enable for the current conversation |
+| **Model Selector** | Choose which AI model to use |
+
+These controls allow you to customize the Agent's behavior without memorizing commands. For advanced users, the same configurations can be achieved via CLI commands (see [§3 CLI Commands](#3-cli-commands)).
 
 ---
 
@@ -141,24 +155,22 @@ Agent: Task list updated:
 
 ### 2.1 Mode Overview
 
-JiuwenSwarm supports multiple execution modes. Different modes fit different scenarios, and you can choose based on task characteristics.
+JiuwenSwarm supports two execution modes in the Web frontend. Different modes fit different scenarios, and you can choose based on task characteristics.
 
-![Conversation page execution modes](../assets/images/conversation/chat_execution_modes.png)
+![Mode Selector](../assets/images/current-ui-en/02-Mode-Selector.png)
 
 **Mode Comparison**
 
 | Mode | How it runs | Best for | Characteristics |
 |:---|:---|:---|:---|
-| **Task Planning** | Decomposes requirements into concrete steps and executes by plan | Complex and multi-step tasks requiring progress tracking | Clear and controllable process; supports dynamic adjustment |
-| **Performance Mode** | Handles requests flexibly and supports parallel tasks | Clear goals where fast results are preferred | Fast response; efficiency-first |
-| **Cluster Mode** | Multi-agent collaborative execution | Large-scale tasks requiring specialized division of labor | Complementary capabilities; collaborative processing |
+| **Agent mode** | Single agent handles tasks independently, supports task planning and dynamic adjustment | Most daily tasks, Q&A, code generation, etc. | Simple and efficient; single agent handles everything |
+| **Cluster mode** | Multi-agent collaborative execution, with a Leader orchestrating multiple specialized agents | Large-scale tasks requiring specialized division of labor | Complementary capabilities; collaborative processing |
 
 **Mode Switching**
 
-You can switch execution modes in the following ways:
+You can switch execution modes using the **mode selector** at the bottom of the conversation page (in the input area controls).
 
-- **UI switch**: Select the execution mode at the bottom of the conversation page
-- **Command switch**: Use `/mode` or `/switch` (see [CLI Commands](#3-cli-commands))
+> **Note**: For IM controlled channels and TUI, you can also use `/mode` or `/switch` commands (see [CLI Commands](#3-cli-commands)) to switch to more granular modes.
 
 ---
 
