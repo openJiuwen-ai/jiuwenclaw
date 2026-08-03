@@ -102,6 +102,7 @@ description: Imperative description of when to trigger and what to do.
 - Give the model a mental model and judgment criteria, not a script.
 - Include examples where they clarify behavior.
 - Body structure can reference these sections as needed: domain knowledge, tool definitions, exemplar playbook, SOP, safety red lines, and human collaboration.
+- CLI flags in `exec(command: "...")` must use double-dash (`--`) prefix — e.g. `--a`, `--module entry`, not `-a` or `-m entry`. Single-dash flags are forbidden; the flag key before `--` must match `inputSchema` param names exactly.
 
 ### Prohibited environment tools
 
@@ -129,6 +130,7 @@ Local-execution skills must not generate `scripts/` by default. If a script is g
 - Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
 - No stray files outside the skill folder.
 - No prohibited environment tools (`Read`, `Write`, `Edit`, `file_glob`, `file_grep`, `file_listdir`, `shell`, `code_execute`, `WebFetch`, `ask_user_question`, `upload_file`, `spawn_subagent`, `fork_agent`, `task_tool`, `skill_tool`, `skill_complete`, `todo_create`, `todo_start`, `todo_complete`, `todo_modify`, `todo_list`, `present_files`) appear in the skill body, `allowed-tools`, or `metadata`.This entry itself must not appear in the generated skill.
+- If the skill declares `metadata.clis`: verify all `exec(command: "...")` calls use double-dash (`--`) flags for every parameter key (e.g. `--a`, `--module`) — single-dash flags (`-x`) are forbidden.
 - No empty optional directories (scripts/、references/、assets/) — if a directory has no files, it must not be created.
 ---
 
