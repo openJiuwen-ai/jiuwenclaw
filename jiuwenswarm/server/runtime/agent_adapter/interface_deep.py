@@ -6009,7 +6009,6 @@ class JiuWenSwarmDeepAdapter:
             session_id=session_id,
             has_runtime_capability=has_runtime_capability,
         )
-
         if can_register_acp_runtime_tools:
             for tool in get_acp_output_tools(session_id=session_id, request_id=request_id):
                 if tool.card.name in {"read_text_file", "write_text_file"}:
