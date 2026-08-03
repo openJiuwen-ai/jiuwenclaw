@@ -92,17 +92,42 @@ test('settleHistoricalToolExecutions does not downgrade completed tools', () => 
   }
 });
 
-test('settleHistoricalToolExecutions settles timeout tools', () => {
+test('settleHistoricalToolExecutions preserves timeout tools (does not rewrite as completed)', () => {
   setup();
   try {
     addToolCall('call-5', 'slow_tool');
+    // 把 timeoutAt 拨到过去，触发巡检超时
+    const runtime = useChatStore.getState().getRuntime(SID);
+    const execution = runtime.toolExecutions.get('call-5');
+    runtime.toolExecutions.set('call-5', {
+      ...execution,
+      timeoutAt: new Date(Date.now() - 1000).toISOString(),
+    });
 
     useChatStore.getState().markTimedOutExecutions(SID);
-    const status = getToolStatus('call-5');
-    assert.equal(status, 'pending');
+    assert.equal(getToolStatus('call-5'), 'timeout');
 
     useChatStore.getState().settleHistoricalToolExecutions(SID);
-    assert.equal(getToolStatus('call-5'), 'completed');
+    assert.equal(getToolStatus('call-5'), 'timeout');
+  } finally {
+    teardown();
+  }
+});
+
+test('settleHistoricalToolExecutions preserves error tools', () => {
+  setup();
+  try {
+    addToolCall('call-5b', 'fail_tool');
+    useChatStore.getState().addToolResult(SID, {
+      toolCallId: 'call-5b',
+      toolName: 'fail_tool',
+      result: 'boom',
+      success: false,
+    });
+    assert.equal(getToolStatus('call-5b'), 'error');
+
+    useChatStore.getState().settleHistoricalToolExecutions(SID);
+    assert.equal(getToolStatus('call-5b'), 'error');
   } finally {
     teardown();
   }

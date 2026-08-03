@@ -4,7 +4,10 @@
 import type { Message, ToolExecution } from '../../types';
 import type { ReasoningSegment } from '../../stores/chatStore';
 import { getMessageActor } from '../../components/ChatPanel/MessageItem';
-import { collectViewedSkillIds } from '../../components/ChatPanel/ToolGroupDisplay';
+import {
+  collectViewedSkillIds,
+  isToolExecutionFailed,
+} from '../../components/ChatPanel/ToolGroupDisplay';
 import { isTeamMemberCollaborationMessage } from '../../components/ChatPanel/teamEventUtils';
 import { isA2UIClientEventContent } from '../a2ui/a2uiContent';
 import { parseTimestampToMs } from '../../utils/timestamp';
@@ -464,7 +467,9 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       }
     } else if (item.type === 'message') {
       hasActivity = true;
+      // timestamp：首包/落盘时间（排序用）；completedAt：chat.final 收尾（live 流式合并时才有）
       acc(toTimestampMs(item.message.timestamp), true);
+      acc(toTimestampMs(item.message.completedAt), true);
     } else if (item.type === 'reasoning') {
       hasActivity = true;
       hasWork = true;
@@ -483,6 +488,48 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   return out;
 }
 
+/** 折叠芯片图标色：全成功绿勾 / 有失败但还有成功项→部分失败 / 全失败红叉 / 无工具中性绿 */
+export type WorkOutcomeTone = 'success' | 'partial' | 'error' | 'neutral';
+
+/**
+ * @param successCount 成功的工具数
+ * @param failedCount 失败/超时的工具数
+ * @param thinkingCount 已完成的思考段数（思考成功也算「有成功项」，避免「2 次思考 + 1 次工具失败」误标红叉）
+ */
+export function resolveWorkOutcomeTone(
+  successCount: number,
+  failedCount: number,
+  thinkingCount = 0
+): WorkOutcomeTone {
+  const hasSuccessWork = successCount > 0 || thinkingCount > 0;
+  if (failedCount <= 0) {
+    return hasSuccessWork ? 'success' : 'neutral';
+  }
+  if (!hasSuccessWork) {
+    return 'error';
+  }
+  return 'partial';
+}
+
+function accumulateToolOutcomes(
+  executions: ToolExecution[],
+  into: { toolSuccessCount: number; toolFailedCount: number }
+): void {
+  for (const execution of executions) {
+    if (isDeliverableToolName(execution.toolCall.name)) {
+      continue;
+    }
+    if (isExecutionRunning(execution)) {
+      continue;
+    }
+    if (isToolExecutionFailed(execution)) {
+      into.toolFailedCount += 1;
+    } else {
+      into.toolSuccessCount += 1;
+    }
+  }
+}
+
 export type TurnWorkMeta = {
   turnId: number;
   completed: boolean;
@@ -495,6 +542,9 @@ export type TurnWorkMeta = {
   showAvatar: boolean;
   thinkingCount: number;
   toolCount: number;
+  toolSuccessCount: number;
+  toolFailedCount: number;
+  outcomeTone: WorkOutcomeTone;
 };
 
 const DELIVERABLE_TOOL_NAMES = new Set(['send_file_to_user']);
@@ -529,6 +579,26 @@ function countToolsInGroup(item: Extract<RenderItem, { type: 'toolGroup' }>): nu
   return item.executions.filter((execution) => !isDeliverableToolName(execution.toolCall.name)).length;
 }
 
+function emptyTurnMeta(turnId: number, partial?: Partial<TurnWorkMeta>): TurnWorkMeta {
+  return {
+    turnId,
+    completed: false,
+    hasWork: false,
+    firstWorkKey: null,
+    startMs: Number.NaN,
+    endMs: Number.NaN,
+    workStartMs: Number.NaN,
+    workEndMs: Number.NaN,
+    showAvatar: true,
+    thinkingCount: 0,
+    toolCount: 0,
+    toolSuccessCount: 0,
+    toolFailedCount: 0,
+    outcomeTone: 'neutral',
+    ...partial,
+  };
+}
+
 export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): Map<number, TurnWorkMeta> {
   const map = new Map<number, TurnWorkMeta>();
   let lastTurnId = Number.NEGATIVE_INFINITY;
@@ -536,19 +606,24 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
     if (item.type === 'turnSummary') {
       lastTurnId = Math.max(lastTurnId, item.turnId);
       const prev = map.get(item.turnId);
-      map.set(item.turnId, {
-        turnId: item.turnId,
-        completed: !(item.isLastTurn && isProcessing),
-        hasWork: item.hasWork || Boolean(prev?.hasWork),
-        firstWorkKey: prev?.firstWorkKey ?? null,
-        startMs: item.startMs,
-        endMs: item.endMs,
-        workStartMs: item.workStartMs,
-        workEndMs: item.workEndMs,
-        showAvatar: prev?.showAvatar ?? true,
-        thinkingCount: prev?.thinkingCount ?? 0,
-        toolCount: prev?.toolCount ?? 0,
-      });
+      map.set(
+        item.turnId,
+        emptyTurnMeta(item.turnId, {
+          completed: !(item.isLastTurn && isProcessing),
+          hasWork: item.hasWork || Boolean(prev?.hasWork),
+          firstWorkKey: prev?.firstWorkKey ?? null,
+          startMs: item.startMs,
+          endMs: item.endMs,
+          workStartMs: item.workStartMs,
+          workEndMs: item.workEndMs,
+          showAvatar: prev?.showAvatar ?? true,
+          thinkingCount: prev?.thinkingCount ?? 0,
+          toolCount: prev?.toolCount ?? 0,
+          toolSuccessCount: prev?.toolSuccessCount ?? 0,
+          toolFailedCount: prev?.toolFailedCount ?? 0,
+          outcomeTone: prev?.outcomeTone ?? 'neutral',
+        })
+      );
       continue;
     }
     if (item.type !== 'reasoning' && item.type !== 'toolGroup') {
@@ -566,21 +641,20 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
         prev.thinkingCount += 1;
       } else {
         prev.toolCount += countToolsInGroup(item);
+        accumulateToolOutcomes(item.executions, prev);
       }
     } else {
-      map.set(item.turnId, {
-        turnId: item.turnId,
-        completed: false,
+      const next = emptyTurnMeta(item.turnId, {
         hasWork: true,
         firstWorkKey: item.key,
-        startMs: Number.NaN,
-        endMs: Number.NaN,
-        workStartMs: Number.NaN,
-        workEndMs: Number.NaN,
         showAvatar: item.showAvatar,
         thinkingCount: item.type === 'reasoning' ? 1 : 0,
         toolCount: item.type === 'toolGroup' ? countToolsInGroup(item) : 0,
       });
+      if (item.type === 'toolGroup') {
+        accumulateToolOutcomes(item.executions, next);
+      }
+      map.set(item.turnId, next);
     }
   }
   for (const meta of map.values()) {
@@ -589,6 +663,11 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
     }
     const isLast = Number.isFinite(lastTurnId) && meta.turnId === lastTurnId;
     meta.completed = !(isProcessing && isLast);
+    meta.outcomeTone = resolveWorkOutcomeTone(
+      meta.toolSuccessCount,
+      meta.toolFailedCount,
+      meta.thinkingCount
+    );
     // 折叠条是该轮顶部锚点：只要本轮有可折叠工作，头像就归折叠条，避免被中间气泡抢走后整轮「没头像」。
     if (meta.hasWork) {
       meta.showAvatar = true;
@@ -634,6 +713,9 @@ export type LiveWorkStreak = {
   keys: Set<string>;
   thinkingCount: number;
   toolCount: number;
+  toolSuccessCount: number;
+  toolFailedCount: number;
+  outcomeTone: WorkOutcomeTone;
   showAvatar: boolean;
 };
 
@@ -751,7 +833,7 @@ export function streakMapFingerprint(streaks: Map<string, LiveWorkStreak>): stri
   return [...streaks.values()]
     .map(
       (streak) =>
-        `${streak.id}:${streak.thinkingCount}:${streak.toolCount}:${[...streak.keys].join(',')}`
+        `${streak.id}:${streak.thinkingCount}:${streak.toolCount}:${streak.toolSuccessCount}:${streak.toolFailedCount}:${streak.outcomeTone}:${[...streak.keys].join(',')}`
     )
     .sort()
     .join('|');
@@ -804,9 +886,31 @@ export function buildLiveCompletedStreaks(
 
   const seal = () => {
     if (streak && streak.thinkingCount + streak.toolCount >= 2) {
+      streak.outcomeTone = resolveWorkOutcomeTone(
+        streak.toolSuccessCount,
+        streak.toolFailedCount,
+        streak.thinkingCount
+      );
       sealed.set(streak.firstKey, streak);
     }
     streak = null;
+  };
+
+  const startStreak = (item: Extract<RenderItem, { type: 'reasoning' | 'toolGroup' }>): LiveWorkStreak => {
+    const ordinal = nextOrdinal(item.turnId);
+    return {
+      id: streakExpandKey(item.turnId, ordinal),
+      turnId: item.turnId,
+      ordinal,
+      firstKey: item.key,
+      keys: new Set(),
+      thinkingCount: 0,
+      toolCount: 0,
+      toolSuccessCount: 0,
+      toolFailedCount: 0,
+      outcomeTone: 'neutral',
+      showAvatar: item.showAvatar,
+    };
   };
 
   for (const item of items) {
@@ -824,17 +928,7 @@ export function buildLiveCompletedStreaks(
         continue;
       }
       if (!streak) {
-        const ordinal = nextOrdinal(item.turnId);
-        streak = {
-          id: streakExpandKey(item.turnId, ordinal),
-          turnId: item.turnId,
-          ordinal,
-          firstKey: item.key,
-          keys: new Set(),
-          thinkingCount: 0,
-          toolCount: 0,
-          showAvatar: item.showAvatar,
-        };
+        streak = startStreak(item);
       }
       streak.keys.add(item.key);
       streak.thinkingCount += 1;
@@ -852,20 +946,11 @@ export function buildLiveCompletedStreaks(
       continue;
     }
     if (!streak) {
-      const ordinal = nextOrdinal(item.turnId);
-      streak = {
-        id: streakExpandKey(item.turnId, ordinal),
-        turnId: item.turnId,
-        ordinal,
-        firstKey: item.key,
-        keys: new Set(),
-        thinkingCount: 0,
-        toolCount: 0,
-        showAvatar: item.showAvatar,
-      };
+      streak = startStreak(item);
     }
     streak.keys.add(item.key);
     streak.toolCount += workToolCount;
+    accumulateToolOutcomes(item.executions, streak);
   }
   seal();
   return sealed;
@@ -874,8 +959,13 @@ export function buildLiveCompletedStreaks(
 export function formatStreakSummaryLabel(
   t: (key: string, options?: Record<string, unknown>) => string,
   thinkingCount: number,
-  toolCount: number
+  toolCount: number,
+  outcomeTone: WorkOutcomeTone = 'neutral'
 ): string {
+  // 工具全失败且无成功思考：文案用「失败」，不要「已完成」。
+  if (outcomeTone === 'error' && toolCount > 0 && thinkingCount <= 0) {
+    return t('chatUi.workFailedToolsNoDuration', { tools: toolCount });
+  }
   if (thinkingCount > 0 && toolCount > 0) {
     return t('chatUi.workCompletedBothNoDuration', { thinking: thinkingCount, tools: toolCount });
   }

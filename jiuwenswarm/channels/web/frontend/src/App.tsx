@@ -670,6 +670,8 @@ function AppContent() {
             toolCallId: n.toolCallId,
             summary: n.summary,
             skillTree: n.skillTree,
+            ...(n.timedOut ? { timedOut: true } : {}),
+            ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
           },
           { updatedAt: item.at }
         );
@@ -1420,6 +1422,8 @@ function AppContent() {
                 toolCallId: n.toolCallId,
                 summary: n.summary,
                 skillTree: n.skillTree,
+                ...(n.timedOut ? { timedOut: true } : {}),
+                ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
               },
               { updatedAt: item.at }
             );

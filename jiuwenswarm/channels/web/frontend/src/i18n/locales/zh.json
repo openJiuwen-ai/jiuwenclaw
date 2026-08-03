@@ -1948,6 +1948,8 @@
     "workCompletedThinkingNoDuration": "已完成 {{thinking}} 次思考",
     "workCompletedTools": "已完成 {{tools}} 次工具调用 · {{duration}}",
     "workCompletedToolsNoDuration": "已完成 {{tools}} 次工具调用",
+    "workFailedToolsNoDuration": "{{tools}} 次工具调用失败",
+    "workOutcomePartial": "部分失败",
     "reasoning": {
       "thinking": "思考中…",
       "thought": "已完成思考"
@@ -1987,6 +1989,7 @@
       "failed": "失败",
       "timeout": "执行超时",
       "running": "执行中...",
+      "toolName": "工具名称",
       "arguments": "参数",
       "result": "结果",
       "truncated": "结果已截断"
@@ -1994,6 +1997,7 @@
     "toolGroup": {
       "running": "正在{{label}}",
       "completed": "已完成{{label}}",
+      "failed": "{{label}}执行失败",
       "category": {
         "file": "文件操作",
         "search": "搜索",

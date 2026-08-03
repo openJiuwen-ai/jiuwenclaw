@@ -82,6 +82,8 @@ export interface NormalizedToolResult {
   toolCallId?: string;
   result: string;
   success: boolean;
+  /** status=timeout / timed_out 时为 true，供 store 落成 timeout */
+  timedOut?: boolean;
   summary?: string;
   skillTree?: SkillTreePath;
   beamSearch?: BeamSearchProgress;
@@ -144,13 +146,16 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
       : '');
   const status =
     typeof toolResultPayload.status === 'string'
-      ? toolResultPayload.status
+      ? toolResultPayload.status.trim().toLowerCase()
       : '';
+  const timedOut = status === 'timeout' || status === 'timed_out';
+  const statusFailed =
+    timedOut || status === 'error' || status === 'failed' || status === 'failure';
   const success =
     typeof toolResultPayload.success === 'boolean'
-      ? toolResultPayload.success
+      ? toolResultPayload.success && !timedOut
       : status
-        ? status !== 'error'
+        ? !statusFailed
         : true;
   const toolName =
     (typeof toolResultPayload.tool_name === 'string' &&
@@ -174,6 +179,7 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     toolCallId,
     result,
     success,
+    ...(timedOut ? { timedOut: true } : {}),
     summary,
     skillTree,
     beamSearch,
