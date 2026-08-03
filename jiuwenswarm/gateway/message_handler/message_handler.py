@@ -222,6 +222,9 @@ class MessageHandler(ABC):
         self._stream_app_ids: dict[str, str] = {}  # request_id -> app_id, 多应用流式精确路由
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
         self._evolution_approval = EvolutionApprovalCoordinator()
+        # 配置仅在启动/成功热重载时解析；流式 chunk 热路径直接读取该内存值，
+        # 避免每个审批事件重新读取磁盘配置。
+        self._evolution_auto_save_enabled = False
         self._session_last_user_query: dict[str, str] = {}
         # session_id -> 最近一次人类发起请求的 (channel_id, member_name)。
         # team 模式下 file msg 不携带发起者身份（rid 固定为建会话那轮），send_file 定向
@@ -295,6 +298,17 @@ class MessageHandler(ABC):
 
         if isinstance(self.agent_client, WebSocketAgentServerClient):
             self.agent_client.set_server_push_handler(self._handle_agent_server_push)
+
+    def update_evolution_auto_save(self, config_payload: dict[str, Any] | None) -> None:
+        """Refresh the in-memory evolution auto-save flag from a config snapshot.
+
+        Callers should invoke this at startup and after a successful config hot
+        reload.  The stream/chunk path intentionally does not call the config
+        resolver so it never performs a disk read.
+        """
+        self._evolution_auto_save_enabled = get_evolution_auto_save_enabled(
+            config_payload if isinstance(config_payload, dict) else {}
+        )
 
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
@@ -3321,7 +3335,7 @@ class MessageHandler(ABC):
         """
         payload = getattr(chunk, "payload", None)
         auto_save_enabled = (
-            get_evolution_auto_save_enabled()
+            self._evolution_auto_save_enabled
             if (
                 isinstance(payload, dict)
                 and payload.get("event_type") == "chat.ask_user_question"

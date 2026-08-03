@@ -1599,6 +1599,7 @@ async def _run(
     channels_cfg: dict | None = None
     try:
         full_cfg = get_config()
+        message_handler.update_evolution_auto_save(full_cfg)
         heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
         channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
     except Exception as e:  # noqa: BLE001
@@ -1794,6 +1795,10 @@ async def _run(
             )
             _schedule_gateway_restart(restart_request)
             return False
+
+        # AgentServer 已确认热重载成功后，再刷新 Gateway 内存中的值。
+        # MessageHandler 的流式 chunk 热路径只读取该值，不重新读盘。
+        message_handler.update_evolution_auto_save(config_payload)
 
         # reload 成功：config 变更后让 agent 侧 prewarm channels 落到新配置。
         _schedule_agent_prewarm_sync(
