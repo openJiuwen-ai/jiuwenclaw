@@ -8,7 +8,6 @@
 3. 环境变量 MODEL_NAME, API_KEY, API_BASE
 """
 import logging
-import os
 from collections.abc import Iterable
 from typing import Any
 
@@ -92,14 +91,11 @@ def build_multimodal_reconcile_env(
 ) -> dict[str, str]:
     """Build omission-reconcile view for one ``(service_id, agent_id)``.
 
-    Uses tip (active ∪ staged) plus namespaced os anchors only.
-    Never reads bare multimodal keys from ``os.environ``.
+    Uses tip (active ∪ staged) only. Never reads ``os.environ``.
     """
     from jiuwenclaw.local_env_config import (
         effective_tip,
         get_staged_env,
-        make_env_ns_key,
-        resolve_env_ns,
     )
 
     merged: dict[str, str] = {}
@@ -125,15 +121,6 @@ def build_multimodal_reconcile_env(
             if value is not None:
                 merged[str(key)] = str(value)
 
-    sid, aid = resolve_env_ns(service_id, agent_id)
-    for keys in MULTIMODAL_ENV_GROUP_KEYS.values():
-        anchor = keys[0]
-        if _anchor_value_non_empty(merged, anchor):
-            continue
-        ns_key = make_env_ns_key(sid, aid, anchor)
-        raw = os.environ.get(ns_key)
-        if raw is not None and str(raw).strip():
-            merged[anchor] = str(raw)
     return merged
 
 

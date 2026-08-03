@@ -3631,9 +3631,10 @@ def test_build_bridge_env_empty_value_not_set():
 
 
 def test_child_env_enables_hitl_for_interactive_request(monkeypatch):
+    monkeypatch.setattr(dt, "export_agent_environ", lambda *_a, **_k: {"RAW": "1"})
     monkeypatch.setattr(dt, "_build_bridge_env", lambda _env: {"BASE": "1"})
 
-    assert dt._build_deepresearch_child_env({}, interactive_ask=True) == {
+    assert dt._build_deepresearch_child_env(interactive_ask=True) == {
         "BASE": "1",
         "DEEPSEARCH_HITL": "true",
         "PYTHONUNBUFFERED": "1",
@@ -3642,16 +3643,14 @@ def test_child_env_enables_hitl_for_interactive_request(monkeypatch):
 
 
 def test_child_env_disables_hitl_and_overrides_stale_parent(monkeypatch):
+    monkeypatch.setattr(dt, "export_agent_environ", lambda *_a, **_k: {})
     monkeypatch.setattr(
         dt,
         "_build_bridge_env",
         lambda _env: {"DEEPSEARCH_HITL": "true"},
     )
 
-    env = dt._build_deepresearch_child_env(
-        {"DEEPSEARCH_HITL": "true"},
-        interactive_ask=False,
-    )
+    env = dt._build_deepresearch_child_env(interactive_ask=False)
 
     assert env["DEEPSEARCH_HITL"] == "false"
     assert env["PYTHONUNBUFFERED"] == "1"
@@ -3675,7 +3674,6 @@ def test_child_env_exports_current_tenant_environment(monkeypatch):
     monkeypatch.setattr(dt, "_build_bridge_env", fake_build_bridge_env)
 
     env = dt._build_deepresearch_child_env(
-        {},
         interactive_ask=True,
         service_id="service-1",
         agent_id="office",
@@ -3702,16 +3700,19 @@ def _make_fake_skill(parent: str) -> str:
 
 
 def test_resolve_skill_root_from_env(tmp_path, monkeypatch):
-    # sidecar cwd 不含 office-claw-skills → 必须靠 JIUWENCLAW_SHARED_SKILLS_DIRS 命中
+    # sidecar cwd 不含 office-claw-skills → 必须靠 tip 中的 JIUWENCLAW_SHARED_SKILLS_DIRS 命中
     skill_parent = str(tmp_path / "shared-skills")
     os.makedirs(skill_parent)
     skill_dir = _make_fake_skill(skill_parent)
-    monkeypatch.setenv("JIUWENCLAW_SHARED_SKILLS_DIRS", skill_parent)
     elsewhere = str(tmp_path / "elsewhere")
     os.makedirs(elsewhere)
     monkeypatch.chdir(elsewhere)  # cwd 不含 skill
-    assert dt._resolve_skill_root() == skill_dir
-    assert os.path.basename(dt._resolve_run_script()) == "run_deepsearch.py"
+    token = bind_task_env_overlay({"JIUWENCLAW_SHARED_SKILLS_DIRS": skill_parent})
+    try:
+        assert dt._resolve_skill_root() == skill_dir
+        assert os.path.basename(dt._resolve_run_script()) == "run_deepsearch.py"
+    finally:
+        reset_task_env_overlay(token)
 
 
 def test_deepresearch_python_uses_current_jiuwenclaw_interpreter():
@@ -3735,35 +3736,47 @@ def test_get_deepresearch_tools_exposes_stream_and_rewrite_tools(monkeypatch):
 def test_resolve_skill_root_env_uses_platform_path_separator(tmp_path, monkeypatch):
     p1 = str(tmp_path / "d1"); os.makedirs(p1); sd1 = _make_fake_skill(p1)
     p2 = str(tmp_path / "d2"); os.makedirs(p2)
-    monkeypatch.setenv("JIUWENCLAW_SHARED_SKILLS_DIRS", os.pathsep.join((p1, p2)))
     monkeypatch.chdir(tmp_path)
-    assert dt._resolve_skill_root() == sd1  # 命中第一个含 skill 的
+    token = bind_task_env_overlay({
+        "JIUWENCLAW_SHARED_SKILLS_DIRS": os.pathsep.join((p1, p2)),
+    })
+    try:
+        assert dt._resolve_skill_root() == sd1  # 命中第一个含 skill 的
+    finally:
+        reset_task_env_overlay(token)
 
 
 def test_resolve_skill_root_preserves_windows_drive_letter(tmp_path, monkeypatch):
     windows_parent = r"C:\shared-skills"
     skill_dir = _make_fake_skill(str(tmp_path / windows_parent))
     monkeypatch.setattr(dt.os, "pathsep", ";")
-    monkeypatch.setenv(
-        "JIUWENCLAW_SHARED_SKILLS_DIRS",
-        rf"{windows_parent};D:\other-skills",
-    )
     monkeypatch.chdir(tmp_path)
-
-    assert dt._resolve_skill_root() == os.path.join(windows_parent, "deepresearch")
-    assert os.path.samefile(dt._resolve_skill_root(), skill_dir)
+    token = bind_task_env_overlay({
+        "JIUWENCLAW_SHARED_SKILLS_DIRS": rf"{windows_parent};D:\other-skills",
+    })
+    try:
+        assert dt._resolve_skill_root() == os.path.join(windows_parent, "deepresearch")
+        assert os.path.samefile(dt._resolve_skill_root(), skill_dir)
+    finally:
+        reset_task_env_overlay(token)
 
 
 def test_resolve_skill_root_falls_back_to_cwd(tmp_path, monkeypatch):
-    # 无 env → cwd/office-claw-skills/deepresearch
-    monkeypatch.delenv("JIUWENCLAW_SHARED_SKILLS_DIRS", raising=False)
+    # 无 tip/env → cwd/office-claw-skills/deepresearch
     skill_dir = _make_fake_skill(str(tmp_path / "office-claw-skills"))
     monkeypatch.chdir(tmp_path)
-    assert dt._resolve_skill_root() == skill_dir
+    token = bind_task_env_overlay({})  # seal: tip miss → unset
+    try:
+        assert dt._resolve_skill_root() == skill_dir
+    finally:
+        reset_task_env_overlay(token)
 
 
 def test_resolve_skill_root_empty_when_not_found(tmp_path, monkeypatch):
-    monkeypatch.delenv("JIUWENCLAW_SHARED_SKILLS_DIRS", raising=False)
     monkeypatch.chdir(str(tmp_path))  # 无 office-claw-skills
-    assert dt._resolve_skill_root() == ""
-    assert dt._resolve_run_script() == ""
+    token = bind_task_env_overlay({})  # seal: tip miss → unset
+    try:
+        assert dt._resolve_skill_root() == ""
+        assert dt._resolve_run_script() == ""
+    finally:
+        reset_task_env_overlay(token)

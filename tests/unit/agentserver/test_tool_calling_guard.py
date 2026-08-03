@@ -14,6 +14,8 @@ from jiuwenclaw.local_env_config import (
     apply_env_overrides_to_active,
     bind_task_env_overlay,
     clear_staged_env,
+    get_active_env,
+    ingest_bare_business_into_tip,
     reset_local_env_state_for_tests,
     reset_task_env_overlay,
     set_os_environ,
@@ -225,3 +227,48 @@ def test_patched_build_request_params_logs_reason(monkeypatch: pytest.MonkeyPatc
         "[tool_calling_guard] stripped tools tool_choice reason=%s",
         "test_reason",
     )
+
+
+def test_legacy_office_claw_disable_maps_into_guard_tip(mock_config) -> None:
+    mock_config(_guard_config(enabled=False))
+    os.environ.pop("AGENT_RUNTIME", None)
+    os.environ["OFFICE_CLAW_DISABLE_TOOL_CALLING"] = "true"
+
+    ingest_bare_business_into_tip()
+
+    assert "OFFICE_CLAW_DISABLE_TOOL_CALLING" not in os.environ
+    tip = get_active_env("default", "default")
+    assert tip.get("TOOL_CALLING_GUARD_ENABLED") == "true"
+    assert tip.get("TOOL_CALLING_GUARD_DISABLE") == "true"
+    assert tip.get("TOOL_CALLING_GUARD_STRIP_REASON") == (
+        "legacy_office_claw_disable_tool_calling"
+    )
+    decision = resolve_tool_calling_guard()
+    assert decision.strip_tools is True
+    assert decision.reason == "legacy_office_claw_disable_tool_calling"
+
+
+def test_legacy_office_claw_disable_does_not_override_explicit_guard(mock_config) -> None:
+    mock_config(_guard_config(enabled=False))
+    os.environ.pop("AGENT_RUNTIME", None)
+    os.environ["TOOL_CALLING_GUARD_ENABLED"] = "false"
+    os.environ["OFFICE_CLAW_DISABLE_TOOL_CALLING"] = "true"
+
+    ingest_bare_business_into_tip()
+
+    tip = get_active_env("default", "default")
+    assert tip.get("TOOL_CALLING_GUARD_ENABLED") == "false"
+    assert resolve_tool_calling_guard().strip_tools is False
+
+
+def test_legacy_office_claw_disable_falsy_is_popped_without_mapping(mock_config) -> None:
+    mock_config(_guard_config(enabled=False))
+    os.environ.pop("AGENT_RUNTIME", None)
+    os.environ["OFFICE_CLAW_DISABLE_TOOL_CALLING"] = "false"
+
+    ingest_bare_business_into_tip()
+
+    assert "OFFICE_CLAW_DISABLE_TOOL_CALLING" not in os.environ
+    tip = get_active_env("default", "default")
+    assert "TOOL_CALLING_GUARD_DISABLE" not in tip
+    assert resolve_tool_calling_guard().strip_tools is False

@@ -9,13 +9,14 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from jiuwenclaw.gateway.im_inbound import IMPlatformAdapter
     from jiuwenclaw.schema.message import Message
+
+from jiuwenclaw.local_env_config import read_env
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +70,11 @@ class IMOutboundPipeline:
 
         react = cfg.get("react") or {}
         mcc_raw = react.get("model_client_config") or {}
-        api_key = (mcc_raw.get("api_key") or os.getenv("API_KEY") or "").strip()
-        api_base = (mcc_raw.get("api_base") or os.getenv("API_BASE") or "").strip()
+        api_key = (mcc_raw.get("api_key") or read_env("API_KEY") or "").strip()
+        api_base = (mcc_raw.get("api_base") or read_env("API_BASE") or "").strip()
         if api_base.endswith("/chat/completions"):
             api_base = api_base.rsplit("/chat/completions", 1)[0]
-        model_name = (react.get("model_name") or os.getenv("MODEL_NAME") or "gpt-4o").strip()
+        model_name = (react.get("model_name") or read_env("MODEL_NAME") or "gpt-4o").strip()
         client_provider = mcc_raw.get("client_provider", "OpenAI")
 
         if not api_key or not api_base:

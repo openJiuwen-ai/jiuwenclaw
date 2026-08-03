@@ -119,6 +119,9 @@ from jiuwenclaw.utils import (
 
 
 load_dotenv(dotenv_path=get_env_file())
+from jiuwenclaw.local_env_config import ingest_bare_business_into_tip
+
+ingest_bare_business_into_tip()
 
 # _session_project_dir 进程内缓存上限（超出则淘汰最久未访问；磁盘 metadata 仍为权威来源）
 _SESSION_PROJECT_DIR_CACHE_MAX = 4096

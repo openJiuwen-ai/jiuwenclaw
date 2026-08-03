@@ -46,7 +46,7 @@ from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
 from jiuwenclaw.gateway.local_rpc_hooks import LocalRpcHookDispatcher
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
-from jiuwenclaw.local_env_config import decrypt, mirror_bare_business_env_to_default_ns
+from jiuwenclaw.local_env_config import get_local_config, mirror_bare_business_env_to_default_ns
 
 # 确保工作区已初始化（使用跨进程锁保护并发访问）
 ensure_workspace_initialized(component_name="Gateway")
@@ -939,10 +939,11 @@ async def _run(
         channels_cfg = None
         sync_config_cfg = None
 
-    # 配置解密后存储在内存中
+    # 配置从 tip 读取（明文），再推给 agentserver
     env_dict = {}
     for env_key in _CONFIG_SET_ENV_MAP.values():
-        env_dict[env_key] = decrypt(env_key, os.getenv(env_key))
+        tip_val = get_local_config(env_key)
+        env_dict[env_key] = tip_val if tip_val is not None else ""
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
         env=env_dict

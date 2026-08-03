@@ -57,10 +57,13 @@ from jiuwenclaw.utils import (
 )
 from jiuwenclaw.version import __version__
 from jiuwenclaw.local_env_config import (
+    SPAWN_ENV_KEYS,
     decrypt,
     encrypt,
     mirror_bare_business_env_to_default_ns,
+    read_env,
     set_os_environ,
+    update_process_baseline,
 )
 
 apply_openai_model_client_patch()
@@ -343,7 +346,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             def replace_env(match):
                 var_name = match.group(1)
                 default = match.group(2) if match.group(2) is not None else ""
-                return os.getenv(var_name, default)
+
+                if var_name in SPAWN_ENV_KEYS:
+                    return os.getenv(var_name, default)
+                tip_val = read_env(var_name, "")
+                return tip_val if tip_val else default
 
             return re.sub(pattern, replace_env, value)
         elif isinstance(value, dict):
@@ -385,9 +392,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.on_connect(_on_connect)
 
     async def _config_get(ws, req_id, params, session_id):
-        # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的环境变量当前值
+        # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的 tip 当前值
         payload = {
-            param_key: (os.getenv(env_key) or "")
+            param_key: (read_env(env_key) or "")
             for param_key, env_key in _CONFIG_SET_ENV_MAP.items()
         }
         payload["app_version"] = __version__
@@ -495,8 +502,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 )
                 return
             if val is None:
-                # 改为全量更新, 将env配置全部同步到agentserver
-                env_updates[env_key] = os.getenv(env_key)
+                # 改为全量更新, 将 tip 配置全部同步到 agentserver
+                env_updates[env_key] = read_env(env_key)
             else:
                 env_updates[env_key] = str(val).strip()
 
@@ -565,8 +572,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 return
 
         for env_key, value in env_updates.items():
-            os.environ[env_key] = encrypt(env_key, value)
+            # Tip stores plaintext; encrypt only when persisting to .env file.
             set_os_environ(env_key, value)
+        if env_updates:
+            update_process_baseline(env_updates)
         applied_without_restart = True
 
         if env_updates:

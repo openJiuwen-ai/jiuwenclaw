@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from jiuwenclaw.channel.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenclaw.channel.platform_adapter.message import MessageStore
+from jiuwenclaw.local_env_config import read_env
 from jiuwenclaw.schema.message import Message, ReqMethod, EventType
 
 logger = logging.getLogger(__name__)
@@ -300,9 +301,9 @@ class WecomChannel(BaseChannel):
 
     def _generate_group_ack_sync(self, target_name: str, content: str) -> str:
         """调用轻量 LLM 生成群内简短确认文案。"""
-        api_key = os.getenv("API_KEY", "").strip()
-        api_base = os.getenv("API_BASE", "").strip()
-        model_name = os.getenv("MODEL_NAME", "").strip() or "GLM-4.7"
+        api_key = read_env("API_KEY", "").strip()
+        api_base = read_env("API_BASE", "").strip()
+        model_name = read_env("MODEL_NAME", "").strip() or "GLM-4.7"
         if not api_key or not api_base:
             return self._fallback_group_ack()
 

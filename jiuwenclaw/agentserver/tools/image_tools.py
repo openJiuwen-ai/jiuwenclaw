@@ -19,11 +19,12 @@ import requests
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_vision_model_config_from_yaml
 from jiuwenclaw.http_proxy_config import requests_get
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
-from jiuwenclaw.local_env_config import get_local_config
+from jiuwenclaw.local_env_config import get_local_config, ingest_bare_business_into_tip
 
 
 logger = logging.getLogger(__name__)
 load_dotenv(verbose=True)
+ingest_bare_business_into_tip()
 
 _SANDBOX_MARKER = "home/user"
 

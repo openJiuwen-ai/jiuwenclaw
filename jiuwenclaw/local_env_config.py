@@ -1,4 +1,17 @@
-"""Process env tip + track-B namespaced os.environ helpers.
+"""Process env tip bags for Track B; Track A stays in real ``os.environ``.
+
+Storage contract (acceptance)::
+
+- **Track A** (``SPAWN_ENV_KEYS``): process/spawn shared — live in ``os.environ``.
+- **Track B** (business / sync ``agents[].env``): tip/overlay only — never
+  resident as bare keys or ``sid__aid__*`` namespaced keys in ``os.environ``.
+- **Process baseline**: ``.env`` / bare Track B ingested into
+  ``_process_baseline`` (shared). Readers do **not** fall through to baseline;
+  values reach tips only via hydrate (local) or sync gaps.
+- **Legal child exits**: ``export_agent_environ`` and skill credential injection.
+- **Authority**: ``sync_agents_configs`` replaces per-agent tip then gaps
+  baseline keys absent from the raw ``agents[].env`` object; ``shared_env``
+  is audit-only and must not mutate process env on the sync path.
 
 Isolation dimension is always ``(service_id, agent_id)`` (request-side).
 Tip bags live here; Manager ``_latest_*`` is write-through only.
@@ -75,6 +88,7 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
         "EMBED_MODEL",
         "MODEL_NAME",
         "MODEL_PROVIDER",
+        "MODEL_CONTEXT_WINDOW",
         "TOOL_CALLING_GUARD_ENABLED",
         "TOOL_CALLING_GUARD_DISABLE",
         "TOOL_CALLING_GUARD_STRIP_REASON",
@@ -163,6 +177,8 @@ EnvNsKey = tuple[str, str]
 
 _active_bags: dict[EnvNsKey, dict[str, Any]] = {}
 _staged_bags: dict[EnvNsKey, dict[str, Any]] = {}
+# Process-shared Track B from .env / cold start (not a per-agent tip).
+_process_baseline: dict[str, str] = {}
 
 # Unbound sentinel: distinguish "not bound" from bound empty dict ``{}``.
 _UNBOUND: object = object()
@@ -325,7 +341,7 @@ def promote_staged_env(
     service_id: str | None = None,
     agent_id: str | None = None,
 ) -> None:
-    """Promote staged bag into active + namespaced os.environ for this pair."""
+    """Promote staged bag into active tip for this pair (tip-only)."""
     key = resolve_env_ns(service_id, agent_id)
     staged = _staged_bags.get(key)
     if not staged:
@@ -335,10 +351,9 @@ def promote_staged_env(
     for name, value in list(staged.items()):
         if value is None:
             active.pop(name, None)
-            _pop_ns_os(sid, aid, name)
+            _pop_bare_if_default_default(sid, aid, name)
         else:
-            active[name] = value
-            _set_ns_os(sid, aid, name, value)
+            active[name] = _plaintext_tip_value(name, value)
     _staged_bags.pop(key, None)
     _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
@@ -356,13 +371,43 @@ _EMPTY_OMIT_ENV_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _plaintext_tip_value(name: str, value: Any) -> str:
+    """Store tip values as plaintext (decrypt ciphertext from .env / legacy)."""
+    text = str(value)
+    if not text:
+        return text
+    return str(decrypt(name, text))
+
+
+def _pop_bare_if_default_default(service_id: str, agent_id: str, name: str) -> None:
+    """Pop residual bare Track B key only for the default/default bag."""
+    if service_id == _DEFAULT_SERVICE_ID and agent_id == _DEFAULT_AGENT_ID:
+        os.environ.pop(name, None)
+
+
+def pop_track_b_bare_from_environ() -> list[str]:
+    """Remove Track B bare keys from ``os.environ`` (H1 hygiene / after load_dotenv).
+
+    Returns the logical key names that were present and removed (values never logged).
+    """
+    removed: list[str] = []
+    for key in BUSINESS_MIRROR_KEYS:
+        if key in SPAWN_ENV_KEYS:
+            continue
+        if key not in os.environ:
+            continue
+        os.environ.pop(key, None)
+        removed.append(key)
+    return removed
+
+
 def apply_env_overrides_to_active(
     env_overrides: dict[str, Any] | None,
     *,
     service_id: str | None = None,
     agent_id: str | None = None,
 ) -> None:
-    """Write env overrides directly to active + ns (cold start / sync replace)."""
+    """Write env overrides directly to active tip (cold start / incremental)."""
     if not isinstance(env_overrides, dict):
         return
     key = resolve_env_ns(service_id, agent_id)
@@ -377,13 +422,12 @@ def apply_env_overrides_to_active(
             continue
         if env_value is None:
             active.pop(name, None)
-            _pop_ns_os(sid, aid, name)
+            _pop_bare_if_default_default(sid, aid, name)
         else:
             value = str(env_value)
             if name in _EMPTY_OMIT_ENV_KEYS and not value.strip():
                 continue
-            active[name] = value
-            _set_ns_os(sid, aid, name, value)
+            active[name] = _plaintext_tip_value(name, value)
     _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
@@ -394,7 +438,7 @@ def replace_active_env(
     agent_id: str | None = None,
     clear_staged: bool = True,
 ) -> None:
-    """Full-replace active tip + ns for one ``(sid, aid)`` (sync path)."""
+    """Full-replace active tip for one ``(sid, aid)`` (sync path)."""
     key = resolve_env_ns(service_id, agent_id)
     sid, aid = key
     previous = dict(_bag(_active_bags, key))
@@ -406,21 +450,21 @@ def replace_active_env(
                 continue
             if env_value is None:
                 continue
-            new_map[name] = str(env_value)
+            text = str(env_value)
+            if name in _EMPTY_OMIT_ENV_KEYS and not text.strip():
+                continue
+            new_map[name] = _plaintext_tip_value(name, text)
     _active_bags[key] = new_map
-    # Drop keys that disappeared
     for name in previous:
         if name not in new_map:
-            _pop_ns_os(sid, aid, name)
-    for name, value in new_map.items():
-        _set_ns_os(sid, aid, name, value)
+            _pop_bare_if_default_default(sid, aid, name)
     if clear_staged:
         _staged_bags.pop(key, None)
     _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
 def clear_agent_env_ns(service_id: str, agent_id: str) -> None:
-    """Wipe staged + active tip/ns for one ``(service_id, agent_id)`` pair."""
+    """Wipe staged + active tip for one ``(service_id, agent_id)`` pair."""
     clear_staged_env(service_id=service_id, agent_id=agent_id)
     replace_active_env(
         {},
@@ -428,6 +472,11 @@ def clear_agent_env_ns(service_id: str, agent_id: str) -> None:
         agent_id=agent_id,
         clear_staged=True,
     )
+    if (
+        normalize_env_ns_id(service_id, default=_DEFAULT_SERVICE_ID) == _DEFAULT_SERVICE_ID
+        and normalize_env_ns_id(agent_id, default=_DEFAULT_AGENT_ID) == _DEFAULT_AGENT_ID
+    ):
+        pop_track_b_bare_from_environ()
 
 
 def apply_env_removals(
@@ -436,7 +485,7 @@ def apply_env_removals(
     service_id: str | None = None,
     agent_id: str | None = None,
 ) -> None:
-    """Remove env keys from active, staged, and namespaced os.environ for one pair."""
+    """Remove env keys from active and staged tip for one pair."""
     if not isinstance(removals, dict) or not removals:
         return
     key = resolve_env_ns(service_id, agent_id)
@@ -447,10 +496,7 @@ def apply_env_removals(
         name = str(env_key)
         active.pop(name, None)
         staged.pop(name, None)
-        _pop_ns_os(sid, aid, name)
-        # Legacy bare-key cleanup only for default/default (Gateway .env compat).
-        if sid == "default" and aid == "default":
-            os.environ.pop(name, None)
+        _pop_bare_if_default_default(sid, aid, name)
     _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
@@ -573,22 +619,8 @@ ENV_CONFIG_DICT: MutableMapping[str, Any] = _ActiveEnvDict()
 
 
 # ---------------------------------------------------------------------------
-# Namespaced os.environ
+# Tip writers / export (Track B never resident in os.environ)
 # ---------------------------------------------------------------------------
-
-
-def _set_ns_os(service_id: str, agent_id: str, name: str, value: str) -> None:
-    if name in SPAWN_ENV_KEYS:
-        logger.warning("拒绝 set_os_environ 轨道 A 键: %s", name)
-        return
-    os.environ[make_env_ns_key(service_id, agent_id, name)] = str(value)
-
-
-def _pop_ns_os(service_id: str, agent_id: str, name: str) -> None:
-    try:
-        os.environ.pop(make_env_ns_key(service_id, agent_id, name), None)
-    except EnvNsIdError:
-        return
 
 
 def set_os_environ(
@@ -598,7 +630,7 @@ def set_os_environ(
     service_id: str | None = None,
     agent_id: str | None = None,
 ) -> None:
-    """Write track-B namespaced os.environ (+ active tip write-through)."""
+    """Write Track B active tip only (plaintext). Does not touch ``os.environ``."""
     if name in SPAWN_ENV_KEYS:
         logger.warning("拒绝 set_os_environ 轨道 A 键: %s", name)
         return
@@ -607,11 +639,9 @@ def set_os_environ(
     active = _bag(_active_bags, key)
     if value is None:
         active.pop(str(name), None)
-        _pop_ns_os(sid, aid, str(name))
+        _pop_bare_if_default_default(sid, aid, str(name))
         return
-    text = str(value)
-    active[str(name)] = text
-    _set_ns_os(sid, aid, str(name), text)
+    active[str(name)] = _plaintext_tip_value(str(name), value)
 
 
 def get_os_environ(
@@ -621,32 +651,24 @@ def get_os_environ(
     service_id: str | None = None,
     agent_id: str | None = None,
 ) -> Any:
-    """Read track-B namespaced key only (no bare logical-key fallback)."""
+    """Read Track B from tip only (compat alias; prefer ``get_local_config``)."""
     if name in SPAWN_ENV_KEYS:
         logger.warning("get_os_environ 不服务轨道 A 键: %s —— 请直读 spawn 环境", name)
         return default
-    key = resolve_env_ns(service_id, agent_id)
-    sid, aid = key
-    try:
-        ns_key = make_env_ns_key(sid, aid, name)
-    except EnvNsIdError:
+    tip = effective_tip(service_id, agent_id)
+    if name not in tip:
         return default
-    if ns_key in os.environ:
-        return decrypt(name, os.environ[ns_key])
-    return default
+    return _read_from_mapping(name, tip, default)
 
 
 def export_agent_environ(
     service_id: str,
     agent_id: str,
 ) -> dict[str, str]:
-    """B (de-prefixed tip+ns) ∪ A (present spawn keys) ∪ C for child ``env=``.
+    """Tip (Track B, plaintext) ∪ Track A spawn keys ∪ Windows platform vars.
 
-    On Windows, also pass through platform vars (SYSTEMROOT/SystemDrive/windir/
-    TEMP/COMSPEC/PATHEXT/USERPROFILE/...) that ``WSAStartup`` and ``CreateProcess``
-    need; without ``SYSTEMROOT`` the child's ``import asyncio`` -> ``import
-    _overlapped`` fails with WinError 10106 because the WinSock provider cannot
-    initialize (mswsock.dll lives under ``%SystemRoot%\\System32``).
+    Explicit child ``env=`` only — never a reason to leave Track B in the parent
+    process environ.
     """
     out: dict[str, str] = {}
     tip = effective_tip(service_id, agent_id)
@@ -654,14 +676,6 @@ def export_agent_environ(
         if v is None:
             continue
         out[str(k)] = str(v)
-    sid = normalize_env_ns_id(service_id, default=_DEFAULT_SERVICE_ID)
-    aid = normalize_env_ns_id(agent_id, default=_DEFAULT_AGENT_ID)
-    prefix = f"{sid}__{aid}__"
-    for ek, ev in os.environ.items():
-        if ek.startswith(prefix):
-            logical = ek[len(prefix):]
-            if logical and logical not in out:
-                out[logical] = ev
     for k in SPAWN_ENV_KEYS:
         if k in os.environ:
             out[k] = os.environ[k]
@@ -706,27 +720,172 @@ def _ensure_windows_platform_env(out: dict[str, str]) -> None:
             out[k] = v
 
 
-def mirror_bare_business_env_to_default_ns(*, force: bool = False) -> None:
-    """Whitelist-only bare → ``default__default__*`` once after load_dotenv."""
+def get_process_baseline() -> dict[str, str]:
+    """Return a copy of the process-shared Track B baseline (from ``.env``)."""
+    return dict(_process_baseline)
+
+
+def update_process_baseline(updates: Mapping[str, Any] | None) -> None:
+    """Merge plaintext Track B keys into process baseline (Web/CLI persist)."""
+    if not isinstance(updates, Mapping):
+        return
+    for env_key, env_value in updates.items():
+        name = str(env_key)
+        if name in SPAWN_ENV_KEYS:
+            continue
+        if env_value is None:
+            _process_baseline.pop(name, None)
+            continue
+        text = str(env_value)
+        if name in _EMPTY_OMIT_ENV_KEYS and not text.strip():
+            continue
+        _process_baseline[name] = _plaintext_tip_value(name, text)
+
+
+def apply_process_baseline_gaps(
+    service_id: str | None,
+    agent_id: str | None,
+    *,
+    reserved_keys: Iterable[str] | None = None,
+) -> None:
+    """Copy baseline keys not in ``reserved_keys`` into the agent tip.
+
+    Does not overwrite keys already present on the tip. ``reserved_keys`` should
+    be the raw ``agents[].env`` key set (including ``null`` entries) so explicit
+    deletes are not resurrected from baseline.
+    """
+    key = resolve_env_ns(service_id, agent_id)
+    active = _bag(_active_bags, key)
+    reserved = {str(k) for k in (reserved_keys or ())}
+    for name, value in _process_baseline.items():
+        if name in reserved:
+            continue
+        if name in active:
+            continue
+        active[name] = value
+    sid, aid = key
+    _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
+
+
+def hydrate_default_tip_from_baseline() -> None:
+    """Local cold-start: copy entire baseline into ``default/default`` tip."""
+    apply_process_baseline_gaps(
+        _DEFAULT_SERVICE_ID,
+        _DEFAULT_AGENT_ID,
+        reserved_keys=(),
+    )
+
+
+def should_hydrate_default_tip() -> bool:
+    """True for local processes; False when relay sets ``AGENT_RUNTIME``."""
+    return not str(os.environ.get("AGENT_RUNTIME", "") or "").strip()
+
+
+_LEGACY_OFFICE_CLAW_DISABLE_TOOL_CALLING = "OFFICE_CLAW_DISABLE_TOOL_CALLING"
+_LEGACY_OFFICE_CLAW_DISABLE_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_LEGACY_TOOL_CALLING_GUARD_STRIP_REASON = "legacy_office_claw_disable_tool_calling"
+
+
+def _map_legacy_office_claw_disable_tool_calling() -> bool:
+    """Map deprecated ``OFFICE_CLAW_DISABLE_TOOL_CALLING`` into Guard tip keys.
+
+    Old kill-switch stripped tools from process env alone. New Guard needs
+    ``TOOL_CALLING_GUARD_ENABLED`` + ``TOOL_CALLING_GUARD_DISABLE``. Uses
+    ``os.environ.setdefault`` so explicit new Guard env wins. Always pops the
+    legacy key. Baseline/tip ingest is left to the caller.
+    """
+    if _LEGACY_OFFICE_CLAW_DISABLE_TOOL_CALLING not in os.environ:
+        return False
+    raw = os.environ.pop(_LEGACY_OFFICE_CLAW_DISABLE_TOOL_CALLING, None)
+    if raw is None:
+        return False
+    if str(raw).strip().lower() not in _LEGACY_OFFICE_CLAW_DISABLE_TRUTHY:
+        return False
+    logger.warning(
+        "%s is deprecated; mapped to TOOL_CALLING_GUARD_ENABLED=true, "
+        "TOOL_CALLING_GUARD_DISABLE=true, TOOL_CALLING_GUARD_STRIP_REASON=%s. "
+        "Prefer the TOOL_CALLING_GUARD_* variables.",
+        _LEGACY_OFFICE_CLAW_DISABLE_TOOL_CALLING,
+        _LEGACY_TOOL_CALLING_GUARD_STRIP_REASON,
+    )
+    os.environ.setdefault("TOOL_CALLING_GUARD_ENABLED", "true")
+    os.environ.setdefault("TOOL_CALLING_GUARD_DISABLE", "true")
+    os.environ.setdefault(
+        "TOOL_CALLING_GUARD_STRIP_REASON",
+        _LEGACY_TOOL_CALLING_GUARD_STRIP_REASON,
+    )
+    return True
+
+
+def _ingest_legacy_guard_keys_into_baseline() -> None:
+    """Copy mapped Guard keys from ``os.environ`` into baseline (secondary ingest)."""
+    for key in (
+        "TOOL_CALLING_GUARD_ENABLED",
+        "TOOL_CALLING_GUARD_DISABLE",
+        "TOOL_CALLING_GUARD_STRIP_REASON",
+    ):
+        if key not in os.environ:
+            continue
+        _process_baseline.setdefault(
+            key, _plaintext_tip_value(key, os.environ[key])
+        )
+
+
+def ingest_bare_business_into_tip(*, force: bool = False) -> None:
+    """After ``load_dotenv``: bare Track B → process_baseline, then pop bare.
+
+    Idempotent unless ``force=True``. ``setdefault`` on baseline so a later
+    sync/gaps path remains authoritative for per-agent tips. When
+    ``AGENT_RUNTIME`` is unset, also hydrates ``default/default`` tip for local
+    cold-start readers.
+    """
     global _mirrored_once
+    legacy_mapped = _map_legacy_office_claw_disable_tool_calling()
     if _mirrored_once and not force:
+        # Secondary load_dotenv may have re-seeded bare keys — always re-pop.
+        if legacy_mapped:
+            _ingest_legacy_guard_keys_into_baseline()
+        removed = pop_track_b_bare_from_environ()
+        if removed:
+            logger.info(
+                "secondary ingest: re-popped %d Track B bare key(s) from os.environ "
+                "(baseline already set; keys not re-ingested): %s",
+                len(removed),
+                ", ".join(sorted(removed)),
+            )
+        else:
+            logger.debug(
+                "secondary ingest: no Track B bare keys present in os.environ to re-pop"
+            )
+        # Legacy map may have added Guard keys to baseline after first ingest.
+        if legacy_mapped and should_hydrate_default_tip():
+            hydrate_default_tip_from_baseline()
         return
     for key in BUSINESS_MIRROR_KEYS:
         if key in SPAWN_ENV_KEYS:
             continue
-        ns_key = make_env_ns_key(_DEFAULT_SERVICE_ID, _DEFAULT_AGENT_ID, key)
-        if ns_key in os.environ:
-            continue
         if key not in os.environ:
             continue
         raw = os.environ[key]
-        # Do not seal empty credentials into default tip (spawn often has API_BASE="").
         if key in _EMPTY_OMIT_ENV_KEYS and not str(raw).strip():
+            os.environ.pop(key, None)
             continue
-        os.environ[ns_key] = raw
-        active = _bag(_active_bags, (_DEFAULT_SERVICE_ID, _DEFAULT_AGENT_ID))
-        active.setdefault(key, raw)
+        plain = _plaintext_tip_value(key, raw)
+        _process_baseline.setdefault(key, plain)
+        os.environ.pop(key, None)
     _mirrored_once = True
+    if should_hydrate_default_tip():
+        hydrate_default_tip_from_baseline()
+
+
+def ingest_bare_business_into_baseline(*, force: bool = False) -> None:
+    """Alias for :func:`ingest_bare_business_into_tip` (baseline + optional hydrate)."""
+    ingest_bare_business_into_tip(force=force)
+
+
+def mirror_bare_business_env_to_default_ns(*, force: bool = False) -> None:
+    """Compat alias for :func:`ingest_bare_business_into_tip`."""
+    ingest_bare_business_into_tip(force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -744,7 +903,7 @@ def _read_from_mapping(name: str, mapping: dict[str, Any], default: Any = None) 
 
 
 def get_local_config(name: str, default=None):
-    """Track-B reader: bound overlay (seal) → formula B tip → namespaced os."""
+    """Track-B reader: bound overlay (seal) → formula B tip. No os.environ."""
     if name in SPAWN_ENV_KEYS:
         logger.warning(
             "get_local_config 不服务轨道 A 键 %s —— 请直读 spawn/path API", name
@@ -753,21 +912,17 @@ def get_local_config(name: str, default=None):
 
     overlay = _task_env_overlay.get()
     if overlay is not _UNBOUND:
-        # Seal: miss => unset (no fallthrough to live tip/ns)
+        # Seal: miss => unset (no fallthrough to live tip)
         return _read_from_mapping(name, overlay, default)
 
     tip = effective_tip()
     if name in tip:
         return _read_from_mapping(name, tip, default)
-
-    ns_val = get_os_environ(name, default=None)
-    if ns_val is not None:
-        return ns_val
     return default
 
 
 def read_env(name: str, default: str = "") -> str:
-    """Overlay-aware ``os.environ.get`` for hot-reload paths."""
+    """Overlay-aware tip reader for hot-reload paths."""
     value = get_local_config(name, default or None)
     if value is None:
         return default
@@ -779,7 +934,7 @@ def read_env_if_set(name: str) -> str | None:
     """Return env value when *name* is explicitly set.
 
     Bound overlay (incl. ``{}``): only overlay; miss → ``None`` (seal).
-    Unbound: formula B tip, then namespaced os.environ.
+    Unbound: formula B tip only.
     """
     overlay = _task_env_overlay.get()
     if overlay is not _UNBOUND:
@@ -800,10 +955,6 @@ def read_env_if_set(name: str) -> str | None:
         if isinstance(value, str):
             return decrypt(name, value)
         return str(value)
-
-    ns_val = get_os_environ(name, default=None)
-    if ns_val is not None:
-        return str(ns_val)
     return None
 
 
@@ -840,6 +991,7 @@ def is_sensitive_env_name(name: str) -> bool:
     return (
         "api_key" in lower
         or "token" in lower
+        or "secret" in lower
         or lower == DEFAULT_HEADERS_ENV_KEY
         or "header" in lower
     )
@@ -875,10 +1027,11 @@ def encrypt(name, text):
 
 
 def reset_local_env_state_for_tests() -> None:
-    """Clear bags + unbound overlay/ns ContextVars (unit tests only)."""
+    """Clear bags + baseline + unbound overlay/ns ContextVars (unit tests only)."""
     global _mirrored_once
     _active_bags.clear()
     _staged_bags.clear()
+    _process_baseline.clear()
     _mirrored_once = False
     # Best-effort: cannot fully reset ContextVar without tokens; set unbound.
     _task_env_overlay.set(_UNBOUND)
