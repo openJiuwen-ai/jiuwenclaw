@@ -3675,6 +3675,10 @@ export class AppScreen implements Component, Focusable {
     for (const key of this.shownBudgetExhaustedWorkflowKeys) {
       if (!currentWorkflowKeys.has(key)) this.shownBudgetExhaustedWorkflowKeys.delete(key);
     }
+    if (this.commands.setSkillEvolutionEnabled(snapshot.skillEvolutionEnabled)) {
+      this.composerAutocompleteProvider = this.rebuildAutocompleteProvider();
+      this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
+    }
     // Populate the skill cache as soon as the WebSocket connection is established
     if (!this.didEagerFetchSkills && snapshot.connectionStatus === "connected") {
       this.didEagerFetchSkills = true;

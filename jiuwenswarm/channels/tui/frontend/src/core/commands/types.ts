@@ -162,6 +162,8 @@ export interface SlashCommand {
   argGuide?: string;
   /** 在/help中隐藏，但仍可执行 */
   hidden?: boolean;
+  /** 仅在后端开启技能自演进时显示在 help/补全中；直接输入仍可执行。 */
+  requiresSkillEvolution?: boolean;
   isSafeConcurrent?: boolean;
   kind: CommandKind;
   action: (ctx: CommandContext, args: string) => void | Promise<void>;
