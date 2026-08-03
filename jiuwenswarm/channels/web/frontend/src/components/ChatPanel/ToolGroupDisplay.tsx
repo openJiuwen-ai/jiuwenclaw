@@ -33,7 +33,12 @@ function ToolStatusIcon({
           <circle cx="10" cy="10" r="6.8" />
           <path strokeLinecap="round" strokeLinejoin="round" d="M7.2 10.15 9.1 12.05l3.7-4.05" />
         </svg>
-      ) : tone === 'error' || tone === 'warning' ? (
+      ) : tone === 'error' ? (
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <circle cx="10" cy="10" r="6.8" />
+          <path strokeLinecap="round" d="m7.6 7.6 4.8 4.8M12.4 7.6l-4.8 4.8" />
+        </svg>
+      ) : tone === 'warning' ? (
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
           <circle cx="10" cy="10" r="6.8" />
           <path strokeLinecap="round" d="M10 6.4v4.5" />
@@ -49,8 +54,25 @@ function ToolStatusIcon({
   );
 }
 
-function isToolResultSuccessful(result?: ToolExecution['result']) {
-  return Boolean(result?.success && !result.result.includes('success=False'));
+export function isToolResultSuccessful(result?: ToolExecution['result']) {
+  if (!result) {
+    return false;
+  }
+  if (result.timedOut) {
+    return false;
+  }
+  return Boolean(result.success && !result.result.includes('success=False'));
+}
+
+/** 失败与超时统一按失败态展示（文案可区分超时）。 */
+export function isToolExecutionFailed(execution: ToolExecution): boolean {
+  if (execution.status === 'error' || execution.status === 'timeout') {
+    return true;
+  }
+  if (execution.result && !isToolResultSuccessful(execution.result)) {
+    return true;
+  }
+  return false;
 }
 
 function getExecutionLabel(
@@ -126,16 +148,27 @@ export function collectViewedSkillIds(executions: ToolExecution[]): string[] {
   return Array.from(out);
 }
 
-/** 行内下拉展开的工具详情：展示参数与结果（替代原弹窗）。 */
+/** 行内下拉展开的工具详情：工具名 + 参数 + 结果（替代原弹窗）。 */
 function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
   const { t } = useTranslation();
   const { toolCall, result, status } = execution;
-  const isTimeout = status === 'timeout';
-  const resultSuccess = isToolResultSuccessful(result);
+  const isTimeout = status === 'timeout' || Boolean(result?.timedOut);
+  const failed = isToolExecutionFailed(execution);
+  const resultSuccess = Boolean(result) && !failed;
   const hasArguments = Object.keys(toolCall.arguments).length > 0;
+  const toolNameLabel = toolCall.name?.trim() || result?.toolName || 'tool';
 
   return (
     <div className="tool-tree-item__detail">
+      <div className="tool-tree-item__detail-block">
+        <div className="tool-tree-item__detail-label">
+          {t('chatUi.toolResult.toolName')}
+        </div>
+        <pre className="tool-tree-item__detail-pre tool-tree-item__detail-pre--name">
+          {toolNameLabel}
+        </pre>
+      </div>
+
       {hasArguments && (
         <div className="tool-tree-item__detail-block">
           <div className="tool-tree-item__detail-label">
@@ -151,9 +184,20 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
         <div className="tool-tree-item__detail-block">
           <div className="tool-tree-item__detail-label">
             {t('chatUi.toolResult.result')}
-            {!resultSuccess && (
-              <span className="tool-tree-item__detail-badge">
-                {t('chatUi.toolResult.failed')}
+            {failed && (
+              <span
+                className={clsx(
+                  'tool-tree-item__detail-badge',
+                  'is-error',
+                  isTimeout && 'is-timeout'
+                )}
+              >
+                {isTimeout ? t('chatUi.toolResult.timeout') : t('chatUi.toolResult.failed')}
+              </span>
+            )}
+            {resultSuccess && (
+              <span className="tool-tree-item__detail-badge is-success">
+                {t('chatUi.toolResult.success')}
               </span>
             )}
           </div>
@@ -162,6 +206,7 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
             <pre
               className={clsx(
                 'tool-tree-item__detail-pre',
+                failed && 'is-failed',
                 result.skillTree && 'mt-2'
               )}
             >
@@ -172,8 +217,8 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
       )}
 
       {!result && isTimeout && (
-        <div className="tool-tree-item__detail-status is-warning">
-          <ToolStatusIcon tone="warning" />
+        <div className="tool-tree-item__detail-status is-error">
+          <ToolStatusIcon tone="error" />
           <span>{t('chatUi.toolResult.timeout')}</span>
         </div>
       )}
@@ -211,6 +256,7 @@ interface GroupHeaderLine {
   category: ToolCategory;
   text: string;
   running: boolean;
+  failed: boolean;
   executions: ToolExecution[];
 }
 
@@ -226,15 +272,19 @@ function buildGroupLines(
   return executions.map((execution) => {
     const category = classifyToolCall(execution.toolCall.name);
     const running = isDisplayRunning(execution);
+    const failed = !running && isToolExecutionFailed(execution);
     const label = getExecutionLabel(execution, sessionCompletedLabel, t);
     return {
       key: execution.toolCallId,
       category,
       running,
+      failed,
       executions: [execution],
       text: running
         ? t('chatUi.toolGroup.running', { label })
-        : t('chatUi.toolGroup.completed', { label }),
+        : failed
+          ? t('chatUi.toolGroup.failed', { label })
+          : t('chatUi.toolGroup.completed', { label }),
     };
   });
 }
@@ -347,7 +397,13 @@ export function ToolGroupDisplay({
                 >
                   <span className="tool-tree__header-line">
                     <CategoryIcon category={line.category} />
-                    <span className={clsx('tool-tree__header-line-text', line.running && 'is-running')}>
+                    <span
+                      className={clsx(
+                        'tool-tree__header-line-text',
+                        line.running && 'is-running',
+                        line.failed && 'is-failed'
+                      )}
+                    >
                       {line.text}
                     </span>
                     <span

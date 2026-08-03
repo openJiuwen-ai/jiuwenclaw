@@ -21,4 +21,6 @@ export {
   type RenderItem,
   type TurnWorkMeta,
   type LiveWorkStreak,
+  type WorkOutcomeTone,
+  resolveWorkOutcomeTone,
 } from './buildTurnTimeline';

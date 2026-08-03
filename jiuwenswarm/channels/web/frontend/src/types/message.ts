@@ -62,6 +62,11 @@ export interface Message {
   role: MessageRole;
   content: string;
   timestamp: string;
+  /**
+   * 流式收尾 / chat.final 完成时刻。不参与时间线排序（排序仍用 timestamp，避免与 goal 卡抢序），
+   * 仅作为「任务用时」终点，避免 live 一直停在首包 delta 时间、刷新后变成 final 落盘时间。
+   */
+  completedAt?: string;
   /** 前端渲染身份，避免业务 id 重复或历史 prepend 导致 React key 抖动 */
   renderKey?: string;
   audioBase64?: string;
@@ -108,6 +113,8 @@ export interface ToolResult {
   success: boolean;
   toolCallId?: string;
   summary?: string;  // 结果摘要
+  /** 历史/实时结果显式标记为超时（与 success=false 一起用于展示「执行失败」） */
+  timedOut?: boolean;
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
   skillTree?: SkillTreePath;
   beamSearch?: BeamSearchProgress;

@@ -1534,6 +1534,14 @@ select {
     color: var(--color-feedback-success);
   }
 
+  .completed-work-chip__icon.is-partial {
+    color: var(--color-feedback-warning);
+  }
+
+  .completed-work-chip__icon.is-error {
+    color: var(--color-feedback-danger);
+  }
+
   .completed-work-chip__icon svg {
     width: 16px;
     height: 16px;
@@ -1543,6 +1551,21 @@ select {
     font-variant-numeric: tabular-nums;
     min-width: 0;
     transition: opacity 0.28s ease, transform 0.28s ease;
+  }
+
+  .completed-work-chip__badge {
+    flex-shrink: 0;
+    padding: 0;
+    margin-left: 2px;
+    border-radius: 0;
+    font-size: var(--font-size-2xs, 11px);
+    font-weight: 500;
+    line-height: inherit;
+  }
+
+  .completed-work-chip__badge.is-partial {
+    background: transparent;
+    color: var(--color-feedback-warning);
   }
 
   .completed-work-chip .tool-tree-item__disclosure {
@@ -1841,12 +1864,42 @@ select {
   }
 
   .tool-tree-item__detail-badge {
-    padding: 0 5px;
+    padding: 1px 6px;
     border-radius: 4px;
     font-size: var(--font-size-2xs);
-    font-weight: 500;
+    font-weight: 600;
+    letter-spacing: 0.02em;
     background: var(--color-surface-muted);
     color: var(--color-text-secondary);
+  }
+
+  .tool-tree-item__detail-badge.is-success {
+    background: var(--color-feedback-success-subtle, rgba(22, 163, 74, 0.12));
+    color: var(--color-feedback-success);
+  }
+
+  .tool-tree-item__detail-badge.is-error,
+  .tool-tree-item__detail-badge.is-timeout {
+    background: rgba(220, 38, 38, 0.08);
+    color: rgba(185, 28, 28, 0.88);
+    font-weight: 500;
+  }
+
+  .tool-tree__header-line-text.is-failed {
+    color: rgba(185, 28, 28, 0.78);
+  }
+
+  .tool-tree-item__detail-pre.is-failed {
+    border-color: rgba(220, 38, 38, 0.14);
+  }
+
+  .tool-tree-item__detail-pre--name {
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-weight: 600;
+  }
+
+  .tool-tree-item__detail-status.is-error {
+    color: rgba(185, 28, 28, 0.78);
   }
 
   .tool-tree-item__detail-pre {

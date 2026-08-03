@@ -1947,6 +1947,8 @@
     "workCompletedThinkingNoDuration": "Completed {{thinking}} thoughts",
     "workCompletedTools": "Completed {{tools}} tool calls · {{duration}}",
     "workCompletedToolsNoDuration": "Completed {{tools}} tool calls",
+    "workFailedToolsNoDuration": "{{tools}} tool calls failed",
+    "workOutcomePartial": "Partial failure",
     "reasoning": {
       "thinking": "Thinking…",
       "thought": "Thought"
@@ -1986,6 +1988,7 @@
       "failed": "failed",
       "timeout": "Execution timed out",
       "running": "Running...",
+      "toolName": "Tool name",
       "arguments": "Arguments",
       "result": "Result",
       "truncated": "result truncated"
@@ -1993,6 +1996,7 @@
     "toolGroup": {
       "running": "Running {{label}}",
       "completed": "Completed {{label}}",
+      "failed": "{{label}} failed",
       "category": {
         "file": "file operations",
         "search": "searches",
