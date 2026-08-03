@@ -897,8 +897,7 @@
       "githubToken": "GitHub personal access token for repository or GitHub-related features.",
       "freeSearchDdg": "Enable free DuckDuckGo search (including DDG via Jina). Disable to turn off this source.",
       "freeSearchBing": "Enable free Bing search. Disable to stop using Bing.",
-      "evolutionAutoScan": "Automatically detect signals that a skill can be evolved and suggest creating/updating skills.",
-      "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling automatic skill-creation suggestions.",
+      "skillEvolution": "Learn from tasks and suggest capturing experience or creating new skills.",
       "memoryForbiddenDescription": "Describe sensitive types or rules that must not be written to memory, e.g. passwords, ID numbers, secrets.",
       "symphonyDynamicGraphEnabled": "When disabled, planning uses only the static graph. Existing runtime data is retained.",
       "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path.",
@@ -1064,8 +1063,7 @@
       }
     },
     "booleanLabels": {
-      "evolutionAutoScan": "Auto-detect evolution signals",
-      "skillCreate": "Auto-suggest new skill creation",
+      "skillEvolution": "Enable automatic skill learning",
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",

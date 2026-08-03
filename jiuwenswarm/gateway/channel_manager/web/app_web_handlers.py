@@ -67,6 +67,7 @@ from jiuwenswarm.common.config import (
     update_a2ui_in_config,
     update_updater_in_config,
     update_proactive_recommendation_in_config,
+    update_skill_evolution_enabled_in_config,
 )
 from jiuwenswarm.common.kv_cache_affinity_config import (
     ASCEND_AFFINITY_PROVIDER,
@@ -771,8 +772,6 @@ _CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
-    "skill_create": "SKILL_CREATE",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
     "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
     "teamskills_system_token": "TEAM_SKILLS_HUB_SYSTEM_TOKEN",
@@ -813,6 +812,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
     "setup_guide_enabled",
+    "skill_evolution",
 })
 
 # 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
@@ -1670,18 +1670,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             perm_cfg = raw.get("permissions") or {}
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
-            # skill_create / evolution_auto_scan: env var takes precedence, fallback to config.yaml
+            # Skill evolution is controlled solely by the canonical nested YAML key.
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
-            skill_create_env = os.getenv("SKILL_CREATE")
-            if skill_create_env is not None:
-                payload["skill_create"] = "true" if skill_create_env.lower() in ("true", "1", "yes") else "false"
-            else:
-                payload["skill_create"] = "true" if evolution_cfg.get("skill_create", False) else "false"
-            auto_scan_env = os.getenv("EVOLUTION_AUTO_SCAN")
-            if auto_scan_env is not None:
-                payload["evolution_auto_scan"] = "true" if auto_scan_env.lower() in ("true", "1", "yes") else "false"
-            else:
-                payload["evolution_auto_scan"] = "true" if evolution_cfg.get("auto_scan", False) else "false"
+            payload["skill_evolution"] = "true" if evolution_cfg.get("skill_evolution", False) else "false"
             memory_cfg = (raw.get("memory") or {}).get("forbidden_memory_definition") or {}
             payload["memory_forbidden_enabled"] = "true" if memory_cfg.get("enabled", False) else "false"
             memory_desc = memory_cfg.get("description") or {}
@@ -1708,8 +1699,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("setup_guide_enabled", "true")
-            payload.setdefault("skill_create", "false")
-            payload.setdefault("evolution_auto_scan", "false")
+            payload.setdefault("skill_evolution", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("memory_forbidden_description", "")
             payload.setdefault("swarmflow_enabled", "true" if DEFAULT_SWARMFLOW_ENABLED else "false")
@@ -1872,9 +1862,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             else:
                 env_updates[env_key] = str(val).strip()
 
-        if "evolution_auto_scan" in params:
-            env_updates["EVOLUTION_REVIEW_TRIGGER"] = env_updates["EVOLUTION_AUTO_SCAN"]
-
         raw = get_config_raw()
         preferred_lang = raw.get("preferred_language", "zh")
 
@@ -1913,6 +1900,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_memory_forbidden_description_in_config({preferred_lang: desc_val})
                 elif param_key == "swarmflow_enabled":
                     update_swarmflow_enabled_in_config(parsed)
+                elif param_key == "skill_evolution":
+                    update_skill_evolution_enabled_in_config(parsed)
                 elif param_key.startswith("a2ui_"):
                     ok, update, error = validate_a2ui_config_update(param_key, val)
                     if not ok:
