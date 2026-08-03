@@ -453,10 +453,25 @@ async def test_message_handler_cancel_request_only_stops_exact_stream() -> None:
     class Handler:
         def __init__(self) -> None:
             self._stream_tasks = {"run-1": exact, "manual-run": sibling}
+            self._stream_sessions = {"run-1": "s1", "manual-run": "s1"}
+            self._stream_channels = {"run-1": "web", "manual-run": "web"}
+            self._stream_modes = {"run-1": "agent", "manual-run": "agent"}
+            self._stream_metadata = {
+                "run-1": {"automation": {"kind": "heartbeat"}},
+                "manual-run": None,
+            }
             self.popped = []
+            self.remote_cancelled = []
 
         async def _pop_stream_tracking_and_broadcast(self, request_ids) -> None:  # noqa: ANN001
             self.popped.extend(request_ids)
+
+        async def _cancel_agent_work_for_session(self, msg, session_id, **kwargs):  # noqa: ANN001
+            self.remote_cancelled.append((msg, session_id, kwargs))
+            exact.cancel()
+            await asyncio.gather(exact, return_exceptions=True)
+            await self._pop_stream_tracking_and_broadcast(["run-1"])
+            return True
 
     handler = Handler()
     try:
@@ -465,9 +480,121 @@ async def test_message_handler_cancel_request_only_stops_exact_stream() -> None:
         assert cancelled == ["exact"]
         assert sibling.done() is False
         assert handler.popped == ["run-1"]
+        assert handler.remote_cancelled[0][1] == "s1"
+        assert handler.remote_cancelled[0][2]["target_request_id"] == "run-1"
+        assert handler.remote_cancelled[0][2]["cancel_gateway_tasks"] is False
     finally:
         sibling.cancel()
         await asyncio.gather(sibling, return_exceptions=True)
+
+
+def test_heartbeat_chat_send_never_replaces_manual_stream() -> None:
+    msg = Message(
+        id="heartbeat-run",
+        type="req",
+        channel_id="web",
+        session_id="s1",
+        params={"query": "follow up"},
+        timestamp=1.0,
+        ok=True,
+        req_method=__import__(
+            "jiuwenswarm.common.schema.message", fromlist=["ReqMethod"]
+        ).ReqMethod.CHAT_SEND,
+        metadata={"automation": {"kind": "heartbeat"}},
+    )
+    assert MessageHandler._should_cancel_existing_stream_before_chat_send(msg) is False
+
+
+async def test_agent_server_exact_cancel_selects_only_target_request() -> None:
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    first = asyncio.create_task(wait_forever())
+    sibling = asyncio.create_task(wait_forever())
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._session_stream_tasks = {
+        "s1": {first: asyncio.Event(), sibling: asyncio.Event()}
+    }
+    server._stream_request_ids = {first: "heartbeat-run", sibling: "manual-run"}
+    try:
+        selected = server._cancel_stream_entries(
+            "s1", target_request_id="heartbeat-run"
+        )
+        assert [task for task, _event in selected] == [first]
+        assert server._cancel_stream_entries(
+            "s1", target_request_id="missing"
+        ) == []
+    finally:
+        first.cancel()
+        sibling.cancel()
+        await asyncio.gather(first, sibling, return_exceptions=True)
+
+
+async def test_exact_remote_cancel_failure_keeps_gateway_stream_alive() -> None:
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    stream = asyncio.create_task(wait_forever())
+
+    class Handler:
+        _stream_tasks = {"heartbeat-run": stream}
+        _stream_sessions = {"heartbeat-run": "s1"}
+        _stream_channels = {"heartbeat-run": "web"}
+        _stream_modes = {"heartbeat-run": "agent"}
+        _channel_states = {}
+
+        @staticmethod
+        def _clear_session_evolution_states(_session_id) -> None:  # noqa: ANN001
+            return None
+
+        @staticmethod
+        async def _prepare_agent_dispatch_message(msg):  # noqa: ANN001
+            return msg
+
+        @staticmethod
+        def message_to_e2a(msg):  # noqa: ANN001
+            return SimpleNamespace(channel_context={}, request_id=msg.id)
+
+        @staticmethod
+        async def _send_non_stream_agent_request(_env):  # noqa: ANN001
+            return SimpleNamespace(
+                ok=False,
+                request_id="cancel-request",
+                payload={
+                    "event_type": "chat.interrupt_result",
+                    "success": False,
+                },
+            )
+
+        @staticmethod
+        async def _pop_stream_tracking_and_broadcast(_request_ids) -> None:  # noqa: ANN001
+            raise AssertionError("failed remote cancel must preserve local stream")
+
+    cancel_msg = Message(
+        id="cancel-request",
+        type="req",
+        channel_id="web",
+        session_id="s1",
+        params={"mode": "agent"},
+        timestamp=1.0,
+        ok=True,
+    )
+    try:
+        cancelled = await MessageHandler._cancel_agent_work_for_session(
+            Handler(),
+            cancel_msg,
+            "s1",
+            publish_interrupt_result=False,
+            channel_id="web",
+            cancel_gateway_tasks=False,
+            target_request_id="heartbeat-run",
+            cancel_local_on_agent_failure=False,
+        )
+        assert cancelled is False
+        assert stream.done() is False
+    finally:
+        stream.cancel()
+        await asyncio.gather(stream, return_exceptions=True)
 
 
 def test_message_handler_heartbeat_preserves_bound_session_and_restores_mode(

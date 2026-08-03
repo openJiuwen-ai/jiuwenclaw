@@ -130,6 +130,19 @@ async def test_mark_running_sets_current_run(store: HeartbeatJobStore) -> None:
     assert job.run_state.current_run_started_at == 1000.0
 
 
+async def test_mark_queued_preserves_existing_reservation(
+    store: HeartbeatJobStore,
+) -> None:
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=_interval_schedule(), source="agent_tool",
+    )
+    await store.mark_queued(job.id, "queued-1")
+    job = await store.mark_queued(job.id, "queued-2")
+
+    assert job.run_state.queued_run_id == "queued-1"
+
+
 async def test_mark_succeeded_increments_run_count(store: HeartbeatJobStore) -> None:
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",

@@ -203,7 +203,7 @@ class HeartbeatSchedulerService:
         """扫描 due jobs 并逐个执行调度判断(方案 §7.4)。"""
         jobs = await self._store.list_jobs()
         now = self._now_fn()
-        admitted_job_ids = self._resource_admitted_job_ids(jobs)
+        admitted_job_ids = self._resource_admitted_job_ids(jobs, now=now)
         for job in jobs:
             try:
                 await self._handle_job_tick(job, now, admitted_job_ids)
@@ -215,18 +215,35 @@ class HeartbeatSchedulerService:
                     exc_info=True,
                 )
 
-    def _resource_admitted_job_ids(self, jobs: list[HeartbeatJob]) -> set[str]:
-        """Select a deterministic runnable subset after limits are lowered."""
+    def _resource_admitted_job_ids(
+        self, jobs: list[HeartbeatJob], *, now: float | None = None
+    ) -> set[str]:
+        """Select a fair runnable subset after limits are lowered.
+
+        Non-due scheduled jobs must not consume admission capacity. Previously
+        skipped jobs are preferred on the next due tick so a stable created_at
+        ordering cannot starve newer jobs forever.
+        """
         max_session = int(self._limits.get("max_active_jobs_per_session", 5))
         max_global = int(self._limits.get("max_active_jobs_global", 100))
+        current_time = self._now_fn() if now is None else float(now)
         candidates = sorted(
             (
                 job
                 for job in jobs
                 if job.enabled and job.status in {STATUS_SCHEDULED, STATUS_RUNNING}
+                and (
+                    job.status == STATUS_RUNNING
+                    or (
+                        job.next_run_at is not None
+                        and float(job.next_run_at) <= current_time
+                    )
+                )
             ),
             key=lambda job: (
                 0 if job.status == STATUS_RUNNING else 1,
+                -int(job.run_state.skipped_count),
+                job.next_run_at or 0.0,
                 job.created_at or 0.0,
                 job.id,
             ),
@@ -242,6 +259,17 @@ class HeartbeatSchedulerService:
             admitted.add(job.id)
             per_session[job.session_id] = current + 1
         return admitted
+
+    def _session_is_busy(self, job: HeartbeatJob) -> bool:
+        checker = getattr(self._message_handler, "is_session_busy", None)
+        if not callable(checker):
+            return False
+        return bool(
+            checker(
+                job.session_id,
+                exclude_request_id=job.run_state.current_run_id,
+            )
+        )
 
     async def _handle_job_tick(
         self, job: HeartbeatJob, now: float, admitted_job_ids: set[str]
@@ -280,6 +308,14 @@ class HeartbeatSchedulerService:
         if session is None:
             await self._handle_missing_session(job, now)
             return
+        if self._session_is_busy(job):
+            await self._store.skip_and_reschedule(
+                job.id,
+                now=now,
+                reason="session_busy",
+                next_run_at=self._compute_next_run(job, now),
+            )
+            return
         run_id = self._new_run_id(job, now)
         decision = await self._start_run(
             job, run_id, now, trigger="scheduler", reschedule=True
@@ -288,7 +324,7 @@ class HeartbeatSchedulerService:
             # 跳过本轮,基于 now 重算下次触发(不补跑历史积压)
             await self._store.reschedule(job.id, self._compute_next_run(job, now))
             return
-        if decision == "queued":
+        if decision in {"queued", "coalesced", "replace_pending"}:
             await self._store.reschedule(job.id, self._compute_next_run(job, now))
             return
         if decision == "cancel_failed":
@@ -545,6 +581,7 @@ class HeartbeatSchedulerService:
             "succeeded": "succeeded",
             "failed": "failed",
             "cancelled": "cancelled",
+            "skipped": "skipped",
         }.get(outcome, "failed")
         cancel_pause = self._cancel_intents.get(run_id)
         if normalized == "cancelled" and cancel_pause is not None:
@@ -686,6 +723,13 @@ class HeartbeatSchedulerService:
                 "session_id": job.session_id,
                 "reason": "session_missing",
             }
+        if self._session_is_busy(job):
+            return {
+                "accepted": False,
+                "run_id": "",
+                "session_id": job.session_id,
+                "reason": "session_busy",
+            }
         now = self._now_fn()
         run_id = self._new_run_id(job, now)
         # run_now 受并发策略约束，且 reschedule=false 时恢复执行前调度状态。
@@ -705,6 +749,22 @@ class HeartbeatSchedulerService:
                 "queued": True,
                 "run_id": run_id,
                 "session_id": job.session_id,
+            }
+        if decision in {"coalesced", "replace_pending"}:
+            current = await self._store.get_job(job.id)
+            pending_run_id = (
+                current.run_state.queued_run_id if current is not None else ""
+            )
+            return {
+                "accepted": False,
+                "queued": True,
+                "run_id": pending_run_id or "",
+                "session_id": job.session_id,
+                "reason": (
+                    "already_queued"
+                    if decision == "coalesced"
+                    else "replacement_pending"
+                ),
             }
         if decision in {"cancel_failed", "cancelled"}:
             return {
@@ -752,7 +812,7 @@ class HeartbeatSchedulerService:
         if stype == SCHEDULE_ONCE:
             ra = job.schedule.run_at
             if ra is not None and ra >= now:
-                out.append(self._format_preview(ra))
+                out.append(self._format_preview(ra, timezone=job.timezone))
             return out
         for _ in range(count):
             if stype == SCHEDULE_INTERVAL:
@@ -765,16 +825,23 @@ class HeartbeatSchedulerService:
                 nxt = nxt_ts
             else:
                 break
-            out.append(self._format_preview(nxt))
+            out.append(
+                self._format_preview(
+                    nxt,
+                    timezone=job.schedule.timezone or job.timezone,
+                )
+            )
             base = nxt
         return out
 
     @staticmethod
-    def _format_preview(ts: float) -> dict[str, Any]:
+    def _format_preview(
+        ts: float, *, timezone: str = "Asia/Shanghai"
+    ) -> dict[str, Any]:
         from datetime import datetime as _dt
 
         try:
-            iso = _dt.fromtimestamp(ts, tz=ZoneInfo("Asia/Shanghai")).isoformat()
+            iso = _dt.fromtimestamp(ts, tz=ZoneInfo(timezone)).isoformat()
         except Exception:
             iso = ""
         return {"run_at": ts, "iso": iso}

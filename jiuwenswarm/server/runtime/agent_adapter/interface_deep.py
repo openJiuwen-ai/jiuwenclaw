@@ -5112,7 +5112,9 @@ class JiuWenSwarmDeepAdapter:
     ) -> None:
         """注册 cron 和 send_file 工具（与 mode 无关，每次请求刷新）。"""
         # 定时工具：按当前 session 的 channel 注册（contextvar 已由 _bind_runtime_cron_context 设置）
-        if session_id is None or not session_id.startswith(("heartbeat", "cron")):
+        if session_id is None or not session_id.startswith(
+            ("heartbeat", "health_check", "cron")
+        ):
             try:
                 cron_tools = self._build_cron_tools()
                 if cron_tools:

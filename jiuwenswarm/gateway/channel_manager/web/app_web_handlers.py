@@ -5685,6 +5685,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
+        except RuntimeError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="CONFLICT")
+            return
         await channel.send_response(ws, req_id, ok=True, payload=result)
 
     async def _hb_job_toggle(ws, req_id, params, session_id):
@@ -5740,6 +5743,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+            return
         await channel.send_response(ws, req_id, ok=True, payload=result)
 
     async def _hb_job_run_now(ws, req_id, params, session_id):
@@ -5767,6 +5773,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
             return
         await channel.send_response(ws, req_id, ok=True, payload=result)
 

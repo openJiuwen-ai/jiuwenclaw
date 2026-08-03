@@ -220,6 +220,48 @@ async def test_session_create_seeds_channel_metadata_for_resume(
 
 
 @pytest.mark.asyncio
+async def test_session_delete_notifies_heartbeat_scheduler() -> None:
+    class Agent:
+        async def send_request(self, _env):  # noqa: ANN001
+            return SimpleNamespace(ok=True, payload={"session_id": "tui-session"})
+
+    class Scheduler:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        async def on_session_deleted(self, session_id: str) -> None:
+            self.deleted.append(session_id)
+
+    class Handler:
+        def __init__(self, scheduler: Scheduler) -> None:
+            self.scheduler = scheduler
+
+        def get_heartbeat_scheduler_service(self) -> Scheduler:
+            return self.scheduler
+
+    channel = _TuiChannel()
+    scheduler = Scheduler()
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=channel,
+            agent_client=Agent(),
+            message_handler=Handler(scheduler),
+            path="/tui",
+        )
+    )
+
+    await channel.local_handlers["/tui"]["session.delete"](
+        object(),
+        "req-delete",
+        {"session_id": "tui-session"},
+        "current",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert scheduler.deleted == ["tui-session"]
+
+
+@pytest.mark.asyncio
 async def test_session_list_current_dir_includes_top_level_only_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

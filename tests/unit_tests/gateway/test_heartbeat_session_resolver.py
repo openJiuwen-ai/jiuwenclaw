@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from jiuwenswarm.gateway.heartbeat.session_resolver import (
@@ -137,6 +139,18 @@ async def test_on_session_deleted_empty_session_id_noop() -> None:
     r = HeartbeatSessionResolver(scheduler=sched)
     await r.on_session_deleted("")
     assert sched.calls == []
+
+
+@pytest.mark.parametrize("session_id", ["../outside", "nested/session", r"nested\\session"])
+def test_resolve_rejects_non_canonical_session_id(
+    session_id: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: tmp_path
+    )
+    resolver = HeartbeatSessionResolver()
+    with pytest.raises(ValueError, match="invalid session_id"):
+        resolver.resolve("web", session_id)
 
 
 def test_set_scheduler_allows_deferred_injection() -> None:

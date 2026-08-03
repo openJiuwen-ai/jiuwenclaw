@@ -38,6 +38,7 @@ class _FakeMH:
     def __init__(self) -> None:
         self.messages: list = []
         self.cancelled_request_ids: list[str] = []
+        self.busy_sessions: set[str] = set()
 
     async def publish_user_messages(self, msg) -> None:  # noqa: ANN001
         self.messages.append(msg)
@@ -45,6 +46,11 @@ class _FakeMH:
     async def cancel_request(self, request_id: str) -> bool:
         self.cancelled_request_ids.append(request_id)
         return True
+
+    def is_session_busy(
+        self, session_id: str, *, exclude_request_id: str | None = None
+    ) -> bool:
+        return session_id in self.busy_sessions
 
 
 class _FakeResolver:
@@ -378,12 +384,55 @@ async def test_concurrency_queue_keeps_one_pending_and_consumes_it(setup) -> Non
     second = await sched.trigger_run_now(job.id)
     third = await sched.trigger_run_now(job.id)
     queued = await store.get_job(job.id)
-    assert second["queued"] is True and third["queued"] is True
-    assert queued.run_state.queued_run_id == third["run_id"]
+    assert second["accepted"] is True and second["queued"] is True
+    assert third["accepted"] is False and third["queued"] is True
+    assert third["reason"] == "already_queued"
+    assert third["run_id"] == second["run_id"]
+    assert queued.run_state.queued_run_id == second["run_id"]
     await sched.on_run_finished(job.id, first["run_id"], outcome="succeeded")
     active = await store.get_job(job.id)
-    assert active.run_state.current_run_id == third["run_id"]
+    assert active.run_state.current_run_id == second["run_id"]
     assert len(mh.messages) == 2
+
+
+async def test_busy_manual_session_is_not_preempted_by_due_heartbeat(setup) -> None:
+    store, mh, sched = setup
+    mh.busy_sessions.add("s1")
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict(
+            {"type": "interval", "interval_seconds": 120}
+        ),
+        source="agent_tool", next_run_at=1.0, now=1.0,
+    )
+    sched._now_fn = lambda: 100.0
+
+    await sched._tick_once()
+
+    current = await store.get_job(job.id)
+    assert mh.messages == []
+    assert current.run_state.current_run_id is None
+    assert current.run_state.last_run_status == "skipped"
+    assert current.run_state.last_error == "session_busy"
+    assert current.next_run_at == 220.0
+
+
+async def test_run_now_rejects_busy_manual_session(setup) -> None:
+    store, mh, sched = setup
+    mh.busy_sessions.add("s1")
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict(
+            {"type": "interval", "interval_seconds": 120}
+        ),
+        source="agent_tool",
+    )
+
+    result = await sched.trigger_run_now(job.id)
+
+    assert result["accepted"] is False
+    assert result["reason"] == "session_busy"
+    assert mh.messages == []
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +616,11 @@ def test_preview_cron(setup) -> None:
     )
     out = sched.preview_next_runs(job, count=2)
     assert len(out) == 2
+
+
+def test_preview_formats_job_timezone(setup) -> None:
+    _store, _mh, sched = setup
+    assert sched._format_preview(0.0, timezone="UTC")["iso"].endswith("+00:00")
 
 
 def test_preview_once_returns_one_or_empty(setup) -> None:
@@ -896,6 +950,53 @@ async def test_resource_limit_skip_advances_due_time(tmp_path: Path) -> None:
         statuses.append((current.status, current.run_state.last_run_status))
     assert sum(status == "running" for status, _ in statuses) == 1
     assert sum(last == "skipped" for _, last in statuses) == 1
+
+
+async def test_resource_admission_prioritizes_previously_skipped_job(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    store = HeartbeatJobStore(path=tmp_path / "limit-fairness.json")
+    mh = _FakeMH()
+    sched = HeartbeatSchedulerService(
+        store=store, message_handler=mh, now_fn=lambda: now[0]
+    )
+    sched._session_resolver = _FakeResolver()
+    jobs = []
+    for name in ("a", "b"):
+        jobs.append(
+            await store.create_job(
+                name=name, channel_id="web", session_id="s1", prompt="p",
+                schedule=HeartbeatSchedule.from_dict(
+                    {"type": "interval", "interval_seconds": 120}
+                ),
+                source="agent_tool", next_run_at=1.0, now=1.0,
+            )
+        )
+    sched.set_limits(
+        {"max_active_jobs_per_session": 1, "max_active_jobs_global": 100}
+    )
+    await sched._tick_once()
+    first_running = None
+    for candidate in jobs:
+        if (await store.get_job(candidate.id)).run_state.current_run_id is not None:
+            first_running = candidate
+            break
+    assert first_running is not None
+    first_state = await store.get_job(first_running.id)
+    await sched.on_run_finished(
+        first_running.id,
+        first_state.run_state.current_run_id,
+        outcome="succeeded",
+    )
+
+    now[0] = 220.0
+    await sched._tick_once()
+
+    assert len(mh.messages) == 2
+    assert mh.messages[0].metadata["automation"]["job_id"] != (
+        mh.messages[1].metadata["automation"]["job_id"]
+    )
 
 
 async def test_replace_cancel_failure_does_not_dispatch_replacement(setup) -> None:

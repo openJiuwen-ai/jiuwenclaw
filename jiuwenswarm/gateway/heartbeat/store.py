@@ -230,7 +230,7 @@ class HeartbeatJobStore:
         """Atomically apply concurrency policy and claim a run.
 
         Returns ``(decision, job, replaced_run_id)`` where decision is one of
-        ``run/skip/queued/replace``.
+        ``run/skip/queued/coalesced/replace/replace_pending``.
         """
 
         decision = "run"
@@ -241,6 +241,9 @@ class HeartbeatJobStore:
             active = job.run_state.current_run_id
             if active:
                 if job.concurrency_policy == "queue":
+                    if job.run_state.queued_run_id:
+                        decision = "coalesced"
+                        return job
                     decision = "queued"
                     return replace(
                         job,
@@ -253,6 +256,9 @@ class HeartbeatJobStore:
                         updated_at=float(now),
                     )
                 if job.concurrency_policy == "replace":
+                    if job.run_state.queued_run_id:
+                        decision = "replace_pending"
+                        return job
                     decision = "replace"
                     replaced_run_id = active
                     return replace(
@@ -1025,13 +1031,18 @@ class HeartbeatJobStore:
         return await self._mutate_job(job_id, _mark)
 
     async def mark_queued(self, job_id: str, run_id: str) -> HeartbeatJob:
-        return await self._mutate_job(
-            job_id,
-            lambda job: replace(
+        def _mark(job: HeartbeatJob) -> HeartbeatJob:
+            if job.run_state.queued_run_id:
+                return job
+            return replace(
                 job,
                 run_state=replace(job.run_state, queued_run_id=run_id),
                 updated_at=time.time(),
-            ),
+            )
+
+        return await self._mutate_job(
+            job_id,
+            _mark,
         )
 
     async def clear_queued(self, job_id: str) -> HeartbeatJob:

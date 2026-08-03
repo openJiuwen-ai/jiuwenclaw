@@ -777,6 +777,7 @@ def resolve_3rdagent_switch_session_id(params: dict | None) -> str:
 def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel = bind.channel
     agent_client = bind.agent_client
+    message_handler = bind.message_handler
     on_config_saved = bind.on_config_saved
     path = bind.path
     cron_controller_ref = bind.cron_controller
@@ -1632,6 +1633,25 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
+        async def _notify_heartbeat_session_deleted(deleted_session_id: str) -> None:
+            if message_handler is None:
+                return
+            getter = getattr(
+                message_handler, "get_heartbeat_scheduler_service", None
+            )
+            scheduler = getter() if callable(getter) else None
+            if scheduler is None or not hasattr(scheduler, "on_session_deleted"):
+                return
+            try:
+                await scheduler.on_session_deleted(deleted_session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[cli session.delete] heartbeat lifecycle hook failed: "
+                    "session_id=%s error=%s",
+                    deleted_session_id,
+                    exc,
+                )
+
         if not isinstance(params, dict):
             await channel.send_response(
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
@@ -1665,6 +1685,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 )
                 if resp.ok:
                     pl = resp.payload if isinstance(resp.payload, dict) else {}
+                    await _notify_heartbeat_session_deleted(target)
                     await channel.send_response(ws, req_id, ok=True, payload=pl)
                     return
                 pl = resp.payload if isinstance(resp.payload, dict) else {}
@@ -1726,6 +1747,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 exc,
             )
         shutil.rmtree(session_dir)
+        await _notify_heartbeat_session_deleted(target)
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
 
     async def _forward_rewind_e2a(params: ForwardRewindE2AParams) -> bool:
@@ -3497,6 +3519,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except RuntimeError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="CONFLICT")
         except PermissionError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
@@ -3553,6 +3577,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
         except PermissionError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
@@ -3582,6 +3608,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
         except PermissionError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
         except Exception as exc:
