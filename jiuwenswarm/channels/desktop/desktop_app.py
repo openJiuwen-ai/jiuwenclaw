@@ -8,6 +8,7 @@ import json
 import logging
 import mimetypes
 import os
+import secrets
 import shlex
 import shutil
 import signal
@@ -364,7 +365,6 @@ def _build_child_env(name: str, ports: dict[str, int]) -> dict[str, str]:
     # 在 os.environ.copy() 之前注入文件下载 HMAC 密钥，确保 app（Agent）和 web
     #（文件服务）两个子进程拿到同一个密钥，token 签名/验证一致。
     if "JIUWENSWARM_FILE_DOWNLOAD_SECRET" not in os.environ:
-        import secrets
         os.environ["JIUWENSWARM_FILE_DOWNLOAD_SECRET"] = secrets.token_hex(32)
     env = os.environ.copy()
     env[DESKTOP_ENV_FLAG] = "1"

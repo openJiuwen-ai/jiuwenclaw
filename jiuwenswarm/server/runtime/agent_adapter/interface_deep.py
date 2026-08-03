@@ -8133,6 +8133,9 @@ class JiuWenSwarmDeepAdapter:
                     deep_agent=self._instance,
                     session_id=session_id,
                     turn_index=-1,
+                    # 恢复路径不注入 "[Continue from where the conversation was
+                    # rewound.]" 合成消息,避免把用户从未发送过的指令带入对话。
+                    append_continuation=False,
                 )
                 if restored:
                     logger.info(
