@@ -87,7 +87,8 @@ class TestEnvStaging:
         promote_staged_env()
         assert get_local_config("MODEL_NAME") == "m1"
         assert get_staged_env() == {}
-        assert os.environ.get("default__default__MODEL_NAME") == "m1"
+        assert "default__default__MODEL_NAME" not in os.environ
+        assert "MODEL_NAME" not in os.environ
 
     @staticmethod
     def test_null_env_deletes_staged_key():
@@ -139,7 +140,11 @@ class TestEnvStaging:
 
     @staticmethod
     def test_ns_isolation_between_agents():
-        from jiuwenclaw.local_env_config import apply_env_overrides_to_active, make_env_ns_key
+        from jiuwenclaw.local_env_config import (
+            apply_env_overrides_to_active,
+            get_active_env,
+            make_env_ns_key,
+        )
 
         apply_env_overrides_to_active(
             {"MODEL_NAME": "office-model"},
@@ -151,11 +156,10 @@ class TestEnvStaging:
             service_id="default",
             agent_id="assistant",
         )
-        assert os.environ.get(make_env_ns_key("default", "office", "MODEL_NAME")) == "office-model"
-        assert (
-            os.environ.get(make_env_ns_key("default", "assistant", "MODEL_NAME"))
-            == "assistant-model"
-        )
+        assert get_active_env("default", "office")["MODEL_NAME"] == "office-model"
+        assert get_active_env("default", "assistant")["MODEL_NAME"] == "assistant-model"
+        assert make_env_ns_key("default", "office", "MODEL_NAME") not in os.environ
+        assert make_env_ns_key("default", "assistant", "MODEL_NAME") not in os.environ
         from jiuwenclaw.local_env_config import bind_agent_env_ns, reset_agent_env_ns
 
         t = bind_agent_env_ns("default", "office")
@@ -364,7 +368,11 @@ async def test_agent_manager_promotes_when_all_idle():
 
     assert result.applied == 1
     assert get_staged_env(service_id="s1", agent_id="a1") == {}
-    assert os.environ.get("s1__a1__MODEL_NAME") == "new-model"
+    from jiuwenclaw.local_env_config import get_active_env
+
+    assert get_active_env("s1", "a1").get("MODEL_NAME") == "new-model"
+    assert "s1__a1__MODEL_NAME" not in os.environ
+    assert "MODEL_NAME" not in os.environ
 
 
 @pytest.mark.asyncio
@@ -1139,7 +1147,7 @@ def test_agent_manager_init_applies_yaml_sandbox_to_active_env():
     assert active["JIUWENCLAW_SANDBOX_URL"] == "http://init-sb/v1"
     assert active["JIUWENCLAW_SANDBOX_TYPE"] == "init-type"
     assert active["JIUWENCLAW_SANDBOX_ENABLED"] == "true"
-    assert os.environ.get("s1__a1__JIUWENCLAW_SANDBOX_URL") == "http://init-sb/v1"
+    assert "s1__a1__JIUWENCLAW_SANDBOX_URL" not in os.environ
     assert manager._latest_config_base["sandbox"] is yaml_sandbox
 
 
@@ -1389,7 +1397,7 @@ def _gateway_full_snapshot(**extra: str) -> dict[str, str]:
 
 
 def test_apply_env_removals_bare_pop_only_default_default():
-    from jiuwenclaw.local_env_config import apply_env_removals, make_env_ns_key
+    from jiuwenclaw.local_env_config import apply_env_removals, get_active_env, make_env_ns_key
 
     os.environ["VISION_API_KEY"] = "bare-legacy"
     apply_env_overrides_to_active(
@@ -1404,10 +1412,23 @@ def test_apply_env_removals_bare_pop_only_default_default():
         agent_id="office",
     )
 
+    # office tip cleared; bare key for non-default bag is intentionally left (H1 only pops default/default)
     assert os.environ.get("VISION_API_KEY") == "bare-legacy"
-    assert (
-        os.environ.get(make_env_ns_key("default", "office", "VISION_API_KEY")) is None
+    assert "VISION_API_KEY" not in get_active_env("default", "office")
+    assert make_env_ns_key("default", "office", "VISION_API_KEY") not in os.environ
+
+    apply_env_overrides_to_active(
+        {"VISION_API_KEY": "default-vis"},
+        service_id="default",
+        agent_id="default",
     )
+    apply_env_removals(
+        {"VISION_API_KEY": None},
+        service_id="default",
+        agent_id="default",
+    )
+    assert "VISION_API_KEY" not in os.environ
+    assert "VISION_API_KEY" not in get_active_env("default", "default")
 
 
 @pytest.mark.asyncio
@@ -1446,7 +1467,7 @@ async def test_deep_adapter_create_binds_request_env_namespace(monkeypatch):
 @pytest.mark.asyncio
 async def test_broadcast_reload_omission_scoped_per_manager():
     from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
-    from jiuwenclaw.local_env_config import make_env_ns_key
+    from jiuwenclaw.local_env_config import get_active_env, make_env_ns_key
 
     TenantAgentPool.reset_instance()
     pool = TenantAgentPool.get_instance()
@@ -1499,12 +1520,12 @@ async def test_broadcast_reload_omission_scoped_per_manager():
     await pool.reload_agents_config(None, new_env)
 
     assert (
-        os.environ.get(make_env_ns_key("default", "office", "VISION_API_KEY")) is None
+        get_active_env("default", "office").get("VISION_API_KEY") is None
+        or "VISION_API_KEY" not in get_active_env("default", "office")
     )
-    assert (
-        os.environ.get(make_env_ns_key("default", "assistant", "VISION_API_KEY"))
-        == "assistant-vis"
-    )
+    assert get_active_env("default", "assistant").get("VISION_API_KEY") == "assistant-vis"
+    assert make_env_ns_key("default", "office", "VISION_API_KEY") not in os.environ
+    assert make_env_ns_key("default", "assistant", "VISION_API_KEY") not in os.environ
     office_manager.reload_agents_config.assert_awaited_once()
 
 

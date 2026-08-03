@@ -307,18 +307,19 @@ def test_ns_vision_still_triggers_omission_for_that_agent() -> None:
     assert "VISION_MODEL_NAME" in removals
 
 
-def test_empty_tip_uses_ns_anchor_with_sid_aid() -> None:
-    """When tip is empty, reconcile must still see namespaced multimodal anchors."""
+def test_empty_tip_does_not_use_ns_or_bare_anchor() -> None:
+    """Tip-only: empty tip must not invent multimodal anchors from os.environ."""
     from jiuwenclaw.local_env_config import make_env_ns_key
 
     os.environ[make_env_ns_key("default", "office", "VISION_API_KEY")] = "ns-only-vis"
+    os.environ["VISION_API_KEY"] = "bare-vis"
     new_env = _full_snapshot_base()
 
     reconcile = build_multimodal_reconcile_env(
         service_id="default",
         agent_id="office",
     )
-    assert reconcile.get("VISION_API_KEY") == "ns-only-vis"
+    assert reconcile.get("VISION_API_KEY") in (None, "")
 
     removals = infer_multimodal_env_removals(
         None,
@@ -327,7 +328,7 @@ def test_empty_tip_uses_ns_anchor_with_sid_aid() -> None:
         service_id="default",
         agent_id="office",
     )
-    assert "VISION_API_KEY" in removals
+    assert "VISION_API_KEY" not in removals
 
 
 def test_clear_multimodal_group_only_mutates_explicit_agent_namespace() -> None:

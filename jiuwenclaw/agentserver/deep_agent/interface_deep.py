@@ -420,6 +420,9 @@ from jiuwenclaw.utils import (
 )
 
 load_dotenv(dotenv_path=get_env_file())
+from jiuwenclaw.local_env_config import ingest_bare_business_into_tip
+
+ingest_bare_business_into_tip()
 
 from jiuwenclaw.agentserver.deep_agent.agent_card_id import (
     DEFAULT_SESSION_ID,
@@ -2365,14 +2368,12 @@ class JiuWenClawDeepAdapter:
                     name,
                 )
             else:
-                # Align with resolve_env_vars: sealed miss may still have bare os.environ.
-                bare = str(os.environ.get("API_BASE") or "").strip()
-                if bare:
-                    mcc["api_base"] = bare
-                    logger.info(
-                        "[_build_model_from_entry] 从进程 os.environ API_BASE 获取到 api_base: model_name=%s",
-                        name,
-                    )
+                # Tip-only: no bare os.environ fallthrough for API_BASE.
+                logger.warning(
+                    "[_build_model_from_entry] api_base 为空且 tip/API_BASE 未设置，"
+                    "不回落 os.environ: model_name=%s",
+                    name,
+                )
 
         if not name:
             env_model_name = read_env("MODEL_NAME").strip()
@@ -8703,12 +8704,8 @@ class JiuWenClawDeepAdapter:
                     yield chunk
             finally:
                 reset_request_id(token_request_id)
-                _reset_llm_trace_tokens(
-                    token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model
-                )
-                await self._on_chat_request_end(
-                    chat_env_token, chat_fp_token, chat_skill_dirs_token
-                )
+                _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+                await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
             return
 
         # 拦截斜杠命令

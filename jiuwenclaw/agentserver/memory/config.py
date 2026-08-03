@@ -25,11 +25,13 @@ def clear_config_cache() -> None:
 
 
 def _ensure_dotenv_loaded() -> None:
-    """确保 .env 文件中的变量已加载到 os.environ，避免 load_dotenv 尚未执行导致配置为空。"""
+    """Ensure .env is loaded into tip; pop Track B bare keys (H1)."""
     try:
         from dotenv import load_dotenv
+        from jiuwenclaw.local_env_config import ingest_bare_business_into_tip
         from jiuwenclaw.utils import get_env_file
         load_dotenv(dotenv_path=get_env_file(), override=False)
+        ingest_bare_business_into_tip()
     except Exception as e:
         logger.debug("Failed to load .env file: %s", e)
 

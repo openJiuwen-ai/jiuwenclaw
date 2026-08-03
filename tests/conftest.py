@@ -285,11 +285,19 @@ heartbeat:
 
 @pytest.fixture
 def mock_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Set up mock environment variables."""
-    monkeypatch.setenv("MODEL_PROVIDER", "test_provider")
-    monkeypatch.setenv("MODEL_NAME", "test_model")
-    monkeypatch.setenv("API_BASE", "https://test.api.com")
-    monkeypatch.setenv("API_KEY", "test_api_key")
+    """Set up mock env: Track B via tip; Track A / non-business via os.environ."""
+    from jiuwenclaw.local_env_config import apply_env_overrides_to_active
+
+    apply_env_overrides_to_active(
+        {
+            "MODEL_PROVIDER": "test_provider",
+            "MODEL_NAME": "test_model",
+            "API_BASE": "https://test.api.com",
+            "API_KEY": "test_api_key",
+        },
+        service_id="default",
+        agent_id="default",
+    )
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
 

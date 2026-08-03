@@ -32,7 +32,7 @@ from jiuwenclaw.config import (
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.version import __version__
-from jiuwenclaw.local_env_config import set_os_environ
+from jiuwenclaw.local_env_config import encrypt, read_env, set_os_environ, update_process_baseline
 
 logger = logging.getLogger(__name__)
 apply_openai_model_client_patch()
@@ -327,8 +327,9 @@ def _persist_env_updates(updates: dict[str, str]) -> None:
             found = False
             for env_key, value in updates.items():
                 if stripped.startswith(env_key + "="):
+                    stored = encrypt(env_key, value)
                     new_lines.append(
-                        f'{env_key}="{value}"\n' if value else f"{env_key}=\n"
+                        f'{env_key}="{stored}"\n' if stored else f"{env_key}=\n"
                     )
                     found = True
                     break
@@ -336,7 +337,8 @@ def _persist_env_updates(updates: dict[str, str]) -> None:
                 new_lines.append(line)
         for env_key, value in updates.items():
             if not any(s.strip().startswith(env_key + "=") for s in new_lines):
-                new_lines.append(f'{env_key}="{value}"\n' if value else f"{env_key}=\n")
+                stored = encrypt(env_key, value)
+                new_lines.append(f'{env_key}="{stored}"\n' if stored else f"{env_key}=\n")
         env_path.parent.mkdir(parents=True, exist_ok=True)
         with open(env_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
@@ -375,20 +377,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     async def _config_get(ws, req_id, params, session_id):
         payload = {
-            param_key: (os.getenv(env_key) or "")
+            param_key: (read_env(env_key) or "")
             for param_key, env_key in _CLI_CONFIG_SET_ENV_MAP.items()
         }
         payload["app_version"] = __version__
         try:
             raw = get_config_raw()
             for key, val in payload.items():
-                from jiuwenclaw.extensions import ExtensionRegistry
+                # Tip is plaintext; decrypt is a no-op for already-plain values.
+                from jiuwenclaw.local_env_config import decrypt
 
-                crypto_provider = ExtensionRegistry.get_instance().get_crypto_provider()
-                if (
-                    "api_key" in key.lower() or "token" in key.lower()
-                ) and crypto_provider:
-                    payload[key] = crypto_provider.decrypt(val)
+                payload[key] = decrypt(key, val) if val else val
             ctx_cfg = (raw.get("react") or {}).get("context_engine_config") or {}
             payload["context_engine_enabled"] = (
                 "true" if ctx_cfg.get("enabled", False) else "false"
@@ -416,12 +415,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
             )
             return
-        for key, val in params.items():
-            from jiuwenclaw.extensions import ExtensionRegistry
-
-            crypto_provider = ExtensionRegistry.get_instance().get_crypto_provider()
-            if ("api_key" in key.lower() or "token" in key.lower()) and crypto_provider:
-                params[key] = crypto_provider.encrypt(val)
+        # Tip stores plaintext; encrypt only when persisting to .env (see _persist_env_updates).
 
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
@@ -480,9 +474,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 )
 
         for env_key, value in env_updates.items():
-            os.environ[env_key] = value
             set_os_environ(env_key, value)
-        # env 变量直接写 os.environ 立即生效；YAML 改动需要 agent 重启/热重载才生效
+        if env_updates:
+            update_process_baseline(env_updates)
+        # tip 立即生效；YAML 改动需要 agent 重启/热重载才生效
         applied_without_restart = not yaml_updated
 
         if env_updates:
@@ -957,7 +952,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.info(
                 "[cli command.model] 列出模型: names=%s, current=%s",
                 names,
-                os.getenv("MODEL_NAME", "unknown"),
+                read_env("MODEL_NAME") or "unknown",
             )
             env = e2a_from_agent_fields(
                 request_id=req_id,
@@ -975,9 +970,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             _defs = (_raw.get("models") or {}).get("defaults")
             if isinstance(_defs, list) and _defs:
                 _first_name = resolve_env_vars(str((_defs[0].get("model_client_config") or {}).get("model_name", "")))
-                payload["current"] = _first_name or os.getenv("MODEL_NAME", "unknown")
+                payload["current"] = _first_name or (read_env("MODEL_NAME") or "unknown")
             else:
-                payload["current"] = os.getenv("MODEL_NAME", "unknown")
+                payload["current"] = read_env("MODEL_NAME") or "unknown"
             await channel.send_response(ws, req_id, ok=True, payload=payload)
             return
 
@@ -1165,8 +1160,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         if resp.ok:
             for k, v in env_updates.items():
-                os.environ[k] = v
                 set_os_environ(k, v)
+            if env_updates:
+                update_process_baseline(env_updates)
             _persist_env_updates(env_updates)
             try:
                 config_templates = {

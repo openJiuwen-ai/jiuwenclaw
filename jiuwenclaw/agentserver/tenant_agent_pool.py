@@ -15,6 +15,7 @@ from jiuwenclaw.agentserver.reload_result import (
 from jiuwenclaw.local_env_config import (
     EnvNsIdError,
     apply_env_removals,
+    apply_process_baseline_gaps,
     clear_agent_env_ns,
     effective_tip,
     normalize_env_ns_id,
@@ -819,6 +820,16 @@ class TenantAgentPool:
                     reload_result = await agent_manager.apply_sync_config(
                         spec.config,
                         materialized_env,
+                    )
+                    # Baseline keys absent from raw agents[].env → this tip.
+                    # reserved includes null keys so sync deletes are not resurrected.
+                    apply_process_baseline_gaps(
+                        service_id,
+                        agent_id,
+                        reserved_keys={str(k) for k in spec.env},
+                    )
+                    agent_manager._latest_env_overrides = dict(
+                        effective_tip(service_id, agent_id)
                     )
                     reload_payload = {
                         "applied": reload_result.applied,

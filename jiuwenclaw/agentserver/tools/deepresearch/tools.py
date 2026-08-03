@@ -1451,18 +1451,17 @@ def _build_bridge_env(os_env: dict[str, str]) -> dict[str, str]:
 
 
 def _build_deepresearch_child_env(
-    os_env: dict[str, str],
     *,
     interactive_ask: bool,
-    service_id: str | None = None,
-    agent_id: str | None = None,
+    service_id: str = "default",
+    agent_id: str = "default",
 ) -> dict[str, str]:
-    """Build the stream child env with an explicit per-request HITL switch."""
-    if service_id is not None or agent_id is not None:
-        os_env = export_agent_environ(
-            service_id or "default",
-            agent_id or "default",
-        )
+    """Build the stream child env with an explicit per-request HITL switch.
+
+    Always starts from ``export_agent_environ`` (tip ∪ Track A spawn keys);
+    callers cannot pass a raw/empty env mapping that would omit PATH/HOME.
+    """
+    os_env = export_agent_environ(service_id, agent_id)
     env = _build_bridge_env(os_env)
     env["DEEPSEARCH_HITL"] = "true" if interactive_ask else "false"
     env["PYTHONUNBUFFERED"] = "1"
@@ -1686,7 +1685,6 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
 
     try:
         child_env = _build_deepresearch_child_env(
-            os.environ,
             interactive_ask=interactive_ask,
             service_id=str(route.get("service_id") or "default"),
             agent_id=str(route.get("agent_id") or "default"),
@@ -2050,7 +2048,7 @@ def _resolve_skill_root() -> str:
     fallback: cwd/office-claw-skills(仅当 sidecar cwd 恰为仓根时命中)。
     """
     candidates: list[str] = []
-    dirs_env = os.environ.get("JIUWENCLAW_SHARED_SKILLS_DIRS", "")
+    dirs_env = read_env("JIUWENCLAW_SHARED_SKILLS_DIRS", "")
     if dirs_env:
         for d in dirs_env.split(os.pathsep):
             d = d.strip()

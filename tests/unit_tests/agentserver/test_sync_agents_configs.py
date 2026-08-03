@@ -23,17 +23,20 @@ from jiuwenclaw.local_env_config import (
     BUSINESS_MIRROR_KEYS,
     EnvNsIdError,
     apply_env_overrides_to_active,
+    apply_process_baseline_gaps,
     bind_agent_env_ns,
     bind_task_env_overlay,
     export_agent_environ,
     get_active_env,
     get_local_config,
+    get_process_baseline,
     get_staged_env,
     make_env_ns_key,
     mirror_bare_business_env_to_default_ns,
     normalize_env_ns_id,
     parse_env_ns_key,
     promote_staged_env,
+    read_env,
     read_env_if_set,
     replace_active_env,
     reset_agent_env_ns,
@@ -41,6 +44,7 @@ from jiuwenclaw.local_env_config import (
     reset_task_env_overlay,
     set_os_environ,
     stage_env_overrides,
+    update_process_baseline,
 )
 
 
@@ -56,6 +60,7 @@ def _sync_payload(
     revision: str = "rev-1",
     service_id: str = "default",
     agents: list[dict] | None = None,
+    shared_env: dict[str, str] | None = None,
 ) -> dict:
     if agents is None:
         agents = [
@@ -66,7 +71,14 @@ def _sync_payload(
                 "runtime": {},
             }
         ]
-    return {"revision": revision, "service_id": service_id, "agents": agents}
+    payload = {
+        "revision": revision,
+        "service_id": service_id,
+        "agents": agents,
+    }
+    if shared_env is not None:
+        payload["shared_env"] = shared_env
+    return payload
 
 
 @pytest.fixture(autouse=True)
@@ -153,33 +165,53 @@ class TestDualTrackSpawnVsBusiness:
 
 
 # ---------------------------------------------------------------------------
-# 3. mirror_bare_business_env_to_default_ns
+# 3. mirror / process_baseline + local hydrate
 # ---------------------------------------------------------------------------
 
 
 class TestMirrorBareBusinessEnv:
     @staticmethod
     def test_model_name_mirrored_home_not():
+        os.environ.pop("AGENT_RUNTIME", None)
         os.environ["MODEL_NAME"] = "bare-model"
         os.environ["HOME"] = "/home/user"
         mirror_bare_business_env_to_default_ns()
-        assert os.environ.get("default__default__MODEL_NAME") == "bare-model"
+        assert get_process_baseline().get("MODEL_NAME") == "bare-model"
+        # Local hydrate copies baseline into default/default tip.
+        assert get_active_env("default", "default").get("MODEL_NAME") == "bare-model"
+        assert "MODEL_NAME" not in os.environ
+        assert "default__default__MODEL_NAME" not in os.environ
         assert "default__default__HOME" not in os.environ
         assert os.environ["HOME"] == "/home/user"
 
     @staticmethod
+    def test_agent_runtime_skips_default_hydrate():
+        os.environ["AGENT_RUNTIME"] = "1"
+        os.environ["MODEL_NAME"] = "bare-model"
+        mirror_bare_business_env_to_default_ns()
+        assert get_process_baseline().get("MODEL_NAME") == "bare-model"
+        assert "MODEL_NAME" not in get_active_env("default", "default")
+        # tip-only readers: no baseline fallthrough
+        assert get_local_config("MODEL_NAME") is None
+        assert "MODEL_NAME" not in os.environ
+
+    @staticmethod
     def test_force_false_is_idempotent():
+        os.environ.pop("AGENT_RUNTIME", None)
         os.environ["MODEL_NAME"] = "m1"
         mirror_bare_business_env_to_default_ns()
         os.environ["MODEL_NAME"] = "m2"
         mirror_bare_business_env_to_default_ns(force=False)
-        assert os.environ.get("default__default__MODEL_NAME") == "m1"
+        assert get_process_baseline().get("MODEL_NAME") == "m1"
+        assert get_active_env("default", "default").get("MODEL_NAME") == "m1"
+        assert "MODEL_NAME" not in os.environ
 
     @staticmethod
     def test_get_default_models_env_fallback_needs_mirror():
-        """Gateway/Web cold-start: bare .env keys are invisible to get_local_config until mirror."""
+        """Gateway/Web cold-start: bare .env keys need ingest (+ local hydrate)."""
         from jiuwenclaw.config import get_default_models
 
+        os.environ.pop("AGENT_RUNTIME", None)
         os.environ["API_BASE"] = "https://example.api"
         os.environ["API_KEY"] = "sk-bare"
         os.environ["MODEL_NAME"] = "bare-model"
@@ -196,6 +228,8 @@ class TestMirrorBareBusinessEnv:
         assert mcc["api_key"] == "sk-bare"
         assert mcc["model_name"] == "bare-model"
         assert mcc["client_provider"] == "OpenAI"
+        assert "API_KEY" not in os.environ
+        assert "MODEL_NAME" not in os.environ
 
     @staticmethod
     def test_config_set_and_business_read_keys_are_mirrored():
@@ -264,6 +298,7 @@ class TestMirrorBareBusinessEnv:
         missing_reads = extra_business_reads - BUSINESS_MIRROR_KEYS
         assert missing_reads == set(), f"business read keys missing from mirror: {missing_reads}"
 
+        os.environ.pop("AGENT_RUNTIME", None)
         os.environ["FREE_SEARCH_DDG_ENABLED"] = "1"
         os.environ["LLM_API_KEY"] = "sk-deep"
         os.environ["WEB_SEARCH_API_KEY"] = "sk-search"
@@ -276,7 +311,105 @@ class TestMirrorBareBusinessEnv:
         assert get_local_config("WEB_SEARCH_API_KEY") == "sk-search"
         assert get_local_config("ACR_ACCESS_KEY") == "acr-key"
         assert get_local_config("SKILLNET_DOWNLOAD_TIMEOUT") == "90"
-        assert os.environ.get("default__default__FREE_SEARCH_DDG_ENABLED") == "1"
+        assert "FREE_SEARCH_DDG_ENABLED" not in os.environ
+        assert "default__default__FREE_SEARCH_DDG_ENABLED" not in os.environ
+
+
+class TestProcessBaselineGaps:
+    @staticmethod
+    def test_gaps_copies_non_reserved_only():
+        update_process_baseline(
+            {
+                "FREE_SEARCH_DDG_ENABLED": "1",
+                "API_KEY": "from-baseline",
+                "MODEL_NAME": "from-baseline",
+            }
+        )
+        replace_active_env(
+            {"MODEL_NAME": "from-sync", "API_BASE": ""},
+            service_id="default",
+            agent_id="office",
+        )
+        apply_process_baseline_gaps(
+            "default",
+            "office",
+            reserved_keys={"MODEL_NAME", "API_BASE", "API_KEY"},
+        )
+        tip = get_active_env("default", "office")
+        assert tip["MODEL_NAME"] == "from-sync"
+        assert tip.get("FREE_SEARCH_DDG_ENABLED") == "1"
+        # reserved API_KEY was null-deleted / absent from tip — not resurrected
+        assert "API_KEY" not in tip
+        assert read_env("API_KEY") == ""
+
+    @staticmethod
+    def test_empty_string_sync_not_overwritten_by_baseline():
+        update_process_baseline({"MODEL_NAME": "from-baseline"})
+        replace_active_env(
+            {"MODEL_NAME": ""},
+            service_id="default",
+            agent_id="office",
+        )
+        apply_process_baseline_gaps(
+            "default",
+            "office",
+            reserved_keys={"MODEL_NAME"},
+        )
+        assert get_active_env("default", "office").get("MODEL_NAME") == ""
+
+
+@pytest.mark.asyncio
+async def test_sync_gaps_baseline_into_each_agent_tip(mock_warmup):
+    os.environ["AGENT_RUNTIME"] = "1"
+    update_process_baseline(
+        {
+            # Not in SYNC_ENV_SCHEMA → absent from agents[].env → gap-filled.
+            "SKILLNET_DOWNLOAD_TIMEOUT": "90",
+            "API_KEY": "baseline-key",
+        }
+    )
+    pool = TenantAgentPool.get_instance()
+    result = await pool.sync_agents_configs(
+        _sync_payload(
+            revision="rev-gaps",
+            agents=[
+                {
+                    "agent_id": "office",
+                    "config": {},
+                    "env": _full_env(MODEL_NAME="office-model", API_KEY=None),
+                    "runtime": {},
+                },
+                {
+                    "agent_id": "assistant",
+                    "config": {},
+                    "env": _full_env(MODEL_NAME="assistant-model", API_KEY="ak"),
+                    "runtime": {},
+                },
+            ],
+        )
+    )
+    assert all(a["ok"] for a in result["agents"])
+
+    office = get_active_env("default", "office")
+    assistant = get_active_env("default", "assistant")
+    assert office["MODEL_NAME"] == "office-model"
+    assert assistant["MODEL_NAME"] == "assistant-model"
+    # schema-extra baseline key copied to both tips
+    assert office.get("SKILLNET_DOWNLOAD_TIMEOUT") == "90"
+    assert assistant.get("SKILLNET_DOWNLOAD_TIMEOUT") == "90"
+    # null API_KEY on office: not resurrected from baseline
+    assert "API_KEY" not in office
+    assert assistant.get("API_KEY") == "ak"
+    assert "API_KEY" not in os.environ
+    assert "SKILLNET_DOWNLOAD_TIMEOUT" not in os.environ
+
+    exported = export_agent_environ("default", "office")
+    assert exported.get("SKILLNET_DOWNLOAD_TIMEOUT") == "90"
+    assert "API_KEY" not in exported
+
+    manager = await pool._ensure_agent_manager("office", "default")
+    assert manager._latest_env_overrides.get("SKILLNET_DOWNLOAD_TIMEOUT") == "90"
+    assert "API_KEY" not in manager._latest_env_overrides
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +493,30 @@ class TestExportAgentEnviron:
         assert exported["API_KEY"] == "k"
         assert exported["AGENT_RUNTIME"] == "1"
         assert exported["PATH"] == "/usr/bin"
+        # H1: parent process environ must not carry Track B
+        assert "MODEL_NAME" not in os.environ
+        assert "API_KEY" not in os.environ
+        assert make_env_ns_key("default", "office", "API_KEY") not in os.environ
+
+    @staticmethod
+    def test_h1_parent_environ_clean_after_sync_materialize():
+        """Parent os.environ has no Track B after tip materialization (H1)."""
+        apply_env_overrides_to_active(
+            {
+                "API_KEY": "secret-key",
+                "VISION_API_KEY": "vis-key",
+                "MODEL_CONTEXT_WINDOW": "128000",
+            },
+            service_id="default",
+            agent_id="office",
+        )
+        for key in ("API_KEY", "VISION_API_KEY", "MODEL_CONTEXT_WINDOW"):
+            assert key not in os.environ
+            assert make_env_ns_key("default", "office", key) not in os.environ
+        exported = export_agent_environ("default", "office")
+        assert exported["API_KEY"] == "secret-key"
+        assert exported["VISION_API_KEY"] == "vis-key"
+        assert exported["MODEL_CONTEXT_WINDOW"] == "128000"
 
 
 # ---------------------------------------------------------------------------
@@ -381,11 +538,9 @@ class TestAgentRuntimeEnvNs:
         assert manager.agent_id == "office_default"
         assert manager.env_agent_id == "office"
         assert get_active_env(service_id="default", agent_id="office")["MODEL_NAME"] == "runtime-model"
-        assert (
-            os.environ.get(make_env_ns_key("default", "office", "MODEL_NAME"))
-            == "runtime-model"
-        )
+        assert make_env_ns_key("default", "office", "MODEL_NAME") not in os.environ
         assert make_env_ns_key("office_default", "default", "MODEL_NAME") not in os.environ
+        assert "MODEL_NAME" not in os.environ
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +549,11 @@ class TestAgentRuntimeEnvNs:
 
 
 class TestSyncAgentsConfigsValidation:
+    @staticmethod
+    def test_sync_env_schema_includes_free_search_flags():
+        assert "FREE_SEARCH_DDG_ENABLED" in SYNC_ENV_SCHEMA
+        assert "FREE_SEARCH_BING_ENABLED" in SYNC_ENV_SCHEMA
+
     @staticmethod
     def test_validate_rejects_missing_env_key():
         with pytest.raises(ValueError, match="missing required keys"):
@@ -411,6 +571,105 @@ class TestSyncAgentsConfigsValidation:
                     ],
                 }
             )
+
+    @staticmethod
+    def test_validate_rejects_missing_free_search_keys():
+        env = _full_env()
+        del env["FREE_SEARCH_DDG_ENABLED"]
+        del env["FREE_SEARCH_BING_ENABLED"]
+        with pytest.raises(ValueError, match="missing required keys"):
+            validate_sync_payload(
+                {
+                    "revision": "r1",
+                    "service_id": "default",
+                    "agents": [
+                        {
+                            "agent_id": "office",
+                            "config": {},
+                            "env": env,
+                            "runtime": {},
+                        }
+                    ],
+                }
+            )
+
+    @staticmethod
+    def test_validate_accepts_free_search_false_or_null():
+        normalized = validate_sync_payload(
+            {
+                "revision": "r1",
+                "service_id": "default",
+                "agents": [
+                    {
+                        "agent_id": "office",
+                        "config": {},
+                        "env": _full_env(
+                            FREE_SEARCH_DDG_ENABLED="false",
+                            FREE_SEARCH_BING_ENABLED=None,
+                        ),
+                        "runtime": {},
+                    }
+                ],
+            }
+        )
+        agent_env = normalized["agents"][0]["env"]
+        assert agent_env["FREE_SEARCH_DDG_ENABLED"] == "false"
+        assert agent_env["FREE_SEARCH_BING_ENABLED"] is None
+
+    @staticmethod
+    def test_validate_accepts_non_default_service_id():
+        normalized = validate_sync_payload(
+            {
+                "revision": "r1",
+                "service_id": "tenant_x",
+                "agents": [
+                    {
+                        "agent_id": "office",
+                        "config": {},
+                        "env": _full_env(),
+                        "runtime": {},
+                    }
+                ],
+            }
+        )
+        assert normalized["service_id"] == "tenant_x"
+
+    @staticmethod
+    def test_validate_accepts_omitted_shared_env():
+        normalized = validate_sync_payload(
+            {
+                "revision": "r1",
+                "service_id": "default",
+                "agents": [
+                    {
+                        "agent_id": "office",
+                        "config": {},
+                        "env": _full_env(),
+                        "runtime": {},
+                    }
+                ],
+            }
+        )
+        assert normalized.get("shared_env") is None
+
+    @staticmethod
+    def test_validate_accepts_partial_shared_env():
+        normalized = validate_sync_payload(
+            {
+                "revision": "r1",
+                "service_id": "default",
+                "shared_env": {"HOME": "/tmp", "CUSTOM_EXTRA": "x"},
+                "agents": [
+                    {
+                        "agent_id": "office",
+                        "config": {},
+                        "env": _full_env(),
+                        "runtime": {},
+                    }
+                ],
+            }
+        )
+        assert normalized["shared_env"]["HOME"] == "/tmp"
 
     @staticmethod
     def test_materialize_omits_null_keeps_empty():
@@ -471,10 +730,8 @@ async def test_sync_update_model_name_replaces_tip(mock_warmup):
 
     assert result["agents"][0]["action"] == "updated"
     assert get_active_env(service_id="default", agent_id="office")["MODEL_NAME"] == "new-model"
-    assert (
-        os.environ.get(make_env_ns_key("default", "office", "MODEL_NAME"))
-        == "new-model"
-    )
+    assert make_env_ns_key("default", "office", "MODEL_NAME") not in os.environ
+    assert "MODEL_NAME" not in os.environ
 
 
 @pytest.mark.asyncio
