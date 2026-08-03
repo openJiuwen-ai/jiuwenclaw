@@ -61,6 +61,10 @@ class TaxonomyBuildConfig:
         postprocess_min_skills: Minimum skill count for repair candidates.
         equivalence_enabled: Whether to add one equivalence-group layer under
             sibling leaf sets after normal tree construction.
+        max_skills_per_node: Optional positive override for the derived leaf-size
+            threshold. Zero keeps the branching-factor-derived threshold.
+        model_discovery_max_depth: Optional depth limit for model-discovered
+            groups. Configured taxonomy levels are still expanded.
     """
 
     branching_factor: int = 128
@@ -72,6 +76,8 @@ class TaxonomyBuildConfig:
     postprocess_min_skills: int = 6
 
     equivalence_enabled: bool = True
+    max_skills_per_node: int = 0
+    model_discovery_max_depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -138,6 +144,8 @@ class ResolvedTaxonomyBuildConfig:
         postprocess_max_passes: Normalized repair pass limit.
         postprocess_min_skills: Normalized repair minimum size.
         equivalence_enabled: Whether equivalence-group refinement runs.
+        max_skills_per_node: Normalized optional leaf-size threshold override.
+        model_discovery_max_depth: Normalized model-discovery depth limit.
     """
 
     branching_factor: int
@@ -149,6 +157,8 @@ class ResolvedTaxonomyBuildConfig:
     postprocess_min_skills: int
 
     equivalence_enabled: bool
+    max_skills_per_node: int
+    model_discovery_max_depth: int
 
 
 @dataclass(frozen=True)
@@ -194,6 +204,8 @@ def resolve_build_config(*, config: BuildConfig | None = None) -> ResolvedBuildC
         taxonomy_config=ResolvedTaxonomyBuildConfig(
             branching_factor=max(1, int(taxonomy_cfg.branching_factor or 8)),
             max_depth=max(1, int(taxonomy_cfg.max_depth or 6)),
+            max_skills_per_node=max(0, int(taxonomy_cfg.max_skills_per_node or 0)),
+            model_discovery_max_depth=max(0, int(taxonomy_cfg.model_discovery_max_depth or 0)),
             root_categories=resolve_tree_root_categories(taxonomy_cfg.root_categories),
             postprocess_enabled=bool(taxonomy_cfg.postprocess_enabled),
             postprocess_max_passes=max(0, int(taxonomy_cfg.postprocess_max_passes or 0)),

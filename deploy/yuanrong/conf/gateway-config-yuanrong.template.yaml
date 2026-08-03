@@ -51,6 +51,8 @@ symphony:
     build:
       branching_factor: 12
       max_depth: 6
+      max_skills_per_node: 0
+      model_discovery_max_depth: 0
       root_categories: ""
       max_workers: 2
       max_retries: 2

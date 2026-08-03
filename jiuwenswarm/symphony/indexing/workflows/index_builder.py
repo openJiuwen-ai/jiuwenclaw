@@ -542,6 +542,8 @@ class _IndexBuildWorkflow:
             config=DynamicTreeConfig(
                 branching_factor=taxonomy_config.branching_factor,
                 max_depth=taxonomy_config.max_depth,
+                max_skills_per_node_override=taxonomy_config.max_skills_per_node,
+                model_discovery_max_depth=taxonomy_config.model_discovery_max_depth,
                 root_categories=root_categories,
             ),
             manager_config=TreeManagerConfig(

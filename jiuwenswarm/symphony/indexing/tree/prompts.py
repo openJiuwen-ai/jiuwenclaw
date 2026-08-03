@@ -12,9 +12,12 @@ Return proposed groups only. Do not place skills into groups yet.
 
 Design guidance:
 - optimize for retrieval usefulness rather than implementation taxonomy
+- make each group a final routing bucket whose member skills can satisfy the same user task
+- group skills together only when they are near substitutes; differences may be quality, provider, platform, or modality
+- split complementary skills that serve different task intents, workflow stages, or input/output contracts
+- avoid broad taxonomy labels when a narrower task-level label is possible
 - choose the number of groups from the skill diversity, not from a fixed configured count
-- prefer the smallest set of groups that keeps routing boundaries clear
-- avoid singleton groups unless a skill has genuinely unique routing semantics
+- use one group only when all provided skills are genuine substitutes for the same request family
 - keep groups distinct enough that a router can tell them apart
 - prefer names that remain readable as tree labels
 - ids should be lowercase and hyphenated
@@ -46,8 +49,10 @@ Skills awaiting placement:
 Rules:
 - every skill must appear once
 - only use one of the listed group ids
-- choose the best primary fit for retrieval
-- if a skill spans multiple groups, prefer the broadest correct home
+- choose the group where the skill is a near substitute for the other members
+- prefer task equivalence over broad taxonomy
+- if a skill spans multiple groups, prefer the narrowest group that matches its primary user intent
+- avoid putting complementary workflow steps in the same group unless they answer the same user request
 
 Respond as JSON:
 {{

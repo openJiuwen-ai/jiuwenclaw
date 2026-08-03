@@ -42,7 +42,11 @@ class TreeExpansionEngine:
         self._update_progress(node_id=node.id, skill_count=len(skills), depth=depth)
 
         configured_groups = self._configured_groups_for_node(node=node)
-        if not configured_groups and self._should_force_leaf(depth=depth, skill_count=len(skills)):
+        if self._should_force_leaf(
+            depth=depth,
+            skill_count=len(skills),
+            configured_groups=configured_groups,
+        ):
             self._emit_leaf(node, skills, verbose=verbose)
             return []
 
@@ -72,8 +76,19 @@ class TreeExpansionEngine:
                 description=f"Layer {depth}: {node_id} ({skill_count} skills)",
             )
 
-    def _should_force_leaf(self, *, depth: int, skill_count: int) -> bool:
+    def _should_force_leaf(
+        self,
+        *,
+        depth: int,
+        skill_count: int,
+        configured_groups: dict | None = None,
+    ) -> bool:
         builder = self._builder
+        if configured_groups:
+            return False
+        model_max_depth = int(getattr(builder.config, "model_discovery_max_depth", 0) or 0)
+        if model_max_depth > 0 and depth >= model_max_depth:
+            return True
         return skill_count <= builder.config.max_skills_per_node or depth >= builder.config.max_depth
 
     def _emit_leaf(self, node: TreeNode, skills: list[dict], *, verbose: bool) -> None:

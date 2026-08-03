@@ -33,6 +33,8 @@ class BuildSettings:
     postprocess_max_passes: int = 1
     postprocess_min_skills: int = 6
     equivalence_enabled: bool = True
+    max_skills_per_node: int = 0
+    model_discovery_max_depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,11 @@ def _load_build(raw: dict[str, Any]) -> BuildSettings:
         postprocess_max_passes=_as_non_negative_int(raw.get("postprocess_max_passes"), 1),
         postprocess_min_skills=_as_int(raw.get("postprocess_min_skills"), 6),
         equivalence_enabled=_as_bool(raw.get("equivalence_enabled"), True),
+        max_skills_per_node=_as_non_negative_int(raw.get("max_skills_per_node"), 0),
+        model_discovery_max_depth=_as_non_negative_int(
+            raw.get("model_discovery_max_depth"),
+            0,
+        ),
     )
 
 

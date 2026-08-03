@@ -497,6 +497,8 @@ class SkillIndexService:
                     postprocess_max_passes=build.postprocess_max_passes,
                     postprocess_min_skills=build.postprocess_min_skills,
                     equivalence_enabled=build.equivalence_enabled,
+                    max_skills_per_node=build.max_skills_per_node,
+                    model_discovery_max_depth=build.model_discovery_max_depth,
                 ),
                 execution_config=BuildExecutionConfig(
                     max_workers=build.max_workers,

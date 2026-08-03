@@ -203,6 +203,8 @@ class DynamicTreeConfig:
     max_depth: int = MAX_DEPTH
     root_categories: Optional[dict] = None
     rebalance_interval: int = 50
+    max_skills_per_node_override: int = 0
+    model_discovery_max_depth: int = 0
 
     def _scaled(self, multiplier: float, seed: Optional[int] = None) -> int:
         anchor = self.branching_factor if seed is None else seed
@@ -225,6 +227,8 @@ class DynamicTreeConfig:
 
     @property
     def max_skills_per_node(self) -> int:
+        if self.max_skills_per_node_override > 0:
+            return self.max_skills_per_node_override
         return self._derived_value("max_skills_per_node")
 
     @property
