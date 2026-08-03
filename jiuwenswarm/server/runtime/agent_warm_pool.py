@@ -29,19 +29,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Background prewarming is opt-in. When it stays off, sessions are allocated an id
-# immediately and initialize lazily on their first request.
+# Background prewarming is on by default and can be opted out of through the
+# environment. Once off, sessions are allocated an id immediately and initialize
+# lazily on their first request.
 _PREWARM_ENABLED_ENV_KEY = "JIUWENSWARM_AGENT_PREWARM"
+_PREWARM_ON_VALUES = frozenset({"1", "true", "yes", "on"})
+_PREWARM_OFF_VALUES = frozenset({"0", "false", "no", "off"})
 
 
 def _prewarm_enabled_by_env() -> bool:
     """Return whether background session prewarming is switched on.
 
     Returns:
-        True only when the environment explicitly opts in.
+        The explicit environment choice, or True when the switch is unset or
+        carries an unrecognized value.
     """
     raw = str(os.environ.get(_PREWARM_ENABLED_ENV_KEY, "") or "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    if raw in _PREWARM_OFF_VALUES:
+        return False
+    if raw not in _PREWARM_ON_VALUES and raw:
+        logger.warning(
+            "Ignoring unrecognized %s value %r; keeping prewarming enabled.",
+            _PREWARM_ENABLED_ENV_KEY,
+            raw,
+        )
+    return True
 
 
 def _zero_stats() -> dict[str, int]:

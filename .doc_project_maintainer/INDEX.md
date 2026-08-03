@@ -40,6 +40,7 @@ Status: partial. A 2026-07-15 semantic-hash scan at `10afedf2` found 0 expired a
 - [CHG-20260731-001](changes/records/CHG-20260731-001-session-prewarm-allocation.md): session allocation and DeepAgent prewarming.
 - [CHG-20260801-001](changes/records/CHG-20260801-001-prewarm-foreground-priority.md): foreground chat priority, lazy background warming, and non-blocking runtime probes.
 - [CHG-20260801-005](changes/records/CHG-20260801-005-disable-session-prewarm.md): prewarming off by default behind `JIUWENSWARM_AGENT_PREWARM`.
+- [CHG-20260803-001](changes/records/CHG-20260803-001-enable-session-prewarm-by-default.md): prewarming on by default; `JIUWENSWARM_AGENT_PREWARM` becomes an opt-out.
 
 ## Priority Code Symbols
 
