@@ -13,6 +13,7 @@ from jiuwenclaw.local_env_config import (
     parse_default_headers,
     read_default_headers,
     read_default_headers_raw,
+    reset_local_env_state_for_tests,
     reset_task_env_overlay,
 )
 
@@ -20,11 +21,11 @@ from jiuwenclaw.local_env_config import (
 @pytest.fixture(autouse=True)
 def _reset_env_state():
     saved_environ = dict(os.environ)
+    reset_local_env_state_for_tests()
     ENV_CONFIG_DICT.clear()
     clear_staged_env()
     yield
-    ENV_CONFIG_DICT.clear()
-    clear_staged_env()
+    reset_local_env_state_for_tests()
     os.environ.clear()
     os.environ.update(saved_environ)
 
@@ -54,17 +55,17 @@ class TestParseDefaultHeaders:
 class TestReadDefaultHeaders:
     @staticmethod
     def test_reads_primary_env_key():
-        os.environ["default_headers"] = '{"Authorization":"Basic x"}'
+        ENV_CONFIG_DICT["default_headers"] = '{"Authorization":"Basic x"}'
         assert read_default_headers() == {"Authorization": "Basic x"}
 
     @staticmethod
     def test_alias_default_headers_uppercase():
-        os.environ["DEFAULT_HEADERS"] = '{"Authorization":"Basic y"}'
+        ENV_CONFIG_DICT["DEFAULT_HEADERS"] = '{"Authorization":"Basic y"}'
         assert read_default_headers_raw() == '{"Authorization":"Basic y"}'
 
     @staticmethod
     def test_alias_openai_default_headers():
-        os.environ["OPENAI_DEFAULT_HEADERS"] = '{"Authorization":"Basic z"}'
+        ENV_CONFIG_DICT["OPENAI_DEFAULT_HEADERS"] = '{"Authorization":"Basic z"}'
         assert read_default_headers_raw() == '{"Authorization":"Basic z"}'
 
     @staticmethod

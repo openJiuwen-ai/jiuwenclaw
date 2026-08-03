@@ -23,6 +23,8 @@ class RequestMeta:
     mode: str
     trace_id: str | None
     started_at: float
+    service_id: str = "default"
+    agent_id: str = "default"
 
     def with_trace_id(self, trace_id: str | None) -> RequestMeta:
         if trace_id:
@@ -33,6 +35,8 @@ class RequestMeta:
                 mode=self.mode,
                 trace_id=trace_id,
                 started_at=self.started_at,
+                service_id=self.service_id,
+                agent_id=self.agent_id,
             )
         return self
 

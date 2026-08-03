@@ -17,7 +17,9 @@ from openjiuwen.core.runner import Runner
 import requests
 
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_vision_model_config_from_yaml
+from jiuwenclaw.http_proxy_config import requests_get
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
+from jiuwenclaw.local_env_config import get_local_config
 
 
 logger = logging.getLogger(__name__)
@@ -82,9 +84,9 @@ class _RetryExecutor:
 
 
 def _get_vision_api_credentials():
-    k = os.environ.get("VISION_API_KEY") or os.environ.get("API_KEY", "")
-    b = os.environ.get("VISION_API_BASE") or os.environ.get("API_BASE", "")
-    m = os.environ.get("VISION_MODEL_NAME") or "gpt-4o"
+    k = str(get_local_config("VISION_API_KEY", "") or get_local_config("API_KEY", "") or "")
+    b = str(get_local_config("VISION_API_BASE", "") or get_local_config("API_BASE", "") or "")
+    m = str(get_local_config("VISION_MODEL_NAME", "gpt-4o") or "gpt-4o")
     return k, b, m
 
 
@@ -142,7 +144,7 @@ async def _invoke_openai_vision(src: str, q: str) -> str:
 
 
 async def _invoke_gemini_vision(src: str, q: str) -> str:
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    gemini_key = str(get_local_config("GEMINI_API_KEY", "") or "")
     if not gemini_key:
         return "[ERROR]: GEMINI_API_KEY is not configured for Gemini vision."
 
@@ -162,7 +164,7 @@ async def _invoke_gemini_vision(src: str, q: str) -> str:
             data = None
             for attempt in range(4):
                 try:
-                    r = requests.get(src, headers={"User-Agent": ua}, verify=get_requests_verify())
+                    r = requests_get(src, headers={"User-Agent": ua}, verify=get_requests_verify())
                     r.raise_for_status()
                     data = r.content
                     break

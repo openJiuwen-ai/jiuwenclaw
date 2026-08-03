@@ -57,6 +57,19 @@ def fake_ws():
 
 
 @pytest.fixture(autouse=True)
+def _reset_cli_env_state():
+    from jiuwenclaw.local_env_config import ENV_CONFIG_DICT, clear_staged_env, reset_local_env_state_for_tests
+
+    reset_local_env_state_for_tests()
+    ENV_CONFIG_DICT.clear()
+    clear_staged_env()
+    yield
+    reset_local_env_state_for_tests()
+    ENV_CONFIG_DICT.clear()
+    clear_staged_env()
+
+
+@pytest.fixture(autouse=True)
 def patch_wire_encoder(monkeypatch):
     monkeypatch.setattr(
         agent_ws_server_module,
@@ -148,10 +161,12 @@ async def test_handle_command_diff_returns_summary_payload(server, fake_ws):
 
 @pytest.mark.asyncio
 async def test_handle_command_model_no_action_shows_current(
-    server, fake_ws, monkeypatch
+    server, fake_ws,
 ):
-    """No action → returns current model from os.environ and available list."""
-    monkeypatch.setenv("MODEL_NAME", "test-model")
+    """No action → returns current model from tenant env tip and available list."""
+    from jiuwenclaw.local_env_config import ENV_CONFIG_DICT
+
+    ENV_CONFIG_DICT["MODEL_NAME"] = "test-model"
     request = AgentRequest(
         request_id="req-model",
         channel_id="tui",

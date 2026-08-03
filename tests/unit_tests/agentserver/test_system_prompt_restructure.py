@@ -262,66 +262,54 @@ async def test_runtime_rail_multi_tenant_workspace_dirs():
 
 @pytest.mark.asyncio
 async def test_runtime_rail_single_tenant_workspace_dirs():
-    """测试单租户模式下 _get_workspace_dirs 回退到默认路径。"""
+    """未传 agent_id/service_id 时规范化为 (default, default) 多租户默认路径。"""
     builder = SystemPromptBuilder(language="cn")
     runtime_rail = RuntimePromptRail(
         language="cn",
         channel="web",
         agent_name="main_agent",
         model_name="test-model",
-        # 不传 agent_id 和 service_id，触发单租户模式
     )
     runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
 
+    expected_base = Path("/tmp/test_jiuwenclaw/service_default/agent_default")
     with (
-        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_user_workspace_dir") as mock_user_ws,
-        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_workspace_dir") as mock_agent_ws,
-        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_memory_dir") as mock_memory,
+        patch(
+            "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
+            return_value=expected_base,
+        ),
         patch(
             "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.resolve_agent_registered_skill_dirs",
             return_value=[Path("/home/user/.jiuwenclaw/skills")],
         ),
-        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_deepagent_todo_dir") as mock_todo,
     ):
-        mock_user_ws.return_value = Path("/home/user/.jiuwenclaw")
-        mock_agent_ws.return_value = Path("/home/user/.jiuwenclaw/workspace")
-        mock_memory.return_value = Path("/home/user/.jiuwenclaw/memory")
-        mock_todo.return_value = Path("/home/user/.jiuwenclaw/todo")
-        
         ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
         await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    
-    # 验证单租户路径出现在 prompt 中（兼容 Windows 路径分隔符）
+
     assert "config" in prompt
     assert "workspace" in prompt
     assert "memory" in prompt
     assert "skills" in prompt
     assert "todo" in prompt
-    # 验证路径格式（Windows 使用 \，Linux 使用 /）
-    assert (".jiuwenclaw" in prompt)
-    
-    # 验证完整的绝对路径格式（兼容 Windows/Linux 路径分隔符）
-    expected_config = "/home/user/.jiuwenclaw/config"
-    expected_workspace = "/home/user/.jiuwenclaw/workspace"
-    expected_memory = "/home/user/.jiuwenclaw/memory"
-    expected_skills = "/home/user/.jiuwenclaw/skills"
-    expected_todo = "/home/user/.jiuwenclaw/todo"
-    
-    # Windows 下 Path 会转换为 \ 分隔符，需要兼容
+    assert "service_default" in prompt
+    assert "agent_default" in prompt
+
+    expected_config = str(expected_base / "config")
+    expected_workspace = str(expected_base / "agent" / "jiuwenclaw_workspace")
+    expected_memory = str(expected_base / "agent" / "jiuwenclaw_workspace" / "memory")
+    expected_todo = str(expected_base / "agent" / "jiuwenclaw_workspace" / "todo")
+
     expected_config_win = expected_config.replace("/", "\\")
     expected_workspace_win = expected_workspace.replace("/", "\\")
     expected_memory_win = expected_memory.replace("/", "\\")
-    expected_skills_win = expected_skills.replace("/", "\\")
     expected_todo_win = expected_todo.replace("/", "\\")
-    
-    # 验证所有路径都出现在 prompt 中（兼容两种分隔符）
-    assert (expected_config in prompt or expected_config_win in prompt), f"Config path not found: {expected_config}"
-    assert (expected_workspace in prompt or expected_workspace_win in prompt), f"Workspace path not found: {expected_workspace}"
-    assert (expected_memory in prompt or expected_memory_win in prompt), f"Memory path not found: {expected_memory}"
-    assert (expected_skills in prompt or expected_skills_win in prompt), f"Skills path not found: {expected_skills}"
-    assert (expected_todo in prompt or expected_todo_win in prompt), f"Todo path not found: {expected_todo}"
+
+    assert expected_config in prompt or expected_config_win in prompt
+    assert expected_workspace in prompt or expected_workspace_win in prompt
+    assert expected_memory in prompt or expected_memory_win in prompt
+    assert expected_todo in prompt or expected_todo_win in prompt
 
 
 def test_interface_deep_skill_rail_uses_multi_tenant_paths():
@@ -338,11 +326,12 @@ def test_interface_deep_skill_rail_uses_multi_tenant_paths():
         mock_workspace.return_value = Path("/tmp/test/service_test/agent_test")
         skill_dirs = get_multi_tenant_skill_dirs(service_id, agent_id)
     
-    # 验证返回的是多租户路径
+    # 验证返回的是多租户路径（与 get_agent_skills_dir 布局一致）
     assert len(skill_dirs) == 1
     assert "service_test" in str(skill_dirs[0])
     assert "agent_test" in str(skill_dirs[0])
-    assert "skills" in str(skill_dirs[0])
+    assert skill_dirs[0].name == "skills"
+    assert "jiuwenclaw_workspace" in str(skill_dirs[0])
     
     # 测试单租户模式（不传参数）
     with patch(

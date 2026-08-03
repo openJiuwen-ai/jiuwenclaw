@@ -457,7 +457,6 @@
       "other": { "label": "其他配置", "hint": "未归类的扩展参数" }
     },
     "booleanLabels": {
-      "evolutionAutoScan": "自动检测可演进信号",
       "freeSearchDdg": "启用 DuckDuckGo（含 DDG via Jina）",
       "freeSearchBing": "启用 Bing",
       "enabled": "启用",

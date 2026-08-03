@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_USER = "__default__"
 _DEFAULT_SCOPE = "__default__"
-_LTM_SUBDIR = "memory/ltm"
 
 _VALID_ENGINES = {"builtin", "external", "both", "none"}
 
@@ -96,7 +95,78 @@ def _embed_triple_from_config(config: Optional[Dict[str, Any]]) -> tuple[str, st
     )
 
 
-def _external_memory_fingerprint_payload(config: Optional[Dict[str, Any]]) -> dict[str, Any]:
+def _nonempty_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _resolve_ltm_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Default LTM dir under the tenant agent workspace.
+
+    Path: ``service_{sid}/agent_{aid}/agent/jiuwenclaw_workspace/memory/ltm``
+
+    Empty store paths fall back here. Non-empty tip/config paths are used as-is
+    (P0 — upstream is responsible for isolation).
+
+    When neither explicit ids nor a bound env ns are available, falls back to
+    ``default`` / ``default`` (startup / unbound callers).
+    """
+    from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+    from jiuwenclaw.utils import resolve_tenant_agent_workspace_dir
+
+    if service_id is None and agent_id is None and get_bound_agent_env_ns() is None:
+        service_id, agent_id = "default", "default"
+
+    base = resolve_tenant_agent_workspace_dir(service_id, agent_id) / "memory" / "ltm"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def resolve_openjiuwen_store_paths(
+    oj_cfg: Optional[Dict[str, Any]] = None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> tuple[str, str, str]:
+    """Resolve kv / vector / db paths (tip → config → tenant default).
+
+    Priority for each path:
+      1. tip/env ``MEMORY_KV_PATH`` / ``MEMORY_VECTOR_DIR`` / ``MEMORY_DB_PATH``
+      2. ``openjiuwen.kv_path`` / ``vector_persist_dir`` / ``db_path`` (non-empty)
+      3. tenant default under ``.../memory/ltm/{kv,chroma,ltm.db}``
+
+    Non-empty tip/config values are returned unchanged (P0).
+    """
+    cfg = oj_cfg if isinstance(oj_cfg, dict) else {}
+
+    tip_kv = _nonempty_str(read_env("MEMORY_KV_PATH"))
+    tip_vec = _nonempty_str(read_env("MEMORY_VECTOR_DIR"))
+    tip_db = _nonempty_str(read_env("MEMORY_DB_PATH"))
+    cfg_kv = _nonempty_str(cfg.get("kv_path"))
+    cfg_vec = _nonempty_str(cfg.get("vector_persist_dir"))
+    cfg_db = _nonempty_str(cfg.get("db_path"))
+
+    ltm_dir: Path | None = None
+    if not (tip_kv or cfg_kv) or not (tip_vec or cfg_vec) or not (tip_db or cfg_db):
+        ltm_dir = _resolve_ltm_dir(service_id, agent_id)
+
+    kv_path = tip_kv or cfg_kv or str(ltm_dir / "kv")
+    vector_dir = tip_vec or cfg_vec or str(ltm_dir / "chroma")
+    db_path = tip_db or cfg_db or str(ltm_dir / "ltm.db")
+    return kv_path, vector_dir, db_path
+
+
+def _external_memory_fingerprint_payload(
+    config: Optional[Dict[str, Any]],
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
     """Build stable dict for hashing — mirrors ``external_memory_builder`` inputs."""
     cfg = config if isinstance(config, dict) else {}
     ext = dict(get_external_memory_config(cfg))
@@ -133,31 +203,51 @@ def _external_memory_fingerprint_payload(config: Optional[Dict[str, Any]]) -> di
         )
         vk.setdefault("user", vk.get("user") or read_env("OPENVIKING_USER") or os.environ.get("OPENVIKING_USER", ""))
         ext["openviking"] = vk
+    elif provider == "openjiuwen":
+        kv_path, vector_dir, db_path = resolve_openjiuwen_store_paths(
+            ext.get("openjiuwen") or {},
+            service_id=service_id,
+            agent_id=agent_id,
+        )
+        oj = dict(ext.get("openjiuwen") or {})
+        oj["kv_path"] = kv_path
+        oj["vector_persist_dir"] = vector_dir
+        oj["db_path"] = db_path
+        ext["openjiuwen"] = oj
 
     return {
         "engine": get_memory_engine(cfg),
         "external": ext,
         "embed": _embed_triple_from_config(cfg),
+        "tenant": {
+            "service_id": service_id or "",
+            "agent_id": agent_id or "",
+        },
     }
 
 
-def external_memory_fingerprint(config: Optional[Dict[str, Any]] = None) -> str:
+def external_memory_fingerprint(
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> str:
     """Stable short hash for external memory rail rebuild decisions."""
-    payload = _external_memory_fingerprint_payload(config)
+    payload = _external_memory_fingerprint_payload(
+        config,
+        service_id=service_id,
+        agent_id=agent_id,
+    )
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def _resolve_ltm_dir() -> Path:
-    """Default LTM data dir under ~/.jiuwenclaw/memory/ltm."""
-    base = Path.home() / ".jiuwenclaw" / _LTM_SUBDIR
-    base.mkdir(parents=True, exist_ok=True)
-    return base
 
 
 def build_openjiuwen_provider_config(
     ext_cfg: Dict[str, Any],
     full_config: Optional[Dict[str, Any]] = None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
 ) -> tuple[Dict[str, Any], Any]:
     """Map jiuwenclaw config into the dict OpenJiuwenMemoryProvider expects.
 
@@ -169,20 +259,21 @@ def build_openjiuwen_provider_config(
           "embedding": {"model_name": "...", "base_url": "...", "api_key": "..."},
         }
 
+    Store path policy (P0): tip/config non-empty → as-is; else tenant default LTM dir.
+
     Returns:
         (provider_config, scope_config)
     """
     oj_cfg = ext_cfg.get("openjiuwen") or {}
-    ltm_dir = _resolve_ltm_dir()
+    kv_path, vector_dir, db_path = resolve_openjiuwen_store_paths(
+        oj_cfg,
+        service_id=service_id,
+        agent_id=agent_id,
+    )
 
     kv_backend = (oj_cfg.get("kv_type") or "shelve").lower()
-    kv_path = oj_cfg.get("kv_path") or str(ltm_dir / "kv")
-
     vector_backend = (oj_cfg.get("vector_type") or "chroma").lower()
-    vector_dir = oj_cfg.get("vector_persist_dir") or str(ltm_dir / "chroma")
-
     db_backend = (oj_cfg.get("db_type") or "sqlite").lower()
-    db_path = oj_cfg.get("db_path") or str(ltm_dir / "ltm.db")
 
     embed_cfg = get_embed_config() or {}
     logger.info("[external_memory] get_embed_config() returned: %s", embed_cfg)
@@ -204,8 +295,17 @@ def build_openjiuwen_provider_config(
         "db": {"backend": db_backend, "path": db_path},
         "embedding": embedding,
     }
-    logger.info("[external_memory] provider_config built: kv=(%s, %s), vector=(%s, %s), db=(%s, %s)",
-                kv_backend, kv_path, vector_backend, vector_dir, db_backend, db_path)
+    logger.info(
+        "[external_memory] provider_config built: sid=%s aid=%s kv=(%s, %s), vector=(%s, %s), db=(%s, %s)",
+        service_id,
+        agent_id,
+        kv_backend,
+        kv_path,
+        vector_backend,
+        vector_dir,
+        db_backend,
+        db_path,
+    )
 
     scope_config = _build_scope_config(full_config, embedding)
 

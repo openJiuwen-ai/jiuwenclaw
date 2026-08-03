@@ -21,13 +21,20 @@ class CronController:
 
     _instance: ClassVar[CronController | None] = None
 
-    def __init__(self, *, store: CronJobStore, scheduler: CronSchedulerService) -> None:
+    def __init__(self, *, store: CronJobStore, scheduler: CronSchedulerService,
+                 service_id: str = "default", agent_id: str = "default") -> None:
         self._store = store
         self._scheduler = scheduler
+        self._service_id = str(service_id or "default").strip() or "default"
+        self._agent_id = str(agent_id or "default").strip() or "default"
         self._target_channel: CronTargetChannel | None = None
 
     def set_target_channel(self, channel: CronTargetChannel) -> None:
         self._target_channel = channel
+
+    async def stop_scheduler(self) -> None:
+        """Stop the backing CronSchedulerService for this controller."""
+        await self._scheduler.stop()
 
     @classmethod
     def get_instance(
@@ -152,6 +159,8 @@ class CronController:
             chat_type=chat_type,
             mode=mode,
             delete_after_run=delete_after_run,
+            service_id=self._service_id,
+            agent_id=self._agent_id,
         )
         await self._scheduler.reload()
         return job.to_dict()

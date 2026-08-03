@@ -383,7 +383,7 @@ def test_execute_extracts_topic_from_user_message_then_continues() -> None:
     result = asyncio.run(node._execute(ctx))
     assert result["topic"] == "产品发布"
     assert result["page_count"] == 10
-    assert result["style_id"] == "free"
+    assert result["style_id"] == "custom"
 
 
 @pytest.mark.unit
@@ -446,7 +446,7 @@ def test_p23_raises_when_ask_skipped() -> None:
 
 
 @pytest.mark.unit
-def test_p23_uses_free_when_style_not_required() -> None:
+def test_p23_uses_custom_when_style_not_required() -> None:
     node = _make_root_node()
     ctx = {
         "topic": "产品发布",
@@ -457,7 +457,7 @@ def test_p23_uses_free_when_style_not_required() -> None:
         "missing_fields": [],
     }
     result = asyncio.run(node.sub_plans[2]._execute(ctx))
-    assert result["style_id"] == "free"
+    assert result["style_id"] == "custom"
     assert result["need_ask_style"] is False
 
 

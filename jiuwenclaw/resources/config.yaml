@@ -171,11 +171,11 @@ memory:
     # 依赖顶层 embed 段提供 embedding 配置（不单独配置 api_key）
     openjiuwen:
       kv_type: shelve                                    # shelve | in_memory | sqlite
-      kv_path: ${MEMORY_KV_PATH:-}                       # 默认 ~/.jiuwenclaw/memory/ltm/kv
+      kv_path: ${MEMORY_KV_PATH:-}                       # 空则落租户 workspace/memory/ltm/kv；非空原样用（上游保证隔离）
       vector_type: chroma                                # chroma
-      vector_persist_dir: ${MEMORY_VECTOR_DIR:-}         # 默认 ~/.jiuwenclaw/memory/ltm/chroma
+      vector_persist_dir: ${MEMORY_VECTOR_DIR:-}         # 空则 .../memory/ltm/chroma；非空原样用
       db_type: sqlite
-      db_path: ${MEMORY_DB_PATH:-}                       # 默认 ~/.jiuwenclaw/memory/ltm/ltm.db
+      db_path: ${MEMORY_DB_PATH:-}                       # 空则 .../memory/ltm/ltm.db；非空原样用
 
 # models.*.model_client_config 超时说明：
 #   timeout — 非流式 invoke；流式未配置 stream_timeout 时也使用此值（整包响应上限）
@@ -647,8 +647,7 @@ react:
 
   # Skills 在线自演进配置
   evolution:
-    enabled: false             # true = 启用在线 Skills 自演进
-    auto_scan: true           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    enabled: true             # true = 启用在线 Skills 自演进
     auto_save: true           # true = 每轮对话后自动保存演进经验
     skill_base_dir: "agent/skills"  # Skill 根目录
 
@@ -1136,7 +1135,9 @@ modes:
     team:
   code:
     # code 模式
+    # 控制项目记忆与编码记忆；关闭时不影响文件、LSP 和 plan rails。
     memory:
+      enabled: true
     rails:
     tools:
 
@@ -1150,11 +1151,7 @@ web_search:
   max_results: 8
   paid_provider_order:
     - petal
-    - tavily
-    - perplexity
     - bocha
-    - serper
-    - jina
 
 # DeepResearch 工具：默认开启
 enable_deepresearch: true

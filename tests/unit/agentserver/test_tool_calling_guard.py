@@ -11,9 +11,12 @@ import pytest
 from jiuwenclaw.jiuwen_core_patch import _patched_build_request_params
 from jiuwenclaw.local_env_config import (
     ENV_CONFIG_DICT,
+    apply_env_overrides_to_active,
     bind_task_env_overlay,
     clear_staged_env,
+    reset_local_env_state_for_tests,
     reset_task_env_overlay,
+    set_os_environ,
     stage_env_overrides,
 )
 from jiuwenclaw.tool_calling_guard import is_tool_calling_guard_enabled, resolve_tool_calling_guard
@@ -35,11 +38,9 @@ def _guard_config(*, enabled: bool = False, limited_models: list[str] | None = N
 @pytest.fixture(autouse=True)
 def _reset_env_state() -> None:
     saved = dict(os.environ)
-    ENV_CONFIG_DICT.clear()
-    clear_staged_env()
+    reset_local_env_state_for_tests()
     yield
-    ENV_CONFIG_DICT.clear()
-    clear_staged_env()
+    reset_local_env_state_for_tests()
     os.environ.clear()
     os.environ.update(saved)
 
@@ -73,7 +74,7 @@ def test_is_tool_calling_guard_enabled_env_parsing(
 ) -> None:
     """Document _to_bool fallback: only explicit falsy strings disable the guard."""
     mock_config(_guard_config(enabled=True))
-    os.environ["TOOL_CALLING_GUARD_ENABLED"] = env_value
+    set_os_environ("TOOL_CALLING_GUARD_ENABLED", env_value)
     assert is_tool_calling_guard_enabled() is expected
 
 
@@ -97,10 +98,10 @@ def test_resolve_tool_calling_guard_matrix(
 ) -> None:
     mock_config(_guard_config(enabled=guard_enabled))
     if guard_enabled:
-        os.environ["TOOL_CALLING_GUARD_ENABLED"] = "true"
+        set_os_environ("TOOL_CALLING_GUARD_ENABLED", "true")
     if disable_env is not None:
-        os.environ["TOOL_CALLING_GUARD_DISABLE"] = disable_env
-    os.environ["MODEL_NAME"] = model_name
+        set_os_environ("TOOL_CALLING_GUARD_DISABLE", disable_env)
+    set_os_environ("MODEL_NAME", model_name)
 
     decision = resolve_tool_calling_guard()
     assert decision.strip_tools is expect_strip
@@ -108,9 +109,12 @@ def test_resolve_tool_calling_guard_matrix(
 
 def test_t3_env_override_reason(mock_config) -> None:
     mock_config(_guard_config(enabled=True))
-    os.environ["TOOL_CALLING_GUARD_ENABLED"] = "true"
-    os.environ["TOOL_CALLING_GUARD_DISABLE"] = "true"
-    os.environ["TOOL_CALLING_GUARD_STRIP_REASON"] = "huawei_maas_model_without_function_call"
+    set_os_environ("TOOL_CALLING_GUARD_ENABLED", "true")
+    set_os_environ("TOOL_CALLING_GUARD_DISABLE", "true")
+    set_os_environ(
+        "TOOL_CALLING_GUARD_STRIP_REASON",
+        "huawei_maas_model_without_function_call",
+    )
 
     decision = resolve_tool_calling_guard()
     assert decision.strip_tools is True
@@ -119,7 +123,8 @@ def test_t3_env_override_reason(mock_config) -> None:
 
 def test_t7_guard_hot_reload_off_via_staged_env(mock_config) -> None:
     mock_config(_guard_config(enabled=True))
-    os.environ["MODEL_NAME"] = "qwen3-32b"
+    set_os_environ("MODEL_NAME", "qwen3-32b")
+    set_os_environ("TOOL_CALLING_GUARD_ENABLED", "true")
 
     assert resolve_tool_calling_guard().strip_tools is True
 
@@ -156,8 +161,8 @@ def test_guard_enabled_overlay_empty_string_disables(mock_config) -> None:
 
 def test_t8_reload_removes_limited_models(mock_config) -> None:
     mock_config(_guard_config(enabled=True, limited_models=["qwen3-32b"]))
-    os.environ["TOOL_CALLING_GUARD_ENABLED"] = "true"
-    os.environ["MODEL_NAME"] = "qwen3-32b"
+    set_os_environ("TOOL_CALLING_GUARD_ENABLED", "true")
+    set_os_environ("MODEL_NAME", "qwen3-32b")
 
     assert resolve_tool_calling_guard().strip_tools is True
 
@@ -166,8 +171,8 @@ def test_t8_reload_removes_limited_models(mock_config) -> None:
 
 
 def test_patched_build_request_params_strips_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TOOL_CALLING_GUARD_ENABLED", "true")
-    monkeypatch.setenv("TOOL_CALLING_GUARD_DISABLE", "1")
+    set_os_environ("TOOL_CALLING_GUARD_ENABLED", "true")
+    set_os_environ("TOOL_CALLING_GUARD_DISABLE", "1")
     monkeypatch.setattr(
         "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
         lambda self, *, stream, **kwargs: {
@@ -187,8 +192,8 @@ def test_patched_build_request_params_keeps_tools_when_guard_off(
     mock_config,
 ) -> None:
     mock_config(_guard_config(enabled=False))
-    monkeypatch.setenv("TOOL_CALLING_GUARD_DISABLE", "1")
-    monkeypatch.setenv("MODEL_NAME", "qwen3-32b")
+    set_os_environ("TOOL_CALLING_GUARD_DISABLE", "1")
+    set_os_environ("MODEL_NAME", "qwen3-32b")
     monkeypatch.setattr(
         "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
         lambda self, *, stream, **kwargs: {
@@ -204,9 +209,9 @@ def test_patched_build_request_params_keeps_tools_when_guard_off(
 
 
 def test_patched_build_request_params_logs_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TOOL_CALLING_GUARD_ENABLED", "true")
-    monkeypatch.setenv("TOOL_CALLING_GUARD_DISABLE", "1")
-    monkeypatch.setenv("TOOL_CALLING_GUARD_STRIP_REASON", "test_reason")
+    set_os_environ("TOOL_CALLING_GUARD_ENABLED", "true")
+    set_os_environ("TOOL_CALLING_GUARD_DISABLE", "1")
+    set_os_environ("TOOL_CALLING_GUARD_STRIP_REASON", "test_reason")
     monkeypatch.setattr(
         "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
         lambda self, *, stream, **kwargs: {"tools": [], "tool_choice": "auto", "messages": []},

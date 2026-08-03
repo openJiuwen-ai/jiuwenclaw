@@ -39,8 +39,8 @@ def test_iter_response_image_items_dashscope_nested() -> None:
 
 def test_save_generated_images_from_url_strings(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.tools.image_gen_tools.get_agent_workspace_dir",
-        lambda: tmp_path,
+        "jiuwenclaw.agentserver.tools.image_gen_tools.resolve_tenant_agent_workspace_dir",
+        lambda *args, **kwargs: tmp_path,
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.tools.image_gen_tools.get_effective_request_workspace_dir",

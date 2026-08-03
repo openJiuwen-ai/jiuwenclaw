@@ -22,15 +22,25 @@ from openjiuwen.core.runner import Runner
 import requests
 
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_audio_model_config_from_yaml
+from jiuwenclaw.http_proxy_config import requests_get, requests_post
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
+from jiuwenclaw.local_env_config import get_local_config
 
 
 logger = logging.getLogger(__name__)
-ACR_ACCESS_KEY = os.environ.get("ACR_ACCESS_KEY", "")
-ACR_ACCESS_SECRET = os.environ.get("ACR_ACCESS_SECRET", "")
-ACR_BASE_URL = os.environ.get(
-    "ACR_BASE_URL", "https://identify-ap-southeast-1.acrcloud.com/v1/identify"
-)
+_ACR_DEFAULT_BASE_URL = "https://identify-ap-southeast-1.acrcloud.com/v1/identify"
+
+
+def _get_acr_access_key() -> str:
+    return str(get_local_config("ACR_ACCESS_KEY", "") or "")
+
+
+def _get_acr_access_secret() -> str:
+    return str(get_local_config("ACR_ACCESS_SECRET", "") or "")
+
+
+def _get_acr_base_url() -> str:
+    return str(get_local_config("ACR_BASE_URL", _ACR_DEFAULT_BASE_URL) or _ACR_DEFAULT_BASE_URL)
 HTTP_TIMEOUT = 20
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 DEFAULT_USER_AGENT = (
@@ -102,7 +112,13 @@ def _load_audio_as_base64(file_path: str) -> tuple[str, str]:
 
 def _download_audio_to_tempfile(url: str) -> str:
     hdrs = {"User-Agent": DEFAULT_USER_AGENT}
-    resp = requests.get(url, headers=hdrs, timeout=HTTP_TIMEOUT, stream=True, verify=get_requests_verify())
+    resp = requests_get(
+        url,
+        headers=hdrs,
+        timeout=HTTP_TIMEOUT,
+        stream=True,
+        verify=get_requests_verify(),
+    )
     resp.raise_for_status()
     ct = resp.headers.get("content-type", "")
     ext = _resolve_audio_extension(url, ct)
@@ -127,8 +143,8 @@ def _download_audio_to_tempfile(url: str) -> str:
 
 
 def _create_openai_client_for_audio():
-    key = os.environ.get("AUDIO_API_KEY") or os.environ.get("API_KEY", "")
-    base = os.environ.get("AUDIO_API_BASE") or os.environ.get("API_BASE", "")
+    key = str(get_local_config("AUDIO_API_KEY", "") or get_local_config("API_KEY", "") or "")
+    base = str(get_local_config("AUDIO_API_BASE", "") or get_local_config("API_BASE", "") or "")
     return key, base, OpenAI(api_key=key, base_url=base) if key else None
 
 
@@ -164,7 +180,7 @@ async def audio_question_answering(audio_path_or_url: str, question: str) -> str
     if not api_key:
         return _build_missing_key_msg("audio question answering")
 
-    audio_model = os.environ.get("AUDIO_MODEL_NAME", "gpt-4o-audio-preview")
+    audio_model = str(get_local_config("AUDIO_MODEL_NAME", "gpt-4o-audio-preview") or "gpt-4o-audio-preview")
     logger.info("[audio_question_answering] using model: %s (api_base: %s)", audio_model, api_base)
 
     try:
@@ -247,7 +263,11 @@ async def audio_metadata(audio_path_or_url: str) -> str:
 
         duration = _compute_audio_length_seconds(local_path)
 
-        if not ACR_ACCESS_KEY or not ACR_ACCESS_SECRET:
+        acr_access_key = _get_acr_access_key()
+        acr_access_secret = _get_acr_access_secret()
+        acr_base_url = _get_acr_base_url()
+
+        if not acr_access_key or not acr_access_secret:
             return (
                 f"Duration (seconds): {duration:.2f}\n"
                 "Note: Title/artist identification is disabled because ACR credentials are not provided."
@@ -261,11 +281,11 @@ async def audio_metadata(audio_path_or_url: str) -> str:
 
         ts = time.time()
         sig_base = (
-            "POST\n/v1/identify\n" + ACR_ACCESS_KEY + "\naudio\n1\n" + str(ts)
+            "POST\n/v1/identify\n" + acr_access_key + "\naudio\n1\n" + str(ts)
         )
         sig = base64.b64encode(
             hmac.new(
-                ACR_ACCESS_SECRET.encode("ascii"),
+                acr_access_secret.encode("ascii"),
                 sig_base.encode("ascii"),
                 digestmod=hashlib.sha1,
             ).digest()
@@ -282,7 +302,7 @@ async def audio_metadata(audio_path_or_url: str) -> str:
 
         files_payload = [("sample", (fname, open(local_path, "rb"), upload_fmt))]
         form_data = {
-            "access_key": ACR_ACCESS_KEY,
+            "access_key": acr_access_key,
             "sample_bytes": fsize,
             "timestamp": str(ts),
             "signature": sig,
@@ -290,8 +310,8 @@ async def audio_metadata(audio_path_or_url: str) -> str:
             "signature_version": "1",
         }
 
-        r = requests.post(
-            ACR_BASE_URL,
+        r = requests_post(
+            acr_base_url,
             files=files_payload,
             data=form_data,
             timeout=HTTP_TIMEOUT,

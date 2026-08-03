@@ -32,6 +32,20 @@ from jiuwenclaw.config import get_file_transfer_config
 logger = logging.getLogger(__name__)
 
 
+def _sessions_root_for_history() -> str | None:
+    """Resolve sessions root from bound env_ns for history writes."""
+    try:
+        from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+        from jiuwenclaw.utils import resolve_tenant_sessions_dir
+
+        ns = get_bound_agent_env_ns()
+        if ns is not None:
+            return str(resolve_tenant_sessions_dir(ns[0], ns[1]))
+    except Exception:
+        logger.debug("resolve sessions root for send_file history failed", exc_info=True)
+    return None
+
+
 @dataclass(frozen=True)
 class _SendFileRoute:
     """单次发送的路由信息（执行时解析，请求级隔离）。"""
@@ -237,6 +251,7 @@ class SendFileToolkit:
             timestamp=time.time(),
             event_type="chat.file",
             extra={"files": files_payload},
+            sessions_root=_sessions_root_for_history(),
         )
 
     async def _send_file_local(
@@ -315,12 +330,29 @@ class SendFileToolkit:
                     await server.send_push(msg)
 
                 # 使用 FileTransferManager 发送文件
+                _svc, _aid = "", ""
+                try:
+                    from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+
+                    ns = get_bound_agent_env_ns()
+                    if ns is not None:
+                        _svc, _aid = ns[0], ns[1]
+                except Exception:
+                    logger.debug(
+                        "[SendFileToolkit] resolve bound env_ns for file transfer failed",
+                        exc_info=True,
+                    )
+                meta = route.metadata or {}
+                _svc = str(meta.get("service_id") or _svc or "")
+                _aid = str(meta.get("agent_id") or _aid or "")
                 result = await ft_manager.send_file(
                     file_path=file_path,
                     send_callback=send_callback,
                     session_id=route.session_id,
                     channel_id=route.channel_id,
                     request_id=route.request_id,
+                    service_id=_svc,
+                    agent_id=_aid,
                 )
 
                 if result.get("success"):

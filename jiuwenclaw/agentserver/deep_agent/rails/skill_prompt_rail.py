@@ -27,11 +27,15 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 可用技能清单与加载/释放约定见本 prompt 的「技能」段（SkillUseRail 注入），**须与该段一致**。
 
-## 技能加速通道（skill_acceleration_exec）
+### 技能加速通道（skill_acceleration_exec）
 
-当用户意图明确匹配 `skill_acceleration_exec` 已支持的技能（当前：pptx-craft / PPT 制作）时，**优先调用 `skill_acceleration_exec`**，而非 `skill_tool`。`skill_acceleration_exec` 内部会完成规划+生成+推送全流程，无需你再 `skill_tool` 加载 SKILL.md。若 `skill_acceleration_exec` 返回成功（产物已生成），**禁止**再用 `skill_tool` 重复同一任务——直接向用户总结结果即可。若 `skill_acceleration_exec` 返回失败或未处理，**必须**继续用 `skill_tool` 加载对应技能走标准流程完成用户任务。其余技能直接走下方 `skill_tool` 标准流程。
+⚠️ **默认优先**：当用户意图匹配 `skill_acceleration_exec`（当前：pptx-craft / PPT 制作），你的**第一个工具调用必须是 `skill_acceleration_exec`**——它内部会自行完成规划+研究+生成+推送全流程。**唯一例外**：用户**显式**要求先执行某项 `skill_acceleration_exec` 不会自行处理的前置操作，则必须先完成该操作再调用 `skill_acceleration_exec`。搜索、读文件等研究类操作它内部会自己完成，**不构成**例外；其他技能类操作（如加载独立技能流程）它不会自行处理，**构成**例外。
 
-**加载 SKILL.md 正文（禁止用 bash 执行工具名）：**
+若你已先调用了 `skill_tool` 加载了 pptx-craft 正文（即**不属于**上述例外，只是误触），**仍须立即调用 `skill_acceleration_exec`**--不要因"已经加载了 SKILL.md"或"已经做了研究"而放弃加速通道。
+
+若 `skill_acceleration_exec` 返回成功（产物已生成），**禁止**再用 `skill_tool` 重复同一任务——直接向用户总结结果即可。若 `skill_acceleration_exec` 返回失败或未处理，**必须**继续用 `skill_tool` 加载对应技能走标准流程完成用户任务。其余技能直接走下方 `skill_tool` 标准流程。
+
+### 加载 SKILL.md 正文（禁止用 bash 执行工具名）
 - **必须**且**只能**使用 `skill_tool(skill_name=..., relative_file_path="SKILL.md")` 加载；整段执行结束时调用 `skill_complete(skill_name=..., report="<最终回复>")`。`report` 即给用户的最终回复——**不要**再另写 stop；内容只写结果概要 + 产物路径，禁止复述步骤。不要把这些名字当作 shell 命令。
 - 只有 `skill_tool` 会走系统集成路径（正文入会话、后续上下文中的保护与 [ACTIVE SKILL BODY] 注入），**禁止**用任何其它工具加载或拼凑 SKILL.md。
 - 若你当前可用工具列表中**没有** `skill_tool`：无法按本系统路径加载技能正文，请向用户说明环境未开放该能力；**不得**用其它工具代替。
@@ -39,7 +43,7 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
-1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。
+1. **声明步骤**：默认情况下，每次行动前必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。若 SKILL.md 明确声明“阶段状态和阶段消息由工具事件唯一生成”，则以该声明为准，禁止自行输出 `[当前步骤: ...]` 或其他步骤声明。
 2. **必须使用 todo**：在执行skill步骤前，必须先创建 todo 列表。创建后，必须在执行过程中持续更新（如打勾已完成项、添加遗漏项等），确保 todo 与实际执行状态始终保持一致。
    放弃、跳过或决定不再执行某步骤时（如用户说「不生成 PPT 了」），**必须**立即 `todo_modify` 将该条标为 `cancelled`；
    禁止仅用口头回复收尾而仍保留 `in_progress`/`pending` 项。
@@ -60,11 +64,15 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 The "Skills" section of this prompt (from SkillUseRail) lists available skills and how to load/release them — **follow that section**.
 
-## Skill Acceleration Channel (skill_acceleration_exec)
+### Skill Acceleration Channel (skill_acceleration_exec)
 
-When the user's intent clearly matches a skill already supported by `skill_acceleration_exec` (currently: pptx-craft / PPT creation), **call `skill_acceleration_exec` first** instead of `skill_tool`. `skill_acceleration_exec` handles the full plan-and-generate pipeline internally — you do NOT need to load SKILL.md via `skill_tool`. If `skill_acceleration_exec` returns success (the artifact is already generated), you are **forbidden** from calling `skill_tool` again for the same task — just summarize the result to the user. If `skill_acceleration_exec` returns failure or is not handled, you **MUST** fall back to `skill_tool` to load the corresponding skill and complete the user's task via the standard flow. All other skills use the `skill_tool` standard flow below.
+⚠️ **Default priority**: When the user's intent matches `skill_acceleration_exec` (currently: pptx-craft / PPT creation), your **FIRST tool call MUST be `skill_acceleration_exec`** — it handles planning + research + generation + delivery internally. **Only exception**: the user **explicitly** asks to first perform a preceding action that `skill_acceleration_exec` does not handle internally; then you must complete that action before calling `skill_acceleration_exec`. Research-style actions like `web_search` and file reading are handled internally — they do **NOT** constitute an exception; other skill-type actions (e.g. loading a separate skill flow) are not handled internally and **DO** constitute an exception.
 
-**Load SKILL.md body (never run tool names as shell/bash commands):**
+If you have already mistakenly called `skill_tool` to load the pptx-craft body (i.e. this does **NOT** fall under the exception above - it was just a misfire), **you MUST still call `skill_acceleration_exec` immediately** - do NOT abandon the acceleration channel because "SKILL.md is already loaded" or "research is already done."
+
+If `skill_acceleration_exec` returns success (the artifact is already generated), you are **forbidden** from calling `skill_tool` again for the same task — just summarize the result to the user. If `skill_acceleration_exec` returns failure or is not handled, you **MUST** fall back to `skill_tool` to load the corresponding skill and complete the user's task via the standard flow. All other skills use the `skill_tool` standard flow below.
+
+### Load SKILL.md body (never run tool names as shell/bash commands)
 - You **must** use **only** `skill_tool(skill_name=..., relative_file_path="SKILL.md")` to load the body; when the whole flow is done, call `skill_complete(skill_name=..., report="<final reply>")`. `report` IS the final reply to the user — do **not** write a separate stop turn; keep it to outcome summary + artifact paths, no step recaps.
 - Only `skill_tool` enters the integrated path (session body copy, message protection, and `[ACTIVE SKILL BODY]` reinjection). **Do not** load or stitch SKILL.md with any other tool.
 - If `skill_tool` is **not** in your available tool list, you cannot load skill bodies on this integration path—tell the user; **do not** substitute another file-reading tool.
@@ -72,7 +80,7 @@ When the user's intent clearly matches a skill already supported by `skill_accel
 
 Then execute the workflow; the rules below govern execution.
 
-1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step.
+1. **Declare step**: By default, before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step. If SKILL.md explicitly states that stage status and stage messages are emitted exclusively by tool events, follow that rule and you must not declare `[Current Step: ...]` or any other step message yourself.
 2. **Use todo (mandatory)**: For skills, you MUST create a todo list before executing the skill steps.
    Once created, you MUST continuously update it throughout execution (e.g. check off completed items,
    add missing steps) to ensure the todo always reflects the actual execution state.

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.agentserver.skill_turbo.plan_node import PlanNode
+from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError, PlanNode
 from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,7 @@ _OUTLINE_FIELD_PATTERN = re.compile(
     re.MULTILINE,
 )
 _P4_MAX_ATTEMPTS = 2
+_INSUFFICIENT_INFO_MARKER = "[INSUFFICIENT_INFO]"
 _QUERY_BOUNDS_NO_MATERIAL = (5, 8)
 _QUERY_BOUNDS_WITH_MATERIAL = (3, 5)
 _RESEARCH_DIMENSIONS = (
@@ -60,7 +61,27 @@ _P42A_SYSTEM_PROMPT = """你是 PPT 快速调研助手。根据主题、研究�
 4. 不要编造已确认的事实；只输出搜索 query，不写结论。
 
 必须只输出 JSON：
-{"queries":[{"dimension":"领域现状","query":"..."}]}"""
+{"entity":"主题核心实体名,无明确实体填 null","queries":[{"dimension":"领域现状","query":"..."}]}"""
+
+_P42_MAX_RETRIES = 2
+# 设计：R0 初始搜索用 _P42A_SYSTEM_PROMPT（广覆盖、中英双语、加年份/report 等可信词）；
+# 重搜用下方 _P42_RELEVANCE_SYSTEM_PROMPT 定向收窄/扩搜。重搜刻意不复用 _P42A_SYSTEM_PROMPT——
+# 其“加年份/report/statistics、覆盖5维度”规则正是 R0 把稀有实体名稀释的元凶，带入重搜会再次稀释。
+_P42_RELEVANCE_SYSTEM_PROMPT = """你是 PPT 快速调研的相关性判定与重搜助手。
+
+判定视角：假设你需要用这些搜索结果为「主题实体」撰写一份 PPT 大纲，结果中的信息是否足够支撑你写出关于该实体的具体内容？
+
+相关性判定标准：
+- sufficient：搜索结果中至少有一条直接提及主题实体名，且包含该实体的具体信息（如功能、数据、案例、产品细节），足以支撑撰写关于该实体的 PPT 大纲
+- insufficient：搜索结果中均未提及主题实体名，或仅有同行业/同领域的泛泛内容但缺乏实体具体信息。即使结果属于同一行业领域，只要未直接提及实体名并包含实体具体信息，均判 insufficient
+
+重搜 query 生成规则（仅在相关性 insufficient 或无可用结果时生成，2-4 条）：
+- failure_mode=empty（无可用搜索结果）：扩大查询范围，尝试同义词或英文变体
+- failure_mode=irrelevant（有结果但均不相关）：聚焦主题实体名，用纯实体名或实体名+官网/产品介绍/是什么等限定词收窄
+
+只输出 JSON：
+{"relevance":"sufficient|insufficient","reason":"...","retry_queries":[{"dimension":"...","query":"..."}]}
+相关性 sufficient 时 retry_queries 为空数组。不要编造 query。"""
 
 _P43_COMMON_RULES = """大纲格式要求（必须严格遵守）：
 
@@ -71,19 +92,33 @@ _P43_COMMON_RULES = """大纲格式要求（必须严格遵守）：
 3. `## 页面规划` 下每页一个 `### P{N}:` 块，字段齐全：
    - **类型**：cover/ending/agenda/section/chapter/transition/conclusion/trend/data/case/comparison/technology 等
    - **研究需求**：cover/ending/agenda/section/chapter/transition/conclusion 标 ❌，其余标 ✅
-   - **标题**：结论性完整句（Action + Result）
+   - **标题**：结论性完整句（Action + Result）；结构性页面（cover/ending/agenda/section/chapter）可使用描述性标题
    - **内容概要**：具体有信息量
    - **研究查询**：✅ 页 2-4 个精准查询；❌ 页填 `-`
    - **数据需求**：✅ 页写具体数据类型和维度，数据需求必须具体化；❌ 页填 `-`
 4. 内容页数（研究需求：✅）必须等于 page_count。封面（cover）、结束页（ending）及用户明确要求的结构页（section/agenda/transition/conclusion 等）标 ❌，其余页必须标 ✅。
    禁止自行添加 section/transition/agenda 等结构页；仅当用户明确要求时才添加，且为额外页（总页数 = page_count + 2 + 结构页数），不得占用内容页额度。
    **页面顺序**：cover 必须是 P1（首页），ending 必须是末页（P{总页数}）。
+   **agenda 页内容**：内容概要只列内容页（✅）章节标题与导航，不得列入 cover/ending/agenda 等结构页本身。
 5. 基于给定素材与搜索结果，不编造不存在的趋势或数据。
 6. 只输出 Markdown 正文，不要 JSON，不要代码围栏。"""
 
 _P43_TOPIC_SYSTEM_PROMPT = f"""你是 PPT 大纲策划师（source_type=topic）。基于搜索结果与用户素材，生成结构化 outline.md。
 
-{_P43_COMMON_RULES}"""
+{_P43_COMMON_RULES}
+
+## 信息充分性自检（强制，优先于大纲生成）
+生成大纲前，先自检搜索结果中关于主题实体的信息是否充分：
+- 充分：搜索结果中有至少1条直接提及主题实体名，且包含该实体的具体功能/产品/服务/案例信息，足以支撑撰写关于该实体的 PPT 大纲。
+- 不足：搜索结果中均未提及主题实体名，或虽有名称但仅为不同语境的同名实体，或无具体功能描述（仅有行业报告、竞品信息、通用趋势等）。
+
+若判定不足，必须只输出以下内容（禁止生成大纲、禁止编造功能）：
+{_INSUFFICIENT_INFO_MARKER} <一句话说明搜索结果中缺少关于主题实体的什么信息>
+
+示例：
+- 主题"产品X的核心功能"，搜索结果全是行业报告和竞品信息 →
+  {_INSUFFICIENT_INFO_MARKER} 搜索结果未包含关于产品X的具体功能描述，仅有行业趋势和竞品信息。
+"""
 
 _P43_OUTLINE_SYSTEM_PROMPT = f"""你是 PPT 大纲策划师（source_type=outline）。用户已提供结构化大纲，**必须保留原文**。
 
@@ -333,7 +368,7 @@ def _build_p42a_prompt(inputs: dict[str, Any], source_material: str) -> str:
     ]
     if source_material:
         parts.append(f"用户素材摘要：\n{source_material}\n")
-    parts.append('按 JSON 返回 {"queries":[{"dimension":"...","query":"..."}]}。')
+    parts.append('按 JSON 返回 {"entity":"主题核心实体名,无明确实体填 null","queries":[{"dimension":"...","query":"..."}]}。')
     return "\n".join(parts)
 
 
@@ -373,6 +408,150 @@ async def _run_parallel_web_searches(
     return list(await asyncio.gather(*[_search_one(item) for item in queries]))
 
 
+def _extract_entity(raw: str) -> str:
+    """从 P4.2a 的 LLM 输出中提取主题核心实体名（无明确实体时返回空串）。"""
+    payload = PptCommon.parse_json_payload(raw)
+    if not isinstance(payload, dict):
+        return ""
+    entity = payload.get("entity")
+    if entity is None:
+        return ""
+    entity_str = str(entity).strip()
+    if entity_str.lower() in ("null", "none", ""):
+        return ""
+    return entity_str
+
+
+def _entity_in_result_body(entity: str, result: str) -> bool:
+    """检查实体名是否出现在搜索结果正文（排除 Query 回显行）中。
+
+    与 _entity_in_results 的逐条判定逻辑一致，供排序使用。
+    不用 target in result 是因为 result 含 "Query: {entity}" 回显行，
+    会导致所有结果都判定为 True，排序失效。
+    """
+    if not entity:
+        return False
+    target = entity.lower()
+    raw = (result or "").lower()
+    body = "\n".join(
+        line for line in raw.splitlines()
+        if not line.lstrip().startswith("query:")
+    )
+    return target in body
+
+
+def _entity_in_results(entity: str, batches: list[dict[str, str]]) -> bool:
+    """规则预检：搜索结果中是否直接提及实体名（不区分大小写）。
+
+    用于在 LLM 相关性判定前做兜底预检，避免 LLM 因截断或理解偏差
+    错误判定 sufficient/insufficient。
+
+    排除 web_search 结果开头的 Query 回显行，避免查询词中的实体名导致假阳性。
+    """
+    if not entity:
+        return False
+    target = entity.lower()
+    for b in batches:
+        raw = (b.get("result") or "").lower()
+        # 排除 "Query: ..." 回显行，该行是搜索查询的回显而非结果正文
+        body = "\n".join(
+            line for line in raw.splitlines()
+            if not line.lstrip().startswith("query:")
+        )
+        found = target in body
+        logger.debug(
+            "[P4.2][DEBUG] _entity_in_results: entity=%r target=%r found=%s "
+            "raw_first200=%r body_full=%r",
+            entity, target, found,
+            raw[:200], body[:1000],
+        )
+        if found:
+            return True
+    return False
+
+
+async def _assess_and_suggest_retry(
+    node: PlanNode,
+    topic: str,
+    entity: str,
+    usable_batches: list[dict[str, str]],
+    failure_mode: str,
+) -> tuple[str, str, list[dict[str, str]]]:
+    """判定搜索结果与主题的相关性，相关性不足时生成重搜 query。
+
+    failure_mode:
+      - "empty": 无可用结果，直接生成扩搜 query（换同义词/英文）
+      - "irrelevant": 有结果，由 LLM 判定相关性；insufficient 时生成收窄 query
+
+    返回 (relevance, reason, retry_queries)。empty 模式恒为 insufficient；
+    irrelevant 模式由 LLM 判定 sufficient/insufficient。
+
+    双保险机制：
+    1. 规则预检：搜索结果中直接提及实体名 → 判定 sufficient，跳过 LLM
+    2. LLM 判定：规则预检未命中时，由 LLM 判定相关性
+    """
+    # 方案2：规则预检 — 搜索结果中直接提及实体名则直接判定 sufficient
+    if failure_mode == "irrelevant" and _entity_in_results(entity, usable_batches):
+        logger.info("[P4.2] 规则预检命中：搜索结果中直接提及实体 '%s'，判定 sufficient", entity)
+        return "sufficient", f"规则预检：搜索结果中直接提及实体 '{entity}'", []
+
+    if failure_mode == "empty":
+        results_block = "（无可用搜索结果）"
+    else:
+        # 按实体名出现优先排序：包含实体名的结果排前面，确保截断时丢弃的是不相关结果
+        if entity:
+            ordered = sorted(
+                usable_batches,
+                key=lambda b: not _entity_in_result_body(entity, b.get("result") or ""),
+            )
+        else:
+            ordered = usable_batches
+        results_block = "\n---\n".join(
+            f"query: {b['query']}\n{b['result'][:1200]}"
+            for b in ordered
+        )[:6000]
+    prompt = (
+        f"# 主题\n{topic}\n\n"
+        f"# 主题实体\n{entity or '（无明显实体，为主题类）'}\n\n"
+        f"# 失败模式\n{failure_mode}\n\n"
+        f"# 搜索结果\n{results_block}\n\n"
+        "按系统提示判定相关性并在不足时生成重搜 query，只输出 JSON。"
+    )
+    try:
+        # 仅用 _P42_RELEVANCE_SYSTEM_PROMPT，不引入 _P42A_SYSTEM_PROMPT 的广覆盖/加年份规则，
+        # 避免重搜 query 再次稀释实体名
+        resp = await node.stream_llm_collect(prompt, system_prompt=_P42_RELEVANCE_SYSTEM_PROMPT)
+    except Exception as exc:
+        if isinstance(exc, AbortError):
+            raise
+        logger.warning("[P4.2] 相关性评估调用失败，保守判 insufficient: %s", exc)
+        return "insufficient", f"评估调用失败: {exc}", []
+
+    payload = PptCommon.parse_json_payload(resp)
+    if not isinstance(payload, dict):
+        return "insufficient", "相关性评估解析失败，保守判 insufficient", []
+
+    relevance = str(payload.get("relevance", "")).strip().lower()
+    if relevance not in ("sufficient", "insufficient"):
+        relevance = "insufficient"
+    reason = str(payload.get("reason", "")).strip()
+
+    retry_queries: list[dict[str, str]] = []
+    retry_raw = payload.get("retry_queries") or []
+    if isinstance(retry_raw, list):
+        seen: set[str] = set()
+        for item in retry_raw:
+            if not isinstance(item, dict):
+                continue
+            q = str(item.get("query") or "").strip()
+            if not q or q.casefold() in seen:
+                continue
+            seen.add(q.casefold())
+            dimension = str(item.get("dimension") or "").strip() or "重搜"
+            retry_queries.append({"dimension": dimension, "query": q})
+    return relevance, reason, retry_queries
+
+
 async def _run_p42_quick_research(node: PlanNode, inputs: dict[str, Any]) -> None:
     source_material = await PptCommon.read_file(
         node,
@@ -390,14 +569,53 @@ async def _run_p42_quick_research(node: PlanNode, inputs: dict[str, Any]) -> Non
         raise ContentPlanError("P4.2a 失败：LLM 返回为空")
 
     query_items = _parse_p42a_queries(response_a, has_source_material=has_source_material)
-    search_batches = await _run_parallel_web_searches(node, query_items)
+    entity = _extract_entity(response_a)
+    topic = str(inputs.get("topic", ""))
+    all_used_queries: list[str] = [item["query"] for item in query_items]
 
-    usable = [batch for batch in search_batches if _is_search_result_usable(batch["result"])]
+    # R0：初始并行搜索
+    search_batches = await _run_parallel_web_searches(node, query_items)
+    usable = [b for b in search_batches if _is_search_result_usable(b["result"])]
+
+    # 相关性闸门 + 最多 _P42_MAX_RETRIES 轮重搜：
+    #   无可用结果(empty) → 扩搜（换同义词/英文）
+    #   有结果但不相关(irrelevant) → 收窄（聚焦实体名）
+    # 任一轮判定 sufficient 即完成；耗尽仍 insufficient 则 raise，交由 P4 整体重试 / fallback 兜底。
+    last_relevance = "insufficient"
+    last_reason = ""
+    retry_round = 0
+    while True:
+        failure_mode = "empty" if not usable else "irrelevant"
+        relevance, reason, retry_queries = await _assess_and_suggest_retry(
+            node, topic, entity, usable, failure_mode=failure_mode,
+        )
+        last_relevance, last_reason = relevance, reason
+        if failure_mode == "irrelevant" and relevance == "sufficient":
+            break  # 有结果且相关，完成
+        if retry_round >= _P42_MAX_RETRIES or not retry_queries:
+            break  # 已达重试上限或 LLM 未给出可重搜 query，无法继续
+        all_used_queries.extend(q["query"] for q in retry_queries)
+        retry_batches = await _run_parallel_web_searches(node, retry_queries)
+        usable.extend(b for b in retry_batches if _is_search_result_usable(b["result"]))
+        retry_round += 1
+
     if not usable:
         raise ContentPlanError("P4.2b 快速调研失败：所有 web_search 均无有效结果")
 
+    if last_relevance == "insufficient":
+        raise ContentPlanError(
+            f"P4.2 快速调研相关性不足：经 {retry_round} 轮重搜仍未获得关于主题「{topic}」的有效信息，"
+            f"建议用纯实体名或实体名+官网重搜定位权威来源。原因：{last_reason}"
+        )
+
+    # 按实体名出现优先排序：包含实体名的结果排前面，
+    # 确保 P4.3 截断时丢弃的是不相关结果（与 _assess_and_suggest_retry 中排序逻辑一致）
+    if entity:
+        usable.sort(key=lambda b: not _entity_in_result_body(entity, b.get("result") or ""))
+
     inputs["search_results"] = usable
-    inputs["p4_search_queries"] = [item["query"] for item in query_items]
+    inputs["p4_search_queries"] = all_used_queries
+    inputs["p4_search_entity"] = entity
     inputs["p4_search_hit_count"] = len(usable)
     inputs["p4_quick_research_status"] = "completed"
     inputs["content_plan_status"] = "quick_research_done"
@@ -451,18 +669,31 @@ def _build_p43_prompt(
     degraded = _is_no_search_degraded(inputs)
     user_text = PptCommon.collect_user_text(inputs).strip()
 
+    entity = str(inputs.get("p4_search_entity") or "").strip()
+
     parts = [
-        f"请生成 outline.md 正文，主题：{topic}\n",
+        f"请生成 outline.md 正文，主题：「{topic}」\n",
         f"- page_count: {page_count}（内容页数，不含封面/结束页；默认总页数为 page_count + 2）\n",
         f"- audience: {audience}\n",
         f"- source_type: {source_type}\n",
         f"- search_mode: {search_mode}\n",
         f"- focus_areas: {focus_areas}\n",
     ]
+    if entity:
+        parts.append(
+            f"- 主题实体: {entity}（大纲内容必须基于搜索结果中关于此实体的具体信息，"
+            f"禁止用行业通用趋势或竞品功能替代）\n"
+        )
     if presentation_purpose:
         parts.append(f"- presentation_purpose: {presentation_purpose}\n")
     if user_text:
         parts.append(f"- 用户原文：{user_text}\n")
+    # 模板叙事框架注入（template_canvas 模式下由 P3.5 读取 template-spec.json 获得）
+    narrative_framework = str(inputs.get("narrative_framework") or "").strip()
+    if narrative_framework:
+        parts.append(
+            f"- narrative_framework（模板叙事框架，作为软约束注入大纲）：\n{narrative_framework}\n"
+        )
     # 无图片来源：topic 模式下从源头抑制"放图"意图，避免下游页面生成时自行产图。
     # outline/description 模式保留用户原文，不注入此约束。
     if source_type == "topic" and _has_no_image_source(inputs):
@@ -540,6 +771,21 @@ def _validate_outline_markdown_basic(text: str, *, topic: str, page_count: Any) 
             raise ContentPlanError(
                 f"P4.3 outline 内容页数（✅）应为 {expected_content_pages}，"
                 f"实际 {content_count}"
+            )
+
+    # 遵从 pptx-craft outline-planner Stage 3 产物验证：
+    # 首页类型为 cover，末页类型为 ending（conclusion/transition 为别名）
+    _struct_pages = _split_outline_pages(stripped)
+    if _struct_pages:
+        _first_type = _extract_outline_field(_struct_pages[0][1], "类型").strip().lower()
+        if _first_type and _first_type not in ("cover", "intro"):
+            raise ContentPlanError(
+                f"P4.3 outline 首页类型应为 cover，实际为 {_first_type}"
+            )
+        _last_type = _extract_outline_field(_struct_pages[-1][1], "类型").strip().lower()
+        if _last_type and _last_type not in ("ending", "conclusion", "transition"):
+            raise ContentPlanError(
+                f"P4.3 outline 末页类型应为 ending，实际为 {_last_type}"
             )
 
     required_fields = ("**类型**", "**研究需求**", "**标题**", "**内容概要**", "**研究查询**", "**数据需求**")
@@ -663,6 +909,29 @@ async def _write_outline(
     return written
 
 
+def _check_insufficient_info(outline_text: str, inputs: dict[str, Any]) -> None:
+    """检查 LLM 是否标记了信息不足，若是则 raise ContentPlanError 触发重试/fallback。"""
+    if _INSUFFICIENT_INFO_MARKER not in outline_text:
+        return
+
+    marker_pos = outline_text.find(_INSUFFICIENT_INFO_MARKER)
+    detail = outline_text[marker_pos + len(_INSUFFICIENT_INFO_MARKER):].strip()
+    topic = str(inputs.get("topic") or "").strip()
+    entity = str(inputs.get("p4_search_entity") or "").strip()
+    entity_hint = f"（主题实体：{entity}）" if entity else ""
+
+    search_target = entity or topic
+    raise ContentPlanError(
+        f"P4.3 信息不足自检触发：搜索结果中关于主题「{topic}」{entity_hint}的"
+        f"实体特定信息不充分。{detail}"
+        f"\n\n补充搜索指令：现有搜索结果不足以支撑大纲生成。"
+        f"你必须先使用 web_search 工具搜索更多关于「{search_target}」的信息"
+        f"（建议查询：'{search_target} 官网'、'{search_target} 是什么'、'{search_target} 产品功能'），"
+        f"再基于补充后的搜索结果生成大纲。"
+        f"禁止仅凭现有搜索结果推断或编造功能。"
+    )
+
+
 async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
     _require_p4_prerequisites(inputs)
 
@@ -689,6 +958,9 @@ async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
         raise ContentPlanError("P4.3 失败：LLM 返回为空")
 
     outline_text = _strip_markdown_fence(response)
+
+    _check_insufficient_info(outline_text, inputs)
+
     topic = str(inputs.get("topic") or "").strip()
     _validate_outline_markdown_basic(outline_text, topic=topic, page_count=inputs.get("page_count"))
 
@@ -786,11 +1058,14 @@ class P42QuickResearchNode(PlanNode):
                 "\n"
                 "### 执行流程\n"
                 "1. p4_should_search=False → 直接跳过，写入 skipped\n"
-                "2. p4_should_search=True → LLM 生成固定批次 query\n"
+                "2. p4_should_search=True → LLM 生成固定批次 query（含 entity 实体名）\n"
                 "3. 并行 web_search，汇总搜索结果\n"
+                "4. 相关性闸门：无可用结果→扩搜（换同义词/英文）；有结果但不相关→收窄（聚焦实体名）\n"
+                "5. 最多 2 轮重搜；任一轮判定 sufficient 即完成\n"
                 "\n"
                 "### 失败兜底\n"
                 "- web_search 全部失败: raise ContentPlanError\n"
+                "- 2 轮重搜后仍无可用结果或仍不相关: raise ContentPlanError（交由 P4 整体重试 / fallback 兜底，不向下游传错误信息）\n"
                 "- LLM 生成 query 失败: 使用 topic 直接作为单条 query 搜索\n"
             ),
         )

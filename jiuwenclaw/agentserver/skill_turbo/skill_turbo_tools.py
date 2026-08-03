@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.foundation.tool import tool
 
+from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
+
 if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session
 
@@ -58,6 +60,16 @@ _SKILL_TURBO_SKIP_EVENT_TYPES: frozenset[str] = frozenset({
     "plan.finished",
     "node.started",
     "node.finished",
+})
+
+# ── SkillTurbo 内部任务事件类型 ──
+# task.update 会覆盖前端唯一的 taskProgress 槽位，导致外层 DeepAgent 的 todo 列表
+# 被替换为 PPT 内部步骤；task.start/task.complete 驱动前端的 taskStack 决定
+# chat.* 事件的 segment 归属。当外层有活跃 todo 时需要特殊处理这三类事件。
+_SKILL_TURBO_TASK_EVENT_TYPES: frozenset[str] = frozenset({
+    "task.start",
+    "task.complete",
+    "task.update",
 })
 
 # ── ContextVar：在 before_tool_call 中注入，供工具函数读取 ──
@@ -182,8 +194,11 @@ def _wrap_skill_turbo_result(
         "【重要】每次调用仅处理一个独立任务。若用户要求生成多个同类产物（如多份不同主题的 PPT），"
         "必须为每个产物分别发起独立调用，且严格串行：等待前一次调用完全结束并收到返回结果后，"
         "才能发起下一次调用。严禁在同一轮对话中并行发起多次调用。"
-        "【临时排除】当用户消息中包含自定义模板路径信息（如出现 模板目录路径、"
-        "模板主文件路径 等模板路径字段，或含 pack_dir）时，不要调用此工具——"
+        "【临时排除】当任务需要使用自定义/指定模板时，不要调用此工具——"
+        "无论该模板路径是出现在当前用户消息里、引用历史会话中生成或上传的模板"
+        "（如“使用刚才生成的风格模板”“用之前那个模板”等自然语言引用）、"
+        "还是消息中含 模板目录路径、模板主文件路径、pack_dir 等字段名。"
+        "判断“是否涉及自定义模板”应基于语义。"
         "当前 skill 加速器暂未适配模板包功能，此类请求应改用 skill_tool 走 pptx-craft 标准流程。"
         "此排除规则为临时措施，待 skill 加速器适配模板功能后移除。"
     ),
@@ -195,11 +210,22 @@ async def skill_turbo(query: str) -> dict[str, Any]:
         query: 对单个任务的忠实总结，须严格基于用户原话与历史上下文中已有的信息，不得自行扩写、脑补或补充用户未提及的内容细节（如擅自罗列章节大纲、技术要点、子主题等）。仅在用户表达零散时做必要的凝练与指代消解，确保任务目标、产物与约束完整可执行，但不新增任何信息。每次调用只处理一个任务；若用户要求多个任务，必须串行调用：等待前一次调用完成并收到返回结果后，再发起下一次调用。
     """
     # ── [TEMP-TEMPLATE-BYPASS] 模板请求拦截（临时措施，待 skill 加速器适配模板功能后删除整块）──
-    # 前端选择自定义风格模板时，会在用户消息中附带模板路径信息（模板目录路径/模板主文件路径）。
+    # 拦截任何携带自定义模板路径的请求：前端选择自定义模板时会注入"模板目录路径/模板主文件路径"
+    # 字段；LLM 引用历史中生成/上传的模板时会以自然语言包装路径（如"模板目录：D:\..."）。
+    # 早期仅靠固定字段名做子串匹配，LLM 自由措辞即击穿（见 case officeclaw_885400a37...），
+    # 故改为正则匹配"模板(目录|主文件|路径)？后跟绝对路径"，覆盖两类来源与措辞变体。
     # skill 加速器暂未适配此能力，拦截后引导 LLM 改用 skill_tool 走 pptx-craft 标准流程。
     # 删除方式：搜索 [TEMP-TEMPLATE-BYPASS] 删除本标记块即可。
-    _template_path_markers = ("模板目录路径", "模板主文件路径")
-    if any(marker in query for marker in _template_path_markers):
+    import re
+
+    template_path_pattern = re.compile(
+        r"模板(?:目录|主文件|路径|目录路径|主文件路径)[：:\s]*"
+        r"(?:[A-Za-z]:[\\/]|/|~/|\.{0,2}/)"
+    )
+    template_keywords = ("模板目录路径", "模板主文件路径", "pack_dir")
+    if template_path_pattern.search(query) or any(
+        kw in query for kw in template_keywords
+    ):
         logger.info(
             "[SkillTurboTool] 检测到自定义模板路径，跳过 skill 加速器，建议改用 skill_tool"
         )
@@ -229,6 +255,23 @@ async def skill_turbo(query: str) -> dict[str, Any]:
         )
 
     parent_session: Session | None = get_subagent_parent_session()
+
+    # 检查外层 DeepAgent 是否有活跃的 todo 步骤（task_execution_rail 在 task.start 时
+    # 设置 _ACTIVE_TASK_ID，task.complete 时清除）。用运行时 ContextVar 而非读取
+    # todo.json，避免上一轮异常中止残留旧 todo 导致误判。
+    # 有活跃 todo 时：跳过 PPT 内部的 task.* 事件（task.update 覆盖外层 todo 槽位，
+    # task.start/task.complete 导致前端 taskStack 嵌套、segment 分裂），让 PPT 的
+    # chat.* 事件自然归到外层 todo 步骤的 segment 下渲染。
+    # 无活跃 todo 时：PPT 的 task 事件正常转发，独立展示步骤列表。
+    outer_task_id = get_current_task_id()
+    has_outer_todo = outer_task_id is not None
+    logger.info(
+        "[SkillTurboTool] outer todo active=%s outer_task_id=%s, "
+        "task events will be %s",
+        has_outer_todo,
+        outer_task_id,
+        "skipped" if has_outer_todo else "forwarded as-is",
+    )
 
     # 构造 config 和 SkillTurbo 实例
     config = adapter.build_skill_turbo_config()
@@ -283,6 +326,16 @@ async def skill_turbo(query: str) -> dict[str, Any]:
             # plan/node 生命周期事件：前端无 handler，跳过转发；
             # 其 content 若进入 _parse_stream_chunk 会被误改写为 chat.delta 泄露给用户
             if event_type in _SKILL_TURBO_SKIP_EVENT_TYPES:
+                continue
+
+            # 外层有活跃 todo 时，跳过 PPT 内部的全部 task 事件：
+            # - task.update：会整体替换前端唯一的 taskProgress 槽位，覆盖外层 todo
+            # - task.start/task.complete：外层 task_execution_rail 已为当前 todo 步骤
+            #   发了 task.start（task_id="todo:uuid"），PPT 再发 task.start（task_id="task_xxx"）
+            #   会导致前端 taskStack 嵌套，chat.* 事件被盖戳 PPT 的 task_xxx，归到独立 segment。
+            #   而该 segment 的 taskId 与外层 todo 不匹配，被 resolveSegmentForRow 丢弃，
+            #   PPT 的思考/工具调用全部不显示。跳过后 chat.* 归到外层 todo 的 segment，正常渲染。
+            if has_outer_todo and event_type in _SKILL_TURBO_TASK_EVENT_TYPES:
                 continue
 
             # 转发 chunk 到父会话 stream（前端实时可见）

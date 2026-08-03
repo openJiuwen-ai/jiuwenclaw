@@ -4,6 +4,7 @@
 
 # pylint: disable=protected-access
 
+import asyncio
 import os
 import logging
 from pathlib import Path
@@ -102,7 +103,6 @@ def test_config_explicit_auto_save_true(adapter, monkeypatch):
     config = {
         "evolution": {
             "auto_save": True,
-            "auto_scan": False,
         }
     }
     
@@ -118,7 +118,6 @@ def test_config_explicit_auto_save_false(adapter, monkeypatch):
     config = {
         "evolution": {
             "auto_save": False,
-            "auto_scan": False,
         }
     }
     
@@ -132,9 +131,7 @@ def test_config_default_auto_save_true(adapter, monkeypatch):
     """Test config doesn't set evolution.auto_save, default should be true."""
     captured_args, captured_kwargs = _setup_mocks(monkeypatch)
     config = {
-        "evolution": {
-            "auto_scan": False,
-        }
+        "evolution": {}
     }
     
     adapter.build_skill_evolution_rail_for_test(config)
@@ -181,7 +178,7 @@ def test_build_skill_evolution_rail_wires_file_trajectory_store(adapter, monkeyp
         lambda self: mock_trajectory_dir,
     )
 
-    adapter.build_skill_evolution_rail_for_test({"evolution": {"auto_scan": False}})
+    adapter.build_skill_evolution_rail_for_test({"evolution": {}})
 
     assert captured_trajectory_paths == [mock_trajectory_dir]
     assert captured_kwargs[0]["trajectory_store"]._mock_name == "trajectory_store_instance"
@@ -477,6 +474,7 @@ async def test_evolve_rebuild_slash_returns_removed_message(adapter):
     assert result["result_type"] == "answer"
     assert "/evolve_rebuild" in result["output"]
     assert "已移除" in result["output"]
+    assert "selfEvolution" in result["output"]
 
 
 @pytest.mark.asyncio
@@ -713,14 +711,18 @@ async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch, tmp_pat
         staticmethod(lambda _name: None),
     )
 
-    payload = await adapter.handle_skills_evolution_rebuild(
-        {
-            "name": "demo-skill",
-            "skill_path": str(skill_md),
-            "record_ids": ["ev_1", "ev_2"],
-            "user_intent": "merge notes",
-        }
-    )
+    records, detach = _attach_capture_handler(interface_deep_module.logger)
+    try:
+        payload = await adapter.handle_skills_evolution_rebuild(
+            {
+                "name": "demo-skill",
+                "skill_path": str(skill_md),
+                "record_ids": ["ev_1", "ev_2"],
+                "user_intent": "merge notes",
+            }
+        )
+    finally:
+        detach()
 
     assert payload == {
         "success": True,
@@ -737,6 +739,9 @@ async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch, tmp_pat
         user_intent="merge notes",
         min_score=0.5,
     )
+    messages = [record.getMessage() for record in records if record.levelno == logging.INFO]
+    assert any("skills.evolution.rebuild start" in msg for msg in messages)
+    assert any("skills.evolution.rebuild done" in msg for msg in messages)
 
 
 @pytest.mark.asyncio
@@ -751,13 +756,87 @@ async def test_handle_skills_evolution_rebuild_rejects_path_traversal(adapter, m
     generate = AsyncMock()
     monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
 
-    with pytest.raises(ValueError, match="skill_path not in allowed directories"):
+    with pytest.raises(ValueError, match="技能路径不在允许目录内"):
         await adapter.handle_skills_evolution_rebuild(
             {
                 "name": "demo-skill",
                 "skill_path": str(tmp_path / ".." / "evil.md"),
             }
         )
+    generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_evolution_rebuild_rejects_empty_registered_dirs(
+    adapter, monkeypatch, tmp_path: Path,
+):
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    adapter._registered_skill_dirs = []  # pylint: disable=protected-access
+    monkeypatch.setattr(
+        adapter,
+        "_registered_skill_dirs_for_rail",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+    generate = AsyncMock()
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
+
+    skill_md = tmp_path / ".office-claw" / "skills" / "demo-skill" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("# demo\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="未注册任何技能目录") as exc_info:
+        await adapter.handle_skills_evolution_rebuild(
+            {
+                "name": "demo-skill",
+                "skill_path": str(skill_md),
+            }
+        )
+    message = str(exc_info.value)
+    assert "对话一轮后再采纳" in message
+    assert "skill_path=" in message
+    assert "resolved=" not in message
+    generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_evolution_rebuild_rejects_path_outside_with_project_hint(
+    adapter, monkeypatch, tmp_path: Path,
+):
+    project_root = tmp_path / "relay-claw"
+    skill_md = project_root / ".office-claw" / "skills" / "demo-skill" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("# demo\n", encoding="utf-8")
+
+    other_allowed = tmp_path / "customer-project" / ".office-claw" / "skills"
+    other_allowed.mkdir(parents=True)
+
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    adapter._registered_skill_dirs = [str(other_allowed)]  # pylint: disable=protected-access
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+    generate = AsyncMock()
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
+
+    with pytest.raises(ValueError, match="请切换到工程目录") as exc_info:
+        await adapter.handle_skills_evolution_rebuild(
+            {
+                "name": "demo-skill",
+                "skill_path": str(skill_md),
+            }
+        )
+    message = str(exc_info.value)
+    assert str(project_root.resolve()) in message
+    assert "allowed=" in message
+    assert str(other_allowed.resolve()) in message
+    assert "resolved=" not in message
     generate.assert_not_awaited()
 
 
@@ -819,7 +898,7 @@ async def test_generate_evolution_merge_version_warns_on_partial_finalize_failur
     )
 
 @pytest.mark.asyncio
-async def test_collect_evolution_summary_stashes_auto_rebuild_skills(adapter):
+async def test_collect_evolution_summary_stashes_auto_rebuild_skills(adapter, monkeypatch):
     summary = {
         "skills": [
             {"skill_name": "demo-skill", "records_count": 1},
@@ -827,26 +906,168 @@ async def test_collect_evolution_summary_stashes_auto_rebuild_skills(adapter):
         ],
         "new_skills": [],
     }
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "auto",
+    )
     adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
         auto_save=True,
         take_run_summary=lambda: summary,
     )
 
-    text = adapter._collect_evolution_run_summary_text("req-1")  # pylint: disable=protected-access
+    adapter._drain_evolution_run_summary("req-1")  # pylint: disable=protected-access
 
-    assert text
     assert adapter._pending_auto_rebuild_skills == ["demo-skill", "other-skill"]  # pylint: disable=protected-access
 
 
 @pytest.mark.asyncio
-async def test_collect_evolution_summary_skips_stash_when_auto_save_false(adapter):
-    summary = {"skills": [{"skill_name": "demo-skill", "records_count": 1}], "new_skills": []}
+async def test_schedule_background_evolution_followup_is_fire_and_forget(adapter, monkeypatch):
+    """Chat stream must schedule followup without awaiting rail evolution."""
+    started = asyncio.Event()
+    released = asyncio.Event()
+
+    async def _slow_followup(**_kwargs):
+        started.set()
+        await released.wait()
+
+    monkeypatch.setattr(adapter, "_background_evolution_followup", _slow_followup)
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        has_pending_evolution=True,
+    )
+
+    adapter._schedule_background_evolution_followup(  # pylint: disable=protected-access
+        request_id="req-bg",
+        session_id="sess-bg",
+    )
+
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert len(adapter._pending_evolution_followup_tasks) == 1  # pylint: disable=protected-access
+    task = next(iter(adapter._pending_evolution_followup_tasks))  # pylint: disable=protected-access
+    released.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_background_evolution_followup_waits_then_rebuilds(adapter, monkeypatch):
+    waited: list[float | None] = []
+    rebuilt: list[str] = []
+
+    async def _wait(*, timeout=None):
+        waited.append(timeout)
+
+    async def _rebuild(**_kwargs):
+        rebuilt.extend(adapter._pending_auto_rebuild_skills)  # pylint: disable=protected-access
+
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "auto",
+    )
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        has_pending_evolution=True,
+        wait_for_pending_evolution=_wait,
+        auto_save=True,
+        take_run_summary=lambda: {
+            "skills": [{"skill_name": "weather", "records_count": 1}],
+            "new_skills": [],
+        },
+        drain_pending_approval_events=lambda: [],
+    )
+    monkeypatch.setattr(adapter, "_run_auto_rebuild_skills_detached", _rebuild)
+
+    await adapter._background_evolution_followup(  # pylint: disable=protected-access
+        request_id="req-follow",
+        session_id="sess-follow",
+    )
+
+    assert waited == [300.0]
+    assert rebuilt == ["weather"]
+
+
+@pytest.mark.asyncio
+async def test_background_evolution_followup_hitl_skips_rebuild(adapter, monkeypatch):
+    """HITL pause must drain the summary but must not auto-rebuild."""
+    rebuilt: list[str] = []
+
+    async def _wait(*, timeout=None):
+        return None
+
+    async def _rebuild(**_kwargs):
+        rebuilt.append("ran")
+
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "auto",
+    )
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        has_pending_evolution=True,
+        wait_for_pending_evolution=_wait,
+        auto_save=True,
+        take_run_summary=lambda: {
+            "skills": [{"skill_name": "weather", "records_count": 1}],
+            "new_skills": [],
+        },
+        drain_pending_approval_events=lambda: [],
+    )
+    monkeypatch.setattr(adapter, "_run_auto_rebuild_skills_detached", _rebuild)
+
+    await adapter._background_evolution_followup(  # pylint: disable=protected-access
+        request_id="req-hitl",
+        session_id="sess-hitl",
+        hitl_pending=True,
+    )
+
+    assert rebuilt == []
+    assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_collect_evolution_summary_queues_only_auto_skills(adapter, monkeypatch):
+    """Only selfEvolution=auto skills enter the auto-rebuild queue."""
+    summary = {
+        "skills": [
+            {"skill_name": "auto-skill", "records_count": 1},
+            {"skill_name": "suggest-skill", "records_count": 1},
+            {"skill_name": "off-skill", "records_count": 1},
+        ],
+        "new_skills": [],
+    }
+    actions = {
+        "auto-skill": "auto",
+        "suggest-skill": "suggest",
+        "off-skill": "off",
+    }
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: actions.get(skill_name, "suggest"),
+    )
     adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
         auto_save=False,
         take_run_summary=lambda: summary,
     )
 
-    adapter._collect_evolution_run_summary_text("req-2")  # pylint: disable=protected-access
+    adapter._drain_evolution_run_summary("req-2")  # pylint: disable=protected-access
+
+    assert adapter._pending_auto_rebuild_skills == ["auto-skill"]  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_collect_evolution_summary_skips_when_suggest_or_off(adapter, monkeypatch):
+    summary = {"skills": [{"skill_name": "demo-skill", "records_count": 1}], "new_skills": []}
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "suggest",
+    )
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        auto_save=True,
+        take_run_summary=lambda: summary,
+    )
+
+    adapter._drain_evolution_run_summary("req-suggest")  # pylint: disable=protected-access
 
     assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
 
@@ -867,6 +1088,11 @@ async def test_iter_auto_rebuild_followups_prepare_and_finalize(adapter, monkeyp
         "build_rebuild_command_prompt",
         lambda **_kwargs: "rebuild demo-skill",
     )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "auto",
+    )
 
     async def _fake_follow_up_stream(**_kwargs):
         yield AgentResponseChunk(
@@ -877,8 +1103,8 @@ async def test_iter_auto_rebuild_followups_prepare_and_finalize(adapter, monkeyp
         )
 
     monkeypatch.setattr(adapter, "_iter_skill_creator_follow_up_stream", _fake_follow_up_stream)
-    # auto_save gate still reads rail; store I/O uses disk EvolutionStore.
-    adapter._skill_evolution_rail = SimpleNamespace(auto_save=True)  # pylint: disable=protected-access
+    # Merge gate is per-skill selfEvolution; store I/O uses disk EvolutionStore.
+    adapter._skill_evolution_rail = SimpleNamespace(auto_save=False)  # pylint: disable=protected-access
     _mock_disk_evolution_store(adapter, monkeypatch)
     adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
 
@@ -934,9 +1160,45 @@ async def test_iter_auto_rebuild_followups_skips_on_hitl(adapter, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_iter_auto_rebuild_followups_skips_when_auto_save_false(adapter, monkeypatch):
+async def test_iter_auto_rebuild_followups_skips_when_suggest(adapter, monkeypatch):
     generate = AsyncMock()
     monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "suggest",
+    )
+    adapter._skill_evolution_rail = SimpleNamespace(auto_save=True, store=_FakeEvolutionStore())  # pylint: disable=protected-access
+    adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
+
+    chunks = [
+        chunk
+        async for chunk in adapter._iter_auto_rebuild_followups(  # pylint: disable=protected-access
+            base_inputs={"query": "hello"},
+            stream_request_id="req-suggest",
+            channel_id="web",
+            session_id="sess-suggest",
+            hitl_pending=False,
+        )
+    ]
+
+    assert chunks == []
+    generate.assert_not_awaited()
+    assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_iter_auto_rebuild_followups_merges_when_auto_despite_rail_auto_save_false(
+    adapter, monkeypatch
+):
+    """Per-skill selfEvolution=auto still merges when global rail.auto_save is False."""
+    generate = AsyncMock(return_value={"ok": True, "new_version": "1.0.1"})
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "auto",
+    )
     adapter._skill_evolution_rail = SimpleNamespace(auto_save=False, store=_FakeEvolutionStore())  # pylint: disable=protected-access
     adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
 
@@ -944,14 +1206,35 @@ async def test_iter_auto_rebuild_followups_skips_when_auto_save_false(adapter, m
         chunk
         async for chunk in adapter._iter_auto_rebuild_followups(  # pylint: disable=protected-access
             base_inputs={"query": "hello"},
-            stream_request_id="req-off",
+            stream_request_id="req-auto",
             channel_id="web",
-            session_id="sess-off",
+            session_id="sess-auto",
             hitl_pending=False,
         )
     ]
 
-    assert chunks == []
+    generate.assert_awaited_once()
+    assert any(
+        isinstance(c.payload, dict)
+        and "自动生成新版本" in str(c.payload.get("content", ""))
+        for c in chunks
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_auto_rebuild_skills_detached_skips_non_auto(adapter, monkeypatch):
+    generate = AsyncMock()
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "off",
+    )
+    adapter._skill_evolution_rail = SimpleNamespace(auto_save=True)  # pylint: disable=protected-access
+    adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
+
+    await adapter._run_auto_rebuild_skills_detached(request_id="req-off")  # pylint: disable=protected-access
+
     generate.assert_not_awaited()
     assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
 
@@ -971,6 +1254,11 @@ async def test_iter_auto_rebuild_followups_skips_complete_on_followup_error(adap
         interface_deep_module,
         "build_rebuild_command_prompt",
         lambda **_kwargs: "rebuild demo-skill",
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "auto",
     )
 
     async def _failing_follow_up_stream(**_kwargs):
@@ -1002,163 +1290,20 @@ async def test_iter_auto_rebuild_followups_skips_complete_on_followup_error(adap
 
 
 @pytest.mark.unit
-def test_format_evolution_summary_markdown_escapes_display_text():
-    """LLM-generated display_text must not bypass MF-001 Markdown escaping."""
-    malicious = "[点击](javascript:alert(1))`break"
-    summary = {
-        "display_text": f"\n\n---\n### 📚 技能演进\n- `{malicious}`",
-        "skills": [
-            {
-                "skill_name": "ignored-when-display-text-present",
-                "records_count": 1,
-            }
-        ],
-    }
-
-    result = JiuWenClawDeepAdapter._format_evolution_summary_markdown(summary)
-
-    assert malicious not in result
-    assert "ignored-when-display-text-present" not in result
-    assert r"\[点击\]\(javascript:alert\(1\)\)" in result
-    assert r"\`break" in result
-
-
-@pytest.mark.unit
-def test_format_evolution_summary_markdown_escapes_untrusted_fields():
-    """skill_name/name from take_run_summary must not inject Markdown syntax."""
-    malicious_skill = "[点击](javascript:alert(1))`break"
-    malicious_name = "new[skill](x)`"
-    summary = {
-        "skills": [
-            {
-                "skill_name": malicious_skill,
-                "records_count": 2,
-                "body_count": 1,
-                "description_count": 1,
-            }
-        ],
-        "new_skills": [{"name": malicious_name}],
-    }
-
-    result = JiuWenClawDeepAdapter._format_evolution_summary_markdown(summary)
-
-    assert malicious_skill not in result
-    assert malicious_name not in result
-    assert r"\[点击\]\(javascript:alert\(1\)\)" in result
-    assert r"\`break" in result
-    assert r"new\[skill\]\(x\)" in result
-    assert r"\`" in result.split(r"new\[skill\]\(x\)")[1]
-
-
-@pytest.mark.unit
-def test_format_evolution_summary_markdown_tolerates_non_numeric_counts():
-    """Dirty persisted count fields should degrade to zero instead of raising."""
-    summary = {
-        "skills": [
-            {
-                "skill_name": "demo-skill",
-                "records_count": "not-a-number",
-                "body_count": "2x",
-                "description_count": None,
-            }
-        ],
-    }
-
-    result = JiuWenClawDeepAdapter._format_evolution_summary_markdown(summary)
-
-    assert "demo-skill" in result
-    assert "新增 0 条经验" in result
-
-
-@pytest.mark.unit
-def test_collect_evolution_run_summary_text_degrades_on_format_failure(adapter):
-    """Footnote formatting failures must not propagate to the main chat path."""
-    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
-        take_run_summary=lambda: "corrupted-non-dict-summary",
-    )
-    records, detach = _attach_capture_handler(interface_deep_module.logger)
-    try:
-        result = adapter._collect_evolution_run_summary_text("req-format-fail")  # pylint: disable=protected-access
-    finally:
-        detach()
-
-    assert result == ""
-    assert any(
-        "evolution UI summary format failed" in record.message
-        for record in records
-        if record.levelno >= logging.WARNING
-    )
-
-
-@pytest.mark.unit
-def test_collect_evolution_run_summary_text_tolerates_dirty_records_count(adapter):
-    """Non-numeric records_count from persisted JSON must not raise."""
-    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
-        take_run_summary=lambda: {
-            "skills": [
-                {
-                    "skill_name": "demo-skill",
-                    "records_count": "not-a-number",
-                }
-            ],
-        },
-    )
-
-    result = adapter._collect_evolution_run_summary_text("req-dirty-count")  # pylint: disable=protected-access
-
-    assert "demo-skill" in result
-    assert "新增 0 条经验" in result
-
-
-@pytest.mark.unit
-def test_collect_evolution_run_summary_text_skips_when_rail_none(adapter):
+def test_drain_evolution_run_summary_skips_when_rail_none(adapter):
     """rail is None should log skip reason for ops troubleshooting."""
     adapter._skill_evolution_rail = None  # pylint: disable=protected-access
     records, detach = _attach_capture_handler(interface_deep_module.logger)
     try:
-        result = adapter._collect_evolution_run_summary_text("req-rail-none")  # pylint: disable=protected-access
+        adapter._drain_evolution_run_summary("req-rail-none")  # pylint: disable=protected-access
     finally:
         detach()
 
-    assert result == ""
+    assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
     assert len(records) == 1
-    assert "evolution UI summary skipped" in records[0].message
+    assert "evolution summary skipped" in records[0].message
     assert "reason=skill_evolution_rail_none" in records[0].message
     assert "request_id=req-rail-none" in records[0].message
-
-
-@pytest.mark.unit
-def test_stash_and_take_pending_evolution_summary(adapter):
-    """HITL-deferred footnote should survive until the next request for the session."""
-    footnote = "\n\n---\n### 📚 技能演进\n- `demo-skill`：新增 1 条经验"
-    adapter._stash_pending_evolution_summary("sess-hitl", footnote, "req-hitl-1")  # pylint: disable=protected-access
-
-    assert adapter._pending_evolution_summary_by_session["sess-hitl"] == footnote  # pylint: disable=protected-access
-
-    taken = adapter._take_pending_evolution_summary("sess-hitl")  # pylint: disable=protected-access
-    assert taken == footnote
-    assert adapter._take_pending_evolution_summary("sess-hitl") == ""  # pylint: disable=protected-access
-
-
-@pytest.mark.unit
-def test_stash_pending_evolution_summary_logs_hitl_deferral(adapter):
-    adapter._stash_pending_evolution_summary(  # pylint: disable=protected-access
-        "sess-hitl",
-        "footnote",
-        "req-hitl-2",
-    )
-    records, detach = _attach_capture_handler(interface_deep_module.logger)
-    try:
-        adapter._stash_pending_evolution_summary(  # pylint: disable=protected-access
-            "sess-hitl",
-            "footnote-2",
-            "req-hitl-3",
-        )
-    finally:
-        detach()
-
-    assert any("stashed evolution UI footnote for HITL resume" in r.message for r in records)
-    assert any("session_id=sess-hitl" in r.message for r in records)
 
 
 # =============================================================================

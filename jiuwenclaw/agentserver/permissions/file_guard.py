@@ -260,10 +260,18 @@ class FileGuardChecker:
         except ImportError:
             pass
         try:
-            from jiuwenclaw.utils import get_agent_workspace_dir
-            p = Path(get_agent_workspace_dir()).resolve()
+            from jiuwenclaw.utils import resolve_tenant_agent_workspace_dir
+            p = resolve_tenant_agent_workspace_dir().resolve()
             logger.debug(
-                "[file_guard] workspace_root source=agent_default (get_agent_workspace_dir) path=%s",
+                "[file_guard] workspace_root source=tenant_workspace "
+                "(resolve_tenant_agent_workspace_dir) path=%s",
+                p,
+            )
+            return p
+        except TypeError:
+            p = Path.cwd().resolve()
+            logger.debug(
+                "[file_guard] workspace_root source=cwd_fallback (no tenant bind) path=%s",
                 p,
             )
             return p

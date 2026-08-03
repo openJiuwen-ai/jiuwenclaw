@@ -187,12 +187,15 @@ def _build_load_directive(lang: str, skill_name: str) -> str:
     if lang == "zh":
         return (
             f"\n\n[Skill {skill_name} 已激活] 请严格按照 SKILL.md 的步骤顺序执行。"
-            "每次行动前声明当前步骤；遇到用户确认/审批点必须等待用户回复；"
+            "默认每次行动前声明当前步骤；若 SKILL.md 明确声明“阶段状态和阶段消息由工具事件唯一生成”，"
+            "则禁止自行输出任何步骤声明；遇到用户确认/审批点必须等待用户回复；"
             f"完成整个技能流程后调用 `skill_complete(skill_name=\"{skill_name}\")` 收尾。\n"
         )
     return (
         f"\n\n[Skill {skill_name} active] Follow SKILL.md in order. "
-        "Declare the current step before each action, wait at user approval gates, "
+        "By default, declare the current step before each action. If SKILL.md explicitly states "
+        "that stage status and stage messages are emitted exclusively by tool events, you must not declare "
+        "any step message yourself. Wait at user approval gates, "
         f"and call `skill_complete(skill_name=\"{skill_name}\")` when the full skill flow is done.\n"
     )
 

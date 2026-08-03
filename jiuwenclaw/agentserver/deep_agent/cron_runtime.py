@@ -13,12 +13,38 @@ from jiuwenclaw.gateway.cron.models import (
     normalize_target_channel_id,
 )
 from jiuwenclaw.agentserver.tools.cron_tools import CronToolRoute, CronTools
+from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
 
 if TYPE_CHECKING:
     from jiuwenclaw.gateway.message_handler import MessageHandler
 
 from jiuwenclaw.schema.message import Message, ReqMethod
 from jiuwenclaw.utils import logger
+
+
+def _normalize_tenant_scope(
+    service_id: str | None,
+    agent_id: str | None,
+) -> tuple[str, str]:
+    return (
+        TenantAgentPool.normalize_tenant_id(service_id),
+        TenantAgentPool.normalize_tenant_id(agent_id),
+    )
+
+
+def _tenant_scope_from_context(context: Any | None) -> tuple[str, str]:
+    if context is None:
+        return "default", "default"
+    metadata = getattr(context, "metadata", None)
+    if isinstance(metadata, dict):
+        sid = metadata.get("service_id")
+        aid = metadata.get("agent_id")
+        if sid is not None or aid is not None:
+            return _normalize_tenant_scope(
+                str(sid) if sid is not None else None,
+                str(aid) if aid is not None else None,
+            )
+    return "default", "default"
 
 
 class _CronToolsCronBackend(CronToolBackend):
@@ -41,11 +67,14 @@ class _CronToolsCronBackend(CronToolBackend):
             else None
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
+        service_id, agent_id = _tenant_scope_from_context(context)
         return CronToolRoute(
             request_id=request_id,
             channel_id=channel_id,
             session_id=session_id,
             chat_type=chat_type,
+            service_id=service_id,
+            agent_id=agent_id,
         )
 
     async def list_jobs(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
@@ -332,17 +361,27 @@ class CronRuntimeBridge:
 
     def __init__(self) -> None:
         self._backend_override: CronToolBackend | None = None
-        self._resolved_backend: CronToolBackend | None = None
+        self._resolved_backends: dict[tuple[str, str], CronToolBackend] = {}
 
     def set_backend(self, backend: CronToolBackend | None) -> None:
         self._backend_override = backend
-        self._resolved_backend = backend
+        self._resolved_backends.clear()
+        if backend is not None:
+            self._resolved_backends[("default", "default")] = backend
 
-    def get_backend(self) -> CronToolBackend | None:
+    def get_backend(
+        self,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> CronToolBackend | None:
         if self._backend_override is not None:
             return self._backend_override
-        if self._resolved_backend is not None:
-            return self._resolved_backend
+
+        sid, aid = _normalize_tenant_scope(service_id, agent_id)
+        cache_key = (sid, aid)
+        cached = self._resolved_backends.get(cache_key)
+        if cached is not None:
+            return cached
 
         message_handler = None
         try:
@@ -351,20 +390,50 @@ class CronRuntimeBridge:
         except RuntimeError:
             message_handler = None
 
-        backend: CronToolBackend = _CronToolsCronBackend(CronTools(), message_handler=message_handler)
-        self._resolved_backend = backend
-        logger.info("[CronRuntimeBridge] CronTools backend initialized successfully")
+        from jiuwenclaw.agentserver.cron_local_runtime import AgentCronRegistry
+
+        cron_tools = AgentCronRegistry.get_or_create(
+            sid,
+            aid,
+            factory=lambda: CronTools(service_id=sid, agent_id=aid),
+        )
+        backend: CronToolBackend = _CronToolsCronBackend(
+            cron_tools,
+            message_handler=message_handler,
+        )
+        self._resolved_backends[cache_key] = backend
+        logger.info(
+            "[CronRuntimeBridge] CronTools backend initialized for service_id=%s agent_id=%s",
+            sid,
+            aid,
+        )
         return backend
 
-    def ensure_scheduler_started(self) -> None:
+    async def remove_tenant(
+        self,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> bool:
+        """Drop cached backend and stop the shared Agent-side scheduler for the tenant."""
+        sid, aid = _normalize_tenant_scope(service_id, agent_id)
+        self._resolved_backends.pop((sid, aid), None)
+        from jiuwenclaw.agentserver.cron_local_runtime import AgentCronRegistry
+
+        return await AgentCronRegistry.remove(sid, aid)
+
+    def ensure_scheduler_started(
+        self,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
         """确保scheduler已启动，如果未启动则异步启动"""
-        backend = self.get_backend()
+        backend = self.get_backend(service_id=service_id, agent_id=agent_id)
         if backend is None:
             return
-        
+
         if not isinstance(backend, _CronToolsCronBackend):
             return
-        
+
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -374,15 +443,31 @@ class CronRuntimeBridge:
         except Exception as exc:
             logger.warning("[CronRuntimeBridge] Failed to start scheduler: %s", exc)
 
-    def build_tools(self, *, context: Any, agent_id: Optional[str]) -> list[Any]:
+    def build_tools(
+        self,
+        *,
+        context: Any,
+        agent_id: Optional[str],
+        service_id: str | None = None,
+        tenant_agent_id: str | None = None,
+    ) -> list[Any]:
         """Build cron tools."""
-        backend = self.get_backend()
+        sid, aid = _normalize_tenant_scope(service_id, tenant_agent_id)
+        if service_id is None and tenant_agent_id is None:
+            sid, aid = _tenant_scope_from_context(context)
+
+        backend = self.get_backend(service_id=sid, agent_id=aid)
         if backend is None:
             logger.warning("[CronRuntimeBridge] cron backend is not ready, skip builtin cron tools")
             return []
-        
-        logger.info("[CronRuntimeBridge] Building cron tools for context: %s", 
-                    getattr(context, 'tool_scope', 'unknown'))
+
+        logger.info(
+            "[CronRuntimeBridge] Building cron tools for scope=%s tool_scope=%s",
+            (sid, aid),
+            getattr(context, "tool_scope", "unknown"),
+        )
+        # Start Agent-side scheduler so existing cron_jobs.json are armed (relay / AgentServer-only).
+        self.ensure_scheduler_started(service_id=sid, agent_id=aid)
         tools = create_cron_tools(
             backend,
             context=context,
@@ -391,7 +476,9 @@ class CronRuntimeBridge:
             include_legacy_compat=False,
             agent_id=agent_id,
         )
-        logger.info("[CronRuntimeBridge] Built %d cron tools: %s", 
-                    len(tools), 
-                    [tool.card.name if hasattr(tool, 'card') else str(tool) for tool in tools])
+        logger.info(
+            "[CronRuntimeBridge] Built %d cron tools: %s",
+            len(tools),
+            [tool.card.name if hasattr(tool, "card") else str(tool) for tool in tools],
+        )
         return tools

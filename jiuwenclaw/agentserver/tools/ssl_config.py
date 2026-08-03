@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
-import os
 import ssl
+
+from jiuwenclaw.local_env_config import get_local_config
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
-    raw = os.environ.get(key, "").strip().lower()
+    raw = str(get_local_config(key, "") or "").strip().lower()
     if raw in ("0", "false", "no", "off"):
         return False
     if raw in ("1", "true", "yes", "on"):

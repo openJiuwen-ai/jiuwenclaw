@@ -2,52 +2,32 @@
 
 """Unit tests for team runtime inheritance helpers."""
 
-from types import SimpleNamespace
-
-from openjiuwen.core.foundation.tool import ToolCard
-
-from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
-    filter_inheritable_ability_cards,
-)
+from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimePromptRail
 
 
-class _FakeAbilityManager:
-    def __init__(self, abilities):
-        self._abilities = abilities
-
-    def list(self):
-        return list(self._abilities)
-
-
-def _make_tool_card(name: str) -> ToolCard:
-    return ToolCard(
-        id=name,
-        name=name,
-        description=f"{name} description",
-        input_params={"type": "object"},
+def test_runtime_prompt_rail_office_tenant_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
+        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
+    )
+    rail = RuntimePromptRail(service_id="default", agent_id="office")
+    dirs = rail._get_workspace_dirs()
+    config = dirs["config"].replace("\\", "/")
+    workspace = dirs["workspace"].replace("\\", "/")
+    assert config.endswith("service_default/agent_office/config")
+    assert "service_default/agent_office/agent/jiuwenclaw_workspace" in workspace
+    assert dirs["memory"].replace("\\", "/").endswith(
+        "service_default/agent_office/agent/jiuwenclaw_workspace/memory"
     )
 
 
-def test_filter_inheritable_ability_cards_includes_extended_claw_tools():
-    main_agent = SimpleNamespace(
-        ability_manager=_FakeAbilityManager(
-            [
-                _make_tool_card("visual_question_answering"),
-                _make_tool_card("audio_question_answering"),
-                _make_tool_card("audio_metadata"),
-                _make_tool_card("user_todos"),
-                _make_tool_card("task_tool"),
-                _make_tool_card("send_file_to_user"),
-            ]
-        )
+def test_runtime_prompt_rail_none_tenant_normalizes_to_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
+        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
     )
-
-    inherited = filter_inheritable_ability_cards(main_agent)
-    inherited_names = {card.name for card in inherited}
-
-    assert "visual_question_answering" in inherited_names
-    assert "audio_question_answering" in inherited_names
-    assert "audio_metadata" in inherited_names
-    assert "user_todos" in inherited_names
-    assert "task_tool" in inherited_names
-    assert "send_file_to_user" not in inherited_names
+    rail = RuntimePromptRail()
+    dirs = rail._get_workspace_dirs()
+    assert dirs["config"].replace("\\", "/").endswith(
+        "service_default/agent_default/config"
+    )

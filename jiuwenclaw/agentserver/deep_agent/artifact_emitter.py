@@ -252,6 +252,26 @@ async def _trigger_artifact_post_process_hook(
         )
         return
 
+    # Sync back: if hook renamed files via ctx.artifact_paths, update artifacts
+    new_paths = {
+        old: new
+        for old, new in zip(artifact_paths, hook_ctx.artifact_paths)
+        if old != new and new
+    }
+    if new_paths:
+        for item in artifacts:
+            old_path = str(item.get("path") or "").strip()
+            if old_path in new_paths:
+                new_path = new_paths[old_path]
+                item["path"] = new_path
+                item["name"] = Path(new_path).name
+                logger.info(
+                    "%s artifact path updated by hook: %s -> %s",
+                    log_prefix,
+                    Path(old_path).name,
+                    Path(new_path).name,
+                )
+
     _refresh_artifact_sizes(artifacts, log_prefix=log_prefix)
     logger.info(
         "%s artifact post-process hook done session_id=%s tool=%s count=%d",

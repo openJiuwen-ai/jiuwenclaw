@@ -14,7 +14,8 @@ from openjiuwen.core.foundation.tool.tool import tool
 from jiuwenclaw.utils import logger
 
 
-_global_workspace_dir: str = "."
+# Optional absolute workspace override (tests). Production resolves per-request tenant.
+_workspace_dir_override: str | None = None
 _ctx_channel_id: _contextvars.ContextVar[str] = _contextvars.ContextVar("user_todo_channel_id", default="default")
 _ctx_created_by: _contextvars.ContextVar[str] = _contextvars.ContextVar("user_todo_created_by", default="")
 
@@ -91,9 +92,10 @@ class TodoItem:
 
 
 def set_global_workspace_dir(workspace_dir: str):
-    """Set global workspace directory."""
-    global _global_workspace_dir
-    _global_workspace_dir = workspace_dir
+    """Optional workspace override (tests). Empty clears override."""
+    global _workspace_dir_override
+    stripped = str(workspace_dir or "").strip()
+    _workspace_dir_override = stripped or None
 
 
 def set_global_channel_id(channel_id: str):
@@ -107,8 +109,16 @@ def set_global_created_by(created_by: str):
 
 
 def _get_todos_dir() -> str:
-    """Get the todos directory path."""
-    return os.path.join(_global_workspace_dir, "memory", "user_todos")
+    """Resolve ``…/jiuwenclaw_workspace/memory/user_todos`` for the current tenant.
+
+    Prefer explicit test override; otherwise ``resolve_tenant_agent_workspace_dir()``
+    (bound env_ns / ContextVar, else default/default).
+    """
+    if _workspace_dir_override:
+        return os.path.join(_workspace_dir_override, "memory", "user_todos")
+    from jiuwenclaw.utils import resolve_tenant_agent_workspace_dir
+
+    return str(resolve_tenant_agent_workspace_dir() / "memory" / "user_todos")
 
 
 def _sanitize_channel_id(raw_id: str) -> str:

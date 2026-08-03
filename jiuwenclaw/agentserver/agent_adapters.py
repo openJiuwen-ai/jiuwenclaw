@@ -137,6 +137,9 @@ async def create_adapter(
     workspace_dir: str | None = None,
     agent_id: str | None = None,
     service_id: str | None = None,
+    *,
+    env_agent_id: str | None = None,
+    env_service_id: str | None = None,
 ) -> AgentAdapter:
     """Factory function to create SDK adapter instance.
 
@@ -145,6 +148,7 @@ async def create_adapter(
         workspace_dir: Workspace directory path to pass to adapter.
         agent_id: Agent ID for multi-tenant isolation.
         service_id: Service ID for multi-tenant isolation.
+        env_agent_id / env_service_id: Request-side ids for tip/ns bags.
 
     Returns:
         AgentAdapter instance for the specified SDK.
@@ -164,6 +168,8 @@ async def create_adapter(
                 workspace_dir=workspace_dir,
                 agent_id=agent_id,
                 service_id=service_id,
+                env_agent_id=env_agent_id,
+                env_service_id=env_service_id,
             )
 
         return await asyncio.get_event_loop().run_in_executor(None, import_and_create)

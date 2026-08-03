@@ -24,6 +24,18 @@ def test_skill_protocol_en_contains_todo_before_execution():
     assert "todo" in text.lower()
 
 
+def test_skill_protocol_cn_allows_tool_owned_stage_messages():
+    text = _build_skill_protocol_section_text("cn")
+    assert "阶段状态和阶段消息由工具事件唯一生成" in text
+    assert "禁止自行输出" in text
+
+
+def test_skill_protocol_en_allows_tool_owned_stage_messages():
+    text = _build_skill_protocol_section_text("en")
+    assert "stage status and stage messages are emitted exclusively by tool events" in text
+    assert "must not declare" in text
+
+
 class _FakeBuilder:
     def __init__(self, language: str = "cn") -> None:
         self.language = language
@@ -95,3 +107,33 @@ def test_skill_protocol_en_requires_cancelled_on_abandon():
     assert "todo_modify" in text
     assert "cancelled" in text
     assert "not to generate the PPT" in text
+
+
+def test_skill_protocol_cn_requires_acceleration_first():
+    """加速通道默认约束：第一个工具调用必须是 skill_acceleration_exec（含唯一例外）。"""
+    text = _build_skill_protocol_section_text("cn")
+    assert "默认优先" in text
+    assert "第一个工具调用必须是" in text
+    assert "仍须立即调用" in text
+    # 唯一例外：仅限 skill_acceleration_exec 不会自行处理的操作
+    assert "唯一例外" in text
+    assert "不会自行处理" in text
+    assert "不构成" in text
+    assert "技能类" in text
+    # 误触恢复：加载 pptx-craft 正文不属于例外，仍须走加速通道
+    assert "pptx-craft 正文" in text
+
+
+def test_skill_protocol_en_requires_acceleration_first():
+    """Acceleration default constraint: FIRST tool call MUST be skill_acceleration_exec (with only exception)."""
+    text = _build_skill_protocol_section_text("en")
+    assert "Default priority" in text
+    assert "FIRST tool call MUST be" in text
+    assert "you MUST still call" in text
+    # Only exception: only for actions skill_acceleration_exec does NOT handle internally
+    assert "Only exception" in text
+    assert "does not handle internally" in text
+    assert "constitute an exception" in text
+    assert "skill-type" in text
+    # 误触恢复：加载 pptx-craft body 不属于例外，仍须走加速通道
+    assert "pptx-craft body" in text

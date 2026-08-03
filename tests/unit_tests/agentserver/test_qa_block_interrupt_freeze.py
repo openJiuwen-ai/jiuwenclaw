@@ -50,7 +50,7 @@ class TestQABlockInterruptFreeze(unittest.IsolatedAsyncioTestCase):
             )
         mock_persist.assert_awaited_once()
 
-    async def test_freeze_helper_calls_sync_freeze(self) -> None:
+    async def test_freeze_helper_uses_async_for_reused_session(self) -> None:
         session = MagicMock()
         freeze_rail = getattr(self.adapter, "_qa_block_freeze_rail")
         with patch(
@@ -77,8 +77,43 @@ class TestQABlockInterruptFreeze(unittest.IsolatedAsyncioTestCase):
             agent=getattr(self.adapter, "_instance"),
             session=session,
             status="interrupted",
+            persist_mode="async",
         )
         mock_persist.assert_awaited_once()
+
+    async def test_freeze_helper_uses_sync_before_closing_owned_session(self) -> None:
+        calls: list[str] = []
+        session = MagicMock()
+        session.pre_run = AsyncMock(side_effect=lambda *_a, **_k: calls.append("pre_run"))
+        session.post_run = AsyncMock(side_effect=lambda *_a, **_k: calls.append("post_run"))
+        freeze_rail = getattr(self.adapter, "_qa_block_freeze_rail")
+        freeze_rail.freeze_current_qa_sync = AsyncMock(
+            side_effect=lambda *_a, **_k: calls.append("freeze")
+        )
+
+        with patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep._resolve_session_for_checkpoint",
+            new=AsyncMock(return_value=(session, True)),
+        ), patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.resolve_context_engine",
+            return_value=None,
+        ):
+            await _freeze_qa_block_before_abort(
+                self.adapter,
+                "session-1",
+                reason="cancel",
+            )
+
+        freeze_rail.freeze_current_qa_sync.assert_awaited_once_with(
+            "session-1",
+            agent=getattr(self.adapter, "_instance"),
+            session=session,
+            status="interrupted",
+            persist_mode="sync",
+        )
+        session.pre_run.assert_awaited_once_with(inputs=None)
+        session.post_run.assert_awaited_once_with()
+        self.assertEqual(calls, ["pre_run", "freeze", "post_run"])
 
     async def test_supplement_interrupt_freezes_before_abort(self) -> None:
         request = AgentRequest(

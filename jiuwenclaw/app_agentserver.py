@@ -58,6 +58,9 @@ for _lg in LogManager.get_all_loggers().values():
 
 # Load env from user workspace config/.env
 load_dotenv(dotenv_path=get_env_file())
+from jiuwenclaw.local_env_config import mirror_bare_business_env_to_default_ns
+
+mirror_bare_business_env_to_default_ns()
 
 # 进程退出诊断：仅记录原因，不改变退出码/清理顺序。默认为 unknown，
 # 若 atexit 仍为 unknown 且看不到 stopping…，多半是强杀/原生崩/os._exit。

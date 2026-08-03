@@ -22,7 +22,7 @@ from jiuwenclaw.runtime.pip_env import (
     rewrite_shell_command,
     runtime_subprocess_env,
 )
-from jiuwenclaw.utils import get_agent_workspace_dir
+from jiuwenclaw.utils import resolve_tenant_agent_workspace_dir
 
 
 _DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -82,7 +82,7 @@ def _check_command_safety(command: str) -> str | None:
 
 
 def _resolve_command_workdir(workdir: str) -> Path:
-    project_root = get_agent_workspace_dir()
+    project_root = resolve_tenant_agent_workspace_dir()
     candidate = Path(workdir) if workdir else project_root
     if not candidate.is_absolute():
         candidate = project_root / candidate

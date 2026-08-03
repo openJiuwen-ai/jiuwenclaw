@@ -5,6 +5,7 @@
 # pylint: disable=protected-access
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -16,7 +17,7 @@ from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapt
 
 def _make_adapter() -> JiuWenClawDeepAdapter:
     adapter = object.__new__(JiuWenClawDeepAdapter)
-    adapter._config_cache = {"evolution": {"enabled": False, "auto_scan": False}}
+    adapter._config_cache = {"evolution": {"enabled": False}}
     adapter._skill_evolution_rail = None
     adapter._model = None
     adapter._registered_skill_dirs = []
@@ -131,8 +132,14 @@ def test_do_evolve_rollback_restores_skill_without_rail(monkeypatch, tmp_path: P
     skill_dir = tmp_path / "daily-weather"
     archive_dir = skill_dir / "archive"
     archive_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# current body\n", encoding="utf-8")
-    (skill_dir / "evolutions.json").write_text('{"version":"2.0.0"}', encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: daily-weather\nversion: 2.0.0\n---\n# current body\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "evolutions.json").write_text(
+        '{"skill_id":"daily-weather","version":"v2.0.0","summary":"live-marker","entries":[]}',
+        encoding="utf-8",
+    )
     (archive_dir / "SKILL.v1.0.0.md").write_text("# archived body\n", encoding="utf-8")
     (archive_dir / "evolutions.v1.0.0.json").write_text(
         '{"version":"1.0.0","records":[]}',
@@ -162,30 +169,40 @@ def test_do_evolve_rollback_restores_skill_without_rail(monkeypatch, tmp_path: P
         "version": "SKILL.v1.0.0.md",
     }
     assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# archived body\n"
-    assert '"version": "1.0.0"' in (skill_dir / "evolutions.json").read_text(encoding="utf-8") or (
-        '"version":"1.0.0"' in (skill_dir / "evolutions.json").read_text(encoding="utf-8")
-    )
+    evo_text = (skill_dir / "evolutions.json").read_text(encoding="utf-8")
+    evo_data = json.loads(evo_text)
+    # Live evolutions.json must be cleared; no SKILL.md version -> default v1.0.0.
+    assert evo_data.get("entries") == []
+    assert not evo_data.get("records")
+    assert evo_data.get("version") == "v1.0.0"
     assert not (archive_dir / "SKILL.v1.0.0.md").exists()
+    # Pre-rollback snapshot archives empty paired evolutions (not a live copy).
+    archived_evo = archive_dir / "evolutions.v2.0.0.json"
+    assert archived_evo.is_file()
+    archived_evo_data = json.loads(archived_evo.read_text(encoding="utf-8"))
+    assert archived_evo_data.get("entries") == []
+    assert archived_evo_data.get("summary") in (None, "")
+    assert archived_evo_data.get("skill_id") == "daily-weather"
+    assert (archive_dir / "SKILL.v2.0.0.md").is_file()
     assert adapter._skill_evolution_rail is None
     assert adapter._model is None
 
 
 @pytest.mark.unit
-def test_rollback_skill_via_store_continues_when_evo_restore_fails(monkeypatch):
-    """Body rollback must succeed even if paired evolution-log restore fails."""
+def test_rollback_skill_via_store_continues_when_evo_clear_fails(monkeypatch):
+    """Body rollback must succeed even if clearing the live evolution log fails."""
     adapter = _make_adapter()
     body_archive = SimpleNamespace(name="SKILL.v1.0.0.md")
-    evo_archive = SimpleNamespace(name="evolutions.v1.0.0.json")
     store = MagicMock()
     store.get_skill_archive_dir.return_value = Path("/tmp/skill/archive")
     store.normalize_body_archive_name.return_value = "SKILL.v1.0.0.md"
     store.get_skill_archive_file.return_value = body_archive
-    store.resolve_paired_evolution_archive.return_value = evo_archive
     store.read_archive_text = AsyncMock(return_value="# archived body\n")
     store.archive_current_state = AsyncMock()
     store.write_skill_content = AsyncMock()
-    store.restore_evolution_log_from_archive = AsyncMock(return_value=False)
-    store.render_evolution_markdown = AsyncMock()
+    store._extract_version_from_skill_md = MagicMock(return_value=None)
+    store.clear_evolutions = AsyncMock(return_value=False)
+    store.restore_evolution_log_from_archive = AsyncMock()
     store.delete_archive_version = AsyncMock(return_value=True)
 
     ok, evo_ok = asyncio.run(
@@ -193,16 +210,47 @@ def test_rollback_skill_via_store_continues_when_evo_restore_fails(monkeypatch):
     )
     assert ok is True
     assert evo_ok is False
+    store.archive_current_state.assert_awaited_once_with("daily-weather")
     store.write_skill_content.assert_awaited_once_with("daily-weather", "# archived body\n")
-    store.restore_evolution_log_from_archive.assert_awaited_once()
-    store.render_evolution_markdown.assert_awaited_once_with("daily-weather")
+    store.clear_evolutions.assert_awaited_once_with(
+        "daily-weather", retain_version="v1.0.0",
+    )
+    store.restore_evolution_log_from_archive.assert_not_awaited()
     store.delete_archive_version.assert_awaited_once_with(
         "daily-weather", "SKILL.v1.0.0.md"
     )
 
 
 @pytest.mark.unit
-def test_do_evolve_rollback_surfaces_evo_restore_warning(monkeypatch):
+def test_rollback_skill_via_store_retains_frontmatter_version(monkeypatch):
+    """When restored SKILL.md has a version, clear_evolutions keeps that version."""
+    adapter = _make_adapter()
+    body_archive = SimpleNamespace(name="SKILL.v1.2.0.md")
+    body = "---\nname: daily-weather\nversion: v1.2.0\n---\n# archived body\n"
+    store = MagicMock()
+    store.get_skill_archive_dir.return_value = Path("/tmp/skill/archive")
+    store.normalize_body_archive_name.return_value = "SKILL.v1.2.0.md"
+    store.get_skill_archive_file.return_value = body_archive
+    store.read_archive_text = AsyncMock(return_value=body)
+    store.archive_current_state = AsyncMock()
+    store.write_skill_content = AsyncMock()
+    store._extract_version_from_skill_md = MagicMock(return_value="v1.2.0")
+    store.clear_evolutions = AsyncMock(return_value=None)
+    store.delete_archive_version = AsyncMock(return_value=True)
+
+    ok, evo_ok = asyncio.run(
+        adapter._rollback_skill_via_store(store, "daily-weather", "SKILL.v1.2.0.md")
+    )
+    assert ok is True
+    assert evo_ok is True
+    store.archive_current_state.assert_awaited_once_with("daily-weather")
+    store.clear_evolutions.assert_awaited_once_with(
+        "daily-weather", retain_version="v1.2.0",
+    )
+
+
+@pytest.mark.unit
+def test_do_evolve_rollback_surfaces_evo_clear_warning(monkeypatch):
     adapter = _make_adapter()
     store = MagicMock()
     store.skill_exists.return_value = True
@@ -224,6 +272,7 @@ def test_do_evolve_rollback_surfaces_evo_restore_warning(monkeypatch):
     assert result["ok"] is True
     assert result["rolled_back"] is True
     assert "evolution log" in result["warning"]
+    assert "清空失败" in result["warning"]
 
     rpc = asyncio.run(
         adapter.handle_skills_evolution_rollback(
@@ -232,6 +281,7 @@ def test_do_evolve_rollback_surfaces_evo_restore_warning(monkeypatch):
     )
     assert rpc["rolled_back"] is True
     assert "evolution log" in rpc["warning"]
+    assert "清空失败" in rpc["warning"]
 
 
 @pytest.mark.unit
@@ -523,3 +573,88 @@ def test_rebuild_not_in_disk_only_evolution_methods():
     assert "skills.evolution.archives" in _DISK_ONLY_EVOLUTION_METHODS
     assert "skills.evolution.rollback" in _DISK_ONLY_EVOLUTION_METHODS
     assert "skills.evolution.rebuild" not in _DISK_ONLY_EVOLUTION_METHODS
+
+
+@pytest.mark.unit
+def test_handle_skills_evolution_rollback_with_skill_path(monkeypatch, tmp_path: Path):
+    """带 skill_path 时只回滚到指定目录，且成功响应包含 skill_path。"""
+    # 准备两个同名 skill 目录，内容不同
+    skills_a = tmp_path / "skills_a"
+    skills_b = tmp_path / "skills_b"
+    skills_a.mkdir()
+    skills_b.mkdir()
+    for base in (skills_a, skills_b):
+        skill_dir = base / "daily-weather"
+        archive_dir = skill_dir / "archive"
+        archive_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"# current body at {base.name}\n",
+            encoding="utf-8",
+        )
+        (archive_dir / "SKILL.v1.0.0.md").write_text(
+            f"# archived body at {base.name}\n",
+            encoding="utf-8",
+        )
+        (archive_dir / "evolutions.v1.0.0.json").write_text(
+            '{"version":"1.0.0","records":[]}',
+            encoding="utf-8",
+        )
+
+    adapter = _make_adapter()
+    adapter._registered_skill_dirs = [str(skills_a), str(skills_b)]
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_build_skill_evolution_rail",
+        lambda self, _config: (_ for _ in ()).throw(
+            AssertionError("rollback must not build EvolutionRail")
+        ),
+    )
+
+    # 指定 skills_b 下的 skill_path
+    skill_path = skills_b / "daily-weather" / "SKILL.md"
+    result = asyncio.run(
+        adapter.handle_skills_evolution_rollback({
+            "name": "daily-weather",
+            "version": "SKILL.v1.0.0.md",
+            "skill_path": str(skill_path),
+        })
+    )
+
+    assert result["success"] is True
+    assert result["rolled_back"] is True
+    assert result["skill_path"] == str(skill_path)
+    assert "SKILL.v1.0.0.md" in result["version"]
+    assert (skills_b / "daily-weather" / "SKILL.md").read_text(encoding="utf-8") == "# archived body at skills_b\n"
+    # 只有 skills_b 的目标版本被删除，skills_a 的保持不变
+    assert not (skills_b / "daily-weather" / "archive" / "SKILL.v1.0.0.md").exists()
+    assert (skills_a / "daily-weather" / "archive" / "SKILL.v1.0.0.md").exists()
+    assert (skills_a / "daily-weather" / "SKILL.md").read_text(encoding="utf-8") == "# current body at skills_a\n"
+
+
+@pytest.mark.unit
+def test_handle_skills_evolution_rollback_rejects_mismatched_skill_dir_name(monkeypatch, tmp_path: Path):
+    """skill_path 的目录名与 name 不一致时抛出错误。"""
+    skill_dir = tmp_path / "wrong-name"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# dummy\n", encoding="utf-8")
+    adapter = _make_adapter()
+    adapter._registered_skill_dirs = [str(tmp_path)]
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+
+    with pytest.raises(ValueError, match="目录名必须与 name 一致"):
+        asyncio.run(
+            adapter.handle_skills_evolution_rollback({
+                "name": "daily-weather",
+                "version": "latest",
+                "skill_path": str(skill_dir / "SKILL.md"),
+            })
+        )

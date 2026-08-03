@@ -9,10 +9,10 @@
 """
 import logging
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any
 
-from jiuwenclaw.local_env_config import read_env
+from jiuwenclaw.local_env_config import read_env, set_os_environ
 from jiuwenclaw.utils import resolve_env_vars
 
 logger = logging.getLogger(__name__)
@@ -55,8 +55,18 @@ MULTIMODAL_ENV_GROUP_KEYS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Groups disabled by UI env omission reconcile (yaml literal must not re-enable).
-_MULTIMODAL_ENV_OMISSION_DISABLED: set[str] = set()
+# Groups disabled by UI env omission reconcile, scoped by (service_id, agent_id).
+# yaml literal must not re-enable a group disabled for that agent only.
+_MULTIMODAL_ENV_OMISSION_DISABLED: dict[tuple[str, str], set[str]] = {}
+
+
+def _omission_ns_key(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> tuple[str, str]:
+    from jiuwenclaw.local_env_config import resolve_env_ns
+
+    return resolve_env_ns(service_id, agent_id)
 
 
 def is_full_env_reload_snapshot(env: dict[str, Any] | None) -> bool:
@@ -77,26 +87,51 @@ def build_multimodal_reconcile_env(
         *,
         active_env: dict[str, Any] | None = None,
         staged_env: dict[str, Any] | None = None,
-        os_environ: Mapping[str, str] | None = None,
+        service_id: str | None = None,
+        agent_id: str | None = None,
 ) -> dict[str, str]:
-    """Merge active, staged, and multimodal anchor ``os.environ`` for omission reconcile."""
-    from jiuwenclaw.local_env_config import ENV_CONFIG_DICT, get_staged_env
+    """Build omission-reconcile view for one ``(service_id, agent_id)``.
+
+    Uses tip (active ∪ staged) plus namespaced os anchors only.
+    Never reads bare multimodal keys from ``os.environ``.
+    """
+    from jiuwenclaw.local_env_config import (
+        effective_tip,
+        get_staged_env,
+        make_env_ns_key,
+        resolve_env_ns,
+    )
 
     merged: dict[str, str] = {}
-    source_active = active_env if active_env is not None else ENV_CONFIG_DICT
+    if active_env is not None:
+        source_active = active_env
+    else:
+        source_active = effective_tip(service_id, agent_id)
     if isinstance(source_active, dict):
         for key, value in source_active.items():
             if value is not None:
                 merged[str(key)] = str(value)
-    source_staged = staged_env if staged_env is not None else get_staged_env()
+
+    if staged_env is not None:
+        source_staged = staged_env
+    elif active_env is not None:
+        # Explicit active bag: still overlay this pair's staged tip.
+        source_staged = get_staged_env(service_id=service_id, agent_id=agent_id)
+    else:
+        # effective_tip already includes staged.
+        source_staged = {}
     if isinstance(source_staged, dict):
         for key, value in source_staged.items():
             if value is not None:
                 merged[str(key)] = str(value)
-    environ = os_environ if os_environ is not None else os.environ
+
+    sid, aid = resolve_env_ns(service_id, agent_id)
     for keys in MULTIMODAL_ENV_GROUP_KEYS.values():
         anchor = keys[0]
-        raw = environ.get(anchor)
+        if _anchor_value_non_empty(merged, anchor):
+            continue
+        ns_key = make_env_ns_key(sid, aid, anchor)
+        raw = os.environ.get(ns_key)
         if raw is not None and str(raw).strip():
             merged[anchor] = str(raw)
     return merged
@@ -136,32 +171,58 @@ def multimodal_env_anchor_present(group: str) -> bool:
     return bool(str(read_env(anchor) or "").strip())
 
 
-def multimodal_env_omission_disabled(group: str) -> bool:
-    """Return True when the group was disabled via env omission reconcile."""
-    return group in _MULTIMODAL_ENV_OMISSION_DISABLED
+def multimodal_env_omission_disabled(
+    group: str,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> bool:
+    """Return True when the group was disabled via env omission for this agent ns."""
+    key = _omission_ns_key(service_id, agent_id)
+    disabled = _MULTIMODAL_ENV_OMISSION_DISABLED.get(key)
+    return bool(disabled and group in disabled)
 
 
-def reset_multimodal_env_omission_disabled() -> None:
-    """Clear omission-disabled flags (e.g. between tests)."""
-    _MULTIMODAL_ENV_OMISSION_DISABLED.clear()
+def reset_multimodal_env_omission_disabled(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """Clear omission-disabled flags.
+
+    With no ids: clear all bags (tests). With ids: clear one ``(sid, aid)`` bag.
+    """
+    if service_id is None and agent_id is None:
+        _MULTIMODAL_ENV_OMISSION_DISABLED.clear()
+        return
+    _MULTIMODAL_ENV_OMISSION_DISABLED.pop(_omission_ns_key(service_id, agent_id), None)
 
 
 def sync_multimodal_env_omission_state(
     removals: dict[str, None],
     new_env: dict[str, Any] | None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
-    """Mark groups disabled on env omission; re-enable when anchor reappears in snapshot."""
+    """Mark groups disabled on env omission for one agent; re-enable when anchor returns."""
+    key = _omission_ns_key(service_id, agent_id)
+    disabled = _MULTIMODAL_ENV_OMISSION_DISABLED.setdefault(key, set())
     if removals:
         for group, keys in MULTIMODAL_ENV_GROUP_KEYS.items():
             anchor = keys[0]
             if anchor in removals:
-                _MULTIMODAL_ENV_OMISSION_DISABLED.add(group)
+                disabled.add(group)
     if not isinstance(new_env, dict):
+        if not disabled:
+            _MULTIMODAL_ENV_OMISSION_DISABLED.pop(key, None)
         return
     for group, anchor in MULTIMODAL_ENV_ANCHOR_KEYS.items():
         value = new_env.get(anchor)
         if value is not None and str(value).strip():
-            _MULTIMODAL_ENV_OMISSION_DISABLED.discard(group)
+            disabled.discard(group)
+    if not disabled:
+        _MULTIMODAL_ENV_OMISSION_DISABLED.pop(key, None)
 
 
 def _api_key_is_env_bound(raw_api_key: Any) -> bool:
@@ -198,20 +259,35 @@ def _allow_embed_main_api_fallback(
     return True
 
 
-def _skip_apply_after_env_omission(group: str, *, caller: str) -> bool:
+def _skip_apply_after_env_omission(
+    group: str,
+    *,
+    caller: str,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> bool:
     """Return True when apply should skip because env omission disabled the group."""
-    if not multimodal_env_omission_disabled(group):
+    if not multimodal_env_omission_disabled(
+        group, service_id=service_id, agent_id=agent_id
+    ):
         return False
     logger.debug(
-        "%s skipped: group %s disabled by env omission reconcile",
+        "%s skipped: group %s disabled by env omission reconcile (sid=%s aid=%s)",
         caller,
         group,
+        service_id,
+        agent_id,
     )
     return True
 
 
-def clear_multimodal_env_groups(group_names: Iterable[str]) -> None:
-    """Remove env keys for the given multimodal groups from all env layers."""
+def clear_multimodal_env_groups(
+    group_names: Iterable[str],
+    *,
+    service_id: str,
+    agent_id: str,
+) -> None:
+    """Remove env keys for the given multimodal groups from one agent namespace."""
     from jiuwenclaw.local_env_config import apply_env_removals
 
     removals: dict[str, None] = {}
@@ -221,7 +297,11 @@ def clear_multimodal_env_groups(group_names: Iterable[str]) -> None:
             continue
         for key in keys:
             removals[key] = None
-    apply_env_removals(removals)
+    apply_env_removals(
+        removals,
+        service_id=service_id,
+        agent_id=agent_id,
+    )
 
 
 def infer_multimodal_env_removals(
@@ -229,6 +309,8 @@ def infer_multimodal_env_removals(
         new_env: dict[str, Any] | None,
         *,
         active_env: dict[str, Any] | None = None,
+        service_id: str | None = None,
+        agent_id: str | None = None,
 ) -> dict[str, None]:
     """Infer multimodal env keys to clear when frontend omits them from a full reload snapshot."""
     if not is_full_env_reload_snapshot(new_env):
@@ -238,7 +320,10 @@ def infer_multimodal_env_removals(
     reconcile_env = (
         active_env
         if active_env is not None
-        else build_multimodal_reconcile_env()
+        else build_multimodal_reconcile_env(
+            service_id=service_id,
+            agent_id=agent_id,
+        )
     )
     removals: dict[str, None] = {}
     for _group, keys in MULTIMODAL_ENV_GROUP_KEYS.items():
@@ -311,7 +396,11 @@ _EMBED_MODEL_KEY_MAP = {
 
 
 def dedicated_multimodal_model_configured(
-    config_base: dict[str, Any] | None, model_type: str
+    config_base: dict[str, Any] | None,
+    model_type: str,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
 ) -> bool:
     """Whether ``models.{model_type}`` has its own non-empty ``api_key`` (after YAML env resolution).
 
@@ -325,7 +414,9 @@ def dedicated_multimodal_model_configured(
         return False
     if not isinstance(config_base, dict):
         return False
-    if multimodal_env_omission_disabled(model_type):
+    if multimodal_env_omission_disabled(
+        model_type, service_id=service_id, agent_id=agent_id
+    ):
         return False
     mc = _get_model_config(config_base, model_type)
     raw_api_key = mc.get("api_key")
@@ -396,13 +487,13 @@ def apply_audio_model_config_from_yaml(config_base: dict[str, Any] | None) -> No
             provider = read_env("MODEL_PROVIDER", "").strip()
 
     if api_key:
-        os.environ["AUDIO_API_KEY"] = api_key
+        set_os_environ("AUDIO_API_KEY", api_key)
     if api_base:
-        os.environ["AUDIO_API_BASE"] = api_base
+        set_os_environ("AUDIO_API_BASE", api_base)
     if model_name:
-        os.environ["AUDIO_MODEL_NAME"] = model_name
+        set_os_environ("AUDIO_MODEL_NAME", model_name)
     if provider:
-        os.environ["AUDIO_PROVIDER"] = provider
+        set_os_environ("AUDIO_PROVIDER", provider)
 
 
 def apply_vision_model_config_from_yaml(config_base: dict[str, Any] | None) -> None:
@@ -451,13 +542,13 @@ def apply_vision_model_config_from_yaml(config_base: dict[str, Any] | None) -> N
             provider = read_env("MODEL_PROVIDER", "").strip()
 
     if api_key:
-        os.environ["VISION_API_KEY"] = api_key
+        set_os_environ("VISION_API_KEY", api_key)
     if api_base:
-        os.environ["VISION_API_BASE"] = api_base
+        set_os_environ("VISION_API_BASE", api_base)
     if model_name:
-        os.environ["VISION_MODEL_NAME"] = model_name
+        set_os_environ("VISION_MODEL_NAME", model_name)
     if provider:
-        os.environ["VISION_PROVIDER"] = provider
+        set_os_environ("VISION_PROVIDER", provider)
 
 
 def apply_video_model_config_from_yaml(config_base: dict[str, Any] | None) -> None:
@@ -470,7 +561,7 @@ def apply_video_model_config_from_yaml(config_base: dict[str, Any] | None) -> No
     3. 环境变量 MODEL_NAME, API_KEY, API_BASE
     """
     if not isinstance(config_base, dict):
-        os.environ.pop("VIDEO_UNDERSTANDING_STRICT", None)
+        set_os_environ("VIDEO_UNDERSTANDING_STRICT", None)
         return
     if _skip_apply_after_env_omission(
         "video", caller="apply_video_model_config_from_yaml"
@@ -490,9 +581,9 @@ def apply_video_model_config_from_yaml(config_base: dict[str, Any] | None) -> No
     )
 
     if strict:
-        os.environ["VIDEO_UNDERSTANDING_STRICT"] = "1"
+        set_os_environ("VIDEO_UNDERSTANDING_STRICT", "1")
     else:
-        os.environ.pop("VIDEO_UNDERSTANDING_STRICT", None)
+        set_os_environ("VIDEO_UNDERSTANDING_STRICT", None)
         if not api_key and allow_fallback:
             api_key = str(
                 embed_cfg.get("embed_api_key") or read_env("API_KEY", "")
@@ -510,13 +601,13 @@ def apply_video_model_config_from_yaml(config_base: dict[str, Any] | None) -> No
             provider = read_env("MODEL_PROVIDER", "").strip()
 
     if api_key:
-        os.environ["VIDEO_API_KEY"] = api_key
+        set_os_environ("VIDEO_API_KEY", api_key)
     if api_base:
-        os.environ["VIDEO_API_BASE"] = api_base
+        set_os_environ("VIDEO_API_BASE", api_base)
     if model_name:
-        os.environ["VIDEO_MODEL_NAME"] = model_name
+        set_os_environ("VIDEO_MODEL_NAME", model_name)
     if provider:
-        os.environ["VIDEO_PROVIDER"] = provider
+        set_os_environ("VIDEO_PROVIDER", provider)
 
 
 def apply_image_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -> None:
@@ -565,10 +656,10 @@ def apply_image_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
             provider = read_env("MODEL_PROVIDER", "").strip()
 
     if api_key:
-        os.environ["IMAGE_GEN_API_KEY"] = api_key
+        set_os_environ("IMAGE_GEN_API_KEY", api_key)
     if api_base:
-        os.environ["IMAGE_GEN_API_BASE"] = api_base
+        set_os_environ("IMAGE_GEN_API_BASE", api_base)
     if model_name:
-        os.environ["IMAGE_GEN_MODEL_NAME"] = model_name
+        set_os_environ("IMAGE_GEN_MODEL_NAME", model_name)
     if provider:
-        os.environ["IMAGE_GEN_PROVIDER"] = provider
+        set_os_environ("IMAGE_GEN_PROVIDER", provider)

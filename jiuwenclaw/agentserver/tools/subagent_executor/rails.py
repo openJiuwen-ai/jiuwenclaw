@@ -19,7 +19,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
-from jiuwenclaw.utils import logger, get_agent_workspace_dir
+from jiuwenclaw.utils import logger, resolve_tenant_agent_workspace_dir
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     set_current_agent_context,
     set_current_agent_subagent_id,
@@ -279,11 +279,11 @@ class SubagentContextRail(DeepAgentRail):
                 logger.debug("[SubagentArtifact] Failed to get workspace node path: %s", e)
                 return getattr(self._workspace, 'root_path', None)
 
-        # Fallback to agent workspace
+        # Fallback to tenant agent workspace
         try:
-            return get_agent_workspace_dir()
+            return resolve_tenant_agent_workspace_dir()
         except Exception as e:
-            logger.debug("[SubagentArtifact] Failed to get agent workspace dir: %s", e)
+            logger.debug("[SubagentArtifact] Failed to resolve tenant workspace dir: %s", e)
             return None
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:

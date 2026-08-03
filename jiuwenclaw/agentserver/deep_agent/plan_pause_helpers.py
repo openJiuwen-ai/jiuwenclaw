@@ -218,11 +218,12 @@ async def persist_checkpoint_for_session(
             await session.post_run()
 
 
-async def post_agent_execute_for_session(session: Any) -> None:
+async def post_agent_execute_for_session(session: Any, checkpointer: Any | None = None) -> None:
     """Flush session state to checkpointer without post_run."""
     actual_session = getattr(session, "_parent", session) or session
     inner = getattr(actual_session, "_inner", actual_session)
-    await CheckpointerFactory.get_checkpointer().post_agent_execute(inner)
+    cp = checkpointer if checkpointer is not None else CheckpointerFactory.get_checkpointer()
+    await cp.post_agent_execute(inner)
 
 
 def format_paused_plan_snapshot(todos: list[TodoItem]) -> str:

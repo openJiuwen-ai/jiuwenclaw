@@ -49,12 +49,15 @@ def extract_llm_json(
         raise ValueError(f"LLM返回了未预期的类型: {type(raw)}")
     
     # 尝试直接解析
+    first_error: json.JSONDecodeError | None = None
     try:
         result = json.loads(raw)
         if isinstance(result, expected_type):
             return result
-    except json.JSONDecodeError:
-        pass
+        # 解析成功但类型不匹配
+        first_error = None
+    except json.JSONDecodeError as e:
+        first_error = e
     
     # 提取 ```json ... ``` / ``` ... ``` 代码块
     code_block = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
@@ -78,6 +81,16 @@ def extract_llm_json(
         except json.JSONDecodeError:
             pass
     
+    # 构建包含具体错误原因的报错信息
+    if first_error is not None:
+        context_start = max(0, first_error.pos - 80)
+        context_end = min(len(raw), first_error.pos + 80)
+        error_context = raw[context_start:context_end].replace("\n", "\\n")
+        raise ValueError(
+            f"无法从LLM输出中解析JSON（期望{expected_type.__name__}）："
+            f"{first_error.msg}（第{first_error.lineno}行第{first_error.colno}列）。"
+            f"出错位置附近：...{error_context}..."
+        )
     raise ValueError(
         f"无法从LLM输出中解析JSON（期望{expected_type.__name__}）：{raw[:300]}"
     )

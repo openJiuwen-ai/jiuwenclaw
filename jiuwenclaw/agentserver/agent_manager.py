@@ -14,6 +14,7 @@ from jiuwenclaw.agentserver.reload_result import (
     ReloadAggregateResult,
     ReloadResult,
     log_agent_config_hot_reload_replay,
+    reload_touches_memory,
 )
 from jiuwenclaw.agentserver.memory import (
     acquire_memory_cache_session,
@@ -26,6 +27,7 @@ from jiuwenclaw.local_env_config import (
     bind_task_env_overlay,
     build_effective_env_overlay,
     promote_staged_env,
+    replace_active_env,
     reset_task_env_overlay,
     stage_env_overrides,
 )
@@ -34,7 +36,7 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
     merge_reload_env_snapshot,
     sync_multimodal_env_omission_state,
 )
-from jiuwenclaw.utils import get_agent_workspace_dir
+from jiuwenclaw.utils import get_agent_workspace_dir, get_multi_tenant_user_workspace_dir
 from jiuwenclaw.config import _sandbox_yaml_to_env_overlay
 
 if TYPE_CHECKING:
@@ -90,15 +92,19 @@ class AgentManager:
             config_base: dict[str, Any] | None = None,
             env_overrides: dict[str, Any] | None = None,
             last_reload_trace_id: str | None = None,
+            *,
+            env_agent_id: str | None = None,
+            env_service_id: str | None = None,
     ) -> None:
         """初始化 AgentManager.
 
         Args:
-            agent_id: agent名称/路径
+            agent_id: agent名称/路径（可能被 AGENT_RUNTIME 改写成 cache_key）
             service_id: 服务ID（chat_id + bot_app_id 组合）
             user_workspace_dir: 用户工作目录路径
             config_base: 初始配置（用于懒加载 agent 时重放）
             env_overrides: 初始环境变量覆盖（用于懒加载 agent 时重放）
+            env_agent_id / env_service_id: 请求侧 id，用于 tip/ns 袋键（不得用改写后 agent_id）
         """
         # 结构: dict[channel_id][mode][session_id] -> JiuWenClaw
         # 每个 session_id 对应独立的 Agent 实例，支持多 session 并发执行
@@ -109,14 +115,39 @@ class AgentManager:
         self._latest_config_base: dict[str, Any] | None = config_base
         self._latest_env_overrides: dict[str, Any] = {}
 
+        # Request-side ids for env tip / ns (never follow AGENT_RUNTIME rewrite).
+        self.env_agent_id = env_agent_id if env_agent_id is not None else agent_id
+        self.env_service_id = (
+            env_service_id if env_service_id is not None else service_id
+        )
+
         # 应用初始 env_overrides（冷启动，尚无在途 session）
         if env_overrides is not None and isinstance(env_overrides, dict):
-            omission_removals = infer_multimodal_env_removals(None, env_overrides)
+            omission_removals = infer_multimodal_env_removals(
+                None,
+                env_overrides,
+                active_env=None,
+                service_id=self.env_service_id,
+                agent_id=self.env_agent_id,
+            )
             if omission_removals:
-                apply_env_removals(omission_removals)
-            sync_multimodal_env_omission_state(omission_removals, env_overrides)
+                apply_env_removals(
+                    omission_removals,
+                    service_id=self.env_service_id,
+                    agent_id=self.env_agent_id,
+                )
+            sync_multimodal_env_omission_state(
+                omission_removals,
+                env_overrides,
+                service_id=self.env_service_id,
+                agent_id=self.env_agent_id,
+            )
             self._latest_env_overrides = merge_reload_env_snapshot(None, env_overrides)
-            apply_env_overrides_to_active(env_overrides)
+            apply_env_overrides_to_active(
+                env_overrides,
+                service_id=self.env_service_id,
+                agent_id=self.env_agent_id,
+            )
 
         # 把 config_base['sandbox'] 的 url/type/enabled 翻译成 active env,
         # 让懒加载路径首次 _create_sys_operation 也能读到 yaml 配置的值
@@ -124,26 +155,55 @@ class AgentManager:
         if isinstance(config_base, dict):
             sandbox_overlay = _sandbox_yaml_to_env_overlay(config_base.get("sandbox"))
             if sandbox_overlay:
-                apply_env_overrides_to_active(sandbox_overlay)
+                apply_env_overrides_to_active(
+                    sandbox_overlay,
+                    service_id=self.env_service_id,
+                    agent_id=self.env_agent_id,
+                )
 
         self.agent_id = agent_id
         self.service_id = service_id
         self.user_workspace_dir = user_workspace_dir
         self._last_reload_trace_id = last_reload_trace_id
         logger.info(
-            "[AgentManager] 初始化: agent_id=%s, service_id=%s, workspace=%s, has_config=%s",
+            "[AgentManager] 初始化: agent_id=%s, service_id=%s, env_ns=(%s,%s), workspace=%s, has_config=%s",
             agent_id,
             service_id,
+            self.env_service_id,
+            self.env_agent_id,
             user_workspace_dir,
             config_base is not None,
         )
 
-    @staticmethod
-    def _build_session_key(channel_id: str, mode: str, session_id: str) -> str:
-        return f"{channel_id}:{mode}:{session_id}"
+    @property
+    def env_ns_service_id(self) -> str:
+        return self.env_service_id
+
+    @property
+    def env_ns_agent_id(self) -> str:
+        return self.env_agent_id
+
+    def _build_session_key(self, channel_id: str, mode: str, session_id: str) -> str:
+        """Build registry session key including tenant ids (request-side env_*).
+
+        ``_SESSION_BINDINGS`` is process-global; without ``(service_id, agent_id)``
+        two tenants sharing channel/mode/session_id (e.g. ``default``) would
+        steal each other's memory cache refcounts.
+        """
+        return (
+            f"{self.env_service_id}:{self.env_agent_id}:"
+            f"{channel_id}:{mode}:{session_id}"
+        )
 
     def _memory_workspace_dir(self) -> str:
-        return str(self.user_workspace_dir or get_agent_workspace_dir())
+        if self.user_workspace_dir:
+            return str(Path(self.user_workspace_dir) / "agent" / "jiuwenclaw_workspace")
+        workspace = get_multi_tenant_user_workspace_dir(
+            self.env_service_id, self.env_agent_id
+        )
+        if workspace is not None:
+            return str(workspace / "agent" / "jiuwenclaw_workspace")
+        return str(get_agent_workspace_dir())
 
     async def _sync_agent_memory_cache(self, session_key: str, agent: "JiuWenClaw") -> None:
         fingerprint = await agent.get_memory_cache_fingerprint()
@@ -151,7 +211,7 @@ class AgentManager:
             return
         await acquire_memory_cache_session(
             session_key,
-            "default",
+            self.env_agent_id,
             self._memory_workspace_dir(),
             fingerprint,
         )
@@ -183,17 +243,21 @@ class AgentManager:
             user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None,
             agent_id=self.agent_id,
             service_id=self.service_id,
+            env_agent_id=self.env_agent_id,
+            env_service_id=self.env_service_id,
         )
         merged_config = dict(config) if isinstance(config, dict) else {}
         merged_config.setdefault(
             "agent_name",
             f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}",
         )
-        overlay_token = None
-        if self._latest_env_overrides:
-            overlay = build_effective_env_overlay(self._latest_env_overrides)
-            if overlay:
-                overlay_token = bind_task_env_overlay(overlay)
+        # Always bind (incl. {}): seal; tip = formula B ∪ latest overrides.
+        overlay = build_effective_env_overlay(
+            self._latest_env_overrides or None,
+            service_id=self.env_service_id,
+            agent_id=self.env_agent_id,
+        )
+        overlay_token = bind_task_env_overlay(overlay)
         try:
             await agent.create_instance(merged_config, mode=mode, session_id=session_id)
             self.agents.setdefault(agent_key, {}).setdefault(mode, {})[session_id] = agent
@@ -217,8 +281,7 @@ class AgentManager:
                 except Exception as e:
                     logger.warning("[AgentManager] Replay reload_agent_config failed: %s", e)
         finally:
-            if overlay_token is not None:
-                reset_task_env_overlay(overlay_token)
+            reset_task_env_overlay(overlay_token)
 
         session_key = self._build_session_key(agent_key, mode, session_id)
         try:
@@ -428,7 +491,11 @@ class AgentManager:
         if isinstance(config, dict):
             sandbox_overlay = _sandbox_yaml_to_env_overlay(config.get("sandbox"))
             if sandbox_overlay:
-                stage_env_overrides(sandbox_overlay)
+                stage_env_overrides(
+                    sandbox_overlay,
+                    service_id=self.env_service_id,
+                    agent_id=self.env_agent_id,
+                )
 
         aggregate = ReloadAggregateResult()
         for channel_id, channel_agents in self.agents.items():
@@ -441,7 +508,7 @@ class AgentManager:
                 continue
             for mode, mode_agents in channel_agents.items():
                 for session_id, agent in mode_agents.items():
-                    session_key = f"{channel_id}:{mode}:{session_id}"
+                    session_key = self._build_session_key(channel_id, mode, session_id)
                     try:
                         result = await agent.reload_agent_config(
                             config_base=config,
@@ -466,9 +533,116 @@ class AgentManager:
                         )
             logger.info("channel %s reload agent config finished.", channel_id)
 
-        if not self.is_working():
-            promote_staged_env()
+        idle = not self.is_working()
+        if idle:
+            promote_staged_env(
+                service_id=self.env_service_id,
+                agent_id=self.env_agent_id,
+            )
+        try:
+            from jiuwenclaw.agentserver.tools.browser_tools import (
+                notify_browser_runtime_after_reload,
+            )
 
+            notify_browser_runtime_after_reload(
+                idle=idle,
+                service_id=self.env_service_id,
+                agent_id=self.env_agent_id,
+            )
+        except Exception:
+            logger.exception(
+                "[AgentManager] browser runtime reload notify failed"
+            )
+
+        return aggregate
+
+    async def apply_sync_config(
+        self,
+        config: dict[str, Any],
+        env: dict[str, Any],
+    ) -> ReloadAggregateResult:
+        """Apply sync_agents_configs write-through config/env to live adapters."""
+        previous_config = self._latest_config_base
+        self._latest_config_base = config
+        self._latest_env_overrides = dict(env)
+        replace_active_env(
+            env,
+            service_id=self.env_service_id,
+            agent_id=self.env_agent_id,
+            clear_staged=True,
+        )
+        invalidate_memory = reload_touches_memory(
+            env,
+            config,
+            previous_config=previous_config,
+        )
+
+        aggregate = ReloadAggregateResult()
+        # Walk channel/mode/session so memory bindings use tenant-qualified keys.
+        for channel_id, channel_agents in self.agents.items():
+            if not isinstance(channel_agents, dict):
+                continue
+            for mode, mode_agents in channel_agents.items():
+                if not isinstance(mode_agents, dict):
+                    continue
+                for session_id, claw in mode_agents.items():
+                    adapter = getattr(claw, "_adapter", None)
+                    if adapter is None:
+                        continue
+                    session_key = self._build_session_key(channel_id, mode, session_id)
+                    try:
+                        if claw.is_working():
+                            # Busy: rewrite pending to sync-side materialization (plan: never
+                            # clear-only; never keep old Gateway snapshot).
+                            pending = (config, env, invalidate_memory)
+                            if hasattr(adapter, "_pending_reload"):
+                                setattr(adapter, "_pending_reload", pending)
+                                aggregate.deferred += 1
+                            else:
+                                result = await claw.reload_agent_config(config, env)
+                                aggregate.merge(result, session_key=session_key)
+                        else:
+                            reload_fn = getattr(adapter, "reload_agent_config", None)
+                            if callable(reload_fn):
+                                result = await reload_fn(
+                                    config,
+                                    env,
+                                    _force_apply=True,
+                                    _invalidate_memory_cache=invalidate_memory,
+                                )
+                                aggregate.merge(result, session_key=session_key)
+                                if result.applied or result.deferred:
+                                    try:
+                                        await self._sync_agent_memory_cache(
+                                            session_key, claw
+                                        )
+                                    except Exception as exc:
+                                        logger.warning(
+                                            "[AgentManager] sync memory cache after sync apply failed: %s",
+                                            exc,
+                                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "[AgentManager] apply_sync_config failed for adapter"
+                        )
+                        aggregate.failed.append(
+                            {"session": session_key, "error": str(exc)}
+                        )
+
+        try:
+            from jiuwenclaw.agentserver.tools.browser_tools import (
+                notify_browser_runtime_after_reload,
+            )
+
+            notify_browser_runtime_after_reload(
+                idle=not self.is_working(),
+                service_id=self.env_service_id,
+                agent_id=self.env_agent_id,
+            )
+        except Exception:
+            logger.exception(
+                "[AgentManager] browser runtime sync-config notify failed"
+            )
         return aggregate
 
     async def _process_disk_only_evolution(self, request: Any) -> Any:

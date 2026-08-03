@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+_MAX_RECENT_TASK_KEYS = 1024
+_TaskKey = tuple[str, str]
 
 
 class SessionManager:
@@ -28,6 +32,8 @@ class SessionManager:
         self._session_priorities: dict[str, int] = {}
         self._session_queues: dict[str, asyncio.PriorityQueue] = {}
         self._session_processors: dict[str, asyncio.Task] = {}
+        self._active_task_keys: set[_TaskKey] = set()
+        self._recent_task_keys: OrderedDict[_TaskKey, None] = OrderedDict()
 
     def get_session_id(self, session_id: str | None) -> str:
         """获取 session_id，默认为 'default'."""
@@ -87,6 +93,9 @@ class SessionManager:
                     except Exception as e:
                         logger.error("[SessionManager] Session 任务处理器异常: %s", e)
 
+                self._active_task_keys = {
+                    key for key in self._active_task_keys if key[0] != session_id
+                }
                 self._session_queues.pop(session_id, None)
                 self._session_priorities.pop(session_id, None)
                 self._session_tasks.pop(session_id, None)
@@ -111,6 +120,69 @@ class SessionManager:
         priority = self._session_priorities[session_id]
         await self._session_queues[session_id].put((priority, task_func))
 
+    def _reserve_task_key(self, key: _TaskKey) -> bool:
+        if key in self._active_task_keys or key in self._recent_task_keys:
+            return False
+        self._active_task_keys.add(key)
+        return True
+
+    def _complete_task_key(self, key: _TaskKey) -> None:
+        self._active_task_keys.discard(key)
+        self._recent_task_keys[key] = None
+        while len(self._recent_task_keys) > _MAX_RECENT_TASK_KEYS:
+            self._recent_task_keys.popitem(last=False)
+
+    async def submit_task_once(
+        self,
+        session_id: str,
+        task_key: str,
+        task_func: Callable[[], Awaitable[Any]],
+    ) -> bool:
+        """Atomically queue a keyed task once in this process."""
+        key = (session_id, task_key)
+        if not self._reserve_task_key(key):
+            return False
+
+        async def tracked_task() -> Any:
+            try:
+                return await task_func()
+            finally:
+                self._complete_task_key(key)
+
+        try:
+            await self.submit_task(session_id, tracked_task)
+        except BaseException:
+            self._active_task_keys.discard(key)
+            raise
+        return True
+
+    async def submit_and_wait_once(
+        self,
+        session_id: str,
+        task_key: str,
+        task_func: Callable[[], Awaitable[Any]],
+    ) -> tuple[bool, Any | None]:
+        """Atomically queue and await a keyed task once in this process."""
+        result_future = asyncio.get_running_loop().create_future()
+
+        async def wait_task() -> None:
+            try:
+                result = await task_func()
+            except asyncio.CancelledError:
+                if not result_future.done():
+                    result_future.cancel()
+                raise
+            except Exception as exc:
+                if not result_future.done():
+                    result_future.set_exception(exc)
+            else:
+                if not result_future.done():
+                    result_future.set_result(result)
+
+        if not await self.submit_task_once(session_id, task_key, wait_task):
+            return False, None
+        return True, await result_future
+
     async def submit_and_wait(
         self,
         session_id: str,
@@ -131,9 +203,16 @@ class SessionManager:
         async def wrapped_task():
             try:
                 result = await task_func()
-                result_future.set_result(result)
+            except asyncio.CancelledError:
+                if not result_future.done():
+                    result_future.cancel()
+                raise
             except Exception as e:
-                result_future.set_exception(e)
+                if not result_future.done():
+                    result_future.set_exception(e)
+            else:
+                if not result_future.done():
+                    result_future.set_result(result)
 
         self._session_priorities[session_id] -= 1
         priority = self._session_priorities[session_id]

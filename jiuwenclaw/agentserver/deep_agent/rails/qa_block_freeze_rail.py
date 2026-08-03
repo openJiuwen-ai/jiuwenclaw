@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any, Literal
 
@@ -116,17 +117,32 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         context: Any,
         qa_id: str,
         native_messages: list,
+        force_produce: bool = False,
+        l0_content_mode: str | None = None,
+        had_full_compact_in_qa: bool | None = None,
     ) -> None:
         mgr = self._qa_artifact_mgr
         if mgr is None or self.workspace is None:
             return
         artifact_ctx = make_processor_ctx(context, sys_operation=self.sys_operation)
-        mgr.schedule_freeze_artifact_produce(
-            artifact_ctx,
-            workspace=self.workspace,
-            qa_id=qa_id,
-            native_messages=native_messages,
-        )
+        produce = mgr.schedule_freeze_artifact_produce
+        call_kwargs: dict[str, Any] = {
+            "workspace": self.workspace,
+            "qa_id": qa_id,
+            "native_messages": native_messages,
+        }
+        # Compatible with older agent-core that lacks force_produce kwargs.
+        try:
+            params = inspect.signature(produce).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "force_produce" in params:
+            call_kwargs["force_produce"] = force_produce
+        if "l0_content_mode" in params:
+            call_kwargs["l0_content_mode"] = l0_content_mode
+        if "had_full_compact_in_qa" in params:
+            call_kwargs["had_full_compact_in_qa"] = had_full_compact_in_qa
+        produce(artifact_ctx, **call_kwargs)
 
     async def _clear_empty_current_qa_after_failed_freeze(
         self,
@@ -203,6 +219,18 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
                 context=context,
                 qa_id=commit.entry.qa_id,
                 native_messages=commit.native_messages,
+                # Force-produce responsibility split (P0-2):
+                # - Rail: extract flags from QABlockEntry and set force_produce.
+                #   recovery_required is entry-only and cannot be inferred by manager.
+                # - Manager: final gate; also ORs had_full_compact / compact_summary_tail
+                #   from kwargs or message inference (defense-in-depth / non-rail callers).
+                force_produce=bool(
+                    getattr(commit.entry, "had_full_compact_in_qa", False)
+                    or getattr(commit.entry, "l0_content_mode", "") == "compact_summary_tail"
+                    or getattr(commit.entry, "recovery_required", False)
+                ),
+                l0_content_mode=getattr(commit.entry, "l0_content_mode", None),
+                had_full_compact_in_qa=getattr(commit.entry, "had_full_compact_in_qa", None),
             )
         )
 
@@ -219,8 +247,13 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         session: Any = None,
         status: Literal["completed", "interrupted"] = "interrupted",
         persist_context: bool = True,
+        persist_mode: Literal["async", "sync"] = "sync",
     ) -> None:
         """Emergency freeze before plan cancel checkpoint.
+
+        Async persistence requires the caller to keep ``session`` alive until
+        the background freeze task finishes. Callers that own a temporary
+        session must use the default sync mode before closing it.
 
         ``persist_context=False`` skips ``save_contexts`` so callers (orphan salvage)
         can restore temporarily stripped current-round user messages before persisting.
@@ -261,7 +294,7 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             history,
             store,
             status=status,
-            persist_mode="sync",
+            persist_mode=persist_mode,
             summarizer_model=summarizer_model,
             post_commit=lambda commit, s=actual_session, c=context: self._on_freeze_commit(s, c, commit),
         )
@@ -273,12 +306,13 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             else:
                 await self._persist_freeze_checkpoint(actual_session, session_id=session_id)
             logger.info(
-                "[QABlockFreezeRail] cancel sync freeze done session_id=%s qa_id=%s status=%s "
-                "persist_context=%s",
+                "[QABlockFreezeRail] cancel freeze done session_id=%s qa_id=%s status=%s "
+                "persist_context=%s persist_mode=%s",
                 session_id,
                 entry.qa_id,
                 status,
                 persist_context,
+                persist_mode,
             )
         else:
             await self._clear_empty_current_qa_after_failed_freeze(

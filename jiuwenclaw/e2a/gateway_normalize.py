@@ -606,6 +606,8 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             "status": body.get("status"),
             "data": body.get("data"),
             "message": body.get("message"),
+            "service_id": body.get("service_id"),
+            "agent_id": body.get("agent_id"),
         }
         return AgentResponseChunk(
             request_id=rid,

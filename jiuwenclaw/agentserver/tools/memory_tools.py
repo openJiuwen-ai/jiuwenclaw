@@ -23,7 +23,6 @@ from ..memory import (
     create_wiki_memory_settings,
     is_memory_enabled,
     get_memory_mode,
-    DEFAULT_WORKSPACE_DIR,
     get_bound_memory_cache_fingerprint,
 )
 from ..memory.external_memory_config import is_builtin_memory_allowed
@@ -41,14 +40,86 @@ def is_group_chat_mode() -> bool:
     return _GROUP_CHAT_MODE.get()
 
 
-_default_agent_id: str = "default"
+_MEMORY_WORKSPACE_CV: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "memory_workspace_dir", default=None
+)
+_MEMORY_AGENT_ID_CV: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "memory_agent_id", default=None
+)
 
 
-def _resolve_workspace_dir(workspace_dir: str | None = None) -> str:
+def bind_memory_workspace_dir(path: str) -> contextvars.Token:
+    return _MEMORY_WORKSPACE_CV.set(path)
+
+
+def reset_memory_workspace_dir(token: contextvars.Token) -> None:
+    _MEMORY_WORKSPACE_CV.reset(token)
+
+
+def clear_memory_workspace_binding() -> None:
+    """Reset memory workspace ContextVar (tests / request teardown safety)."""
+    _MEMORY_WORKSPACE_CV.set(None)
+
+
+def bind_memory_agent_id(agent_id: str) -> contextvars.Token:
+    aid = str(agent_id).strip()
+    if not aid:
+        raise ValueError("memory agent_id must be a non-empty string")
+    return _MEMORY_AGENT_ID_CV.set(aid)
+
+
+def reset_memory_agent_id(token: contextvars.Token) -> None:
+    _MEMORY_AGENT_ID_CV.reset(token)
+
+
+def get_bound_memory_agent_id() -> str | None:
+    return _MEMORY_AGENT_ID_CV.get()
+
+
+def clear_memory_agent_id_binding() -> None:
+    """Reset memory agent_id ContextVar (tests / request teardown safety)."""
+    _MEMORY_AGENT_ID_CV.set(None)
+
+
+def _resolve_workspace_dir(
+    workspace_dir: str | None = None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> str:
     if workspace_dir and workspace_dir != ".":
         return workspace_dir
-    from jiuwenclaw.utils import get_agent_workspace_dir
-    return str(get_agent_workspace_dir())
+    bound = _MEMORY_WORKSPACE_CV.get()
+    if bound:
+        return bound
+    from jiuwenclaw.utils import resolve_tenant_agent_workspace_dir
+
+    return str(resolve_tenant_agent_workspace_dir(service_id, agent_id))
+
+
+def _resolve_memory_agent_id(explicit: str | None = None) -> str:
+    """Resolve INDEX_CACHE agent_id: explicit > memory CV > bound env_ns > error.
+
+    Never silently falls back to ``\"default\"``. Single-tenant must bind or pass
+    ``agent_id=\"default\"`` explicitly (same policy as Rail scope).
+    """
+    if explicit is not None:
+        aid = str(explicit).strip()
+        if not aid:
+            raise TypeError("memory agent_id must be a non-empty string")
+        return aid
+    bound = _MEMORY_AGENT_ID_CV.get()
+    if bound:
+        return bound
+    from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+
+    ns = get_bound_agent_env_ns()
+    if ns is not None:
+        return ns[1]
+    raise TypeError(
+        "memory agent_id is required: pass agent_id=..., or call "
+        "bind_memory_agent_id / bind_agent_env_ns before resolving the manager"
+    )
 
 
 def _resolve_embed_fingerprint(explicit: str | None = None) -> str:
@@ -63,7 +134,7 @@ def _resolve_embed_fingerprint(explicit: str | None = None) -> str:
 async def _get_memory_manager(
     *,
     workspace_dir: str | None = None,
-    agent_id: str = "default",
+    agent_id: str | None = None,
     memory_mode: str | None = None,
     embed_fingerprint: str | None = None,
 ) -> Optional[MemoryIndexManager | MemoryWikiManager]:
@@ -74,6 +145,7 @@ async def _get_memory_manager(
     if not is_memory_enabled(mode):
         return None
 
+    resolved_agent_id = _resolve_memory_agent_id(agent_id)
     resolved_workspace = _resolve_workspace_dir(workspace_dir)
     fp = _resolve_embed_fingerprint(embed_fingerprint)
     settings = create_memory_settings(resolved_workspace)
@@ -82,7 +154,7 @@ async def _get_memory_manager(
         if mode == "wiki":
             wiki_settings = create_wiki_memory_settings()
             return await MemoryWikiManager.get(
-                agent_id=agent_id,
+                agent_id=resolved_agent_id,
                 workspace_dir=resolved_workspace,
                 settings=settings,
                 embed_fingerprint=fp,
@@ -91,7 +163,7 @@ async def _get_memory_manager(
                 language=wiki_settings.language,
             )
         return await MemoryIndexManager.get(
-            agent_id=agent_id,
+            agent_id=resolved_agent_id,
             workspace_dir=resolved_workspace,
             settings=settings,
             embed_fingerprint=fp,
@@ -105,7 +177,7 @@ def set_global_memory_manager(
     manager: Optional[MemoryIndexManager | MemoryWikiManager],
     workspace_dir: str = ".",
     settings: Optional[MemorySettings] = None,
-    agent_id: str = "default",
+    agent_id: str | None = None,
 ):
     """Deprecated: memory managers are fingerprint-scoped; kept for test compatibility."""
     del manager, workspace_dir, settings, agent_id
@@ -166,11 +238,16 @@ def _validate_memory_path(path: str) -> tuple[bool, str]:
 
 async def init_memory_manager_async(
     workspace_dir: str = ".",
-    agent_id: str = "default",
+    *,
+    agent_id: str,
     memory_mode: str = "plan",
     embed_fingerprint: str | None = None,
 ) -> Optional[MemoryIndexManager | MemoryWikiManager]:
-    """Initialize memory manager for the given workspace and config fingerprint."""
+    """Initialize memory manager for the given workspace and config fingerprint.
+
+    ``agent_id`` is required (keyword-only). Callers must pass the request-side
+    env agent id explicitly — there is no silent ``\"default\"`` fallback.
+    """
     if not is_builtin_memory_allowed():
         logger.info("Memory system is disabled (engine gate)")
         return None

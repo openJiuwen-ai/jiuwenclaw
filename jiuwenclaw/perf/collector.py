@@ -12,6 +12,7 @@ from jiuwenclaw.perf.config import get_perf_summary_config
 from jiuwenclaw.perf.events import LlmPerfEvent, TaskPerfEvent, ToolPerfEvent
 from jiuwenclaw.perf.writer import append_request_summary
 from jiuwenclaw.perf.guard import run_perf_safe
+from jiuwenclaw.utils import normalize_tenant_scope_id
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,8 @@ class PerfCollector:
         mode: str,
         trace_id: str | None = None,
         started_at: float | None = None,
+        service_id: str | None = None,
+        agent_id: str | None = None,
     ) -> RequestSummaryAccumulator | None:
         cfg = get_perf_summary_config()
         if not cfg.enabled:
@@ -52,6 +55,8 @@ class PerfCollector:
             mode=(mode or "agent.plan").strip() or "agent.plan",
             trace_id=trace_id,
             started_at=started_at if started_at is not None else time.time(),
+            service_id=normalize_tenant_scope_id(service_id),
+            agent_id=normalize_tenant_scope_id(agent_id),
         )
         acc = RequestSummaryAccumulator(
             meta=meta,
@@ -140,7 +145,12 @@ class PerfCollector:
         summary = acc.finalize(status=status, ended_at=ended_at)
 
         def _write_summary() -> None:
-            append_request_summary(acc.meta.session_id, summary)
+            append_request_summary(
+                acc.meta.session_id,
+                summary,
+                service_id=acc.meta.service_id,
+                agent_id=acc.meta.agent_id,
+            )
             acc.flushed = True
             with self._lock:
                 self._written_request_ids.add(rid)

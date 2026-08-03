@@ -46,17 +46,25 @@ from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
 from jiuwenclaw.gateway.local_rpc_hooks import LocalRpcHookDispatcher
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
-from jiuwenclaw.local_env_config import decrypt
+from jiuwenclaw.local_env_config import decrypt, mirror_bare_business_env_to_default_ns
 
 # 确保工作区已初始化（使用跨进程锁保护并发访问）
 ensure_workspace_initialized(component_name="Gateway")
+
+# SessionMap 路径布局迁移：agent_default/.checkpoint → {JIUWENCLAW_DATA_DIR}/.gateway/
+from jiuwenclaw.gateway.session_map import migrate_legacy_session_map_if_needed
+
+migrate_legacy_session_map_if_needed()
 
 # Reduce openjiuwen internal logs (keep Gateway logs)
 configure_openjiuwen_logging_under_jiuwenclaw()
 for _lg in LogManager.get_all_loggers().values():
     _lg.set_level(logging.INFO)
 
+# Load env from user workspace config/.env, then mirror business bare keys into
+# default__default__* so get_local_config / get_default_models see cold-start tip.
 load_dotenv(dotenv_path=get_env_file())
+mirror_bare_business_env_to_default_ns()
 
 logger = logging.getLogger(__name__)
 
@@ -826,6 +834,7 @@ async def _run(
     web_port: int,
     web_path: str,
 ) -> None:
+    from openjiuwen.core.runner import Runner
     from jiuwenclaw.channel.dingding import DingTalkChannel, DingTalkConfig
     from jiuwenclaw.channel.feishu import FeishuChannel, FeishuConfig
     from jiuwenclaw.channel.whatsapp_channel import WhatsAppChannel, WhatsAppChannelConfig
@@ -839,7 +848,7 @@ async def _run(
     from jiuwenclaw.config import get_config
     from jiuwenclaw.gateway.agent_client import WebSocketAgentServerClient
     from jiuwenclaw.gateway.channel_manager import ChannelManager
-    from jiuwenclaw.gateway.cron import CronController, CronJobStore, CronSchedulerService
+    from jiuwenclaw.gateway.cron import CronTenantRegistry
     from jiuwenclaw.gateway.heartbeat import GatewayHeartbeatService, HeartbeatConfig
     from jiuwenclaw.gateway.message_handler import MessageHandler
     from jiuwenclaw.app_web_handlers import (
@@ -862,7 +871,6 @@ async def _run(
     from jiuwenclaw.schema.hooks_context import WebChannelCreatedHookContext
     from jiuwenclaw.updater import WindowsUpdaterService
     from jiuwenclaw.telemetry import init_telemetry
-    from openjiuwen.core.runner import Runner
 
     logger.info("[App] Gateway starting, connecting AgentServer: %s", agent_server_url)
 
@@ -910,14 +918,11 @@ async def _run(
     message_handler.set_inbound_pipeline(im_inbound)
     message_handler.set_outbound_pipeline(im_outbound)
 
-    cron_store = CronJobStore(path=get_user_workspace_dir() / "gateway" / "cron_jobs.json")
-    cron_scheduler = CronSchedulerService(
-        store=cron_store,
+    cron_registry = CronTenantRegistry.get_instance(
         agent_client=client,
         message_handler=message_handler,
     )
-    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
-    message_handler.set_cron_controller(cron_controller)
+    message_handler.set_cron_registry(cron_registry)
 
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None
@@ -1127,7 +1132,7 @@ async def _run(
             channel_manager=channel_manager,
             on_config_saved=_on_config_saved,
             heartbeat_service=heartbeat_service if heartbeat_enabled else None,
-            cron_controller=cron_controller,
+            cron_registry=cron_registry,
             updater_service=updater_service,
         )
     )
@@ -1735,7 +1740,6 @@ async def _run(
     await channel_manager.set_config(initial_channels_conf)
 
     await channel_manager.start_dispatch()
-    await cron_scheduler.start()
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     logger.info("[App] about to call gateway_server.start()")
     try:
@@ -1877,7 +1881,7 @@ async def _run(
                 pass
             await wechat_channel.stop()
 
-        await cron_scheduler.stop()
+        await cron_registry.stop_all()
         await channel_manager.stop_dispatch()
         if heartbeat_enabled:
             await heartbeat_service.stop()

@@ -20,12 +20,9 @@ from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenclaw.utils import (
-    get_user_workspace_dir,
-    get_agent_memory_dir,
-    resolve_agent_registered_skill_dirs,
-    get_agent_workspace_dir,
-    get_deepagent_todo_dir,
     get_multi_tenant_user_workspace_dir,
+    normalize_tenant_scope_id,
+    resolve_agent_registered_skill_dirs,
 )
 
 _CN_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -58,6 +55,8 @@ class RuntimePromptRail(DeepAgentRail):
         self._tz = timezone(timedelta(hours=timezone_offset))
         self._agent_name = agent_name
         self._model_name = model_name
+        self._mode: str = ""
+        self._session_id: str | None = None
         self._workspace_dir = workspace_dir
         self._agent_id = agent_id
         self._service_id = service_id
@@ -72,6 +71,22 @@ class RuntimePromptRail(DeepAgentRail):
             self._registered_skill_dirs = None
             return
         self._registered_skill_dirs = [str(d) for d in dirs if str(d).strip()]
+
+    def set_model_name(self, model_name: str) -> None:
+        """Per-request model name used in the runtime prompt section."""
+        self._model_name = model_name or ""
+
+    def set_mode(self, mode: str) -> None:
+        """Per-request mode label (team/plan/…); stored for prompt/runtime context."""
+        self._mode = mode or ""
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """Per-request session id for session-scoped runtime context."""
+        self._session_id = (
+            session_id.strip()
+            if isinstance(session_id, str) and session_id.strip()
+            else None
+        )
 
     def _skills_dirs_display(self, workspace_root: Path) -> str:
         if self._registered_skill_dirs:
@@ -126,30 +141,26 @@ class RuntimePromptRail(DeepAgentRail):
         self._request_soul = value
 
     def _get_workspace_dirs(self) -> dict[str, str]:
-        """获取工作空间目录路径，支持多租户。"""
-        if self._agent_id and self._service_id:
-            # 多租户模式
-            base_workspace = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
-            if base_workspace:
-                workspace_root = base_workspace / "agent" / "jiuwenclaw_workspace"
-                return {
-                    "config": str(base_workspace / "config"),
-                    "workspace": self._workspace_dir or str(workspace_root), # 优先使用请求中的 workspace_dir
-                    "memory": str(workspace_root / "memory"),
-                    "daily_memory": str(workspace_root / "memory" / "daily_memory"),
-                    "skills": self._skills_dirs_display(workspace_root),
-                    "todo": str(workspace_root / "todo"),
-                }
-        
-        # 单租户模式
-        workspace_root = Path(self._workspace_dir or str(get_agent_workspace_dir()))
+        """获取工作空间目录路径（始终按租户树；缺省为 default/default）。"""
+        service_id = normalize_tenant_scope_id(self._service_id)
+        agent_id = normalize_tenant_scope_id(self._agent_id)
+        base_workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+        if base_workspace is None:
+            # normalize 后两侧均非空，理论上不会走到；防御性回退 default/default。
+            base_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+        if base_workspace is None:
+            raise RuntimeError(
+                "failed to resolve multi-tenant workspace for RuntimePromptRail "
+                f"(service_id={service_id!r}, agent_id={agent_id!r})"
+            )
+        workspace_root = base_workspace / "agent" / "jiuwenclaw_workspace"
         return {
-            "config": str(get_user_workspace_dir() / "config"),
-            "workspace": self._workspace_dir or str(get_agent_workspace_dir()),
-            "memory": str(get_agent_memory_dir()),
-            "daily_memory": str(get_agent_memory_dir() / "daily_memory"),
+            "config": str(base_workspace / "config"),
+            "workspace": self._workspace_dir or str(workspace_root),
+            "memory": str(workspace_root / "memory"),
+            "daily_memory": str(workspace_root / "memory" / "daily_memory"),
             "skills": self._skills_dirs_display(workspace_root),
-            "todo": str(get_deepagent_todo_dir()),
+            "todo": str(workspace_root / "todo"),
         }
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
@@ -371,16 +382,16 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
                 |------|---------|------------|
                 | `{config_dir}` | Configuration | Do not modify lightly; bad config can cause failures |
                 | `{resolved_workspace}` | Identity and task info | You may update this to better serve your user |
-                | `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory; 
+                | `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory;
                 consult it anytime |
-                | `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records; 
+                | `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records;
                 call memory_index after creating/editing |
                 | `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
                 | `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
 
                 ## Configuration
 
-                Be careful with your configuration. If changes are required, remember to restart your service 
+                Be careful with your configuration. If changes are required, remember to restart your service
                 afterwards.
 
                 | Path | Purpose |
@@ -390,7 +401,7 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
 
                 ## File Output and Sending Guidelines
 
-                Generated artifacts (code files, documents, data files, etc.) produced during user task execution 
+                Generated artifacts (code files, documents, data files, etc.) produced during user task execution
                 should be stored according to the following rules:
 
                 ### Files to Deliver to User
@@ -409,15 +420,16 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
 
                 ## Sending Files
 
-                When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it 
+                When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it
                 in these scenarios:
-                - Task completion produces files that need to be delivered to the user (reports, documents, 
+                - Task completion produces files that need to be delivered to the user (reports, documents,
                 data files, images, etc.)
                 - User explicitly requests to download, export, or receive files
                 - User asks how to obtain generated files
-                - After the user actively invokes file generation/modification tools such as `write_file` and `write_text_file`
+                - After the user actively invokes file generation/modification tools such as
+                  `write_file` and `write_text_file`
 
-                **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user` 
+                **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user`
                 tool."""
 
         self.system_prompt_builder.add_section(PromptSection(

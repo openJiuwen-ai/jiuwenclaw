@@ -27,7 +27,8 @@ NODE_DISPLAY_NAMES: dict[str, str] = {
     "p6_5_image_prepare": "Stage 10: 图片准备",
     "p8_ppt_page_gen": "Stage 11: 幻灯片生成",
     "p9_ppt_export": "Stage 12: PPTX导出",
-    "p10_delivery": "Stage 13: 交付",
+    "p11_speaker_notes": "Stage 13: 演讲备注",
+    "p10_delivery": "Stage 14: 交付",
     "ppt_gen_root": "PPT生成",
 }
 

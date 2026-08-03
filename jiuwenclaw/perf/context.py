@@ -25,6 +25,8 @@ def set_request_context(
     channel_id: str,
     mode: str,
     trace_id: str | None = None,
+    service_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     started_at = time.time()
     _request_context.set(
@@ -35,6 +37,8 @@ def set_request_context(
             "mode": mode,
             "trace_id": trace_id,
             "started_at": started_at,
+            "service_id": service_id,
+            "agent_id": agent_id,
         }
     )
     _request_wall_start.set(started_at)
@@ -47,6 +51,8 @@ def set_request_context(
         mode=mode,
         trace_id=trace_id,
         started_at=started_at,
+        service_id=service_id,
+        agent_id=agent_id,
     )
 
 

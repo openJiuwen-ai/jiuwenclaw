@@ -15,6 +15,44 @@ import importlib.abc
 import importlib.machinery
 import sys
 import types
+from enum import Enum
+from importlib.util import spec_from_file_location, module_from_spec
+from pathlib import Path
+
+import pytest
+
+# Patch TaskStatus onto openjiuwen.harness.schema.task when the installed build omits it.
+try:
+    import openjiuwen as _openjiuwen
+
+    _task_py = (
+        Path(_openjiuwen.__file__).resolve().parent
+        / "harness"
+        / "schema"
+        / "task.py"
+    )
+    if _task_py.is_file():
+        _spec = spec_from_file_location("openjiuwen.harness.schema.task", _task_py)
+        if _spec and _spec.loader:
+            _task_schema = module_from_spec(_spec)
+            _spec.loader.exec_module(_task_schema)
+            if not hasattr(_task_schema, "TaskStatus"):
+
+                class TaskStatus(str, Enum):
+                    PENDING = "pending"
+                    IN_PROGRESS = "in_progress"
+                    COMPLETED = "completed"
+                    FAILED = "failed"
+
+                _task_schema.TaskStatus = TaskStatus
+            sys.modules["openjiuwen.harness.schema.task"] = _task_schema
+except Exception:
+    import logging
+
+    logging.getLogger(__name__).debug(
+        "optional openjiuwen.harness.schema.task TaskStatus patch skipped",
+        exc_info=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -84,3 +122,21 @@ class _OpenJiuwenStubFinder(importlib.abc.MetaPathFinder):
 
 if not any(isinstance(f, _OpenJiuwenStubFinder) for f in sys.meta_path):
     sys.meta_path.append(_OpenJiuwenStubFinder())
+
+
+@pytest.fixture(autouse=True)
+def _reset_request_scoped_tenant_bindings():
+    """Prevent ContextVar leakage across agentserver unit tests."""
+    from jiuwenclaw.agentserver.tenant_context import clear_tenant_bindings
+
+    try:
+        from jiuwenclaw.agentserver.tools.memory_tools import clear_memory_workspace_binding
+    except (ImportError, ModuleNotFoundError):
+        def clear_memory_workspace_binding() -> None:
+            return None
+
+    clear_tenant_bindings()
+    clear_memory_workspace_binding()
+    yield
+    clear_tenant_bindings()
+    clear_memory_workspace_binding()

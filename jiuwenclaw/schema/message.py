@@ -43,7 +43,7 @@ class ReqMethod(Enum):
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
-    AGENTS_SYNC_CONFIGS = "sync_agents_configs"
+    SYNC_AGENTS_CONFIGS = "sync_agents_configs"
 
     MEMORY_COMPUTE = "memory.compute"
 
@@ -175,6 +175,7 @@ class EventType(Enum):
     TEAM_MESSAGE = "team.message"
     HEARTBEAT_RELAY = "heartbeat.relay"
     HISTORY_GET = "history.message"
+    SYNC_AGENTS_CONFIGS_RESULT = "sync_agents_configs.result"
     # SkillDev 事件类型
     SKILLDEV_STARTED = "skilldev.started"
     SKILLDEV_STAGE_CHANGED = "skilldev.stage_changed"

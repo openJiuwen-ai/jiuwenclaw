@@ -6,23 +6,29 @@ import asyncio
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
-from pydantic import Field
 import httpx
+from pydantic import Field
 from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import \
     AssistantMessageChunk, OpenAIModelClient, ToolCall, UsageMetadata
-from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse
-from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import (
     SiliconFlowModelClient,
 )
+from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.session.stream import OutputSchema
+
+from jiuwenclaw.http_proxy_config import (
+    read_proxy_url,
+    resolve_httpx_proxy,
+    should_bypass_proxy,
+)
 from jiuwenclaw.local_env_config import read_default_headers
 from jiuwenclaw.tool_arguments_validator import (
     tool_arguments_failure_message,
@@ -35,6 +41,10 @@ if TYPE_CHECKING:
     import openai
 
 llm_logger = logging.getLogger("jiuwenclaw.app")
+
+_tool_finish_reason_var: ContextVar[Optional[str]] = ContextVar(
+    "_tool_finish_reason", default=None
+)
 
 _GLM_TOOL_XML_CLOSED_RE = re.compile(
     r"<(arg_value|arg_key|tool_call)[^>]*?>.*?</\1>",
@@ -80,11 +90,25 @@ def _sanitize_glm_tool_xml_tags(raw: str) -> str:
 # Session context for retry notifications.
 # Set by react_agent._call_llm_stream before calling llm.stream/invoke.
 _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=None)
+APIG_MODE_HEADER = "X-Apig-Mode"
+APIG_MODE_DEBUG_VALUE = "Debug"
+APIG_RATELIMIT_APP_HEADER = "X-Apig-Ratelimit-App"
+RETRY_AFTER_HEADER = "Retry-After"
+MAAS_APIG_METADATA_KEY = "maas_apig"
+_MAAS_APIG_HEADER_FIELDS = (
+    ("x_apig_ratelimit_app", APIG_RATELIMIT_APP_HEADER),
+    ("retry_after", RETRY_AFTER_HEADER),
+)
+_maas_apig_headers: ContextVar[Optional[dict[str, str]]] = ContextVar(
+    "maas_apig_headers",
+    default=None,
+)
 
 
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
 _ORIGINAL_PARSE_RESPONSE = None
 _ORIGINAL_GENERATE_IMAGE = None
+_ORIGINAL_SESSION_WRITE_STREAM = None
 
 _HUAWEI_MAAS_API_MARKERS = (
     "modelarts-maas.com",
@@ -111,14 +135,99 @@ def _maybe_make_maas_span_id(client: Any) -> str:
 
 
 def _inject_span_id_kwargs(kwargs: dict, span_id: str) -> dict:
-    """把 x-span-id 合并到底层 client 的 ``custom_headers`` 中（不修改原 kwargs）。"""
+    """把 MaaS 请求头合并到底层 client 的 ``custom_headers`` 中（不修改原 kwargs）。"""
     if not span_id:
         return kwargs
     out = dict(kwargs)
     headers = dict(out.get("custom_headers") or {})
     headers["x-span-id"] = span_id
+    headers[APIG_MODE_HEADER] = APIG_MODE_DEBUG_VALUE
     out["custom_headers"] = headers
     return out
+
+
+def _empty_maas_apig_headers() -> dict[str, str]:
+    return {field_name: "" for field_name, _header_name in _MAAS_APIG_HEADER_FIELDS}
+
+
+def _headers_get(headers: Any, name: str) -> Any:
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)
+    except Exception:
+        value = None
+    if value is not None:
+        return value
+    lower_name = name.lower()
+    try:
+        return headers.get(lower_name)
+    except Exception:
+        return None
+
+
+def _extract_maas_apig_headers(headers: Any) -> dict[str, str]:
+    """读取 MaaS/APIG 响应头；缺失字段固定为空字符串。"""
+    result = _empty_maas_apig_headers()
+    for field_name, header_name in _MAAS_APIG_HEADER_FIELDS:
+        value = _headers_get(headers, header_name)
+        if value is not None:
+            result[field_name] = str(value)
+    return result
+
+
+def set_maas_apig_headers_for_call(headers: Any = None) -> Token:
+    return _maas_apig_headers.set(_extract_maas_apig_headers(headers))
+
+
+def reset_maas_apig_headers_for_call(token: Token) -> None:
+    _maas_apig_headers.reset(token)
+
+
+def clear_maas_apig_headers_for_call() -> None:
+    _maas_apig_headers.set(None)
+
+
+def get_maas_apig_headers_for_call() -> dict[str, str] | None:
+    current = _maas_apig_headers.get()
+    return dict(current) if current is not None else None
+
+
+async def _capture_maas_apig_response_hook(response: httpx.Response) -> None:
+    if _maas_apig_headers.get() is not None:
+        set_maas_apig_headers_for_call(getattr(response, "headers", None))
+
+
+def _inject_maas_apig_into_llm_usage_stream(data: Any) -> Any:
+    current = get_maas_apig_headers_for_call()
+    if current is None:
+        return data
+
+    data_type = data.type if isinstance(data, OutputSchema) else None
+    payload = data.payload if isinstance(data, OutputSchema) else None
+    is_schema = isinstance(data, OutputSchema)
+    if isinstance(data, dict):
+        data_type = data.get("type")
+        payload = data.get("payload")
+
+    if data_type != "llm_usage":
+        return data
+
+    next_payload = dict(payload) if isinstance(payload, dict) else {"value": payload}
+    next_payload.setdefault(MAAS_APIG_METADATA_KEY, current)
+    clear_maas_apig_headers_for_call()
+    if is_schema:
+        return data.model_copy(update={"payload": next_payload})
+    out = dict(data)
+    out["payload"] = next_payload
+    return out
+
+
+def _prepare_maas_apig_capture_for_call(span_id: str) -> None:
+    if span_id:
+        set_maas_apig_headers_for_call()
+    else:
+        clear_maas_apig_headers_for_call()
 
 
 def _llm_log_ctx() -> str:
@@ -234,7 +343,6 @@ class RetryMixin:
         "model config error",
         "model invoke parameter error",
         "model client_config is invalid",
-        "async invoke error"
     )
 
     def _resolve_stream_timeout(self, timeout: Optional[float]) -> float:
@@ -432,6 +540,7 @@ class RetryMixin:
         cfg = self._get_retry_config()
         if not cfg.enabled:
             span_id = _maybe_make_maas_span_id(self)
+            _prepare_maas_apig_capture_for_call(span_id)
             llm_logger.info(f"LLM invoke 未启用重试，直接返回结果 {_llm_log_ctx()} [span_id={span_id}]")
             async with track_llm_resp(self, streaming=False, span_id=span_id):
                 return await invoke_func(*args, **_inject_span_id_kwargs(kwargs, span_id))
@@ -439,6 +548,7 @@ class RetryMixin:
         last_error = None
         for attempt in range(cfg.max_attempts + 1):
             span_id = _maybe_make_maas_span_id(self)
+            _prepare_maas_apig_capture_for_call(span_id)
             try:
                 async with track_llm_resp(self, streaming=False, span_id=span_id):
                     result = await invoke_func(*args, **_inject_span_id_kwargs(kwargs, span_id))
@@ -490,6 +600,7 @@ class RetryMixin:
         cfg = self._get_retry_config()
         if not cfg.enabled:
             span_id = _maybe_make_maas_span_id(self)
+            _prepare_maas_apig_capture_for_call(span_id)
             llm_logger.info(f"LLM stream 未启用重试机制 {_llm_log_ctx()} [span_id={span_id}]")
             async with track_llm_resp(self, streaming=True, span_id=span_id):
                 async for chunk in stream_func(*args, **_inject_span_id_kwargs(kwargs, span_id)):
@@ -499,6 +610,7 @@ class RetryMixin:
         last_error = None
         for attempt in range(cfg.max_attempts + 1):
             span_id = _maybe_make_maas_span_id(self)
+            _prepare_maas_apig_capture_for_call(span_id)
             try:
                 async with track_llm_resp(self, streaming=True, span_id=span_id):
                     async for chunk in stream_func(*args, **_inject_span_id_kwargs(kwargs, span_id)):
@@ -828,6 +940,9 @@ def _sanitize_wire_tool_pairing(params: dict[str, Any]) -> None:
 def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
     """Patched version: ensure usage chunks and sanitize tool arguments before provider calls."""
     params = _ORIGINAL_BUILD_REQUEST_PARAMS(self, stream=stream, **kwargs)
+    if os.getenv("OFFICE_CLAW_DISABLE_TOOL_CALLING", "").strip().lower() in {"1", "true", "yes", "on"}:
+        params.pop("tools", None)
+        params.pop("tool_choice", None)
     decision = resolve_tool_calling_guard()
     if decision.strip_tools:
         params.pop("tools", None)
@@ -890,12 +1005,17 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
-        proxy_url = UrlUtils.get_global_proxy_url(self.model_client_config.api_base)
+        is_huawei_maas = _is_huawei_maas_api_base(api_base)
+        proxy_url = resolve_httpx_proxy(self.model_client_config.api_base or "")
         # httpx不接受空字符串proxy，需要处理
+        event_hooks = {"response": [_capture_maas_apig_response_hook]} if is_huawei_maas else None
+        http_client_kwargs: dict[str, Any] = {"verify": verify}
+        if event_hooks is not None:
+            http_client_kwargs["event_hooks"] = event_hooks
         if proxy_url and proxy_url.strip():
-            http_client = httpx.AsyncClient(proxy=proxy_url, verify=verify)
+            http_client = httpx.AsyncClient(proxy=proxy_url, **http_client_kwargs)
         else:
-            http_client = httpx.AsyncClient(verify=verify)
+            http_client = httpx.AsyncClient(**http_client_kwargs)
 
         # Use method-level timeout if provided, otherwise use config timeout
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
@@ -1279,6 +1399,10 @@ def _patch_railed_model_call_session() -> None:
     around llm.invoke/stream calls so RetryMixin._notify_retry_start can reach the frontend."""
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 
+    if not hasattr(ReActAgent, "_railed_model_call"):
+        llm_logger.debug("ReActAgent._railed_model_call not found; retry session patch skipped")
+        return
+
     _orig_railed_model_call = ReActAgent._railed_model_call  # pylint: disable=protected-access
 
     async def _patched_railed_model_call(self, ctx):
@@ -1290,6 +1414,25 @@ def _patch_railed_model_call_session() -> None:
             _retry_session.reset(token)
 
     ReActAgent._railed_model_call = _patched_railed_model_call  # pylint: disable=protected-access
+
+
+def _patch_llm_usage_stream_maas_apig() -> None:
+    """在内部 llm_usage 事件 payload 中补充当次 MaaS/APIG 响应头快照。"""
+    global _ORIGINAL_SESSION_WRITE_STREAM
+    if _ORIGINAL_SESSION_WRITE_STREAM is not None:
+        return
+
+    from openjiuwen.core.session.agent import Session
+
+    _ORIGINAL_SESSION_WRITE_STREAM = Session.write_stream
+
+    async def _patched_write_stream(self, data):
+        return await _ORIGINAL_SESSION_WRITE_STREAM(
+            self,
+            _inject_maas_apig_into_llm_usage_stream(data),
+        )
+
+    Session.write_stream = _patched_write_stream
 
 
 def apply_siliconflow_model_client_patch() -> None:
@@ -1315,8 +1458,27 @@ def apply_siliconflow_model_client_patch() -> None:
             setattr(SiliconFlowModelClient, _attr, getattr(RetryMixin, _attr))
 
 
+def apply_url_utils_proxy_patch() -> None:
+    """Route openjiuwen proxy helpers through overlay-aware env readers."""
+
+    @staticmethod
+    def _patched_get_global_proxy_url(url: str) -> Optional[str]:
+        if url and should_bypass_proxy(url):
+            return None
+        proxy_url = read_proxy_url()
+        return proxy_url or None
+
+    @staticmethod
+    def _patched_should_bypass_proxy(url: str) -> bool:
+        return should_bypass_proxy(url)
+
+    setattr(UrlUtils, "get_global_proxy_url", _patched_get_global_proxy_url)
+    setattr(UrlUtils, "should_bypass_proxy", _patched_should_bypass_proxy)
+
+
 def apply_openai_model_client_patch() -> None:
     """Monkey-patch upstream OpenAIModelClient with JiuwenClaw SSL/headers/stream behavior."""
+    apply_url_utils_proxy_patch()
     global _ORIGINAL_BUILD_REQUEST_PARAMS, _ORIGINAL_PARSE_RESPONSE, _ORIGINAL_GENERATE_IMAGE
     if _ORIGINAL_BUILD_REQUEST_PARAMS is None:
         _ORIGINAL_BUILD_REQUEST_PARAMS = OpenAIModelClient._build_request_params
@@ -1335,6 +1497,7 @@ def apply_openai_model_client_patch() -> None:
     OpenAIModelClient.stream = PatchOpenAIModelClient.stream
     OpenAIModelClient.generate_image = _impl["generate_image"]
     _patch_railed_model_call_session()
+    _patch_llm_usage_stream_maas_apig()
     _static_attrs = ('_extract_error_details', '_extract_retry_after', '_raise_mock_error')
     _instance_attrs = (
         '_stream_with_retry', '_invoke_with_retry', '_resolve_stream_timeout',
@@ -1390,7 +1553,10 @@ def apply_tool_invoke_interface_log() -> None:
         tool_call_id = str(getattr(tool_call, "id", "") or "")
         sid = session_id_from_context(session) or None
         original_arguments = getattr(tool_call, "arguments", None)
-        validation = validate_tool_arguments(original_arguments)
+        validation = validate_tool_arguments(
+            original_arguments,
+            finish_reason=_tool_finish_reason_var.get(),
+        )
         if validation.ok:
             if hasattr(tool_call, "arguments"):
                 tool_call.arguments = validation.normalized
@@ -1433,3 +1599,38 @@ def apply_tool_invoke_interface_log() -> None:
 
     _patched_execute._jiuwen_interface_log_patched = True  # type: ignore[attr-defined]  # pylint: disable=protected-access
     AbilityManager._execute_single_tool_call = _patched_execute  # pylint: disable=protected-access
+    apply_react_agent_finish_reason_patch()
+
+
+def apply_react_agent_finish_reason_patch() -> None:
+    """Monkey-patch ``ReActAgent._call_llm`` to propagate ``finish_reason`` via ContextVar.
+
+    openjiuwen's ``ToolCall`` schema does not carry ``finish_reason``; the value lives on
+    the parent ``AssistantMessage`` and is dropped when ``ability_manager.execute()``
+    is called. This patch sets ``_tool_finish_reason_var`` right after the LLM returns,
+    so ``_patched_execute`` can pass it to ``validate_tool_arguments`` and reliably
+    distinguish ``finish_reason=="length"`` (genuine truncation) from JSON syntax errors.
+    """
+    try:
+        from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
+    except Exception:
+        llm_logger.debug("ReActAgent finish_reason patch skipped")
+        return
+
+    if not hasattr(ReActAgent, "_call_llm"):
+        llm_logger.debug("ReActAgent._call_llm not found; finish_reason patch skipped")
+        return
+
+    _orig_call_llm = ReActAgent._call_llm  # pylint: disable=protected-access
+    if getattr(_orig_call_llm, "_jiuwen_finish_reason_patched", False):
+        return
+
+    async def _patched_call_llm(self, messages, tools=None):
+        result = await _orig_call_llm(self, messages, tools)
+        finish_reason = getattr(result, "finish_reason", None)
+        if finish_reason is not None:
+            _tool_finish_reason_var.set(finish_reason)
+        return result
+
+    _patched_call_llm._jiuwen_finish_reason_patched = True  # type: ignore[attr-defined]  # pylint: disable=protected-access
+    ReActAgent._call_llm = _patched_call_llm  # pylint: disable=protected-access

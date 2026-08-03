@@ -178,6 +178,8 @@ class CronJob:
     mode: str = "agent"
     # 执行一次后自动删除（用于提醒类任务）
     delete_after_run: bool = False
+    service_id: str = "default"
+    agent_id: str = "default"
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -192,6 +194,8 @@ class CronJob:
             "targets": self.targets,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "service_id": self.service_id,
+            "agent_id": self.agent_id,
         }
         if self.session_id:
             d["session_id"] = self.session_id
@@ -273,6 +277,9 @@ class CronJob:
 
         delete_after_run = bool(data.get("delete_after_run", False))
 
+        job_service_id = str(data.get("service_id") or "default").strip() or "default"
+        job_agent_id = str(data.get("agent_id") or "default").strip() or "default"
+
         return CronJob(
             id=job_id,
             name=name,
@@ -289,6 +296,8 @@ class CronJob:
             chat_type=job_chat_type,
             mode=job_mode,
             delete_after_run=delete_after_run,
+            service_id=job_service_id,
+            agent_id=job_agent_id,
         )
 
 

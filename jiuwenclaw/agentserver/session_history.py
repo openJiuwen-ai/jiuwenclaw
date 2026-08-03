@@ -59,22 +59,48 @@ _FLUSH_THREAD_LOCK = threading.Lock()
 _flush_stop_event = threading.Event()  # 测试可控启停；生产由 atexit/shutdown() 收尾
 
 
-def _serialize_value(obj: Any) -> Any:
-    """递归把 datetime/date 转为 ISO 字符串，其余原样返回（JSON 序列化用）。"""
+def _serialize_value_with_flag(obj: Any) -> tuple[Any, bool]:
+    """Convert values to JSON-serializable forms; return whether coercion occurred."""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj, False
     if isinstance(obj, datetime.datetime):
-        return obj.isoformat()
+        return obj.isoformat(), True
     if isinstance(obj, datetime.date):
-        return obj.isoformat()
+        return obj.isoformat(), True
+    if callable(obj):
+        name = getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None) or type(obj).__name__
+        return f"<callable:{name}>", True
     if isinstance(obj, dict):
-        return {k: _serialize_value(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_serialize_value(item) for item in obj]
-    return obj
+        changed = False
+        serialized: dict[Any, Any] = {}
+        for k, v in obj.items():
+            serialized_value, value_changed = _serialize_value_with_flag(v)
+            serialized[k] = serialized_value
+            changed = changed or value_changed
+        return serialized, changed
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        changed = not isinstance(obj, list)
+        serialized_items = []
+        for item in obj:
+            serialized_item, item_changed = _serialize_value_with_flag(item)
+            serialized_items.append(serialized_item)
+            changed = changed or item_changed
+        return serialized_items, changed
+    try:
+        json.dumps(obj, ensure_ascii=False)
+    except TypeError:
+        return repr(obj), True
+    return obj, False
+
+
+def _serialize_value(obj: Any) -> Any:
+    return _serialize_value_with_flag(obj)[0]
 
 
 # ════════════════════════════════════════════════════════
 # 缓冲层：_PendingState 与合并函数
 # ════════════════════════════════════════════════════════
+
 
 @dataclass
 class _PendingState:
@@ -199,6 +225,7 @@ _MERGE = {
 # 缓冲层：批量写与普通缓冲层操作
 # ════════════════════════════════════════════════════════
 
+
 def _history_file(session_id: str, sessions_root: str | None = None) -> Path:
     root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
     session_dir = root / session_id
@@ -240,20 +267,20 @@ def read_history_records(path: Path) -> list[dict[str, Any]]:
 
 def read_history_records_for_frontend(path: Path) -> list[dict[str, Any]]:
     """读取并过滤被撤回的 delta/reasoning（用于前端历史恢复）。
-    
+
     过滤规则：
     - 找出所有 chat.retract 的 request_id
     - 过滤掉相同 request_id 的 chat.delta、chat.reasoning、chat.tool_call、chat.tool_result
     - 保留其他所有事件（包括 chat.retract 本身）
     """
     records = read_history_records(path)
-    
+
     revoked_rids = {
         r.get("request_id")
         for r in records
         if r.get("event_type") == "chat.retract" and r.get("request_id") is not None
     }
-    
+
     filtered_event_types = (
         "chat.delta",
         "chat.reasoning",
@@ -321,6 +348,7 @@ def _ensure_worker_started() -> None:
 # 缓冲层：批量写
 # ════════════════════════════════════════════════════════
 
+
 def _batch_write_items(session_id: str, items: list[dict], sessions_root: str | None) -> None:
     """批量写入 history.json（一次 open 写多行）。_FILE_LOCK 串行化磁盘写。"""
     if not items:
@@ -337,6 +365,7 @@ def _batch_write_items(session_id: str, items: list[dict], sessions_root: str | 
 # ════════════════════════════════════════════════════════
 # 缓冲层：普通缓冲层操作
 # ════════════════════════════════════════════════════════
+
 
 def _flush_buffer_unlocked(session_id: str) -> tuple[list[dict], str | None]:
     """落盘并清空普通缓冲层（调用方已持锁）。返回 (items, recorded_root)，
@@ -408,6 +437,7 @@ def _flush_on_type_switch_unlocked(session_id: str, event_type: str, request_id:
 # ════════════════════════════════════════════════════════
 # 缓冲层：tool_calls.delta 暂留机制
 # ════════════════════════════════════════════════════════
+
 
 def _extract_tool_call_id(item: dict) -> str:
     """从 chat.tool_call 提取 id（嵌套 item["tool_call"]["tool_call_id"]）。"""
