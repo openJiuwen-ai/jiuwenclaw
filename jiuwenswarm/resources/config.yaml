@@ -1132,6 +1132,66 @@ modes:
       spawn_mode: inprocess
       enable_swarmflow: false
 
+      # Proactive reliability monitoring for team leaders and teammates.
+      reliability:
+        enabled: false
+        monitor_roles:
+          - leader
+          - teammate
+
+        detectors:
+          tool_error:
+            enabled: true
+            window_seconds: 60.0
+            rate_threshold: 5
+            consecutive_threshold: 3
+
+          repeat_tool:
+            enabled: true
+            history_size: 30
+            repeat_warn: 10
+            pingpong_warn: 10
+            loop_block: 20
+            global_stop: 30
+
+          model_error:
+            enabled: true
+            window_seconds: 120.0
+            rate_threshold: 3
+            consecutive_threshold: 2
+
+          output_length:
+            enabled: true
+            text_threshold: 32000
+            thinking_threshold: 16000
+
+          compaction:
+            enabled: true
+            window_seconds: 300.0
+            frequency_threshold: 3
+            drop_ratio: 0.3
+
+          pingpong:
+            enabled: true
+            min_volleys: 6
+
+        policy:
+          severity_actions:
+            low:
+              - observe_only
+            medium:
+              - report_leader
+            high:
+              - local_steer
+              - report_leader
+            critical:
+              - local_steer
+              - escalate_user
+
+        restart_intensity:
+          intensity: 5
+          period_seconds: 60.0
+
       # SwarmFlow per-Leader concurrency caps (three-layer governor).
       # Only effective when enable_swarmflow is true.
       #   max_workflows:    L1 — max concurrent workflow runs under one leader (>=1).
