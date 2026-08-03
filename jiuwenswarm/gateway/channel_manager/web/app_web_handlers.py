@@ -1116,7 +1116,12 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
         pass
 
 
-async def _restart_agent_browser_runtime(agent_client=None) -> None:
+async def _restart_agent_browser_runtime(
+    agent_client=None,
+    *,
+    previous_chrome_path: str = "",
+    previous_headless: bool = True,
+) -> None:
     """Stop active agent-side browser runtimes so the next task uses new config."""
     if agent_client is None:
         return
@@ -1128,6 +1133,14 @@ async def _restart_agent_browser_runtime(agent_client=None) -> None:
         request_id=f"browser-restart-{uuid.uuid4().hex[:8]}",
         channel_id="",
         req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+        params={
+            "browser_key": "",
+            "profile_name": (
+                os.getenv("BROWSER_PROFILE_NAME") or "jiuwenclaw"
+            ).strip(),
+            "display_mode": "headless" if previous_headless else "headed",
+            "browser_binary": str(previous_chrome_path or "").strip(),
+        },
     )
     response = await agent_client.send_request(env)
     if not response.ok:
@@ -4401,6 +4414,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         raw_headless = params.get("headless", True)
         headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
+        current_browser_cfg = get_config().get("browser", {})
+        if not isinstance(current_browser_cfg, dict):
+            current_browser_cfg = {}
+        previous_chrome_path = current_browser_cfg.get("chrome_path", "")
+        if not isinstance(previous_chrome_path, str):
+            previous_chrome_path = ""
+        raw_previous_headless = current_browser_cfg.get("headless", True)
+        previous_headless = (
+            bool(raw_previous_headless)
+            if isinstance(raw_previous_headless, bool)
+            else True
+        )
+
         try:
             update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
             resolved_agent_client = _resolve(agent_client)
@@ -4411,7 +4437,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
 
         try:
-            await _restart_agent_browser_runtime(resolved_agent_client)
+            await _restart_agent_browser_runtime(
+                resolved_agent_client,
+                previous_chrome_path=previous_chrome_path,
+                previous_headless=previous_headless,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[path.set] browser config saved but active runtime reset failed: %s",

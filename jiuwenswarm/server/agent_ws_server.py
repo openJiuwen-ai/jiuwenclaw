@@ -140,6 +140,24 @@ async def _reset_active_browser_runtimes_if_available(browser_move: Any) -> int:
     return await reset_runtimes()
 
 
+async def _reset_requested_browser_runtime_if_available(
+    browser_move: Any,
+    params: dict[str, Any],
+) -> int:
+    """Prefer an identity-scoped reset and retain compatibility with older SDKs."""
+    reset_runtime = getattr(browser_move, "reset_managed_browser_runtime", None)
+    display_mode = str(params.get("display_mode") or "").strip().lower()
+    profile_name = str(params.get("profile_name") or "").strip()
+    if callable(reset_runtime) and display_mode and profile_name:
+        return await reset_runtime(
+            browser_key=str(params.get("browser_key") or "").strip(),
+            profile_name=profile_name,
+            display_mode=display_mode,
+            browser_binary=str(params.get("browser_binary") or "").strip(),
+        )
+    return await _reset_active_browser_runtimes_if_available(browser_move)
+
+
 def _log_permission_reload_failure(task: asyncio.Task) -> None:
     """后台权限重载任务完成回调: 仅在异常时记 debug(与原同步 try/except 语义一致)。"""
     exc = task.exception()
@@ -6554,8 +6572,9 @@ class AgentWebSocketServer:
         try:
             from openjiuwen.harness.tools import browser_move
 
-            reset_runtimes = await _reset_active_browser_runtimes_if_available(
-                browser_move
+            reset_runtimes = await _reset_requested_browser_runtime_if_available(
+                browser_move,
+                request.params or {},
             )
             result = browser_move.restart_local_browser_runtime_server()
             resp = AgentResponse(
