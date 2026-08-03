@@ -6009,18 +6009,6 @@ class JiuWenSwarmDeepAdapter:
             session_id=session_id,
             has_runtime_capability=has_runtime_capability,
         )
-        # Only block default tools when ACP runtime replacements will actually
-        # be registered. If the ACP client does not declare fs/terminal
-        # capabilities, keep the default read_file/write_file/bash tools so
-        # the agent can still work autonomously (e.g. in benchmark sandboxes).
-        if channel_id == "acp" and can_register_acp_runtime_tools:
-            for existing in list(self._instance.ability_manager.list() or []):
-                if getattr(existing, "name", "") in _ACP_BLOCKED_DEFAULT_TOOL_NAMES:
-                    self._instance.ability_manager.remove(existing.name)
-        # Clean up stale ACP runtime tools before re-registering
-        for existing in list(self._instance.ability_manager.list() or []):
-            if getattr(existing, "name", "") in acp_tool_names:
-                self._instance.ability_manager.remove(existing.name)
 
         if can_register_acp_runtime_tools:
             for tool in get_acp_output_tools(session_id=session_id, request_id=request_id):
