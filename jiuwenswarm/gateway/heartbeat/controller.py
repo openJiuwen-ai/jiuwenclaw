@@ -399,6 +399,16 @@ class HeartbeatController:
         # 任何影响调度的更新都必须基于当前时间重算，禁止沿用旧 schedule 的 due time。
         now = __import__("time").time()
         target_enabled = patch.get("enabled", existing.enabled)
+        if target_enabled and not existing.enabled:
+            activation_schedule = HeartbeatSchedule.from_dict(
+                patch.get("schedule", existing.schedule.to_dict()),
+                default_timezone=str(patch.get("timezone") or existing.timezone),
+            )
+            await self._check_resource_limits_async(
+                session_id=existing.session_id,
+                schedule=activation_schedule,
+                exclude_job_id=existing.id,
+            )
         if target_enabled and (
             "schedule" in patch
             or "timezone" in patch
@@ -428,10 +438,13 @@ class HeartbeatController:
         if existing is None:
             raise KeyError("job not found")
         if existing is not None and existing.run_state.current_run_id:
-            try:
-                await self._scheduler.cancel_run(job_id, pause_schedule=False)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[HeartbeatController] cancel run on delete failed: %s", exc)
+            cancel_result = await self._scheduler.cancel_run(
+                job_id, pause_schedule=True
+            )
+            if cancel_result.get("cancel_status") == "failed":
+                raise RuntimeError(
+                    "cannot delete heartbeat job while its active run could not be cancelled"
+                )
         deleted = await self._store.delete_job(job_id)
         await self._scheduler.reload()
         return {"deleted": bool(deleted)}

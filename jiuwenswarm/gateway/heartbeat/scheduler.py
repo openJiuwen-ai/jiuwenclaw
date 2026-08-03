@@ -42,6 +42,7 @@ from jiuwenswarm.gateway.heartbeat.models import (
     SCHEDULE_INTERVAL,
     SCHEDULE_ONCE,
     SESSION_DELETED_COMPLETED,
+    STATUS_RUNNING,
     STATUS_SCHEDULED,
 )
 from jiuwenswarm.gateway.heartbeat.session_resolver import HeartbeatSessionResolver
@@ -84,6 +85,10 @@ class HeartbeatSchedulerService:
 
         # 内存中的活跃 run:run_id -> (job_id, started_at)
         self._active_runs: dict[str, tuple[str, float]] = {}
+        # Exact cancellation intent consumed by the stream's finally callback.
+        # Keeping this in-process is sufficient because cancel_request awaits
+        # the exact stream task before it returns.
+        self._cancel_intents: dict[str, bool] = {}
         self._limits: dict[str, Any] = {}
 
     def set_limits(self, limits: dict[str, Any] | None) -> None:
@@ -198,9 +203,10 @@ class HeartbeatSchedulerService:
         """扫描 due jobs 并逐个执行调度判断(方案 §7.4)。"""
         jobs = await self._store.list_jobs()
         now = self._now_fn()
+        admitted_job_ids = self._resource_admitted_job_ids(jobs)
         for job in jobs:
             try:
-                await self._handle_job_tick(job, now)
+                await self._handle_job_tick(job, now, admitted_job_ids)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[HeartbeatScheduler] handle job tick failed job=%s: %s",
@@ -209,7 +215,37 @@ class HeartbeatSchedulerService:
                     exc_info=True,
                 )
 
-    async def _handle_job_tick(self, job: HeartbeatJob, now: float) -> None:
+    def _resource_admitted_job_ids(self, jobs: list[HeartbeatJob]) -> set[str]:
+        """Select a deterministic runnable subset after limits are lowered."""
+        max_session = int(self._limits.get("max_active_jobs_per_session", 5))
+        max_global = int(self._limits.get("max_active_jobs_global", 100))
+        candidates = sorted(
+            (
+                job
+                for job in jobs
+                if job.enabled and job.status in {STATUS_SCHEDULED, STATUS_RUNNING}
+            ),
+            key=lambda job: (
+                0 if job.status == STATUS_RUNNING else 1,
+                job.created_at or 0.0,
+                job.id,
+            ),
+        )
+        admitted: set[str] = set()
+        per_session: dict[str, int] = {}
+        for job in candidates:
+            if len(admitted) >= max_global:
+                break
+            current = per_session.get(job.session_id, 0)
+            if current >= max_session:
+                continue
+            admitted.add(job.id)
+            per_session[job.session_id] = current + 1
+        return admitted
+
+    async def _handle_job_tick(
+        self, job: HeartbeatJob, now: float, admitted_job_ids: set[str]
+    ) -> None:
         """单 job 的调度判断:可调度性 + due + session + 并发 + dispatch。"""
         if not job.enabled:
             return
@@ -223,29 +259,15 @@ class HeartbeatSchedulerService:
             return
         if job.next_run_at is None or job.next_run_at > now:
             return
-        max_session = int(self._limits.get("max_active_jobs_per_session", 5))
-        max_global = int(self._limits.get("max_active_jobs_global", 100))
-        if await self._store.count_active_jobs_for_session(job.session_id) > max_session:
+        if job.id not in admitted_job_ids:
             logger.warning(
-                "[HeartbeatScheduler] skip job %s: session active-job limit exceeded",
+                "[HeartbeatScheduler] skip job %s: resource admission limit exceeded",
                 job.id,
             )
             await self._store.skip_and_reschedule(
                 job.id,
                 now=now,
-                reason="session_active_job_limit_exceeded",
-                next_run_at=self._compute_next_run(job, now),
-            )
-            return
-        if await self._store.count_active_jobs_global() > max_global:
-            logger.warning(
-                "[HeartbeatScheduler] skip job %s: global active-job limit exceeded",
-                job.id,
-            )
-            await self._store.skip_and_reschedule(
-                job.id,
-                now=now,
-                reason="global_active_job_limit_exceeded",
+                reason="resource_admission_limit_exceeded",
                 next_run_at=self._compute_next_run(job, now),
             )
             return
@@ -269,20 +291,36 @@ class HeartbeatSchedulerService:
         if decision == "queued":
             await self._store.reschedule(job.id, self._compute_next_run(job, now))
             return
+        if decision == "cancel_failed":
+            await self._store.reschedule(job.id, self._compute_next_run(job, now))
+            return
 
     async def _handle_missing_session(self, job: HeartbeatJob, now: float) -> None:
         """session 删除/归档/不可恢复(方案 §5.2)。"""
-        policy = job.session_deleted_policy
-        if policy == SESSION_DELETED_COMPLETED:
-            await self._store.complete_for_session_deleted(job.id, now)
-        else:
-            # 默认 disable
-            await self._store.disable(job.id, now)
+        await self._apply_session_deleted_job(job, now)
         logger.info(
             "[HeartbeatScheduler] session missing for job=%s, applied policy=%s",
             job.id,
-            policy,
+            job.session_deleted_policy,
         )
+
+    async def _apply_session_deleted_job(
+        self, job: HeartbeatJob, now: float
+    ) -> None:
+        """Stop an exact active run before applying its session lifecycle policy."""
+        cancel_failed = False
+        if job.run_state.current_run_id:
+            result = await self.cancel_run(job.id, pause_schedule=True)
+            cancel_failed = result.get("cancel_status") == "failed"
+        if (
+            job.session_deleted_policy == SESSION_DELETED_COMPLETED
+            and not cancel_failed
+        ):
+            await self._store.complete_for_session_deleted(job.id, now)
+        else:
+            # On cancellation failure, disabled preserves current_run_id so a
+            # still-live stream remains authoritative until its callback.
+            await self._store.disable(job.id, now)
 
     # ---- 投递回原 session(方案 §7.6) ----
 
@@ -390,10 +428,45 @@ class HeartbeatSchedulerService:
             ),
         )
         if decision == "replace" and replaced_run_id:
-            # Install the replacement first.  The cancelled stream reports its
-            # own completion asynchronously; once the new run id is persisted,
-            # that stale callback cannot finish or overwrite the replacement.
-            claimed = await self._store.replace_claimed_run(
+            # Reserve the replacement while the old run remains authoritative.
+            # The stream callback consumes this intent without starting queued
+            # work; only a confirmed cancellation promotes the replacement.
+            self._cancel_intents[replaced_run_id] = False
+            try:
+                cancel_status, cancel_error = await self._send_cancel_to_session(
+                    job, replaced_run_id
+                )
+            except asyncio.CancelledError:
+                self._cancel_intents.pop(replaced_run_id, None)
+                await asyncio.shield(
+                    self._store.clear_replacement_reservation(
+                        job.id, run_id, now=self._now_fn()
+                    )
+                )
+                raise
+            if cancel_status == "failed":
+                self._cancel_intents.pop(replaced_run_id, None)
+                await self._store.clear_replacement_reservation(
+                    job.id, run_id, now=self._now_fn()
+                )
+                await self._store.record_cancel_result(
+                    job.id,
+                    status=cancel_status,
+                    error=cancel_error,
+                    now=self._now_fn(),
+                )
+                return "cancel_failed"
+            # Fake/custom handlers may acknowledge without invoking the normal
+            # stream finally callback. Finalize the exact old run idempotently.
+            await self.on_run_finished(
+                job.id,
+                replaced_run_id,
+                outcome="cancelled",
+                consume_queue=False,
+            )
+            self._cancel_intents.pop(replaced_run_id, None)
+            self._active_runs.pop(replaced_run_id, None)
+            promoted, claimed = await self._store.replace_claimed_run(
                 job.id,
                 expected_run_id=replaced_run_id,
                 new_run_id=run_id,
@@ -406,17 +479,13 @@ class HeartbeatSchedulerService:
                     else None
                 ),
             )
-            self._active_runs.pop(replaced_run_id, None)
-            cancel_status, cancel_error = await self._send_cancel_to_session(
-                job, replaced_run_id
-            )
             await self._store.record_cancel_result(
                 job.id,
                 status=cancel_status,
                 error=cancel_error,
                 now=self._now_fn(),
             )
-            decision = "run"
+            decision = "run" if promoted else "cancelled"
         if decision == "run":
             await self._dispatch_claimed_job(claimed, run_id, now)
         return decision
@@ -477,6 +546,10 @@ class HeartbeatSchedulerService:
             "failed": "failed",
             "cancelled": "cancelled",
         }.get(outcome, "failed")
+        cancel_pause = self._cancel_intents.get(run_id)
+        if normalized == "cancelled" and cancel_pause is not None:
+            pause_schedule = bool(cancel_pause)
+            consume_queue = False
         completed_attempt = normalized in {"succeeded", "failed"}
         next_count = int(job.run_count) + (1 if completed_attempt else 0)
         terminal = completed_attempt and (
@@ -535,24 +608,33 @@ class HeartbeatSchedulerService:
         cancelled_run_id: str | None = None
         cancel_status = "idle"
         if run_id:
-            matched = await self.on_run_finished(
-                job.id,
-                run_id,
-                outcome="cancelled",
-                pause_schedule=pause_schedule,
-                consume_queue=False,
-            )
-            # Persist cancellation before stopping the stream.  Its finally
-            # callback is then stale and cannot race the requested pause state.
-            cancel_status, cancel_error = await self._send_cancel_to_session(job, run_id)
+            self._cancel_intents[run_id] = bool(pause_schedule)
+            try:
+                cancel_status, cancel_error = await self._send_cancel_to_session(
+                    job, run_id
+                )
+                if cancel_status != "failed":
+                    # The normal cancel path already awaited the stream callback;
+                    # this covers not_found and simple test/custom transports.
+                    await self.on_run_finished(
+                        job.id,
+                        run_id,
+                        outcome="cancelled",
+                        pause_schedule=pause_schedule,
+                        consume_queue=False,
+                    )
+                    self._active_runs.pop(run_id, None)
+                elif pause_schedule:
+                    # Stop future scheduling while preserving the still-live run.
+                    await self._store.disable(job.id, now)
+            finally:
+                self._cancel_intents.pop(run_id, None)
             await self._store.record_cancel_result(
                 job.id,
                 status=cancel_status,
                 error=cancel_error,
                 now=self._now_fn(),
             )
-            if matched and not pause_schedule:
-                await self._consume_queued_run(job.id)
             cancelled_run_id = run_id
         elif pause_schedule:
             await self._store.disable(job.id, now)
@@ -575,37 +657,7 @@ class HeartbeatSchedulerService:
                     "not_found",
                     "exact gateway stream was not found",
                 )
-            from jiuwenswarm.common.schema.message import Message, ReqMethod
-
-            now = self._now_fn()
-            msg = Message(
-                id=f"heartbeat-cancel-{job.id}-{run_id}",
-                type="req",
-                channel_id=job.channel_id,
-                session_id=job.session_id,
-                req_method=ReqMethod.CHAT_CANCEL,
-                timestamp=now,
-                ok=True,
-                params={
-                    "request_id": run_id,
-                    "heartbeat": {
-                        "job_id": job.id,
-                        "run_id": run_id,
-                    }
-                },
-                metadata={
-                    "automation": {
-                        "kind": "heartbeat",
-                        "job_id": job.id,
-                        "run_id": run_id,
-                        "triggered_at": now,
-                        "source": job.source,
-                        "trigger": "cancel",
-                    }
-                },
-            )
-            await self._message_handler.publish_user_messages(msg)
-            return "cancelled", None
+            return "failed", "exact gateway cancellation is unavailable"
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[HeartbeatScheduler] send cancel to session failed job=%s run_id=%s: %s",
@@ -654,6 +706,17 @@ class HeartbeatSchedulerService:
                 "run_id": run_id,
                 "session_id": job.session_id,
             }
+        if decision in {"cancel_failed", "cancelled"}:
+            return {
+                "accepted": False,
+                "run_id": run_id,
+                "session_id": job.session_id,
+                "reason": (
+                    "replacement_cancel_failed"
+                    if decision == "cancel_failed"
+                    else "job_disabled_during_replace"
+                ),
+            }
         return {
             "accepted": True,
             "run_id": run_id,
@@ -669,10 +732,7 @@ class HeartbeatSchedulerService:
         for job in jobs:
             if job.status in HEARTBEAT_TERMINAL_STATUSES:
                 continue
-            if job.session_deleted_policy == SESSION_DELETED_COMPLETED:
-                await self._store.complete_for_session_deleted(job.id, now)
-            else:
-                await self._store.disable(job.id, now)
+            await self._apply_session_deleted_job(job, now)
             logger.info(
                 "[HeartbeatScheduler] session %s deleted, applied policy=%s to job=%s",
                 session_id,

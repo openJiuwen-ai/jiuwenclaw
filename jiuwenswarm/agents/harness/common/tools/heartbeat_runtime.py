@@ -56,14 +56,9 @@ class HeartbeatRuntimeBridge:
         }
         request = getattr(self._gateway_push, "request", None)
         if not callable(request):
-            # Compatibility for custom transports implementing the old one-way
-            # protocol. Production WebSocket transport always uses request().
-            await self._gateway_push.send_push(message)
-            return {
-                "action": action,
-                "status": "forwarded",
-                "message": "heartbeat request forwarded to gateway",
-            }
+            raise RuntimeError(
+                "heartbeat transport does not support authoritative responses"
+            )
         response = await request(message, timeout_seconds=15.0)
         if not isinstance(response, dict):
             raise RuntimeError("invalid heartbeat response from gateway")

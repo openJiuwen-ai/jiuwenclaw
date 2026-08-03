@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -480,6 +481,24 @@ async def test_on_session_deleted_disables_bound_jobs(setup) -> None:
     assert other.status == STATUS_SCHEDULED
 
 
+async def test_on_session_deleted_cancels_exact_active_run_before_completion(
+    setup,
+) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="active", channel_id="web", session_id="sd1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", session_deleted_policy="completed",
+    )
+    started = await sched.trigger_run_now(job.id)
+    await sched.on_session_deleted("sd1")
+    current = await store.get_job(job.id)
+    assert mh.cancelled_request_ids == [started["run_id"]]
+    assert current.status == STATUS_COMPLETED
+    assert current.run_state.current_run_id is None
+    assert started["run_id"] not in sched._active_runs
+
+
 # ---------------------------------------------------------------------------
 # source 兜底
 # ---------------------------------------------------------------------------
@@ -610,6 +629,74 @@ async def test_cancel_run_reports_exact_stream_not_found(setup) -> None:
     assert result["cancel_status"] == "not_found"
     assert current.run_state.last_cancel_status == "not_found"
     assert current.run_state.last_cancel_error == "exact gateway stream was not found"
+
+
+async def test_cancel_failure_preserves_authoritative_active_run(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool",
+    )
+    started = await sched.trigger_run_now(job.id)
+
+    async def fail_cancel(request_id: str) -> bool:
+        raise RuntimeError(f"cancel transport failed for {request_id}")
+
+    mh.cancel_request = fail_cancel
+    result = await sched.cancel_run(job.id)
+    current = await store.get_job(job.id)
+    assert result["cancel_status"] == "failed"
+    assert current.status == "running"
+    assert current.run_state.current_run_id == started["run_id"]
+    assert started["run_id"] in sched._active_runs
+
+
+async def test_cancel_failure_can_pause_without_erasing_live_run(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool",
+    )
+    started = await sched.trigger_run_now(job.id)
+
+    async def fail_cancel(request_id: str) -> bool:
+        raise RuntimeError(f"cancel transport failed for {request_id}")
+
+    mh.cancel_request = fail_cancel
+    result = await sched.cancel_run(job.id, pause_schedule=True)
+    current = await store.get_job(job.id)
+    assert result["cancel_status"] == "failed"
+    assert result["paused"] is True
+    assert current.status == STATUS_DISABLED
+    assert current.enabled is False
+    assert current.run_state.current_run_id == started["run_id"]
+
+
+async def test_cancel_caller_interruption_clears_cancel_intent(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool",
+    )
+    started = await sched.trigger_run_now(job.id)
+
+    async def wait_for_cancel(request_id: str) -> bool:
+        await asyncio.Event().wait()
+        return True
+
+    mh.cancel_request = wait_for_cancel
+    cancel_task = asyncio.create_task(sched.cancel_run(job.id))
+    await asyncio.sleep(0)
+    cancel_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancel_task
+
+    current = await store.get_job(job.id)
+    assert started["run_id"] not in sched._cancel_intents
+    assert current.run_state.current_run_id == started["run_id"]
 
 
 async def test_cancel_pause_survives_stream_finally_callback(setup) -> None:
@@ -801,8 +888,59 @@ async def test_resource_limit_skip_advances_due_time(tmp_path: Path) -> None:
         {"max_active_jobs_per_session": 1, "max_active_jobs_global": 100}
     )
     await sched._tick_once()
-    assert mh.messages == []
+    assert len(mh.messages) == 1
+    statuses = []
     for job in jobs:
         current = await store.get_job(job.id)
         assert current.next_run_at == 220.0
-        assert current.run_state.last_run_status == "skipped"
+        statuses.append((current.status, current.run_state.last_run_status))
+    assert sum(status == "running" for status, _ in statuses) == 1
+    assert sum(last == "skipped" for _, last in statuses) == 1
+
+
+async def test_replace_cancel_failure_does_not_dispatch_replacement(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", concurrency_policy="replace",
+    )
+    first = await sched.trigger_run_now(job.id)
+
+    async def fail_cancel(request_id: str) -> bool:
+        raise RuntimeError(f"cannot cancel {request_id}")
+
+    mh.cancel_request = fail_cancel
+    replacement = await sched.trigger_run_now(job.id)
+    current = await store.get_job(job.id)
+    assert replacement["accepted"] is False
+    assert replacement["reason"] == "replacement_cancel_failed"
+    assert len(mh.messages) == 1
+    assert current.run_state.current_run_id == first["run_id"]
+    assert current.run_state.queued_run_id is None
+
+
+async def test_replace_caller_interruption_rolls_back_reservation(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", concurrency_policy="replace",
+    )
+    first = await sched.trigger_run_now(job.id)
+
+    async def wait_for_cancel(request_id: str) -> bool:
+        await asyncio.Event().wait()
+        return True
+
+    mh.cancel_request = wait_for_cancel
+    replacement_task = asyncio.create_task(sched.trigger_run_now(job.id))
+    await asyncio.sleep(0)
+    replacement_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await replacement_task
+
+    current = await store.get_job(job.id)
+    assert first["run_id"] not in sched._cancel_intents
+    assert current.run_state.current_run_id == first["run_id"]
+    assert current.run_state.queued_run_id is None

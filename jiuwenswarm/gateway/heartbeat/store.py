@@ -255,7 +255,16 @@ class HeartbeatJobStore:
                 if job.concurrency_policy == "replace":
                     decision = "replace"
                     replaced_run_id = active
-                    return job
+                    return replace(
+                        job,
+                        run_state=replace(
+                            job.run_state,
+                            queued_run_id=run_id,
+                            queued_trigger=trigger,
+                            queued_reschedule=bool(reschedule),
+                        ),
+                        updated_at=float(now),
+                    )
                 decision = "skip"
                 return replace(
                     job,
@@ -303,12 +312,38 @@ class HeartbeatJobStore:
         trigger: str,
         reschedule: bool,
         next_run_at_after_claim: float | None = None,
-    ) -> HeartbeatJob:
-        """Replace exactly one active run after its targeted cancellation was sent."""
+    ) -> tuple[bool, HeartbeatJob]:
+        """Promote a reserved replacement after exact cancellation is confirmed."""
+
+        promoted = False
 
         def _replace(job: HeartbeatJob) -> HeartbeatJob:
-            if job.run_state.current_run_id != expected_run_id:
+            nonlocal promoted
+            rs = job.run_state
+            if rs.queued_run_id != new_run_id:
+                raise RuntimeError("replacement reservation changed")
+            if rs.current_run_id not in {expected_run_id, None}:
                 raise RuntimeError("active run changed while replacing")
+            if not job.enabled or job.status == STATUS_DISABLED:
+                return replace(
+                    job,
+                    run_state=replace(
+                        rs,
+                        queued_run_id=None,
+                        queued_trigger=None,
+                        queued_reschedule=False,
+                    ),
+                    updated_at=float(now),
+                )
+            promoted = True
+            if rs.current_run_id == expected_run_id:
+                resume_status = rs.resume_status
+                resume_enabled = rs.resume_enabled
+                resume_next_run_at = rs.resume_next_run_at
+            else:
+                resume_status = job.status
+                resume_enabled = job.enabled
+                resume_next_run_at = job.next_run_at
             return replace(
                 job,
                 status=STATUS_RUNNING,
@@ -318,18 +353,46 @@ class HeartbeatJobStore:
                     else job.next_run_at
                 ),
                 run_state=replace(
-                    job.run_state,
+                    rs,
                     current_run_id=new_run_id,
                     current_run_started_at=float(now),
                     current_trigger=trigger,
                     current_reschedule=bool(reschedule),
+                    resume_status=resume_status,
+                    resume_enabled=resume_enabled,
+                    resume_next_run_at=resume_next_run_at,
                     last_run_status=RUN_CANCELLED,
                     last_error="replaced",
+                    queued_run_id=None,
+                    queued_trigger=None,
+                    queued_reschedule=False,
                 ),
                 updated_at=float(now),
             )
 
-        return await self._mutate_job(job_id, _replace)
+        result = await self._mutate_job(job_id, _replace)
+        return promoted, result
+
+    async def clear_replacement_reservation(
+        self, job_id: str, replacement_run_id: str, *, now: float
+    ) -> HeartbeatJob:
+        """Clear only the matching queued replacement after cancellation failed."""
+
+        def _clear(job: HeartbeatJob) -> HeartbeatJob:
+            if job.run_state.queued_run_id != replacement_run_id:
+                return job
+            return replace(
+                job,
+                run_state=replace(
+                    job.run_state,
+                    queued_run_id=None,
+                    queued_trigger=None,
+                    queued_reschedule=False,
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _clear)
 
     async def finish_run(
         self,
@@ -860,151 +923,140 @@ class HeartbeatJobStore:
     # ---- 状态机写方法(方案 §7.9 / 接口设计 §1.4) ----
 
     async def mark_running(self, job_id: str, run_id: str, now: float) -> HeartbeatJob:
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            status=STATUS_RUNNING,
-            enabled=True,
-            run_state=replace(
-                job.run_state,
-                current_run_id=run_id,
-                current_run_started_at=float(now),
-            ),
-            updated_at=float(now),
-        )
-        job.check_invariants()
-        await self._upsert_job(job)
-        return job
+        def _mark(job: HeartbeatJob) -> HeartbeatJob:
+            return replace(
+                job,
+                status=STATUS_RUNNING,
+                enabled=True,
+                run_state=replace(
+                    job.run_state,
+                    current_run_id=run_id,
+                    current_run_started_at=float(now),
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _mark)
 
     async def mark_succeeded(
         self, job_id: str, run_id: str, now: float
     ) -> HeartbeatJob:
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            status=STATUS_SCHEDULED,
-            enabled=True,
-            last_run_at=float(now),
-            run_count=int(job.run_count) + 1,
-            run_state=replace(
-                job.run_state,
-                current_run_id=None,
-                current_run_started_at=None,
-                last_run_status=RUN_SUCCEEDED,
-                last_error=None,
-            ),
-            updated_at=float(now),
-        )
-        job.check_invariants()
-        await self._upsert_job(job)
-        return job
+        def _mark(job: HeartbeatJob) -> HeartbeatJob:
+            if job.run_state.current_run_id != run_id:
+                return job
+            return replace(
+                job,
+                status=STATUS_SCHEDULED,
+                enabled=True,
+                last_run_at=float(now),
+                run_count=int(job.run_count) + 1,
+                run_state=replace(
+                    job.run_state,
+                    current_run_id=None,
+                    current_run_started_at=None,
+                    last_run_status=RUN_SUCCEEDED,
+                    last_error=None,
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _mark)
 
     async def mark_failed(
         self, job_id: str, run_id: str, now: float, error: str
     ) -> HeartbeatJob:
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            status=STATUS_SCHEDULED,
-            enabled=True,
-            last_run_at=float(now),
-            run_count=int(job.run_count) + 1,
-            run_state=replace(
-                job.run_state,
-                current_run_id=None,
-                current_run_started_at=None,
-                last_run_status=RUN_FAILED,
-                last_error=str(error)[:1000],
-            ),
-            updated_at=float(now),
-        )
-        job.check_invariants()
-        await self._upsert_job(job)
-        return job
+        def _mark(job: HeartbeatJob) -> HeartbeatJob:
+            if job.run_state.current_run_id != run_id:
+                return job
+            return replace(
+                job,
+                status=STATUS_SCHEDULED,
+                enabled=True,
+                last_run_at=float(now),
+                run_count=int(job.run_count) + 1,
+                run_state=replace(
+                    job.run_state,
+                    current_run_id=None,
+                    current_run_started_at=None,
+                    last_run_status=RUN_FAILED,
+                    last_error=str(error)[:1000],
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _mark)
 
     async def record_skipped(
         self, job_id: str, now: float, reason: str
     ) -> HeartbeatJob:
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            last_run_at=float(now),
-            run_state=replace(
-                job.run_state,
-                last_run_status=RUN_SKIPPED,
-                last_error=str(reason)[:1000],
-                skipped_count=int(job.run_state.skipped_count) + 1,
-            ),
-            updated_at=float(now),
-        )
-        await self._upsert_job(job)
-        return job
+        def _record(job: HeartbeatJob) -> HeartbeatJob:
+            return replace(
+                job,
+                last_run_at=float(now),
+                run_state=replace(
+                    job.run_state,
+                    last_run_status=RUN_SKIPPED,
+                    last_error=str(reason)[:1000],
+                    skipped_count=int(job.run_state.skipped_count) + 1,
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _record)
 
     async def mark_cancelled(
         self, job_id: str, run_id: str | None, now: float
     ) -> HeartbeatJob:
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            status=STATUS_SCHEDULED,
-            run_state=replace(
-                job.run_state,
-                current_run_id=None,
-                current_run_started_at=None,
-                last_run_status=RUN_CANCELLED,
-            ),
-            updated_at=float(now),
-        )
-        job.check_invariants()
-        await self._upsert_job(job)
-        return job
+        def _mark(job: HeartbeatJob) -> HeartbeatJob:
+            if run_id is not None and job.run_state.current_run_id != run_id:
+                return job
+            return replace(
+                job,
+                status=STATUS_SCHEDULED,
+                run_state=replace(
+                    job.run_state,
+                    current_run_id=None,
+                    current_run_started_at=None,
+                    last_run_status=RUN_CANCELLED,
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _mark)
 
     async def mark_queued(self, job_id: str, run_id: str) -> HeartbeatJob:
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            run_state=replace(job.run_state, queued_run_id=run_id),
-            updated_at=time.time(),
+        return await self._mutate_job(
+            job_id,
+            lambda job: replace(
+                job,
+                run_state=replace(job.run_state, queued_run_id=run_id),
+                updated_at=time.time(),
+            ),
         )
-        await self._upsert_job(job)
-        return job
 
     async def clear_queued(self, job_id: str) -> HeartbeatJob:
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            run_state=replace(job.run_state, queued_run_id=None),
-            updated_at=time.time(),
+        return await self._mutate_job(
+            job_id,
+            lambda job: replace(
+                job,
+                run_state=replace(
+                    job.run_state,
+                    queued_run_id=None,
+                    queued_trigger=None,
+                    queued_reschedule=False,
+                ),
+                updated_at=time.time(),
+            ),
         )
-        await self._upsert_job(job)
-        return job
 
     async def reschedule(self, job_id: str, next_run_at: float | None) -> HeartbeatJob:
         """更新下次触发时间。next_run_at=None 时若处于终态则保持,否则置 scheduled。"""
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        if job.status in HEARTBEAT_TERMINAL_STATUSES:
-            # 终态不接受 reschedule;保持不变。
-            return job
-        job = replace(job, next_run_at=next_run_at, updated_at=time.time())
-        job.check_invariants()
-        await self._upsert_job(job)
-        return job
+        def _reschedule(job: HeartbeatJob) -> HeartbeatJob:
+            if job.status in HEARTBEAT_TERMINAL_STATUSES:
+                return job
+            return replace(job, next_run_at=next_run_at, updated_at=time.time())
+
+        return await self._mutate_job(job_id, _reschedule)
 
     async def mark_completed(
         self,
@@ -1014,85 +1066,80 @@ class HeartbeatJobStore:
         reason: str = "stop_condition_reached",
     ) -> HeartbeatJob:
         """once / delete_after_run / max_runs 达成 → 标记 completed,保留记录,停用。"""
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        run_count = int(job.run_count) + 1
-        job = replace(
-            job,
-            status=STATUS_COMPLETED,
-            enabled=False,
-            next_run_at=None,
-            last_run_at=float(now),
-            run_count=run_count,
-            run_state=replace(
-                job.run_state,
-                current_run_id=None,
-                current_run_started_at=None,
-                last_run_status=RUN_SUCCEEDED,
-                last_error=None,
-                queued_run_id=None,
-            ),
-            updated_at=float(now),
-        )
-        job.check_invariants()
-        await self._upsert_job(job)
-        return job
+        def _complete(job: HeartbeatJob) -> HeartbeatJob:
+            if run_id is not None and job.run_state.current_run_id not in {run_id, None}:
+                return job
+            return replace(
+                job,
+                status=STATUS_COMPLETED,
+                enabled=False,
+                next_run_at=None,
+                last_run_at=float(now),
+                run_count=int(job.run_count) + 1,
+                run_state=replace(
+                    job.run_state,
+                    current_run_id=None,
+                    current_run_started_at=None,
+                    last_run_status=RUN_SUCCEEDED,
+                    last_error=None,
+                    queued_run_id=None,
+                    queued_trigger=None,
+                    queued_reschedule=False,
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _complete)
 
     async def mark_expired(self, job_id: str, now: float) -> HeartbeatJob:
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            status=STATUS_EXPIRED,
-            enabled=False,
-            next_run_at=None,
-            updated_at=float(now),
+        return await self._mutate_job(
+            job_id,
+            lambda job: replace(
+                job,
+                status=STATUS_EXPIRED,
+                enabled=False,
+                next_run_at=None,
+                updated_at=float(now),
+            ),
         )
-        job.check_invariants()
-        await self._upsert_job(job)
-        return job
 
     async def disable(self, job_id: str, now: float) -> HeartbeatJob:
         """session_deleted_policy=disable 或手动停用。"""
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            status=STATUS_DISABLED,
-            enabled=False,
-            next_run_at=None,
-            updated_at=float(now),
+        return await self._mutate_job(
+            job_id,
+            lambda job: replace(
+                job,
+                status=STATUS_DISABLED,
+                enabled=False,
+                next_run_at=None,
+                updated_at=float(now),
+            ),
         )
-        job.check_invariants()
-        await self._upsert_job(job)
-        return job
 
     async def complete_for_session_deleted(self, job_id: str, now: float) -> HeartbeatJob:
         """session_deleted_policy=completed 时调用。"""
-        job = await self.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
-        job = replace(
-            job,
-            status=STATUS_COMPLETED,
-            enabled=False,
-            next_run_at=None,
-            run_state=replace(
-                job.run_state,
-                current_run_id=None,
-                current_run_started_at=None,
-                last_run_status=RUN_CANCELLED,
-                last_error="session_deleted",
-                queued_run_id=None,
-            ),
-            updated_at=float(now),
-        )
-        job.check_invariants()
-        await self._upsert_job(job)
-        return job
+        def _complete(job: HeartbeatJob) -> HeartbeatJob:
+            return replace(
+                job,
+                status=STATUS_COMPLETED,
+                enabled=False,
+                next_run_at=None,
+                run_state=replace(
+                    job.run_state,
+                    current_run_id=None,
+                    current_run_started_at=None,
+                    current_trigger=None,
+                    current_reschedule=False,
+                    last_run_status=RUN_CANCELLED,
+                    last_error="session_deleted",
+                    queued_run_id=None,
+                    queued_trigger=None,
+                    queued_reschedule=False,
+                ),
+                updated_at=float(now),
+            )
+
+        return await self._mutate_job(job_id, _complete)
 
     # ---- 查询辅助 ----
 

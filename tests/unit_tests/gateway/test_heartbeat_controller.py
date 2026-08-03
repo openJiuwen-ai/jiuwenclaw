@@ -160,6 +160,27 @@ async def test_max_active_jobs_per_session_enforced(ctrl: HeartbeatController, m
         })
 
 
+async def test_reenable_enforces_active_job_limit(ctrl: HeartbeatController) -> None:
+    await ctrl.create_job({
+        "name": "active", "channel_id": "web", "session_id": "s", "prompt": "p",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    })
+    disabled = await ctrl.create_job({
+        "name": "disabled", "channel_id": "web", "session_id": "s", "prompt": "p",
+        "enabled": False,
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    })
+    ctrl.set_limits(
+        {
+            "max_active_jobs_per_session": 1,
+            "max_active_jobs_global": 100,
+            "min_interval_seconds": 60,
+        }
+    )
+    with pytest.raises(ValueError, match="max_active_jobs_per_session"):
+        await ctrl.toggle_job(disabled["id"], True)
+
+
 # ---------------------------------------------------------------------------
 # toggle / 重新激活
 # ---------------------------------------------------------------------------
@@ -209,13 +230,35 @@ async def test_delete_running_job_cancels_exact_run_before_physical_delete(
 
     async def cancel_run(job_id: str, *, pause_schedule: bool = False):
         calls.append((job_id, pause_schedule))
-        return {"job_id": job_id, "cancelled_run_id": "run-active"}
+        return {
+            "job_id": job_id,
+            "cancelled_run_id": "run-active",
+            "cancel_status": "cancelled",
+        }
 
     monkeypatch.setattr(ctrl._scheduler, "cancel_run", cancel_run)
     result = await ctrl.delete_job(job["id"], access_session_id="s1")
     assert result == {"deleted": True}
-    assert calls == [(job["id"], False)]
+    assert calls == [(job["id"], True)]
     assert await ctrl._store.get_job(job["id"]) is None
+
+
+async def test_delete_running_job_stops_when_exact_cancel_fails(
+    ctrl: HeartbeatController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = await ctrl.create_job({
+        "name": "x", "channel_id": "web", "session_id": "s1", "prompt": "p",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    })
+    await ctrl._store.mark_running(job["id"], "run-active", 1000.0)
+
+    async def cancel_run(job_id: str, *, pause_schedule: bool = False):
+        return {"job_id": job_id, "cancel_status": "failed"}
+
+    monkeypatch.setattr(ctrl._scheduler, "cancel_run", cancel_run)
+    with pytest.raises(RuntimeError, match="could not be cancelled"):
+        await ctrl.delete_job(job["id"], access_session_id="s1")
+    assert await ctrl._store.get_job(job["id"]) is not None
 
 
 async def test_preview_job(ctrl: HeartbeatController) -> None:

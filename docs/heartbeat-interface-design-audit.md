@@ -33,7 +33,7 @@
 
 修订：增加带 `operation_id` 的关联请求/响应。AgentServer 注册一次性 Future，向 Gateway push 操作；Gateway 执行 Controller 后，通过内部 `heartbeat.tool_response` 请求回送结果；Agent Tool 等待真实结果并原样返回。超时和 Gateway 错误必须作为工具错误暴露。无 `operation_id` 的旧 push 暂时保留界面回包兼容。
 
-状态：本轮编码。
+状态：已落地。Agent Tool transport 不支持关联 `request()` 时明确失败，不再把单向 push 伪装成成功。
 
 ### HB-D02（P0）Web/RPC 的会话字段与授权边界矛盾
 
@@ -75,7 +75,7 @@
 
 修订：响应增加 `cancel_status=cancelled|not_found|failed|idle`；`paused` 只表示调度已停用。精确取消结果必须由 MessageHandler 的 bool 返回值决定；失败原因写入 run_state 的最近错误信息。保留旧字段以兼容前端。
 
-状态：本轮编码。
+状态：已落地。取消先确认、后结束本地 run；取消失败保留真实运行态，delete/replace 不再继续破坏性状态转换。
 
 ### HB-D07（P0）运行中停用/修改可能被旧完成回调覆盖
 
@@ -97,9 +97,9 @@ run 开始时保存的 `resume_*` 快照在完成时无条件恢复。若用户�
 
 当配置下调导致已有任务超限，scheduler 对 due job 只 warning/return，不推进 next_run_at。该 job 每个 poll 周期都会再次命中，产生持续日志和扫描压力。
 
-修订：防御性限流按一次 skipped 处理，记录原因并基于 now 推进下一次触发；once 无下一次时进入 expired。资源限制值规范化为 API 中稳定的数字类型。
+修订：防御性限流按一次 skipped 处理，记录原因并基于 now 推进下一次触发；once 无下一次时进入 expired。每个 tick 以 `running > created_at > id` 做确定性准入，只有超额任务被跳过，避免降配后所有 due job 一起饥饿。资源限制值规范化为 API 中稳定的数字类型，重新启用任务也必须重新校验限额。
 
-状态：本轮编码。
+状态：已落地。
 
 ### HB-D10（P1）会话“不存在”和“暂时不可读”被混为一类
 
@@ -209,9 +209,9 @@ preview 未返回计算基准，客户端收到结果时无法解释边界差异
 
 原方案没有验证 request metadata 会被所有 delta/final/processing_status 分支回传，徽章可能只在部分事件出现。
 
-修订：MessageHandler 合并 request metadata 到所有 stream chunk；至少用 delta/final/cancel 三类测试验证。前端对缺标记的中间 processing 状态应容错。
+修订：MessageHandler 合并 request metadata 到所有 stream chunk；用 delta/final/processing_status 三类事件验证。取消改走精确 request-id 控制 API，不再伪造一条普通 chat cancel 消息。前端对历史版本缺标记的中间 processing 状态应容错。
 
-状态：主链已合并；继续补端到端测试。
+状态：已落地并补测试。
 
 ### HB-D24（P2）`max_runs=null` 的无限任务只有 UI 提醒，没有服务端治理
 
@@ -230,7 +230,7 @@ preview 未返回计算基准，客户端收到结果时无法解释边界差异
 3. Gateway 校验 ownership，执行 Controller。
 4. Gateway 通过内部 `heartbeat.tool_response` 将 `{ok,data,error,code}` 回送 AgentServer。
 5. Agent Tool Future 完成并把真实结果返回模型；超时明确失败。
-6. 旧请求未带 operation_id 时才保留 `chat.tool_result` 界面回包。
+6. 旧 Gateway push 未带 operation_id 时只保留界面回包兼容；Agent Tool transport 本身不支持关联请求时明确报错。
 
 ### 3.2 调度与运行修改优先级
 
@@ -275,13 +275,17 @@ preview 未返回计算基准，客户端收到结果时无法解释边界差异
 
 - Agent Tool 使用 `operation_id` 等待 Gateway 的真实数据或错误；旧单向 transport 仅保留兼容路径。
 - 精确取消结果返回并持久化 `cancelled/not_found/failed/idle`，pause 与取消事实分离。
+- cancel/replace 先确认精确 stream 已停止，再结束旧 run 或提升替代 run；失败与调用协程中断都保持旧 run 权威并清理预留。
+- delete 在活动 run 取消失败时拒绝删除；显式 session 删除会先精确取消活动 run，再执行 completed/disabled 策略。
 - finish 采用最新 job 状态，运行中 disable 不会被旧回调重新启用；scheduler 与 run_now 的 interval 锚点分别锁定。
 - Gateway reload 以精确 stream task 为运行证据；无证据 orphan 立即恢复，活跃 stream 可重新挂接。
-- 限流跳过原子记录 skipped 并推进 `next_run_at`，避免 poll 热循环。
+- store 的生产状态转换全部改成锁内原子 mutation，避免 read-modify-write 覆盖并发回调。
+- 限流采用确定性准入，只有超额任务原子记录 skipped 并推进 `next_run_at`，避免 poll 热循环和全体饥饿；重新启用也校验限额。
 - session 目录缺失和 metadata 暂时不可读已分流。
 - MessageHandler 对 heartbeat 保留绑定 session，并从 session metadata 恢复当前 mode，不再被频道默认状态覆盖。
 - 旧探活配置在启动时加锁幂等迁移；`HEALTH_CHECK_*` 环境变量优先，旧变量只读 fallback。
-- 探活内部协议改为 health_check 单写，所有已识别的 session/history/UI/relay consumer 对旧 heartbeat 双读。
+- 探活内部协议改为 health_check 单写，所有已识别的 session/history/UI/relay consumer（含 Telegram、DingTalk）对旧 heartbeat 双读。
+- delta/final/processing_status 流事件均保留 heartbeat `automation` 元数据。
 - list 增加稳定排序；limits 输出规范为数字/null；meta 明确 run_count 和 `delete_after_run` 兼容语义。
 
 仍按本审计保留到后续版本的项目：D04 状态字段拆分、D14 字段重命名、D17 幂等/revision、D19 schema v2、D21 新错误码、D22 preview 时间基准、D24 长期治理。它们不是本轮基础要求的隐式欠实现，而是需要版本或平台能力配合的显式后续项。
@@ -295,13 +299,15 @@ preview 未返回计算基准，客户端收到结果时无法解释边界差异
 | Agent Tool 关联往返 | 模型拿到真实 job 数据；Gateway code/error 进入工具错误 |
 | get missing | 返回 `NOT_FOUND`，不因 `None` 封装崩溃 |
 | cancel 真实性 | cancelled 与 exact stream not_found 均进入响应和 run_state |
+| cancel 失败/中断 | 保留权威 active run；delete/replace 停止；协程中断清除 intent/reservation |
 | 完成竞态 | 运行中 disable 不被旧 callback 覆盖 |
 | interval 锚点 | scheduler 按 claim 时刻；run_now reschedule 按完成时刻 |
 | Gateway reload | orphan 立即恢复；精确活跃 stream 重新挂接 |
-| 限流降配 | skipped 被记录且 next_run_at 推进 |
+| 限流降配/重启用 | 确定性准入一个合法任务，其余 skipped 且推进；重新启用受限额约束 |
 | session metadata | 目录缺失与文件缺失/损坏分别走 missing/transient |
 | session 现场恢复 | heartbeat 保留绑定 session，并恢复该 session 当前 mode |
 | 配置/命名兼容 | 迁移幂等且保留 jobs；health_check 单写、heartbeat 双读 |
+| relay/automation | Telegram、DingTalk 新旧 payload 双读；delta/final/processing 元数据保留 |
 | API 稳定性 | list 稳定排序；limits 数字/null 归一化；弃用语义进入 meta |
 
-截至本轮，Heartbeat/HealthCheck 定向回归为 146 个用例通过；session metadata/history 兼容回归为 90 个用例通过。测试框架在用例全部结束后仍有项目既有后台线程未退出，因此本地运行需在结果完整输出后中断进程；该现象与本轮断言结果无关，但应另行清理测试生命周期。
+截至本轮，Heartbeat/HealthCheck 定向回归为 161 个用例通过（另有 73 个被筛选排除）；此前 session metadata/history 兼容回归为 90 个用例通过。测试框架在用例全部结束后仍有项目既有后台线程/事件循环未退出，因此本地运行需在结果完整输出后中断进程；该现象与本轮断言结果无关，但应另行清理测试生命周期。

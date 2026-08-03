@@ -6,17 +6,24 @@ from types import SimpleNamespace
 
 import pytest
 
+import jiuwenswarm.common.config as config_module
 from jiuwenswarm.agents.harness.common.tools.heartbeat_runtime import (
     HEARTBEAT_TOOL_NAMES,
     HeartbeatRuntimeBridge,
 )
+from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.message import EventType, Message
-import jiuwenswarm.common.config as config_module
 from jiuwenswarm.gateway.app_gateway import _resolve_health_check_config
 from jiuwenswarm.gateway.health_check.health_check import (
     HEALTH_CHECK_OK,
     GatewayHealthCheckService,
     HealthCheckConfig,
+)
+from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import (
+    DingTalkChannel,
+)
+from jiuwenswarm.gateway.channel_manager.im_platforms.telegram.telegram_connect import (
+    TelegramChannel,
 )
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
@@ -92,6 +99,25 @@ def test_health_check_config_prefers_new_section_and_reads_legacy() -> None:
     ) == {"every": 20, "target": "web"}
 
 
+@pytest.mark.parametrize("payload_key", ["health_check", "heartbeat"])
+def test_telegram_and_dingtalk_read_health_check_relay_payload(
+    payload_key: str,
+) -> None:
+    msg = Message(
+        id="health-check-relay",
+        type="event",
+        channel_id="telegram",
+        session_id="health_check_1",
+        params={},
+        timestamp=1.0,
+        ok=True,
+        payload={payload_key: "probe result"},
+        event_type=EventType.HEALTH_CHECK_RELAY,
+    )
+    assert TelegramChannel._extract_content(None, msg) == "probe result"
+    assert DingTalkChannel._extract_message_content(None, msg) == "probe result"
+
+
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 async def test_agent_heartbeat_runtime_builds_nine_tools_and_forwards_context() -> None:
     push = _Push()
@@ -134,6 +160,22 @@ async def test_agent_heartbeat_runtime_surfaces_gateway_error() -> None:
         )
 
 
+async def test_agent_heartbeat_runtime_rejects_legacy_one_way_transport() -> None:
+    class LegacyPush:
+        async def send_push(self, msg: dict) -> None:
+            raise AssertionError("one-way fallback must not be used")
+
+    context = SimpleNamespace(
+        channel_id="web",
+        session_id="session-1",
+        metadata={"request_id": "request-1"},
+    )
+    with pytest.raises(RuntimeError, match="authoritative responses"):
+        await HeartbeatRuntimeBridge(gateway_push=LegacyPush())._send(
+            context, "list", {"scope": "current"}
+        )
+
+
 async def test_agent_server_correlates_gateway_push_result() -> None:
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._current_ws = object()
@@ -151,6 +193,23 @@ async def test_agent_server_correlates_gateway_push_result() -> None:
         {"body": {"action": "get", "data": {"job_id": "hb-1"}}}
     )
     assert result == {"ok": True, "data": {"id": "hb-1"}}
+    assert server._gateway_push_waiters == {}
+
+
+async def test_agent_server_gateway_push_timeout_cleans_waiter() -> None:
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._current_ws = object()
+    server._current_send_lock = asyncio.Lock()
+    server._gateway_push_waiters = {}
+
+    async def send_push(msg: dict) -> None:
+        return None
+
+    server.send_push = send_push  # type: ignore[method-assign]
+    with pytest.raises(TimeoutError, match="heartbeat operation timed out"):
+        await server.request_gateway_push(
+            {"body": {"action": "list", "data": {}}}, timeout_seconds=0.001
+        )
     assert server._gateway_push_waiters == {}
 
 
@@ -345,6 +404,37 @@ async def test_message_handler_reports_exact_heartbeat_completion() -> None:
     assert handler._heartbeat_scheduler_service.calls == [
         (("job-1", "run-1"), {"outcome": "failed", "error": "boom"})
     ]
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        EventType.CHAT_DELTA,
+        EventType.CHAT_FINAL,
+        EventType.CHAT_PROCESSING_STATUS,
+    ],
+)
+def test_message_handler_preserves_automation_metadata_on_stream_events(
+    event_type: EventType,
+) -> None:
+    metadata = {
+        "automation": {
+            "kind": "heartbeat",
+            "job_id": "job-1",
+            "run_id": "run-1",
+        }
+    }
+    message = MessageHandler._chunk_to_message(
+        AgentResponseChunk(
+            request_id="run-1",
+            channel_id="web",
+            payload={"event_type": event_type.value, "content": "event"},
+        ),
+        "bound-session",
+        metadata=metadata,
+    )
+    assert message.event_type == event_type
+    assert message.metadata == metadata
 
 
 async def test_message_handler_cancel_request_only_stops_exact_stream() -> None:
