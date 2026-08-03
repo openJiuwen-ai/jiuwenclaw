@@ -228,11 +228,9 @@ The frontend shows the following options under **Self-Evolution Configuration**:
 
 | Switch | Config key | Default | Purpose |
 | --- | --- | --- | --- |
-| **Enable Skills Self-Evolution** (master switch) | `react.evolution.enabled` | `true` | Master switch for self-evolution. When off, the entire self-evolution chain (including the `/evolve` manual command) is unavailable |
-| **Auto-detect evolution signals** | `react.evolution.auto_scan` | `false` | When enabled, the system scans failures, corrections, and other evolution signals after chat and tool execution. Env `EVOLUTION_AUTO_SCAN` takes precedence |
-| **Auto-suggest new skill creation** | `react.evolution.skill_create` | `false` | When enabled, the system can propose creating a new Skill when no suitable Skill exists. Env `SKILL_CREATE` takes precedence |
+| **Enable Skills Self-Evolution** | `react.evolution.skill_evolution` | `false` | Controls automatic Skill creation and evolution together. When off, the related Rails, tools, prompts, watchers, and `/evolve` commands are unavailable |
 
-> 💡 **Note**: `react.evolution.enabled` is the master switch (on by default, determines whether self-evolution is available), `auto_scan` / `skill_create` are sub-switches (off by default, determine whether to trigger automatically). Even with the master switch on, `auto_scan` only controls automatic scanning of failure/correction signals; `skill_create` independently controls whether to auto-suggest new skill creation. When both are off, the system only responds to manual `/evolve` commands.
+> 💡 **Note**: `react.evolution.auto_save` remains an advanced YAML-only approval setting and is not shown in the frontend. Explicit use of the general `skill-creator` or `swarmskill-creator` capability is independent from this automatic self-evolution switch.
 
 > 📖 For details on the self-evolution mechanism, see [Skill Self-Evolution](SkillSelfEvolution.md).
 
