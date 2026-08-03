@@ -47,7 +47,7 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
     resolve_agent_request_timeout_seconds,
     send_agent_request_with_timeout,
 )
-from jiuwenswarm.gateway.auth.common import _handle_connect
+from jiuwenswarm.extensions.agentos.auth.common import _handle_connect
 
 logger = logging.getLogger(__name__)
 

@@ -25,7 +25,7 @@ from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
-from jiuwenswarm.gateway.auth.common import _handle_connect
+from jiuwenswarm.extensions.agentos.auth.common import _handle_connect
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
