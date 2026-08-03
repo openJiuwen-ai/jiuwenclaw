@@ -23,6 +23,9 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
     ToolCallInputs,
 )
+from openjiuwen.harness.subagents.browser_agent import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as deep_interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.common.schema.agent import AgentRequest
@@ -214,7 +217,10 @@ def test_deep_adapter_subagents_includes_browser_by_default_when_runtime_enabled
 
     assert subagents is not None
     assert [item["name"] for item in subagents] == ["browser_agent"]
-    assert subagents[-1]["kwargs"]["max_iterations"] == 8
+    assert (
+        subagents[-1]["kwargs"]["max_iterations"]
+        == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    )
 
 
 def test_deep_adapter_subagents_only_includes_explicitly_enabled_agents(

@@ -47,11 +47,13 @@ from openjiuwen.harness.workspace.workspace import Workspace
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
     _CRON_TOOL_CHANNEL_ID,
-    _agent_def_to_subagent_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
 )
@@ -63,7 +65,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
     StructuredAskUserRail,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
+from jiuwenswarm.agents.harness.common.memory.config import is_memory_enabled
 from jiuwenswarm.agents.harness.common.tools import (
     SkillToolkit,
 )
@@ -495,7 +497,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             workspace=workspace,
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
-            enable_read_image_multimodal=False,
+            enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             auto_create_workspace=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
@@ -1037,7 +1039,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     language=resolved_language,
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
-                        react_cfg.get("max_iterations", 15),
+                        DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
                     )
                 )
                 browser_spec.factory_kwargs = {"auto_create_workspace": False}

@@ -124,6 +124,9 @@ from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
     register_blank_agent_if_teammate,
     resolve_a2x_config,
 )
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
@@ -1820,7 +1823,7 @@ class JiuWenSwarmDeepAdapter:
                             if isinstance(browser_agent_cfg, dict)
                             else None
                         ),
-                        react_cfg.get("max_iterations", 15),
+                        DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
                     ),
                 )
             )
@@ -2921,11 +2924,16 @@ class JiuWenSwarmDeepAdapter:
             return True
         return self._vision_model_config is None
 
-    def _resolve_enable_read_image_multimodal(self, config: dict[str, Any]) -> bool:
+    def _resolve_enable_read_image_multimodal(
+        self,
+        config: dict[str, Any],
+    ) -> bool | None:
         configured = config.get("enable_read_image_multimodal")
         if isinstance(configured, bool):
             return configured
-        return self._vision_model_config is None
+        if self._vision_model_config is not None:
+            return False
+        return None
 
     def _apply_model_to_react_agent(self, model: Model) -> None:
         """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。
