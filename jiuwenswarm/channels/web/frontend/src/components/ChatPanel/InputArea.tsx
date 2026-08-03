@@ -1,12 +1,20 @@
 ﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { AtSign, CircleX, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
+import { AtSign, CircleX, ClipboardList, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
 import { FileTypeIcon, getFileTypeIconKeyFromFilename, type FileTypeIconKey } from './FileTypeIcon';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
-import { useChatStore, useGoalStore, useSessionStore, useWorkspaceStore, resolveEffectiveModel } from '../../stores';
+import {
+  useChatStore,
+  useGoalStore,
+  usePlanStore,
+  useSessionStore,
+  useWorkspaceStore,
+  resolveEffectiveModel,
+} from '../../stores';
+import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
@@ -452,6 +460,12 @@ export function InputArea({
   // 就该跟着消失，不能靠"目标是否存在"续命——目标存在与否、当前状态、编辑/暂停/删除，已经由
   // 输入框上方常驻的 GoalBar 完整覆盖，工具栏这里再挂一份重复的常驻入口只会显得"选择没解除"。
   const goalTagVisible = canUseGoalMenu && goalArmed;
+  // Plan 是持续开关（不是 Goal 那种"下一条消息生效"的过渡态）：打开后一直用
+  // agent.plan 发送，直到用户点叉或后端推 plan.mode_exited。
+  // 和 Goal 一样只对单 agent 开放，集群模式不提供 Plan 入口。
+  const planActive = usePlanStore((s) => s.runtimes[activeSessionId ?? '']?.active ?? false);
+  const canUsePlanMenu = supportsPlanMode(mode);
+  const planTagVisible = canUsePlanMenu && planActive;
 
   const mentionableMembers = useMemo(() => {
     return teamMembers
@@ -1830,6 +1844,30 @@ export function InputArea({
                     </span>
                   </button>
                 )}
+                {canUsePlanMenu && (
+                  <button
+                    type="button"
+                    className="chat-mode-select__option"
+                    role="menuitem"
+                    onClick={() => {
+                      setAttachMenuOpen(false);
+                      if (activeSessionId) {
+                        // explicitEntry：这是用户手动打开开关，下一条 Plan 消息要带
+                        // plan_entry_source，否则会被后端的防重入闸门拦下。
+                        usePlanStore
+                          .getState()
+                          .setActive(activeSessionId, true, { explicitEntry: true });
+                      }
+                    }}
+                  >
+                    <span className="chat-mode-select__option-main">
+                      <span className="chat-mode-select__icon" aria-hidden="true">
+                        <ClipboardList className="w-4 h-4" />
+                      </span>
+                      <span className="chat-mode-select__label">{t('plan.toolbarTag')}</span>
+                    </span>
+                  </button>
+                )}
               </div>,
               document.body
             )}
@@ -1955,6 +1993,30 @@ export function InputArea({
                     onClearGoal?.(activeSessionId);
                   }
                   useGoalStore.getState().setArmed(activeSessionId, false);
+                }}
+              >
+                <X size={11} strokeWidth={2.5} />
+              </button>
+            </div>
+          )}
+
+          {planTagVisible && (
+            <div className="chat-goal-tag">
+              <button type="button" className="chat-mode-select__trigger">
+                <span className="chat-mode-select__value">
+                  <span className="chat-mode-select__icon" aria-hidden="true">
+                    <ClipboardList className="w-4 h-4" />
+                  </span>
+                  <span className="chat-mode-select__label">{t('plan.toolbarTag')}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="chat-goal-tag__close"
+                title={t('plan.closeTag')}
+                onClick={() => {
+                  if (!activeSessionId) return;
+                  usePlanStore.getState().setActive(activeSessionId, false);
                 }}
               >
                 <X size={11} strokeWidth={2.5} />
