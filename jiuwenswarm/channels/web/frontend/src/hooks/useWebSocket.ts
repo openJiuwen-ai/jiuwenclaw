@@ -73,6 +73,7 @@ import {
   findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn,
 } from '../features/teamLeaderMessages';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
+import { stripUploadDocumentBlocks } from '../utils/documentMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -504,6 +505,7 @@ interface UseWebSocketReturn {
     options?: WebRequestOptions
   ) => Promise<T>;
   persistMedia: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
+  persistDocuments: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   sendMessage: (content: string, sessionId: string, mediaItems?: MediaItem[]) => Promise<boolean>;
   sendStructuredChatContent: (content: unknown, sessionId: string) => Promise<void>;
   interrupt: (
@@ -563,15 +565,37 @@ function toPersistedMediaRecord(item: MediaItem): Record<string, unknown> {
   };
 }
 
+function slimPersistedMediaRecords(items: Record<string, unknown>[]): Record<string, unknown>[] {
+  return items.map((item) => ({
+    type: item.type,
+    filename: item.filename,
+    mime_type: item.mime_type ?? item.mimeType,
+    path: item.path,
+    size_bytes: item.size_bytes ?? item.sizeBytes,
+  }));
+}
+
 function buildPersistedMediaFiles(mediaItems: MediaItem[]): Record<string, unknown> {
-  return {
-    uploaded_images: mediaItems.map((item) => ({
+  const files: Record<string, unknown> = {};
+  const images = mediaItems.filter((item) => item.type === 'image');
+  const documents = mediaItems.filter((item) => item.type === 'document');
+  if (images.length) {
+    files.uploaded_images = images.map((item) => ({
       filename: item.filename,
       path: item.path,
       mime_type: getMediaMimeType(item),
       size_bytes: item.size_bytes ?? item.sizeBytes,
-    })),
-  };
+    }));
+  }
+  if (documents.length) {
+    files.uploaded_documents = documents.map((item) => ({
+      filename: item.filename,
+      path: item.path,
+      mime_type: getMediaMimeType(item),
+      size_bytes: item.size_bytes ?? item.sizeBytes,
+    }));
+  }
+  return files;
 }
 
 function getSessionWorkContext(sessionId: string): Record<string, unknown> {
@@ -927,7 +951,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const clearPendingContextCompressionStart = useCallback((sessionId: string) => {
     const pending = pendingContextCompressionStartRef.current.get(sessionId);
     if (pending) {
-      clearTimeout(pending.timer);
+      window.clearTimeout(pending.timer);
       pendingContextCompressionStartRef.current.delete(sessionId);
     }
   }, []);
@@ -941,13 +965,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const key = getTeamMemberContextCompressionKey(sessionId, memberId);
     const pending = pendingTeamMemberContextCompressionStartRef.current.get(key);
     if (!pending) return;
-    clearTimeout(pending.timer);
+    window.clearTimeout(pending.timer);
     pendingTeamMemberContextCompressionStartRef.current.delete(key);
   }, [getTeamMemberContextCompressionKey]);
 
   const clearAllPendingTeamMemberContextCompressionStarts = useCallback(() => {
     for (const pending of pendingTeamMemberContextCompressionStartRef.current.values()) {
-      clearTimeout(pending.timer);
+      window.clearTimeout(pending.timer);
     }
     pendingTeamMemberContextCompressionStartRef.current.clear();
   }, []);
@@ -1004,7 +1028,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const pending: PendingContextCompressionStart = {
           runtimeState,
           shown: false,
-          timer: setTimeout(() => {
+          timer: window.setTimeout(() => {
             const current = pendingContextCompressionStartRef.current.get(sessionId);
             if (current !== pending) return;
             pending.shown = true;
@@ -1084,7 +1108,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const pending: PendingContextCompressionStart = {
           runtimeState,
           shown: false,
-          timer: setTimeout(() => {
+          timer: window.setTimeout(() => {
             if (pendingTeamMemberContextCompressionStartRef.current.get(key) !== pending) return;
             pending.shown = true;
             setTeamMemberContextCompressionStatus(sessionId, memberId, {
@@ -1133,7 +1157,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   useEffect(() => {
     return () => {
       pendingContextCompressionStartRef.current.forEach((pending) => {
-        clearTimeout(pending.timer);
+        window.clearTimeout(pending.timer);
       });
       pendingContextCompressionStartRef.current.clear();
       clearAllPendingTeamMemberContextCompressionStarts();
@@ -1146,6 +1170,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         session_id: sessionId,
         content,
         media_items: mediaItems as unknown as Record<string, unknown>[],
+      });
+    },
+    [request],
+  );
+
+  const persistDocuments = useCallback(
+    async (content: string, sessionId: string, mediaItems: MediaItem[]) => {
+      return request<PersistMediaResponse>('document.persist', {
+        session_id: sessionId,
+        content,
+        parse: true,
+        documents: mediaItems.map((item) => ({
+          filename: item.filename,
+          mime_type: getMediaMimeType(item),
+          base64_data: item.base64_data || item.base64Data,
+        })),
       });
     },
     [request],
@@ -1310,11 +1350,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
 
       // 添加用户消息（附带输入栏选中的技能）
+      // 气泡只展示用户原文；路径提示仅随 chat.send 发给 Agent。
       const selectedSkills = useSessionStore.getState().getRuntime(sessionId)?.selectedSkills ?? [];
       useChatStore.getState().addMessage(sessionId, {
         id: `user-${Date.now()}`,
         role: 'user',
-        content,
+        content: stripUploadDocumentBlocks(content) || content.replace(/\n*【上传文档[\s\S]*$/, '').trim() || content,
         mediaItems,
         timestamp: new Date().toISOString(),
         ...(selectedSkills.length > 0 ? { skills: selectedSkills } : {}),
@@ -1344,6 +1385,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           clearedTeamPanelSessionRef.current.delete(sessionId);
         }
         useChatStore.getState().setPaused(sessionId, false);
+        // 执行中追问：先收尾上一轮仍在 streaming 的 leader，避免新一轮气泡/头像挂错簇
+        closeActiveTeamLeaderMessages(sessionId);
+        useChatStore.getState().closeReasoning(sessionId);
       }
       try {
         let outgoingContent = content.replace(/\{\{skill:([^}]+)\}\}/g, '$1');
@@ -1354,10 +1398,31 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             outgoingMediaItems = mediaItems.map(toPersistedMediaRecord);
             outgoingFiles = buildPersistedMediaFiles(mediaItems);
           } else {
-            const persisted = await persistMedia(content, sessionId, mediaItems);
-            outgoingContent = persisted.content ?? persisted.query ?? content;
-            outgoingMediaItems = persisted.media_items;
-            outgoingFiles = persisted.files;
+            const imageItems = mediaItems.filter((item) => item.type !== 'document');
+            const documentItems = mediaItems.filter((item) => item.type === 'document');
+            const mergedItems: Record<string, unknown>[] = [];
+            const mergedFiles: Record<string, unknown> = {};
+            if (imageItems.length) {
+              const persisted = await persistMedia(content, sessionId, imageItems);
+              outgoingContent = persisted.content ?? persisted.query ?? content;
+              if (Array.isArray(persisted.media_items)) {
+                mergedItems.push(...persisted.media_items);
+              }
+              if (persisted.files && typeof persisted.files === 'object') {
+                Object.assign(mergedFiles, persisted.files);
+              }
+            }
+            if (documentItems.length) {
+              const persistedDocs = await persistDocuments(content, sessionId, documentItems);
+              if (Array.isArray(persistedDocs.media_items)) {
+                mergedItems.push(...persistedDocs.media_items);
+              }
+              if (persistedDocs.files && typeof persistedDocs.files === 'object') {
+                Object.assign(mergedFiles, persistedDocs.files);
+              }
+            }
+            outgoingMediaItems = mergedItems.length ? slimPersistedMediaRecords(mergedItems) : undefined;
+            outgoingFiles = Object.keys(mergedFiles).length ? mergedFiles : undefined;
           }
         }
         // Goal 处于 active 时，普通输入按文档 §5.1 作为补充约束插入当前 Goal，而不是覆盖它
@@ -1393,6 +1458,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
     },
     [
+      closeActiveTeamLeaderMessages,
+      persistDocuments,
       persistMedia,
       request,
       resetContextCompressionTurn,
@@ -2289,6 +2356,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const streamId = currentStreamId;
         const preferredSegmentId =
           finalAction.type === 'patch_segment' ? finalAction.segmentId : undefined;
+        // 收尾时刻单独记：勿覆盖 message.timestamp（排序/goal 卡），但任务用时必须吃到 final。
+        const completedAtIso = normalizeEventTimestampIso(payload.timestamp);
 
         if (assistantStreamSplit && content) {
           const cronMetaEarly = payload.cron as Record<string, unknown> | undefined;
@@ -2304,7 +2373,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 kind: 'agent',
                 content,
                 finalId,
-                timestampIso: new Date().toISOString(),
+                timestampIso: completedAtIso,
               });
               if (!content.includes('MEDIA:')) {
                 handleTtsPlayback(sessionId, finalId, content);
@@ -2321,6 +2390,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 useChatStore.getState().updateMessage(sessionId, rewriteId, {
                   content,
                   isStreaming: false,
+                  completedAt: completedAtIso,
                 });
                 if (!content.includes('MEDIA:')) {
                   handleTtsPlayback(sessionId, rewriteId, content);
@@ -2331,11 +2401,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
         }
 
-        // 未分段：合并进当前流。勿用 payload.timestamp 覆盖消息时间（会与 goal 完成卡抢序）。
+        // 未分段：合并进当前流。勿用 payload.timestamp 覆盖消息时间（会与 goal 完成卡抢序）；
+        // 另写 completedAt，供「任务用时」与历史 final 落盘时间对齐。
         if (streamId && !assistantStreamSplit) {
           useChatStore.getState().updateMessage(sessionId, streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
+            completedAt: completedAtIso,
             ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
           });
           useChatStore.getState().stopStreaming(sessionId);
@@ -2352,6 +2424,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             useChatStore.getState().updateMessage(sessionId, streamId, {
               content: nextContent,
               isStreaming: false,
+              completedAt: completedAtIso,
               ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
             });
             useChatStore.getState().stopStreaming(sessionId);
@@ -2360,7 +2433,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
             return;
           }
-          useChatStore.getState().updateMessage(sessionId, streamId, { isStreaming: false });
+          useChatStore.getState().updateMessage(sessionId, streamId, {
+            isStreaming: false,
+            completedAt: completedAtIso,
+          });
           useChatStore.getState().stopStreaming(sessionId);
         }
         if (content) {
@@ -2392,7 +2468,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               }
             }
             if (placeholderId) {
-              useChatStore.getState().updateMessage(sessionId, placeholderId, { content, isStreaming: false });
+              useChatStore.getState().updateMessage(sessionId, placeholderId, {
+                content,
+                isStreaming: false,
+                completedAt: completedAtIso,
+              });
               if (!content.includes('MEDIA:')) {
                 handleTtsPlayback(sessionId, placeholderId, content);
               }
@@ -2410,9 +2490,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const existing = messages.find((m) => m.id === messageId);
           if (existing) {
             if (existing.content === content) {
+              useChatStore.getState().updateMessage(sessionId, messageId, {
+                isStreaming: false,
+                completedAt: completedAtIso,
+              });
               return;
             }
-            useChatStore.getState().updateMessage(sessionId, messageId, { content, isStreaming: false });
+            useChatStore.getState().updateMessage(sessionId, messageId, {
+              content,
+              isStreaming: false,
+              completedAt: completedAtIso,
+            });
             if (!content.includes('MEDIA:')) {
               handleTtsPlayback(sessionId, messageId, content);
             }
@@ -2457,6 +2545,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 useChatStore.getState().updateMessage(sessionId, rewriteId, {
                   content,
                   isStreaming: false,
+                  completedAt: completedAtIso,
                 });
                 if (!content.includes('MEDIA:')) {
                   handleTtsPlayback(sessionId, rewriteId, content);
@@ -2469,7 +2558,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               id: finalMsgId,
               role: 'assistant',
               content: remainder,
-              timestamp: new Date().toISOString(),
+              timestamp: completedAtIso,
+              completedAt: completedAtIso,
               isProactiveRecommendation,
               ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
             });
@@ -2488,6 +2578,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             useChatStore.getState().updateMessage(sessionId, rewriteId, {
               content,
               isStreaming: false,
+              completedAt: completedAtIso,
             });
             if (!content.includes('MEDIA:')) {
               handleTtsPlayback(sessionId, rewriteId, content);
@@ -2496,13 +2587,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           const last = messages[messages.length - 1];
           if (last?.role === 'assistant' && last.content === content) {
+            useChatStore.getState().updateMessage(sessionId, last.id, {
+              isStreaming: false,
+              completedAt: completedAtIso,
+            });
             return;
           }
           useChatStore.getState().addMessage(sessionId, {
             id: messageId,
             role: 'assistant',
             content,
-            timestamp: new Date().toISOString(),
+            timestamp: completedAtIso,
+            completedAt: completedAtIso,
             isProactiveRecommendation,
             ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
           });
@@ -2615,7 +2711,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
-        useChatStore.getState().addFileItems(sessionId, files);
+        useChatStore.getState().addFileItems(sessionId, files, {
+          timestampIso: normalizeEventTimestampIso(payload.timestamp),
+        });
       }),
       webClient.on('chat.tool_call', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
@@ -2695,11 +2793,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const toolResult = normalizeToolResultPayload(payload);
         const activeSessionId = getPayloadSessionId(payload) || undefined;
-        const shutdownMemberId =
-          (toolResult.toolCallId
-            ? shutdownMemberToolCallRef.current.get(toolResult.toolCallId)
-            : undefined) ||
-          getShutdownMemberFromToolResult(toolResult);
+        // Only trust the result text — "Member shutdown: member_name=X"
+        // means success.  Error messages (e.g. "still holds active task")
+        // do NOT match the regex, so a failed shutdown will NOT remove the
+        // member from the frontend panel.
+        const shutdownMemberId = getShutdownMemberFromToolResult(toolResult);
         if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) {
           const memberId =
             getTeamPayloadMemberName(payload) ||
@@ -2737,9 +2835,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             activeSessionId
           );
         }
-        useChatStore.getState().addToolResult(sessionId, toolResult, {
-          updatedAt: normalizeEventTimestampIso(payload.timestamp),
-        });
+        useChatStore.getState().addToolResult(
+          sessionId,
+          {
+            toolName: toolResult.toolName,
+            result: toolResult.result,
+            success: toolResult.success,
+            toolCallId: toolResult.toolCallId,
+            summary: toolResult.summary,
+            skillTree: toolResult.skillTree,
+            beamSearch: toolResult.beamSearch,
+            ...(toolResult.timedOut ? { timedOut: true } : {}),
+          },
+          {
+            updatedAt: normalizeEventTimestampIso(payload.timestamp),
+          }
+        );
       }),
       webClient.on('todo.updated', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
@@ -3808,6 +3919,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const markAllRuntimes = () => {
       const runtimes = useChatStore.getState().runtimes;
       for (const sid of Object.keys(runtimes)) {
+        // 历史回放期间不要把旧 tool_call 误标 timeout，等 settleHistorical 先按结果落终态
+        if (runtimes[sid]?.isLoadingHistory) {
+          continue;
+        }
         useChatStore.getState().markTimedOutExecutions(sid);
       }
     };
@@ -3823,6 +3938,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     connectionState,
     request,
     persistMedia,
+    persistDocuments,
     sendMessage,
     sendStructuredChatContent,
     interrupt,

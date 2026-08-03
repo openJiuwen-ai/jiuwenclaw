@@ -375,6 +375,9 @@ async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch:
     fake_module.AsyncA2XRegistryClient = _FailingAsyncA2XRegistryClient
 
     adapter = JiuWenSwarmDeepAdapter()
+    # Only a session-scoped adapter builds its own DeepAgent; the root adapter
+    # defers that to ``ensure_instance`` so the chat path does not pay for it.
+    adapter.mark_as_session_scoped("sess_a2x_test")
     config_base = _make_config("teamleader")
 
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
@@ -472,6 +475,9 @@ def test_make_deep_agent_config_keeps_read_image_multimodal_without_vision_model
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = JiuWenSwarmDeepAdapter()
+    # Only a session-scoped adapter builds its own DeepAgent; the root adapter
+    # defers that to ``ensure_instance`` so the chat path does not pay for it.
+    adapter.mark_as_session_scoped("sess_a2x_test")
     config_base = _make_config("teamleader")
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
 
@@ -525,6 +531,9 @@ async def test_create_instance_keeps_workspace_root_separate_from_project_dir(
     tmp_path,
 ) -> None:
     adapter = JiuWenSwarmDeepAdapter()
+    # Only a session-scoped adapter builds its own DeepAgent; the root adapter
+    # defers that to ``ensure_instance`` so the chat path does not pay for it.
+    adapter.mark_as_session_scoped("sess_a2x_workspace_test")
     workspace_dir = tmp_path / "workspace"
     project_dir = tmp_path / "project"
     workspace_dir.mkdir()

@@ -400,6 +400,7 @@ class GitDiffWebSocketHandler:
                 session_id=session_id_for_status or None,
                 include_files=True,
                 include_hunks=True,
+                hunk_paths=detail_files if source == "current" else None,
             )
             status_dict = status.to_dict(include_hunks=True)
             files_dict = self._extract_files(status_dict, source) or {}

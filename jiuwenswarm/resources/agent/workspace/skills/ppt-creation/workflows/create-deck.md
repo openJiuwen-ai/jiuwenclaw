@@ -73,7 +73,7 @@
 - 模板来源与画布模式；
 - 不可改变的主题色、字体、页脚和总结条；
 - narrative mode 与 image treatment；
-- `research-editorial` 参考族、字号 floor 和最大连续 dense 页数；
+- 字号 floor：`deck.typography_policy` 的 `title_min_pt` / `body_min_pt` / `absolute_min_pt` 三档；
 - 每页 role、core message、rhythm、visual strategy、component policy 和 reference IDs；
 - 每页 composition、evidence visual，以及必要时的 reference waiver；
 - 素材状态、来源、权利说明与 fallback。
@@ -140,7 +140,7 @@ python3 ../scripts/finalize_deck.py output/content.pptx output/final.pptx \
 
 全 deck 构建通过、QA 硬错误清零后，对 design-spec 中标记 `Hero: yes` 的 1-2 页做一轮升格精修——这两页是整套 deck 被评价的门面，值得单页级投入。
 
-**精修要达成的就是版式库成品参考图的完成度。** 动手前必须打开 `references/complex-slide.png`（矩阵分组·漏斗汇聚·路径带，精修的标杆样例）和该 hero 页骨架对应的参考图实际看一遍——整页一张结构大图、淡彩只在分组头、白卡挂阴影、箭头表达汇聚与流转、无空白象限。每张参考图的分区骨架与绘制规则在 `references/index.yaml` 对应条目里，精修时逐条对照落实：
+**精修要达成的就是版式库成品参考图的完成度。** 动手前必须打开 `references/complex-slide.jpg`（矩阵分组·漏斗汇聚·路径带，精修的标杆样例）和该 hero 页骨架对应的参考图实际看一遍——整页一张结构大图、淡彩只在分组头、白卡挂阴影、箭头表达汇聚与流转、无空白象限。每张参考图的分区骨架与绘制规则在 `references/index.yaml` 对应条目里，精修时逐条对照落实：
 
 1. 打开该页当前渲染图与上述参考图并排对比，列出差距（结构表达力、分组配色、流转关系、卡片质感）；
 2. 精修不受"只用组件"限制：优先用 `addTintMatrix` / `addConvergeFunnel` / `addChevronStages` 等结构组件重构主区域；组件表达不了的关系，直接用原生 shapes 逐元素绘制（淡彩分组头、汇聚漏斗、chevron 带、带阴影白卡是参考 deck 的核心词汇）；

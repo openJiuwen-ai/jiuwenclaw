@@ -371,6 +371,7 @@ layouts:
 
   - id: complex-slide
     name: 矩阵分组 · 漏斗汇聚 · 路径带
+    image: complex-slide.jpg
     summary: 上部行标签加多族群矩阵，中间大箭头汇聚，下部三段横向路径带
     skeleton: |
       +---------------- 通栏标题 ----------------+

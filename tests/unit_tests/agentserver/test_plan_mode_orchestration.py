@@ -52,6 +52,7 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
     agent = MagicMock()
     manager = MagicMock()
     manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = manager
@@ -67,6 +68,44 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
     assert sub_mode == "plan"
     assert resolved_agent is agent
     manager.get_agent.assert_awaited_once()
+    manager.wait_for_session_prewarm.assert_awaited_once_with(session_id)
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_normalizes_agent_request_for_code_workspace() -> None:
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = _chat_request(
+        "sess_code_workspace",
+        mode="agent",
+        extra_params={"work_mode": "code", "project_dir": "/tmp/code-project"},
+    )
+
+    with patch(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        return_value={},
+    ), patch.object(
+        agent_ws_server_module,
+        "_sync_chat_request_metadata",
+        return_value="/tmp/code-project",
+    ):
+        mode, sub_mode, resolved_agent = await server._prepare_code_mode_chat_turn(
+            request,
+            "web",
+        )
+
+    assert (mode, sub_mode, resolved_agent) == ("code", "normal", agent)
+    assert request.params["mode"] == "code.normal"
+    manager.get_agent.assert_awaited_once_with(
+        channel_id="web",
+        mode="code",
+        project_dir="/tmp/code-project",
+        sub_mode="normal",
+    )
 
 
 @pytest.mark.asyncio
@@ -80,6 +119,7 @@ async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     agent = MagicMock()
     manager = MagicMock()
     manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = manager
@@ -109,6 +149,7 @@ async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
         project_dir="/tmp/locked-project",
         sub_mode=None,
     )
+    manager.wait_for_session_prewarm.assert_awaited_once_with("sess_team_project")
 
 
 @pytest.mark.asyncio
@@ -119,6 +160,9 @@ async def test_ensure_code_mode_state_syncs_plan_to_normal() -> None:
     plan_agent = MagicMock()
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
+    # Non-chat callers now await ensure_instance(), which builds the root
+    # DeepAgent on demand instead of relying on eager construction.
+    plan_agent.ensure_instance = AsyncMock(return_value=plan_instance)
     plan_instance.card = SimpleNamespace(id="code-agent")
     plan_state = SimpleNamespace(mode="plan", plan_slug="test")
     plan_instance.load_state.return_value = SimpleNamespace(plan_mode=plan_state)
@@ -153,6 +197,9 @@ async def test_ensure_code_mode_state_skips_if_mode_already_matches() -> None:
     plan_agent = MagicMock()
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
+    # Non-chat callers now await ensure_instance(), which builds the root
+    # DeepAgent on demand instead of relying on eager construction.
+    plan_agent.ensure_instance = AsyncMock(return_value=plan_instance)
     plan_instance.card = SimpleNamespace(id="code-agent")
     plan_state = SimpleNamespace(mode="plan", plan_slug="test")
     plan_instance.load_state.return_value = SimpleNamespace(plan_mode=plan_state)
@@ -185,6 +232,9 @@ async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit() 
     plan_agent = MagicMock()
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
+    # Non-chat callers now await ensure_instance(), which builds the root
+    # DeepAgent on demand instead of relying on eager construction.
+    plan_agent.ensure_instance = AsyncMock(return_value=plan_instance)
     plan_instance.card = SimpleNamespace(id="code-agent")
     plan_state = SimpleNamespace(mode="normal", plan_slug="old-plan")
     plan_instance.load_state.return_value = SimpleNamespace(plan_mode=plan_state)
@@ -236,6 +286,9 @@ async def test_disconnect_cleanup_then_stale_plan_reentry_blocked_by_slug() -> N
     plan_agent = MagicMock()
     plan_instance = MagicMock()
     plan_agent.get_instance.return_value = plan_instance
+    # Non-chat callers now await ensure_instance(), which builds the root
+    # DeepAgent on demand instead of relying on eager construction.
+    plan_agent.ensure_instance = AsyncMock(return_value=plan_instance)
     plan_instance.card = SimpleNamespace(id="code-agent")
     # Plan was completed: mode is normal but a plan_slug is still on checkpoint.
     plan_state = SimpleNamespace(mode="normal", plan_slug="leftover-slug")
@@ -294,6 +347,7 @@ async def test_prepare_chat_turn_skips_approval_for_interrupt_resume() -> None:
     agent = MagicMock()
     manager = MagicMock()
     manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = manager
@@ -315,6 +369,7 @@ async def test_prepare_chat_turn_skips_approval_for_interrupt_resume() -> None:
     assert mode == "code"
     assert sub_mode == "plan"
     manager.get_agent.assert_awaited_once()
+    manager.wait_for_session_prewarm.assert_awaited_once_with(session_id)
 
 
 @pytest.mark.asyncio

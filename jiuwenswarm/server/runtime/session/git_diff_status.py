@@ -691,6 +691,7 @@ class DiffStatusService:
         session_id: str | None = None,
         include_files: bool = False,
         include_hunks: bool = False,
+        hunk_paths: list[str] | set[str] | tuple[str, ...] | None = None,
     ) -> ProjectGitDiffStatus:
         """聚合当前工作区 diff 和上一轮对话 diff(设计文档 §4.1.16)。
 
@@ -750,7 +751,12 @@ class DiffStatusService:
         if repo_is_git and not repo_is_transient:
             diff_service = get_diff_service()
             try:
-                raw_diff = diff_service.get_git_diff(project_dir)
+                raw_diff = diff_service.get_git_diff(
+                    project_dir,
+                    include_files=effective_include_files,
+                    include_hunks=include_hunks,
+                    hunk_paths=hunk_paths,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[DiffStatus] get_git_diff failed (project=%s dir=%s): %s",

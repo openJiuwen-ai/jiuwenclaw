@@ -23,7 +23,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
     ToolCallInputs,
 )
-from openjiuwen.harness.subagents.browser_agent import (
+from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as deep_interface_module

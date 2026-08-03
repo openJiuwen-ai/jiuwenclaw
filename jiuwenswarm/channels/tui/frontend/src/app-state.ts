@@ -20,7 +20,6 @@ import {
   mergeHistoryMessagesForRestore,
   parseHistoryFrame,
 } from "./core/history-parser.js";
-import { generateSessionId } from "./core/session-state.js";
 import { getToolGroupIds } from "./core/transcript-timeline.js";
 import {
   handleIncomingFrame,
@@ -637,7 +636,7 @@ export class CliPiAppState {
       uiLifecycle?: UiLifecyclePort | null;
     },
   ) {
-    this.sessionId = cliSession || generateSessionId();
+    this.sessionId = cliSession || "new";
     this.bootSessionId = cliSession ? cliSession : null;
     const config = loadTuiConfig();
     if (config.theme) {
@@ -3332,7 +3331,7 @@ export class CliPiAppState {
     const previousMode = this.mode;
     void (async () => {
       try {
-        await this.request("session.create", {
+        await this.request("session.switch", {
           session_id: target,
           previous_session_id: "",
           previous_mode: previousMode,
@@ -3366,7 +3365,7 @@ export class CliPiAppState {
           }
         } else {
           // 非已存在错误：降级仅拉历史，不阻断
-          this.lastError = `session.create failed: ${message}`;
+          this.lastError = `session.switch failed: ${message}`;
           this.emitChange();
         }
       } finally {

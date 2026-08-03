@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import secrets
-import time
 from enum import Enum
 from pathlib import Path
 
@@ -43,20 +41,6 @@ def _make_key(
     if scope == SessionMapScope.PER_CHAT_BOT:
         return f"{provider}::{chat_id}::{bot_id}"
     return f"{provider}::{chat_id}::{bot_id}::{user_id}"
-
-
-def _make_session_id(
-    scope: SessionMapScope,
-    provider: str,
-    chat_id: str,
-    bot_id: str,
-    user_id: str,
-) -> str:
-    ts = format(int(time.time() * 1000), "x")
-    suffix = secrets.token_hex(3)
-    if scope == SessionMapScope.PER_CHAT_BOT:
-        return f"{provider}::{chat_id}::{bot_id}::{ts}::{suffix}"
-    return f"{provider}::{chat_id}::{bot_id}::{user_id}::{ts}::{suffix}"
 
 
 class SessionMap:
@@ -100,10 +84,32 @@ class SessionMap:
         existing = self._mapping.get(key)
         if existing and not rotate:
             return existing
+        raise RuntimeError(
+            "SessionMap cannot allocate session IDs; use AgentServer session.create"
+        )
 
-        sid = _make_session_id(self._scope, provider, chat_id, bot_id, user_id)
-        if existing == sid:
-            return sid
-        self._mapping[key] = sid
-        self._save()
-        return sid
+    def find_session_id(
+        self,
+        provider: str,
+        chat_id: str,
+        bot_id: str,
+        user_id: str,
+    ) -> str | None:
+        key = _make_key(self._scope, provider, chat_id, bot_id, user_id)
+        return self._mapping.get(key)
+
+    def set_session_id(
+        self,
+        provider: str,
+        chat_id: str,
+        bot_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> None:
+        key = _make_key(self._scope, provider, chat_id, bot_id, user_id)
+        sid = str(session_id).strip()
+        if not sid:
+            raise ValueError("session_id is required")
+        if self._mapping.get(key) != sid:
+            self._mapping[key] = sid
+            self._save()

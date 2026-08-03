@@ -1,6 +1,7 @@
 import { Children, isValidElement, useEffect, useId, useMemo, useRef, useState, type AnchorHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeSlug from 'rehype-slug';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import type { MermaidConfig } from 'mermaid';
@@ -303,8 +304,10 @@ function isCompleteCodeFence(contentLines: string[], node?: HastElement): boolea
 }
 
 function MarkdownLink({ href, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+  const isFragmentLink = href?.startsWith('#');
+
   return (
-    <a href={href} target='_blank' rel='noopener noreferrer' {...props}>
+    <a href={href} target={isFragmentLink ? undefined : '_blank'} rel={isFragmentLink ? undefined : 'noopener noreferrer'} {...props}>
       {children}
     </a>
   );
@@ -376,7 +379,7 @@ export function MarkdownRenderer({ content, className, testId }: MarkdownRendere
 
   return (
     <div className={className} data-testid={testId}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSlug]} components={components}>
         {markdown}
       </ReactMarkdown>
     </div>

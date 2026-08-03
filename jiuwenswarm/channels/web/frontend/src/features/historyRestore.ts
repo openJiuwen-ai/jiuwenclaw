@@ -285,21 +285,12 @@ function normalizeHistoryMediaItem(value: unknown): MediaItem | null {
     return null;
   }
 
-  const rawType = typeof value.type === 'string' ? value.type.trim().toLowerCase() : 'image';
-  if (rawType && rawType !== 'image') {
-    return null;
-  }
-
   const path = pickFirstString(value, ['path', 'url']);
   if (!path) {
     return null;
   }
 
-  const mimeType = pickFirstString(value, ['mime_type', 'mimeType']) ?? 'image/png';
-  if (!mimeType.startsWith('image/')) {
-    return null;
-  }
-
+  const mimeType = pickFirstString(value, ['mime_type', 'mimeType']) ?? 'application/octet-stream';
   const filename = pickFirstString(value, ['filename', 'name']) ?? filenameFromPath(path);
   const size = typeof value.size_bytes === 'number'
     ? value.size_bytes
@@ -307,8 +298,27 @@ function normalizeHistoryMediaItem(value: unknown): MediaItem | null {
       ? value.sizeBytes
       : undefined;
 
+  const rawType = typeof value.type === 'string' ? value.type.trim().toLowerCase() : '';
+  let type: MediaItem['type'];
+  if (rawType === 'image' || rawType === 'audio' || rawType === 'video' || rawType === 'document') {
+    type = rawType;
+  } else if (mimeType.startsWith('image/')) {
+    type = 'image';
+  } else if (mimeType.startsWith('audio/')) {
+    type = 'audio';
+  } else if (mimeType.startsWith('video/')) {
+    type = 'video';
+  } else {
+    type = 'document';
+  }
+
+  // Keep legacy image-only filtering for ambiguous image records without type.
+  if (type === 'image' && !mimeType.startsWith('image/') && rawType !== 'image') {
+    return null;
+  }
+
   return {
-    type: 'image',
+    type,
     filename,
     path,
     mime_type: mimeType,
@@ -348,11 +358,13 @@ function extractHistoryMediaItems(record: Record<string, unknown>): MediaItem[] 
 
   if (isRecord(record.files)) {
     appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_images);
+    appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_documents);
   }
   if (isRecord(record.event_payload)) {
     appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.media_items);
     if (isRecord(record.event_payload.files)) {
       appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_images);
+      appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_documents);
     }
   }
 
@@ -588,6 +600,121 @@ function parseHistoryTimelineEntry(
   return null;
 }
 
+function isAssistantLikeHistoryMessage(message: Message): boolean {
+  return (
+    message.role === 'assistant' ||
+    (message.role === 'system' && Boolean(message.id?.startsWith('team-leader-')))
+  );
+}
+
+/**
+ * 与实时 `addFileItems` 对齐：chat.file 挂到「已经出现的」最近一条助手消息。
+ * 旧逻辑挂到下一条 final，会导致刷新后文件从总结上方跑到总结气泡内部下方。
+ */
+function attachFilesToPreviousAssistant(messages: Message[], files: FileDownloadItem[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (!isAssistantLikeHistoryMessage(messages[i])) {
+      continue;
+    }
+    messages[i] = {
+      ...messages[i],
+      fileItems: mergeFileDownloadItems(messages[i].fileItems, files),
+    };
+    return true;
+  }
+  return false;
+}
+
+function createFileOnlyAssistantMessage(at: string, files: FileDownloadItem[]): Message {
+  const timestamp = at.trim() || new Date().toISOString();
+  return {
+    id: `hist-file-${timestamp}`,
+    role: 'assistant',
+    content: '',
+    timestamp,
+    fileItems: files,
+  };
+}
+
+interface MaterializedHistoryTimeline {
+  messages: Message[];
+  toolReplay: HistoryToolReplayItem[];
+  harnessReplay: HistoryHarnessReplayItem[];
+  teamReplay: HistoryTeamReplayItem[];
+  reasoningReplay: HistoryReasoningReplayItem[];
+}
+
+/** 将已按时间升序的 history 条目折叠成消息/工具/思考，供 restore / page / 文件预览共用。 */
+function materializeHistoryTimeline(entries: HistoryTimelineEntry[]): MaterializedHistoryTimeline {
+  const messages: Message[] = [];
+  const toolReplay: HistoryToolReplayItem[] = [];
+  const harnessReplay: HistoryHarnessReplayItem[] = [];
+  const teamReplay: HistoryTeamReplayItem[] = [];
+  const reasoningReplay: HistoryReasoningReplayItem[] = [];
+
+  for (const e of entries) {
+    if (e.kind === 'message') {
+      messages.push(e.message);
+      continue;
+    }
+    if (e.kind === 'usage_summary') {
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].role === 'assistant') {
+          messages[i] = { ...messages[i], usageSummary: e.usage };
+          break;
+        }
+      }
+      continue;
+    }
+    if (e.kind === 'harness_message') {
+      harnessReplay.push({
+        kind: 'harness_message',
+        at: e.at,
+        payload: { content: e.content, stage: e.stage },
+      });
+      messages.push({
+        id: `harness-msg-${e.at}`,
+        role: 'system',
+        content: e.content,
+        timestamp: e.at,
+        isHarnessMessage: true,
+      });
+      continue;
+    }
+    if (e.kind === 'harness_stage_result') {
+      harnessReplay.push({
+        kind: 'harness_stage_result',
+        at: e.at,
+        payload: {
+          stage: e.stage,
+          status: e.status,
+          error: e.error,
+          messages: e.messages,
+          metrics: e.metrics,
+        },
+      });
+      continue;
+    }
+    if (e.kind === 'file_items') {
+      if (!attachFilesToPreviousAssistant(messages, e.files)) {
+        messages.push(createFileOnlyAssistantMessage(e.at, e.files));
+      }
+      continue;
+    }
+    if (e.kind === 'team_member' || e.kind === 'team_task') {
+      teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
+      continue;
+    }
+    if (e.kind === 'reasoning') {
+      reasoningReplay.push({ at: e.at, text: e.text });
+      continue;
+    }
+    toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
+  }
+
+  return { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay };
+}
+
 /**
  * 将磁盘上的 history.json 解析结果（通常为记录数组）转为与历史恢复相同的筛选规则下的消息列表，
  * 并按时间升序返回全部可展示的用户/助手消息。
@@ -617,9 +744,7 @@ export function parseHistoryJsonFileToTimelinePreview(
     return { messages: [], executions: [], reasoningSegments: [], mode: null };
   }
 
-  const messages: Message[] = [];
-  const toolReplay: HistoryToolReplayItem[] = [];
-  const reasoningReplay: HistoryReasoningReplayItem[] = [];
+  const entries: HistoryTimelineEntry[] = [];
   let isTeam = false;
 
   for (const item of parsed) {
@@ -630,19 +755,23 @@ export function parseHistoryJsonFileToTimelinePreview(
       isTeam = true;
     }
     const entry = parseHistoryTimelineEntry(item, sessionId);
-    if (entry?.kind === 'message') {
-      messages.push(entry.message);
-    } else if (entry?.kind === 'tool_call' || entry?.kind === 'tool_result') {
-      toolReplay.push({ kind: entry.kind, at: entry.at, payload: entry.payload });
+    if (entry) {
+      entries.push(entry);
     }
     const reasoningText = extractHistoryReasoningText(item);
     if (reasoningText) {
-      reasoningReplay.push({ at: recordTimestampIso(item) ?? '', text: reasoningText });
+      entries.push({ kind: 'reasoning', at: recordTimestampIso(item) ?? '', text: reasoningText });
     }
   }
 
-  messages.sort((a, b) => safeTimestampMs(a.timestamp) - safeTimestampMs(b.timestamp));
+  // 文件预览按记录原始顺序；同戳时 sourceIndex 由后续 timeline 排序兜底。
+  entries.sort((a, b) => {
+    const aAt = a.kind === 'message' ? a.message.timestamp : a.at;
+    const bAt = b.kind === 'message' ? b.message.timestamp : b.at;
+    return safeTimestampMs(aAt) - safeTimestampMs(bAt);
+  });
 
+  const { messages, toolReplay, reasoningReplay } = materializeHistoryTimeline(entries);
   const executions = buildToolExecutionsFromReplay(toolReplay);
   const reasoningSegments = buildReasoningSegmentsFromReplay(sessionId, reasoningReplay);
 
@@ -714,7 +843,8 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
           display_name: n.display_name,
           memberName: n.memberName,
         },
-        status: 'completed',
+        // 与实时一致：先 pending，等 tool_result 再落终态；无 result 的孤儿在循环末尾结算。
+        status: 'pending',
         startedAt,
         updatedAt: startedAt,
         timeoutAt: startedAt,
@@ -735,7 +865,14 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
       toolCallId: n.toolCallId,
       summary: n.summary,
       skillTree: n.skillTree,
+      ...(n.timedOut ? { timedOut: true as const } : {}),
+      ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
     };
+    const resultStatus: ToolExecution['status'] = n.timedOut
+      ? 'timeout'
+      : n.success
+        ? 'completed'
+        : 'error';
     const parsed = parseTimestampToMs(item.at);
     const atIso = Number.isFinite(parsed) ? timestampMsToIso(parsed) : undefined;
     if (!existing) {
@@ -750,7 +887,7 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
           arguments: {},
         },
         result,
-        status: n.success ? 'completed' : 'error',
+        status: resultStatus,
         startedAt: atIso,
         updatedAt: atIso,
         timeoutAt: atIso,
@@ -761,8 +898,27 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
     byId.set(n.toolCallId, {
       ...existing,
       result,
-      status: n.success ? 'completed' : 'error',
+      status: resultStatus,
       ...(atIso ? { updatedAt: atIso } : {}),
+    });
+  }
+
+  // 与 chatStore.settleHistoricalToolExecutions 对齐：仅结算仍无结果的孤儿 call
+  for (const id of order) {
+    const execution = byId.get(id);
+    if (!execution || execution.status !== 'pending' || execution.result) {
+      continue;
+    }
+    byId.set(id, {
+      ...execution,
+      status: 'completed',
+      updatedAt: execution.startedAt,
+      result: {
+        toolName: execution.toolCall.name,
+        result: '',
+        success: true,
+        toolCallId: id,
+      },
     });
   }
 
@@ -871,65 +1027,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   function finalize(): void {
     if (disposed) return;
 
-    const messages: Message[] = [];
-    const toolReplay: HistoryToolReplayItem[] = [];
-    const harnessReplay: HistoryHarnessReplayItem[] = [];
-    const teamReplay: HistoryTeamReplayItem[] = [];
-    const reasoningReplay: HistoryReasoningReplayItem[] = [];
-    let pendingFileItems: FileDownloadItem[] | null = null;
-    for (const e of entries) {
-      if (e.kind === 'message') {
-        if (pendingFileItems && (
-          e.message.role === 'assistant' ||
-          (e.message.role === 'system' && e.message.id?.startsWith('team-leader-'))
-        )) {
-          e.message = { ...e.message, fileItems: pendingFileItems };
-          pendingFileItems = null;
-        }
-        messages.push(e.message);
-      } else if (e.kind === 'usage_summary') {
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === 'assistant') {
-            messages[i] = { ...messages[i], usageSummary: e.usage };
-            break;
-          }
-        }
-      } else if (e.kind === 'harness_message') {
-        harnessReplay.push({
-          kind: 'harness_message',
-          at: e.at,
-          payload: { content: e.content, stage: e.stage },
-        });
-        // Also add as system message with harness flag
-        messages.push({
-          id: `harness-msg-${e.at}`,
-          role: 'system',
-          content: e.content,
-          timestamp: e.at,
-          isHarnessMessage: true,
-        });
-      } else if (e.kind === 'harness_stage_result') {
-        harnessReplay.push({
-          kind: 'harness_stage_result',
-          at: e.at,
-          payload: {
-            stage: e.stage,
-            status: e.status,
-            error: e.error,
-            messages: e.messages,
-            metrics: e.metrics,
-          },
-        });
-      } else if (e.kind === 'file_items') {
-        pendingFileItems = mergeFileDownloadItems(pendingFileItems, e.files);
-      } else if (e.kind === 'team_member' || e.kind === 'team_task') {
-        teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      } else if (e.kind === 'reasoning') {
-        reasoningReplay.push({ at: e.at, text: e.text });
-      } else {
-        toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      }
-    }
+    const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
+      materializeHistoryTimeline(entries);
 
     dispose();
 
@@ -1038,64 +1137,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   function finalize(): void {
     if (disposed) return;
 
-    const messages: Message[] = [];
-    const toolReplay: HistoryToolReplayItem[] = [];
-    const harnessReplay: HistoryHarnessReplayItem[] = [];
-    const teamReplay: HistoryTeamReplayItem[] = [];
-    const reasoningReplay: HistoryReasoningReplayItem[] = [];
-    let pendingFileItems: FileDownloadItem[] | null = null;
-    for (const e of entries) {
-      if (e.kind === 'message') {
-        if (pendingFileItems && (
-          e.message.role === 'assistant' ||
-          (e.message.role === 'system' && e.message.id?.startsWith('team-leader-'))
-        )) {
-          e.message = { ...e.message, fileItems: pendingFileItems };
-          pendingFileItems = null;
-        }
-        messages.push(e.message);
-      } else if (e.kind === 'usage_summary') {
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === 'assistant') {
-            messages[i] = { ...messages[i], usageSummary: e.usage };
-            break;
-          }
-        }
-      } else if (e.kind === 'harness_message') {
-        harnessReplay.push({
-          kind: 'harness_message',
-          at: e.at,
-          payload: { content: e.content, stage: e.stage },
-        });
-        messages.push({
-          id: `harness-msg-${e.at}`,
-          role: 'system',
-          content: e.content,
-          timestamp: e.at,
-          isHarnessMessage: true,
-        });
-      } else if (e.kind === 'harness_stage_result') {
-        harnessReplay.push({
-          kind: 'harness_stage_result',
-          at: e.at,
-          payload: {
-            stage: e.stage,
-            status: e.status,
-            error: e.error,
-            messages: e.messages,
-            metrics: e.metrics,
-          },
-        });
-      } else if (e.kind === 'file_items') {
-        pendingFileItems = mergeFileDownloadItems(pendingFileItems, e.files);
-      } else if (e.kind === 'team_member' || e.kind === 'team_task') {
-        teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      } else if (e.kind === 'reasoning') {
-        reasoningReplay.push({ at: e.at, text: e.text });
-      } else {
-        toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      }
-    }
+    const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
+      materializeHistoryTimeline(entries);
 
     dispose();
 
