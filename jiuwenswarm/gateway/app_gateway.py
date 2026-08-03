@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+﻿# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Standalone Gateway entrypoint (split deployment).
 
 This process starts:
@@ -1436,7 +1436,7 @@ async def _run(
     from jiuwenswarm.gateway.channel_manager.im_platforms.discord.discord_connect import DiscordChannel, \
         DiscordChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
-    from jiuwenswarm.common.config import get_config
+    from jiuwenswarm.common.config import get_config, resolve_env_vars
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
@@ -1671,6 +1671,21 @@ async def _run(
     tui_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
+
+    # 注册 AgentOSAuthenticator（如果配置了 auth.type=agentos）
+    from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
+
+    auth_config = resolve_env_vars(get_config().get("auth", {}))
+    if isinstance(auth_config, dict) and str(auth_config.get("type", "")).strip().lower() == "agentos":
+        agentos_cfg = auth_config.get("agentos", {})
+        if isinstance(agentos_cfg, dict):
+            auth_service_url = str(agentos_cfg.get("auth_service_url", "")).strip()
+            if auth_service_url:
+                timeout = float(agentos_cfg.get("timeout", 10.0))
+                extension_registry.register_authenticator(
+                    AgentOSAuthenticator(auth_service_url=auth_service_url, timeout=timeout)
+                )
+                logger.info("[App] AgentOSAuthenticator 已注册, auth_service_url=%s", auth_service_url)
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
     # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询
