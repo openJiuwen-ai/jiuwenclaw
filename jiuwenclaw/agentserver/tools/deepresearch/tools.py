@@ -17,7 +17,7 @@ import tempfile
 import threading
 import uuid
 import zipfile
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,11 +40,18 @@ from jiuwenclaw.agentserver.tools.deepresearch.todo_progress import (
     deepresearch_todo_path,
     persist_deepresearch_task_update,
 )
-from jiuwenclaw.local_env_config import export_agent_environ, read_env
+from jiuwenclaw.local_env_config import (
+    build_effective_env_overlay,
+    export_spawn_environ,
+    get_task_env_overlay,
+    read_env,
+)
 
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
 _REPORT_PUBLICATION_ATTEMPTS = 8
+_DEEPRESEARCH_CONFIG_PROTOCOL_VERSION = 1
+_DEEPRESEARCH_CONFIG_MAX_BYTES = 64 * 1024
 
 
 @dataclass
@@ -1394,8 +1401,8 @@ async def deepresearch_run_task(
 
 
 # ---- 凭据桥接 ----
-# 把 RelayClaw sidecar env(project-global 名)桥接成 run_deepsearch.py strict 读的 DeepSearch
-# 专属名(LLM_API_KEY/LLM_MODEL_NAME/WEB_SEARCH_API_KEY)。"有值才设",让 skill/.env 兜底。
+# 把 request-scoped 配置桥接成 run_deepsearch.py 读取的 DeepSearch 专属名，
+# 只选择 runner 必需字段，不复制同一租户的其他凭据。
 _PROVIDER_TO_TYPE = {
     "openai": "openai", "openrouter": "openai",
     "zhipu": "zhipu", "glm": "zhipu",
@@ -1409,13 +1416,10 @@ def _map_provider_to_type(provider: str) -> str:
     return _PROVIDER_TO_TYPE.get(provider.strip().lower(), provider.strip().lower())
 
 
-def _build_bridge_env(os_env: dict[str, str]) -> dict[str, str]:
-    """Reuse deepresearch_run_task config resolution for the stream child."""
-    env = dict(os_env)  # 继承全部 sidecar env(API_KEY/MODEL_NAME/BOCHA_API_KEY/default_headers/...)
-    for key in ("WEB_SEARCH_ENGINE_NAME", "WEB_SEARCH_API_KEY", "WEB_SEARCH_URL"):
-        env.pop(key, None)
-
-    resolved = load_deepresearch_config(os_env)
+def _build_deepresearch_config(source: dict[str, str]) -> dict[str, str]:
+    """Resolve the minimal runner config without copying unrelated credentials."""
+    env: dict[str, str] = {}
+    resolved = load_deepresearch_config(source)
     api_key = resolved["LLM_API_KEY"]
     model = resolved["LLM_MODEL_NAME"]
     base_url = resolved["LLM_BASE_URL"]
@@ -1439,15 +1443,60 @@ def _build_bridge_env(os_env: dict[str, str]) -> dict[str, str]:
         if surl:
             env["WEB_SEARCH_URL"] = surl
 
+    for key in ("MAX_WEB_SEARCH_RESULTS", "EXECUTION_METHOD"):
+        value = resolved.get(key, "")
+        if value:
+            env[key] = str(value)
+
+    for source_key, target_key in (
+        ("VISION_API_KEY", "VISION_API_KEY"),
+        ("VISION_API_URL", "VISION_API_BASE"),
+        ("VISION_PROVIDER", "VISION_PROVIDER"),
+        ("VISION_MODEL_NAME", "VISION_MODEL_NAME"),
+    ):
+        value = resolved.get(source_key, "")
+        if value:
+            env[target_key] = str(value)
+
+    for header_name in ("default_headers", "DEFAULT_HEADERS", "OPENAI_DEFAULT_HEADERS"):
+        value = str(source.get(header_name, "") or "").strip()
+        if value:
+            env["default_headers"] = value
+            break
+
     # LLM_SSL_VERIFY:JiuwenClaw Python 中的 openjiuwen 0.1.10+ factory 从 env 读
     # verify_ssl(os.getenv("LLM_SSL_VERIFY","true")),sidecar 不设此项 → 子进程默认
     # true → 需 ssl_cert → "ssl_cert is required when verify_ssl is True" 构建失败。
     # in-process manager 因 sidecar 的 openjiuwen 版本不同不受影响;子进程必须显式 false
     # (匹配 manager 的 verify_ssl=False 实际效果)。sidecar 若显式设了则尊重。
-    env["LLM_SSL_VERIFY"] = os_env.get("LLM_SSL_VERIFY", "false")
-    env["TOOL_SSL_VERIFY"] = os_env.get("TOOL_SSL_VERIFY", "false")
+    env["LLM_SSL_VERIFY"] = source.get("LLM_SSL_VERIFY", "false")
+    env["TOOL_SSL_VERIFY"] = source.get("TOOL_SSL_VERIFY", "false")
 
     return env
+
+
+def _build_deepresearch_request_config(
+    *,
+    interactive_ask: bool,
+    service_id: str = "default",
+    agent_id: str = "default",
+) -> dict[str, str]:
+    """Resolve one tenant request into the runner's in-memory config payload."""
+    task_overlay = get_task_env_overlay()
+    if task_overlay is None:
+        source = build_effective_env_overlay(
+            service_id=service_id,
+            agent_id=agent_id,
+        )
+    else:
+        source = {
+            str(key): str(value)
+            for key, value in task_overlay.items()
+            if value is not None
+        }
+    config = _build_deepresearch_config(source)
+    config["DEEPSEARCH_HITL"] = "true" if interactive_ask else "false"
+    return config
 
 
 def _build_deepresearch_child_env(
@@ -1455,15 +1504,15 @@ def _build_deepresearch_child_env(
     interactive_ask: bool,
     service_id: str = "default",
     agent_id: str = "default",
+    runtime_config: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Build the stream child env with an explicit per-request HITL switch.
-
-    Always starts from ``export_agent_environ`` (tip ∪ Track A spawn keys);
-    callers cannot pass a raw/empty env mapping that would omit PATH/HOME.
-    """
-    os_env = export_agent_environ(service_id, agent_id)
-    env = _build_bridge_env(os_env)
+    """Build a child env containing runtime flags but no tenant credentials."""
+    del service_id, agent_id
+    config = runtime_config or {}
+    env = export_spawn_environ()
     env["DEEPSEARCH_HITL"] = "true" if interactive_ask else "false"
+    env["LLM_SSL_VERIFY"] = config.get("LLM_SSL_VERIFY", "false")
+    env["TOOL_SSL_VERIFY"] = config.get("TOOL_SSL_VERIFY", "false")
     env["PYTHONUNBUFFERED"] = "1"
     # Force UTF-8 stdout/stderr (PEP 540). On Chinese Windows the child's default
     # stdout encoding is cp936/GBK, so NDJSON with Chinese outline text is emitted
@@ -1472,7 +1521,7 @@ def _build_deepresearch_child_env(
     return env
 
 
-def _validate_deepresearch_search_env(env: dict[str, str]) -> str | None:
+def _validate_deepresearch_search_config(env: dict[str, str]) -> str | None:
     """Return a user-facing error when the child cannot perform web search."""
     engine = env.get("WEB_SEARCH_ENGINE_NAME", "").strip().lower()
     search_key = env.get("WEB_SEARCH_API_KEY", "").strip()
@@ -1484,6 +1533,51 @@ def _validate_deepresearch_search_env(env: dict[str, str]) -> str | None:
         "DeepResearch 搜索配置缺失：请配置完整的 Petal（URL 与凭据）"
         "或 Bocha（API Key）搜索凭据。"
     )
+
+
+def _encode_deepresearch_config(config: dict[str, str]) -> bytes:
+    """Encode one bounded JSON frame for the runner's anonymous stdin pipe."""
+    frame = json.dumps(
+        {"version": _DEEPRESEARCH_CONFIG_PROTOCOL_VERSION, "config": config},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8") + b"\n"
+    if len(frame) > _DEEPRESEARCH_CONFIG_MAX_BYTES:
+        raise ValueError("DeepResearch config frame exceeds 64 KiB")
+    return frame
+
+
+async def _write_deepresearch_config(proc, frame: bytes) -> None:
+    """Write and close the one-shot config channel without logging its content."""
+    if proc.stdin is None:
+        raise RuntimeError("DeepResearch config stdin is unavailable")
+    try:
+        proc.stdin.write(frame)
+        await proc.stdin.drain()
+    finally:
+        proc.stdin.close()
+        wait_closed = getattr(proc.stdin, "wait_closed", None)
+        if callable(wait_closed):
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await wait_closed()
+
+
+async def _stop_deepresearch_process(proc, timeout: float = 10) -> None:
+    """Terminate, then kill and reap a DeepResearch child within bounded waits."""
+    if proc.returncode is not None:
+        return
+    with suppress(ProcessLookupError):
+        proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        return
+    except asyncio.TimeoutError:
+        pass
+    if proc.returncode is None:
+        with suppress(ProcessLookupError):
+            proc.kill()
+    with suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
 
 
 async def _iter_ndjson_lines(stream, read_size: int = 64 * 1024):
@@ -1660,7 +1754,10 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     )
 
     if action == "start":
-        argv = [python_bin, script, "run", "--query", query, "--progress-file", progress_file]
+        argv = [
+            python_bin, script, "run", "--config-stdin",
+            "--query", query, "--progress-file", progress_file,
+        ]
         if conversation_id:
             argv += ["--conversation-id", conversation_id]
     elif action == "resume":
@@ -1677,24 +1774,32 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                     {"status": "error", "error": str(exc)},
                     ensure_ascii=False,
                 )
-        argv = [python_bin, script, "resume", "--conversation-id", conversation_id,
+        argv = [python_bin, script, "resume", "--config-stdin",
+                "--conversation-id", conversation_id,
                 "--feedback", feedback or "", "--node", node,
                 "--interrupt-feedback", "", "--progress-file", progress_file]
     else:
         return f'{{"status":"error","error":"unknown action: {action}"}}'
 
     try:
-        child_env = _build_deepresearch_child_env(
+        deepresearch_config = _build_deepresearch_request_config(
             interactive_ask=interactive_ask,
             service_id=str(route.get("service_id") or "default"),
             agent_id=str(route.get("agent_id") or "default"),
         )
+        child_env = _build_deepresearch_child_env(
+            interactive_ask=interactive_ask,
+            service_id=str(route.get("service_id") or "default"),
+            agent_id=str(route.get("agent_id") or "default"),
+            runtime_config=deepresearch_config,
+        )
+        config_frame = _encode_deepresearch_config(deepresearch_config)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return json.dumps(
-            {"status": "error", "error": f"child env build failed: {exc}"},
+            {"status": "error", "error": f"child config build failed: {exc}"},
             ensure_ascii=False,
         )
-    search_config_error = _validate_deepresearch_search_env(child_env)
+    search_config_error = _validate_deepresearch_search_config(deepresearch_config)
     if search_config_error:
         return json.dumps(
             {
@@ -1774,12 +1879,26 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=child_env,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return f'{{"status":"error","error":"spawn failed: {exc}"}}'
+
+    try:
+        await _write_deepresearch_config(proc, config_frame)
+    except asyncio.CancelledError:
+        cleanup_task = asyncio.create_task(_stop_deepresearch_process(proc))
+        await asyncio.shield(cleanup_task)
+        raise
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        await _stop_deepresearch_process(proc)
+        return json.dumps(
+            {"status": "error", "error": f"config delivery failed: {exc}"},
+            ensure_ascii=False,
+        )
 
     stderr_tail = bytearray()
 
@@ -1988,12 +2107,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
             for payload in route_chunk(chunk, state):
                 await _send(payload)
     finally:
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                proc.kill()
+        await _stop_deepresearch_process(proc)
         try:
             await asyncio.wait_for(stderr_task, timeout=2)
         except Exception:  # pylint: disable=broad-exception-caught

@@ -22,7 +22,7 @@ import os
 import sys
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
 from jiuwenclaw.agentserver.tools.deepresearch import todo_progress
@@ -34,14 +34,14 @@ from jiuwenclaw.local_env_config import (
 
 @pytest.fixture(autouse=True)
 def _stream_search_config(monkeypatch):
-    original_export = dt.export_agent_environ
+    original_build = dt.build_effective_env_overlay
 
-    def export_with_search(service_id, agent_id):
-        env = original_export(service_id, agent_id)
+    def build_with_search(*args, **kwargs):
+        env = original_build(*args, **kwargs)
         env.setdefault("BOCHA_API_KEY", "test-bocha-key")
         return env
 
-    monkeypatch.setattr(dt, "export_agent_environ", export_with_search)
+    monkeypatch.setattr(dt, "build_effective_env_overlay", build_with_search)
 
 
 class _Proc:
@@ -51,6 +51,7 @@ class _Proc:
         self._lines = [l.encode() for l in lines]
         self._stderr = b"".join(s.encode() for s in (stderr_lines or []))
         self.returncode = 0
+        self.stdin = _Stdin()
 
     @property
     def stdout(self):
@@ -84,6 +85,24 @@ class _Proc:
 
     def kill(self):
         pass
+
+
+class _Stdin:
+    def __init__(self):
+        self.data = bytearray()
+        self.closed = False
+
+    def write(self, data):
+        self.data.extend(data)
+
+    async def drain(self):
+        return None
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        return None
 
 
 class _RunningProc(_Proc):
@@ -2845,8 +2864,10 @@ async def test_outline_interaction_is_resumed_inside_the_tool_without_returning_
     assert json.loads(result)["status"] == "completed"
     assert spawn.await_count == 2
     resume_argv = spawn.await_args_list[1].args
-    assert resume_argv[1:4] == ("/s", "resume", "--conversation-id")
-    assert resume_argv[4] == "C1"
+    assert resume_argv[1:3] == ("/s", "resume")
+    assert "--config-stdin" in resume_argv
+    assert "--conversation-id" in resume_argv
+    assert resume_argv[resume_argv.index("--conversation-id") + 1] == "C1"
     assert '{"interrupt_feedback":"accepted","feedback":""}' in resume_argv
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     stage_2_updates = [
@@ -3445,7 +3466,7 @@ async def test_missing_run_script_returns_error():
 @pytest.mark.asyncio
 async def test_missing_search_config_returns_error_without_spawning():
     spawn = AsyncMock(return_value=_Proc([]))
-    child_env = {
+    missing_config = {
         "LLM_MODEL_NAME": "model",
         "LLM_MODEL_TYPE": "openai",
         "LLM_BASE_URL": "https://llm.example/v1",
@@ -3453,7 +3474,9 @@ async def test_missing_search_config_returns_error_without_spawning():
     }
 
     with patch.object(dt, "_resolve_run_script", return_value="/s"), \
-         patch.object(dt, "_build_deepresearch_child_env", return_value=child_env), \
+         patch.object(
+             dt, "_build_deepresearch_request_config", return_value=missing_config,
+         ), \
          patch("asyncio.create_subprocess_exec", new=spawn), \
          patch.object(dt, "_get_route", return_value={
              "request_id": "R1", "channel_id": "CH1", "session_id": "S1",
@@ -3494,8 +3517,24 @@ async def test_no_terminal_marker_captures_stderr():
     assert "Traceback" in out["stderr_tail"]
 
 
-def test_build_bridge_env_maps_global_to_deepsearch_names():
-    env = dt._build_bridge_env({
+def test_deepresearch_config_maps_only_required_values():
+    source = {
+        "API_KEY": "sk-b354", "MODEL_NAME": "glm-5.2", "API_BASE": "https://api.example/v2",
+        "MODEL_PROVIDER": "dashscope", "BOCHA_API_KEY": "bkey",
+        "GITHUB_TOKEN": "must-not-cross-process-boundary",
+        "default_headers": '{"Authorization":"Basic session"}',
+    }
+
+    env = dt._build_deepresearch_config(source)
+
+    assert "GITHUB_TOKEN" not in env
+    assert env["default_headers"] == '{"Authorization":"Basic session"}'
+    assert env["LLM_API_KEY"] == "sk-b354"
+    assert env["WEB_SEARCH_API_KEY"] == "bkey"
+
+
+def test_build_deepresearch_config_maps_global_to_deepsearch_names():
+    env = dt._build_deepresearch_config({
         "API_KEY": "sk-b354", "MODEL_NAME": "glm-5.2", "API_BASE": "https://api.example/v2",
         "MODEL_PROVIDER": "dashscope", "BOCHA_API_KEY": "bkey",
     })
@@ -3510,15 +3549,15 @@ def test_build_bridge_env_maps_global_to_deepsearch_names():
     assert env["TOOL_SSL_VERIFY"] == "false"  # Petal 同样默认 true 且要求 TOOL_SSL_CERT
 
 
-def test_build_bridge_env_respects_explicit_tool_ssl_verify():
-    env = dt._build_bridge_env({"MODEL_NAME": "m", "TOOL_SSL_VERIFY": "true"})
+def test_build_deepresearch_config_respects_explicit_tool_ssl_verify():
+    env = dt._build_deepresearch_config({"MODEL_NAME": "m", "TOOL_SSL_VERIFY": "true"})
 
     assert env["TOOL_SSL_VERIFY"] == "true"
 
 
-def test_build_bridge_env_petal_requires_explicit_url_and_search_key():
+def test_build_deepresearch_config_petal_requires_explicit_url_and_search_key():
     headers = '{"Authorization":"Basic session"}'
-    env = dt._build_bridge_env({
+    env = dt._build_deepresearch_config({
         "API_KEY": "sk-x",
         "MODEL_NAME": "m",
         "API_BASE": "https://dashscope.example/v1",
@@ -3540,7 +3579,7 @@ def test_build_bridge_env_petal_requires_explicit_url_and_search_key():
         ("WEB_SEARCH_API_KEY", "   "),
     ],
 )
-def test_build_bridge_env_rejects_partial_petal_config(invalid_name, invalid_value):
+def test_build_deepresearch_config_rejects_partial_petal_config(invalid_name, invalid_value):
     source = {
         "WEB_SEARCH_ENGINE_NAME": "petal",
         "WEB_SEARCH_URL": "https://petal.example/v1/ai-tools/web-search",
@@ -3550,14 +3589,14 @@ def test_build_bridge_env_rejects_partial_petal_config(invalid_name, invalid_val
         source.pop(invalid_name)
     else:
         source[invalid_name] = invalid_value
-    env = dt._build_bridge_env(source)
+    env = dt._build_deepresearch_config(source)
     assert "WEB_SEARCH_ENGINE_NAME" not in env
     assert "WEB_SEARCH_API_KEY" not in env
     assert "WEB_SEARCH_URL" not in env
 
 
-def test_build_bridge_env_accepts_provider_specific_petal_key():
-    env = dt._build_bridge_env({
+def test_build_deepresearch_config_accepts_provider_specific_petal_key():
+    env = dt._build_deepresearch_config({
         "WEB_SEARCH_ENGINE_NAME": "petal",
         "WEB_SEARCH_URL": "https://petal.example/v1/ai-tools/web-search",
         "PETAL_API_KEY": "petal-key",
@@ -3566,9 +3605,9 @@ def test_build_bridge_env_accepts_provider_specific_petal_key():
     assert env["WEB_SEARCH_API_KEY"] == "petal-key"
 
 
-def test_build_bridge_env_uses_independent_petal_url_with_custom_llm():
+def test_build_deepresearch_config_uses_independent_petal_url_with_custom_llm():
     headers = '{"Authorization":"Basic search-session"}'
-    env = dt._build_bridge_env({
+    env = dt._build_deepresearch_config({
         "API_KEY": "custom-llm-key",
         "MODEL_NAME": "glm-5.2",
         "API_BASE": "https://dashscope.example/compatible-mode/v1",
@@ -3583,7 +3622,7 @@ def test_build_bridge_env_uses_independent_petal_url_with_custom_llm():
     assert env["WEB_SEARCH_URL"] == "https://client-claw.example/v1/ai-tools/web-search"
 
 
-def test_build_bridge_env_reuses_run_task_petal_fallback():
+def test_build_deepresearch_config_reuses_run_task_petal_fallback():
     source = {
         "API_KEY": "sk-x",
         "MODEL_NAME": "m",
@@ -3592,7 +3631,7 @@ def test_build_bridge_env_reuses_run_task_petal_fallback():
     }
 
     resolved = dt._get_task_manager_cls()._load_config(source)
-    env = dt._build_bridge_env(source)
+    env = dt._build_deepresearch_config(source)
 
     assert env["LLM_API_KEY"] == resolved["LLM_API_KEY"]
     assert env["LLM_MODEL_NAME"] == resolved["LLM_MODEL_NAME"]
@@ -3623,32 +3662,28 @@ def test_general_llm_configs_normalize_only_styled_report_provider():
     assert workflow_config["api_key"] == report_style_config["api_key"] == bytearray(b"sk-test")
 
 
-def test_build_bridge_env_empty_value_not_set():
+def test_build_deepresearch_config_empty_value_not_set():
     # 无 API_KEY → 不设 LLM_API_KEY,让 .env 兜底
-    env = dt._build_bridge_env({"MODEL_NAME": "m"})
+    env = dt._build_deepresearch_config({"MODEL_NAME": "m"})
     assert "LLM_API_KEY" not in env
     assert env["LLM_MODEL_NAME"] == "m"
 
 
 def test_child_env_enables_hitl_for_interactive_request(monkeypatch):
-    monkeypatch.setattr(dt, "export_agent_environ", lambda *_a, **_k: {"RAW": "1"})
-    monkeypatch.setattr(dt, "_build_bridge_env", lambda _env: {"BASE": "1"})
+    monkeypatch.setattr(dt, "export_spawn_environ", lambda: {"PATH": "/usr/bin"})
 
     assert dt._build_deepresearch_child_env(interactive_ask=True) == {
-        "BASE": "1",
+        "PATH": "/usr/bin",
         "DEEPSEARCH_HITL": "true",
+        "LLM_SSL_VERIFY": "false",
+        "TOOL_SSL_VERIFY": "false",
         "PYTHONUNBUFFERED": "1",
         "PYTHONUTF8": "1",
     }
 
 
 def test_child_env_disables_hitl_and_overrides_stale_parent(monkeypatch):
-    monkeypatch.setattr(dt, "export_agent_environ", lambda *_a, **_k: {})
-    monkeypatch.setattr(
-        dt,
-        "_build_bridge_env",
-        lambda _env: {"DEEPSEARCH_HITL": "true"},
-    )
+    monkeypatch.setattr(dt, "export_spawn_environ", lambda: {})
 
     env = dt._build_deepresearch_child_env(interactive_ask=False)
 
@@ -3656,24 +3691,26 @@ def test_child_env_disables_hitl_and_overrides_stale_parent(monkeypatch):
     assert env["PYTHONUNBUFFERED"] == "1"
 
 
-def test_child_env_exports_current_tenant_environment(monkeypatch):
+def test_request_config_resolves_current_tenant_in_memory(monkeypatch):
     observed = {}
 
-    def fake_export(service_id, agent_id):
+    def fake_overlay(*parts, service_id, agent_id):
         observed["tenant"] = (service_id, agent_id)
+        observed["parts"] = parts
         return {
             "API_KEY": "huawei-maas-session",
             "default_headers": '{"Authorization":"Basic session"}',
         }
 
-    def fake_build_bridge_env(source):
+    def fake_build_config(source):
         observed["source"] = source
         return dict(source)
 
-    monkeypatch.setattr(dt, "export_agent_environ", fake_export, raising=False)
-    monkeypatch.setattr(dt, "_build_bridge_env", fake_build_bridge_env)
+    monkeypatch.setattr(dt, "get_task_env_overlay", lambda: None)
+    monkeypatch.setattr(dt, "build_effective_env_overlay", fake_overlay)
+    monkeypatch.setattr(dt, "_build_deepresearch_config", fake_build_config)
 
-    env = dt._build_deepresearch_child_env(
+    config = dt._build_deepresearch_request_config(
         interactive_ask=True,
         service_id="service-1",
         agent_id="office",
@@ -3681,12 +3718,156 @@ def test_child_env_exports_current_tenant_environment(monkeypatch):
 
     assert observed == {
         "tenant": ("service-1", "office"),
+        "parts": (),
         "source": {
             "API_KEY": "huawei-maas-session",
             "default_headers": '{"Authorization":"Basic session"}',
         },
     }
-    assert env["default_headers"] == '{"Authorization":"Basic session"}'
+    assert config["default_headers"] == '{"Authorization":"Basic session"}'
+    assert config["DEEPSEARCH_HITL"] == "true"
+
+
+def test_request_config_does_not_fall_through_bound_empty_overlay(monkeypatch):
+    monkeypatch.setattr(dt, "get_task_env_overlay", lambda: {})
+
+    def fail_live_tip_fallback(*_args, **_kwargs):
+        raise AssertionError("bound task overlay must seal the live tenant tip")
+
+    monkeypatch.setattr(dt, "build_effective_env_overlay", fail_live_tip_fallback)
+
+    config = dt._build_deepresearch_request_config(interactive_ask=True)
+
+    assert "LLM_API_KEY" not in config
+    assert "WEB_SEARCH_API_KEY" not in config
+
+
+@pytest.mark.asyncio
+async def test_stream_writes_secret_config_to_stdin_not_child_env():
+    lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({
+            "__deepsearch_status__": "interrupted",
+            "agent": "feedback_handler",
+            "conversation_id": "C1",
+        }),
+    ]
+    proc = _Proc(lines)
+    spawn = AsyncMock(return_value=proc)
+    config = {
+        "LLM_MODEL_NAME": "model",
+        "LLM_MODEL_TYPE": "openai",
+        "LLM_BASE_URL": "https://llm.example/v1",
+        "LLM_API_KEY": "llm-secret",
+        "WEB_SEARCH_ENGINE_NAME": "bocha",
+        "WEB_SEARCH_API_KEY": "search-secret",
+    }
+    child_env = {"PATH": "/usr/bin", "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1"}
+
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_build_deepresearch_request_config", return_value=config), \
+         patch.object(dt, "_build_deepresearch_child_env", return_value=child_env), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "", "channel_id": "", "session_id": "",
+         }), \
+         patch("asyncio.create_subprocess_exec", new=spawn), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport"
+         ):
+        result = await dt.deepresearch_stream._func(
+            action="start", query="X", file_name="r",
+        )
+
+    assert json.loads(result)["status"] == "interrupted"
+    assert spawn.await_args.kwargs["stdin"] is asyncio.subprocess.PIPE
+    assert spawn.await_args.kwargs["env"] == child_env
+    assert "--config-stdin" in spawn.await_args.args
+    frame = json.loads(bytes(proc.stdin.data).decode("utf-8"))
+    assert frame == {"version": 1, "config": config}
+    assert proc.stdin.closed is True
+    assert "llm-secret" not in json.dumps(child_env)
+    assert "search-secret" not in json.dumps(child_env)
+
+
+@pytest.mark.asyncio
+async def test_config_pipe_is_closed_when_delivery_fails():
+    class BrokenStdin(_Stdin):
+        async def drain(self):
+            raise BrokenPipeError("child exited")
+
+    stdin = BrokenStdin()
+
+    with pytest.raises(BrokenPipeError, match="child exited"):
+        await dt._write_deepresearch_config(SimpleNamespace(stdin=stdin), b"frame\n")
+
+    assert stdin.closed is True
+
+
+@pytest.mark.asyncio
+async def test_stop_process_kills_and_reaps_child_that_ignores_terminate():
+    class StubbornProcess:
+        def __init__(self):
+            self.returncode = None
+            self.terminate = Mock()
+            self.kill = Mock()
+            self.wait_calls = 0
+
+        async def wait(self):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                await asyncio.Event().wait()
+            self.returncode = -9
+            return self.returncode
+
+    proc = StubbornProcess()
+
+    await dt._stop_deepresearch_process(proc, timeout=0.01)
+
+    proc.terminate.assert_called_once_with()
+    proc.kill.assert_called_once_with()
+    assert proc.wait_calls == 2
+    assert proc.returncode == -9
+
+
+@pytest.mark.asyncio
+async def test_stream_cancellation_during_config_delivery_stops_child():
+    proc = _Proc([])
+    proc.returncode = None
+    proc.terminate = Mock()
+    proc.kill = Mock()
+
+    async def wait():
+        proc.returncode = -15
+        return proc.returncode
+
+    proc.wait = AsyncMock(side_effect=wait)
+    config = {
+        "LLM_MODEL_NAME": "model",
+        "LLM_MODEL_TYPE": "openai",
+        "LLM_BASE_URL": "https://llm.example/v1",
+        "LLM_API_KEY": "llm-secret",
+        "WEB_SEARCH_ENGINE_NAME": "bocha",
+        "WEB_SEARCH_API_KEY": "search-secret",
+    }
+
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_build_deepresearch_request_config", return_value=config), \
+         patch.object(dt, "_build_deepresearch_child_env", return_value={"PATH": "/usr/bin"}), \
+         patch.object(dt, "_write_deepresearch_config", side_effect=asyncio.CancelledError), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "", "channel_id": "", "session_id": "",
+         }), \
+         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport"
+         ), \
+         pytest.raises(asyncio.CancelledError):
+        await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
+
+    proc.terminate.assert_called_once_with()
+    proc.wait.assert_awaited_once_with()
 
 
 def _make_fake_skill(parent: str) -> str:

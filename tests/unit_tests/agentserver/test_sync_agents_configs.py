@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import jiuwenclaw.local_env_config as local_env_config
+
 from jiuwenclaw.agentserver.agent_manager import AgentManager
 from jiuwenclaw.agentserver.sync_agents_configs import (
     SYNC_ENV_SCHEMA,
@@ -478,6 +480,29 @@ class TestOfficeAssistantIsolation:
 
 
 class TestExportAgentEnviron:
+    @staticmethod
+    def test_spawn_export_excludes_tenant_secrets():
+        apply_env_overrides_to_active(
+            {
+                "API_KEY": "tenant-secret",
+                "GITHUB_TOKEN": "github-secret",
+                "default_headers": '{"Authorization":"Basic secret"}',
+            },
+            service_id="default",
+            agent_id="office",
+        )
+        os.environ["PATH"] = "/usr/bin"
+        os.environ["AGENT_RUNTIME"] = "1"
+        os.environ["GITHUB_TOKEN"] = "unexpected-parent-secret"
+
+        exported = local_env_config.export_spawn_environ()
+
+        assert exported["PATH"] == "/usr/bin"
+        assert exported["AGENT_RUNTIME"] == "1"
+        assert "API_KEY" not in exported
+        assert "GITHUB_TOKEN" not in exported
+        assert "default_headers" not in exported
+
     @staticmethod
     def test_includes_deprefixed_b_and_present_spawn():
         apply_env_overrides_to_active(
