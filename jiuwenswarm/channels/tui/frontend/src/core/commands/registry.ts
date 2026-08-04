@@ -23,6 +23,7 @@ import { createHelpCommand } from "./builtins/help.js";
 import { createHooksCommand } from "./builtins/hooks.js";
 import { createKeybindingsCommand } from "./builtins/keybindings.js";
 import { createInitCommand } from "./builtins/init.js";
+import { createAuthCommand } from "./builtins/auth.js";
 import { createModelCommand } from "./builtins/model.js";
 import { createMcpCommand } from "./builtins/mcp.js";
 import { createMemoryCommand } from "./builtins/memory.js";
@@ -72,6 +73,7 @@ export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): Sla
     createBtwCommand(),
     createClearCommand(),
     createInitCommand(),
+    createAuthCommand(),
     createColorCommand(),
     createCompactCommand(),
     createConfigCommand(),

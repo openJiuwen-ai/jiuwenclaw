@@ -1472,6 +1472,7 @@ async def _run(
         build_cli_route_binding,
     )
     from jiuwenswarm.gateway.channel_manager.tui.tui_channel import TuiChannel, TuiChannelConfig
+    from jiuwenswarm.gateway.channel_manager.openai_account_service import OpenAIAccountService
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.updater import UpdaterService
@@ -1597,6 +1598,7 @@ async def _run(
     # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
     message_handler.set_channel_manager(channel_manager)
     updater_service = UpdaterService()
+    openai_account_service = OpenAIAccountService()
     prewarm_sync_debounce_task: asyncio.Task[None] | None = None
 
     async def _sync_agent_prewarm_channels() -> None:
@@ -1759,6 +1761,7 @@ async def _run(
             heartbeat_service=heartbeat_service,
             cron_controller=cron_controller,
             updater_service=updater_service,
+            openai_account_service=openai_account_service,
         )
     )
 
@@ -1830,6 +1833,7 @@ async def _run(
                 path="/tui",
                 channel_id="tui",
                 cron_controller=cron_controller,
+                openai_account_service=openai_account_service,
                 ws_channel=tui_channel,
             )
         ),
