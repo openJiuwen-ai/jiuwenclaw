@@ -442,6 +442,7 @@ def _sync_chat_request_metadata(
     project_dir: str | None,
     mode: str,
     explicit_mode_provided: bool = False,
+    user_id: str = "",
 ) -> str | None:
     """将本次 chat 请求的参数同步到会话元数据，返回生效的 project_dir。
 
@@ -512,6 +513,7 @@ def _sync_chat_request_metadata(
             project_dir=str(project_dir) if project_dir else None,
             project_id=request_project_id,
             cron_id=request_cron_id,
+            user_id=str(user_id or "").strip() or None,
             last_user_message_at=(
                 _dt.datetime.now(_dt.timezone.utc).timestamp() if is_chat_turn else None
             ),
@@ -619,6 +621,7 @@ def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
         is_stream=data.get("is_stream", False),
         timestamp=data.get("timestamp", 0.0),
         metadata=metadata,
+        user_id=str(data.get("user_id") or "").strip(),
     )
 
 
@@ -2061,6 +2064,7 @@ class AgentWebSocketServer:
                 requested_project_dir,
                 canonical_mode if canonical_mode else mode,
                 explicit_mode_provided=explicit_mode_provided,
+                user_id=str(getattr(request, "user_id", "") or "").strip(),
             )
         else:
             # Read-only path (e.g. command.goal get): never create/update
@@ -7501,7 +7505,7 @@ class AgentWebSocketServer:
             init_session_metadata(
                 session_id=session_id,
                 channel_id=channel_id,
-                user_id=params.get("user_id", ""),
+                user_id=str(getattr(request, "user_id", "") or params.get("user_id", "") or "").strip(),
                 title=params.get("title", ""),
                 mode=canonical_mode,
                 project_dir=project_dir,

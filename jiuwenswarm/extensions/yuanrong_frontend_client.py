@@ -628,7 +628,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         )
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self._invoke_url(), data=data, headers=headers, method="POST")
-        return self._urlopen_request(req)
+        return self._urlopen_request(req, raise_on_timeout=True)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         """发送非流式请求.

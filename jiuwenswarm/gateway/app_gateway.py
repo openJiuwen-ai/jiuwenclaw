@@ -1616,26 +1616,45 @@ async def _run(
             "VISION_API_BASE",
             "VISION_API_KEY",
         }
-        try:
-            client.set_or_update_server_config(
-                config=dict(config_payload or {}),
-                env=dict(env_updates or {}),
-            )
+        _RELOAD_MAX_RETRIES = 3
+        _RELOAD_RETRY_BACKOFF_BASE = 2.0  # seconds: 2, 4, 8
 
-            reload_env = e2a_from_agent_fields(
-                request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
-                channel_id="",
-                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={
-                    # config: full config snapshot after save; Agent should prefer this over local yaml.
-                    "config": dict(config_payload or {}),
-                    # env: incremental environment updates; missing keys mean unchanged.
-                    "env": dict(env_updates or {}),
-                    **dict(reload_options or {}),
-                },
-            )
-            reload_resp = await client.send_request(reload_env)
-            if not getattr(reload_resp, "ok", False):
+        client.set_or_update_server_config(
+            config=dict(config_payload or {}),
+            env=dict(env_updates or {}),
+        )
+
+        # reload 是全局配置热重载，不绑定特定 user。但 faas 沙箱 acquire instance
+        # 需要 X-Session-Context（由 envelope.user_id 透传成 sessionCtxID）；user_id 为空
+        # 时 faas 拿不到 sessionCtxID，acquire lease 走 init 路径失败
+        # （"connect runtime failed"），invocation 60s 超时，首登 config.set 后前端卡死+1001。
+        # user_id 还必须是 faas 沙箱配置了可工作区的真实用户：faas 沙箱按 user_id
+        # 映射 /home/<user>/.jiuwenswarm 工作区，非配置用户（system/root）建沙箱失败
+        # （code 80004 "Failed to create sandbox"）。agentos_test 是 agentos 部署的默认
+        # 用户（gateway-config.yaml ssh username），有完整工作区，复用其 warm instance。
+        reload_env = e2a_from_agent_fields(
+            request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
+            channel_id="",
+            session_id="sess_reload",
+            user_id="agentos_test",
+            req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+            params={
+                # config: full config snapshot after save; Agent should prefer this over local yaml.
+                "config": dict(config_payload or {}),
+                # env: incremental environment updates; missing keys mean unchanged.
+                "env": dict(env_updates or {}),
+                **dict(reload_options or {}),
+            },
+        )
+
+        reload_ok = False
+        last_error: Exception | None = None
+        for attempt in range(_RELOAD_MAX_RETRIES + 1):
+            try:
+                reload_resp = await client.send_request(reload_env)
+                if getattr(reload_resp, "ok", False):
+                    reload_ok = True
+                    break
                 err_payload = getattr(reload_resp, "payload", None) or {}
                 err_msg = (
                     err_payload.get("error")
@@ -1643,35 +1662,51 @@ async def _run(
                     else err_payload
                 )
                 err_str = str(err_msg or "")
-                # ValidationError 是配置格式问题，不需要重启 gateway
+                # ValidationError 是配置格式问题，不需要重试也不需要重启 gateway
                 if any(kw in err_str for kw in ("ValidationError", "validation error", "Field required")):
                     logger.warning("[App] agent.reload_config validation error (non-fatal): %s", err_str)
                     return False
-                raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
+                last_error = RuntimeError(f"agent.reload_config rejected: {err_msg}")
+            except Exception as e:  # noqa: BLE001
+                last_error = e
 
-            if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
-                restart_env = e2a_from_agent_fields(
-                    request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
-                    channel_id="",
-                    req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+            if attempt < _RELOAD_MAX_RETRIES:
+                delay = _RELOAD_RETRY_BACKOFF_BASE ** (attempt + 1)
+                logger.warning(
+                    "[App] agent.reload_config attempt %d/%d failed, retrying in %.1fs: %s",
+                    attempt + 1, _RELOAD_MAX_RETRIES + 1, delay, last_error,
                 )
-                await client.send_request(restart_env)
+                await asyncio.sleep(delay)
 
-            # 主动推荐：enabled 变更时同步 proactive.tick job（创建/删除）
-            proactive_keys = {
-                "proactive_recommendation_enabled",
-            }
-            if updated_env_keys and (proactive_keys & set(updated_env_keys)):
-                try:
-                    from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
-                    await sync_proactive_tick_job(cron_controller, config_payload)
-                except Exception as e:  # noqa: BLE001  # 兜底：proactive 同步失败不阻断配置保存
-                    logger.warning("[App] proactive.tick sync on config save failed: %s", e)
-            return True
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
+        if not reload_ok:
+            logger.critical(
+                "[App] agent.reload_config failed after %d attempts, scheduling restart: %s",
+                _RELOAD_MAX_RETRIES + 1, last_error,
+            )
             _schedule_gateway_restart(restart_request)
             return False
+
+        if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
+            restart_env = e2a_from_agent_fields(
+                request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
+                channel_id="",
+                session_id="sess_reload",
+                user_id="agentos_test",
+                req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+            )
+            await client.send_request(restart_env)
+
+        # 主动推荐：enabled 变更时同步 proactive.tick job（创建/删除）
+        proactive_keys = {
+            "proactive_recommendation_enabled",
+        }
+        if updated_env_keys and (proactive_keys & set(updated_env_keys)):
+            try:
+                from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
+                await sync_proactive_tick_job(cron_controller, config_payload)
+            except Exception as e:  # noqa: BLE001  # 兜底：proactive 同步失败不阻断配置保存
+                logger.warning("[App] proactive.tick sync on config save failed: %s", e)
+        return True
 
     web_channel = None
     tui_channel = None
