@@ -268,21 +268,23 @@ def _hook_safe(method):
     """
     @functools.wraps(method)
     async def wrapper(self, *args, **kwargs):
-        if self._degraded:
+        if getattr(self, "_degraded", False):
             return None
         try:
             return await method(self, *args, **kwargs)
         except Exception as exc:  # noqa: BLE001
-            self._failure_count += 1
+            failure_count = getattr(self, "_failure_count", 0) + 1
+            setattr(self, "_failure_count", failure_count)
+            failure_threshold = getattr(self, "_failure_threshold", 10)
             logger.warning(
                 "[perf] hook %s failed (%d/%d): %s",
                 method.__name__,
-                self._failure_count,
-                self._failure_threshold,
+                failure_count,
+                failure_threshold,
                 exc,
             )
-            if self._failure_count >= self._failure_threshold:
-                self._degraded = True
+            if failure_count >= failure_threshold:
+                setattr(self, "_degraded", True)
                 logger.warning(
                     "[perf] circuit breaker tripped - PerfTraceRail hooks disabled until process restart"
                 )
