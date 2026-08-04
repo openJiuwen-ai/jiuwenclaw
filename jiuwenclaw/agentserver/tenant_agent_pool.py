@@ -561,11 +561,12 @@ class TenantAgentPool:
 
                 await self._agent_wrappers.put(cache_key, agent_manager)
 
-                active_keys = await self._agent_wrappers.keys()
-                stale_locks = [k for k in self._locks if k not in active_keys]
-                for stale_key in stale_locks:
-                    del self._locks[stale_key]
-                    self._lock_loops.pop(stale_key, None)
+                async with self._global_lock:
+                    active_keys = await self._agent_wrappers.keys()
+                    stale_locks = [k for k in self._locks if k not in active_keys]
+                    for stale_key in stale_locks:
+                        del self._locks[stale_key]
+                        self._lock_loops.pop(stale_key, None)
 
                 logger.info(
                     "[TenantAgentPool] AgentManager 实例创建完成: agent_id=%s, service_id=%s",
@@ -770,29 +771,12 @@ class TenantAgentPool:
                         )
                     )
 
-            for agent_id in sorted(incoming_ids):
-                spec = incoming_specs[agent_id]
-                existing = registry.get(service_id, agent_id)
-                if agent_id in added_ids:
-                    action = "added"
-                elif existing is not None and existing.content_hash == spec.content_hash:
-                    action = "unchanged"
-                else:
-                    action = "updated"
-
-                if action == "unchanged":
-                    results.append(
-                        build_agent_result(
-                            AgentSyncResultItem(
-                                agent_id=agent_id,
-                                action=action,
-                                ok=True,
-                                warmup={"ok": True, "error": None, "skipped": True},
-                            )
-                        )
-                    )
-                    continue
-
+            async def _sync_one_agent(
+                agent_id: str, spec: Any, action: str,
+            ) -> dict[str, Any]:
+                # Apply side effects first; commit catalog only on full success so a
+                # failed attempt keeps the previous content_hash and identical retries
+                # re-run replace_active_env / apply_sync_config.
                 materialized_env = materialize_sync_env(spec.env)
                 agent_ok = True
                 agent_error: str | None = None
@@ -800,11 +784,6 @@ class TenantAgentPool:
                 warmup_payload: dict[str, Any] | None = None
 
                 try:
-                    # Apply side effects first; commit catalog only on full success so a
-                    # failed attempt keeps the previous content_hash and identical retries
-                    # re-run replace_active_env / apply_sync_config.
-                    # Skip DeepAgent __warmup__ create/destroy: it dominated sync latency
-                    # (~2.5s × N agents) and did not reuse into real chat sessions.
                     replace_active_env(
                         materialized_env,
                         service_id=service_id,
@@ -821,7 +800,7 @@ class TenantAgentPool:
                         spec.config,
                         materialized_env,
                     )
-                    # Baseline keys absent from raw agents[].env → this tip.
+                    # Baseline keys absent from raw agents[].env -> this tip.
                     # reserved includes null keys so sync deletes are not resurrected.
                     apply_process_baseline_gaps(
                         service_id,
@@ -839,6 +818,8 @@ class TenantAgentPool:
                     if reload_result.failed:
                         agent_ok = False
                         agent_error = "reload failed for one or more sessions"
+                    # Skip DeepAgent warmup create/destroy: it dominated sync latency
+                    # (~2.5s x N agents) and did not reuse into real chat sessions.
                     warmup_payload = {"ok": True, "error": None, "skipped": True}
                     if agent_ok:
                         registry.upsert(spec)
@@ -852,7 +833,6 @@ class TenantAgentPool:
                     agent_error = str(exc)
 
                 if not agent_ok:
-                    all_ok = False
                     if action == "added":
                         try:
                             await self._evict_manager_cache(agent_id, service_id)
@@ -864,18 +844,69 @@ class TenantAgentPool:
                                 agent_id,
                                 exc_info=True,
                             )
-                results.append(
-                    build_agent_result(
-                        AgentSyncResultItem(
-                            agent_id=agent_id,
-                            action=action,
-                            ok=agent_ok,
-                            error=agent_error,
-                            warmup=warmup_payload,
-                            reload=reload_payload,
-                        )
+                return build_agent_result(
+                    AgentSyncResultItem(
+                        agent_id=agent_id,
+                        action=action,
+                        ok=agent_ok,
+                        error=agent_error,
+                        warmup=warmup_payload,
+                        reload=reload_payload,
                     )
                 )
+
+            incoming_task_keys: list[tuple[str, str]] = []
+            for agent_id in sorted(incoming_ids):
+                spec = incoming_specs[agent_id]
+                existing = registry.get(service_id, agent_id)
+                if agent_id in added_ids:
+                    action = "added"
+                elif existing is not None and existing.content_hash == spec.content_hash:
+                    action = "unchanged"
+                else:
+                    action = "updated"
+                incoming_task_keys.append((agent_id, action))
+
+            gather_coros = [
+                _sync_one_agent(aid, incoming_specs[aid], action)
+                for aid, action in incoming_task_keys
+                if action != "unchanged"
+            ]
+            gather_results = await asyncio.gather(*gather_coros, return_exceptions=True)
+
+            gather_idx = 0
+            for agent_id, action in incoming_task_keys:
+                if action == "unchanged":
+                    results.append(
+                        build_agent_result(
+                            AgentSyncResultItem(
+                                agent_id=agent_id,
+                                action=action,
+                                ok=True,
+                                warmup={"ok": True, "error": None, "skipped": True},
+                            )
+                        )
+                    )
+                    continue
+
+                raw = gather_results[gather_idx]
+                gather_idx += 1
+                if isinstance(raw, BaseException):
+                    all_ok = False
+                    results.append(
+                        build_agent_result(
+                            AgentSyncResultItem(
+                                agent_id=agent_id,
+                                action=action,
+                                ok=False,
+                                error=str(raw),
+                            )
+                        )
+                    )
+                else:
+                    if not raw.get("ok", True):
+                        all_ok = False
+                    results.append(raw)
 
             if all_ok:
                 self._last_sync_revision[service_id] = revision

@@ -1033,6 +1033,122 @@ async def test_sync_agents_configs_registers_and_isolates_tip(mock_warmup):
     )
 
 
+@pytest.mark.asyncio
+async def test_sync_multiple_agents_parallel_execution(mock_warmup):
+    """Multiple agents should be processed concurrently via asyncio.gather."""
+    import asyncio
+    import time
+
+    pool = TenantAgentPool.get_instance()
+    agents = [
+        {
+            "agent_id": f"agent-{i}",
+            "config": {"react": {"agent_name": f"agent-{i}"}},
+            "env": _full_env(MODEL_NAME=f"model-{i}"),
+            "runtime": {},
+        }
+        for i in range(5)
+    ]
+    call_times: list[float] = []
+
+    async def _track_ensure(*args, **kwargs):
+        call_times.append(time.monotonic())
+        await asyncio.sleep(0.1)
+        mock_mgr = MagicMock()
+        reload_result = MagicMock(applied=1, deferred=0, failed=[])
+        mock_mgr.apply_sync_config = AsyncMock(return_value=reload_result)
+        mock_mgr._latest_env_overrides = {}
+        return mock_mgr
+
+    with patch.object(TenantAgentPool, "_ensure_agent_manager", new=_track_ensure):
+        result = await pool.sync_agents_configs(_sync_payload(revision="par-1", agents=agents))
+
+    assert len(result["agents"]) == 5
+    assert all(a["ok"] for a in result["agents"])
+    if len(call_times) >= 2:
+        spread = max(call_times) - min(call_times)
+        assert spread < 0.4, f"Agents not parallel: spread={spread:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_sync_multiple_agents_result_order_preserved(mock_warmup):
+    """Parallel execution must still return results in sorted agent_id order."""
+    import asyncio
+
+    pool = TenantAgentPool.get_instance()
+    agents = [
+        {
+            "agent_id": f"agent-{i}",
+            "config": {"react": {"agent_name": f"agent-{i}"}},
+            "env": _full_env(MODEL_NAME=f"model-{i}"),
+            "runtime": {},
+        }
+        for i in range(5)
+    ]
+
+    async def _delayed_ensure(*args, **kwargs):
+        idx = int(str(args[1]).split("-")[1])
+        await asyncio.sleep(0.05 * (5 - idx))
+        mock_mgr = MagicMock()
+        reload_result = MagicMock(applied=1, deferred=0, failed=[])
+        mock_mgr.apply_sync_config = AsyncMock(return_value=reload_result)
+        mock_mgr._latest_env_overrides = {}
+        return mock_mgr
+
+    with patch.object(TenantAgentPool, "_ensure_agent_manager", new=_delayed_ensure):
+        result = await pool.sync_agents_configs(_sync_payload(revision="ord-1", agents=agents))
+
+    result_ids = [a["agent_id"] for a in result["agents"]]
+    assert result_ids == [f"agent-{i}" for i in range(5)]
+    assert all(a["ok"] for a in result["agents"])
+
+
+@pytest.mark.asyncio
+async def test_sync_multiple_agents_partial_failure(mock_warmup):
+    """One agent failing should not prevent others from succeeding."""
+    pool = TenantAgentPool.get_instance()
+    agents = [
+        {
+            "agent_id": "ok-1",
+            "config": {"react": {"agent_name": "ok-1"}},
+            "env": _full_env(MODEL_NAME="m1"),
+            "runtime": {},
+        },
+        {
+            "agent_id": "fail-1",
+            "config": {"react": {"agent_name": "fail-1"}},
+            "env": _full_env(MODEL_NAME="m2"),
+            "runtime": {},
+        },
+        {
+            "agent_id": "ok-2",
+            "config": {"react": {"agent_name": "ok-2"}},
+            "env": _full_env(MODEL_NAME="m3"),
+            "runtime": {},
+        },
+    ]
+
+    async def _mixed_ensure(*args, **kwargs):
+        mock_mgr = MagicMock()
+        if args[1] == "fail-1":
+            mock_mgr.apply_sync_config = AsyncMock(side_effect=RuntimeError("test failure"))
+        else:
+            reload_result = MagicMock(applied=1, deferred=0, failed=[])
+            mock_mgr.apply_sync_config = AsyncMock(return_value=reload_result)
+        mock_mgr._latest_env_overrides = {}
+        return mock_mgr
+
+    with patch.object(TenantAgentPool, "_ensure_agent_manager", new=_mixed_ensure):
+        result = await pool.sync_agents_configs(_sync_payload(revision="pfail-1", agents=agents))
+
+    ok_agents = [a for a in result["agents"] if a["ok"]]
+    fail_agents = [a for a in result["agents"] if not a["ok"]]
+    assert len(ok_agents) == 2
+    assert len(fail_agents) == 1
+    assert fail_agents[0]["agent_id"] == "fail-1"
+    assert pool._last_sync_revision.get("default") is None
+
+
 def test_build_agent_spec_hash_stable():
     a = build_agent_spec(
         service_id="default",
