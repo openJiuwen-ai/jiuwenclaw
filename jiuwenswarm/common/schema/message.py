@@ -16,6 +16,7 @@ class ReqMethod(Enum):
     CHAT_CANCEL = "chat.interrupt"
     CHAT_ANSWER = "chat.user_answer"
     CHAT_SWARMFLOW_REPLY = "chat.swarmflow_reply"
+    SSH_RELAY = "ssh.relay"
     HISTORY_GET = "history.get"
     COMMAND_BTW = "command.btw"
     COMMAND_ADD_DIR = "command.add_dir"
@@ -50,16 +51,21 @@ class ReqMethod(Enum):
     SESSION_REWIND_COMPACT = "session.rewind_compact"
     SESSION_RESTORE_FILES = "session.restore_files"
     HISTORY_LIST_TURNS = "history.list_turns"
+    TEAM_TEMPLATES_LIST = "team.templates.list"
+    TEAM_BINDINGS_LIST = "team.bindings.list"
+    TEAM_BINDING_CREATE = "team.binding.create"
+    TEAM_BINDING_GENERATE = "team.binding.generate"
+    TEAM_SESSION_BIND = "team.session.bind"
     TEAM_DELETE = "team.delete"
 
     PATH_GET = "path.get"
     PATH_SET = "path.set"
 
-    BROWSER_START = "browser.start"
     BROWSER_RUNTIME_RESTART = "browser.runtime_restart"
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
+    AGENT_PREWARM_SYNC = "agent.prewarm.sync"
 
     MEMORY_COMPUTE = "memory.compute"
 
@@ -92,6 +98,7 @@ class ReqMethod(Enum):
     SKILLS_MARKETPLACE_REMOVE = "skills.marketplace.remove"
     SKILLS_MARKETPLACE_TOGGLE = "skills.marketplace.toggle"
     SKILLS_UNINSTALL = "skills.uninstall"
+    SKILLS_ONLINE_SEARCH = "skills.online_search.search"
     SKILLS_SKILLNET_SEARCH = "skills.skillnet.search"
     SKILLS_SKILLNET_INSTALL = "skills.skillnet.install"
     SKILLS_SKILLNET_INSTALL_STATUS = "skills.skillnet.install_status"
@@ -161,6 +168,8 @@ class ReqMethod(Enum):
 
     CHANNEL_TELEGRAM_GET_CONF = "channel.telegram.get_conf"
     CHANNEL_TELEGRAM_SET_CONF = "channel.telegram.set_conf"
+    CHANNEL_SLACK_GET_CONF = "channel.slack.get_conf"
+    CHANNEL_SLACK_SET_CONF = "channel.slack.set_conf"
     CHANNEL_DINGTALK_GET_CONF = "channel.dingtalk.get_conf"
     CHANNEL_DINGTALK_SET_CONF = "channel.dingtalk.set_conf"
 
@@ -180,6 +189,7 @@ class ReqMethod(Enum):
     TEAM_SNAPSHOT = "team.snapshot"
     TEAM_HISTORY_GET = "team.history.get"
     TEAM_MEMBERS_GET = "team.members.get"
+    TEAM_MQ_PUBLISH = "team.mq.publish"
 
     # Harness package management
     HARNESS_PACKAGES_GET = "harness.packages.get"

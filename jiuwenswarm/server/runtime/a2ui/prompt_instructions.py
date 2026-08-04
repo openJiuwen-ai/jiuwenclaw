@@ -4,8 +4,83 @@
 
 from __future__ import annotations
 
+import json
+import re
+from typing import Any
 
-def build_a2ui_autonomy_instruction(language: str = "en") -> str:
+
+_BROWSER_WORKFLOW_ACTION_MARKERS = (
+    "browser_preflight_submit",
+    "run_browser_agent",
+    "hotel_option_select",
+    "continue_hotel_booking",
+    "hotel_payment_confirm",
+    "hotel_payment_cancel",
+    "gmail_email_select",
+    "continue_gmail_email_review",
+    "gmail_reply_draft_select",
+    "continue_gmail_reply_draft",
+    "gmail_send_confirm",
+    "gmail_send_cancel",
+    "gmail_cleanup_select",
+    "review_gmail_cleanup",
+    "gmail_cleanup_confirm",
+    "gmail_cleanup_cancel",
+    "social_post_draft_select",
+    "continue_social_post_draft",
+    "social_post_confirm",
+    "social_post_cancel",
+)
+_BROWSER_WORKFLOW_INTENT_RE = re.compile(
+    r"(?:"
+    r"(?:book|reserve|buy|purchase|checkout|fill|submit|search|summari[sz]e|"
+    r"reply|clean|archive|delete|post|publish|comment|like|follow|open|click)"
+    r".{0,80}"
+    r"(?:browser|web(?:site)?|gmail|e-?mail|mailbox|hotel|ticket|form|"
+    r"social(?:\s+media)?|facebook|instagram|linkedin|x\.com|twitter)"
+    r"|"
+    r"(?:browser|web(?:site)?|gmail|e-?mail|mailbox|hotel|ticket|form|"
+    r"social(?:\s+media)?|facebook|instagram|linkedin|x\.com|twitter)"
+    r".{0,80}"
+    r"(?:book|reserve|buy|purchase|checkout|fill|submit|search|summari[sz]e|"
+    r"reply|clean|archive|delete|post|publish|comment|like|follow|open|click)"
+    r"|"
+    r"(?:预订|预约|购买|下单|填写|提交|搜索|查找|总结|回复|清理|归档|删除|"
+    r"发布|发帖|评论|点赞|关注|打开|点击)"
+    r".{0,40}"
+    r"(?:浏览器|网页|网站|邮箱|邮件|收件箱|酒店|宾馆|机票|车票|表单|"
+    r"社交媒体|微博|小红书)"
+    r"|"
+    r"(?:浏览器|网页|网站|邮箱|邮件|收件箱|酒店|宾馆|机票|车票|表单|"
+    r"社交媒体|微博|小红书)"
+    r".{0,40}"
+    r"(?:预订|预约|购买|下单|填写|提交|搜索|查找|总结|回复|清理|归档|删除|"
+    r"发布|发帖|评论|点赞|关注|打开|点击)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_a2ui_browser_workflow_request(value: Any) -> bool:
+    """Return whether the current request needs browser-specific A2UI rules."""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, (dict, list, tuple)):
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(value)
+    else:
+        text = str(value or "")
+
+    normalized = text.lower()
+    if any(marker in normalized for marker in _BROWSER_WORKFLOW_ACTION_MARKERS):
+        return True
+    return bool(_BROWSER_WORKFLOW_INTENT_RE.search(text))
+
+
+def build_a2ui_browser_workflow_instruction() -> str:
+    """Return browser-workflow rules for requests that actually need them."""
     browser_preflight_rule_en = (
         " Browser task preflight: when the user asks you to perform a browser "
         "automation task such as booking tickets, reserving hotels, buying "
@@ -100,6 +175,16 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "comment, like, follow, delete, or perform externally visible social "
         "actions without final explicit confirmation."
     )
+    return (
+        mandatory_account_action_rule_en
+        + browser_preflight_rule_en
+        + hotel_booking_flow_rule_en
+        + gmail_flow_rule_en
+        + social_post_flow_rule_en
+    )
+
+
+def build_a2ui_autonomy_instruction(language: str = "en") -> str:
     template_binding_rule_en = (
         " For repeated list/card data, use A2UI template binding correctly: "
         "Duplicate dataModelUpdate keys are invalid. Encode arrays as one "
@@ -205,11 +290,6 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         + icon_font_rule_en
         + unsupported_component_rule_zh
         + autonomy_rule_zh
-        + mandatory_account_action_rule_en
-        + browser_preflight_rule_en
-        + hotel_booking_flow_rule_en
-        + gmail_flow_rule_en
-        + social_post_flow_rule_en
     )
 
     if language in {"zh", "cn"}:
@@ -235,15 +315,12 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
         "server-to-client message list, with beginRendering before "
         "surfaceUpdate and dataModelUpdate only when needed."
         + autonomy_rule_en
-        + mandatory_account_action_rule_en
-        + browser_preflight_rule_en
-        + hotel_booking_flow_rule_en
-        + gmail_flow_rule_en
-        + social_post_flow_rule_en
         + requested_component_rule_en
     )
 
 
 __all__ = [
     "build_a2ui_autonomy_instruction",
+    "build_a2ui_browser_workflow_instruction",
+    "is_a2ui_browser_workflow_request",
 ]

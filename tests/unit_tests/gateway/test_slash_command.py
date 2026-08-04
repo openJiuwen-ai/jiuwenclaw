@@ -372,3 +372,17 @@ def test_exit_parse_rejects_short_form_requires_full_team_session_ref() -> None:
     assert pj.action is ParsedControlAction.JOIN_OK
     assert pj.session_ref == "team_jiuwen_sess_19f4b147e5a_session_sess_19f4b147e5a"
     assert pj.member_name == "auditor"
+
+    # 中文 team name：完整格式应放行
+    p = parse_channel_control_text(
+        "/exit team_我的团队_sess_abc123_session_sess_abc123"
+    )
+    assert p.action is ParsedControlAction.EXIT_OK
+    assert p.session_ref == "team_我的团队_sess_abc123_session_sess_abc123"
+
+    pj = parse_channel_control_text(
+        "/join team_我的团队_sess_abc123_session_sess_abc123 as 审核员"
+    )
+    assert pj.action is ParsedControlAction.JOIN_OK
+    assert pj.session_ref == "team_我的团队_sess_abc123_session_sess_abc123"
+    assert pj.member_name == "审核员"

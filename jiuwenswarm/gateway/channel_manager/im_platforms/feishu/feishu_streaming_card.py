@@ -154,8 +154,9 @@ class FeishuCardKitClient:
         if response.status_code == 401 or code in AUTH_ERROR_CODES:
             raise CardKitError("CardKit authentication failed")
         if response.status_code >= 400 or code != 0:
+            msg = data.get('msg', '')
             raise CardKitError(
-                f"CardKit request failed: http={response.status_code} code={code}"
+                f"CardKit request failed: http={response.status_code} code={code}, message is {msg}"
             )
         return data
 

@@ -15,7 +15,10 @@ import {
   a2uiWarn,
   dualWriteA2UIValue,
   isMultiSelectChoice,
+  isSingleSelectChoice,
   literalArrayValues,
+  nextChoiceSelections,
+  selectionCollectionValues,
   visibleChoiceDefault as visibleChoiceDefaultValue,
 } from './formDefaults';
 
@@ -38,13 +41,9 @@ function nonEmptyChoiceValue(value: unknown): string | null {
 }
 
 function selectedValuesFromData(value: DataValue | null): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .map(nonEmptyChoiceValue)
-      .filter((item): item is string => item !== null);
-  }
-  const singleValue = nonEmptyChoiceValue(value);
-  return singleValue ? [singleValue] : [];
+  return selectionCollectionValues(value)
+    .map(nonEmptyChoiceValue)
+    .filter((item): item is string => item !== null);
 }
 
 export function visibleMultipleChoiceDefault(
@@ -89,7 +88,7 @@ export function MultipleChoiceWithDefaults({
   const variant = rawProps.variant as string | undefined;
   const type = variant ?? rawProps.type as string | undefined;
 
-  const isSingleSelect = !isMultiSelect;
+  const isSingleSelect = isSingleSelectChoice(rawProps);
 
   // Filterable search support
   const filterable = rawProps.filterable as boolean | undefined;
@@ -126,34 +125,15 @@ export function MultipleChoiceWithDefaults({
         return;
       }
 
-      // Single-select mode (maxAllowedSelections === 1): always replace
-      if (isSingleSelect) {
-        const nextValue = [optionValue];
-        dualWriteA2UIValue(setValue, selectionsPath, nextValue);
-        return;
-      }
-
-      // Multi-select mode: add/remove from array
-      const currentValues = [...effectiveSelectedValues];
-      if (checked) {
-        if (!currentValues.includes(optionValue)) {
-          currentValues.push(optionValue);
-        }
-      } else {
-        const index = currentValues.indexOf(optionValue);
-        if (index !== -1) {
-          currentValues.splice(index, 1);
-        }
-      }
-
-      // Respect maxAllowedSelections for multi-select
-      if (maxAllowedSelections !== undefined && currentValues.length > maxAllowedSelections) {
-        return;
-      }
-
-      dualWriteA2UIValue(setValue, selectionsPath, currentValues);
+      const nextValues = nextChoiceSelections(
+        effectiveSelectedValues,
+        optionValue,
+        checked,
+        maxAllowedSelections,
+      );
+      dualWriteA2UIValue(setValue, selectionsPath, nextValues);
     },
-    [selectionsPath, effectiveSelectedValues, maxAllowedSelections, isSingleSelect, setValue],
+    [selectionsPath, effectiveSelectedValues, maxAllowedSelections, setValue],
   );
 
   const hostStyle = (

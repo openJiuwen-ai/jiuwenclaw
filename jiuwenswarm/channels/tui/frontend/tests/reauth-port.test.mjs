@@ -74,7 +74,7 @@ class MockUiLifecycle {
   const handoff = new HandoffPortImpl(env, lifecycle);
   const reauth = new ReauthenticationPortImpl(env, handoff, lifecycle);
   // 触发 handoff（mock closeUi 不退出，但 handoffInProgress=true）
-  await handoff.requestHandoff("cc-tui").catch(() => {});
+  await handoff.requestHandoff("cc-tui", "switch claude").catch(() => {});
   await assert.rejects(
     reauth.requestReauthentication("access-token-expired"),
     /Handoff or reauthentication already in progress/,

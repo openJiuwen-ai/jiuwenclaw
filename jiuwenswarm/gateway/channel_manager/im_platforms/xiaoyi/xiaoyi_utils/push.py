@@ -16,8 +16,6 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-PUSH_URL = "https://hag.cloud.huawei.com/open-ability-agent/v1/agent-webhook"
-
 
 @dataclass
 class PushConfig:
@@ -113,7 +111,7 @@ class XiaoYiPushService:
             timeout = aiohttp.ClientTimeout(total=30)
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    self.config.push_url or PUSH_URL,
+                    self.config.push_url,
                     headers=headers,
                     json=payload,
                     timeout=timeout,

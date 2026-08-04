@@ -8,6 +8,7 @@ import {
 } from "./auth.js";
 
 export interface ModelMeta {
+  index?: number;
   name: string;
   alias?: string;
   model_name?: string;
@@ -38,6 +39,7 @@ export const SUPPORTED_MODEL_PROVIDERS = [
   "DashScope",
   "SiliconFlow",
   "InferenceAffinity",
+  "AscendAffinity",
   "DeepSeek",
   "OpenAIAccount",
 ] as const;
@@ -166,17 +168,16 @@ export function createModelCommand(): SlashCommand {
         // If no arg or "list", show selectable model list
         if (value === "" || value === "list") {
           const payload = await ctx.request<ModelListPayload>("command.model", {});
-          const models = payload.available_models ?? [];
+          const modelsMeta = payload.models ?? [];
           const current = payload.current ?? "unknown";
-          if (models.length === 0) {
+          if (modelsMeta.length === 0) {
             ctx.addItem(addInfo(ctx.sessionId, "No models configured", "m"));
             return;
           }
-          const skipped = models.filter((m) => isReservedMultimodalModelKey(m));
-          const selectableWithOriginalIndex = models
-            .map((name, index) => ({ name, index }))
-            .filter((entry) => !isReservedMultimodalModelKey(entry.name));
-          const selectable = selectableWithOriginalIndex.map((entry) => entry.name);
+          const skipped = modelsMeta.filter((m) => isReservedMultimodalModelKey(m.name));
+          const selectableMeta = modelsMeta.filter(
+            (m) => m.name && !isReservedMultimodalModelKey(m.name),
+          );
           if (skipped.length > 0) {
             ctx.addItem(
               addInfo(
@@ -186,11 +187,11 @@ export function createModelCommand(): SlashCommand {
               ),
             );
           }
-          if (selectable.length === 0) {
+          if (selectableMeta.length === 0) {
             ctx.addItem(addInfo(ctx.sessionId, "No switchable models in list", "m"));
             return;
           }
-          const modelsMeta = payload.models ?? [];
+          const selectable = selectableMeta.map((m) => m.name);
           let openAIAccountStatus: OpenAIAccountAuthStatus | null = null;
           if (modelsMeta.some((meta) => isOpenAIAccountProvider(meta.model_provider))) {
             try {
@@ -201,15 +202,13 @@ export function createModelCommand(): SlashCommand {
           }
           // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
           // 回退到 name-matching（兼容不带 is_current 的旧后端）
-          const currentIdx = selectableWithOriginalIndex.findIndex((entry) => {
-            const meta = modelsMeta[entry.index];
+          const currentIdx = selectableMeta.findIndex((meta) => {
             return meta?.is_current === true;
           });
           const fallbackCurrentIdx = currentIdx < 0 ? selectable.findIndex((m) => m === current) : currentIdx;
           const nameOccurrence: Record<string, number> = {};
-          const items = selectableWithOriginalIndex.map((entry, i) => {
-            const m = entry.name;
-            const meta = modelsMeta[entry.index];
+          const items = selectableMeta.map((meta, i) => {
+            const m = meta.name;
             const isCurrent = i === fallbackCurrentIdx;
             // 统计同名出现次序
             const seq = (nameOccurrence[m] ?? 0) + 1;
@@ -240,8 +239,7 @@ export function createModelCommand(): SlashCommand {
               const _mk = (mm: ModelMeta | undefined) =>
                 `${mm?.model_provider ?? ""}|${mm?.api_base ?? ""}`;
               const myFingerprint = _mk(meta);
-              const conflictCount = selectableWithOriginalIndex.reduce((acc, candidate) => {
-                const xm = modelsMeta[candidate.index];
+              const conflictCount = selectableMeta.reduce((acc, xm) => {
                 return xm && _mk(xm) === myFingerprint ? acc + 1 : acc;
               }, 0);
               if (conflictCount > 1) {
