@@ -127,6 +127,15 @@ from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
     resolve_a2x_config,
 )
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
+from jiuwenswarm.server.runtime.agent_adapter.llm_io_trace import (
+    begin_llm_trace_event,
+    end_llm_trace_event,
+    log_invoke_input,
+    log_invoke_output,
+    log_reasoning_delta,
+    log_stream_input,
+    log_stream_output,
+)
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
@@ -334,6 +343,26 @@ _CRON_TOOL_BOUND: ContextVar[bool] = ContextVar(
     default=False,
 )
 
+_LLM_TRACE_SESSION_ID: ContextVar[str] = ContextVar(
+    "llm_trace_session_id",
+    default="",
+)
+_LLM_TRACE_REQUEST_ID: ContextVar[str] = ContextVar(
+    "llm_trace_request_id",
+    default="",
+)
+_LLM_TRACE_ITERATION: ContextVar[int | None] = ContextVar(
+    "llm_trace_iteration",
+    default=None,
+)
+_LLM_TRACE_MODEL_NAME: ContextVar[str] = ContextVar(
+    "llm_trace_model_name",
+    default="",
+)
+
+_REASONING_TRACE_LOG_BATCH = 5
+_LLM_IO_TRACE_PATCH_APPLIED = False
+
 
 @dataclass(frozen=True, slots=True)
 class _RuntimeCronContextTokens:
@@ -425,6 +454,219 @@ _AGENT_CARD_ID = "jiuwenswarm"
 # registrar that could share an id with an adapter must take a reference here too.
 _SYS_OPERATION_REFCOUNTS: dict[str, int] = {}
 _SYS_OPERATION_REFCOUNT_LOCK = threading.Lock()
+
+
+def _extract_iteration_from_obj(value: Any) -> int | None:
+    """Best-effort parse iteration from chunk/payload/dict."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        for key in ("iteration", "iter", "step", "round"):
+            if key in value:
+                parsed = _extract_iteration_from_obj(value.get(key))
+                if parsed is not None:
+                    return parsed
+        for key in ("metadata", "meta", "extra", "context"):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                parsed = _extract_iteration_from_obj(nested)
+                if parsed is not None:
+                    return parsed
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return int(raw)
+        return None
+    return None
+
+
+def _extract_iteration_from_chunk(chunk: Any) -> int | None:
+    """Extract iteration from stream chunk object."""
+    for attr in ("iteration", "iter", "step"):
+        if hasattr(chunk, attr):
+            parsed = _extract_iteration_from_obj(getattr(chunk, attr, None))
+            if parsed is not None:
+                return parsed
+    payload = getattr(chunk, "payload", None)
+    return _extract_iteration_from_obj(payload)
+
+
+def _apply_llm_io_trace_patch() -> None:
+    """Monkey Patch Model.invoke/stream 添加 LLM IO trace 日志."""
+    global _LLM_IO_TRACE_PATCH_APPLIED
+    if _LLM_IO_TRACE_PATCH_APPLIED:
+        return
+
+    try:
+        original_invoke = Model.invoke
+        original_stream = Model.stream
+
+        async def _traced_invoke(
+            self: Model,
+            messages: List[Any],
+            tools: List[Any] | None = None,
+            model: str | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            model_name = model or getattr(self.model_config, "model_name", "") or ""
+            trace_sid = _LLM_TRACE_SESSION_ID.get()
+            trace_rid = _LLM_TRACE_REQUEST_ID.get()
+            trace_iter = _LLM_TRACE_ITERATION.get()
+            resolved_iter = (
+                _extract_iteration_from_obj(kwargs) if trace_iter is None else trace_iter
+            )
+            _ev_token = begin_llm_trace_event()
+            try:
+                try:
+                    log_invoke_input(
+                        session_id=trace_sid,
+                        request_id=trace_rid,
+                        iteration=resolved_iter,
+                        model_name=model_name,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=kwargs.get("max_tokens"),
+                        temperature=kwargs.get("temperature"),
+                        top_p=kwargs.get("top_p"),
+                        stop=kwargs.get("stop"),
+                        timeout=kwargs.get("timeout"),
+                    )
+                except Exception:
+                    logger.debug("[llm_trace] log_invoke_input failed", exc_info=True)
+                result = await original_invoke(
+                    self, messages, tools=tools, model=model, **kwargs
+                )
+                try:
+                    log_invoke_output(
+                        session_id=trace_sid,
+                        request_id=trace_rid,
+                        iteration=resolved_iter,
+                        model_name=model_name,
+                        assistant_msg=result,
+                    )
+                except Exception:
+                    logger.debug("[llm_trace] log_invoke_output failed", exc_info=True)
+                return result
+            finally:
+                end_llm_trace_event(_ev_token)
+
+        async def _traced_stream(
+            self: Model,
+            messages: List[Any],
+            tools: List[Any] | None = None,
+            model: str | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            model_name = model or getattr(self.model_config, "model_name", "") or ""
+            trace_sid = _LLM_TRACE_SESSION_ID.get()
+            trace_rid = _LLM_TRACE_REQUEST_ID.get()
+            trace_iter = _LLM_TRACE_ITERATION.get()
+            resolved_iter = (
+                _extract_iteration_from_obj(kwargs) if trace_iter is None else trace_iter
+            )
+            _ev_token = begin_llm_trace_event()
+            try:
+                try:
+                    log_stream_input(
+                        session_id=trace_sid,
+                        request_id=trace_rid,
+                        iteration=resolved_iter,
+                        model_name=model_name,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=kwargs.get("max_tokens"),
+                        temperature=kwargs.get("temperature"),
+                        top_p=kwargs.get("top_p"),
+                        stop=kwargs.get("stop"),
+                        timeout=kwargs.get("timeout"),
+                    )
+                except Exception:
+                    logger.debug("[llm_trace] log_stream_input failed", exc_info=True)
+                accumulated: Any = None
+                reasoning_seq = 0
+                reasoning_trace_pending: List[Tuple[int, str]] = []
+
+                def emit_reasoning_trace_batch() -> None:
+                    if not reasoning_trace_pending:
+                        return
+                    try:
+                        log_reasoning_delta(
+                            session_id=trace_sid,
+                            request_id=trace_rid,
+                            iteration=resolved_iter,
+                            model_name=model_name,
+                            reasoning_seq=reasoning_trace_pending[0][0],
+                            fragment="".join(t[1] for t in reasoning_trace_pending),
+                        )
+                    except Exception:
+                        logger.debug("[llm_trace] log_reasoning_delta failed", exc_info=True)
+                    reasoning_trace_pending.clear()
+
+                async for chunk in original_stream(
+                    self, messages, tools=tools, model=model, **kwargs
+                ):
+                    if accumulated is None:
+                        accumulated = chunk
+                    else:
+                        try:
+                            accumulated = accumulated + chunk
+                        except Exception:
+                            accumulated = chunk
+
+                    reasoning_content = (
+                        getattr(chunk, "reasoning_content", None)
+                        or (
+                            chunk.get("reasoning_content")
+                            if isinstance(chunk, dict)
+                            else None
+                        )
+                        or (
+                            (chunk.payload.get("reasoning_content") or chunk.payload.get("reasoning"))
+                            if isinstance(getattr(chunk, "payload", None), dict)
+                            else None
+                        )
+                    )
+                    if reasoning_content:
+                        reasoning_trace_pending.append(
+                            (reasoning_seq, str(reasoning_content))
+                        )
+                        if len(reasoning_trace_pending) >= _REASONING_TRACE_LOG_BATCH:
+                            emit_reasoning_trace_batch()
+                        reasoning_seq += 1
+
+                    yield chunk
+
+                emit_reasoning_trace_batch()
+
+                if accumulated:
+                    try:
+                        log_stream_output(
+                            session_id=trace_sid,
+                            request_id=trace_rid,
+                            iteration=resolved_iter,
+                            model_name=model_name,
+                            assistant_msg=accumulated,
+                        )
+                    except Exception:
+                        logger.debug("[llm_trace] log_stream_output failed", exc_info=True)
+            except Exception:
+                emit_reasoning_trace_batch()
+                raise
+            finally:
+                end_llm_trace_event(_ev_token)
+
+        Model.invoke = _traced_invoke
+        Model.stream = _traced_stream
+        _LLM_IO_TRACE_PATCH_APPLIED = True
+        logger.info("[JiuWenSwarmDeepAdapter] LLM IO trace patch applied")
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarmDeepAdapter] Failed to apply LLM IO trace patch", exc_info=True
+        )
+
 
 _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
     {
@@ -5306,6 +5548,8 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
+        _apply_llm_io_trace_patch()
+
         await asyncio.sleep(0)
         await self._instance.ensure_initialized()
         initial_runtime_workspace = self._project_dir or str(
@@ -8497,6 +8741,14 @@ class JiuWenSwarmDeepAdapter:
                         session_id, _e, request.request_id,
                     )
 
+        token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
+        token_trace_rid = _LLM_TRACE_REQUEST_ID.set(request.request_id or "")
+        token_trace_iter = _LLM_TRACE_ITERATION.set(0)
+        token_trace_model = _LLM_TRACE_MODEL_NAME.set(
+            getattr(self, "_model", None) and getattr(self._model, "model_config", None)
+            and getattr(self._model.model_config, "model_name", "") or ""
+        )
+
         slash_result = await self._handle_slash_command(
             query,
             session_id,
@@ -8750,6 +9002,10 @@ class JiuWenSwarmDeepAdapter:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
+            _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
+            _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
+            _LLM_TRACE_ITERATION.reset(token_trace_iter)
+            _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
             self._unmark_session_active(session_id)
             # [CRON-CTX] 非流式 cron 执行收尾补 commit：对齐流式路径的自动落盘。
             # 根因：cron 走非流式 _inner_invoke，其 commit 挂在 need_cleanup 下，
@@ -8846,6 +9102,14 @@ class JiuWenSwarmDeepAdapter:
                         session_id, _e, request.request_id,
                     )
 
+        token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
+        token_trace_rid = _LLM_TRACE_REQUEST_ID.set(rid or "")
+        token_trace_iter = _LLM_TRACE_ITERATION.set(0)
+        token_trace_model = _LLM_TRACE_MODEL_NAME.set(
+            getattr(self, "_model", None) and getattr(self._model, "model_config", None)
+            and getattr(self._model.model_config, "model_name", "") or ""
+        )
+
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
@@ -8881,6 +9145,10 @@ class JiuWenSwarmDeepAdapter:
 
             async for chunk in process_team_message_stream(request, inputs, self._instance):
                 yield chunk
+            _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
+            _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
+            _LLM_TRACE_ITERATION.reset(token_trace_iter)
+            _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
             return
 
         # Auto-Harness 模式处理
@@ -9798,6 +10066,10 @@ class JiuWenSwarmDeepAdapter:
             cleanup_permission_context(token_perm)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
+            _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
+            _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
+            _LLM_TRACE_ITERATION.reset(token_trace_iter)
+            _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
             # Always clean up rail state — process_interrupt's
             # _stop_session_interrupt_work sets abort flags but does NOT
             # call cleanup_session(), so skipping cleanup here would leak
@@ -10026,6 +10298,15 @@ class JiuWenSwarmDeepAdapter:
                                 "error": payload.get("output", "未知错误"),
                             }
                         output = payload.get("output", {})
+                        if isinstance(output, dict) and output.get("result_type") == "error":
+                            logger.warning(
+                                "[interface_deep] nested_answer_error_detected output=%s",
+                                output.get("output", "未知错误"),
+                            )
+                            return {
+                                "event_type": "chat.error",
+                                "error": output.get("output", "未知错误"),
+                            }
                         content = (
                             output.get("output", "") if isinstance(output, dict) else str(output)
                         )
@@ -10315,9 +10596,23 @@ class JiuWenSwarmDeepAdapter:
                         "goal": err_payload.get("goal"),
                     }
                 if chunk.get("result_type") == "error":
+                    logger.warning(
+                        "[interface_deep] top_level_chunk_error_detected output=%s",
+                        chunk.get("output", "未知错误"),
+                    )
                     return {
                         "event_type": "chat.error",
                         "error": chunk.get("output", "未知错误"),
+                    }
+                output_payload = chunk.get("output")
+                if isinstance(output_payload, dict) and output_payload.get("result_type") == "error":
+                    logger.warning(
+                        "[interface_deep] nested_chunk_error_detected output=%s",
+                        output_payload.get("output", "未知错误"),
+                    )
+                    return {
+                        "event_type": "chat.error",
+                        "error": output_payload.get("output", "未知错误"),
                     }
                 output = chunk.get("output", "")
                 if output:

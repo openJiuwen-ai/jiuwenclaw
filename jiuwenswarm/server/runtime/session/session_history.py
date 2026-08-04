@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
 
@@ -501,6 +501,21 @@ def _ensure_worker_started() -> None:
         _WORKER_STARTED = True
 
 
+def enrich_history_messages_session_id(
+    messages: Iterable[dict[str, Any]],
+    resolved_session_id: str,
+) -> list[dict[str, Any]]:
+    """为缺少 session_id 的历史记录做浅拷贝补全（兼容旧数据）。"""
+    sid = resolved_session_id.strip()
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if "session_id" not in m:
+            out.append({**m, "session_id": sid})
+        else:
+            out.append(m)
+    return out
+
+
 def append_history_record(
     *,
     session_id: str,
@@ -559,6 +574,7 @@ def append_history_record(
                 )
     if mode:
         item["mode"] = str(mode)
+    item["session_id"] = sid
 
     _ensure_worker_started()
     try:
