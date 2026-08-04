@@ -45,6 +45,14 @@ from jiuwenclaw.local_env_config import export_agent_environ, read_env
 logger = logging.getLogger(__name__)
 _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
 _REPORT_PUBLICATION_ATTEMPTS = 8
+_DEEPRESEARCH_PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
 
 
 @dataclass
@@ -1464,6 +1472,10 @@ def _build_deepresearch_child_env(
             agent_id or "default",
         )
     env = _build_bridge_env(os_env)
+    for key in _DEEPRESEARCH_PROXY_ENV_KEYS:
+        value = os.environ.get(key, "")
+        if value:
+            env[key] = value
     env["DEEPSEARCH_HITL"] = "true" if interactive_ask else "false"
     env["PYTHONUNBUFFERED"] = "1"
     # Force UTF-8 stdout/stderr (PEP 540). On Chinese Windows the child's default
