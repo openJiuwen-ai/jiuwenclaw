@@ -15,9 +15,8 @@
     # 详情日志（请求/响应原文，默认关；敏感模式下强制不打印）
     # export PERF_TRACE_DETAIL=true
 
-trace_id 来源：优先复用 TelemetryRail 的 _request_context.request_id（DeepAdapter 在
-invoke 前设置），回退 session_id，最后兜底生成。与 TelemetryRail 共存不冲突（回调框架
-按 priority 降序执行，高者先跑；PerfTraceRail=5 晚于 TelemetryRail=10）。
+trace_id 来源：优先读 DeepAdapter 在 invoke 前设置的请求级 _request_context.request_id，
+回退 session_id，最后兜底生成。回调框架按 priority 降序执行（高者先跑）。
 
 skill 阶段：skill 执行走 skill_step / skill_complete tool，before/after_tool_call 自动
 捕获（tool_name=skill_step），无需专门 skill 钩子。
@@ -43,6 +42,7 @@ model_call 次数；一轮 iter 内可能含多次 model_call，它们共用同�
 
 from __future__ import annotations
 
+import functools
 import os
 import time
 from contextvars import ContextVar
@@ -70,7 +70,20 @@ _ENABLED = os.getenv("PERF_TRACE_ENABLED", "true").strip().lower() not in (
 _DETAIL = os.getenv("PERF_TRACE_DETAIL", "false").strip().lower() not in (
     "false", "0", "no", "off",
 )
-_MAX_DETAIL = int(os.getenv("PERF_TRACE_DETAIL_MAX", "2000"))
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    """读环境变量并转 int，非法/缺失回退 default（避免模块导入期崩溃）。"""
+    raw = os.getenv(name)
+    if not raw or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+_MAX_DETAIL = _safe_int_env("PERF_TRACE_DETAIL_MAX", 2000)
 
 
 def _safe_is_sensitive() -> bool:
@@ -93,17 +106,17 @@ def _should_log_detail() -> bool:
 def _resolve_trace_id(ctx: Any) -> str:
     """拿请求级 trace_id。
 
-    优先复用 TelemetryRail 的 _request_context.request_id（DeepAdapter 在 invoke 前设置）；
+    优先读 DeepAdapter 在 invoke 前设置的请求级 _request_context.request_id；
     回退到 ctx.inputs.conversation_id / session_id；最后兜底生成。
     """
-    # 1. TelemetryRail 的 _request_context（默认挂载，invoke 前由 DeepAdapter 设置）
+    # 1. 请求级 _request_context（invoke 前由 DeepAdapter 设置）
     try:
         from jiuwenclaw.telemetry.instrumentors.telemetry_rail import _request_context
         rc = _request_context.get()
         if rc and rc.get("request_id"):
             return str(rc["request_id"])
     except Exception as exc:
-        logger.debug("[perf] trace_id: telemetry context unavailable, falling back: %s", exc)
+        logger.debug("[perf] trace_id: request context unavailable, falling back: %s", exc)
     # 2. ctx.inputs.conversation_id / session_id（session 级兜底）
     try:
         inputs = getattr(ctx, "inputs", None)
@@ -121,7 +134,7 @@ def _resolve_trace_id(ctx: Any) -> str:
 
 
 def _resolve_session_id(ctx: Any) -> str:
-    """拿会话级 session_id。优先 TelemetryRail 的 _request_context.session_id，
+    """拿会话级 session_id。优先读请求级 _request_context.session_id，
     回退 ctx.inputs.conversation_id / session_id。"""
     try:
         from jiuwenclaw.telemetry.instrumentors.telemetry_rail import _request_context
@@ -129,7 +142,7 @@ def _resolve_session_id(ctx: Any) -> str:
         if rc and rc.get("session_id"):
             return str(rc["session_id"])
     except Exception as exc:
-        logger.debug("[perf] session_id: telemetry context unavailable, falling back: %s", exc)
+        logger.debug("[perf] session_id: request context unavailable, falling back: %s", exc)
     try:
         inputs = getattr(ctx, "inputs", None)
         if inputs is not None:
@@ -234,7 +247,8 @@ def _tool_args(inputs: Any) -> str:
     tc = getattr(inputs, "tool_call", None)
     if tc is None:
         return ""
-    args = getattr(tc, "arguments", None) or {}
+    args = getattr(tc, "arguments", None)
+    args = args if args is not None else {}
     return _truncate(str(args))
 
 
@@ -246,20 +260,59 @@ def _tool_result_str(inputs: Any) -> str:
     return _truncate(str(result))
 
 
+def _hook_safe(method):
+    """装饰器：吞掉钩子异常并计入熔断，避免回调框架 trigger() 兜底打 ERROR+traceback。
+
+    钩子失败累计到阈值后熔断，后续钩子直接跳过（返回 None），
+    把“钩子失败”的噪声限制在阈值条 WARNING 内（走项目 logger，不进框架 openjiuwen.* 树）。
+    """
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        if self._degraded:
+            return None
+        try:
+            return await method(self, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            self._failure_count += 1
+            logger.warning(
+                "[perf] hook %s failed (%d/%d): %s",
+                method.__name__,
+                self._failure_count,
+                self._failure_threshold,
+                exc,
+            )
+            if self._failure_count >= self._failure_threshold:
+                self._degraded = True
+                logger.warning(
+                    "[perf] circuit breaker tripped - PerfTraceRail hooks disabled until process restart"
+                )
+            return None
+
+    return wrapper
+
+
 class PerfTraceRail(DeepAgentRail):
     """性能追踪 Rail：统一 trace_id + 各阶段耗时日志（INFO 级，不依赖 OTel 后端）。
 
     回调框架按 priority 降序执行（高者先跑），且 before/after 同序、不反转；
-    priority=5 晚于 TelemetryRail=10（注意是"晚于"而非"早于"），各阶段耗时因此包含
-    TelemetryRail 的 after 钩子开销、不含其 before 开销（亚毫秒级，不影响定位）。
+    priority=5 属较低优先级，各阶段耗时可能包含更高优先级 rail 的 after 钩子开销
+    （亚毫秒级，不影响定位）。
     before/after 钩子共用同一个 ctx 对象，靠 setattr 传递 call_id。
     """
 
     priority = 5
 
+    def __init__(self) -> None:
+        super().__init__()
+        # 熔断：钩子失败累计到阈值后整体跳过，避免框架兜底打 ERROR+traceback 噪声
+        self._failure_count: int = 0
+        self._degraded: bool = False
+        self._failure_threshold: int = _safe_int_env("PERF_TRACE_HOOK_FAILURE_THRESHOLD", 10)
+
     # ------------------------------------------------------------------
     # invoke - 请求端到端
     # ------------------------------------------------------------------
+    @_hook_safe
     async def before_invoke(self, ctx: Any) -> None:
         if not _ENABLED:
             return
@@ -271,6 +324,7 @@ class PerfTraceRail(DeepAgentRail):
         _mark("invoke")
         logger.info("[perf] %s phase=invoke start", _log_kv())
 
+    @_hook_safe
     async def after_invoke(self, ctx: Any) -> None:
         if not _ENABLED:
             return
@@ -282,6 +336,7 @@ class PerfTraceRail(DeepAgentRail):
     # ------------------------------------------------------------------
     # task_iteration - 每轮外层 task-loop 迭代（一轮内可能含多次 model_call）
     # ------------------------------------------------------------------
+    @_hook_safe
     async def before_task_iteration(self, ctx: Any) -> None:
         if not _ENABLED:
             return
@@ -290,6 +345,7 @@ class PerfTraceRail(DeepAgentRail):
         _mark("iter", str(n))
         logger.info("[perf] %s phase=iter start iter=%d", _log_kv(), n)
 
+    @_hook_safe
     async def after_task_iteration(self, ctx: Any) -> None:
         if not _ENABLED:
             return
@@ -302,6 +358,7 @@ class PerfTraceRail(DeepAgentRail):
     # ------------------------------------------------------------------
     # model_call - LLM 调用
     # ------------------------------------------------------------------
+    @_hook_safe
     async def before_model_call(self, ctx: Any) -> None:
         if not _ENABLED:
             return
@@ -318,6 +375,7 @@ class PerfTraceRail(DeepAgentRail):
                 _log_kv(), n, _msg_summary(msgs),
             )
 
+    @_hook_safe
     async def after_model_call(self, ctx: Any) -> None:
         if not _ENABLED:
             return
@@ -337,6 +395,7 @@ class PerfTraceRail(DeepAgentRail):
     # ------------------------------------------------------------------
     # tool_call - 工具调用（含 skill_step / skill_complete）
     # ------------------------------------------------------------------
+    @_hook_safe
     async def before_tool_call(self, ctx: Any) -> None:
         if not _ENABLED:
             return
@@ -356,6 +415,7 @@ class PerfTraceRail(DeepAgentRail):
                 _log_kv(), tool_name, _tool_args(inputs),
             )
 
+    @_hook_safe
     async def after_tool_call(self, ctx: Any) -> None:
         if not _ENABLED:
             return
