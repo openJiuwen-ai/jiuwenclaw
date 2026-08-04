@@ -7,8 +7,18 @@
 第一个动作，但仍保留只读约束说明。
 """
 
+import pytest
+
 from jiuwenswarm.common.schema.agent import AgentRequest
-from jiuwenswarm.server.agent_ws_server import _inject_plan_mode_activation_reminder
+
+try:
+    from jiuwenswarm.server.agent_ws_server import _inject_plan_mode_activation_reminder
+except ImportError:
+    pytest.skip(
+        "jiuwenswarm.server.agent_ws_server not importable "
+        "(openjiuwen develop branch may not be installed)",
+        allow_module_level=True,
+    )
 
 
 def _make_request(params: dict) -> AgentRequest:
