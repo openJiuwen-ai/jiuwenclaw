@@ -10,6 +10,7 @@ Migrated from JiuSwarmReActAgent:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 from typing import Any, List, Optional
@@ -37,6 +38,14 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     strip_image_content_from_model_context,
 )
+from jiuwenswarm.agents.harness.common.rails.symphony import (
+    SymphonyToolStreamHandler,
+)
+from jiuwenswarm.common.tool_display import (
+    build_tool_display_name,
+    extract_call_goal,
+    inject_call_goal_schema,
+)
 from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
@@ -49,43 +58,6 @@ def _structured_tool_result_payload(result: Any) -> Any | None:
     if isinstance(result, (dict, list)):
         return result
     return None
-
-
-def _symphony_direct_display_content(result: Any) -> str:
-    if not isinstance(result, dict):
-        return ""
-    if not bool(result.get("direct_display", False)):
-        return ""
-    presentation = result.get("presentation")
-    presentation_markdown = (
-        presentation.get("markdown") if isinstance(presentation, dict) else None
-    )
-    rendered = (
-        result.get("content")
-        or result.get("markdown")
-        or presentation_markdown
-    )
-    return rendered.strip() if isinstance(rendered, str) else ""
-
-
-def _copy_symphony_result_fields(
-    payload: dict[str, Any],
-    raw_output: Any,
-) -> None:
-    if not isinstance(raw_output, dict):
-        return
-    for key in (
-        "score_status",
-        "score_build",
-        "direct_display",
-        "display_format",
-        "mermaid",
-        "summary",
-        "continue_after_display",
-        "followup_action",
-    ):
-        if key in raw_output:
-            payload[key] = raw_output[key]
 
 
 def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
@@ -275,7 +247,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # Per-session conversation context
         self._conversation_ids: dict[str, str] = {}
         self._main_sessions: dict[str, Session] = {}
-        self._stream_tasks: set[asyncio.Task] = set()
         # Shared across sessions (same workspace → same tool instance)
         self._main_todo_tool: Optional[TodoListTool] = None
         # Track in-flight tool calls for cancellation status emission
@@ -283,6 +254,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # Store cancelled tool info for interrupt response (per-session to avoid
         # cross-session leakage in concurrent collect→get→clear sequences).
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
+        self._symphony_stream_handler = SymphonyToolStreamHandler()
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -622,10 +594,106 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
+        self._inject_tool_call_goal_schema(ctx)
+        self._ensure_tool_call_goal_prompt()
+
         if ctx.context is not None:
             if not self._read_image_multimodal_enabled():
                 strip_image_content_from_model_context(ctx.context)
             await self._fix_incomplete_tool_context(ctx)
+
+    @staticmethod
+    def _inject_tool_call_goal_schema(ctx: AgentCallbackContext) -> None:
+        """仅给送入 LLM 的 ToolInfo 注入 call_goal，且必须 deepcopy。
+
+        不可就地改 parameters / card.input_params：ToolInfo 与执行侧 schema 常共享
+        内层 properties，注入后 SchemaUtils 会补上 call_goal=None，LocalFunction
+        再 **kwargs 传给 send_file 等实现会直接 TypeError（表现为工具挂掉）。
+        """
+        tools = getattr(ctx.inputs, "tools", None) or []
+        if not tools:
+            return
+        next_tools: list[Any] = []
+        changed = False
+        for tool in tools:
+            params = getattr(tool, "parameters", None)
+            if not isinstance(params, dict):
+                next_tools.append(tool)
+                continue
+            props = params.get("properties")
+            if isinstance(props, dict) and "call_goal" in props:
+                next_tools.append(tool)
+                continue
+            cloned = copy.deepcopy(params)
+            inject_call_goal_schema(cloned)
+            if cloned == params:
+                next_tools.append(tool)
+                continue
+            model_copy = getattr(tool, "model_copy", None)
+            if callable(model_copy):
+                try:
+                    next_tools.append(model_copy(update={"parameters": cloned}))
+                    changed = True
+                    continue
+                except Exception as exc:
+                    # model_copy 可能抛 ValidationError 等与具体 ToolInfo 实现相关的异常；
+                    # 注入失败时跳过该工具，不阻断主链路。
+                    logger.warning(
+                        "[StreamEventRail] model_copy for call_goal failed; skip inject tool=%s err=%s",
+                        getattr(tool, "name", type(tool).__name__),
+                        exc,
+                    )
+            # 无 model_copy / copy 失败：绝不回写原始 ToolInfo，避免 call_goal 泄漏进执行侧。
+            next_tools.append(tool)
+        if changed:
+            try:
+                ctx.inputs.tools = next_tools
+            except (AttributeError, TypeError) as exc:
+                logger.warning(
+                    "[StreamEventRail] replace tools with call_goal schema failed: %s",
+                    exc,
+                )
+
+    def _ensure_tool_call_goal_prompt(self) -> None:
+        builder = getattr(self._deep_agent, "system_prompt_builder", None)
+        if builder is None:
+            return
+        try:
+            from openjiuwen.harness.prompts import PromptSection
+            cn_text = (
+                "# 工具 call_goal\n\n"
+                "每次调用工具时，请填写参数 `call_goal`：用一句简短中文说明"
+                "这次调用要达成的目标（如「调研 openJiuwen 官网信息」「创建三子棋对战团队」），"
+                "不要只写工具名或裸 URL。"
+                "该字段仅用于界面展示，不影响工具实际执行。\n"
+                "团队工具也必须填 `call_goal`，且不能用其它字段代替：\n"
+                "- `spawn_member` / `spawn_teammate`：`call_goal` 写「为何创建该成员」；"
+                "`display_name` 仍是成员展示名，两者都要填。\n"
+                "- `send_message`：`call_goal` 写「这次消息的目的」；"
+                "`summary` 可继续填，但不能省略 `call_goal`。\n"
+                "- `build_team`：`call_goal` 写建队目标；`display_name` 仍是团队名。"
+            )
+            en_text = (
+                "# Tool call_goal\n\n"
+                "When calling any tool, set `call_goal`: one short phrase for the goal of this call "
+                "(e.g. \"Research openJiuwen official site\", \"Create tic-tac-toe team\"). "
+                "Do not just repeat the tool name or raw URL. UI only; does not affect execution.\n"
+                "Team tools must also set `call_goal`; do not substitute other fields:\n"
+                "- `spawn_member` / `spawn_teammate`: `call_goal` = why spawn this member; "
+                "`display_name` remains the member label — fill both.\n"
+                "- `send_message`: `call_goal` = purpose of this message; "
+                "`summary` may still be set, but `call_goal` is required too.\n"
+                "- `build_team`: `call_goal` = team goal; `display_name` remains the team name."
+            )
+            builder.add_section(
+                PromptSection(
+                    name="tool_call_goal",
+                    content={"cn": cn_text, "en": en_text},
+                    priority=40,
+                )
+            )
+        except (ImportError, AttributeError, TypeError, ValueError) as exc:
+            logger.warning("[StreamEventRail] inject call_goal prompt failed: %s", exc)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         await self._emit_context_usage(
@@ -633,10 +701,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             member_name=self._member_name or None,
             role=self._role or None,
         )
-
-    # ------------------------------------------------------------------
-    # before_tool_call: pause check + emit tool_call event
-    # ------------------------------------------------------------------
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         sid = self._resolve_sid(ctx, ctx.session)
@@ -647,8 +711,25 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         session = ctx.session
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call
-            await self._emit_tool_call(session, tc)
+            # 主模型随 tool_call 产出的目标文案（call_goal）：取出后剥掉，避免 schema 拒收。
+            # 绝不碰 display_name（team 成员名等业务字段）。
+            model_display, cleaned_args = extract_call_goal(
+                getattr(tc, "arguments", {}) if tc else {}
+            )
+            # 无论是否填了 call_goal，都写回清洗后的 arguments，避免执行侧拿到该字段。
+            if tc is not None:
+                try:
+                    tc.arguments = cleaned_args
+                except (AttributeError, TypeError) as exc:
+                    logger.warning(
+                        "[StreamEventRail] rewrite tool arguments without call_goal failed; tool_id=%s err=%s",
+                        getattr(tc, "id", ""),
+                        exc,
+                    )
+                ctx.inputs.tool_args = cleaned_args
+            await self._emit_tool_call(session, tc, model_display_name=model_display)
             await self._emit_tool_update(session, tc, status="in_progress")
+            self._symphony_stream_handler.bind_progress(ctx, session, tc)
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
             if tc_id:
@@ -669,12 +750,17 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
 
         tc = ctx.inputs.tool_call
         tc_id = getattr(tc, "id", "")
+        self._symphony_stream_handler.reset_progress(ctx)
         # Remove from in-flight tracking on completion
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
 
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
-        self._request_symphony_force_finish(ctx, tc, ctx.inputs.tool_result)
+        self._symphony_stream_handler.request_force_finish(
+            ctx,
+            tc,
+            ctx.inputs.tool_result,
+        )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
@@ -709,26 +795,42 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _emit_tool_call(session: Session, tool_call: Any) -> None:
+    async def _emit_tool_call(
+        session: Session,
+        tool_call: Any,
+        *,
+        model_display_name: str = "",
+    ) -> None:
         try:
+            name = getattr(tool_call, "name", "")
+            arguments = getattr(tool_call, "arguments", {})
+            tool_call_payload: dict[str, Any] = {
+                "name": name,
+                "arguments": arguments,
+                "tool_call_id": getattr(tool_call, "id", ""),
+            }
+            # 优先用主模型随 tool_call 产出的目标文案；未填时再规则兜底。
+            display_name = (model_display_name or "").strip() or build_tool_display_name(
+                name, arguments
+            )
+            if display_name:
+                tool_call_payload["display_name"] = display_name
             await session.write_stream(
                 OutputSchema(
                     type="tool_call",
                     index=0,
-                    payload={
-                        "tool_call": {
-                            "name": getattr(tool_call, "name", ""),
-                            "arguments": getattr(tool_call, "arguments", {}),
-                            "tool_call_id": getattr(tool_call, "id", ""),
-                        }
-                    },
+                    payload={"tool_call": tool_call_payload},
                 )
             )
         except Exception:
             logger.debug("tool_call emit failed", exc_info=True)
 
-    @staticmethod
-    async def _emit_tool_result(session: Session, tool_call: Any, result: Any) -> None:
+    async def _emit_tool_result(
+        self,
+        session: Session,
+        tool_call: Any,
+        result: Any,
+    ) -> None:
         try:
             raw_output = _structured_tool_result_payload(result)
             tool_result_payload = {
@@ -738,7 +840,11 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             }
             if raw_output is not None:
                 tool_result_payload["raw_output"] = raw_output
-                _copy_symphony_result_fields(tool_result_payload, raw_output)
+                self._symphony_stream_handler.enrich_result_payload(
+                    tool_call,
+                    tool_result_payload,
+                    raw_output,
+                )
             error_state = _infer_tool_result_error(raw_output if raw_output is not None else result)
             if error_state is not None:
                 tool_result_payload["success"] = not error_state
@@ -756,25 +862,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
-
-    @staticmethod
-    def _request_symphony_force_finish(
-        ctx: AgentCallbackContext,
-        tool_call: Any,
-        result: Any,
-    ) -> None:
-        tool_name = str(getattr(tool_call, "name", "") if tool_call else "").strip()
-        if tool_name != "symphony_compose_score":
-            return
-        content = _symphony_direct_display_content(result)
-        if not content:
-            return
-        if (
-            isinstance(result, dict)
-            and _boolish_true(result.get("continue_after_display"))
-        ):
-            return
-        ctx.request_force_finish({"output": content, "result_type": "answer"})
 
     @staticmethod
     async def _emit_ask_user_question_if_interrupted(
@@ -1123,7 +1210,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 return
             messages = context.get_messages()
             tools = getattr(ctx.inputs, "tools", None) or []
-            # fix tool parameter validation
             for tool in tools:
                 if not tool.parameters:
                     tool.parameters = {
@@ -1132,6 +1218,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     }
                 if tool.parameters.get("type") is None:
                     tool.parameters["type"] = "object"
+            self._inject_tool_call_goal_schema(ctx)
             len_messages = len(messages)
             if len_messages == 0:
                 return

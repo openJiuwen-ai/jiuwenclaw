@@ -33,7 +33,6 @@ class RuntimeBackgroundExecRequest:
     workdir: str | None = None
     env: dict[str, str] | None = None
     stdin_data: bytes | None = None
-    capture_output: bool = True
 
 
 @dataclass(frozen=True)

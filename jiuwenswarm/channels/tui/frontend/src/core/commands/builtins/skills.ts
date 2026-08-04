@@ -256,14 +256,21 @@ export function createSkillsCommand(): SlashCommand {
             return;
           }
 
-          // ClawHub install flow: "slug@clawhub" or bare slug that looks like a ClawHub identifier
+          // ClawHub install flow: "ownerHandle/slug@clawhub" or "slug@clawhub"
           // ClawHub identifiers are alphanumeric slugs like "code-review", "daily-report" etc.
           if (spec.includes("@clawhub") || (spec.includes("@") && spec.endsWith("@clawhub"))) {
-            const slug = spec.replace(/@clawhub$/i, "");
+            const clawhubPart = spec.replace(/@clawhub$/i, "");
+            let slug = clawhubPart;
+            let ownerHandle: string | undefined;
+            if (clawhubPart.includes("/")) {
+              const slashIdx = clawhubPart.indexOf("/");
+              ownerHandle = clawhubPart.substring(0, slashIdx);
+              slug = clawhubPart.substring(slashIdx + 1);
+            }
             ctx.addItem(makeItem(ctx.sessionId, "info", `Installing from ClawHub: ${slug}`));
             const downloadPayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }>(
               "skills.clawhub.download",
-              { slug, force: false },
+              { slug, owner_handle: ownerHandle || "", force: false },
               120_000,
             );
             if (downloadPayload.success) {
@@ -296,7 +303,7 @@ export function createSkillsCommand(): SlashCommand {
                   ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing from ClawHub: ${slug}`));
                   const forcePayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }>(
                     "skills.clawhub.download",
-                    { slug, force: true },
+                    { slug, owner_handle: ownerHandle || "", force: true },
                     120_000,
                   );
                   if (forcePayload.success) {
@@ -324,7 +331,7 @@ export function createSkillsCommand(): SlashCommand {
                     value: s.slug,
                     description: `${s.summary || "(no description)"} | slug: ${s.slug} | v${s.version || "?"}`,
                   }));
-                  ctx.addItem(makeItem(ctx.sessionId, "info", `Found ${searchPayload.skills.length} matching skills on ClawHub. Use the slug shown below:`, "*", { view: "list", title: "ClawHub Search Results (use slug@clawhub to install)", items }));
+                  ctx.addItem(makeItem(ctx.sessionId, "info", `Found ${searchPayload.skills.length} matching skills on ClawHub. Use the slug shown below:`, "*", { view: "list", title: "ClawHub Search Results", items }));
                 } else {
                   // Search also requires token — if token error, give guidance
                   if (searchPayload.detail_key === "skills.clawhub.errors.tokenNotConfigured") {

@@ -48,11 +48,15 @@ _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
+_STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
+_STREAM_COALESCE_MAX_FRAMES = 32
+
 _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
     {
         "connection.ack",
         "todo.updated",
         "chat.tool_call",
+        "chat.tool_update",
         "chat.tool_result",
         "chat.processing_status",
         "chat.interrupt_result",
@@ -74,6 +78,9 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "security.alert",
         "goal.snapshot",
         "goal.updated",
+        # Web 的 Plan 开关靠该事件在计划执行后自动复位，需要完整 payload
+        # 才能拿到退出后应回到的 mode。
+        "plan.mode_exited",
         "runtime.accepted",
         "execution.error",
         "proactive_recommendation",
@@ -139,6 +146,88 @@ class WebChannel(BaseWsChannel):
         # Git diff 监控注册表(设计文档阶段10):由 app_gateway 在启动期注入,
         # handler 通过 ``getattr(channel, "git_watcher_registry", None)`` 防御性读取。
         self.git_watcher_registry: Any = None
+
+    @staticmethod
+    def _coalescible_stream_frame(
+        frame: Any,
+    ) -> tuple[dict[str, Any], str] | None:
+        """Return (decoded frame, content) for a merge-safe stream frame.
+
+        帧已是 dict（入队时不预序列化），故无需 json.loads；返回 decoded 与
+        content 供 _coalesce 直接在 dict 层合并，省去 str↔dict 往返。
+        """
+        if not isinstance(frame, dict) or frame.get("type") != "event":
+            return None
+        if frame.get("event") not in _STREAM_COALESCE_EVENT_TYPES:
+            return None
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        content = payload.get("content")
+        if not isinstance(content, str):
+            return None
+        return frame, content
+
+    @staticmethod
+    def _same_stream_identity(
+        a: dict[str, Any],
+        b: dict[str, Any],
+    ) -> bool:
+        """两帧除 payload.content 外是否同流（可合并）。
+
+        逐键比对 payload 非 content 字段 + 外层 event 等键，避免构造 comparable
+        dict 副本与整 dict 哈希比对的开销。
+        """
+        a_payload = a["payload"]
+        b_payload = b["payload"]
+        if a.get("event") != b.get("event"):
+            return False
+        if a.get("type") != b.get("type"):
+            return False
+        for key in set(a_payload) | set(b_payload):
+            if key == "content":
+                continue
+            if a_payload.get(key) != b_payload.get(key):
+                return False
+        return True
+
+    def _coalesce(
+        self,
+        first_frame: Any,
+        queue: asyncio.Queue,
+    ) -> list[Any]:
+        """Merge only contiguous stream frames with identical non-content data."""
+        parsed = self._coalescible_stream_frame(first_frame)
+        if parsed is None:
+            return [first_frame]
+
+        decoded, merged_content = parsed
+        merged_count = 1
+        trailing: list[Any] = []
+
+        while merged_count < _STREAM_COALESCE_MAX_FRAMES:
+            try:
+                candidate = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if candidate is None:
+                trailing.append(None)
+                break
+            candidate_parsed = self._coalescible_stream_frame(candidate)
+            if (
+                candidate_parsed is None
+                or not self._same_stream_identity(decoded, candidate_parsed[0])
+            ):
+                trailing.append(candidate)
+                break
+            merged_content += candidate_parsed[1]
+            merged_count += 1
+
+        if merged_count == 1:
+            return [first_frame, *trailing]
+
+        merged_payload = {**decoded["payload"], "content": merged_content}
+        return [{**decoded, "payload": merged_payload}, *trailing]
 
     # ── 公共属性 ──────────────────────────────────────────
 
@@ -212,7 +301,7 @@ class WebChannel(BaseWsChannel):
             if code:
                 frame["code"] = code
         try:
-            self._enqueue_send(ws, json.dumps(frame, ensure_ascii=False))
+            self._enqueue_send(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug(
@@ -242,7 +331,7 @@ class WebChannel(BaseWsChannel):
         if stream_id is not None:
             frame["stream_id"] = stream_id
         try:
-            self._enqueue_send(ws, json.dumps(frame, ensure_ascii=False))
+            self._enqueue_send(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug(
@@ -461,7 +550,7 @@ class WebChannel(BaseWsChannel):
 
             ws_serve = websockets.serve
 
-        ws_max_size = 8 * 2**20  # 8 MB — matches AgentServer link
+        from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
 
         self._server = await ws_serve(
             self._connection_handler,
@@ -470,7 +559,7 @@ class WebChannel(BaseWsChannel):
             process_request=self._process_request,
             ping_interval=20,
             ping_timeout=60,
-            max_size=ws_max_size,
+            max_size=WEB_WS_MAX_MESSAGE_BYTES,
         )
         self._running = True
         logger.info(
@@ -617,7 +706,7 @@ class WebChannel(BaseWsChannel):
         # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
         # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
         if msg.event_type == EventType.HEARTBEAT_RELAY:
-            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
@@ -636,7 +725,7 @@ class WebChannel(BaseWsChannel):
             and isinstance(msg.payload, dict)
             and isinstance(msg.payload.get("cron"), dict)
         ):
-            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
@@ -657,7 +746,7 @@ class WebChannel(BaseWsChannel):
             and isinstance(msg.payload, dict)
             and msg.payload.get("source") == "proactive_notification"
         ):
-            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
@@ -682,7 +771,9 @@ class WebChannel(BaseWsChannel):
                 "payload": res_payload,
             }
             if not msg.ok:
-                error_text = res_payload.get("error")
+                # Prefer explicit error; fall back to message (e.g. command.goal
+                # unary failures put the human-readable text in payload.message).
+                error_text = res_payload.get("error") or res_payload.get("message")
                 if isinstance(error_text, str) and error_text:
                     frame["error"] = error_text
                 code_text = res_payload.get("code")
@@ -1108,13 +1199,15 @@ class WebChannel(BaseWsChannel):
         )
         session_id = _explicit_session_id if has_explicit_session else self._make_session_id()
 
-        # 追踪 ws → session_id 映射，用于断连时清理
-        ws_id = id(ws)
-        sessions = self._ws_sessions.get(ws_id)
-        if sessions is None:
-            sessions = set()
-            self._ws_sessions[ws_id] = sessions
-        sessions.add(session_id)
+        # 追踪 ws → 真实 session_id，用于断连清理/日志。
+        # 与 register_ws 一致：仅显式 session 入集；临时 id 只供 Message 构造，避免膨胀。
+        if has_explicit_session:
+            ws_id = id(ws)
+            sessions = self._ws_sessions.get(ws_id)
+            if sessions is None:
+                sessions = set()
+                self._ws_sessions[ws_id] = sessions
+            sessions.add(session_id)
 
         params = await self._process_files(params)
 
@@ -1135,6 +1228,9 @@ class WebChannel(BaseWsChannel):
             await self.register_ws(ws, _rk)
         # else: ws 层心跳 / 拉取请求，不更新路由注册，沿用 ws 已有的 RoutingKey。
 
+        # Preserve client top-level is_stream (e.g. command.goal set/resume).
+        # chat.send / history.get still become stream in _normalize_gateway_message
+        # even when the client omits this field.
         user_message = Message(
             id=req_id,
             type="req",
@@ -1145,6 +1241,7 @@ class WebChannel(BaseWsChannel):
             ok=True,
             req_method=self._parse_req_method(method),
             mode=self._parse_mode(params.get("mode")),
+            is_stream=bool(data.get("is_stream", False)),
             app_id=_app_id,
             agent_ref={"mode": _mode, "id": _agent_id},
             user_id=req_user_id,
@@ -1197,12 +1294,14 @@ class WebChannel(BaseWsChannel):
             )
 
     async def _broadcast_to(self, frame: dict[str, Any], clients: set[Any]) -> None:
-        """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）."""
-        data = json.dumps(frame, ensure_ascii=False)
+        """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）.
+
+        入队 dict，由 writer 统一序列化一次，避免此处预 dumps。
+        """
         if not clients:
             return
         for client in clients:
-            self._enqueue_send(client, data)
+            self._enqueue_send(client, frame)
 
     # ── BaseWsChannel 抽象方法 ──
 
@@ -1212,8 +1311,8 @@ class WebChannel(BaseWsChannel):
         routing_target: RoutingTarget | None = None,
         *,
         member_names: list[str] | None = None,
-    ) -> str:
-        """将 Message 序列化为 Web 前端 JSON 帧."""
+    ) -> dict[str, Any]:
+        """将 Message 转为 Web 前端帧 dict（由 writer 统一序列化）."""
         event_name = "chat.final"
         if getattr(msg, "event_type", None) is not None:
             event_name = msg.event_type.value
@@ -1244,7 +1343,7 @@ class WebChannel(BaseWsChannel):
             "event": event_name,
             "payload": payload,
         }
-        return json.dumps(frame, ensure_ascii=False)
+        return frame
 
     @staticmethod
     def _parse_req_method(method: str) -> ReqMethod | None:

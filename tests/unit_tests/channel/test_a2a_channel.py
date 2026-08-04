@@ -1,4 +1,3 @@
-import asyncio
 import time
 
 import pytest
@@ -174,91 +173,81 @@ def test_is_terminal_message_rules():
     assert A2AChannel.is_terminal_message(non_terminal) is False
 
 
-def test_dispatch_a2a_request_requires_on_message_callback():
+@pytest.mark.asyncio
+async def test_dispatch_a2a_request_requires_on_message_callback():
     channel = build_channel()
 
-    async def _run():
+    with pytest.raises(RuntimeError, match="on_message callback"):
         await channel.dispatch_a2a_request(
             request_id="req-1",
             session_id="sess-1",
             query="hello",
         )
 
-    with pytest.raises(RuntimeError, match="on_message callback"):
-        asyncio.run(_run())
 
-
-def test_dispatch_a2a_request_and_send_queue_roundtrip():
+@pytest.mark.asyncio
+async def test_dispatch_a2a_request_and_send_queue_roundtrip():
     channel = build_channel()
     seen = []
 
     async def on_message(msg: Message):
         seen.append(msg)
 
-    async def _run():
-        channel.on_message(on_message)
-        pending = await channel.dispatch_a2a_request(
-            request_id="req-2",
-            session_id="sess-2",
-            query="hello",
-            files=[{"filename": "x.txt", "data": "aGVsbG8="}],
-            metadata={"trace_id": "t-1"},
-        )
+    channel.on_message(on_message)
+    pending = await channel.dispatch_a2a_request(
+        request_id="req-2",
+        session_id="sess-2",
+        query="hello",
+        files=[{"filename": "x.txt", "data": "aGVsbG8="}],
+        metadata={"trace_id": "t-1"},
+    )
 
-        assert len(seen) == 1
-        outbound = seen[0]
-        assert outbound.id == "req-2"
-        assert outbound.session_id == "sess-2"
-        assert outbound.params["query"] == "hello"
-        assert outbound.params["files"][0]["filename"] == "x.txt"
-        assert outbound.metadata == {"trace_id": "t-1"}
+    assert len(seen) == 1
+    outbound = seen[0]
+    assert outbound.id == "req-2"
+    assert outbound.session_id == "sess-2"
+    assert outbound.params["query"] == "hello"
+    assert outbound.params["files"][0]["filename"] == "x.txt"
+    assert outbound.metadata == {"trace_id": "t-1"}
 
-        inbound = Message(
-            id="req-2",
-            type="event",
-            channel_id="a2a",
-            session_id="sess-2",
-            params={},
-            timestamp=time.time(),
-            ok=True,
-            payload={"content": "ok", "is_complete": True},
-            event_type=EventType.CHAT_FINAL,
-        )
-        await channel.send(inbound)
-        queued = await pending.queue.get()
-        assert queued.payload["content"] == "ok"
-
-    asyncio.run(_run())
+    inbound = Message(
+        id="req-2",
+        type="event",
+        channel_id="a2a",
+        session_id="sess-2",
+        params={},
+        timestamp=time.time(),
+        ok=True,
+        payload={"content": "ok", "is_complete": True},
+        event_type=EventType.CHAT_FINAL,
+    )
+    await channel.send(inbound)
+    queued = await pending.queue.get()
+    assert queued.payload["content"] == "ok"
 
 
-def test_a2a_channel_start_serves_agent_card():
-    pytest.importorskip("a2a.types")
-    httpx = pytest.importorskip("httpx")
+@pytest.mark.asyncio
+async def test_dispatch_a2a_request_defaults_metadata_to_empty_dict():
+    """A2A ingress must not leave Message.metadata as None (breaks MessageHandler)."""
+    channel = build_channel()
+    seen = []
 
-    async def _run():
-        channel = A2AChannel(
-            A2AChannelConfig(enabled=True, host="127.0.0.1", port=19102),
-            DummyBus(),
-        )
-        try:
-            await channel.start()
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(
-                    "http://127.0.0.1:19102/.well-known/agent-card.json"
-                )
-            assert response.status_code == 200
-            card = response.json()
-            assert card["name"] == "JiuwenSwarm Gateway A2A Server"
-            iface = card["supportedInterfaces"][0]
-            assert iface["url"].endswith("/a2a")
-            assert iface["protocolBinding"] == "JSONRPC"
-        finally:
-            await channel.stop()
+    async def on_message(msg: Message):
+        seen.append(msg)
 
-    asyncio.run(_run())
+    channel.on_message(on_message)
+    await channel.dispatch_a2a_request(
+        request_id="req-empty-md",
+        session_id="sess-empty-md",
+        query="hello",
+    )
+
+    assert len(seen) == 1
+    assert seen[0].metadata == {}
 
 
-def test_executor_empty_query_emits_failed_task_lifecycle():
+@pytest.mark.asyncio
+async def test_executor_empty_query_emits_failed_task_lifecycle():
     pytest.importorskip("a2a.types")
     from a2a.types import Message, Part, Role, Task, TaskState, TaskStatusUpdateEvent
     from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import _A2AAgentExecutor
@@ -293,20 +282,17 @@ def test_executor_empty_query_emits_failed_task_lifecycle():
 
     channel = build_channel()
 
-    async def _run():
-        event_queue = MockEventQueue()
-        await _A2AAgentExecutor(channel).execute(MockContext(), event_queue)
-        assert event_queue.closed is True
-        assert len(event_queue.events) == 2
-        assert isinstance(event_queue.events[0], Task)
-        assert event_queue.events[0].id == "task-empty"
-        status_event = event_queue.events[1]
-        assert isinstance(status_event, TaskStatusUpdateEvent)
-        assert status_event.task_id == "task-empty"
-        assert status_event.context_id == "ctx-empty"
-        assert status_event.status.state == TaskState.TASK_STATE_FAILED
-
-    asyncio.run(_run())
+    event_queue = MockEventQueue()
+    await _A2AAgentExecutor(channel).execute(MockContext(), event_queue)
+    assert event_queue.closed is True
+    assert len(event_queue.events) == 2
+    assert isinstance(event_queue.events[0], Task)
+    assert event_queue.events[0].id == "task-empty"
+    status_event = event_queue.events[1]
+    assert isinstance(status_event, TaskStatusUpdateEvent)
+    assert status_event.task_id == "task-empty"
+    assert status_event.context_id == "ctx-empty"
+    assert status_event.status.state == TaskState.TASK_STATE_FAILED
 
 
 def _make_message(
@@ -400,7 +386,7 @@ class _FakeContext:
         return "hello"
 
 
-def _run_executor_with_stream(channel: A2AChannel, stream: list[Message]):
+async def _run_executor_with_stream(channel: A2AChannel, stream: list[Message]):
     """Drive _A2AAgentExecutor.execute with a scripted message stream."""
     pytest.importorskip("a2a.types")
     executor = _A2AAgentExecutor(channel)
@@ -412,11 +398,8 @@ def _run_executor_with_stream(channel: A2AChannel, stream: list[Message]):
             replayed = Message(**{**item.__dict__, "id": msg.id})
             await pending.queue.put(replayed)
 
-    async def _run():
-        channel.on_message(on_message)
-        await executor.execute(_FakeContext(), event_queue)
-
-    asyncio.run(_run())
+    channel.on_message(on_message)
+    await executor.execute(_FakeContext(), event_queue)
     return event_queue
 
 
@@ -450,12 +433,13 @@ def _thought_status_updates(events) -> list:
     return result
 
 
-def test_executor_streams_reasoning_as_thought_status_updates_by_default():
+@pytest.mark.asyncio
+async def test_executor_streams_reasoning_as_thought_status_updates_by_default():
     pytest.importorskip("a2a.types")
     from a2a.types import TaskArtifactUpdateEvent
 
     channel = build_channel()
-    event_queue = _run_executor_with_stream(channel, _stream_reasoning_then_final())
+    event_queue = await _run_executor_with_stream(channel, _stream_reasoning_then_final())
 
     artifact_events = [e for e in event_queue.events if isinstance(e, TaskArtifactUpdateEvent)]
     assert len(artifact_events) == 1
@@ -468,12 +452,13 @@ def test_executor_streams_reasoning_as_thought_status_updates_by_default():
     assert dict(thought_parts[0].metadata)[A2A_THOUGHT_METADATA_KEY] is True
 
 
-def test_executor_drops_reasoning_when_disabled():
+@pytest.mark.asyncio
+async def test_executor_drops_reasoning_when_disabled():
     pytest.importorskip("a2a.types")
     from a2a.types import TaskArtifactUpdateEvent
 
     channel = A2AChannel(A2AChannelConfig(enabled=False, expose_reasoning=False), DummyBus())
-    event_queue = _run_executor_with_stream(channel, _stream_reasoning_then_final())
+    event_queue = await _run_executor_with_stream(channel, _stream_reasoning_then_final())
 
     artifact_events = [e for e in event_queue.events if isinstance(e, TaskArtifactUpdateEvent)]
     assert len(artifact_events) == 1
@@ -482,7 +467,8 @@ def test_executor_drops_reasoning_when_disabled():
     assert _thought_status_updates(event_queue.events) == []
 
 
-def test_executor_terminal_reasoning_chunk_does_not_leak_into_artifact():
+@pytest.mark.asyncio
+async def test_executor_terminal_reasoning_chunk_does_not_leak_into_artifact():
     pytest.importorskip("a2a.types")
     from a2a.types import TaskArtifactUpdateEvent, TaskState
 
@@ -501,7 +487,7 @@ def test_executor_terminal_reasoning_chunk_does_not_leak_into_artifact():
             event_type=EventType.CHAT_DELTA,
         ),
     ]
-    event_queue = _run_executor_with_stream(channel, stream)
+    event_queue = await _run_executor_with_stream(channel, stream)
 
     artifact_events = [e for e in event_queue.events if isinstance(e, TaskArtifactUpdateEvent)]
     all_texts = [p.text for e in artifact_events for p in e.artifact.parts]

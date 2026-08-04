@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +22,9 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
     ToolCallInputs,
+)
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as deep_interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
@@ -154,6 +158,38 @@ def test_deep_adapter_subagents_defaults_to_none_when_unconfigured(
     assert subagents is None
 
 
+def test_browser_runtime_environment_tracks_mode_and_chrome_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _TestableJiuWenSwarmDeepAdapter()
+    monkeypatch.setenv("BROWSER_MANAGED_BINARY", "C:\\stale\\chrome.exe")
+    monkeypatch.setenv(
+        "PLAYWRIGHT_MCP_ARGS",
+        "-y @playwright/mcp@latest --headless",
+    )
+
+    adapter._sync_browser_runtime_environment(
+        {
+            "browser": {
+                "chrome_path": "C:\\custom\\chrome.exe",
+                "headless": False,
+            }
+        }
+    )
+
+    assert os.environ["BROWSER_MANAGED_BINARY"] == "C:\\custom\\chrome.exe"
+    assert "BROWSER_MANAGED_ARGS" not in os.environ
+    assert "--headless" not in os.environ["PLAYWRIGHT_MCP_ARGS"].split()
+
+    adapter._sync_browser_runtime_environment(
+        {"browser": {"chrome_path": "", "headless": True}}
+    )
+
+    assert "BROWSER_MANAGED_BINARY" not in os.environ
+    assert os.environ["BROWSER_MANAGED_ARGS"] == "--headless=new"
+    assert os.environ["PLAYWRIGHT_MCP_ARGS"].split().count("--headless") == 1
+
+
 def test_deep_adapter_subagents_includes_browser_by_default_when_runtime_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -181,7 +217,10 @@ def test_deep_adapter_subagents_includes_browser_by_default_when_runtime_enabled
 
     assert subagents is not None
     assert [item["name"] for item in subagents] == ["browser_agent"]
-    assert subagents[-1]["kwargs"]["max_iterations"] == 8
+    assert (
+        subagents[-1]["kwargs"]["max_iterations"]
+        == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    )
 
 
 def test_deep_adapter_subagents_only_includes_explicitly_enabled_agents(

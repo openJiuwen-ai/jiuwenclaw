@@ -65,13 +65,17 @@ class _FakeGoals:
 
     async def pause(self) -> GoalRecord | None:
         self.calls.append(("pause", None))
-        if self.record is not None:
+        if self.record is None:
+            return None
+        if self.record.status is GoalStatus.ACTIVE:
             self.record.status = GoalStatus.PAUSED
         return self.record
 
     async def resume(self) -> GoalRecord | None:
         self.calls.append(("resume", None))
-        if self.record is not None and self.record.status is GoalStatus.PAUSED:
+        if self.record is None:
+            return None
+        if self.record.status in (GoalStatus.PAUSED, GoalStatus.BLOCKED):
             self.record.status = GoalStatus.ACTIVE
         return self.record
 
@@ -86,6 +90,7 @@ def _adapter(goal_manager: _FakeGoals) -> JiuWenSwarmDeepAdapter:
     adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = SimpleNamespace(goal_manager=goal_manager)
     adapter._is_session_scoped_adapter = True
+    adapter._stream_content_run_kind = None
     return adapter
 
 
@@ -130,9 +135,61 @@ async def test_resume_without_goal_is_a_normal_control_response() -> None:
     )
 
     assert result is not None
-    assert result["result_type"] == "goal_control"
+    assert result["result_type"] == "goal_error"
+    assert result["error_code"] == "no_goal"
     assert result["goal"] is None
-    assert result["output"] == "No goal in this session."
+    assert "cannot resume" in str(result["error"])
+
+
+@pytest.mark.asyncio
+async def test_pause_without_goal_returns_no_goal_error() -> None:
+    result = await _adapter(_FakeGoals()).handle_goal_command_structured(
+        {"action": "pause"},
+        session_id="session-1",
+    )
+    assert result is not None
+    assert result["result_type"] == "goal_error"
+    assert result["error_code"] == "no_goal"
+
+
+@pytest.mark.asyncio
+async def test_clear_without_goal_returns_no_goal_error() -> None:
+    result = await _adapter(_FakeGoals()).handle_goal_command_structured(
+        {"action": "clear"},
+        session_id="session-1",
+    )
+    assert result is not None
+    assert result["result_type"] == "goal_error"
+    assert result["error_code"] == "no_goal"
+
+
+@pytest.mark.asyncio
+async def test_resume_completed_goal_returns_invalid_state() -> None:
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="done")
+    goals.record.status = GoalStatus.COMPLETED
+    result = await _adapter(goals).handle_goal_command_structured(
+        {"action": "resume"},
+        session_id="session-1",
+    )
+    assert result is not None
+    assert result["result_type"] == "goal_error"
+    assert result["error_code"] == "invalid_state"
+    assert result["goal"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_pause_non_active_goal_returns_invalid_state() -> None:
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="paused")
+    goals.record.status = GoalStatus.PAUSED
+    result = await _adapter(goals).handle_goal_command_structured(
+        {"action": "pause"},
+        session_id="session-1",
+    )
+    assert result is not None
+    assert result["result_type"] == "goal_error"
+    assert result["error_code"] == "invalid_state"
 
 
 @pytest.mark.asyncio
@@ -195,6 +252,29 @@ def test_runtime_events_are_adapted_without_leaking_runtime_objects() -> None:
     }
 
 
+def test_empty_answer_chunk_is_dropped_not_emitted_as_chat_final() -> None:
+    """Empty answer is not a UI closer — discard for both Goal and normal chat."""
+    assert (
+        JiuWenSwarmDeepAdapter._parse_stream_chunk(
+            {
+                "type": "answer",
+                "payload": {"output": {"output": "", "chunked": False}},
+            }
+        )
+        is None
+    )
+    assert (
+        JiuWenSwarmDeepAdapter._parse_stream_chunk(
+            {
+                "type": "answer",
+                "payload": {"output": {"output": "   ", "chunked": False}},
+            },
+            _has_streamed_content=True,
+        )
+        is None
+    )
+
+
 def test_runtime_goal_update_payload_is_always_nested_under_goal() -> None:
     goal = GoalRecord.create(session_id="session-1", objective="ship the feature").to_dict()
     updated = JiuWenSwarmDeepAdapter._parse_stream_chunk(
@@ -237,10 +317,14 @@ async def test_command_goal_unary_response_stays_rpc_payload() -> None:
     assert response.payload["message"] == "No goal in this session."
 
 
-def test_active_goal_demotes_intermediate_chat_final_to_delta() -> None:
+def test_active_goal_demotes_goal_round_chat_final_to_delta() -> None:
+    """Goal multi-attempt middle: demote final so the frontend does not split."""
     goals = _FakeGoals()
     goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
     adapter = _adapter(goals)
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+    adapter._instance.interaction_started = True
+    adapter._stream_content_run_kind = "goal"
 
     payload = adapter._adapt_goal_intermediate_final(
         {"event_type": "chat.final", "content": "attempt output"}
@@ -251,6 +335,120 @@ def test_active_goal_demotes_intermediate_chat_final_to_delta() -> None:
         "content": "attempt output",
         "goal_intermediate": True,
     }
+
+
+def test_active_goal_keeps_user_round_chat_final_terminal() -> None:
+    """User answer finishes while Goal is still ACTIVE: keep real chat.final."""
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    adapter = _adapter(goals)
+    adapter._instance.active_round = SimpleNamespace(run_kind="user")
+    adapter._instance.interaction_started = True
+    adapter._stream_content_run_kind = "user"
+
+    payload = adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "ordinary answer"}
+    )
+
+    assert payload == {
+        "event_type": "chat.final",
+        "content": "ordinary answer",
+    }
+
+
+def test_late_user_final_stays_terminal_after_goal_round_started() -> None:
+    """Provenance beats live active_round when user final arrives late."""
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    adapter = _adapter(goals)
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+    adapter._instance.interaction_started = True
+    adapter._stream_content_run_kind = "user"
+
+    payload = adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "ordinary answer"}
+    )
+
+    assert payload == {
+        "event_type": "chat.final",
+        "content": "ordinary answer",
+    }
+
+
+def test_user_to_goal_content_injects_bubble_split_final() -> None:
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    adapter = _adapter(goals)
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+    adapter._instance.interaction_started = True
+    adapter._stream_content_run_kind = "user"
+
+    boundary = adapter._begin_visible_chat_content()
+
+    assert boundary == {"event_type": "chat.final", "content": ""}
+    assert adapter._stream_content_run_kind == "goal"
+
+
+def test_active_goal_keeps_chat_final_when_no_goal_round_in_flight() -> None:
+    """Between user end and next Goal start, do not demote (no goal round)."""
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    adapter = _adapter(goals)
+    adapter._instance.active_round = None
+    adapter._instance.interaction_started = True
+
+    payload = adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "ordinary answer"}
+    )
+
+    assert payload == {
+        "event_type": "chat.final",
+        "content": "ordinary answer",
+    }
+
+
+def test_interrupt_resume_dispatch_injects_even_without_output_lease() -> None:
+    """Permission answers must send_input when Goal already holds the lease."""
+    assert JiuWenSwarmDeepAdapter._is_interrupt_resume_dispatch(
+        {
+            "source": "permission_interrupt",
+            "request_id": "call_1",
+            "answers": [{"selected_options": ["allow_once"]}],
+        }
+    )
+    adapter = _adapter(_FakeGoals())
+    assert adapter._should_inject_into_existing_interaction(
+        {
+            "source": "permission_interrupt",
+            "request_id": "call_1",
+            "answers": [{"selected_options": ["allow_once"]}],
+        }
+    )
+    assert not adapter._should_inject_into_existing_interaction(
+        {"query": "hello", "mode": "agent"}
+    )
+
+
+def test_paused_goal_keeps_chat_final_terminal_even_if_round_still_unwinding() -> None:
+    """User cancel pauses GoalRecord first; finals during abort must stay final."""
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    goals.record.status = GoalStatus.PAUSED
+    adapter = _adapter(goals)
+    # Simulate an in-flight goal round still unwinding after pause+cancel.
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+    adapter._instance.interaction_started = True
+
+    payload = adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "cancelled output"}
+    )
+
+    assert payload == {
+        "event_type": "chat.final",
+        "content": "cancelled output",
+    }
+    assert adapter._has_active_goal_interaction() is True
+    assert adapter._goal_record_is_active() is False
 
 
 def test_internal_goal_resume_is_not_recorded_as_user_history() -> None:
@@ -308,6 +506,40 @@ def test_chat_send_does_not_map_to_structured_goal_op() -> None:
     assert JiuWenSwarmDeepAdapter._structured_goal_op_from_request(req) is None
 
 
+def test_readonly_goal_get_skips_metadata_sync_flag() -> None:
+    """command.goal get is read-only; set/resume/pause/clear are not."""
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+    get_req = AgentRequest(
+        request_id="g1",
+        channel_id="web",
+        session_id="ghost_goal_get",
+        req_method=ReqMethod.COMMAND_GOAL,
+        params={"action": "get", "mode": "agent"},
+    )
+    assert AgentWebSocketServer._is_readonly_goal_get_request(get_req) is True
+    # Default action is get when omitted.
+    assert AgentWebSocketServer._is_readonly_goal_get_request(
+        AgentRequest(
+            request_id="g2",
+            channel_id="web",
+            session_id="ghost_goal_get",
+            req_method=ReqMethod.COMMAND_GOAL,
+            params={},
+        )
+    ) is True
+    for action in ("set", "resume", "pause", "clear"):
+        assert AgentWebSocketServer._is_readonly_goal_get_request(
+            AgentRequest(
+                request_id=f"a-{action}",
+                channel_id="web",
+                session_id="s1",
+                req_method=ReqMethod.COMMAND_GOAL,
+                params={"action": action},
+            )
+        ) is False
+
+
 def test_web_channel_does_not_treat_goal_slash_as_intent() -> None:
     assert (
         JiuWenSwarmDeepAdapter._parse_goal_slash_intent("/goal set write a report")
@@ -323,3 +555,140 @@ def test_web_channel_does_not_treat_goal_slash_as_intent() -> None:
         params={"query": "/goal set write a report"},
     )
     assert JiuWenSwarmDeepAdapter._structured_goal_op_from_request(req) is None
+
+
+def test_stream_end_synthesizes_final_after_goal_cleared() -> None:
+    """pause→clear ends the iterator without a final; host must synthesize one."""
+    goals = _FakeGoals()
+    adapter = _adapter(goals)
+    goals.record = None
+
+    assert adapter._should_emit_stream_end_chat_final(
+        had_assistant_output=True,
+        emitted_terminal_chat_final=False,
+    )
+
+
+def test_stream_end_synthesizes_final_even_before_assistant_tokens() -> None:
+    """Goal.set may be processing before the first delta; clear still needs a final."""
+    goals = _FakeGoals()
+    adapter = _adapter(goals)
+    goals.record = None
+
+    assert adapter._should_emit_stream_end_chat_final(
+        had_assistant_output=False,
+        emitted_terminal_chat_final=False,
+    )
+
+
+def test_stream_end_skips_final_when_goal_still_active() -> None:
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship")
+    adapter = _adapter(goals)
+
+    assert not adapter._should_emit_stream_end_chat_final(
+        had_assistant_output=True,
+        emitted_terminal_chat_final=False,
+    )
+
+
+def test_stream_end_skips_final_when_already_emitted() -> None:
+    goals = _FakeGoals()
+    adapter = _adapter(goals)
+    goals.record = None
+
+    assert not adapter._should_emit_stream_end_chat_final(
+        had_assistant_output=True,
+        emitted_terminal_chat_final=True,
+    )
+
+
+def test_record_goal_set_history_writes_objective_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.append_history_record",
+        lambda **kwargs: captured.append(kwargs),
+    )
+    req = AgentRequest(
+        request_id="r1",
+        channel_id="web",
+        session_id="s1",
+        req_method=ReqMethod.COMMAND_GOAL,
+        params={"mode": "agent"},
+    )
+    JiuWenSwarmDeepAdapter._record_goal_set_history_if_needed(
+        req,
+        action="set",
+        result_type="goal_stream",
+        goal_payload={"goal_id": "g1", "objective": "ship it"},
+    )
+    assert len(captured) == 1
+    assert captured[0]["role"] == "user"
+    assert captured[0]["content"] == "ship it"
+    assert captured[0]["extra"]["is_goal_objective_message"] is True
+    assert captured[0]["extra"]["goal_id"] == "g1"
+
+    captured.clear()
+    JiuWenSwarmDeepAdapter._record_goal_set_history_if_needed(
+        req,
+        action="pause",
+        result_type="ok",
+        goal_payload={"goal_id": "g1", "objective": "ship it"},
+    )
+    assert captured == []
+
+
+def test_record_goal_completed_history_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.append_history_record",
+        lambda **kwargs: captured.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.load_history_records",
+        lambda _sid: [],
+    )
+    JiuWenSwarmDeepAdapter._record_goal_completed_history_if_needed(
+        session_id="s1",
+        channel_id="web",
+        channel_metadata=None,
+        mode="agent",
+        goal_payload={
+            "goal_id": "g1",
+            "status": "completed",
+            "last_assessment": {"evidence": "all done"},
+        },
+    )
+    assert len(captured) == 1
+    assert captured[0]["extra"]["is_goal_completed_message"] is True
+    assert captured[0]["extra"]["id"] == "goal-completed-g1"
+    assert captured[0]["content"].startswith("goal.completed:")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.load_history_records",
+        lambda _sid: [
+            {
+                "id": "goal-completed-g1",
+                "is_goal_completed_message": True,
+                "goal_id": "g1",
+            }
+        ],
+    )
+    captured.clear()
+    JiuWenSwarmDeepAdapter._record_goal_completed_history_if_needed(
+        session_id="s1",
+        channel_id="web",
+        channel_metadata=None,
+        mode="agent",
+        goal_payload={"goal_id": "g1", "status": "completed"},
+    )
+    assert captured == []
+
+    JiuWenSwarmDeepAdapter._record_goal_completed_history_if_needed(
+        session_id="s1",
+        channel_id="web",
+        channel_metadata=None,
+        mode="agent",
+        goal_payload={"goal_id": "g2", "status": "active"},
+    )
+    assert captured == []

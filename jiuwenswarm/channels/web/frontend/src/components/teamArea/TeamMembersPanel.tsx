@@ -10,6 +10,7 @@ import { MarkdownMessageBody } from '../ChatPanel/MessageItem';
 import { parseTeamEventMessage, type ParsedTeamEvent } from '../ChatPanel/teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { isTeamLeaderMember, isUserMember } from '../../utils/teamMemberAvatar';
+import { contextCompressionRunningText } from '../../utils/contextCompression';
 import teamIcon from '../../assets/team.svg';
 import { MemberListItem } from './MemberListItem';
 import {
@@ -641,7 +642,9 @@ function TeamMemberContextCompressionBar({
         </span>
         {runtime?.summary && !isComplete && (
           <span className={activityClassName}>
-            {runtime.summary}
+            {isRunning
+              ? contextCompressionRunningText(t, runtime?.processor, runtime.summary)
+              : runtime.summary}
           </span>
         )}
         {!isRunning && (

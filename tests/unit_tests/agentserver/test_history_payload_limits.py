@@ -163,9 +163,11 @@ def test_history_get_sanitizes_large_restorable_records(monkeypatch):
     message = result["messages"][0]
     assert message["content"].endswith("[truncated]")
     assert message["tool_result"]["result"].endswith("[truncated]")
+    from jiuwenswarm.server import wire_truncate as wire_truncate_module
+
     assert (
         len(json.dumps(message, ensure_ascii=False).encode("utf-8"))
-        <= getattr(agent_ws_server_module, "_HISTORY_WIRE_RECORD_MAX_BYTES")
+        <= getattr(wire_truncate_module, "_HISTORY_WIRE_RECORD_MAX_BYTES")
     )
 
 

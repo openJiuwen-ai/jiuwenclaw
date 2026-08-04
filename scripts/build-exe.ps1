@@ -30,6 +30,30 @@ Write-Host "`n[3/4] Running PyInstaller..." -ForegroundColor Yellow
 uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+
+# Verify the actual frozen runtime, not only the PyInstaller source configuration.
+$FrozenExe = Join-Path $ProjectRoot "dist\jiuwenswarm\jiuwenswarm.exe"
+$A2UIVerifier = Join-Path $ProjectRoot "scripts\verify_a2ui_bundle.py"
+$VerifyProcess = Start-Process `
+    -FilePath $FrozenExe `
+    -ArgumentList @($A2UIVerifier) `
+    -Wait `
+    -PassThru `
+    -NoNewWindow
+if ($VerifyProcess.ExitCode -ne 0) {
+    throw "Frozen A2UI bundle verification failed. See ~/.jiuwenswarm/logs/jiuwenswarm_exe_error.log"
+}
+
+# 3.5 Bundle Node.js runtime for browser tools
+if (Test-Truthy $BundleNode) {
+    Write-Host "`n[3.5/4] Bundling Node.js runtime..." -ForegroundColor Yellow
+    $DistDir = Join-Path $ProjectRoot "dist\jiuwenswarm"
+    Copy-NodeRuntime -SourceDir $NodeSource -DistDir $DistDir
+} else {
+    Write-Host "`n[3.5/4] Skipping bundled Node.js runtime (BUNDLE_NODE=$BundleNode)" -ForegroundColor Yellow
+}
+
+
 # 4. Build installer (Inno Setup)
 Write-Host "`n[4/4] Building installer (Inno Setup)..." -ForegroundColor Yellow
 $IsccPaths = @(

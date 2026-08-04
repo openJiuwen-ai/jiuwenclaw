@@ -214,7 +214,7 @@ class ReActAgentConfig(BaseModel):
             api_key: str,
             api_base: str,
             model_name: str,
-            verify_ssl: bool = False
+            ssl_config: Optional[Dict[str, Any]] = None
     ) -> 'ReActAgentConfig':
         """Configure model client for LLM initialization
 
@@ -226,7 +226,11 @@ class ReActAgentConfig(BaseModel):
             api_key: API key
             api_base: API base URL
             model_name: Model name
-            verify_ssl: Whether to verify SSL (default False)
+            ssl_config: Optional dict of SSL options to pass through to
+                ModelClientConfig. Recognized keys: "verify_ssl" (bool,
+                default True) and "ssl_cert" (str path to a CA bundle for
+                self-signed certs, default None). When omitted, SSL
+                verification uses the ModelClientConfig defaults.
 
         Returns:
             self (supports chaining)
@@ -236,11 +240,13 @@ class ReActAgentConfig(BaseModel):
         self.api_base = api_base
         self.model_name = model_name
 
+        ssl_options = ssl_config or {}
         self.model_client_config = ModelClientConfig(
             client_provider=provider,
             api_key=api_key,
             api_base=api_base,
-            verify_ssl=verify_ssl
+            verify_ssl=ssl_options.get("verify_ssl", True),
+            ssl_cert=ssl_options.get("ssl_cert", None)
         )
         self.model_config_obj = ModelRequestConfig(
             model_name=model_name

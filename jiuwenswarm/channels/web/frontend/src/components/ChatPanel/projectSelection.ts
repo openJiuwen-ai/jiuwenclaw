@@ -9,6 +9,6 @@ export function getInputProjectOptions(projects: ProjectInfo[], search = ''): Pr
   return projects.filter(project => {
     if (isDefaultInputProject(project)) return false;
     if (!keyword) return true;
-    return project.name.toLowerCase().includes(keyword);
+    return project.name.toLowerCase().includes(keyword) || project.project_dir.toLowerCase().includes(keyword);
   });
 }

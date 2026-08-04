@@ -56,6 +56,7 @@ class SwarmBuildContext(BuildContext):
     request_metadata: dict[str, Any] | None = None
     mode: str = "team"
     project_dir: str | None = None
+    disable_teammate_worktree: bool = False
     team_id: str = ""
     team_ws_root: str | None = None
     team_skills_dir: str | None = None
@@ -85,6 +86,7 @@ class SwarmBuildContext(BuildContext):
             "request_metadata": self.request_metadata,
             "mode": self.mode,
             "project_dir": self.project_dir,
+            "disable_teammate_worktree": self.disable_teammate_worktree,
             "team_id": self.team_id,
             "team_ws_root": self.team_ws_root,
             "team_skills_dir": self.team_skills_dir,
@@ -118,6 +120,7 @@ class SwarmBuildContext(BuildContext):
             request_metadata=seed.get("request_metadata"),
             mode=seed.get("mode") or "team",
             project_dir=seed.get("project_dir"),
+            disable_teammate_worktree=bool(seed.get("disable_teammate_worktree", False)),
             team_id=seed.get("team_id", ""),
             team_ws_root=seed.get("team_ws_root"),
             team_skills_dir=seed.get("team_skills_dir"),

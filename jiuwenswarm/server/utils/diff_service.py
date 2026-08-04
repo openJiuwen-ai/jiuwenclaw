@@ -8,6 +8,7 @@ import difflib
 import copy
 import json
 import logging
+import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -20,14 +21,34 @@ from jiuwenswarm.server.runtime.session.session_history import load_history_reco
 
 logger = logging.getLogger(__name__)
 
+INTERNAL_UNTRACKED_DIRS = {".agent_history"}
+
 
 MAX_FILES = 50
 MAX_DIFF_SIZE_BYTES = 1_000_000
 MAX_LINES_PER_FILE = 400
 MAX_FILES_FOR_DETAILS = 500
+HISTORY_PRIORITY_PROJECT_ROOT = 0
+HISTORY_PRIORITY_SHARED_WORKSPACE = 10
+HISTORY_PRIORITY_EXTRA_ROOT = 20
+HISTORY_PRIORITY_UNKNOWN = 50
+WORKTREE_HISTORY_CONTAINERS: tuple[tuple[str, ...], ...] = (
+    (".worktrees",),
+    (".jiuwen", "worktrees"),
+)
 
 # change_sets.json 写入锁:保证同一进程内多线程惰性回填时不互相覆盖。
 _CHANGE_SET_LOCK = threading.Lock()
+
+# file_ops 条目上的软删除标记。被 conversation 回退"截断"掉的快照打上此标记后
+# 对 turn diff 显示层不可见，但仍保留 old_content，从而不丢失文件回滚能力。
+_REWOUND_KEY = "rewound_out"
+
+# file_ops 条目上的 discard 软删除标记。由 ``discard_turn_changes`` 打上,
+# 与 conversation rewind 的 ``rewound_out`` 区分:redo 只恢复 ``discarded_out``,
+# 不会误暴露 rewind 软隐藏的"未来"条目。两者都对显示层不可见
+# (见 ``_read_agent_history`` 的 ``include_rewound`` 过滤)。
+_DISCARDED_KEY = "discarded_out"
 
 
 class DiffHistoryExpiredError(RuntimeError):
@@ -45,6 +66,7 @@ class DiffService:
         session_id: str,
         project_dir: str | None = None,
         repo_context: dict[str, Any] | None = None,
+        extra_history_roots: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """获取 session 的所有 turn diff（完整信息）.
 
@@ -55,7 +77,7 @@ class DiffService:
         Returns:
             turn diff 列表，按时间倒序排列（most recent first）
         """
-        turns = self._compute_turn_diffs(session_id, project_dir)
+        turns = self._compute_turn_diffs(session_id, project_dir, extra_history_roots=extra_history_roots)
         self._enrich_with_change_sets(session_id, turns, repo_context=repo_context)
         return list(reversed(turns))
 
@@ -64,6 +86,7 @@ class DiffService:
         session_id: str,
         project_dir: str | None = None,
         repo_context: dict[str, Any] | None = None,
+        extra_history_roots: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """获取 session 的历史 turn diff 摘要，包含已持久化快照。
 
@@ -71,7 +94,7 @@ class DiffService:
         但仍存在于 change_sets/snapshot 中的历史轮次也返回出来（例如已撤销
         的 turn）。
         """
-        turns = self._compute_turn_diffs(session_id, project_dir)
+        turns = self._compute_turn_diffs(session_id, project_dir, extra_history_roots=extra_history_roots)
         self._enrich_with_change_sets(session_id, turns, repo_context=repo_context)
         by_turn = {int(t.get("turnIndex", 0) or 0): t for t in turns}
         for entry in self._load_change_sets(session_id):
@@ -99,6 +122,7 @@ class DiffService:
         change_set_id: str | None = None,
         project_dir: str | None = None,
         repo_context: dict[str, Any] | None = None,
+        extra_history_roots: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """获取指定轮次的 turn diff。
 
@@ -132,14 +156,24 @@ class DiffService:
             snapshot = self._load_turn_snapshot(session_id, change_set_id)
             if snapshot is not None:
                 return snapshot
-            turns = self.get_turn_diffs(session_id, project_dir, repo_context=repo_context)
+            turns = self.get_turn_diffs(
+                session_id,
+                project_dir,
+                repo_context=repo_context,
+                extra_history_roots=extra_history_roots,
+            )
             for turn in turns:
                 if turn.get("change_set_id") == change_set_id:
                     return turn
             raise DiffHistoryExpiredError(
                 f"diff history expired for change_set_id={change_set_id}"
             )
-        turns = self.get_turn_diffs(session_id, project_dir, repo_context=repo_context)
+        turns = self.get_turn_diffs(
+            session_id,
+            project_dir,
+            repo_context=repo_context,
+            extra_history_roots=extra_history_roots,
+        )
         for turn in turns:
             if int(turn.get("turnIndex", 0) or 0) == turn_index:
                 return turn
@@ -156,14 +190,24 @@ class DiffService:
                     )
         return None
 
-    def _compute_turn_diffs(self, session_id: str, project_dir: str | None = None) -> list[dict[str, Any]]:
+    def _compute_turn_diffs(
+        self,
+        session_id: str,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """计算 turn-based diffs."""
         history = self._read_history(session_id)
 
         if not history:
             return []
 
-        agent_history = self._read_agent_history(session_id, project_dir)
+        agent_history = self._read_agent_history(
+            session_id,
+            project_dir,
+            extra_history_roots=extra_history_roots,
+        )
 
         turns: list[dict[str, Any]] = []
 
@@ -416,13 +460,19 @@ class DiffService:
         }
 
     def mark_turn_discarded(
-        self, session_id: str, turn_index: int, project_dir: str | None = None
+        self,
+        session_id: str,
+        turn_index: int,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
     ) -> str | None:
         """将指定 turn 的 change_set 状态标记为 discarded。"""
         if turn_index <= 0:
             return None
         target = self.get_turn_diff(
             session_id, turn_index=turn_index, project_dir=project_dir,
+            extra_history_roots=extra_history_roots,
         )
         change_set_id = str((target or {}).get("change_set_id") or "")
         if not change_set_id:
@@ -441,6 +491,71 @@ class DiffService:
         if snapshot is not None:
             snapshot["status"] = "discarded"
             self._save_turn_snapshot(session_id, snapshot)
+        return change_set_id
+
+    def unmark_turn_discarded(
+        self,
+        session_id: str,
+        turn_index: int,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> str | None:
+        """将指定 turn 的 status 恢复为 completed(与 ``mark_turn_discarded`` 对称).
+
+        1. 将 change_sets.json 中该 entry 的 status 显式设回 ``"completed"``
+           (而非 pop 掉——缺少 status 字段的 turn 在按 change_set_id 读取
+           snapshot 时会与其他路径默认值不一致,显式写回保持状态模型一致)
+        2. 将 snapshot 的 status 同样设回 ``"completed"``
+        3. 去掉 file_ops 中该轮条目的 ``discarded_out`` 标记
+           (只恢复 discard 标记,不触碰 rewind 的 ``rewound_out``,避免
+           误暴露此前 conversation rewind 软隐藏的"未来"条目)
+        """
+        if turn_index <= 0:
+            return None
+        target = self.get_turn_diff(
+            session_id, turn_index=turn_index, project_dir=project_dir,
+            extra_history_roots=extra_history_roots,
+        )
+        change_set_id = str((target or {}).get("change_set_id") or "")
+        if not change_set_id:
+            return None
+
+        # 1. 将 change_sets 的 status 显式设回 completed
+        with _CHANGE_SET_LOCK:
+            entries = self._load_change_sets(session_id)
+            changed = False
+            for entry in entries:
+                if entry.get("change_set_id") == change_set_id:
+                    entry["status"] = "completed"
+                    changed = True
+                    break
+            if changed:
+                self._save_change_sets(session_id, entries)
+
+        # 2. 将 snapshot 的 status 显式设回 completed
+        snapshot = self._load_turn_snapshot(session_id, change_set_id) or target
+        if snapshot is not None:
+            snapshot["status"] = "completed"
+            self._save_turn_snapshot(session_id, snapshot)
+
+        # 3. 去掉 file_ops 中该轮条目的 discarded_out 标记
+        history = self._read_history(session_id)
+        user_count = 0
+        target_timestamp: float | None = None
+        for record in history:
+            if record.get("role") == "user":
+                user_count += 1
+                if user_count == turn_index:
+                    target_timestamp = record.get("timestamp")
+                    break
+        if target_timestamp is not None:
+            self.restore_rewound_entries_by_timestamp(
+                session_id, target_timestamp, project_dir=project_dir,
+                extra_history_roots=extra_history_roots,
+                discarded=True,
+            )
+
         return change_set_id
 
     def _enrich_with_change_sets(
@@ -530,6 +645,18 @@ class DiffService:
             return []
 
     @staticmethod
+    def resolve_project_dir(session_id: str) -> str | None:
+        """解析 session 的项目目录(``_get_project_dir_from_metadata`` 的公开入口).
+
+        调用方若随后会写 ``metadata.json``(如 ``rewind_session`` 调
+        ``update_session_metadata``)，**必须在写之前**调用本函数并把结果显式
+        传给下游，不要让下游自己去推断：``metadata.json`` 是非原子的原地覆写
+        且由后台线程执行，下游读到半截文件会 ``JSONDecodeError`` → 静默返回
+        ``None`` → 扫不到项目目录下的 file_ops → 整个清理变成无声的空操作。
+        """
+        return DiffService._get_project_dir_from_metadata(session_id)
+
+    @staticmethod
     def _get_project_dir_from_metadata(session_id: str) -> str | None:
         """从 session metadata.json 中读取项目目录.
 
@@ -569,32 +696,208 @@ class DiffService:
             logger.debug("Failed to read metadata file %s: %s", metadata_file, e)
         return None
 
+    @staticmethod
     def _is_valid_file_ops_file(
-        self, name: str, session_id: str | None, require_session: bool = False
+        name: str, session_id: str | None, require_session: bool = False
     ) -> bool:
-        """检查文件名是否是有效的 file_ops 文件."""
-        if not name.startswith(f"file_ops_{self._agent_id}_"):
+        """检查文件名是否是有效的 file_ops 文件.
+
+        文件名约定: ``file_ops_{agent_id}_{session_id}.json``,其中 session_id
+        始终是 ``.json`` 前的最后一段。使用 ``_{session_id}.json`` 后缀匹配替代
+        子串匹配,避免短 session_id 误匹配其他 agent 的 file_ops 文件。
+
+        当 session_id 对应的是父会话时,也接受子 agent 会话(后缀形如
+        ``_sub_{type}_{suffix}``)的 file_ops 文件,使 diff 统计能覆盖子 agent
+        的文件变更。
+        """
+        if not name.startswith("file_ops_"):
             return False
         if not name.endswith(".json"):
             return False
-        if require_session:
-            return session_id is not None and session_id in name
-        return session_id is None or session_id in name
+        if not session_id:
+            return not require_session
+        suffix = f"_{session_id}.json"
+        if name.endswith(suffix):
+            return True
+        sub_marker = f"_{session_id}_sub_"
+        marker_pos = name.find(sub_marker, len("file_ops_"))
+        if marker_pos < 0:
+            return False
+        agent_id = name[len("file_ops_"):marker_pos]
+        return bool(agent_id) and "_" not in agent_id
 
-    def _read_agent_history(self, session_id: str | None = None, project_dir: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _agent_history_dirs_for_roots(
+        history_roots: list[str],
+        *,
+        include_child_workspaces: bool = False,
+    ) -> list[Path]:
+        """Return .agent_history dirs for roots and optional immediate workspaces."""
+        result: list[Path] = []
+        seen_history_dirs: set[Path] = set()
+
+        def add_history_dir(hist_dir: Path) -> None:
+            try:
+                key = hist_dir.resolve()
+            except Exception:
+                key = hist_dir
+            if key in seen_history_dirs:
+                return
+            seen_history_dirs.add(key)
+            result.append(hist_dir)
+
+        for history_root in history_roots:
+            root = Path(history_root)
+            add_history_dir(root / ".agent_history")
+            if not include_child_workspaces:
+                continue
+            if not root.is_dir():
+                continue
+            try:
+                children = list(root.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                if child.is_dir():
+                    add_history_dir(child / ".agent_history")
+        return result
+
+    @staticmethod
+    def _default_worktree_history_roots(project_dir: str | None) -> list[str]:
+        """Return known local worktree container dirs under the project root."""
+        if not project_dir:
+            return []
+        root = Path(project_dir)
+        return [str(root.joinpath(*parts)) for parts in WORKTREE_HISTORY_CONTAINERS]
+
+    @classmethod
+    def _history_roots_with_worktree_containers(
+        cls,
+        project_dir: str | None,
+        extra_history_roots: list[str] | None = None,
+    ) -> list[str]:
+        """Return explicit roots plus known worktree containers below each root."""
+        roots: list[str] = []
+        seen: set[str] = set()
+
+        def add_root(value: str | None) -> None:
+            raw = str(value or "").strip()
+            if not raw:
+                return
+            try:
+                key = os.path.normcase(str(Path(raw).expanduser().resolve()))
+            except Exception:
+                key = os.path.normcase(raw)
+            if key in seen:
+                return
+            seen.add(key)
+            roots.append(raw)
+
+        for root in cls._default_worktree_history_roots(project_dir):
+            add_root(root)
+        for root in extra_history_roots or []:
+            if not isinstance(root, str):
+                continue
+            raw = root.strip()
+            if not raw:
+                continue
+            add_root(raw)
+            for child_root in cls._default_worktree_history_roots(raw):
+                add_root(child_root)
+        return roots
+
+    @staticmethod
+    def _get_git_common_worktree_root(worktree_root: Path) -> Path | None:
+        """Return the canonical repo root for a linked git worktree, if known."""
+        if not worktree_root.is_dir():
+            return None
+        common_dir = DiffService._run_git_command(
+            str(worktree_root),
+            ["rev-parse", "--git-common-dir"],
+        )
+        if not common_dir or not common_dir.strip():
+            return None
+        common_path = Path(common_dir.strip())
+        if not common_path.is_absolute():
+            common_path = worktree_root / common_path
+        try:
+            common_path = common_path.resolve()
+        except OSError:
+            pass
+        if common_path.name != ".git":
+            return None
+        canonical_root = common_path.parent
+        try:
+            worktree_resolved = worktree_root.resolve()
+            canonical_resolved = canonical_root.resolve()
+        except OSError:
+            return None
+        if worktree_resolved == canonical_resolved:
+            return None
+        return canonical_resolved
+
+    @staticmethod
+    def _map_worktree_file_path(
+        file_path: str,
+        *,
+        source_root: Path,
+        target_root: Path | None,
+    ) -> str:
+        """Map a file-op path from a linked worktree back to the canonical repo."""
+        if target_root is None:
+            return file_path
+        try:
+            path = Path(file_path).expanduser().resolve()
+            source = source_root.expanduser().resolve()
+            rel = path.relative_to(source)
+        except Exception:
+            return file_path
+        return str(target_root / rel)
+
+    def _read_agent_history(
+        self,
+        session_id: str | None = None,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+        include_rewound: bool = False
+    ) -> dict[str, Any]:
         """读取 .agent_history（同时读取全局与 session-specific 文件并合并）.
 
         Args:
             session_id: 若提供，额外扫描匹配该 session 的 file_ops 文件。
             project_dir: 项目目录路径，若提供则也从项目目录读取 .agent_history。
+            extra_history_roots: 额外写入根目录，例如 team/member workspace。
+            include_rewound: 是否包含被标记为 ``rewound_out`` / ``discarded_out``
+                的条目(软删除快照)。默认 ``False``——**显示层**(turn diff)不应
+                看到它们,否则会展示已被回退掉的 turn 的改动。**还原层**
+                (``get_files_to_restore`` / ``get_files_to_redo``) 必须传 ``True``:
+                这些快照仍持有文件的原始/修改后内容,是回滚/重做能力的唯一来源。
+                详见 ``truncate_file_ops_by_timestamp`` 的 ``soft`` 参数。
         """
         result: dict[str, Any] = {}
+        history_file_priorities: dict[str, int] = {}
+
+        def path_key(path: Path) -> str:
+            try:
+                return os.path.normcase(str(path.resolve()))
+            except OSError:
+                return os.path.normcase(str(path))
+
+        def add_history_file(path: Path, priority: int) -> None:
+            paths.append(path)
+            history_file_priorities.setdefault(path_key(path), priority)
 
         # 1. 从 Agent Workspace 和 User Workspace 读取（公共位置）
-        paths = [
+        paths: list[Path] = []
+        add_history_file(
             get_agent_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
+            HISTORY_PRIORITY_SHARED_WORKSPACE,
+        )
+        add_history_file(
             get_user_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
-        ]
+            HISTORY_PRIORITY_SHARED_WORKSPACE,
+        )
 
         # 2. session-specific file_ops（如 file_ops_jiuwenswarm_tui_xxx.json）
         if session_id:
@@ -605,7 +908,7 @@ class DiffService:
                 for f in hist_dir.iterdir():
                     name = f.name
                     if self._is_valid_file_ops_file(name, session_id, require_session=True):
-                        paths.append(f)
+                        add_history_file(f, HISTORY_PRIORITY_SHARED_WORKSPACE)
 
         # 3. 从项目目录读取（实际写入位置）
         # 如果未传入 project_dir，尝试从 session metadata 获取
@@ -614,15 +917,48 @@ class DiffService:
         if project_dir:
             project_hist_dir = Path(project_dir) / ".agent_history"
             if project_hist_dir.is_dir():
+                for f in project_hist_dir.iterdir():
+                    name = f.name
+                    if self._is_valid_file_ops_file(name, session_id):
+                        add_history_file(f, HISTORY_PRIORITY_PROJECT_ROOT)
+                global_file = project_hist_dir / f"file_ops_{self._agent_id}.json"
+                if global_file.exists():
+                    add_history_file(global_file, HISTORY_PRIORITY_PROJECT_ROOT)
+        extra_roots = self._history_roots_with_worktree_containers(
+            project_dir,
+            extra_history_roots,
+        )
+
+        for project_hist_dir in self._agent_history_dirs_for_roots(
+            extra_roots,
+            include_child_workspaces=True,
+        ):
+            if project_hist_dir.is_dir():
                 # 读取 session-specific file_ops 文件
                 for f in project_hist_dir.iterdir():
                     name = f.name
                     if self._is_valid_file_ops_file(name, session_id):
-                        paths.append(f)
+                        add_history_file(f, HISTORY_PRIORITY_EXTRA_ROOT)
                 # 也读取全局 file_ops 文件（不带 session_id 后缀的）
                 global_file = project_hist_dir / f"file_ops_{self._agent_id}.json"
                 if global_file.exists():
-                    paths.append(global_file)
+                    add_history_file(global_file, HISTORY_PRIORITY_EXTRA_ROOT)
+
+        worktree_root_cache: dict[Path, Path | None] = {}
+
+        def mapped_file_path_for_history(file_path: str, history_file: Path) -> str:
+            source_root = history_file.parent.parent
+            try:
+                source_key = source_root.resolve()
+            except OSError:
+                source_key = source_root
+            if source_key not in worktree_root_cache:
+                worktree_root_cache[source_key] = self._get_git_common_worktree_root(source_root)
+            return self._map_worktree_file_path(
+                file_path,
+                source_root=source_root,
+                target_root=worktree_root_cache[source_key],
+            )
 
         # 用于规范化路径，避免大小写差异导致的重复
         def normalize_path(p: str) -> str:
@@ -630,42 +966,80 @@ class DiffService:
             # 使用 pathlib.Path 规范化路径
             try:
                 return str(Path(p).resolve())
-            except Exception:
+            except OSError:
                 return p.replace("\\", "/").lower()
+
+        def comparable_path_key(p: str) -> str:
+            return p.lower()
+
+        result_entry_priorities: dict[str, list[int]] = {}
+        result_path_by_comparable_key: dict[str, str] = {}
 
         for history_file in paths:
             if history_file.exists():
                 try:
                     data = json.loads(history_file.read_text(encoding="utf-8"))
+                    history_priority = history_file_priorities.get(
+                        path_key(history_file),
+                        HISTORY_PRIORITY_UNKNOWN,
+                    )
                     for file_path, entries in data.items():
+                        mapped_file_path = mapped_file_path_for_history(file_path, history_file)
                         # 规范化路径，避免大小写差异导致的重复
-                        normalized_path = normalize_path(file_path)
+                        normalized_path = normalize_path(mapped_file_path)
+                        comparable_key = comparable_path_key(normalized_path)
+                        normalized_path = result_path_by_comparable_key.setdefault(
+                            comparable_key,
+                            normalized_path,
+                        )
                         if normalized_path not in result:
                             result[normalized_path] = []
+                            result_entry_priorities[normalized_path] = []
                         # 合并条目，避免时间戳相近的重复记录
                         for entry in entries:
+                            # 软删除的快照默认对显示层不可见（见 include_rewound）
+                            if not include_rewound and (
+                                entry.get(_REWOUND_KEY) or entry.get(_DISCARDED_KEY)
+                            ):
+                                continue
                             # 检查是否已存在相同时间戳（±1秒）的相同操作
                             ts = entry.get("timestamp", "")
                             action = entry.get("action", "")
                             is_duplicate = False
-                            for existing in result[normalized_path]:
+                            duplicate_index: int | None = None
+                            for idx, existing in enumerate(result[normalized_path]):
                                 existing_ts = existing.get("timestamp", "")
                                 existing_action = existing.get("action", "")
-                                if action == existing_action:
+                                same_content = (
+                                    entry.get("old_content") == existing.get("old_content")
+                                    and entry.get("new_content") == existing.get("new_content")
+                                )
+                                if action == existing_action and same_content:
                                     # 比较时间戳是否相近（同一秒内）
                                     try:
                                         t1 = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                                         t2 = datetime.fromisoformat(existing_ts.replace("Z", "+00:00"))
                                         if abs((t1 - t2).total_seconds()) < 2:
                                             is_duplicate = True
+                                            duplicate_index = idx
                                             break
                                     except (ValueError, TypeError):
                                         # 时间戳格式无效，无法比较，跳过此条目比较
                                         continue
-                            if not is_duplicate:
+                            if is_duplicate:
+                                priorities = result_entry_priorities[normalized_path]
+                                if (
+                                    duplicate_index is not None
+                                    and duplicate_index < len(priorities)
+                                    and history_priority < priorities[duplicate_index]
+                                ):
+                                    result[normalized_path][duplicate_index] = entry
+                                    priorities[duplicate_index] = history_priority
+                            else:
                                 result[normalized_path].append(entry)
-                except Exception as e:
-                    logger.warning(f"Failed to read agent history file {history_file}: {e}")
+                                result_entry_priorities[normalized_path].append(history_priority)
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Failed to read agent history file %s: %s", history_file, e)
 
         return result
 
@@ -1292,9 +1666,27 @@ class DiffService:
         return "".join(kept), large_files
 
     def _get_untracked_files(
-        self, project_dir: str, max_files: int = MAX_FILES
+        self,
+        project_dir: str,
+        max_files: int = MAX_FILES,
+        *,
+        include_hunks: bool = True,
+        hunk_paths: set[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
-        """获取未跟踪文件列表，仅记录文件名和状态."""
+        """获取未跟踪文件列表，并读取内容计算行数与 hunk.
+
+        与 tracked 文件走 ``git diff HEAD`` 不同，untracked 文件不在 git
+        索引中、无 old_content 可 diff。尤其 unborn HEAD（仓库无任何
+        commit）场景下 ``git diff HEAD`` 会失败，工作区改动几乎都是
+        untracked；若此处仍把 ``linesAdded`` 写死为 0，会导致
+        ``get_git_diff`` 返回的 ``stats.linesAdded`` 恒为 0，前端"变更"
+        栏目看不到行数变化。此处将整文件视为新增 hunk，给出与 tracked
+        文件一致的 stats 口径。
+
+        二进制文件（前 8KB 出现 NUL 字节）不计行数；大文件按
+        ``MAX_LINES_PER_FILE`` 截断并标记 ``isTruncated``，与
+        ``_compute_hunks`` 的截断口径一致。
+        """
         # core.quotepath=false 让 git 对非 ASCII 字节直接输出原始 UTF-8 文件名
         # （而非八进制转义串），否则中文路径无法对应磁盘真实路径。但 ASCII 控制字符
         # （如 TAB）无论该设置如何都会被加引号并 C 转义（如 "dir\tfile.txt"），
@@ -1314,9 +1706,11 @@ class DiffService:
             if not rel_path:
                 continue
             rel_path = DiffService._unquote_git_path(rel_path)
+            if self._is_internal_untracked_path(rel_path):
+                continue
             abs_path = str(Path(project_dir) / rel_path)
 
-            files[abs_path] = {
+            entry: dict[str, Any] = {
                 "filePath": abs_path,
                 "hunks": [],
                 "isNewFile": True,
@@ -1329,10 +1723,100 @@ class DiffService:
                 "lastEditTime": None,
             }
 
+            # 符号链接不解引用：避免未跟踪 symlink 指向工作区外敏感/超大文件，
+            # 通过 diff API 暴露内容。symlink 不计行数，hunks 留空。
+            if Path(abs_path).is_symlink():
+                files[abs_path] = entry
+                continue
+
+            # 二进制探测：前 8KB 出现 NUL 字节视为二进制，不计行数
+            try:
+                with open(abs_path, "rb") as f:
+                    head = f.read(8192)
+            except OSError:
+                files[abs_path] = entry
+                continue
+            if b"\x00" in head:
+                entry["isBinary"] = True
+                files[abs_path] = entry
+                continue
+
+            # 流式逐行读取：完整行数计入 stats（与 tracked 文件 git numstat
+            # 口径一致）。仅在 detail 层需要该文件时保留 hunk lines，避免
+            # summary/files 层为未展开文件构造整文件 hunk。
+            hunk_lines: list[str] = []
+            total_lines = 0
+            wants_hunks = include_hunks and (
+                hunk_paths is None or rel_path in hunk_paths or abs_path in hunk_paths
+            )
+            try:
+                with open(abs_path, "r", encoding="utf-8", errors="replace", newline="") as f:
+                    for line in f:
+                        total_lines += 1
+                        if wants_hunks and total_lines <= MAX_LINES_PER_FILE:
+                            hunk_lines.append(line.rstrip("\r\n"))
+            except OSError:
+                files[abs_path] = entry
+                continue
+
+            truncated = total_lines > MAX_LINES_PER_FILE
+            if wants_hunks:
+                entry["hunks"] = [{
+                    "oldStart": 0,
+                    "oldLines": 0,
+                    "newStart": 1,
+                    "newLines": len(hunk_lines),
+                    "lines": [f"+{line}" for line in hunk_lines],
+                }]
+            entry["isTruncated"] = truncated
+            entry["linesAdded"] = total_lines
+            files[abs_path] = entry
+
         return files
 
-    def get_git_diff(self, project_dir: str | None) -> dict[str, Any] | None:
-        """获取工作区相对于 HEAD 的 git diff（仅已跟踪文件的修改）.
+    @staticmethod
+    def _is_internal_untracked_path(rel_path: str) -> bool:
+        parts = Path(rel_path).parts
+        return any(part in INTERNAL_UNTRACKED_DIRS for part in parts)
+
+    @staticmethod
+    def _normalize_hunk_paths(
+        repo_dir: str,
+        hunk_paths: list[str] | set[str] | tuple[str, ...] | None,
+    ) -> set[str] | None:
+        """Normalize requested detail paths to repo-relative POSIX-style paths."""
+        if not hunk_paths:
+            return None
+        result: set[str] = set()
+        for raw in hunk_paths:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            candidate = Path(text)
+            rel = text
+            if candidate.is_absolute():
+                try:
+                    rel = os.path.relpath(str(candidate), repo_dir)
+                except ValueError:
+                    rel = text
+            rel = rel.replace("\\", "/").lstrip("/")
+            result.add(rel)
+        return result or None
+
+    def get_git_diff(
+        self,
+        project_dir: str | None,
+        *,
+        include_files: bool = True,
+        include_hunks: bool = True,
+        hunk_paths: list[str] | set[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any] | None:
+        """获取工作区相对于 HEAD 的 git diff，含未跟踪文件行数.
+
+        已跟踪文件走 ``git diff HEAD``；untracked 文件（含 unborn HEAD
+        仓库无 commit 场景）由 ``_get_untracked_files`` 读取内容计算行数
+        与 hunk，并累加进 stats，避免工作区仅有新增文件时 lines_added
+        恒为 0。
 
         Args:
             project_dir: 项目目录路径.
@@ -1352,6 +1836,8 @@ class DiffService:
             return None
         if self._is_in_transient_git_state(repo_dir):
             return None
+        effective_include_files = include_files or include_hunks
+        requested_hunk_paths = self._normalize_hunk_paths(repo_dir, hunk_paths)
 
         files: dict[str, dict[str, Any]] = {}
         total_files_changed = 0
@@ -1376,25 +1862,49 @@ class DiffService:
                 "files": {},
             }
 
-        if has_tracked_changes:
+        if has_tracked_changes and not effective_include_files and shortstat_stats:
+            total_files_changed += shortstat_stats["filesChanged"]
+            total_added += shortstat_stats["linesAdded"]
+            total_removed += shortstat_stats["linesRemoved"]
+        elif has_tracked_changes:
             numstat_output = self._run_git_command(repo_dir, ["diff", "HEAD", "--numstat"])
-            name_status_output = self._run_git_command(repo_dir, ["diff", "HEAD", "--name-status"])
-            porcelain_status_output = self._run_git_command(
-                repo_dir, ["-c", "core.quotepath=false", "status", "--porcelain=v1"]
-            )
-            diff_output = self._run_git_command(repo_dir, ["diff", "HEAD"])
-            if numstat_output and diff_output:
+            if numstat_output:
                 per_file_stats = self._parse_git_numstat(numstat_output)
-                per_file_status = self._parse_git_name_status(name_status_output or "")
-                per_file_status.update(
-                    self._parse_git_porcelain_status(porcelain_status_output or "")
-                )
                 total_files_changed += len(per_file_stats)
                 total_added += sum(int(stats["added"]) for stats in per_file_stats.values())
                 total_removed += sum(int(stats["removed"]) for stats in per_file_stats.values())
-                filtered_output, large_files = self._split_large_file_diffs(diff_output)
-                all_hunks, truncated_files = self._parse_git_diff_hunks(filtered_output)
 
+                if effective_include_files:
+                    name_status_output = self._run_git_command(repo_dir, ["diff", "HEAD", "--name-status"])
+                    porcelain_status_output = self._run_git_command(
+                        repo_dir, ["-c", "core.quotepath=false", "status", "--porcelain=v1"]
+                    )
+                    per_file_status = self._parse_git_name_status(name_status_output or "")
+                    per_file_status.update(
+                        self._parse_git_porcelain_status(porcelain_status_output or "")
+                    )
+                else:
+                    per_file_status = {}
+
+                all_hunks: dict[str, list[dict[str, Any]]] = {}
+                large_files: set[str] = set()
+                truncated_files: set[str] = set()
+                if include_hunks:
+                    diff_args = ["--literal-pathspecs", "diff", "HEAD"]
+                    if requested_hunk_paths is not None:
+                        rel_paths = sorted(
+                            p for p in requested_hunk_paths
+                            if not Path(p).is_absolute()
+                        )
+                        if rel_paths:
+                            diff_args.extend(["--", *rel_paths])
+                    diff_output = self._run_git_command(repo_dir, diff_args)
+                    if diff_output:
+                        filtered_output, large_files = self._split_large_file_diffs(diff_output)
+                        all_hunks, truncated_files = self._parse_git_diff_hunks(filtered_output)
+
+                if not effective_include_files:
+                    per_file_stats = {}
                 for rel_path, stats in list(per_file_stats.items())[:MAX_FILES]:
                     abs_path = str(Path(repo_dir) / rel_path)
                     is_binary = bool(stats.get("isBinary", False))
@@ -1422,13 +1932,27 @@ class DiffService:
                         "lastEditTime": None,
                     }
 
-        untracked_files = self._get_untracked_files(repo_dir, max_files=max(0, MAX_FILES - len(files)))
+        untracked_files = self._get_untracked_files(
+            repo_dir,
+            max_files=max(0, MAX_FILES - len(files)) if effective_include_files else MAX_FILES,
+            include_hunks=include_hunks,
+            hunk_paths=requested_hunk_paths,
+        )
+        if not effective_include_files:
+            untracked_stats_files = untracked_files
+            untracked_files = {}
+        else:
+            untracked_stats_files = untracked_files
         for file_path, entry in untracked_files.items():
             entry["status"] = "added"
             files[file_path] = entry
-        total_files_changed += len(untracked_files)
+        total_files_changed += len(untracked_stats_files)
+        # untracked 文件无 git diff 可统计，_get_untracked_files 已按文件内容
+        # 计算行数；此处补回 stats，避免 unborn HEAD 等场景下 lines_added 恒为 0。
+        total_added += sum(int(f.get("linesAdded", 0) or 0) for f in untracked_stats_files.values())
+        total_removed += sum(int(f.get("linesRemoved", 0) or 0) for f in untracked_stats_files.values())
 
-        if not files:
+        if total_files_changed <= 0 and not files:
             return None
 
         return {
@@ -1452,7 +1976,12 @@ class DiffService:
         )
 
     def get_files_to_restore(
-        self, session_id: str, turn_index: int, project_dir: str | None = None
+        self,
+        session_id: str,
+        turn_index: int,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """返回需要恢复的文件及其目标内容.
 
@@ -1487,7 +2016,13 @@ class DiffService:
             return {}
 
         # 2. 读取 file_ops 日志
-        agent_history = self._read_agent_history(session_id, project_dir)
+        #    include_rewound=True: 之前的 conversation 回退只截断了对话、没有动
+        #    工作区，那些被软删除的快照仍是对应文件唯一的原始内容来源，必须纳入，
+        #    否则文件会永久失去回滚能力。
+        agent_history = self._read_agent_history(
+            session_id, project_dir, include_rewound=True,
+            extra_history_roots=extra_history_roots,
+        )
 
         # 3. 对于每个文件，找到第一条 timestamp >= target_timestamp 的 entry
         #    该 entry 的 old_content 即为目标 turn 开始前的文件状态
@@ -1512,14 +2047,161 @@ class DiffService:
 
         return files_to_restore
 
+    def get_files_to_redo(
+        self,
+        session_id: str,
+        turn_index: int,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """返回需要重新应用的文件及其新内容(与 ``get_files_to_restore`` 对称).
+
+        discard(soft) 后 file_ops 中 timestamp >= target 的条目被标记
+        ``discarded_out``。本方法找出这些条目,返回它们的 ``new_content``
+        (即 agent 修改后的内容),供 redo 写回文件。
+
+        Args:
+            session_id: 会话 ID
+            turn_index: 目标重新应用轮次(1-based)
+            project_dir: 项目目录路径(可选)
+
+        Returns:
+            { file_path: { "content": str | None, "action": "write" | "delete" } }
+            content 为 None 表示文件被 agent 删除,redo 时应删除文件。
+        """
+        history = self._read_history(session_id)
+        if not history:
+            return {}
+
+        # 1. 找到目标 turn 的起始时间(第 N 条 user 消息的 timestamp)
+        user_count = 0
+        target_timestamp: float | None = None
+        for record in history:
+            if record.get("role") == "user":
+                user_count += 1
+                if user_count == turn_index:
+                    target_timestamp = record.get("timestamp")
+                    break
+
+        if target_timestamp is None:
+            return {}
+
+        # 2. 读取 file_ops 日志(include_rewound=True 才能看到 discarded_out 条目)
+        agent_history = self._read_agent_history(
+            session_id, project_dir, include_rewound=True,
+            extra_history_roots=extra_history_roots,
+        )
+
+        # 3. 对每个文件,遍历所有 timestamp >= target_timestamp 且被 discard 标记
+        #    的 entry,取**最后一条**的 new_content(即 agent 修改后的最终态)。
+        #    不能取第一条就 break——同一 turn 内同一文件可能被多次编辑,
+        #    取中间态写回会导致 redo 后文件内容与 discard 前不一致。
+        files_to_redo: dict[str, dict[str, Any]] = {}
+        for file_path, entries in agent_history.items():
+            last_entry: dict[str, Any] | None = None
+            for entry in entries:
+                if not entry.get(_DISCARDED_KEY):
+                    continue  # 只看被 discard 标记的条目(非 rewind 的 rewound_out)
+                edit_time = self._iso_to_timestamp(entry["timestamp"])
+                if edit_time >= target_timestamp:
+                    last_entry = entry  # 持续覆盖,保留最后一条
+            if last_entry is not None:
+                if last_entry.get("new_content") is not None:
+                    files_to_redo[file_path] = {
+                        "content": last_entry["new_content"],
+                        "action": "write",
+                    }
+                else:
+                    # new_content 为 None: 文件被 agent 删除,redo 时应删除
+                    files_to_redo[file_path] = {
+                        "content": None,
+                        "action": "delete",
+                    }
+
+        return files_to_redo
+
+    def _collect_session_file_ops_paths(
+        self,
+        session_id: str,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+    ) -> list[Path]:
+        """收集所有 session-specific file_ops 文件路径。
+
+        扫描范围与 ``truncate_file_ops_by_timestamp`` 一致:
+        agent/user workspace、project_dir、extra_history_roots(含 worktree 容器)。
+        """
+        file_ops_paths: list[Path] = []
+
+        for base_dir in (get_agent_workspace_dir(), get_user_workspace_dir()):
+            hist_dir = base_dir / ".agent_history"
+            if not hist_dir.is_dir():
+                continue
+            for f in hist_dir.iterdir():
+                if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
+                    file_ops_paths.append(f)
+
+        resolved_project_dir = project_dir or self._get_project_dir_from_metadata(session_id)
+        if resolved_project_dir:
+            project_hist_dir = Path(resolved_project_dir) / ".agent_history"
+            if project_hist_dir.is_dir():
+                for f in project_hist_dir.iterdir():
+                    if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
+                        if f not in file_ops_paths:
+                            file_ops_paths.append(f)
+        extra_roots = self._history_roots_with_worktree_containers(
+            resolved_project_dir,
+            extra_history_roots,
+        )
+
+        for project_hist_dir in self._agent_history_dirs_for_roots(
+            extra_roots,
+            include_child_workspaces=True,
+        ):
+            if project_hist_dir.is_dir():
+                for f in project_hist_dir.iterdir():
+                    if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
+                        if f not in file_ops_paths:
+                            file_ops_paths.append(f)
+
+        return file_ops_paths
 
     def truncate_file_ops_by_timestamp(
         self,
         session_id: str,
         cutoff_ts: float,
         project_dir: str | None = None,
+        soft: bool = False,
+        *,
+        extra_history_roots: list[str] | None = None,
+        discarded: bool = False,
     ) -> None:
         """截断 file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
+
+        ``soft`` 决定"截断"的含义，取值应与调用方**是否同时还原了工作区文件**一致:
+
+           - ``soft=False``(硬删除,默认): 条目被物理移除。仅当调用方已经把这些
+             文件写回原始内容时才正确(如 ``discard_turn_changes``)——文件已回到
+             旧状态，快照失去意义。
+           - ``soft=True``(软删除): 条目保留 ``old_content``，只打上软删除标记。
+             用于**只回退对话、不动文件**的场景(``rewind_session`` 的
+             conversation 模式、``compact_partial_session``)或需要保留快照供
+             redo 的场景(``discard_turn_changes``)。此时硬删除会让文件
+             陷入"已被修改、但系统不再持有其原始内容"的状态，后续任何 /rewind 都
+             无法还原它，且不会报错(issue #2241)。标记后显示层照旧看不到这些条目，
+             还原层仍可用——显示一致性与回滚能力各取所需。
+
+        ``discarded`` 控制 ``soft=True`` 时使用哪种标记(仅 ``soft=True`` 时有意义):
+
+           - ``discarded=False``(默认): 打 ``rewound_out`` 标记(conversation
+             rewind / compact 路径)。``restore_rewound_entries_by_timestamp``
+             默认也只恢复 ``rewound_out``。
+           - ``discarded=True``: 打 ``discarded_out`` 标记(``discard_turn_changes``
+             路径)。与 ``rewound_out`` 区分后,``redo_turn_changes`` 只恢复
+             ``discarded_out`` 条目,不会误暴露此前 conversation rewind 软隐藏的
+             "未来"条目,避免 last turn diff 混入不属于当前 history 的修改。
 
         在 rewind / discard_turn_changes 操作后调用，确保 file_ops 日志与
         截断后的 history.json / 实际工作区一致。
@@ -1541,28 +2223,15 @@ class DiffService:
                 覆盖 ``channel_metadata.cwd`` 缺失的场景(如 Web/code 模式新会话)。
                 为 ``None`` 时底层从 session metadata 推断(读取顺序见
                 ``_get_project_dir_from_metadata``)。
+            soft: 见上文。调用方未还原工作区文件时必须传 ``True``。
+            discarded: 见上文。``soft=True`` 时决定标记类型。
         """
 
-        # 收集所有 session-specific file_ops 文件
-        file_ops_paths: list[Path] = []
+        marker = _DISCARDED_KEY if discarded else _REWOUND_KEY
 
-        for base_dir in (get_agent_workspace_dir(), get_user_workspace_dir()):
-            hist_dir = base_dir / ".agent_history"
-            if not hist_dir.is_dir():
-                continue
-            for f in hist_dir.iterdir():
-                if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
-                    file_ops_paths.append(f)
-
-        # 也从项目目录扫描(显式传入优先,否则从 metadata 推断)
-        resolved_project_dir = project_dir or self._get_project_dir_from_metadata(session_id)
-        if resolved_project_dir:
-            project_hist_dir = Path(resolved_project_dir) / ".agent_history"
-            if project_hist_dir.is_dir():
-                for f in project_hist_dir.iterdir():
-                    if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
-                        if f not in file_ops_paths:
-                            file_ops_paths.append(f)
+        file_ops_paths = self._collect_session_file_ops_paths(
+            session_id, project_dir, extra_history_roots=extra_history_roots,
+        )
 
         for file_ops_path in file_ops_paths:
             try:
@@ -1584,6 +2253,14 @@ class DiffService:
                             continue
                         if entry_ts < cutoff_ts:
                             filtered.append(e)
+                        elif soft:
+                            # 保留快照(old_content)，仅对显示层隐藏
+                            if not e.get(marker):
+                                e[marker] = True
+                                truncated = True
+                            filtered.append(e)
+                        else:
+                            truncated = True
                     if len(filtered) != len(entries):
                         truncated = True
                     if filtered:
@@ -1595,12 +2272,87 @@ class DiffService:
                         encoding="utf-8",
                     )
                     logger.info(
-                        "truncate_file_ops: cleaned %s (cutoff_ts=%s)",
-                        file_ops_path.name, cutoff_ts,
+                        "truncate_file_ops: cleaned %s (cutoff_ts=%s, soft=%s, marker=%s)",
+                        file_ops_path.name, cutoff_ts, soft, marker,
                     )
             except Exception as exc:
                 logger.warning(
                     "truncate_file_ops: failed to process %s: %s",
+                    file_ops_path, exc,
+                )
+
+    def restore_rewound_entries_by_timestamp(
+        self,
+        session_id: str,
+        cutoff_ts: float,
+        project_dir: str | None = None,
+        *,
+        extra_history_roots: list[str] | None = None,
+        discarded: bool = False,
+    ) -> None:
+        """去掉 file_ops 中 timestamp >= cutoff_ts 的条目的软删除标记.
+
+        与 ``truncate_file_ops_by_timestamp(soft=True)`` 对称:
+        后者加标记(隐藏条目),本方法去标记(恢复条目可见性)。
+        用于 ``redo_turn_changes`` 恢复被 ``discard(soft)`` 隐藏的 file_ops 条目。
+
+        ``discarded`` 控制恢复哪种标记,应与当初打标记时一致:
+
+           - ``discarded=False``(默认): 恢复 ``rewound_out`` 条目
+             (conversation rewind 路径)。
+           - ``discarded=True``: 恢复 ``discarded_out`` 条目
+             (``discard_turn_changes`` → ``redo_turn_changes`` 路径)。
+             只恢复 discard 标记,不触碰 rewind 标记,避免误暴露此前
+             conversation rewind 软隐藏的"未来"条目。
+
+        Args:
+            session_id: 会话 ID
+            cutoff_ts: 阈值(Unix timestamp),>= 此时间的匹配标记条目将被恢复
+            project_dir: 项目目录路径(可选)
+        """
+        marker = _DISCARDED_KEY if discarded else _REWOUND_KEY
+
+        file_ops_paths = self._collect_session_file_ops_paths(
+            session_id, project_dir, extra_history_roots=extra_history_roots,
+        )
+
+        for file_ops_path in file_ops_paths:
+            try:
+                data = json.loads(file_ops_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    continue
+
+                restored = False
+                new_data: dict[str, Any] = {}
+                for file_path, entries in data.items():
+                    if not isinstance(entries, list):
+                        continue
+                    filtered = []
+                    for e in entries:
+                        try:
+                            entry_ts = self._iso_to_timestamp(e.get("timestamp", ""))
+                        except (ValueError, TypeError):
+                            filtered.append(e)
+                            continue
+                        if entry_ts >= cutoff_ts and e.get(marker):
+                            e.pop(marker, None)
+                            restored = True
+                        filtered.append(e)
+                    if filtered:
+                        new_data[file_path] = filtered
+
+                if restored:
+                    file_ops_path.write_text(
+                        json.dumps(new_data, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    logger.info(
+                        "restore_rewound_entries: restored %s (cutoff_ts=%s, marker=%s)",
+                        file_ops_path.name, cutoff_ts, marker,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "restore_rewound_entries: failed to process %s: %s",
                     file_ops_path, exc,
                 )
 
