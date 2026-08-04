@@ -12,28 +12,33 @@
     export AGENT_EXTRA_RAILS=jiuwenclaw.agentserver.extensions.perf_trace_rail
     # 可选关闭（默认开）
     # export PERF_TRACE_ENABLED=false
+    # 详情日志（请求/响应原文，默认关；敏感模式下强制不打印）
+    # export PERF_TRACE_DETAIL=true
 
 trace_id 来源：优先复用 TelemetryRail 的 _request_context.request_id（DeepAdapter 在
-invoke 前设置），回退 session_id，最后兜底生成。与 TelemetryRail 共存不冲突（priority
-不同：PerfTraceRail=5 早于 TelemetryRail=10）。
+invoke 前设置），回退 session_id，最后兜底生成。与 TelemetryRail 共存不冲突（回调框架
+按 priority 降序执行，高者先跑；PerfTraceRail=5 晚于 TelemetryRail=10）。
 
 skill 阶段：skill 执行走 skill_step / skill_complete tool，before/after_tool_call 自动
 捕获（tool_name=skill_step），无需专门 skill 钩子。
 
+iter 语义：iter=外层 task-loop 迭代号（before_task_iteration 递增），不是内层 ReAct
+model_call 次数；一轮 iter 内可能含多次 model_call，它们共用同一 iter 号。
+
 日志样例（一次请求，2 轮 ReAct）::
 
-    [perf] trace_id=req_xxx phase=invoke start
-    [perf] trace_id=req_xxx phase=iter start iter=1
-    [perf] trace_id=req_xxx phase=model start iter=1
-    [perf] trace_id=req_xxx phase=model end iter=1 elapsed_ms=5547.8
-    [perf] trace_id=req_xxx phase=tool start tool=search_web
-    [perf] trace_id=req_xxx phase=tool end tool=search_web elapsed_ms=1230.5
-    [perf] trace_id=req_xxx phase=iter end iter=1 elapsed_ms=6790.3
-    [perf] trace_id=req_xxx phase=iter start iter=2
-    [perf] trace_id=req_xxx phase=model start iter=2
-    [perf] trace_id=req_xxx phase=model end iter=2 elapsed_ms=3201.1
-    [perf] trace_id=req_xxx phase=iter end iter=2 elapsed_ms=3205.4
-    [perf] trace_id=req_xxx phase=invoke end elapsed_ms=10002.7
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=invoke start
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=iter start iter=1
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model start iter=1
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model end iter=1 elapsed_ms=5547.8
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=tool start tool=search_web
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=tool end tool=search_web elapsed_ms=1230.5
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=iter end iter=1 elapsed_ms=6790.3
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=iter start iter=2
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model start iter=2
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model end iter=2 elapsed_ms=3201.1
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=iter end iter=2 elapsed_ms=3205.4
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=invoke end elapsed_ms=10002.7
 """
 
 from __future__ import annotations
@@ -61,10 +66,28 @@ _ENABLED = os.getenv("PERF_TRACE_ENABLED", "true").strip().lower() not in (
     "false", "0", "no", "off",
 )
 # 是否打印请求/响应详情（messages / response / tool args / tool result）
-_DETAIL = os.getenv("PERF_TRACE_DETAIL", "true").strip().lower() not in (
+# 默认关：详情会打印用户原文，生产环境慎开；且敏感模式下强制不打印。
+_DETAIL = os.getenv("PERF_TRACE_DETAIL", "false").strip().lower() not in (
     "false", "0", "no", "off",
 )
 _MAX_DETAIL = int(os.getenv("PERF_TRACE_DETAIL_MAX", "2000"))
+
+
+def _safe_is_sensitive() -> bool:
+    """框架敏感模式下应脱敏，不打印请求/响应原文。
+
+    懒导入避免硬依赖；与 task_loop_event_executor 的 UserConfig.is_sensitive() 同源。
+    """
+    try:
+        from openjiuwen.core.common.security.user_config import UserConfig
+        return bool(UserConfig.is_sensitive())
+    except Exception:
+        return False
+
+
+def _should_log_detail() -> bool:
+    """是否打印请求/响应详情：需 DETAIL 开启且当前非敏感模式。"""
+    return _DETAIL and not _safe_is_sensitive()
 
 
 def _resolve_trace_id(ctx: Any) -> str:
@@ -79,8 +102,8 @@ def _resolve_trace_id(ctx: Any) -> str:
         rc = _request_context.get()
         if rc and rc.get("request_id"):
             return str(rc["request_id"])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[perf] trace_id: telemetry context unavailable, falling back: %s", exc)
     # 2. ctx.inputs.conversation_id / session_id（session 级兜底）
     try:
         inputs = getattr(ctx, "inputs", None)
@@ -91,8 +114,8 @@ def _resolve_trace_id(ctx: Any) -> str:
             )
             if cid:
                 return str(cid)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[perf] trace_id: inputs fallback unavailable: %s", exc)
     # 3. 兜底
     return f"perf_{time.monotonic_ns():x}"
 
@@ -105,8 +128,8 @@ def _resolve_session_id(ctx: Any) -> str:
         rc = _request_context.get()
         if rc and rc.get("session_id"):
             return str(rc["session_id"])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[perf] session_id: telemetry context unavailable, falling back: %s", exc)
     try:
         inputs = getattr(ctx, "inputs", None)
         if inputs is not None:
@@ -116,8 +139,8 @@ def _resolve_session_id(ctx: Any) -> str:
             )
             if sid:
                 return str(sid)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[perf] session_id: inputs fallback unavailable: %s", exc)
     return ""
 
 
@@ -171,8 +194,11 @@ def _msg_summary(messages: Any) -> str:
     if not messages:
         return "[]"
     try:
+        msgs = list(messages)
+        if len(msgs) > 8:
+            return f"[{len(msgs)} msgs]"
         parts = []
-        for msg in messages:
+        for msg in msgs:
             role = getattr(msg, "role", None)
             if role is None and isinstance(msg, dict):
                 role = msg.get("role", "?")
@@ -180,7 +206,7 @@ def _msg_summary(messages: Any) -> str:
             if content is None and isinstance(msg, dict):
                 content = msg.get("content", "")
             parts.append(f"{{role={role},content={_truncate(content, 300)}}}")
-        return f"[{','.join(parts)}]" if len(parts) <= 8 else f"[{len(parts)} msgs]"
+        return f"[{','.join(parts)}]"
     except Exception:
         return "<unreadable>"
 
@@ -223,7 +249,9 @@ def _tool_result_str(inputs: Any) -> str:
 class PerfTraceRail(DeepAgentRail):
     """性能追踪 Rail：统一 trace_id + 各阶段耗时日志（INFO 级，不依赖 OTel 后端）。
 
-    priority=5，早于业务 rail（TelemetryRail=10），捕获完整时间线。
+    回调框架按 priority 降序执行（高者先跑），且 before/after 同序、不反转；
+    priority=5 晚于 TelemetryRail=10（注意是"晚于"而非"早于"），各阶段耗时因此包含
+    TelemetryRail 的 after 钩子开销、不含其 before 开销（亚毫秒级，不影响定位）。
     before/after 钩子共用同一个 ctx 对象，靠 setattr 传递 call_id。
     """
 
@@ -248,11 +276,11 @@ class PerfTraceRail(DeepAgentRail):
             return
         logger.info(
             "[perf] %s phase=invoke end elapsed_ms=%.1f",
-            _log_kv(),_elapsed("invoke"),
+            _log_kv(), _elapsed("invoke"),
         )
 
     # ------------------------------------------------------------------
-    # task_iteration - 每轮 ReAct 迭代
+    # task_iteration - 每轮外层 task-loop 迭代（一轮内可能含多次 model_call）
     # ------------------------------------------------------------------
     async def before_task_iteration(self, ctx: Any) -> None:
         if not _ENABLED:
@@ -260,7 +288,7 @@ class PerfTraceRail(DeepAgentRail):
         n = _iter.get() + 1
         _iter.set(n)
         _mark("iter", str(n))
-        logger.info("[perf] %s phase=iter start iter=%d", _log_kv(),n)
+        logger.info("[perf] %s phase=iter start iter=%d", _log_kv(), n)
 
     async def after_task_iteration(self, ctx: Any) -> None:
         if not _ENABLED:
@@ -268,7 +296,7 @@ class PerfTraceRail(DeepAgentRail):
         n = _iter.get()
         logger.info(
             "[perf] %s phase=iter end iter=%d elapsed_ms=%.1f",
-            _log_kv(),n, _elapsed("iter", str(n)),
+            _log_kv(), n, _elapsed("iter", str(n)),
         )
 
     # ------------------------------------------------------------------
@@ -281,13 +309,13 @@ class PerfTraceRail(DeepAgentRail):
         call_id = str(time.monotonic_ns())
         setattr(ctx, "_perf_model_call_id", call_id)
         _mark("model", call_id)
-        logger.info("[perf] %s phase=model start iter=%d", _log_kv(),n)
-        if _DETAIL:
+        logger.info("[perf] %s phase=model start iter=%d", _log_kv(), n)
+        if _should_log_detail():
             inputs = getattr(ctx, "inputs", None)
             msgs = getattr(inputs, "messages", None) if inputs else None
             logger.info(
                 "[perf] %s phase=model req iter=%d messages=%s",
-                _log_kv(),n, _msg_summary(msgs),
+                _log_kv(), n, _msg_summary(msgs),
             )
 
     async def after_model_call(self, ctx: Any) -> None:
@@ -296,14 +324,14 @@ class PerfTraceRail(DeepAgentRail):
         call_id = getattr(ctx, "_perf_model_call_id", "")
         logger.info(
             "[perf] %s phase=model end iter=%d elapsed_ms=%.1f",
-            _log_kv(),_iter.get(), _elapsed("model", call_id),
+            _log_kv(), _iter.get(), _elapsed("model", call_id),
         )
-        if _DETAIL:
+        if _should_log_detail():
             inputs = getattr(ctx, "inputs", None)
             resp = getattr(inputs, "response", None) if inputs else None
             logger.info(
                 "[perf] %s phase=model resp iter=%d %s",
-                _log_kv(),_iter.get(), _response_summary(resp),
+                _log_kv(), _iter.get(), _response_summary(resp),
             )
 
     # ------------------------------------------------------------------
@@ -319,13 +347,13 @@ class PerfTraceRail(DeepAgentRail):
         _mark("tool", call_id)
         logger.info(
             "[perf] %s phase=tool start tool=%s",
-            _log_kv(),tool_name,
+            _log_kv(), tool_name,
         )
-        if _DETAIL:
+        if _should_log_detail():
             inputs = getattr(ctx, "inputs", None)
             logger.info(
                 "[perf] %s phase=tool req tool=%s args=%s",
-                _log_kv(),tool_name, _tool_args(inputs),
+                _log_kv(), tool_name, _tool_args(inputs),
             )
 
     async def after_tool_call(self, ctx: Any) -> None:
@@ -345,13 +373,13 @@ class PerfTraceRail(DeepAgentRail):
             return
         logger.info(
             "[perf] %s phase=tool end tool=%s elapsed_ms=%.1f",
-            _log_kv(),tool_name, elapsed,
+            _log_kv(), tool_name, elapsed,
         )
-        if _DETAIL:
+        if _should_log_detail():
             inputs = getattr(ctx, "inputs", None)
             logger.info(
                 "[perf] %s phase=tool resp tool=%s result=%s",
-                _log_kv(),tool_name, _tool_result_str(inputs),
+                _log_kv(), tool_name, _tool_result_str(inputs),
             )
 
 
