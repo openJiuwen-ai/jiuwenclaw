@@ -37,6 +37,16 @@ from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
+    PLAN_EXECUTE_OPTION_VALUES,
+    PLAN_REMINDER_ORIGINAL_QUERY_KEY,
+    PLAN_SKIP_OPTION_VALUES,
+    plan_skip_feedback,
+)
+from jiuwenswarm.common.mode_matrix import (
+    is_web_composable_mode,
+    read_request_work_mode,
+)
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.chat_final import ensure_final_mode_inplace
@@ -85,11 +95,19 @@ def _history_user_content(params: Any, query: Any) -> Any:
 
     追加补充/调整请求时，``query`` 是包装后的提示词模板，会把模型提示词暴露到
     历史记录里。这里优先使用原始用户输入 ``supplement_input`` 作为展示内容。
+
+    进入 plan 的那一轮同理：``query`` 前面被拼了一段 <system-reminder>，历史里
+    要还原成用户原文，否则重新加载会话会把提示词当成用户提问显示出来。
     """
-    if isinstance(params, dict) and params.get("is_supplement"):
+    if not isinstance(params, dict):
+        return query
+    if params.get("is_supplement"):
         supplement_input = params.get("supplement_input")
         if isinstance(supplement_input, str) and supplement_input.strip():
             return supplement_input
+    original_query = params.get(PLAN_REMINDER_ORIGINAL_QUERY_KEY)
+    if isinstance(original_query, str):
+        return original_query
     return query
 
 
@@ -895,14 +913,22 @@ class JiuWenSwarm:
 
     @staticmethod
     def _adapter_mode_for_request(request: AgentRequest) -> str:
+        """选择 Deep / Code adapter。
+
+        Web 请求（显式携带 ``work_mode``）由 ``work_mode`` 决定 profile：
+        ``code`` 走 CodeAdapter，``work`` 走 DeepAdapter。TUI 等历史客户端不带
+        ``work_mode``，继续按完整 mode 串判定，行为不变。
+        """
         params = request.params if isinstance(request.params, dict) else {}
+        work_mode = read_request_work_mode(params)
         raw_mode = params.get("mode", "")
-        if isinstance(raw_mode, str):
-            mode = raw_mode.strip().lower()
-            if mode == "team.plan":
-                return "code"
-            if mode == "code" or mode.startswith("code."):
-                return "code"
+        mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else ""
+        if work_mode is not None and is_web_composable_mode(mode or "agent"):
+            return "code" if work_mode == "code" else "agent"
+        if mode == "team.plan":
+            return "code"
+        if mode == "code" or mode.startswith("code."):
+            return "code"
         return "agent"
 
     async def create_instance(self, config: dict[str, Any] | None = None, *,
@@ -1424,6 +1450,27 @@ class JiuWenSwarm:
                 "auto_confirm": True,
                 "persist_allow": True,
                 "feedback": "",
+            }
+        elif value in PLAN_EXECUTE_OPTION_VALUES:
+            # Web 的"执行"：批准并退出 plan，但本轮不再调模型。真正的执行由前端
+            # 紧接着补发的普通消息开启新一轮完成。``plan_execute`` 是额外键，
+            # ConfirmPayload 会忽略它，rail 在校验前从原始 dict 读取。
+            confirm_payload = {
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+                "plan_execute": True,
+            }
+        elif value in PLAN_SKIP_OPTION_VALUES:
+            # Web 的"跳过"：不退出 plan，也不继续修改，直接结束本轮。
+            # ``plan_skip`` 是额外键，ConfirmPayload 会忽略它；
+            # PlanApprovalInterruptRail 在校验前从原始 dict 读取该标记。
+            confirm_payload = {
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input
+                or plan_skip_feedback(get_config().get("preferred_language")),
+                "plan_skip": True,
             }
         elif value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
             feedback = custom_input or (
@@ -2462,7 +2509,7 @@ class JiuWenSwarm:
                             should_record = et.startswith("chat.")
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
-                            if et == "context_compression_state":
+                            if et == "context.compression_state":
                                 _append_compact_history_from_payload(
                                     payload=data.payload,
                                     session_id=session_id,
@@ -2575,7 +2622,7 @@ class JiuWenSwarm:
                         should_record = et.startswith("chat.")
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
-                        if et == "context_compression_state":
+                        if et == "context.compression_state":
                             _append_compact_history_from_payload(
                                 payload=data,
                                 session_id=session_id,
@@ -2798,6 +2845,20 @@ class JiuWenSwarm:
         if self._adapter is None:
             return None
         return await self._adapter.ensure_instance()
+
+    def get_live_session_instance(self, session_id: str | None):
+        """Return the DeepAgent already running ``session_id``, if any.
+
+        Returns None when no adapter exists, when the adapter predates this
+        accessor, or when the session has not started a child adapter yet.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return None
+        getter = getattr(adapter, "get_live_session_instance", None)
+        if getter is None:
+            return None
+        return getter(session_id)
 
     async def apply_package_change_to_session_adapters(
         self,

@@ -25,7 +25,8 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'team.task',
   'harness.message',
   'harness.stage_result',
-  'harness.extension_ready'
+  'harness.extension_ready',
+  'context.compact_boundary'
 ]);
 
 /** 后端约定：最后一帧 `history.message` 使用 `payload.status: done`（兼容旧版 `payload.content: done`） */
@@ -74,7 +75,14 @@ type HistoryTimelineEntry =
   | { kind: 'team_task'; at: string; payload: { event: Record<string, unknown> } }
   | { kind: 'harness_message'; at: string; content: string; stage?: string }
   | { kind: 'harness_stage_result'; at: string; stage: string; status: string; error: string; messages: string[]; metrics: Record<string, unknown> }
+  | { kind: 'compaction'; at: string; summary: string }
   | { kind: 'reasoning'; at: string; text: string };
+
+/** 历史回放出的压缩汇总：boundary 记录计数，metadata 拼 tooltip 明细行 */
+export interface HistoryCompactionReplay {
+  count: number;
+  summaries: string[];
+}
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
@@ -87,6 +95,8 @@ interface BeginHistoryRestoreOptions {
   onTeamReplay?: (items: HistoryTeamReplayItem[]) => void;
   /** 与消息同一时间线顺序，用于恢复模型思考块（chat.reasoning） */
   onReasoningReplay?: (items: HistoryReasoningReplayItem[]) => void;
+  /** 恢复上下文压缩汇总（context.compact_boundary），用于回显「本轮完成上下文压缩 N 次」 */
+  onCompactionReplay?: (info: HistoryCompactionReplay) => void;
   /** 无消息且无工具回放时调用；`totalPages` 来自流中最后一帧（若有） */
   onEmpty?: (totalPages: number | null) => void;
   onError?: (message: string) => void;
@@ -375,6 +385,52 @@ function isTruthyHistoryFlag(value: unknown): boolean {
   return value === true || value === 'true' || value === 1 || value === '1';
 }
 
+function compactTokenCount(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
+  if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(value);
+}
+
+/** 从 boundary 记录的 compact_metadata 拼一行 tooltip 明细（兼容手动 compact 的 stats 结构） */
+function formatCompactBoundarySummary(record: Record<string, unknown>): string {
+  const meta = isRecord(record.compact_metadata) ? record.compact_metadata : null;
+  if (!meta) return '';
+  const before = isRecord(meta.before) ? meta.before : null;
+  const after = isRecord(meta.after) ? meta.after : null;
+  const saved = isRecord(meta.saved) ? meta.saved : null;
+  const beforeTokens =
+    typeof before?.tokens === 'number'
+      ? before.tokens
+      : typeof meta.raw_total_tokens === 'number'
+        ? meta.raw_total_tokens
+        : null;
+  const afterTokens =
+    typeof after?.tokens === 'number'
+      ? after.tokens
+      : typeof meta.total_tokens === 'number'
+        ? meta.total_tokens
+        : null;
+  const percent =
+    typeof saved?.percent === 'number'
+      ? saved.percent
+      : typeof meta.rate === 'number'
+        ? meta.rate
+        : null;
+  const processor =
+    typeof meta.processor === 'string' && meta.processor.trim() ? meta.processor.trim() : '';
+  const parts: string[] = [];
+  if (beforeTokens != null && afterTokens != null) {
+    parts.push(`~${compactTokenCount(beforeTokens)} -> ~${compactTokenCount(afterTokens)} tokens`);
+  }
+  if (percent != null) {
+    parts.push(`saved ${percent.toFixed(1)}%`);
+  }
+  const line = parts.join(', ');
+  if (processor && line) return `${processor}: ${line}`;
+  return processor || line;
+}
+
 function parseHistoryTimelineEntry(
   record: Record<string, unknown>,
   sessionId: string
@@ -585,6 +641,10 @@ function parseHistoryTimelineEntry(
     return { kind: 'harness_message', at, content, stage };
   }
 
+  if (eventType === 'context.compact_boundary') {
+    return { kind: 'compaction', at, summary: formatCompactBoundarySummary(record) };
+  }
+
   if (eventType === 'harness.stage_result') {
     const stage = typeof payload.stage === 'string' ? payload.stage : '';
     const status = typeof payload.status === 'string' ? payload.status : 'success';
@@ -707,6 +767,10 @@ function materializeHistoryTimeline(entries: HistoryTimelineEntry[]): Materializ
     }
     if (e.kind === 'reasoning') {
       reasoningReplay.push({ at: e.at, text: e.text });
+      continue;
+    }
+    if (e.kind === 'compaction') {
+      // 压缩边界不进 toolReplay，由 beginHistoryRestore 在循环结束后统一汇总回放
       continue;
     }
     toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
@@ -1048,6 +1112,13 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
     if (reasoningReplay.length > 0) {
       options.onReasoningReplay?.(reasoningReplay);
+    }
+    const compactionCount = entries.reduce((n, e) => (e.kind === 'compaction' ? n + 1 : n), 0);
+    if (compactionCount > 0) {
+      const compactionSummaries = entries.flatMap((e) =>
+        e.kind === 'compaction' && e.summary.trim() ? [e.summary] : []
+      );
+      options.onCompactionReplay?.({ count: compactionCount, summaries: compactionSummaries });
     }
   }
 

@@ -1122,7 +1122,12 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
         pass
 
 
-async def _restart_agent_browser_runtime(agent_client=None) -> None:
+async def _restart_agent_browser_runtime(
+    agent_client=None,
+    *,
+    previous_chrome_path: str = "",
+    previous_headless: bool = True,
+) -> None:
     """Stop active agent-side browser runtimes so the next task uses new config."""
     if agent_client is None:
         return
@@ -1134,6 +1139,14 @@ async def _restart_agent_browser_runtime(agent_client=None) -> None:
         request_id=f"browser-restart-{uuid.uuid4().hex[:8]}",
         channel_id="",
         req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+        params={
+            "browser_key": "",
+            "profile_name": (
+                os.getenv("BROWSER_PROFILE_NAME") or "jiuwenclaw"
+            ).strip(),
+            "display_mode": "headless" if previous_headless else "headed",
+            "browser_binary": str(previous_chrome_path or "").strip(),
+        },
     )
     response = await agent_client.send_request(env)
     if not response.ok:
@@ -2254,6 +2267,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             models = get_default_models(config)
             result = []
             active_model = ""
+            # 显式配置的上下文窗口上限（react.context_engine_config.context_window_tokens）
+            # 优先级高于按模型名解析，与 AgentServer 侧 ContextEngine 行为保持一致
+            cec = (config.get("react", {}) or {}).get("context_engine_config", {}) or {}
+            cw_override = cec.get("context_window_tokens")
+            if not (isinstance(cw_override, int) and cw_override > 0):
+                cw_override = None
             for idx, entry in enumerate(models):
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
@@ -2262,7 +2281,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 context_window_tokens = 0
                 try:
                     from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                    context_window_tokens = ContextUtils.resolve_context_max(model_name=model_name)
+                    context_window_tokens = ContextUtils.resolve_context_max(
+                        model_name=model_name,
+                        fallback_context_window_tokens=cw_override,
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to resolve context_window_tokens for model %s",
@@ -4689,6 +4711,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         raw_headless = params.get("headless", True)
         headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
+        current_browser_cfg = get_config().get("browser", {})
+        if not isinstance(current_browser_cfg, dict):
+            current_browser_cfg = {}
+        previous_chrome_path = current_browser_cfg.get("chrome_path", "")
+        if not isinstance(previous_chrome_path, str):
+            previous_chrome_path = ""
+        raw_previous_headless = current_browser_cfg.get("headless", True)
+        previous_headless = (
+            bool(raw_previous_headless)
+            if isinstance(raw_previous_headless, bool)
+            else True
+        )
+
         try:
             update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
             resolved_agent_client = _resolve(agent_client)
@@ -4699,7 +4734,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
 
         try:
-            await _restart_agent_browser_runtime(resolved_agent_client)
+            await _restart_agent_browser_runtime(
+                resolved_agent_client,
+                previous_chrome_path=previous_chrome_path,
+                previous_headless=previous_headless,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[path.set] browser config saved but active runtime reset failed: %s",

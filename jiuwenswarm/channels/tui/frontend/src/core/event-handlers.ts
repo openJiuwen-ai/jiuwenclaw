@@ -878,6 +878,7 @@ function handleContextCompressionState(
           sessionId: activeSessionId,
           content: formatCompressionStartedLine(processor, phase, before),
           icon: "i",
+          transcriptOnly: true,
           meta: { view: "dim" },
           at: new Date().toISOString(),
         });
@@ -1504,6 +1505,7 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
     }
 
     default:
+      console.debug("[ws] unhandled event:", effectiveEvent);
       return connectionChanged;
   }
 }

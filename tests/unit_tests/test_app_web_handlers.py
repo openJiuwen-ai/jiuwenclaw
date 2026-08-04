@@ -136,12 +136,17 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
         "update_browser_in_config",
         lambda config: saved_configs.append(config),
     )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"browser": {"chrome_path": "", "headless": True}},
+    )
 
     async def fake_clear(client):
         lifecycle_calls.append(("reload", client))
 
-    async def fake_restart(client):
-        lifecycle_calls.append(("restart", client))
+    async def fake_restart(client, **kwargs):
+        lifecycle_calls.append(("restart", client, kwargs))
 
     monkeypatch.setattr(app_web_handlers, "_clear_agent_config_cache", fake_clear)
     monkeypatch.setattr(
@@ -165,7 +170,14 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     ]
     assert lifecycle_calls == [
         ("reload", agent_client),
-        ("restart", agent_client),
+        (
+            "restart",
+            agent_client,
+            {
+                "previous_chrome_path": "",
+                "previous_headless": True,
+            },
+        ),
     ]
     assert channel.responses[-1] == {
         "id": "req-path",

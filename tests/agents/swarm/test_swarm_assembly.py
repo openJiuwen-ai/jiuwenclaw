@@ -55,6 +55,9 @@ from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.rails import SkillUseRail
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.agents.swarm import (
     SwarmBuildContext,
     enrich_team_spec_for_swarm,
@@ -2300,6 +2303,31 @@ def test_browser_subagent_spec_included_when_enabled() -> None:
     subs = build_member_subagent_specs(config, "code.team", "leader")
     factory_names = [s.factory_name for s in subs]
     assert SWARM_BROWSER_AGENT in factory_names
+    browser_spec = next(s for s in subs if s.factory_name == SWARM_BROWSER_AGENT)
+    assert (
+        browser_spec.factory_kwargs["max_iterations"]
+        == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    )
+
+
+def test_browser_subagent_spec_honors_explicit_iteration_budget() -> None:
+    """An explicit browser budget wins over the generous browser default."""
+    config = {
+        "react": {
+            "max_iterations": 9,
+            "subagents": {
+                "browser_agent": {
+                    "enabled": True,
+                    "max_iterations": 23,
+                },
+            },
+        },
+    }
+
+    subs = build_member_subagent_specs(config, "code.team", "leader")
+    browser_spec = next(s for s in subs if s.factory_name == SWARM_BROWSER_AGENT)
+
+    assert browser_spec.factory_kwargs["max_iterations"] == 23
 
 
 def test_browser_subagent_spec_excluded_when_disabled() -> None:
@@ -2363,6 +2391,10 @@ def test_browser_subagent_provider_passes_correct_browser_key(
     assert result is not None
     assert len(captured) == 1
     assert captured[0]["browser_key"] == "sess42-browser-usd-sgd"
+    assert (
+        captured[0]["max_iterations"]
+        == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    )
 
 
 def test_browser_subagent_teammates_get_distinct_keys(

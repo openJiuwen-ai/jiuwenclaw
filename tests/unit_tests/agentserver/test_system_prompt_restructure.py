@@ -14,6 +14,9 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 )
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.common import utils as _utils_mod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
@@ -1203,4 +1206,9 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     # DeepAdapter: no research_agent configured, browser enabled
     assert subagents == ["browser_spec"]
     mock_research.assert_not_called()
-    mock_browser.assert_called_once()
+    mock_browser.assert_called_once_with(
+        model,
+        workspace="/tmp/jiuwenswarm-workspace",
+        language="cn",
+        max_iterations=DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+    )

@@ -126,6 +126,9 @@ from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
     register_blank_agent_if_teammate,
     resolve_a2x_config,
 )
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
@@ -173,7 +176,6 @@ from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-from jiuwenswarm.server.runtime.prompt_attachment_loader import PromptAttachmentLoader
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
     EVOLUTION_EXECUTE_LABELS,
@@ -299,7 +301,6 @@ from jiuwenswarm.common.utils import (
     get_checkpoint_dir,
     get_default_project_session_workspace_dir,
     get_env_file,
-    get_prompt_attachment_dir,
     get_runtime_state_path,
     reset_free_search_runtime_flags,
 )
@@ -716,6 +717,12 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
             "enable_openrouter_model_context_window_tokens": bool(
                 cec.get("enable_openrouter_model_context_window_tokens", False)
             ),
+            # 显式设置的上下文窗口上限；非法值回退 None（由 agent-core 按模型解析）
+            "context_window_tokens": parse_int(cec.get("context_window_tokens"), None),
+            # 上下文压缩 debug 落盘开关；目录缺省时由 agent-core 按
+            # OPENJIUWEN_CONTEXT_DEBUG_DIR / workspace 默认路径解析
+            "enable_context_debug": bool(cec.get("enable_context_debug", False)),
+            "context_debug_dir": cec.get("context_debug_dir") or None,
         }
     )
 
@@ -886,8 +893,9 @@ async def ensure_persistent_checkpointer() -> None:
 
 _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
     "agent": {"cn": "智能体模式", "en": "Agent Mode"},
+    # Web 的 work 单 agent 计划模式（mode=agent.plan + work_mode=work）。
+    "agent.plan": {"cn": "计划模式", "en": "Plan Mode"},
     # 历史 token 归一到合并后的 agent 显示名（兼容旧会话 / 旧请求）。
-    "agent.plan": {"cn": "智能体模式", "en": "Agent Mode"},
     "agent.fast": {"cn": "智能体模式", "en": "Agent Mode"},
     "team": {"cn": "集群模式", "en": "Cluster Mode"},
     "team.plan": {"cn": "集群计划模式", "en": "Cluster Plan Mode"},
@@ -1032,7 +1040,6 @@ class JiuWenSwarmDeepAdapter:
         self._context_processor_rail: ContextProcessorRail | None = None
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
-        self._prompt_attachment_loader: PromptAttachmentLoader | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
@@ -1053,6 +1060,7 @@ class JiuWenSwarmDeepAdapter:
         self._ask_user_rail: StructuredAskUserRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
+        self._memory_forbidden_rail: Any = None
         self._tool_cards = None
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
         self._sys_operation = None
@@ -2243,7 +2251,7 @@ class JiuWenSwarmDeepAdapter:
                             if isinstance(browser_agent_cfg, dict)
                             else None
                         ),
-                        react_cfg.get("max_iterations", 15),
+                        DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
                     ),
                 )
             )
@@ -3371,11 +3379,16 @@ class JiuWenSwarmDeepAdapter:
             return True
         return self._vision_model_config is None
 
-    def _resolve_enable_read_image_multimodal(self, config: dict[str, Any]) -> bool:
+    def _resolve_enable_read_image_multimodal(
+        self,
+        config: dict[str, Any],
+    ) -> bool | None:
         configured = config.get("enable_read_image_multimodal")
         if isinstance(configured, bool):
             return configured
-        return self._vision_model_config is None
+        if self._vision_model_config is not None:
+            return False
+        return None
 
     def _apply_model_to_react_agent(self, model: Model) -> None:
         """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。
@@ -4408,6 +4421,21 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     @staticmethod
+    def _build_memory_forbidden_rail() -> Any | None:
+        """Build the execution-time sensitive-memory write guard."""
+        try:
+            from jiuwenswarm.agents.harness.common.rails.memory_forbidden_rail import (
+                MemoryForbiddenRail,
+            )
+
+            rail = MemoryForbiddenRail()
+            logger.info("[JiuWenSwarmDeepAdapter] MemoryForbiddenRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] MemoryForbiddenRail create failed: %s", exc)
+            return None
+
+    @staticmethod
     def _build_llm_retry_rail(config_base: dict[str, Any] | None = None) -> LLMRetryRail | None:
         try:
             config_base = config_base or get_config()
@@ -4596,8 +4624,44 @@ class JiuWenSwarmDeepAdapter:
         )
         return rails_list
 
+    def _build_work_agent_mode_rail(self) -> Any | None:
+        """构建 work profile 的 plan rail（只读白名单 + 通用工作计划提示词）。
+
+        与 code 侧的区别只在构造参数：work 不引用 explore_agent / plan_agent，
+        白名单只放调研与计划文件写入，其余会产生业务副作用的工具在 plan 期间
+        一律被拦截。
+        """
+        try:
+            from jiuwenswarm.agents.harness.work.rails.work_agent_mode_rail import (
+                WorkAgentModeRail,
+            )
+
+            return WorkAgentModeRail(language=self._resolve_runtime_language())
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] WorkAgentModeRail create failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _build_work_plan_approval_rail() -> Any | None:
+        """构建 work plan 的审批 rail（``exit_plan_mode`` 即时弹窗）。"""
+        try:
+            from jiuwenswarm.agents.harness.code.rails.code_plan_approval_interrupt_rail import (
+                PlanApprovalInterruptRail,
+            )
+
+            return PlanApprovalInterruptRail()
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] PlanApprovalInterruptRail create failed: %s", exc
+            )
+            return None
+
     def _build_agent_rails(
-        self, config: dict[str, Any], config_base: dict[str, Any], *, mode: str = "agent"
+        self,
+        config: dict[str, Any],
+        config_base: dict[str, Any],
+        *,
+        mode: str = "agent",
     ) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
         rail_infos = [
@@ -4621,6 +4685,7 @@ class JiuWenSwarmDeepAdapter:
             ),
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
+            _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
             _RailBuildInfo(
                 "_permission_rail",
@@ -4671,6 +4736,20 @@ class JiuWenSwarmDeepAdapter:
         )
         if isinstance(mode, str) and mode.startswith("agent"):
             rail_infos.append(_RailBuildInfo("_ask_user_rail", self._build_structured_ask_user_rail))
+
+            # work 单 agent 常挂 plan rails，与 code 侧一致：plan 是会话运行期状态，
+            # 不是另一种 agent 装配，所以不能按 sub_mode 决定挂不挂——否则开关 Plan
+            # 就得换 agent 实例，内存里的对话上下文会跟着一起丢。
+            #
+            # 非 plan 态它们几乎不做事：``AgentModeRail.before_model_call`` 会把
+            # enter/exit_plan_mode 从模型可见工具里滤掉（``WorkAgentModeRail`` 再补上
+            # switch_mode），审批 rail 只拦 ``exit_plan_mode``，普通模式下不会触发。
+            rail_infos.append(
+                _RailBuildInfo("_work_agent_mode_rail", self._build_work_agent_mode_rail)
+            )
+            rail_infos.append(
+                _RailBuildInfo("_work_plan_approval_rail", self._build_work_plan_approval_rail)
+            )
 
         return self._instantiate_rails(rail_infos, config_base)
 
@@ -4841,6 +4920,8 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._memory_rail)
         if self._avatar_rail is not None:
             rails_list.append(self._avatar_rail)
+        if self._memory_forbidden_rail is not None:
+            rails_list.append(self._memory_forbidden_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
         return rails_list
@@ -5143,6 +5224,30 @@ class JiuWenSwarmDeepAdapter:
         """
         return not self._is_session_scoped_adapter and not self._root_instance_requested
 
+    def get_live_session_instance(self, session_id: str | None) -> Any | None:
+        """Return the already-running DeepAgent that owns ``session_id``.
+
+        Chat turns run on a session-scoped child adapter, and
+        ``DeepAgent.load_state`` caches its snapshot on the bound Session object.
+        Callers that mutate session state outside a chat turn (plan mode sync)
+        must therefore reach that instance instead of a throwaway session, or
+        the running conversation keeps reading the pre-change snapshot.
+
+        Returns:
+            The live DeepAgent, or None when this session has not started one yet
+            (first turn of a session) — the caller should then fall back to the
+            checkpointer, which ``start_interaction`` reads on creation.
+        """
+        if self._is_session_scoped_adapter:
+            return self._instance
+        adapter = self._get_cached_session_adapter(session_id)
+        if adapter is None:
+            return None
+        # 子适配器一定是 session 级的（``_new_session_scoped_adapter`` 建完就
+        # ``mark_as_session_scoped``），所以这一跳递归只会走上面那个分支返回它自己的
+        # 实例，不会再往下递归。
+        return adapter.get_live_session_instance(session_id)
+
     async def ensure_instance(self) -> Any:
         """Return this adapter's own DeepAgent, building it on first use.
 
@@ -5209,9 +5314,6 @@ class JiuWenSwarmDeepAdapter:
             "project_dir", config.get("project_dir")
         )
         self._workspace_dir = config.get("workspace_dir", str(get_agent_workspace_dir()))
-        self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
-        self._prompt_attachment_loader.ensure_layout()
-
         if self._skip_own_instance_build():
             return
 
@@ -5382,31 +5484,6 @@ class JiuWenSwarmDeepAdapter:
             if all(seg in ("*", "**") for seg in segments[1:]):
                 return True
         return False
-
-    async def _sync_prompt_attachments_for_request(self, session_id: str) -> None:
-        """Hot-load prompt attachment files for the current request.
-
-        Prompt attachment loading must not block the user request path. Failures are
-        logged and the original Runner flow continues without attachment injection.
-        """
-
-        if self._instance is None:
-            return
-        if self._prompt_attachment_loader is None:
-            self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
-            self._prompt_attachment_loader.ensure_layout()
-        try:
-            await self._prompt_attachment_loader.sync_to_agent(
-                self._instance,
-                session_id=session_id,
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] prompt attachment sync skipped: %s", exc)
-
-    def _prompt_attachment_root(self) -> Path:
-        if self._workspace_dir == str(get_agent_workspace_dir()):
-            return get_prompt_attachment_dir()
-        return Path(self._workspace_dir) / "prompt_attachment"
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
@@ -8507,7 +8584,6 @@ class JiuWenSwarmDeepAdapter:
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
             )
-            await self._sync_prompt_attachments_for_request(session_id)
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
             )
@@ -9008,7 +9084,6 @@ class JiuWenSwarmDeepAdapter:
                     payload=image_tool_fallback_notice,
                     is_complete=False,
                 )
-            await self._sync_prompt_attachments_for_request(session_id)
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
             )
@@ -9697,7 +9772,12 @@ class JiuWenSwarmDeepAdapter:
                     getattr(self._model_request_config, "model_name", "") or ""
                     if self._model_request_config else ""
                 )
-                cw_fallback = ContextUtils.resolve_context_max(model_name=model_name)
+                # 与 ContextEngine 一致：显式配置的 context_window_tokens 优先于按模型名解析
+                cw_override = _deep_agent_context_engine_config(self._config_cache).context_window_tokens
+                cw_fallback = ContextUtils.resolve_context_max(
+                    model_name=model_name,
+                    fallback_context_window_tokens=cw_override,
+                )
                 if cw_fallback > 0:
                     context_window_tokens = cw_fallback
             except Exception:
