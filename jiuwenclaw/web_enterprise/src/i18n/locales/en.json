@@ -50,8 +50,6 @@
   "history": {
     "title": "Chat History",
     "newSession": "New chat",
-    "switchUser": "Switch",
-    "userPlaceholder": "username",
     "subtitle": "Browse conversations archived on Web Pod",
     "refresh": "Refresh",
     "loading": "Loading...",

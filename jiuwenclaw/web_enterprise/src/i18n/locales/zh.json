@@ -50,8 +50,6 @@
   "history": {
     "title": "历史会话",
     "newSession": "新建会话",
-    "switchUser": "切换",
-    "userPlaceholder": "用户名",
     "subtitle": "浏览 Web Pod 本地归档的对话",
     "refresh": "刷新",
     "loading": "加载中...",
