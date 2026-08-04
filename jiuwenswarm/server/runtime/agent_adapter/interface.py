@@ -124,6 +124,23 @@ def _should_record_user_history(params: Any) -> bool:
     return str(params.get("source") or "") != "proactive_recommendation"
 
 
+def _resolve_final_record_timestamp(
+    *,
+    event_type: str,
+    segment_started_at: float | None,
+    extra_fields: dict[str, Any] | None,
+) -> float:
+    """chat.final 落盘用「气泡出现的时刻」，收尾时刻另存 completed_at。"""
+    completed_at = time.time()
+    if event_type != "chat.final" or not segment_started_at:
+        return completed_at
+    if segment_started_at >= completed_at:
+        return completed_at
+    if isinstance(extra_fields, dict):
+        extra_fields.setdefault("completed_at", completed_at)
+    return segment_started_at
+
+
 def _history_media_string(item: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         value = item.get(key)
@@ -1925,29 +1942,39 @@ class JiuWenSwarm:
                     ok = result_type not in {"goal_error", "goal_confirm_required"}
                     # Only set writes user history (objective as the user turn).
                     # pause / resume / clear / get stay control-only.
+                    # 忙碌时与流式路径同一 helper：推迟到上一轮收尾再落盘。
                     if ok and str(action or "").strip().lower() == "set":
-                        objective = str(params.get("objective") or "").strip()
-                        if objective:
-                            goal_obj = goal_result.get("goal")
-                            goal_id = (
-                                str(goal_obj.get("goal_id") or "").strip() or None
-                                if isinstance(goal_obj, dict)
-                                else None
+                        goal_obj = goal_result.get("goal")
+                        record_fn = getattr(adapter, "_record_goal_set_history_if_needed", None)
+                        if callable(record_fn):
+                            record_fn(
+                                request,
+                                action=str(action),
+                                result_type=str(result_type) if result_type else None,
+                                goal_payload=goal_obj if isinstance(goal_obj, dict) else None,
                             )
-                            append_history_record(
-                                session_id=session_id,
-                                request_id=request.request_id,
-                                channel_id=request.channel_id,
-                                role="user",
-                                content=objective,
-                                timestamp=time.time(),
-                                channel_metadata=request.metadata,
-                                mode=params.get("mode", "unknown"),
-                                extra={
-                                    "goal_id": goal_id,
-                                    "is_goal_objective_message": True,
-                                },
-                            )
+                        else:
+                            objective = str(params.get("objective") or "").strip()
+                            if objective:
+                                goal_id = (
+                                    str(goal_obj.get("goal_id") or "").strip() or None
+                                    if isinstance(goal_obj, dict)
+                                    else None
+                                )
+                                append_history_record(
+                                    session_id=session_id,
+                                    request_id=request.request_id,
+                                    channel_id=request.channel_id,
+                                    role="user",
+                                    content=objective,
+                                    timestamp=time.time(),
+                                    channel_metadata=request.metadata,
+                                    mode=params.get("mode", "unknown"),
+                                    extra={
+                                        "goal_id": goal_id,
+                                        "is_goal_objective_message": True,
+                                    },
+                                )
                     # Keep message for callers that read payload.message; also
                     # mirror into error on failure so Gateway top-level error
                     # forwarding and older clients stay consistent.
@@ -2357,8 +2384,13 @@ class JiuWenSwarm:
         final_answer_content = ""
         final_answer_chunks: list[str] = []
         durable_pending_final_chunks: list[str] = []
+        durable_pending_final_started_at: float | None = None
         durable_pending_reasoning_chunks: list[str] = []
         durable_final_content = ""
+        # 这条流是否带过 Goal 事件。Goal 仍 active 时流结束是不发 chat.final 的
+        # （见 interface_deep._should_emit_stream_end_chat_final），气泡里的正文
+        # 就没人落盘；收尾时按这个标记补一次，只影响 Goal 流。
+        saw_goal_stream_output = False
 
         def _consume_durable_reasoning_content() -> str:
             nonlocal durable_pending_reasoning_chunks
@@ -2374,12 +2406,42 @@ class JiuWenSwarm:
             merged["reasoning_content"] = reasoning_text
             return merged
 
-        def _persist_pending_final_text() -> None:
-            nonlocal durable_pending_final_chunks, durable_final_content
-            pending_text = "".join(durable_pending_final_chunks)
+        def _reset_durable_pending_final() -> None:
+            nonlocal durable_pending_final_chunks, durable_pending_final_started_at
             durable_pending_final_chunks = []
+            durable_pending_final_started_at = None
+
+        def _note_durable_pending_final_delta(content: str) -> None:
+            nonlocal durable_pending_final_started_at
+            if durable_pending_final_started_at is None:
+                durable_pending_final_started_at = time.time()
+            durable_pending_final_chunks.append(content)
+
+        def _note_goal_stream_payload(event_type: str, payload: dict[str, Any]) -> None:
+            nonlocal saw_goal_stream_output
+            if saw_goal_stream_output:
+                return
+            if event_type.startswith("goal.") or payload.get("goal_intermediate"):
+                saw_goal_stream_output = True
+
+        def _persist_pending_final_text() -> None:
+            nonlocal durable_final_content
+            pending_text = "".join(durable_pending_final_chunks)
+            segment_started_at = durable_pending_final_started_at
+            _reset_durable_pending_final()
             if not pending_text or pending_text == durable_final_content:
                 return
+            extra_fields = _attach_reasoning_content({
+                k: v for k, v in request.params.items()
+                if k in ("source", "proactive_type", "proactive_target")
+            })
+            if not isinstance(extra_fields, dict):
+                extra_fields = {}
+            record_timestamp = _resolve_final_record_timestamp(
+                event_type="chat.final",
+                segment_started_at=segment_started_at,
+                extra_fields=extra_fields,
+            )
             append_history_record(
                 session_id=session_id,
                 request_id=rid,
@@ -2387,13 +2449,10 @@ class JiuWenSwarm:
                 role="assistant",
                 event_type="chat.final",
                 content=pending_text,
-                timestamp=time.time(),
+                timestamp=record_timestamp,
                 # 透传 proactive 标记到 history——刷新页面时前端靠 payload.source===
                 # 'proactive_recommendation' 渲染推荐卡片，不带则退化白色气泡。
-                extra=_attach_reasoning_content({
-                    k: v for k, v in request.params.items()
-                    if k in ("source", "proactive_type", "proactive_target")
-                }),
+                extra=extra_fields if extra_fields else None,
                 mode=request.params.get("mode", "unknown"),
             )
             durable_final_content = pending_text
@@ -2540,7 +2599,9 @@ class JiuWenSwarm:
                                 continue
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
+                            _note_goal_stream_payload(et, data.payload)
                             should_record = et.startswith("chat.")
+                            final_segment_started_at: float | None = None
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
                             if et == "context.compression_state":
@@ -2592,7 +2653,7 @@ class JiuWenSwarm:
                                         yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                         a2ui_pending_render_sent = True
                                     continue
-                                durable_pending_final_chunks.append(payload_content)
+                                _note_durable_pending_final_delta(payload_content)
                                 should_record = False
                             elif et == "chat.reasoning":
                                 durable_pending_reasoning_chunks.append(payload_content)
@@ -2617,9 +2678,18 @@ class JiuWenSwarm:
                                     if payload_content:
                                         final_answer_content = payload_content
                                         final_answer_chunks.clear()
-                                    durable_pending_final_chunks = []
+                                    _reset_durable_pending_final()
                                     continue
-                                durable_pending_final_chunks = []
+                                # 先记住本段起始时刻：下面的 reset/flush 会把它清掉。
+                                final_segment_started_at = durable_pending_final_started_at
+                                if payload_content:
+                                    _reset_durable_pending_final()
+                                else:
+                                    # 空 final 只是收尾/拆气泡信号（Goal 中间态 final 被降级成
+                                    # chat.delta、流末尾的兜底 final），气泡里留下的正文就是前面
+                                    # 那些 delta。这里必须落盘同一份，否则历史里整段回答会消失。
+                                    _persist_pending_final_text()
+                                    final_segment_started_at = None
 
                             if should_record:
                                 payload_dict = dict(data.payload)
@@ -2637,6 +2707,15 @@ class JiuWenSwarm:
                                 for pk in ("source", "proactive_type", "proactive_target"):
                                     if pk not in extra_fields and pk in request.params:
                                         extra_fields[pk] = request.params[pk]
+                                if not isinstance(extra_fields, dict):
+                                    extra_fields = {}
+                                record_timestamp = _resolve_final_record_timestamp(
+                                    event_type=et,
+                                    segment_started_at=(
+                                        final_segment_started_at if et == "chat.final" else None
+                                    ),
+                                    extra_fields=extra_fields,
+                                )
                                 append_history_record(
                                     session_id=session_id,
                                     request_id=rid,
@@ -2644,7 +2723,7 @@ class JiuWenSwarm:
                                     role="assistant",
                                     event_type=et,
                                     content=data.payload.get("content") or data.payload.get("error") or "",
-                                    timestamp=time.time(),
+                                    timestamp=record_timestamp,
                                     extra=extra_fields if extra_fields else None,
                                     mode=request.params.get("mode", "unknown"),
                                 )
@@ -2658,7 +2737,9 @@ class JiuWenSwarm:
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
+                        _note_goal_stream_payload(et, data)
                         should_record = et.startswith("chat.")
+                        final_segment_started_at = None
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
                         if et == "context.compression_state":
@@ -2712,7 +2793,7 @@ class JiuWenSwarm:
                                     yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                     a2ui_pending_render_sent = True
                                 continue
-                            durable_pending_final_chunks.append(payload_content)
+                            _note_durable_pending_final_delta(payload_content)
                             should_record = False
                         elif et == "chat.reasoning":
                             durable_pending_reasoning_chunks.append(payload_content)
@@ -2735,9 +2816,15 @@ class JiuWenSwarm:
                                 if payload_content:
                                     final_answer_content = payload_content
                                     final_answer_chunks.clear()
-                                durable_pending_final_chunks = []
+                                _reset_durable_pending_final()
                                 continue
-                            durable_pending_final_chunks = []
+                            final_segment_started_at = durable_pending_final_started_at
+                            if payload_content:
+                                _reset_durable_pending_final()
+                            else:
+                                # 同上：空 final 收尾时把气泡正文落盘，别丢历史。
+                                _persist_pending_final_text()
+                                final_segment_started_at = None
 
                         if should_record:
                             extra_fields = {k: v for k, v in data.items() if k not in ("event_type", "content")}
@@ -2753,6 +2840,15 @@ class JiuWenSwarm:
                             for pk in ("source", "proactive_type", "proactive_target"):
                                 if pk not in extra_fields and pk in request.params:
                                     extra_fields[pk] = request.params[pk]
+                            if not isinstance(extra_fields, dict):
+                                extra_fields = {}
+                            record_timestamp = _resolve_final_record_timestamp(
+                                event_type=et,
+                                segment_started_at=(
+                                    final_segment_started_at if et == "chat.final" else None
+                                ),
+                                extra_fields=extra_fields,
+                            )
                             append_history_record(
                                 session_id=session_id,
                                 request_id=rid,
@@ -2760,7 +2856,7 @@ class JiuWenSwarm:
                                 role="assistant",
                                 event_type=et,
                                 content=data.get("content") or data.get("error") or "",
-                                timestamp=time.time(),
+                                timestamp=record_timestamp,
                                 extra=extra_fields if extra_fields else None,
                                 mode=request.params.get("mode", "unknown"),
                             )
@@ -2781,6 +2877,11 @@ class JiuWenSwarm:
             logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
             raise
         finally:
+            # Goal 还在跑时这条流不会收到收尾的 chat.final，气泡里已经展示的正文
+            # 也就没有任何一处落盘。补一次，否则重新打开历史记录时这段回答凭空
+            # 消失，和实时看到的不是一回事。非 Goal 流不进这里。
+            if saw_goal_stream_output:
+                _persist_pending_final_text()
             # The adapter producer owns RuntimeOutputStream.  Cancelling and
             # awaiting it releases the runtime output lease and aborts the
             # in-flight round when the outer WebSocket consumer disappears.

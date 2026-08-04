@@ -35,6 +35,7 @@ import {
   type FetchHistoryPageResult,
 } from './features/historyRestore';
 import { prefetchHistoryPages } from './features/historyPagination';
+import { queueOrAddGoalObjectiveMessage } from './features/goalPendingObjectiveBubble';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -1741,13 +1742,7 @@ function AppContent() {
         if (goalArmedOnNew) {
           // 欢迎页 "+" 选了「目标」：这条内容不走普通 chat.send，
           // 本地落一条 user 消息（供徽章匹配）后改调 command.goal（见 InputArea.tsx 的同款分流逻辑）
-          useChatStore.getState().addMessage(newSid, {
-            id: `user-${Date.now()}`,
-            role: 'user',
-            content,
-            timestamp: new Date().toISOString(),
-            isGoalObjectiveMessage: true,
-          });
+          queueOrAddGoalObjectiveMessage(newSid, content);
           setGoalObjective(newSid, content);
         } else {
           const sent = await sendMessage(content, newSid, mediaItems);

@@ -15,6 +15,7 @@ import {
   resolveEffectiveModel,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
+import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
@@ -1021,15 +1022,8 @@ export function InputArea({
         pushAttachmentAlert(t('chat.goalAttachmentsBlocked'));
         return;
       }
-      // command.goal 是独立控制信令，不受聊天排队影响，跳过 team/queue/interrupt 判断；
-      // 消息仍要本地落进 chatStore 才能在气泡上显示"设为目标"徽章（见 MessageItem.tsx）
-      useChatStore.getState().addMessage(sid, {
-        id: `user-${Date.now()}`,
-        role: 'user',
-        content: trimmedBase,
-        timestamp: new Date().toISOString(),
-        isGoalObjectiveMessage: true,
-      });
+      // command.goal 立刻发出（GoalBar「已设置」）；忙碌时用户气泡暂存，答完再入列。
+      queueOrAddGoalObjectiveMessage(sid, trimmedBase);
       useGoalStore.getState().setArmed(sid, false);
       onSetGoal(sid, trimmedBase);
     } else if (goalArmed && trimmedBase && sid === NEW_CONVERSATION_ID) {

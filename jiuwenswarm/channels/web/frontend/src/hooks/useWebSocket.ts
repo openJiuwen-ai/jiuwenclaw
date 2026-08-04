@@ -44,6 +44,7 @@ import {
   useCronStore,
 } from '../stores';
 import { isPlanWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
+import { flushPendingGoalObjectiveBubble } from '../features/goalPendingObjectiveBubble';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
@@ -2492,7 +2493,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         // 未分段：合并进当前流。勿用 payload.timestamp 覆盖消息时间（会与 goal 完成卡抢序）；
         // 另写 completedAt，供「任务用时」与历史 final 落盘时间对齐。
-        if (streamId && !assistantStreamSplit) {
+        // 空正文的 final 只是收尾信号（用户轮答完、Goal 段答完），本轮即使已按工具边界
+        // 分过段也要走这里收尾：否则 currentStreamId 一直留着，紧接着的 Goal delta 会继续
+        // 追加进同一个气泡，最后只剩一个气泡（docs/zh/Goal持续目标Web前端对接.md §16
+        // 要求「永远可以收尾当前助手气泡」）。
+        if (streamId && (!assistantStreamSplit || !content)) {
           useChatStore.getState().updateMessage(sessionId, streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
@@ -2503,6 +2508,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (content && !content.includes('MEDIA:')) {
             handleTtsPlayback(sessionId, streamId, content);
           }
+          // 空 final = 用户轮→goal 轮拆气泡边界：此时入列目标用户气泡，不打断上一轮回答
+          if (!content) {
+            flushPendingGoalObjectiveBubble(sessionId);
+          }
+          return;
+        }
+        // 无流式气泡时的空 final（上一轮未吐字就被 goal 劫持）同样要入列
+        if (!streamId && !content) {
+          flushPendingGoalObjectiveBubble(sessionId);
           return;
         }
         if (streamId && assistantStreamSplit && content) {
