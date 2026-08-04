@@ -488,12 +488,11 @@ export class MemoryViewController {
         try {
           mkdirSync(dirname(filePath), { recursive: true });
           writeFileSync(filePath, "", { encoding: "utf-8", flag: "wx" });
-          selectedFile.exists = true;
-        } catch {
+        } catch (err) {
           // If another process created the selected placeholder concurrently,
           // continue opening it; otherwise preserve the existing failure behavior.
           if (!existsSync(filePath)) {
-            this.statusMessage = "Cannot edit: memory file does not exist.";
+            this.statusMessage = `Cannot create memory file: ${err instanceof Error ? err.message : String(err)}`;
             this.tui.requestRender();
             return;
           }
