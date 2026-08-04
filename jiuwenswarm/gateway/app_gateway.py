@@ -1685,7 +1685,7 @@ async def _run(
                 extension_registry.register_authenticator(
                     AgentOSAuthenticator(auth_service_url=auth_service_url, timeout=timeout)
                 )
-                logger.info("[App] AgentOSAuthenticator 已注册, auth_service_url=%s", auth_service_url)
+                logger.info("AgentOSAuthenticator 已注册, auth_service_url=%s", auth_service_url)
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
     # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询
