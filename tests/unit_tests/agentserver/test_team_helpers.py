@@ -290,6 +290,7 @@ class _FakeRail:
         self.drain_waits: list[bool] = []
         self.signal_trigger = True
         self.review_trigger = False
+        self.auto_save = False
 
     async def drain_pending_approval_events(self, wait: bool = False, timeout: float | None = None):
         self._drain_calls += 1
@@ -543,6 +544,40 @@ def _delivered(calls: list) -> list:
     """Map recorded delivery calls to ``(session_id, user content)``."""
     return [(session_id, _delivered_content(payload)) for session_id, payload in calls]
 
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("signal_trigger", "auto_save"),
+    [(False, False), (True, True)],
+)
+async def test_team_evolution_monitor_skips_without_pending_signal_approval(
+        monkeypatch,
+        signal_trigger: bool,
+        auto_save: bool,
+):
+    _FakeTransport.pushes = []
+    approval_event = SimpleNamespace(
+        type="chat.ask_user_question",
+        payload={"request_id": "team_skill_evolve_req1", "questions": [{"header": "x"}]},
+    )
+    rail = _FakeRail([[approval_event]])
+    rail.signal_trigger = signal_trigger
+    rail.auto_save = auto_save
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+
+    await _TeamHelpersTestApi.watch_team_evolution_and_push(
+        "web",
+        "sess-no-signal-approval",
+        rail,
+    )
+
+    assert _FakeTransport.pushes == []
+    assert rail.drain_waits == []
 
 
 @pytest.mark.anyio
@@ -1028,6 +1063,7 @@ async def test_team_evolution_monitor_uses_approval_request_id_without_provision
             self._drain_calls = 0
             self.signal_trigger = True
             self.review_trigger = False
+            self.auto_save = False
 
         async def drain_pending_approval_events(self, wait: bool = False, timeout: float | None = None):
             assert wait is False
@@ -1170,7 +1206,11 @@ async def test_ensure_team_evolution_watcher_starts_without_reasoning_gate(monke
 
         @staticmethod
         def get_team_skill_rail(session_id: str):
-            return SimpleNamespace(signal_trigger=True, review_trigger=False)
+            return SimpleNamespace(
+                signal_trigger=True,
+                review_trigger=False,
+                auto_save=False,
+            )
 
         @staticmethod
         def register_team_evolution_watcher(
@@ -1224,12 +1264,20 @@ async def test_ensure_team_evolution_watcher_defers_when_rail_missing(monkeypatc
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("review_trigger", "should_start"),
-    [(False, True), (True, True)],
+    ("signal_trigger", "review_trigger", "auto_save", "should_start"),
+    [
+        (False, False, False, False),
+        (False, True, False, False),
+        (True, False, False, True),
+        (True, True, False, True),
+        (True, False, True, False),
+    ],
 )
-async def test_ensure_team_evolution_watcher_ignores_legacy_review_trigger(
+async def test_ensure_team_evolution_watcher_requires_pending_signal_approval(
         monkeypatch,
+        signal_trigger: bool,
         review_trigger: bool,
+        auto_save: bool,
         should_start: bool,
 ):
     registered: dict[str, asyncio.Task] = {}
@@ -1237,8 +1285,9 @@ async def test_ensure_team_evolution_watcher_ignores_legacy_review_trigger(
     class _Rail:
         pass
 
-    _Rail.signal_trigger = False
+    _Rail.signal_trigger = signal_trigger
     _Rail.review_trigger = review_trigger
+    _Rail.auto_save = auto_save
 
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         @staticmethod

@@ -1403,6 +1403,15 @@ def ensure_team_evolution_watcher(
             source,
         )
         return
+    if not rail.signal_trigger or rail.auto_save:
+        logger.info(
+            "[TeamHelpers] evolution monitor skipped because no signal approval is pending: "
+            "channel_id=%s session_id=%s source=%s",
+            channel_id,
+            session_id,
+            source,
+        )
+        return
     logger.info(
         "[TeamHelpers] launching evolution monitor: channel_id=%s session_id=%s source=%s",
         channel_id,
@@ -2952,7 +2961,10 @@ async def _watch_team_evolution_and_push(
     session_id: str,
     rail: Any,
 ) -> None:
-    """Monitor TeamSkillEvolutionRail and push stable status/approval events for every evolution cycle."""
+    """Push status and approval events for signal-triggered evolution awaiting approval."""
+    if not rail.signal_trigger or rail.auto_save:
+        return
+
     from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
 
     push_context = EvolutionPushContext(
@@ -3011,6 +3023,21 @@ async def _watch_team_evolution_and_push(
             fallback_sec=TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
         )
         while True:
+            if not rail.signal_trigger or rail.auto_save:
+                if active_cycle_request_id is not None:
+                    await push_evolution_status(
+                        push_context,
+                        build_evolution_status_update(
+                            request_id=active_cycle_request_id,
+                            status="end",
+                            stage=TEAM_EVOLUTION_HIDDEN_STAGE,
+                            message="",
+                        ),
+                        build_server_push_message,
+                    )
+                await _cleanup_evolution_rail()
+                return
+
             events = await rail.drain_pending_approval_events(wait=False) or []
             if not events:
                 if active_cycle_request_id is not None:

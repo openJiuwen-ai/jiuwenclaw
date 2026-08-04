@@ -10008,7 +10008,11 @@ class JiuWenSwarmDeepAdapter:
                     is_complete=False,
                 )
 
-            if self._skill_evolution_rail is not None:
+            if (
+                self._skill_evolution_rail is not None
+                and self._skill_evolution_rail.signal_trigger
+                and not self._skill_evolution_rail.auto_save
+            ):
                 task = asyncio.create_task(
                     self._watch_evolution_and_push(rid, cid, session_id)
                 )
@@ -11544,6 +11548,11 @@ class JiuWenSwarmDeepAdapter:
         try:
             if self._skill_evolution_rail is None:
                 return
+            if (
+                not self._skill_evolution_rail.signal_trigger
+                or self._skill_evolution_rail.auto_save
+            ):
+                return
 
             active = False
             last_event_at = time.monotonic()
@@ -11554,6 +11563,14 @@ class JiuWenSwarmDeepAdapter:
 
             while True:
                 if self._skill_evolution_rail is None:
+                    return
+                if (
+                    not self._skill_evolution_rail.signal_trigger
+                    or self._skill_evolution_rail.auto_save
+                ):
+                    if active:
+                        await _push_status("end", "hidden", "")
+                    await _cleanup_evolution_rail()
                     return
 
                 events = await self._skill_evolution_rail.drain_pending_approval_events(wait=False) or []
