@@ -51,6 +51,9 @@ _session_buffer_root: dict[str, str | None] = {}
 # tool_update 的 per-call_id 合并缓冲（_session_buffer_type 为 chat.tool_update 时生效）
 _session_tool_update_buffer: dict[str, "OrderedDict[str, dict[str, Any]]"] = {}
 _session_tool_update_root: dict[str, str | None] = {}
+# reasoning/delta 的 per-stream_source_id 合并缓冲（携带 stream_source_id 时生效）
+_session_source_buffer: dict[str, "OrderedDict[tuple[str, str], dict[str, Any]]"] = {}
+_session_source_root: dict[str, str | None] = {}
 # 暂留层：每 session 最多一个 tool_calls.delta 暂留条目
 _session_pending: dict[str, "_PendingState"] = {}
 _pending_raw_counter: int = 0  # 非缓冲事件进 pending_queue 的唯一键计数器
@@ -369,7 +372,8 @@ def _batch_write_items(session_id: str, items: list[dict], sessions_root: str | 
 
 def _flush_buffer_unlocked(session_id: str) -> tuple[list[dict], str | None]:
     """落盘并清空普通缓冲层（调用方已持锁）。返回 (items, recorded_root)，
-    调用方锁外执行 IO。tool_update 走 per-call 缓冲可返回多条。"""
+    调用方锁外执行 IO。tool_update 走 per-call 缓冲可返回多条。
+    source_buffer 走 per-source 缓冲也可返回多条。"""
     # tool_update per-call 缓冲优先（此时 _session_buffer 该 sid 为空）
     per_call = _session_tool_update_buffer.pop(session_id, None)
     if per_call is not None:
@@ -378,6 +382,14 @@ def _flush_buffer_unlocked(session_id: str) -> tuple[list[dict], str | None]:
         _session_buffer_root.pop(session_id, None)
         recorded_root = _session_tool_update_root.pop(session_id, None)
         return list(per_call.values()), recorded_root
+    # per-source 缓冲（携带 stream_source_id 的 reasoning/delta）
+    per_source = _session_source_buffer.pop(session_id, None)
+    if per_source is not None:
+        _session_buffer_type.pop(session_id, None)
+        _session_buffer_request_id.pop(session_id, None)
+        _session_buffer_root.pop(session_id, None)
+        recorded_root = _session_source_root.pop(session_id, None)
+        return list(per_source.values()), recorded_root
     item = _session_buffer.pop(session_id, None)
     if item is None:
         return [], None
@@ -519,7 +531,7 @@ def _route_event(sid: str, item: dict, event_type: str, sessions_root_s: str | N
             _batch_write_items(sid, flush_items, sessions_root_s)
         return
 
-    # ── 3. 普通缓冲：tool_update 走 per-call_id 分组，delta/reasoning 单条合并 ──
+    # ── 3. 普通缓冲：tool_update 走 per-call_id 分组，source 缓冲走 per-source 分组 ──
     if event_type in NORMAL_BUFFER_EVENT_TYPES:
         with _buffer_lock:
             switch_items, switch_root = _flush_on_type_switch_unlocked(sid, event_type, rid)
@@ -537,20 +549,45 @@ def _route_event(sid: str, item: dict, event_type: str, sessions_root_s: str | N
                 if len(per_call) >= BUFFER_MAX_SIZE:
                     cap_items, cap_root = _flush_buffer_unlocked(sid)
             else:
-                existing = _session_buffer.get(sid)
-                if existing is not None and _session_buffer_type.get(sid) == event_type:
-                    merged = _MERGE[event_type](existing, item)
+                source_id = item.get("stream_source_id")
+                # source 缓冲与普通缓冲互斥：切换时先落盘对方缓冲，避免两者共存
+                # 导致 _flush_buffer_unlocked 先命中一方而遗留另一方
+                cross_items: list[dict] = []
+                cross_root: str | None = None
+                if source_id is not None and sid in _session_buffer:
+                    cross_items, cross_root = _flush_buffer_unlocked(sid)
+                elif source_id is None and sid in _session_source_buffer:
+                    cross_items, cross_root = _flush_buffer_unlocked(sid)
+                if source_id is not None:
+                    # 携带 stream_source_id 的 reasoning/delta：按 source 分桶
+                    per_source = _session_source_buffer.setdefault(sid, OrderedDict())
+                    source_key = (source_id, event_type)
+                    existing_src = per_source.get(source_key)
+                    per_source[source_key] = _MERGE[event_type](existing_src, item) if existing_src else dict(item)
+                    _session_buffer_type[sid] = event_type
+                    _session_buffer_request_id[sid] = rid
+                    _session_buffer_root[sid] = sessions_root_s
+                    _session_source_root[sid] = sessions_root_s
+                    cap_items, cap_root = ([], None)
+                    if len(per_source) >= BUFFER_MAX_SIZE:
+                        cap_items, cap_root = _flush_buffer_unlocked(sid)
                 else:
-                    merged = dict(item)
-                _session_buffer[sid] = merged
-                _session_buffer_type[sid] = event_type
-                _session_buffer_request_id[sid] = rid
-                _session_buffer_root[sid] = sessions_root_s
-                cap_items, cap_root = ([], None)
-                if merged.get("delta_count", 1) >= BUFFER_MAX_SIZE:
-                    cap_items, cap_root = _flush_buffer_unlocked(sid)
-        # switch_items（切换前旧记录）用 switch_root、cap_items（达上限的当前记录）用 cap_root；
-        # root 一致则合并一次 open，否则各落各文件（防多租户 root 混用落错文件）。
+                    existing = _session_buffer.get(sid)
+                    if existing is not None and _session_buffer_type.get(sid) == event_type:
+                        merged = _MERGE[event_type](existing, item)
+                    else:
+                        merged = dict(item)
+                    _session_buffer[sid] = merged
+                    _session_buffer_type[sid] = event_type
+                    _session_buffer_request_id[sid] = rid
+                    _session_buffer_root[sid] = sessions_root_s
+                    cap_items, cap_root = ([], None)
+                    if merged.get("delta_count", 1) >= BUFFER_MAX_SIZE:
+                        cap_items, cap_root = _flush_buffer_unlocked(sid)
+        # cross_items（source/普通缓冲切换时落盘的对方数据）、switch_items（类型切换）、
+        # cap_items（容量触发）各自用对应 root 落盘；root 一致则合并一次 open。
+        if cross_items:
+            _batch_write_items(sid, cross_items, cross_root)
         if switch_items and cap_items and switch_root == cap_root:
             _batch_write_items(sid, switch_items + cap_items, switch_root if switch_root is not None else cap_root)
         else:
@@ -676,7 +713,11 @@ def _periodic_flush() -> None:
     delta 残留落盘。仅残留、不丢数据、不崩；完全消除需把 pending 落盘原子化进锁内，代价过高。
     """
     with _buffer_lock:
-        buffer_sids = list(set(_session_buffer.keys()) | set(_session_tool_update_buffer.keys()))
+        buffer_sids = list(
+            set(_session_buffer.keys())
+            | set(_session_tool_update_buffer.keys())
+            | set(_session_source_buffer.keys())
+        )
         pending_sids = [
             (sid, p) for sid, p in _session_pending.items()
             if time.monotonic() - p.start_time >= PENDING_MAX_SECONDS

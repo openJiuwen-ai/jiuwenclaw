@@ -47,6 +47,8 @@ def _reset_buffer_state():
     sh._session_buffer_root.clear()
     sh._session_tool_update_buffer.clear()
     sh._session_tool_update_root.clear()
+    sh._session_source_buffer.clear()
+    sh._session_source_root.clear()
     sh._session_pending.clear()
     sh._flush_stop_event.clear()
     sh._FLUSH_THREAD_STARTED = False
@@ -60,6 +62,8 @@ def _reset_buffer_state():
     sh._session_buffer_root.clear()
     sh._session_tool_update_buffer.clear()
     sh._session_tool_update_root.clear()
+    sh._session_source_buffer.clear()
+    sh._session_source_root.clear()
     sh._session_pending.clear()
     sh._flush_stop_event.clear()
     sh._FLUSH_THREAD_STARTED = False
@@ -818,3 +822,152 @@ class TestGracefulShutdown:
             sh.shutdown()
         contents = [r.get("content") for r in _read_history("s1", root)]
         assert "RACE" in contents, f"shutdown 进行中到达的缓冲事件丢失: {contents}"
+
+
+# ════════════════════════════════════════════════════════
+# per-stream_source_id 分桶：并行推理流不应交错
+# ════════════════════════════════════════════════════════
+
+def _make_reasoning_with_source(req: str, content: str, source_id: str, ts: float = 1.0) -> dict:
+    return {
+        "request_id": req, "event_type": "chat.reasoning", "content": content,
+        "timestamp": ts, "id": f"{req}:assistant", "role": "assistant",
+        "session_id": "s1", "stream_source_id": source_id,
+    }
+
+
+def _make_delta_with_source(req: str, content: str, source_id: str, ts: float = 1.0) -> dict:
+    return {
+        "request_id": req, "event_type": "chat.delta", "content": content,
+        "timestamp": ts, "id": f"{req}:assistant", "role": "assistant",
+        "session_id": "s1", "stream_source_id": source_id,
+    }
+
+
+class TestParallelReasoningStreamSourceBucketing:
+    """并行推理流按 stream_source_id 分桶，不同来源的 reasoning 各成一条记录。"""
+
+    @staticmethod
+    def test_same_source_id_merges_correctly():
+        a = _make_reasoning_with_source("r1", "用户要求对15个", "src_a", ts=1.0)
+        b = _make_reasoning_with_source("r1", "搜索结果进行评分", "src_a", ts=2.0)
+        merged = sh._merge_reasoning_events(a, b)
+        assert merged["content"] == "用户要求对15个搜索结果进行评分"
+
+    @staticmethod
+    def test_different_source_ids_produce_separate_records():
+        root = _tmp_sessions_root()
+        sh._route_event("s1", _make_reasoning_with_source("r1", "用户要求对15个", "src_a", ts=1.0),
+                        "chat.reasoning", root)
+        sh._route_event("s1", _make_reasoning_with_source("r1", "用户要求对16个", "src_b", ts=1.2),
+                        "chat.reasoning", root)
+        sh._route_event("s1", _make_reasoning_with_source("r1", "搜索结果进行评分。", "src_a", ts=1.4),
+                        "chat.reasoning", root)
+        sh._route_event("s1", _make_reasoning_with_source("r1", "搜索结果进行评分。", "src_b", ts=1.6),
+                        "chat.reasoning", root)
+        sh._flush_buffer("s1", root)
+        history = _read_history("s1", root)
+        reasoning = [r for r in history if r.get("event_type") == "chat.reasoning"]
+        assert len(reasoning) == 2
+        by_source = {r.get("stream_source_id"): r["content"] for r in reasoning}
+        assert by_source["src_a"] == "用户要求对15个搜索结果进行评分。"
+        assert by_source["src_b"] == "用户要求对16个搜索结果进行评分。"
+
+    @staticmethod
+    def test_no_source_id_uses_single_bucket():
+        root = _tmp_sessions_root()
+        sh._route_event("s1", _make_reasoning("r1", "hello ", ts=1.0), "chat.reasoning", root)
+        sh._route_event("s1", _make_reasoning("r1", "world", ts=2.0), "chat.reasoning", root)
+        sh._flush_buffer("s1", root)
+        history = _read_history("s1", root)
+        reasoning = [r for r in history if r.get("event_type") == "chat.reasoning"]
+        assert len(reasoning) == 1
+        assert reasoning[0]["content"] == "hello world"
+
+    @staticmethod
+    def test_source_and_no_source_coexist():
+        root = _tmp_sessions_root()
+        sh._route_event("s1", _make_reasoning("r1", "no_source ", ts=1.0), "chat.reasoning", root)
+        sh._route_event("s1", _make_reasoning("r1", "tail", ts=2.0), "chat.reasoning", root)
+        sh._flush_buffer("s1", root)
+        sh._route_event("s1", _make_reasoning_with_source("r1", "src ", "src_a", ts=3.0),
+                        "chat.reasoning", root)
+        sh._route_event("s1", _make_reasoning_with_source("r1", "content", "src_a", ts=4.0),
+                        "chat.reasoning", root)
+        sh._flush_buffer("s1", root)
+        history = _read_history("s1", root)
+        reasoning = [r for r in history if r.get("event_type") == "chat.reasoning"]
+        assert len(reasoning) == 2
+        contents = sorted(r["content"] for r in reasoning)
+        assert "no_source tail" in contents
+        assert "src content" in contents
+
+    @staticmethod
+    def test_delta_with_source_id_also_buckets():
+        root = _tmp_sessions_root()
+        sh._route_event("s1", _make_delta_with_source("r1", "A1", "src_a", ts=1.0),
+                        "chat.delta", root)
+        sh._route_event("s1", _make_delta_with_source("r1", "B1", "src_b", ts=1.2),
+                        "chat.delta", root)
+        sh._route_event("s1", _make_delta_with_source("r1", "A2", "src_a", ts=1.4),
+                        "chat.delta", root)
+        sh._route_event("s1", _make_delta_with_source("r1", "B2", "src_b", ts=1.6),
+                        "chat.delta", root)
+        sh._flush_buffer("s1", root)
+        history = _read_history("s1", root)
+        deltas = [r for r in history if r.get("event_type") == "chat.delta"]
+        assert len(deltas) == 2
+        by_source = {r.get("stream_source_id"): r["content"] for r in deltas}
+        assert by_source["src_a"] == "A1A2"
+        assert by_source["src_b"] == "B1B2"
+
+    @staticmethod
+    def test_via_append_history_record():
+        root = _tmp_sessions_root()
+        for i, (source, text) in enumerate([
+            ("dr_collector_0", "用户要求对15个"),
+            ("dr_collector_1", "用户要求对16个"),
+            ("dr_collector_0", "搜索结果进行可信度评分，"),
+            ("dr_collector_1", "搜索结果进行可信度评分，"),
+            ("dr_collector_0", "并以JSON对象输出。"),
+            ("dr_collector_1", "并只输出JSON对象。"),
+        ]):
+            sh.append_history_record(
+                session_id="s1",
+                request_id="r1",
+                channel_id="officeclaw",
+                role="assistant",
+                event_type="chat.reasoning",
+                content=text,
+                timestamp=float(i + 1),
+                extra={"stream_source_id": source},
+                sessions_root=root,
+            )
+        sh._flush_buffer("s1", root)
+        history = _read_history("s1", root)
+        reasoning = [r for r in history if r.get("event_type") == "chat.reasoning"]
+        assert len(reasoning) == 2
+        by_source = {r.get("stream_source_id"): r["content"] for r in reasoning}
+        assert by_source["dr_collector_0"] == "用户要求对15个搜索结果进行可信度评分，并以JSON对象输出。"
+        assert by_source["dr_collector_1"] == "用户要求对16个搜索结果进行可信度评分，并只输出JSON对象。"
+
+    @staticmethod
+    def test_type_switch_flushes_source_buffer():
+        root = _tmp_sessions_root()
+        sh._route_event("s1", _make_reasoning_with_source("r1", "think", "src_a", ts=1.0),
+                        "chat.reasoning", root)
+        sh._route_event("s1", _make_delta("r1", "answer"), "chat.delta", root)
+        history = _read_history("s1", root)
+        assert len(history) == 1
+        assert history[0].get("event_type") == "chat.reasoning"
+        assert history[0]["content"] == "think"
+
+    @staticmethod
+    def test_request_switch_flushes_source_buffer():
+        root = _tmp_sessions_root()
+        sh._route_event("s1", _make_reasoning_with_source("r1", "think", "src_a", ts=1.0),
+                        "chat.reasoning", root)
+        sh._flush_on_request_switch("s1", "r2", root)
+        history = _read_history("s1", root)
+        assert len(history) == 1
+        assert history[0]["content"] == "think"
