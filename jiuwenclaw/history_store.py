@@ -109,6 +109,10 @@ class ChatHistoryStore:
     async def record_user(self, *, request_id: str, session_id: str, query: str, ts: float,
                           user: str | None = None) -> bool:
         """落盘一条 user 消息。重发幂等（UNIQUE 命中则不增计数）。user 写 sessions.user（首条定）。"""
+        # 空 user 归一为默认身份 'guest'（与 _ensure 里的存量回填一致），
+        # 避免写入 NULL 而读取时不过滤 → 跨用户历史泄漏。
+        if not user:
+            user = "guest"
         conn = await self._ensure()
         cur = await conn.execute(
             "INSERT OR IGNORE INTO messages (session_id, request_id, role, content, event_type, timestamp) "
@@ -295,11 +299,13 @@ def _open_readonly(db_path: str | Path) -> sqlite3.Connection:
 
 def list_sessions_sync(db_path: str | Path, *, limit: int = 20, offset: int = 0,
                        user: str | None = None) -> list[dict[str, Any]]:
-    """同步读会话列表（http.server 线程用）。db 不存在或无表返回空。user 非空时按 user 过滤。"""
+    """同步读会话列表（http.server 线程用）。db 不存在或无表返回空。按 user 过滤（空归一为 'guest'）。"""
     if not Path(db_path).exists():
         return []
     limit = max(1, min(limit, _MAX_LIST_LIMIT))
     offset = max(0, offset)
+    if not user:
+        user = "guest"
     conn = _open_readonly(db_path)
     try:
         if user:
@@ -323,13 +329,15 @@ def list_sessions_sync(db_path: str | Path, *, limit: int = 20, offset: int = 0,
 
 def get_session_detail_sync(db_path: str | Path, session_id: str, *,
                             user: str | None = None) -> dict[str, Any] | None:
-    """同步读会话详情。db 不存在 / 无表 / 会话不存在均返回 None。user 非空时校验归属。"""
+    """同步读会话详情。db 不存在 / 无表 / 会话不存在均返回 None。校验 user 归属（空归一为 'guest'）。"""
     if not Path(db_path).exists():
         return None
+    if not user:
+        user = "guest"
     conn = _open_readonly(db_path)
     try:
-        where = "WHERE session_id = ?" + (" AND user = ?" if user else "")
-        params: tuple = (session_id, user) if user else (session_id,)
+        where = "WHERE session_id = ? AND user = ?"
+        params: tuple = (session_id, user)
         s = conn.execute(
             "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
             f"FROM sessions {where}",
