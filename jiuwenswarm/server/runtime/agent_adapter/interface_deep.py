@@ -1361,6 +1361,19 @@ class JiuWenSwarmDeepAdapter:
             async with lock:
                 pass
             # A request that was creating/reloading this child may be about to mark it active.
+            # If the preceding lock owner removed (or failed to create) the
+            # child and no reconnect is queued, this waiter is responsible for
+            # pruning the now-empty lock.  Without this, concurrent disconnect
+            # cleanup calls leave an empty lock behind forever and
+            # has_session_runtime() keeps reporting the session as retained.
+            if (
+                sid not in self._session_adapters
+                and self._is_session_lock_idle(sid, lock)
+            ):
+                self._session_adapter_last_used.pop(sid, None)
+                self._session_adapter_versions.pop(sid, None)
+                self._session_adapter_reload_failures.pop(sid, None)
+                self._session_adapter_locks.pop(sid, None)
             return False
 
         lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
