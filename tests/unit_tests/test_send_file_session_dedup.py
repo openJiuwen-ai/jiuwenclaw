@@ -14,19 +14,42 @@ def _clear_dedup_registry():
 
 
 def test_partition_and_mark_sent_files():
-    new_paths, skipped = sfu._partition_sent_files("s1", [r"C:\tmp\a.md", r"C:\tmp\b.md"])
-    assert new_paths == [r"C:\tmp\a.md", r"C:\tmp\b.md"]
-    assert skipped == []
+    with patch.object(sfu, "_load_sent_file_paths_from_history", return_value=set()):
+        new_paths, skipped = sfu._partition_sent_files("s1", [r"C:\tmp\a.md", r"C:\tmp\b.md"])
+        assert new_paths == [r"C:\tmp\a.md", r"C:\tmp\b.md"]
+        assert skipped == []
 
-    sfu._mark_files_sent("s1", [r"C:\tmp\a.md"])
-    new_paths, skipped = sfu._partition_sent_files("s1", [r"C:\tmp\a.md", r"C:\tmp\b.md"])
-    assert new_paths == [r"C:\tmp\b.md"]
-    assert skipped == [r"C:\tmp\a.md"]
+        sfu._mark_files_sent("s1", [r"C:\tmp\a.md"])
+        new_paths, skipped = sfu._partition_sent_files("s1", [r"C:\tmp\a.md", r"C:\tmp\b.md"])
+        assert new_paths == [r"C:\tmp\b.md"]
+        assert skipped == [r"C:\tmp\a.md"]
 
-    sfu.clear_sent_files_for_session("s1")
-    new_paths, skipped = sfu._partition_sent_files("s1", [r"C:\tmp\a.md"])
-    assert new_paths == [r"C:\tmp\a.md"]
-    assert skipped == []
+        sfu.clear_sent_files_for_session("s1")
+        new_paths, skipped = sfu._partition_sent_files("s1", [r"C:\tmp\a.md"])
+        assert new_paths == [r"C:\tmp\a.md"]
+        assert skipped == []
+
+
+def test_partition_uses_durable_history_after_memory_cleanup():
+    file_path = r"C:\tmp\handoff.md"
+    history = [
+        {
+            "event_type": "chat.file",
+            "files": [{"path": file_path, "name": "handoff.md"}],
+        }
+    ]
+
+    sfu._mark_files_sent("sess-1", [file_path])
+    sfu.clear_sent_files_for_session("sess-1")
+
+    with patch(
+        "jiuwenswarm.server.runtime.session.session_history.load_history_records",
+        return_value=history,
+    ):
+        new_paths, skipped = sfu._partition_sent_files("sess-1", [file_path])
+
+    assert new_paths == []
+    assert skipped == [file_path]
 
 
 def test_send_file_skips_duplicate_after_success(tmp_path):
@@ -46,6 +69,10 @@ def test_send_file_skips_duplicate_after_success(tmp_path):
         return_value=mock_server,
     ), patch(
         "jiuwenswarm.server.runtime.session.session_history.append_history_record",
+    ), patch.object(
+        sfu,
+        "_load_sent_file_paths_from_history",
+        return_value=set(),
     ):
         first = asyncio.run(toolkit.send_file(str(file_path)))
         second = asyncio.run(toolkit.send_file(str(file_path)))

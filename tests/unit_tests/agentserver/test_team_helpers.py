@@ -1565,6 +1565,71 @@ async def test_process_team_message_stream_retries_followup_while_native_starts(
 
 
 @pytest.mark.anyio
+async def test_process_team_message_stream_retries_human_followup_while_member_starts(monkeypatch):
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        interact_calls: list[tuple[str, str]] = []
+
+        @staticmethod
+        def has_stream_task(session_id: str) -> bool:
+            assert session_id == "sess-human-followup-starting"
+            return True
+
+        @staticmethod
+        async def get_swarm_enriched_team_spec(**kwargs):
+            return SimpleNamespace(team_name="unit-team")
+
+        @classmethod
+        async def interact(cls, session_id: str, query: str):
+            cls.interact_calls.append((session_id, query))
+            return False, "agent_unavailable"
+
+    async def _fake_retry(
+        team_manager: object,
+        session_id: str,
+        query: str,
+        *,
+        initial_reason: str | None = None,
+    ):
+        assert team_manager is not None
+        assert initial_reason == "agent_unavailable"
+        _FakeManager.interact_calls.append((session_id, f"retry:{query}"))
+        return team_helpers._FollowupInteractBoundaryResult(
+            success=True,
+            reason=None,
+            first_request_ready=False,
+        )
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(team_helpers, "_deliver_followup_interact_across_boundary", _fake_retry)
+
+    request = SimpleNamespace(
+        session_id="sess-human-followup-starting",
+        request_id="req-human-followup-starting",
+        channel_id="feishu",
+        metadata=None,
+        params={"mode": "team"},
+    )
+
+    chunks = []
+    async for chunk in team_helpers.process_team_message_stream(
+        request,
+        {"query": "$human-reporter parse this image"},
+        object(),
+    ):
+        chunks.append(chunk)
+
+    assert _FakeManager.interact_calls == [
+        ("sess-human-followup-starting", "$human-reporter parse this image"),
+        ("sess-human-followup-starting", "retry:$human-reporter parse this image"),
+    ]
+    assert chunks[0].payload == {
+        "event_type": "chat.processing_status_deferred",
+        "session_id": "sess-human-followup-starting",
+    }
+    assert chunks[-1].is_complete is True
+
+
+@pytest.mark.anyio
 async def test_process_team_message_stream_restarts_round_after_shutdown_race(monkeypatch):
     captured: dict[str, Any] = {}
 

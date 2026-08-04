@@ -32,13 +32,36 @@ def _normalize_sent_file_path(path: str) -> str:
     return os.path.abspath(path).replace("\\", "/").lower()
 
 
+def _load_sent_file_paths_from_history(session_id: str) -> set[str]:
+    """Load delivered file paths from the session's durable history."""
+    from jiuwenswarm.server.runtime.session.session_history import (
+        load_history_records,
+    )
+
+    sent: set[str] = set()
+    for record in load_history_records(session_id):
+        if record.get("event_type") != "chat.file":
+            continue
+        files = record.get("files")
+        if not isinstance(files, list):
+            continue
+        for file_info in files:
+            if not isinstance(file_info, dict):
+                continue
+            path = file_info.get("path")
+            if isinstance(path, str) and path.strip():
+                sent.add(_normalize_sent_file_path(path))
+    return sent
+
+
 def _partition_sent_files(
     session_id: str,
     paths: list[str],
 ) -> tuple[list[str], list[str]]:
     """Split *paths* into (new_to_send, already_sent). Does not mutate the registry."""
     sid = (session_id or "").strip() or "default"
-    sent = _SENT_FILE_PATHS_BY_SESSION.get(sid) or set()
+    sent = set(_SENT_FILE_PATHS_BY_SESSION.get(sid) or ())
+    sent.update(_load_sent_file_paths_from_history(sid))
     new_paths: list[str] = []
     skipped: list[str] = []
     for path in paths:
